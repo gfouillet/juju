@@ -292,7 +292,7 @@ func main() {
 
 // Main is not redundant with main(), because it provides an entry point
 // for testing with arbitrary command line arguments.
-func Main(args []string) int {
+var Main = func(args []string) int {
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
