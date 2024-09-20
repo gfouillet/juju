@@ -31,6 +31,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/docker/distribution v2.8.3+incompatible
 	github.com/dustin/go-humanize v1.0.1
+	github.com/fogfactory/dlw v0.1.0
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/go-goose/goose/v5 v5.0.0-20230421180421-abaee9096e3a
 	github.com/go-logr/logr v1.4.1
@@ -176,7 +177,6 @@ require (
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/flosch/pongo2 v0.0.0-20200913210552-0d938eb266f3 // indirect
-	github.com/fogfactory/dlw v0.1.0 // indirect
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/gdamore/tcell/v2 v2.5.1 // indirect
 	github.com/go-delve/delve v1.23.0 // indirect

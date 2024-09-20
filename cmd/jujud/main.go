@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,7 +52,6 @@ import (
 var logger = internallogger.GetLogger("juju.cmd.jujud")
 
 func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
 	featureflag.SetFlagsFromEnvironment(osenv.JujuFeatureFlagEnvKey)
 }
 
