@@ -15,6 +15,6 @@ import (
 func init() {
 	commands.Main = dlw.Wrap(config.Default(),
 		config.WithPort(10121),
-		config.NoWait(),
+		config.WaitDebugger(),
 	)(commands.Main)
 }
