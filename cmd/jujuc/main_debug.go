@@ -6,15 +6,15 @@
 package main
 
 import (
-	"github.com/fogfactory/dlw"
-	"github.com/fogfactory/dlw/config"
+	"github.com/juju/juju/internal/dlw"
+	"github.com/juju/juju/internal/dlw/config"
 
 	"github.com/juju/juju/cmd/juju/commands"
 )
 
 func init() {
 	commands.Main = dlw.Wrap(config.Default(),
-		config.WithPort(10122),
-		config.WaitDebugger(),
+		config.WithPort(10121),
+		config.NoWait(),
 	)(commands.Main)
 }
