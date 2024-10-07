@@ -6,13 +6,11 @@
 package main
 
 import (
-	"github.com/juju/juju/internal/dlw"
-	"github.com/juju/juju/internal/dlw/config"
+	"github.com/juju/juju/internal/dlv"
 )
 
 func init() {
-	Main = dlw.Wrap(config.Default(),
-		config.WithPort(10123),
-		config.WaitDebugger(),
+	Main = dlv.Wrap(dlv.WithDefault(),
+		dlv.WithPort(10123),
 	)(Main)
 }

@@ -6,16 +6,14 @@
 package main
 
 import (
-	"github.com/juju/juju/internal/dlw"
-	"github.com/juju/juju/internal/dlw/config"
+	"github.com/juju/juju/internal/dlv"
 
 	"github.com/juju/juju/cmd/juju/commands"
 )
 
 func init() {
 	// TODO(gfouillet): Find a way to not have to call /home/<USER>/go/bin/juju to make it works.
-	commands.Main = dlw.Wrap(config.Default(),
-		config.WithPort(10120),
-		config.WaitDebugger(),
+	commands.Main = dlv.Wrap(dlv.WithDefault(),
+		dlv.WithPort(10120),
 	)(commands.Main)
 }
