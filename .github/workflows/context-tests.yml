@@ -117,7 +117,7 @@ jobs:
   upgrade:
     needs: [changed-files]
     name: Upgrade
-    if: github.event.pull_request.draft == false && github.base_ref != 'main' && needs.changed-files.outputs.check-upgrade == 'true'
+    if: github.event.pull_request.draft == false && needs.changed-files.outputs.check-upgrade == 'true'
     uses: ./.github/workflows/upgrade.yml
 
   result-check:
