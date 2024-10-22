@@ -26,6 +26,7 @@ var _ logger = struct{}{}
 type LogStream interface {
 	// Next returns the next batch of log records from the stream.
 	Next() ([]logfwd.Record, error)
+	Close() error
 }
 
 // LogStreamFn is a function that opens a log stream.
@@ -185,8 +186,13 @@ func (lf *LogForwarder) loop() error {
 	}
 
 	records := make(chan []logfwd.Record)
-	var stream LogStream
 	go func() {
+		var stream LogStream
+		defer func() {
+			if stream != nil {
+				_ = stream.Close()
+			}
+		}()
 		for {
 			enabled, err := lf.waitForEnabled()
 			if err == tomb.ErrDying {
@@ -207,7 +213,6 @@ func (lf *LogForwarder) loop() error {
 					lf.catacomb.Kill(errors.Annotate(err, "creating log stream"))
 					break
 				}
-
 			}
 			rec, err := stream.Next()
 			if err != nil {

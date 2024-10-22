@@ -285,6 +285,14 @@ func (s *stubStream) Next() ([]logfwd.Record, error) {
 	return []logfwd.Record{<-s.nextRecs}, nil
 }
 
+func (s *stubStream) Close() error {
+	s.stub.AddCall("Close")
+	if err := s.stub.NextErr(); err != nil {
+		return errors.Trace(err)
+	}
+	return nil
+}
+
 type stubSender struct {
 	stub     *testing.Stub
 	activity chan string
