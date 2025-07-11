@@ -30,8 +30,6 @@ type SSHMachine interface {
 }
 
 type sshMachine struct {
-	*state.Machine
-
 	networkService NetworkService
 }
 

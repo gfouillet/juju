@@ -841,17 +841,6 @@ func (m *Machine) SetInstanceInfo(
 	return nil
 }
 
-// Addresses returns any hostnames and ips associated with a machine,
-// determined both by the machine itself, and by asking the provider.
-//
-// The addresses returned by the provider shadow any of the addresses
-// that the machine reported with the same address value.
-// Provider-reported addresses always come before machine-reported
-// addresses. Duplicates are removed.
-func (m *Machine) Addresses() (addresses network.SpaceAddresses) {
-	return network.MergedAddresses(networkAddresses(m.doc.MachineAddresses), networkAddresses(m.doc.Addresses))
-}
-
 // PublicAddress returns a public address for the machine. If no address is
 // available it returns an error that satisfies network.IsNoAddressError().
 func (m *Machine) PublicAddress() (network.SpaceAddress, error) {
@@ -861,17 +850,6 @@ func (m *Machine) PublicAddress() (network.SpaceAddress, error) {
 		err = network.NoAddressError("public")
 	}
 	return publicAddress, err
-}
-
-// PrivateAddress returns a private address for the machine. If no address is
-// available it returns an error that satisfies network.IsNoAddressError().
-func (m *Machine) PrivateAddress() (network.SpaceAddress, error) {
-	privateAddress := m.doc.PreferredPrivateAddress.networkAddress()
-	var err error
-	if privateAddress.Value == "" {
-		err = network.NoAddressError("private")
-	}
-	return privateAddress, err
 }
 
 // String returns a unique description of this machine.
