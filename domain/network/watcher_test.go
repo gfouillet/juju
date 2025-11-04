@@ -5,18 +5,18 @@ package network_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/watcher/watchertest"
 	"github.com/juju/juju/domain"
-	service "github.com/juju/juju/domain/network/service"
-	state "github.com/juju/juju/domain/network/state"
+	"github.com/juju/juju/domain/network/service"
+	"github.com/juju/juju/domain/network/state"
 	changestreamtesting "github.com/juju/juju/internal/changestream/testing"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
@@ -25,22 +25,27 @@ type watcherSuite struct {
 	changestreamtesting.ModelSuite
 }
 
-var _ = gc.Suite(&watcherSuite{})
+func TestWatcherSuite(t *testing.T) {
+	tc.Run(t, &watcherSuite{})
+}
 
-func (s *watcherSuite) TestWatchWithAdd(c *gc.C) {
+func (s *watcherSuite) TestWatchWithAdd(c *tc.C) {
 	factory := changestream.NewWatchableDBFactoryForNamespace(s.GetWatchableDB, "subnet")
 
 	svc := service.NewWatchableService(
-		state.NewState(func() (database.TxnRunner, error) { return factory() }, loggertesting.WrapCheckLog(c)),
-		nil,
+		state.NewState(func(ctx context.Context) (database.TxnRunner, error) { return factory(ctx) }, loggertesting.WrapCheckLog(c)),
+		nil, nil,
 		domain.NewWatcherFactory(factory,
 			loggertesting.WrapCheckLog(c),
 		),
 		loggertesting.WrapCheckLog(c),
 	)
-	watcher, err := svc.WatchSubnets(context.Background(), set.NewStrings())
-	c.Assert(err, jc.ErrorIsNil)
+	watcher, err := svc.WatchSubnets(c.Context(), set.NewStrings())
+	c.Assert(err, tc.ErrorIsNil)
 	watcherC := watchertest.NewStringsWatcherC(c, watcher)
+	// Initial event.
+	watcherC.AssertOneChange()
+	s.AssertChangeStreamIdle(c)
 
 	// Add a new subnet.
 	subnet := network.SubnetInfo{
@@ -48,27 +53,30 @@ func (s *watcherSuite) TestWatchWithAdd(c *gc.C) {
 		ProviderId:        "subnet-provider-id",
 		ProviderNetworkId: "subnet-provider-network-id",
 	}
-	createdSubnetID, err := svc.AddSubnet(context.Background(), subnet)
-	c.Assert(err, jc.ErrorIsNil)
+	createdSubnetID, err := svc.AddSubnet(c.Context(), subnet)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Get the change.
 	watcherC.AssertChange(createdSubnetID.String())
 }
 
-func (s *watcherSuite) TestWatchWithDelete(c *gc.C) {
+func (s *watcherSuite) TestWatchWithDelete(c *tc.C) {
 	factory := changestream.NewWatchableDBFactoryForNamespace(s.GetWatchableDB, "subnet")
 
 	svc := service.NewWatchableService(
-		state.NewState(func() (database.TxnRunner, error) { return factory() }, loggertesting.WrapCheckLog(c)),
-		nil,
+		state.NewState(func(ctx context.Context) (database.TxnRunner, error) { return factory(ctx) }, loggertesting.WrapCheckLog(c)),
+		nil, nil,
 		domain.NewWatcherFactory(factory,
 			loggertesting.WrapCheckLog(c),
 		),
 		loggertesting.WrapCheckLog(c),
 	)
-	watcher, err := svc.WatchSubnets(context.Background(), set.NewStrings())
-	c.Assert(err, jc.ErrorIsNil)
+	watcher, err := svc.WatchSubnets(c.Context(), set.NewStrings())
+	c.Assert(err, tc.ErrorIsNil)
 	watcherC := watchertest.NewStringsWatcherC(c, watcher)
+	// Initial event.
+	watcherC.AssertOneChange()
+	s.AssertChangeStreamIdle(c)
 
 	// Add a new subnet.
 	subnet := network.SubnetInfo{
@@ -76,11 +84,11 @@ func (s *watcherSuite) TestWatchWithDelete(c *gc.C) {
 		ProviderId:        "subnet-provider-id",
 		ProviderNetworkId: "subnet-provider-network-id",
 	}
-	createdSubnetID, err := svc.AddSubnet(context.Background(), subnet)
-	c.Assert(err, jc.ErrorIsNil)
+	createdSubnetID, err := svc.AddSubnet(c.Context(), subnet)
+	c.Assert(err, tc.ErrorIsNil)
 	// Delete the subnet.
-	err = svc.RemoveSubnet(context.Background(), createdSubnetID.String())
-	c.Assert(err, jc.ErrorIsNil)
+	err = svc.RemoveSubnet(c.Context(), createdSubnetID.String())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Get the change.
 	watcherC.AssertChange(createdSubnetID.String())

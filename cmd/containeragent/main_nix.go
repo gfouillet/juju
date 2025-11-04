@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
 	proxyutils "github.com/juju/proxy"
@@ -24,9 +24,9 @@ import (
 	"github.com/juju/juju/cmd/containeragent/config"
 	initcommand "github.com/juju/juju/cmd/containeragent/initialize"
 	unitcommand "github.com/juju/juju/cmd/containeragent/unit"
-	"github.com/juju/juju/cmd/internal/dumplogs"
 	"github.com/juju/juju/cmd/internal/run"
 	"github.com/juju/juju/core/machinelock"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/featureflag"
 	internallogger "github.com/juju/juju/internal/logger"
 	proxy "github.com/juju/juju/internal/proxy/config"
@@ -60,10 +60,10 @@ JUJU_CONTEXT_ID be set in its model.
 `
 
 const (
-	// exit_err is the value that is returned when the user has run juju in an invalid way.
-	exit_err = 2
-	// exit_panic is the value that is returned when we exit due to an unhandled panic.
-	exit_panic = 3
+	// ExitStatusCodeErr is the value that is returned when the user has run juju in an invalid way.
+	ExitStatusCodeErr = 2
+	// ExitStatusCodePanic is the value that is returned when we exit due to an unhandled panic.
+	ExitStatusCodePanic = 3
 )
 
 type containerAgentLogWriter struct {
@@ -126,7 +126,7 @@ func mainWrapper(f commandFactory, args []string) (code int) {
 	ctx, err := cmd.DefaultContext()
 	if err != nil {
 		cmd.WriteError(os.Stderr, err)
-		os.Exit(exit_err)
+		os.Exit(ExitStatusCodeErr)
 	}
 	switch filepath.Base(args[0]) {
 	case names.ContainerAgent:
@@ -135,13 +135,11 @@ func mainWrapper(f commandFactory, args []string) (code int) {
 		code = f.jujuExec(ctx, args)
 	case names.JujuIntrospect:
 		code = f.jujuIntrospect(ctx, args)
-	case names.JujuDumpLogs:
-		code = f.jujuDumpLogs(ctx, args)
 	default:
 		// This should never happen unless jujuc was missing and hooktools were misconfigured.
 		err = errors.New("containeragent always expects to use jujuc for hook tools")
 		cmd.WriteError(ctx.Stderr, err)
-		os.Exit(exit_err)
+		os.Exit(ExitStatusCodeErr)
 	}
 	return code
 }
@@ -152,8 +150,8 @@ func main() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			buf = buf[:runtime.Stack(buf, false)]
-			logger.Criticalf("Unhandled panic: \n%v\n%s", r, buf)
-			os.Exit(exit_panic)
+			logger.Criticalf(context.TODO(), "Unhandled panic: \n%v\n%s", r, buf)
+			os.Exit(ExitStatusCodePanic)
 		}
 	}()
 
@@ -182,10 +180,7 @@ func main() {
 			return cmd.Main(&run.RunCommand{MachineLock: lock}, ctx, args[1:])
 		},
 		jujuIntrospect: func(ctx *cmd.Context, args []string) int {
-			return cmd.Main(introspect.New(nil), ctx, args[1:])
-		},
-		jujuDumpLogs: func(ctx *cmd.Context, args []string) int {
-			return cmd.Main(dumplogs.NewCommand(), ctx, args[1:])
+			return cmd.Main(introspect.New(), ctx, args[1:])
 		},
 	}
 	os.Exit(mainWrapper(f, os.Args))
@@ -197,5 +192,4 @@ type commandFactory struct {
 	containerAgentCmd command
 	jujuExec          command
 	jujuIntrospect    command
-	jujuDumpLogs      command
 }

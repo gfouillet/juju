@@ -6,64 +6,107 @@ package resourceshookcontext
 import (
 	"context"
 
-	"github.com/juju/errors"
+	jujuerrors "github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/resources"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	coreresources "github.com/juju/juju/core/resources"
+	coreapplication "github.com/juju/juju/core/application"
+	"github.com/juju/juju/core/resource"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
-// resourcesUnitDatastore is a shim to elide serviceName from
-// ListResources.
-type resourcesUnitDataStore struct {
-	resources state.Resources
-	unit      *state.Unit
-}
-
-// ListResources implements resource/api/private/server.UnitDataStore.
-func (ds *resourcesUnitDataStore) ListResources() (coreresources.ApplicationResources, error) {
-	return ds.resources.ListResources(ds.unit.ApplicationName())
-}
-
-// UnitDataStore exposes the data storage functionality needed here.
-// All functionality is tied to the unit's application.
-type UnitDataStore interface {
-	// ListResources lists all the resources for the application.
-	ListResources() (coreresources.ApplicationResources, error)
-}
+// applicationUUIDGetter is a function type used to retrieve a
+// coreapplication.UUID based on the given context (from application name or
+// unit name)
+// It returns an error if the UUID retrieval fails.
+type applicationUUIDGetter func(ctx context.Context) (coreapplication.UUID, error)
 
 // NewUnitFacade returns the resources portion of the uniter's API facade.
-func NewUnitFacade(dataStore UnitDataStore) *UnitFacade {
-	return &UnitFacade{
-		DataStore: dataStore,
+func NewUnitFacade(
+	appOrUnitTag names.Tag,
+	applicationService ApplicationService,
+	resourceService ResourceService,
+) (*UnitFacade, error) {
+	var applicationUUIDGetter applicationUUIDGetter
+	switch tag := appOrUnitTag.(type) {
+	case names.UnitTag:
+		unitName, err := coreunit.NewName(tag.Id())
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
+		applicationUUIDGetter = func(ctx context.Context) (coreapplication.UUID, error) {
+			return applicationService.GetApplicationUUIDByUnitName(ctx, unitName)
+		}
+	case names.ApplicationTag:
+		applicationUUIDGetter = func(ctx context.Context) (coreapplication.UUID, error) {
+			return applicationService.GetApplicationUUIDByName(ctx, tag.Id())
+		}
+	default:
+		return nil, errors.Errorf("expected names.UnitTag or names.ApplicationTag, got %T", tag)
 	}
+
+	return &UnitFacade{
+		resourceService:           resourceService,
+		getApplicationUUIDFromAPI: applicationUUIDGetter,
+	}, nil
 }
 
 // UnitFacade is the resources portion of the uniter's API facade.
 type UnitFacade struct {
-	//DataStore is the data store used by the facade.
-	DataStore UnitDataStore
+	resourceService           ResourceService
+	getApplicationUUIDFromAPI applicationUUIDGetter
+	applicationID             coreapplication.UUID
+}
+
+// getApplicationUUID retrieves and caches the application UUID for the unit.
+// It fetches from the API if not already cached.
+func (uf *UnitFacade) getApplicationUUID(ctx context.Context) (coreapplication.UUID, error) {
+	if uf.applicationID == "" {
+		applicationID, err := uf.getApplicationUUIDFromAPI(ctx)
+		if err != nil {
+			return uf.applicationID, err
+		}
+		uf.applicationID = applicationID
+	}
+	return uf.applicationID, nil
+}
+
+// listResources retrieves the application resources information through the
+// resource service using the application UUID.
+func (uf *UnitFacade) listResources(ctx context.Context) ([]resource.Resource, error) {
+	appID, err := uf.getApplicationUUID(ctx)
+	if err != nil {
+		return nil, errors.Errorf("cannot get application UUID: %w", err)
+	}
+	return uf.resourceService.GetResourcesByApplicationUUID(ctx, appID)
 }
 
 // GetResourceInfo returns the resource info for each of the given
 // resource names (for the implicit application). If any one is missing then
 // the corresponding result is set with errors.NotFound.
-func (uf UnitFacade) GetResourceInfo(ctx context.Context, args params.ListUnitResourcesArgs) (params.UnitResourcesResult, error) {
+func (uf *UnitFacade) GetResourceInfo(ctx context.Context, args params.ListUnitResourcesArgs) (params.
+	UnitResourcesResult, error) {
 	var r params.UnitResourcesResult
 	r.Resources = make([]params.UnitResourceResult, len(args.ResourceNames))
 
-	foundResources, err := uf.DataStore.ListResources()
+	// Avoid to fetch resources if not required
+	if len(args.ResourceNames) == 0 {
+		return r, nil
+	}
+
+	foundResources, err := uf.listResources(ctx)
 	if err != nil {
 		r.Error = apiservererrors.ServerError(err)
 		return r, nil
 	}
 
 	for i, name := range args.ResourceNames {
-		res, ok := lookUpResource(name, foundResources.Resources)
+		res, ok := lookUpResource(name, foundResources)
 		if !ok {
-			r.Resources[i].Error = apiservererrors.ServerError(errors.NotFoundf("resource %q", name))
+			r.Resources[i].Error = apiservererrors.ServerError(jujuerrors.NotFoundf("resource %q", name))
 			continue
 		}
 
@@ -72,11 +115,13 @@ func (uf UnitFacade) GetResourceInfo(ctx context.Context, args params.ListUnitRe
 	return r, nil
 }
 
-func lookUpResource(name string, resources []coreresources.Resource) (coreresources.Resource, bool) {
+// lookUpResource searches for a resource by name in a list of resources and
+// returns the resource and a bool indicating success.
+func lookUpResource(name string, resources []resource.Resource) (resource.Resource, bool) {
 	for _, res := range resources {
 		if name == res.Name {
 			return res, true
 		}
 	}
-	return coreresources.Resource{}, false
+	return resource.Resource{}, false
 }

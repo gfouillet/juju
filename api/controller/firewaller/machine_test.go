@@ -4,37 +4,37 @@
 package firewaller_test
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	basetesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/api/controller/firewaller"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/network"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type machineSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&machineSuite{})
+func TestMachineSuite(t *testing.T) {
+	tc.Run(t, &machineSuite{})
+}
 
-func (s *machineSuite) TestMachine(c *gc.C) {
+func (s *machineSuite) TestMachine(c *tc.C) {
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Firewaller")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "Life")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.LifeResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
 		*(result.(*params.LifeResults)) = params.LifeResults{
 			Results: []params.LifeResult{{Life: "alive"}},
 		}
@@ -42,31 +42,31 @@ func (s *machineSuite) TestMachine(c *gc.C) {
 	})
 	tag := names.NewMachineTag("666")
 	client, err := firewaller.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Machine(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(m.Life(), gc.Equals, life.Alive)
-	c.Assert(m.Tag(), jc.DeepEquals, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m.Life(), tc.Equals, life.Alive)
+	c.Assert(m.Tag(), tc.DeepEquals, tag)
 }
 
-func (s *machineSuite) TestInstanceId(c *gc.C) {
+func (s *machineSuite) TestInstanceId(c *tc.C) {
 	calls := 0
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Firewaller")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
 		if calls == 0 {
-			c.Check(request, gc.Equals, "Life")
-			c.Assert(result, gc.FitsTypeOf, &params.LifeResults{})
+			c.Check(request, tc.Equals, "Life")
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
 			*(result.(*params.LifeResults)) = params.LifeResults{
 				Results: []params.LifeResult{{Life: "alive"}},
 			}
 		} else {
-			c.Check(request, gc.Equals, "InstanceId")
-			c.Assert(result, gc.FitsTypeOf, &params.StringResults{})
+			c.Check(request, tc.Equals, "InstanceId")
+			c.Assert(result, tc.FitsTypeOf, &params.StringResults{})
 			*(result.(*params.StringResults)) = params.StringResults{
 				Results: []params.StringResult{{Result: "inst-666"}},
 			}
@@ -76,34 +76,34 @@ func (s *machineSuite) TestInstanceId(c *gc.C) {
 	})
 	tag := names.NewMachineTag("666")
 	client, err := firewaller.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Machine(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-	id, err := m.InstanceId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(m.Life(), gc.Equals, life.Alive)
-	c.Assert(id, gc.Equals, instance.Id("inst-666"))
-	c.Assert(calls, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	id, err := m.InstanceId(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m.Life(), tc.Equals, life.Alive)
+	c.Assert(id, tc.Equals, instance.Id("inst-666"))
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *machineSuite) TestWatchUnits(c *gc.C) {
+func (s *machineSuite) TestWatchUnits(c *tc.C) {
 	calls := 0
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Firewaller")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
 		if calls > 0 {
-			c.Assert(result, gc.FitsTypeOf, &params.StringsWatchResults{})
-			c.Check(request, gc.Equals, "WatchUnits")
+			c.Assert(result, tc.FitsTypeOf, &params.StringsWatchResults{})
+			c.Check(request, tc.Equals, "WatchUnits")
 			*(result.(*params.StringsWatchResults)) = params.StringsWatchResults{
 				Results: []params.StringsWatchResult{{Error: &params.Error{Message: "FAIL"}}},
 			}
 		} else {
-			c.Assert(result, gc.FitsTypeOf, &params.LifeResults{})
-			c.Check(request, gc.Equals, "Life")
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			c.Check(request, tc.Equals, "Life")
 			*(result.(*params.LifeResults)) = params.LifeResults{
 				Results: []params.LifeResult{{Life: life.Alive}},
 			}
@@ -113,32 +113,32 @@ func (s *machineSuite) TestWatchUnits(c *gc.C) {
 	})
 	tag := names.NewMachineTag("666")
 	client, err := firewaller.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Machine(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = m.WatchUnits()
-	c.Assert(err, gc.ErrorMatches, "FAIL")
-	c.Assert(calls, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	_, err = m.WatchUnits(c.Context())
+	c.Assert(err, tc.ErrorMatches, "FAIL")
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *machineSuite) TestIsManual(c *gc.C) {
+func (s *machineSuite) TestIsManual(c *tc.C) {
 	calls := 0
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Firewaller")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
 		if calls > 0 {
-			c.Assert(result, gc.FitsTypeOf, &params.BoolResults{})
-			c.Check(request, gc.Equals, "AreManuallyProvisioned")
+			c.Assert(result, tc.FitsTypeOf, &params.BoolResults{})
+			c.Check(request, tc.Equals, "AreManuallyProvisioned")
 			*(result.(*params.BoolResults)) = params.BoolResults{
 				Results: []params.BoolResult{{Result: true}},
 			}
 		} else {
-			c.Assert(result, gc.FitsTypeOf, &params.LifeResults{})
-			c.Check(request, gc.Equals, "Life")
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			c.Check(request, tc.Equals, "Life")
 			*(result.(*params.LifeResults)) = params.LifeResults{
 				Results: []params.LifeResult{{Life: life.Alive}},
 			}
@@ -148,121 +148,11 @@ func (s *machineSuite) TestIsManual(c *gc.C) {
 	})
 	tag := names.NewMachineTag("666")
 	client, err := firewaller.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Machine(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-	result, err := m.IsManual()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.IsTrue)
-	c.Assert(calls, gc.Equals, 2)
-}
-
-func (s *machineSuite) TestOpenedPortRanges(c *gc.C) {
-	results := map[string][]params.OpenUnitPortRanges{
-		"unit-mysql-0": {
-			{
-				Endpoint:    "server",
-				SubnetCIDRs: []string{"192.168.0.0/24", "192.168.1.0/24"},
-				PortRanges: []params.PortRange{
-					params.FromNetworkPortRange(network.MustParsePortRange("3306/tcp")),
-				},
-			},
-		},
-		"unit-wordpress-0": {
-			{
-				Endpoint:    "website",
-				SubnetCIDRs: []string{"192.168.0.0/24", "192.168.1.0/24"},
-				PortRanges: []params.PortRange{
-					params.FromNetworkPortRange(network.MustParsePortRange("80/tcp")),
-				},
-			},
-			{
-				Endpoint:    "metrics",
-				SubnetCIDRs: []string{"10.0.0.0/24", "10.0.1.0/24", "192.168.0.0/24", "192.168.1.0/24"},
-				PortRanges: []params.PortRange{
-					params.FromNetworkPortRange(network.MustParsePortRange("1337/tcp")),
-				},
-			},
-		},
-	}
-
-	calls := 0
-	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Firewaller")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
-			Entities: []params.Entity{{Tag: "machine-666"}},
-		})
-		if calls > 0 {
-			c.Assert(result, gc.FitsTypeOf, &params.OpenMachinePortRangesResults{})
-			c.Check(request, gc.Equals, "OpenedMachinePortRanges")
-			*(result.(*params.OpenMachinePortRangesResults)) = params.OpenMachinePortRangesResults{
-				Results: []params.OpenMachinePortRangesResult{{
-					UnitPortRanges: results,
-				}},
-			}
-		} else {
-			c.Assert(result, gc.FitsTypeOf, &params.LifeResults{})
-			c.Check(request, gc.Equals, "Life")
-			*(result.(*params.LifeResults)) = params.LifeResults{
-				Results: []params.LifeResult{{Life: life.Alive}},
-			}
-		}
-		calls++
-		return nil
-	})
-
-	tag := names.NewMachineTag("666")
-	client, err := firewaller.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Machine(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-
-	byUnitAndCIDR, byUnitAndEndpoint, err := m.OpenedMachinePortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(byUnitAndCIDR, jc.DeepEquals, map[names.UnitTag]network.GroupedPortRanges{
-		names.NewUnitTag("mysql/0"): {
-			"192.168.0.0/24": []network.PortRange{
-				network.MustParsePortRange("3306/tcp"),
-			},
-			"192.168.1.0/24": []network.PortRange{
-				network.MustParsePortRange("3306/tcp"),
-			},
-		},
-		names.NewUnitTag("wordpress/0"): {
-			"10.0.0.0/24": []network.PortRange{
-				network.MustParsePortRange("1337/tcp"),
-			},
-			"10.0.1.0/24": []network.PortRange{
-				network.MustParsePortRange("1337/tcp"),
-			},
-			"192.168.0.0/24": []network.PortRange{
-				network.MustParsePortRange("80/tcp"),
-				network.MustParsePortRange("1337/tcp"),
-			},
-			"192.168.1.0/24": []network.PortRange{
-				network.MustParsePortRange("80/tcp"),
-				network.MustParsePortRange("1337/tcp"),
-			},
-		},
-	})
-
-	c.Assert(byUnitAndEndpoint, jc.DeepEquals, map[names.UnitTag]network.GroupedPortRanges{
-		names.NewUnitTag("mysql/0"): {
-			"server": []network.PortRange{
-				network.MustParsePortRange("3306/tcp"),
-			},
-		},
-		names.NewUnitTag("wordpress/0"): {
-			"website": []network.PortRange{
-				network.MustParsePortRange("80/tcp"),
-			},
-			"metrics": []network.PortRange{
-				network.MustParsePortRange("1337/tcp"),
-			},
-		},
-	})
-	c.Assert(calls, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	result, err := m.IsManual(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.IsTrue)
+	c.Assert(calls, tc.Equals, 2)
 }

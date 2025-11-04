@@ -4,57 +4,50 @@
 package usersecretsdrain
 
 import (
-	stdcontext "context"
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	coremodel "github.com/juju/juju/core/model"
-	"github.com/juju/juju/internal/secrets/provider"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("UserSecretsDrain", 1, func(stdCtx stdcontext.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newUserSecretsDrainAPI(ctx)
+	registry.MustRegister("UserSecretsDrain", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newUserSecretsDrainAPI(stdCtx, ctx)
 	}, reflect.TypeOf((*SecretsDrainAPI)(nil)))
 }
 
 // newUserSecretsDrainAPI creates a SecretsDrainAPI for draining user secrets.
-func newUserSecretsDrainAPI(context facade.ModelContext) (*SecretsDrainAPI, error) {
-	if !context.Auth().AuthController() {
+func newUserSecretsDrainAPI(stdCtx context.Context, ctx facade.ModelContext) (*SecretsDrainAPI, error) {
+	if !ctx.Auth().AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
-	leadershipChecker, err := context.LeadershipChecker()
+	leadershipChecker, err := ctx.LeadershipChecker()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	model, err := context.State().Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	modelUUID := coremodel.UUID(model.UUID())
-	serviceFactory := context.ServiceFactory()
-	backendService := serviceFactory.SecretBackend()
 
-	secretBackendAdminConfigGetter := func(stdCtx stdcontext.Context) (*provider.ModelBackendConfigInfo, error) {
-		return backendService.GetSecretBackendConfigForAdmin(stdCtx, modelUUID)
-	}
-	secretService := context.ServiceFactory().Secret(secretBackendAdminConfigGetter)
+	domainServices := ctx.DomainServices()
+	backendService := domainServices.SecretBackend()
 
-	authTag := model.ModelTag()
+	secretService := ctx.DomainServices().Secret()
+
+	authTag := names.NewModelTag(ctx.ModelUUID().String())
+
 	commonDrainAPI, err := commonsecrets.NewSecretsDrainAPI(
 		authTag,
-		context.Auth(),
-		context.Logger().Child("usersecretsdrain"),
+		ctx.Auth(),
+		ctx.Logger().Child("usersecretsdrain"),
 		leadershipChecker,
-		modelUUID,
+		ctx.ModelUUID(),
 		secretService,
 		backendService,
-		context.WatcherRegistry(),
+		ctx.WatcherRegistry(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -62,7 +55,7 @@ func newUserSecretsDrainAPI(context facade.ModelContext) (*SecretsDrainAPI, erro
 
 	return &SecretsDrainAPI{
 		SecretsDrainAPI:      commonDrainAPI,
-		modelUUID:            model.UUID(),
+		modelUUID:            ctx.ModelUUID(),
 		secretBackendService: backendService,
 		secretService:        secretService,
 	}, nil

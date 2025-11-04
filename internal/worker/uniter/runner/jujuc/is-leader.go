@@ -4,11 +4,11 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // isLeaderCommand implements the is-leader command.
@@ -30,10 +30,17 @@ is-leader prints a boolean indicating whether the local unit is guaranteed to
 be application leader for at least 30 seconds. If it fails, you should assume that
 there is no such guarantee.
 `
+	examples := `
+    LEADER=$(is-leader)
+    if [ "${LEADER}" == "True" ]; then
+      # Do something a leader would do
+    fi
+`
 	return jujucmd.Info(&cmd.Info{
-		Name:    "is-leader",
-		Purpose: "print application leadership status",
-		Doc:     doc,
+		Name:     "is-leader",
+		Purpose:  "Print application leadership status.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 

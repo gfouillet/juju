@@ -15,7 +15,6 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	callcontext "github.com/juju/juju/environs/envcontext"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -55,11 +54,11 @@ func (p *environProvider) Version() int {
 }
 
 // Open implements environs.EnvironProvider.
-func (p *environProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
+func (p *environProvider) Open(ctx stdcontext.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
 	if err := validateCloudSpec(args.Cloud); err != nil {
 		return nil, errors.Annotate(err, "validating cloud spec")
 	}
-	env, err := newEnviron(ctx, p, args.Cloud, args.Config)
+	env, err := newEnviron(ctx, p, invalidator, args.Cloud, args.Config)
 	return env, errors.Trace(err)
 }
 
@@ -98,7 +97,7 @@ func (p *environProvider) CloudSchema() *jsonschema.Schema {
 const failedLoginMsg = "ServerFaultCode: Cannot complete login due to an incorrect user name or password."
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p *environProvider) Ping(callCtx callcontext.ProviderCallContext, endpoint string) error {
+func (p *environProvider) Ping(ctx stdcontext.Context, endpoint string) error {
 	// try to be smart and not punish people for adding or forgetting http
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -120,7 +119,6 @@ func (p *environProvider) Ping(callCtx callcontext.ProviderCallContext, endpoint
 	// should fail, since there's no password set.
 	u.User = url.User("juju")
 
-	ctx := context.Background()
 	client, err := p.dial(ctx, u, "")
 	if err != nil {
 		if err.Error() == failedLoginMsg {
@@ -128,22 +126,19 @@ func (p *environProvider) Ping(callCtx callcontext.ProviderCallContext, endpoint
 			// vSphere without any creds, so return nil.
 			return nil
 		}
-		logger.Errorf("Unexpected error dialing vSphere connection: %v", err)
+		logger.Errorf(ctx, "Unexpected error dialing vSphere connection: %v", err)
 		return errors.Errorf("No vCenter/ESXi available at %s", endpoint)
 	}
-	defer client.Close(ctx)
+	defer func() { _ = client.Close(ctx) }()
 
 	// We shouldn't get here, since we haven't set a password, but it is
 	// theoretically possible to have user="juju", password="".
 	return nil
 }
 
-// PrepareConfig implements environs.EnvironProvider.
-func (p *environProvider) PrepareConfig(ctx context.Context, args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	return args.Config, nil
+// ValidateCloud is specified in the EnvironProvider interface.
+func (*environProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 // Validate implements environs.EnvironProvider.

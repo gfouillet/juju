@@ -7,15 +7,15 @@ import (
 	"net"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListCommand returns a cammin used to list all subnets
@@ -42,19 +42,34 @@ using the optional --space and/or --zone arguments to only display
 subnets associated with a given network space and/or availability zone.
 
 Like with other Juju commands, the output and its format can be changed
-using the --format and --output (or -o) optional arguments. Supported
-output formats include "yaml" (default) and "json". To redirect the
-output to a file, use --output.
+using the ` + "`--format`" + ` and ` + "`--output`" + ` (or ` + "`-o`" + `) optional arguments. Supported
+output formats include ` + "`yaml`" + ` (default) and ` + "`json`" + `. To redirect the
+output to a file, use ` + "`--output`" + `.
+`
+
+const listCommandExample = `
+To list all subnets known to Juju:
+
+    juju subnets
+
+To list subnets associated with a specific network space:
+
+    juju subnets --space my-space
+
+To list subnets associated with a specific availability zone:
+
+    juju subnets --zone my-zone
 `
 
 // Info is defined on the cmd.Command interface.
 func (c *ListCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "subnets",
-		Args:    "[--space <name>] [--zone <name>] [--format yaml|json] [--output <path>]",
-		Purpose: "List subnets known to Juju.",
-		Doc:     strings.TrimSpace(listCommandDoc),
-		Aliases: []string{"list-subnets"},
+		Name:     "subnets",
+		Args:     "[--space <name>] [--zone <name>] [--format yaml|json] [--output <path>]",
+		Purpose:  "List subnets known to Juju.",
+		Doc:      strings.TrimSpace(listCommandDoc),
+		Aliases:  []string{"list-subnets"},
+		Examples: listCommandExample,
 	})
 }
 
@@ -95,7 +110,7 @@ func (c *ListCommand) Run(ctx *cmd.Context) error {
 		// Validate space and/or zone, if given to display a nicer error
 		// message.
 		// Get the list of subnets, filtering them as requested.
-		subnets, err := api.ListSubnets(c.spaceTag, c.ZoneName)
+		subnets, err := api.ListSubnets(ctx, c.spaceTag, c.ZoneName)
 		if err != nil {
 			return errors.Annotate(err, "cannot list subnets")
 		}

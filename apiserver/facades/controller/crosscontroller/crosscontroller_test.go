@@ -1,62 +1,86 @@
 // Copyright 2017 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package crosscontroller_test
+package crosscontroller
 
 import (
 	"context"
 	"errors"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/facades/controller/crosscontroller"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
+	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&CrossControllerSuite{})
+func TestCrossControllerSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &CrossControllerSuite{})
+}
 
 type CrossControllerSuite struct {
-	coretesting.BaseSuite
+	testhelpers.IsolationSuite
 
-	resources                *common.Resources
+	watcherRegistry          *facademocks.MockWatcherRegistry
 	watcher                  *mockNotifyWatcher
 	localControllerInfo      func() ([]string, string, error)
-	watchLocalControllerInfo func() state.NotifyWatcher
-	api                      *crosscontroller.CrossControllerAPI
+	watchLocalControllerInfo watchLocalControllerInfoFunc
+	api                      *CrossControllerAPI
 
 	publicDnsAddress string
 }
 
-func (s *CrossControllerSuite) SetUpTest(c *gc.C) {
-	s.BaseSuite.SetUpTest(c)
-	s.resources = common.NewResources()
-	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
+func (s *CrossControllerSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.watcherRegistry = facademocks.NewMockWatcherRegistry(ctrl)
+
+	c.Cleanup(func() {
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
+}
+
+func (s *CrossControllerSuite) newAPI(c *tc.C) {
 	s.localControllerInfo = func() ([]string, string, error) {
 		return []string{"addr1", "addr2"}, "ca-cert", nil
 	}
-	s.watchLocalControllerInfo = func() state.NotifyWatcher {
-		return s.watcher
+	s.watchLocalControllerInfo = func(ctx context.Context) (watcher.NotifyWatcher, error) {
+		return s.watcher, nil
 	}
-	api, err := crosscontroller.NewCrossControllerAPI(
-		s.resources,
+	api, err := NewCrossControllerAPI(
+		s.watcherRegistry,
 		func(context.Context) ([]string, string, error) { return s.localControllerInfo() },
 		func(context.Context) (string, error) { return s.publicDnsAddress, nil },
-		func() state.NotifyWatcher { return s.watchLocalControllerInfo() },
+		func(ctx context.Context) (watcher.NotifyWatcher, error) {
+			return s.watchLocalControllerInfo(c.Context())
+		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.api = api
 	s.watcher = newMockNotifyWatcher()
-	s.AddCleanup(func(*gc.C) { s.watcher.Stop() })
+	s.AddCleanup(func(*tc.C) { _ = s.watcher.Stop() })
+
+	c.Cleanup(func() {
+		s.api = nil
+		s.localControllerInfo = nil
+		s.watchLocalControllerInfo = nil
+		s.watcher = nil
+	})
 }
 
-func (s *CrossControllerSuite) TestControllerInfo(c *gc.C) {
-	results, err := s.api.ControllerInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ControllerAPIInfoResults{
+func (s *CrossControllerSuite) TestControllerInfo(c *tc.C) {
+	s.newAPI(c)
+	results, err := s.api.ControllerInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ControllerAPIInfoResults{
 		Results: []params.ControllerAPIInfoResult{{
 			Addresses: []string{"addr1", "addr2"},
 			CACert:    "ca-cert",
@@ -64,11 +88,12 @@ func (s *CrossControllerSuite) TestControllerInfo(c *gc.C) {
 	})
 }
 
-func (s *CrossControllerSuite) TestControllerInfoWithDNSAddress(c *gc.C) {
+func (s *CrossControllerSuite) TestControllerInfoWithDNSAddress(c *tc.C) {
+	s.newAPI(c)
 	s.publicDnsAddress = "publicDNSaddr"
-	results, err := s.api.ControllerInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ControllerAPIInfoResults{
+	results, err := s.api.ControllerInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ControllerAPIInfoResults{
 		Results: []params.ControllerAPIInfoResult{{
 			Addresses: []string{"publicDNSaddr", "addr1", "addr2"},
 			CACert:    "ca-cert",
@@ -76,41 +101,63 @@ func (s *CrossControllerSuite) TestControllerInfoWithDNSAddress(c *gc.C) {
 	})
 }
 
-func (s *CrossControllerSuite) TestControllerInfoError(c *gc.C) {
+func (s *CrossControllerSuite) TestControllerInfoError(c *tc.C) {
+	s.newAPI(c)
 	s.localControllerInfo = func() ([]string, string, error) {
 		return nil, "", errors.New("nope")
 	}
-	results, err := s.api.ControllerInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ControllerAPIInfoResults{
+	results, err := s.api.ControllerInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ControllerAPIInfoResults{
 		Results: []params.ControllerAPIInfoResult{{
 			Error: &params.Error{Message: "nope"},
 		}},
 	})
 }
 
-func (s *CrossControllerSuite) TestWatchControllerInfo(c *gc.C) {
+func (s *CrossControllerSuite) TestWatchControllerInfo(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.newAPI(c)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("42", nil)
 	s.watcher.changes <- struct{}{} // initial value
-	results, err := s.api.WatchControllerInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.NotifyWatchResults{
+	results, err := s.api.WatchControllerInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.NotifyWatchResults{
 		Results: []params.NotifyWatchResult{{
-			NotifyWatcherId: "1",
+			NotifyWatcherId: "42",
 		}},
 	})
-	c.Assert(s.resources.Get("1"), gc.Equals, s.watcher)
 }
 
-func (s *CrossControllerSuite) TestWatchControllerInfoError(c *gc.C) {
+func (s *CrossControllerSuite) TestWatchControllerInfoError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.newAPI(c)
 	s.watcher.tomb.Kill(errors.New("nope"))
 	close(s.watcher.changes)
 
-	results, err := s.api.WatchControllerInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.NotifyWatchResults{
+	results, err := s.api.WatchControllerInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.NotifyWatchResults{
 		Results: []params.NotifyWatchResult{{
 			Error: &params.Error{Message: "nope"},
 		}},
 	})
-	c.Assert(s.resources.Get("1"), gc.IsNil)
+}
+
+type stubControllerInfoGetter struct{}
+
+func (stubControllerInfoGetter) GetAllAPIAddressesForClients(ctx context.Context) ([]string, error) {
+	return []string{"host-name:50000", "10.1.2.3:50000"}, nil
+
+}
+
+func (s *CrossControllerSuite) TestGetControllerInfo(c *tc.C) {
+	addrs, cert, err := controllerInfo(c.Context(), stubControllerInfoGetter{}, controller.Config{
+		"ca-cert": "ca-cert",
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+	// Public address is sorted first.
+	c.Check(addrs, tc.DeepEquals, []string{"host-name:50000", "10.1.2.3:50000"})
+	c.Check(cert, tc.Equals, "ca-cert")
 }

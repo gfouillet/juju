@@ -6,13 +6,13 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/domain/externalcontroller/service"
 	"github.com/juju/juju/domain/externalcontroller/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 // RegisterExport registers the export operations with the given coordinator.
@@ -74,17 +74,17 @@ func (e *exportOperation) Execute(ctx context.Context, model description.Model) 
 	// is no extra performance cost.
 	var sourceModelUUIDs []string
 	for _, remoteApp := range model.RemoteApplications() {
-		sourceModelUUIDs = append(sourceModelUUIDs, remoteApp.SourceModelTag().Id())
+		sourceModelUUIDs = append(sourceModelUUIDs, remoteApp.SourceModelUUID())
 	}
 
 	controllers, err := e.service.ControllersForModels(ctx, sourceModelUUIDs...)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	for _, controller := range controllers {
 		_ = model.AddExternalController(description.ExternalControllerArgs{
-			Tag:    controller.ControllerTag,
+			ID:     controller.ControllerUUID,
 			Addrs:  controller.Addrs,
 			Alias:  controller.Alias,
 			CACert: controller.CACert,

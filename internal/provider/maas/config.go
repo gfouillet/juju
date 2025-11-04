@@ -7,12 +7,12 @@ import (
 	"context"
 
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
-var configSchema = environschema.Fields{}
+var configSchema = configschema.Fields{}
 
 var configFields = func() schema.Fields {
 	fs, _, err := configSchema.ValidationSchema()
@@ -41,12 +41,18 @@ func (p EnvironProvider) newConfig(ctx context.Context, cfg *config.Config) (*ma
 }
 
 // Schema returns the configuration schema for an environment.
-func (EnvironProvider) Schema() environschema.Fields {
+func (EnvironProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
 	}
 	return fields
+}
+
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p EnvironProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
 }
 
 // ConfigSchema returns extra config attributes specific

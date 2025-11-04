@@ -5,8 +5,8 @@ package assumes
 
 import (
 	"github.com/juju/collections/set"
-	"github.com/juju/version/v2"
 
+	"github.com/juju/juju/core/semversion"
 	chassumes "github.com/juju/juju/internal/charm/assumes"
 )
 
@@ -22,7 +22,7 @@ type Feature struct {
 	// An optional semantic version for this featureflag. It can be left empty
 	// to signify that a particular feature is available without explicitly
 	// specifying a version
-	Version *version.Number
+	Version *semversion.Number
 }
 
 // FeatureSet describes a set of features supported by a particular model.
@@ -39,6 +39,9 @@ func (fs *FeatureSet) Merge(other FeatureSet) {
 
 // AsList returns the contents of this set as a list sorted by feature name.
 func (fs *FeatureSet) AsList() []Feature {
+	if fs == nil {
+		return nil
+	}
 	set := set.NewStrings()
 	for featName := range fs.features {
 		set.Add(featName)

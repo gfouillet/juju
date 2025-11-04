@@ -18,7 +18,6 @@ package charmhub
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/url"
 	"path"
 	"strings"
@@ -26,9 +25,7 @@ import (
 
 	"github.com/juju/errors"
 
-	charmmetrics "github.com/juju/juju/core/charm/metrics"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/internal/charm"
 	charmhubpath "github.com/juju/juju/internal/charmhub/path"
 	"github.com/juju/juju/internal/charmhub/transport"
 )
@@ -65,6 +62,7 @@ type Config struct {
 
 	// FileSystem represents the file system operations for downloading.
 	// If nil, use the real OS file system.
+	// This is only required for downloading of charms or bundles.
 	FileSystem FileSystem
 }
 
@@ -84,7 +82,7 @@ type Client struct {
 	url             string
 	infoClient      *infoClient
 	findClient      *findClient
-	downloadClient  *downloadClient
+	downloadClient  *DownloadClient
 	refreshClient   *refreshClient
 	resourcesClient *resourcesClient
 }
@@ -133,22 +131,21 @@ func NewClient(config Config) (*Client, error) {
 		return nil, errors.Annotate(err, "constructing resources path")
 	}
 
-	logger.Tracef("NewClient to %q", url)
-
 	apiRequester := newAPIRequester(httpClient, logger)
 	apiRequestLogger := newAPIRequesterLogger(apiRequester, logger)
 	restClient := newHTTPRESTClient(apiRequestLogger)
 
 	return &Client{
-		url:           base.String(),
-		infoClient:    newInfoClient(infoPath, restClient, logger),
-		findClient:    newFindClient(findPath, restClient, logger),
-		refreshClient: newRefreshClient(refreshPath, restClient, logger),
+		url:             base.String(),
+		infoClient:      newInfoClient(infoPath, restClient, logger),
+		findClient:      newFindClient(findPath, restClient, logger),
+		refreshClient:   newRefreshClient(refreshPath, restClient, logger),
+		resourcesClient: newResourcesClient(resourcesPath, restClient, logger),
+
 		// download client doesn't require a path here, as the download could
 		// be from any server in theory. That information is found from the
 		// refresh response.
-		downloadClient:  newDownloadClient(httpClient, fs, logger),
-		resourcesClient: newResourcesClient(resourcesPath, restClient, logger),
+		downloadClient: NewDownloadClient(httpClient, fs, logger),
 	}, nil
 }
 
@@ -175,35 +172,20 @@ func (c *Client) Refresh(ctx context.Context, config RefreshConfig) ([]transport
 // RefreshWithRequestMetrics defines a client for making refresh API calls.
 // Specifically to use the refresh action and provide metrics.  Intended for
 // use in the charm revision updater facade only.  Otherwise use Refresh.
-func (c *Client) RefreshWithRequestMetrics(ctx context.Context, config RefreshConfig, metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricKey]string) ([]transport.RefreshResponse, error) {
+func (c *Client) RefreshWithRequestMetrics(ctx context.Context, config RefreshConfig, metrics Metrics) ([]transport.RefreshResponse, error) {
 	return c.refreshClient.RefreshWithRequestMetrics(ctx, config, metrics)
 }
 
 // RefreshWithMetricsOnly defines a client making a refresh API call with no
 // action, whose purpose is to send metrics data for models without current
 // units.  E.G. the controller model.
-func (c *Client) RefreshWithMetricsOnly(ctx context.Context, metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricKey]string) error {
+func (c *Client) RefreshWithMetricsOnly(ctx context.Context, metrics Metrics) error {
 	return c.refreshClient.RefreshWithMetricsOnly(ctx, metrics)
 }
 
 // Download defines a client for downloading charms directly.
-func (c *Client) Download(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) error {
+func (c *Client) Download(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (*Digest, error) {
 	return c.downloadClient.Download(ctx, resourceURL, archivePath, options...)
-}
-
-// DownloadAndRead defines a client for downloading charms directly.
-func (c *Client) DownloadAndRead(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (*charm.CharmArchive, error) {
-	return c.downloadClient.DownloadAndRead(ctx, resourceURL, archivePath, options...)
-}
-
-// DownloadAndReadBundle defines a client for downloading bundles directly.
-func (c *Client) DownloadAndReadBundle(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (charm.Bundle, error) {
-	return c.downloadClient.DownloadAndReadBundle(ctx, resourceURL, archivePath, options...)
-}
-
-// DownloadResource returns an io.ReadCloser to read the Resource from.
-func (c *Client) DownloadResource(ctx context.Context, resourceURL *url.URL) (r io.ReadCloser, err error) {
-	return c.downloadClient.DownloadResource(ctx, resourceURL)
 }
 
 // ListResourceRevisions returns resource revisions for the provided charm and resource.

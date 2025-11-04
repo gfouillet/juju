@@ -45,11 +45,17 @@ type ModificationStatusGetter interface {
 }
 
 const (
-	// Status values common to machine and unit agents.
+	// Status values common to machine and unit agents, and tasks.
 
 	// Error means the entity requires human intervention
 	// in order to operate correctly.
+	//
+	// The task did not get run due to an error.
 	Error Status = "error"
+)
+
+const (
+	// Status values common to machine and unit agents.
 
 	// Started is set when:
 	// The entity is actively participating in the model.
@@ -61,11 +67,18 @@ const (
 )
 
 const (
-	// Status values specific to machine agents.
+	// Status values specific to machine agents and tasks.
 
 	// Pending is set when:
+	//
 	// The machine is not yet participating in the model.
+	//
+	// The task first is queued.
 	Pending Status = "pending"
+)
+
+const (
+	// Status values specific to machine agents.
 
 	// Stopped is set when:
 	// The machine's agent will perform no further action, other than
@@ -76,6 +89,19 @@ const (
 	// The machine ought to be signalling activity, but it cannot be
 	// detected.
 	Down Status = "down"
+)
+
+const (
+	// Status values specific to unit agents and tasks.
+
+	// Failed is set when:
+	//
+	// The unit agent has failed in some way,eg the agent ought to be signalling
+	// activity, but it cannot be detected. It might also be that the unit agent
+	// detected an unrecoverable condition and managed to tell the Juju server about it.
+	//
+	// The task did not completed successfully.
+	Failed Status = "failed"
 )
 
 const (
@@ -92,8 +118,8 @@ const (
 	Rebooting Status = "rebooting"
 
 	// Executing is set when:
-	// The agent is running a hook or action. The human-readable message should reflect
-	// which hook or action is being run.
+	// The agent is running a hook or task. The human-readable message should reflect
+	// which hook or task is being run.
 	Executing Status = "executing"
 
 	// Idle is set when:
@@ -101,12 +127,6 @@ const (
 	// becomes "idle". It will stay "idle" until some action (e.g. it needs to run a hook) or
 	// error (e.g it loses contact with the Juju server) moves it to a different state.
 	Idle Status = "idle"
-
-	// Failed is set when:
-	// The unit agent has failed in some way,eg the agent ought to be signalling
-	// activity, but it cannot be detected. It might also be that the unit agent
-	// detected an unrecoverable condition and managed to tell the Juju server about it.
-	Failed Status = "failed"
 
 	// Lost is set when:
 	// The juju agent has not communicated with the juju server for an unexpectedly long time;
@@ -211,6 +231,26 @@ const (
 )
 
 const (
+	// Status values specific to tasks. The combined status of an operation's
+	// tasks result in the operation's status.
+
+	// Completed indicates that the task ran to completion as intended.
+	Completed Status = "completed"
+
+	// Cancelled means that the task was cancelled before being run.
+	Cancelled Status = "cancelled"
+
+	// Aborting indicates that the task is running but should be
+	// aborted.
+	Aborting Status = "aborting"
+
+	// Aborted indicates the task was aborted.
+	// TODO: is this really used? What is the difference between aborted
+	// and cancelled?
+	Aborted Status = "aborted"
+)
+
+const (
 	// Status values that are common to several entities.
 
 	// Destroying indicates that the entity is being destroyed.
@@ -219,11 +259,17 @@ const (
 	Destroying Status = "destroying"
 )
 
+const (
+	// Status values that are common to instances and tasks.
+
+	// Running indicates that the entity is currently running.
+	Running Status = "running"
+)
+
 // InstanceStatus
 const (
 	Empty             Status = ""
 	Provisioning      Status = "allocating"
-	Running           Status = "running"
 	ProvisioningError Status = "provisioning error"
 )
 
@@ -254,6 +300,8 @@ func (s Status) KnownModificationStatus() bool {
 	return false
 }
 
+// KnownInstanceStatus returns true if status has a known value for a machine
+// cloud  instance.
 func (s Status) KnownInstanceStatus() bool {
 	switch s {
 	case
@@ -266,6 +314,63 @@ func (s Status) KnownInstanceStatus() bool {
 		return true
 	}
 	return false
+}
+
+// KnownMachineStatus returns true if status has a known value for a machine.
+func (s Status) KnownMachineStatus() bool {
+	switch s {
+	case
+		Error,
+		Started,
+		Pending,
+		Stopped,
+		Down:
+		return true
+	}
+	return false
+}
+
+// KnownTaskStatus returns true if status has a known value for
+// a task or operation.
+func (s Status) KnownTaskStatus() bool {
+	switch s {
+	case
+		Aborting,
+		Aborted,
+		Cancelled,
+		Completed,
+		Error,
+		Failed,
+		Pending,
+		Running:
+		return true
+	}
+	return false
+}
+
+// IsInActiveTaskStatus returns true if status has a known value for
+// a completed task or operation.
+func (s Status) IsInActiveTaskStatus() bool {
+	switch s {
+	case
+		Aborted,
+		Cancelled,
+		Completed,
+		Error,
+		Failed:
+		return true
+	}
+	return false
+}
+
+// ActiveTaskStatuses returns a slice of strings representing
+// the possible statuses of an active task.
+func ActiveTaskStatuses() []string {
+	return []string{
+		Running.String(),
+		Pending.String(),
+		Aborting.String(),
+	}
 }
 
 // KnownAgentStatus returns true if status has a known value for an agent.
@@ -345,37 +450,4 @@ func ValidModelStatus(status Status) bool {
 // status value which has been deprecated.
 func (s Status) Matches(candidate Status) bool {
 	return s == candidate
-}
-
-// DeriveStatus is used to determine the application
-// status from a set of unit status values.
-func DeriveStatus(statuses []StatusInfo) StatusInfo {
-	// By providing an unknown default, we get a reasonable answer
-	// even if there are no units.
-	result := StatusInfo{
-		Status: Unknown,
-	}
-	for _, unitStatus := range statuses {
-		currentSeverity := statusSeverities[result.Status]
-		unitSeverity := statusSeverities[unitStatus.Status]
-		if unitSeverity > currentSeverity {
-			result.Status = unitStatus.Status
-			result.Message = unitStatus.Message
-			result.Data = unitStatus.Data
-			result.Since = unitStatus.Since
-		}
-	}
-	return result
-}
-
-// statusSeverities holds status values with a severity measure.
-// Status values with higher severity are used in preference to others.
-var statusSeverities = map[Status]int{
-	Error:       100,
-	Blocked:     90,
-	Maintenance: 80, // Maintenance (us busy) is higher than Waiting (someone else busy)
-	Waiting:     70,
-	Active:      60,
-	Terminated:  50,
-	Unknown:     40,
 }

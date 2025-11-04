@@ -4,18 +4,19 @@
 package bundlechanges
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/naturalsort"
 
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/naturalsort"
 )
 
 const Kubernetes = "kubernetes"
@@ -33,7 +34,7 @@ type resolver struct {
 
 // handleApplications populates the change set with "addCharm"/"addApplication" records.
 // This function also handles adding application annotations.
-func (r *resolver) handleApplications() (map[string]string, error) {
+func (r *resolver) handleApplications(ctx context.Context) (map[string]string, error) {
 	add := r.changes.add
 	applications := r.bundle.Applications
 	existing := r.model
@@ -94,7 +95,7 @@ func (r *resolver) handleApplications() (map[string]string, error) {
 			// The case of upgrade charmhub charm with by channel... need the correct revision,
 			// or we will not have an addCharmChange corresponding to the upgradeCharmChange.
 			if r.charmResolver != nil {
-				_, rev, err := r.charmResolver(application.Charm, computedBase, channel, arch, revision)
+				_, rev, err := r.charmResolver(ctx, application.Charm, computedBase, channel, arch, revision)
 				if err != nil {
 					return nil, errors.Trace(err)
 				}
@@ -179,7 +180,7 @@ func (r *resolver) handleApplications() (map[string]string, error) {
 			}
 		} else {
 			// Look for changes.
-			if ok, err := r.allowCharmUpgrade(existingApp, application, arch); err != nil {
+			if ok, err := r.allowCharmUpgrade(ctx, existingApp, application, arch); err != nil {
 				return nil, errors.Trace(err)
 			} else if ok {
 				charmOrChange := application.Charm
@@ -274,7 +275,7 @@ func (r *resolver) handleApplications() (map[string]string, error) {
 	return addedApplications, nil
 }
 
-func (r *resolver) allowCharmUpgrade(existingApp *Application, bundleApp *charm.ApplicationSpec, bundleArch string) (bool, error) {
+func (r *resolver) allowCharmUpgrade(ctx context.Context, existingApp *Application, bundleApp *charm.ApplicationSpec, bundleArch string) (bool, error) {
 	// This covers most of v1 charm URL changes, everything else below is to
 	// support channels. Charmstore charms allow channels, but bundles were not
 	// aware of them, with the introduction of Charmhub charms, then we do need
@@ -320,7 +321,7 @@ func (r *resolver) allowCharmUpgrade(existingApp *Application, bundleApp *charm.
 				return false, errors.Trace(err)
 			}
 		}
-		resolvedChan, resolvedRev, err = r.charmResolver(bundleApp.Charm, base, bundleApp.Channel, bundleArch, rev)
+		resolvedChan, resolvedRev, err = r.charmResolver(ctx, bundleApp.Charm, base, bundleApp.Channel, bundleArch, rev)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -702,7 +703,7 @@ func (p *unitProcessor) processUnitPlacement() error {
 
 		// If we haven't done any then we have a cycle
 		if done == 0 {
-			return errors.Errorf("cycle in placement directives for: " + strings.Join(toDo.SortedValues(), ", "))
+			return errors.Errorf("cycle in placement directives for: %s", strings.Join(toDo.SortedValues(), ", "))
 		}
 	}
 	return nil
@@ -733,10 +734,10 @@ func (p *unitProcessor) placeUnitsForApplication(name string, application *charm
 		}
 	}
 
-	p.logger.Tracef("model: %s", p.existing.pretty())
-	p.logger.Tracef("placements: %v", application.To)
+	p.logger.Tracef(context.TODO(), "model: %s", p.existing.pretty())
+	p.logger.Tracef(context.TODO(), "placements: %v", application.To)
 	unsatisfied := p.existing.unsatisfiedMachineAndUnitPlacements(name, application.To)
-	p.logger.Tracef("unsatisfied: %v", unsatisfied)
+	p.logger.Tracef(context.TODO(), "unsatisfied: %v", unsatisfied)
 
 	var lastChangeID string
 	// unitCount on a nil existingApp returns zero.
@@ -747,7 +748,7 @@ func (p *unitProcessor) placeUnitsForApplication(name string, application *charm
 		}
 		_ = unsatisfied
 
-		p.logger.Tracef("directive: %q", directive)
+		p.logger.Tracef(context.TODO(), "directive: %q", directive)
 		placement, err := p.getPlacementForNewUnit(name, application, directive)
 		if err != nil {
 			return err
@@ -1261,7 +1262,7 @@ func computeApplicationBase(application *charm.ApplicationSpec, defaultBase core
 		return defaultBase, nil
 	}
 
-	ch, err := charm.ReadCharm(application.Charm)
+	ch, err := charm.ReadCharmArchive(application.Charm)
 	if err != nil {
 		return corebase.Base{}, errors.Trace(err)
 	}

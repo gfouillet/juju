@@ -8,19 +8,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/version/v2"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/tools"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func newValidateToolsMetadataCommand() cmd.Command {
@@ -111,6 +111,10 @@ func (c *validateAgentsMetadataCommand) Info() *cmd.Info {
 		Name:    "validate-agent-binaries",
 		Purpose: "check that compressed tar archives (.tgz) for the Juju agent binaries are available",
 		Doc:     validateAgentsMetadataDoc,
+		SeeAlso: []string{
+			"generate-images",
+			"sign",
+		},
 	})
 }
 
@@ -142,7 +146,7 @@ func (c *validateAgentsMetadataCommand) Init(args []string) error {
 	}
 	if c.partVersion != "" {
 		var err error
-		if c.major, c.minor, err = version.ParseMajorMinor(c.partVersion); err != nil {
+		if c.major, c.minor, err = semversion.ParseMajorMinor(c.partVersion); err != nil {
 			return err
 		}
 	}
@@ -241,8 +245,8 @@ func (c *validateAgentsMetadataCommand) Run(context *cmd.Context) error {
 
 	if len(versions) > 0 {
 		metadata := map[string]interface{}{
-			"Matching Tools Versions": versions,
-			"Resolve Metadata":        *resolveInfo,
+			"Matching Agent Binary Versions": versions,
+			"Resolve Metadata":               *resolveInfo,
 		}
 		_ = c.out.Write(context, metadata)
 	} else {

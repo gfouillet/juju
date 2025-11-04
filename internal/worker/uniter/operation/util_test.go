@@ -8,18 +8,16 @@ import (
 	"sync"
 
 	"github.com/juju/errors"
-	"github.com/juju/testing"
 	utilexec "github.com/juju/utils/v4/exec"
 
 	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
-	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	runnercontext "github.com/juju/juju/internal/worker/uniter/runner/context"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
@@ -57,7 +55,7 @@ func (cb *DeployCallbacks) GetArchiveInfo(charmURL string) (charm.BundleInfo, er
 	return cb.MockGetArchiveInfo.Call(charmURL)
 }
 
-func (cb *DeployCallbacks) SetCurrentCharm(charmURL string) error {
+func (cb *DeployCallbacks) SetCurrentCharm(ctx context.Context, charmURL string) error {
 	return cb.MockSetCurrentCharm.Call(charmURL)
 }
 
@@ -70,14 +68,12 @@ type MockBundleInfo struct {
 }
 
 type MockStage struct {
-	gotInfo  *charm.BundleInfo
-	gotAbort *<-chan struct{}
-	err      error
+	gotInfo *charm.BundleInfo
+	err     error
 }
 
-func (mock *MockStage) Call(info charm.BundleInfo, abort <-chan struct{}) error {
+func (mock *MockStage) Call(info charm.BundleInfo) error {
 	mock.gotInfo = &info
-	mock.gotAbort = &abort
 	return mock.err
 }
 
@@ -99,8 +95,8 @@ type MockDeployer struct {
 	MockNotifyResolved *MockNoArgs
 }
 
-func (d *MockDeployer) Stage(info charm.BundleInfo, abort <-chan struct{}) error {
-	return d.MockStage.Call(info, abort)
+func (d *MockDeployer) Stage(ctx context.Context, info charm.BundleInfo) error {
+	return d.MockStage.Call(info)
 }
 
 func (d *MockDeployer) Deploy() error {
@@ -110,12 +106,14 @@ func (d *MockDeployer) Deploy() error {
 type MockFailAction struct {
 	gotActionId *string
 	gotMessage  *string
+	status      string
 	err         error
 }
 
-func (mock *MockFailAction) Call(actionId, message string) error {
+func (mock *MockFailAction) Call(actionId, status, message string) error {
 	mock.gotActionId = &actionId
 	mock.gotMessage = &message
+	mock.status = status
 	return mock.err
 }
 
@@ -129,10 +127,14 @@ type RunActionCallbacks struct {
 }
 
 func (cb *RunActionCallbacks) FailAction(_ context.Context, actionId, message string) error {
-	return cb.MockFailAction.Call(actionId, message)
+	return cb.MockFailAction.Call(actionId, "failed", message)
 }
 
-func (cb *RunActionCallbacks) SetExecutingStatus(message string) error {
+func (cb *RunActionCallbacks) ErrorAction(_ context.Context, actionId, message string) error {
+	return cb.MockFailAction.Call(actionId, "error", message)
+}
+
+func (cb *RunActionCallbacks) SetExecutingStatus(_ context.Context, message string) error {
 	cb.mut.Lock()
 	defer cb.mut.Unlock()
 	cb.executingMessage = message
@@ -157,7 +159,7 @@ type RunCommandsCallbacks struct {
 	executingMessage string
 }
 
-func (cb *RunCommandsCallbacks) SetExecutingStatus(message string) error {
+func (cb *RunCommandsCallbacks) SetExecutingStatus(_ context.Context, message string) error {
 	cb.executingMessage = message
 	return nil
 }
@@ -183,12 +185,8 @@ func (cb *PrepareHookCallbacks) PrepareHook(_ context.Context, hookInfo hook.Inf
 	return cb.MockPrepareHook.Call(hookInfo)
 }
 
-func (cb *PrepareHookCallbacks) SetExecutingStatus(message string) error {
+func (cb *PrepareHookCallbacks) SetExecutingStatus(_ context.Context, message string) error {
 	cb.executingMessage = message
-	return nil
-}
-
-func (cb *PrepareHookCallbacks) SetUpgradeSeriesStatus(context.Context, model.UpgradeSeriesStatus, string) error {
 	return nil
 }
 
@@ -242,7 +240,7 @@ func (cb *CommitHookCallbacks) CommitHook(_ context.Context, hookInfo hook.Info)
 	return cb.MockCommitHook.Call(hookInfo)
 }
 
-func (cb *CommitHookCallbacks) SetSecretRotated(url string, oldRevision int) error {
+func (cb *CommitHookCallbacks) SetSecretRotated(_ context.Context, url string, oldRevision int) error {
 	cb.rotatedSecretURI = url
 	cb.rotatedOldRevision = oldRevision
 	return nil
@@ -326,7 +324,7 @@ func (f *MockRunnerActionWaitFactory) NewActionRunner(_ context.Context, action 
 
 type MockContext struct {
 	runnercontext.Context
-	testing.Stub
+	testhelpers.Stub
 	actionData      *runnercontext.ActionData
 	setStatusCalled bool
 	status          jujuc.StatusInfo
@@ -334,7 +332,7 @@ type MockContext struct {
 	relation        *MockRelation
 }
 
-func (mock *MockContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error) {
+func (mock *MockContext) SecretMetadata(context.Context) (map[string]jujuc.SecretMetadata, error) {
 	return map[string]jujuc.SecretMetadata{
 		"9m4e2mr0ui3e8a215n4g": {
 			Description:    "description",
@@ -342,6 +340,7 @@ func (mock *MockContext) SecretMetadata() (map[string]jujuc.SecretMetadata, erro
 			Owner:          secrets.Owner{Kind: secrets.ApplicationOwner, ID: "mariadb"},
 			RotatePolicy:   secrets.RotateHourly,
 			LatestRevision: 666,
+			LatestChecksum: "deadbeef",
 		},
 	}, nil
 }
@@ -414,15 +413,13 @@ func (mock *MockRunAction) Call(actionName string) error {
 }
 
 type MockRunCommands struct {
-	gotCommands    *string
-	gotRunLocation *runner.RunLocation
-	response       *utilexec.ExecResponse
-	err            error
+	gotCommands *string
+	response    *utilexec.ExecResponse
+	err         error
 }
 
-func (mock *MockRunCommands) Call(commands string, runLocation runner.RunLocation) (*utilexec.ExecResponse, error) {
+func (mock *MockRunCommands) Call(commands string) (*utilexec.ExecResponse, error) {
 	mock.gotCommands = &commands
-	mock.gotRunLocation = &runLocation
 	return mock.response, mock.err
 }
 
@@ -452,8 +449,8 @@ func (r *MockRunner) RunAction(ctx context.Context, actionName string) (runner.H
 	return runner.ExplicitHookHandler, r.MockRunAction.Call(actionName)
 }
 
-func (r *MockRunner) RunCommands(ctx context.Context, commands string, runLocation runner.RunLocation) (*utilexec.ExecResponse, error) {
-	return r.MockRunCommands.Call(commands, runLocation)
+func (r *MockRunner) RunCommands(ctx context.Context, commands string) (*utilexec.ExecResponse, error) {
+	return r.MockRunCommands.Call(commands)
 }
 
 func (r *MockRunner) RunHook(ctx context.Context, hookName string) (runner.HookHandlerType, error) {
@@ -588,26 +585,4 @@ var someCommandArgs = operation.CommandArgs{
 	RelationId:      123,
 	RemoteUnitName:  "foo/456",
 	ForceRemoteUnit: true,
-	RunLocation:     runner.Workload,
-}
-
-type RemoteInitCallbacks struct {
-	operation.Callbacks
-	MockRemoteInit *MockRemoteInit
-}
-
-func (cb *RemoteInitCallbacks) RemoteInit(runningStatus remotestate.ContainerRunningStatus, abort <-chan struct{}) error {
-	return cb.MockRemoteInit.Call(runningStatus, abort)
-}
-
-type MockRemoteInit struct {
-	gotRunningStatus *remotestate.ContainerRunningStatus
-	gotAbort         <-chan struct{}
-	err              error
-}
-
-func (mock *MockRemoteInit) Call(runningStatus remotestate.ContainerRunningStatus, abort <-chan struct{}) error {
-	mock.gotRunningStatus = &runningStatus
-	mock.gotAbort = abort
-	return mock.err
 }

@@ -5,31 +5,32 @@ package action_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"sync"
+	stdtesting "testing"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	actionapi "github.com/juju/juju/api/client/action"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/action"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 )
 
 type ExecSuite struct {
 	BaseActionSuite
 }
 
-var _ = gc.Suite(&ExecSuite{})
+func TestExecSuite(t *stdtesting.T) {
+	tc.Run(t, &ExecSuite{})
+}
 
 func newTestExecCommand(clock clock.Clock, modelType model.ModelType) (cmd.Command, *action.ExecCommand) {
 	return action.NewExecCommandForTest(minimalStore(modelType), clock, nil)
@@ -42,8 +43,7 @@ func minimalStore(modelType model.ModelType) *jujuclient.MemStore {
 	store.Models["arthur"] = &jujuclient.ControllerModels{
 		CurrentModel: "king/sword",
 		Models: map[string]jujuclient.ModelDetails{"king/sword": {
-			ModelType:    modelType,
-			ActiveBranch: model.GenerationMaster,
+			ModelType: modelType,
 		}},
 	}
 	store.Accounts["arthur"] = jujuclient.AccountDetails{
@@ -52,7 +52,7 @@ func minimalStore(modelType model.ModelType) *jujuclient.MemStore {
 	return store
 }
 
-func (*ExecSuite) TestTargetArgParsing(c *gc.C) {
+func (*ExecSuite) TestTargetArgParsing(c *tc.C) {
 	for i, test := range []struct {
 		message      string
 		args         []string
@@ -174,27 +174,21 @@ func (*ExecSuite) TestTargetArgParsing(c *gc.C) {
 		applications: []string{"mysql"},
 		units:        []string{"wordpress/0", "wordpress/1", "consul/leader"},
 		modeType:     model.IAAS,
-	}, {
-		message:  "command to unit operator",
-		args:     []string{"--operator", "--unit", "mysql/0", "echo hello"},
-		commands: "echo hello",
-		units:    []string{"mysql/0"},
-		modeType: model.CAAS,
 	}} {
 		c.Log(fmt.Sprintf("%v: %s", i, test.message))
 		runCmd, execCmd := newTestExecCommand(testClock(), test.modeType)
 		cmdtesting.TestInit(c, runCmd, test.args, test.errMatch)
 		if test.errMatch == "" {
-			c.Check(execCmd.All(), gc.Equals, test.all)
-			c.Check(execCmd.Machines(), gc.DeepEquals, test.machines)
-			c.Check(execCmd.Applications(), gc.DeepEquals, test.applications)
-			c.Check(execCmd.Units(), gc.DeepEquals, test.units)
-			c.Check(execCmd.Commands(), gc.Equals, test.commands)
+			c.Check(execCmd.All(), tc.Equals, test.all)
+			c.Check(execCmd.Machines(), tc.DeepEquals, test.machines)
+			c.Check(execCmd.Applications(), tc.DeepEquals, test.applications)
+			c.Check(execCmd.Units(), tc.DeepEquals, test.units)
+			c.Check(execCmd.Commands(), tc.Equals, test.commands)
 		}
 	}
 }
 
-func (*ExecSuite) TestWaitArgParsing(c *gc.C) {
+func (*ExecSuite) TestWaitArgParsing(c *tc.C) {
 	for i, test := range []struct {
 		message  string
 		args     []string
@@ -226,12 +220,12 @@ func (*ExecSuite) TestWaitArgParsing(c *gc.C) {
 		runCmd, execCmd := newTestExecCommand(testClock(), test.modeType)
 		cmdtesting.TestInit(c, runCmd, test.args, test.errMatch)
 		if test.errMatch == "" {
-			c.Check(execCmd.Wait(), gc.Equals, test.wait)
+			c.Check(execCmd.Wait(), tc.Equals, test.wait)
 		}
 	}
 }
 
-func (s *ExecSuite) TestExecForMachineAndUnit(c *gc.C) {
+func (s *ExecSuite) TestExecForMachineAndUnit(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -267,7 +261,7 @@ func (s *ExecSuite) TestExecForMachineAndUnit(c *gc.C) {
 	context, err := cmdtesting.RunCommand(c, runCmd,
 		"--format=yaml", "--machine=0", "--unit=mysql/0", "hostname", "--utc",
 	)
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(err, tc.ErrorIsNil)
 
 	expected := `
 "0":
@@ -291,10 +285,10 @@ mysql/0:
     started: 2015-02-14 08:15:00 +0000 UTC
   unit: mysql/0
 `[1:]
-	c.Assert(cmdtesting.Stdout(context), gc.Equals, expected)
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, expected)
 }
 
-func (s *ExecSuite) TestAllMachines(c *gc.C) {
+func (s *ExecSuite) TestAllMachines(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -326,9 +320,9 @@ func (s *ExecSuite) TestAllMachines(c *gc.C) {
 	runCmd, _ := newTestExecCommand(testClock(), model.IAAS)
 	context, err := cmdtesting.RunCommand(c, runCmd,
 		"--format=yaml", "--all", "hostname", "--utc")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(cmdtesting.Stdout(context), gc.Equals, `
+	c.Check(cmdtesting.Stdout(context), tc.Equals, `
 "0":
   id: "1"
   machine: "0"
@@ -348,10 +342,10 @@ func (s *ExecSuite) TestAllMachines(c *gc.C) {
     enqueued: 2015-02-14 08:13:00 +0000 UTC
     started: 2015-02-14 08:15:00 +0000 UTC
 `[1:])
-	c.Check(cmdtesting.Stderr(context), gc.Equals, "")
+	c.Check(cmdtesting.Stderr(context), tc.Equals, "")
 }
 
-func (s *ExecSuite) TestAllMachinesWithError(c *gc.C) {
+func (s *ExecSuite) TestAllMachinesWithError(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -387,14 +381,14 @@ func (s *ExecSuite) TestAllMachinesWithError(c *gc.C) {
 	runCmd, _ := newTestExecCommand(testClock(), model.IAAS)
 	context, err := cmdtesting.RunCommand(c, runCmd,
 		"--format=yaml", "--all", "hostname", "--utc")
-	c.Assert(err, gc.ErrorMatches, `the following tasks failed:
+	c.Assert(err, tc.ErrorMatches, `the following tasks failed:
  - id "1" with return code 2
  - id "2" with return code 1
 
 use 'juju show-task' to inspect the failures
 `)
 
-	c.Check(cmdtesting.Stdout(context), gc.Equals, `
+	c.Check(cmdtesting.Stdout(context), tc.Equals, `
 "0":
   id: "1"
   machine: "0"
@@ -417,10 +411,10 @@ use 'juju show-task' to inspect the failures
     enqueued: 2015-02-14 08:13:00 +0000 UTC
     started: 2015-02-14 08:15:00 +0000 UTC
 `[1:])
-	c.Check(cmdtesting.Stderr(context), gc.Equals, "")
+	c.Check(cmdtesting.Stderr(context), tc.Equals, "")
 }
 
-func (s *ExecSuite) TestTimeout(c *gc.C) {
+func (s *ExecSuite) TestTimeout(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -472,13 +466,13 @@ func (s *ExecSuite) TestTimeout(c *gc.C) {
 	}()
 
 	wg.Wait()
-	c.Check(err, gc.ErrorMatches, "timed out waiting for results from: machine 1, machine 2")
+	c.Check(err, tc.ErrorMatches, "timed out waiting for results from: machine 1, machine 2")
 
-	c.Check(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Check(cmdtesting.Stderr(ctx), gc.Equals, "")
+	c.Check(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Check(cmdtesting.Stderr(ctx), tc.Equals, "")
 }
 
-func (s *ExecSuite) TestVerbosity(c *gc.C) {
+func (s *ExecSuite) TestVerbosity(c *tc.C) {
 	tests := []struct {
 		about          string
 		args           []string
@@ -600,7 +594,7 @@ use 'juju show-task' to inspect the failure
 		// Set up context
 		output := bytes.Buffer{}
 		ctx := &cmd.Context{
-			Context: context.Background(),
+			Context: c.Context(),
 			Stdout:  &output,
 			Stderr:  &output,
 		}
@@ -613,21 +607,21 @@ use 'juju show-task' to inspect the failure
 		// Run command
 		runCmd, _ := newTestExecCommand(testClock(), model.IAAS)
 		err := cmdtesting.InitCommand(runCmd, t.args)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		err = runCmd.Run(ctx)
 		if t.error == "" {
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		} else {
-			c.Assert(err, gc.NotNil)
-			c.Check(err, gc.ErrorMatches, t.error)
+			c.Assert(err, tc.NotNil)
+			c.Check(err, tc.ErrorMatches, t.error)
 		}
 
-		c.Check(output.String(), gc.Equals, t.output)
+		c.Check(output.String(), tc.Equals, t.output)
 	}
 }
 
-func (s *ExecSuite) TestCAASCantTargetMachine(c *gc.C) {
+func (s *ExecSuite) TestCAASCantTargetMachine(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -638,130 +632,14 @@ func (s *ExecSuite) TestCAASCantTargetMachine(c *gc.C) {
 	)
 
 	expErr := "unable to target machines with a k8s controller"
-	c.Assert(err, gc.ErrorMatches, expErr)
-}
-
-func (s *ExecSuite) TestIAASCantTargetOperator(c *gc.C) {
-	fakeClient := &fakeAPIClient{}
-	restore := s.patchAPIClient(fakeClient)
-	defer restore()
-
-	runCmd, _ := newTestExecCommand(testClock(), model.IAAS)
-	_, err := cmdtesting.RunCommand(c, runCmd,
-		"--unit", "unit/0", "--operator", "echo hello",
-	)
-
-	expErr := "only k8s models support the --operator flag"
-	c.Assert(err, gc.ErrorMatches, expErr)
-}
-
-func (s *ExecSuite) TestCAASExecOnOperator(c *gc.C) {
-	fakeClient := &fakeAPIClient{}
-	restore := s.patchAPIClient(fakeClient)
-	defer restore()
-
-	fakeClient.actionResults = []actionapi.ActionResult{{
-		Action: &actionapi.Action{
-			ID:       validActionId,
-			Receiver: "unit-mysql-0",
-		},
-		Output: map[string]interface{}{
-			"stdout": "bumblebee",
-		},
-		Status:    "completed",
-		Enqueued:  time.Date(2015, time.February, 14, 8, 13, 0, 0, time.UTC),
-		Started:   time.Date(2015, time.February, 14, 8, 15, 0, 0, time.UTC),
-		Completed: time.Date(2015, time.February, 14, 8, 17, 0, 0, time.UTC),
-	}}
-
-	runCmd, _ := newTestExecCommand(testClock(), model.CAAS)
-	context, err := cmdtesting.RunCommand(c, runCmd,
-		"--format=yaml", "--unit=mysql/0", "--operator", "hostname", "--utc",
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	parallel := true
-	group := ""
-	c.Assert(fakeClient.execParams, jc.DeepEquals, &actionapi.RunParams{
-		Commands:        "hostname",
-		Timeout:         300 * time.Second,
-		Units:           []string{"mysql/0"},
-		WorkloadContext: false,
-		Parallel:        &parallel,
-		ExecutionGroup:  &group,
-	})
-
-	expectedOutput := `
-mysql/0:
-  id: "1"
-  results:
-    stdout: bumblebee
-  status: completed
-  timing:
-    completed: 2015-02-14 08:17:00 +0000 UTC
-    enqueued: 2015-02-14 08:13:00 +0000 UTC
-    started: 2015-02-14 08:15:00 +0000 UTC
-  unit: mysql/0
-`[1:]
-	c.Assert(cmdtesting.Stdout(context), gc.Equals, expectedOutput)
-}
-
-func (s *ExecSuite) TestCAASExecOnWorkload(c *gc.C) {
-	fakeClient := &fakeAPIClient{}
-	restore := s.patchAPIClient(fakeClient)
-	defer restore()
-
-	fakeClient.actionResults = []actionapi.ActionResult{{
-		Action: &actionapi.Action{
-			ID:       validActionId,
-			Receiver: "unit-mysql-0",
-		},
-		Output: map[string]interface{}{
-			"stdout": "bumblebee",
-		},
-		Status:    "completed",
-		Enqueued:  time.Date(2015, time.February, 14, 8, 13, 0, 0, time.UTC),
-		Started:   time.Date(2015, time.February, 14, 8, 15, 0, 0, time.UTC),
-		Completed: time.Date(2015, time.February, 14, 8, 17, 0, 0, time.UTC),
-	}}
-
-	runCmd, _ := newTestExecCommand(testClock(), model.CAAS)
-	context, err := cmdtesting.RunCommand(c, runCmd,
-		"--format=yaml", "--unit=mysql/0", "hostname", "--utc", "--execution-group", "group",
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	parallel := true
-	group := "group"
-	c.Check(fakeClient.execParams, jc.DeepEquals, &actionapi.RunParams{
-		Commands:        "hostname",
-		Timeout:         300 * time.Second,
-		Units:           []string{"mysql/0"},
-		WorkloadContext: true,
-		Parallel:        &parallel,
-		ExecutionGroup:  &group,
-	})
-
-	expectedOutput := `
-mysql/0:
-  id: "1"
-  results:
-    stdout: bumblebee
-  status: completed
-  timing:
-    completed: 2015-02-14 08:17:00 +0000 UTC
-    enqueued: 2015-02-14 08:13:00 +0000 UTC
-    started: 2015-02-14 08:15:00 +0000 UTC
-  unit: mysql/0
-`[1:]
-	c.Assert(cmdtesting.Stdout(context), gc.Equals, expectedOutput)
+	c.Assert(err, tc.ErrorMatches, expErr)
 }
 
 func testClock() testclock.AdvanceableClock {
 	return testclock.NewDilatedWallClock(100 * time.Millisecond)
 }
 
-func (s *ExecSuite) TestBlockAllMachines(c *gc.C) {
+func (s *ExecSuite) TestBlockAllMachines(c *tc.C) {
 	fakeClient := &fakeAPIClient{block: true}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -771,7 +649,7 @@ func (s *ExecSuite) TestBlockAllMachines(c *gc.C) {
 	testing.AssertOperationWasBlocked(c, err, ".*To enable changes.*")
 }
 
-func (s *ExecSuite) TestBlockExecForMachineAndUnit(c *gc.C) {
+func (s *ExecSuite) TestBlockExecForMachineAndUnit(c *tc.C) {
 	fakeClient := &fakeAPIClient{block: true}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -783,7 +661,7 @@ func (s *ExecSuite) TestBlockExecForMachineAndUnit(c *gc.C) {
 	testing.AssertOperationWasBlocked(c, err, ".*To enable changes.*")
 }
 
-func (s *ExecSuite) TestSingleResponse(c *gc.C) {
+func (s *ExecSuite) TestSingleResponse(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -857,16 +735,16 @@ use 'juju show-task' to inspect the failure
 
 		context, err := cmdtesting.RunCommand(c, runCmd, args...)
 		if test.err != "" {
-			c.Check(err, gc.ErrorMatches, test.err)
+			c.Check(err, tc.ErrorMatches, test.err)
 		} else {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		}
-		c.Check(cmdtesting.Stdout(context), gc.Equals, test.stdout)
-		c.Check(cmdtesting.Stderr(context), gc.Equals, "")
+		c.Check(cmdtesting.Stdout(context), tc.Equals, test.stdout)
+		c.Check(cmdtesting.Stderr(context), tc.Equals, "")
 	}
 }
 
-func (s *ExecSuite) TestMultipleUnitsPlainOutput(c *gc.C) {
+func (s *ExecSuite) TestMultipleUnitsPlainOutput(c *tc.C) {
 	fakeClient := &fakeAPIClient{}
 	restore := s.patchAPIClient(fakeClient)
 	defer restore()
@@ -919,10 +797,10 @@ result112
 		runCmd, _ := newTestExecCommand(testClock(), model.IAAS)
 		context, err := cmdtesting.RunCommand(c, runCmd,
 			"--format=plain", unitFlag, "do-stuff")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
-		c.Check(cmdtesting.Stdout(context), gc.Equals, stdout)
-		c.Check(cmdtesting.Stderr(context), gc.Equals, "")
+		c.Check(cmdtesting.Stdout(context), tc.Equals, stdout)
+		c.Check(cmdtesting.Stderr(context), tc.Equals, "")
 	}
 
 }

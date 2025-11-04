@@ -4,27 +4,30 @@
 package secrets_test
 
 import (
-	"github.com/juju/cmd/v4/cmdtesting"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/secrets"
 	"github.com/juju/juju/cmd/juju/secrets/mocks"
 	coresecrets "github.com/juju/juju/core/secrets"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type grantSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	store      *jujuclient.MemStore
 	secretsAPI *mocks.MockGrantRevokeSecretsAPI
 }
 
-var _ = gc.Suite(&grantSuite{})
+func TestGrantSuite(t *testing.T) {
+	tc.Run(t, &grantSuite{})
+}
 
-func (s *grantSuite) SetUpTest(c *gc.C) {
+func (s *grantSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	store := jujuclient.NewMemStore()
 	store.Controllers["mycontroller"] = jujuclient.ControllerDetails{}
@@ -32,49 +35,51 @@ func (s *grantSuite) SetUpTest(c *gc.C) {
 	s.store = store
 }
 
-func (s *grantSuite) setup(c *gc.C) *gomock.Controller {
+func (s *grantSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.secretsAPI = mocks.NewMockGrantRevokeSecretsAPI(ctrl)
 	return ctrl
 }
 
-func (s *grantSuite) TestGrant(c *gc.C) {
+func (s *grantSuite) TestGrant(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	uri := coresecrets.NewURI()
-	s.secretsAPI.EXPECT().GrantSecret(uri, "", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
+	s.secretsAPI.EXPECT().GrantSecret(gomock.Any(), uri, "", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewGrantCommandForTest(s.store, s.secretsAPI), uri.String(), "gitlab,mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *grantSuite) TestGrantByName(c *gc.C) {
+func (s *grantSuite) TestGrantByName(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretsAPI.EXPECT().GrantSecret(nil, "my-secret", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
+	s.secretsAPI.EXPECT().GrantSecret(gomock.Any(), nil, "my-secret", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewGrantCommandForTest(s.store, s.secretsAPI), "my-secret", "gitlab,mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *grantSuite) TestGrantEmptyData(c *gc.C) {
+func (s *grantSuite) TestGrantEmptyData(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewGrantCommandForTest(s.store, s.secretsAPI), "arg1")
-	c.Assert(err, gc.ErrorMatches, `missing secret URI or application name`)
+	c.Assert(err, tc.ErrorMatches, `missing secret URI or application name`)
 }
 
 type revokeSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	store      *jujuclient.MemStore
 	secretsAPI *mocks.MockGrantRevokeSecretsAPI
 }
 
-var _ = gc.Suite(&revokeSuite{})
+func TestRevokeSuite(t *testing.T) {
+	tc.Run(t, &revokeSuite{})
+}
 
-func (s *revokeSuite) SetUpTest(c *gc.C) {
+func (s *revokeSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	store := jujuclient.NewMemStore()
 	store.Controllers["mycontroller"] = jujuclient.ControllerDetails{}
@@ -82,36 +87,36 @@ func (s *revokeSuite) SetUpTest(c *gc.C) {
 	s.store = store
 }
 
-func (s *revokeSuite) setup(c *gc.C) *gomock.Controller {
+func (s *revokeSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.secretsAPI = mocks.NewMockGrantRevokeSecretsAPI(ctrl)
 	return ctrl
 }
 
-func (s *revokeSuite) TestRevoke(c *gc.C) {
+func (s *revokeSuite) TestRevoke(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	uri := coresecrets.NewURI()
-	s.secretsAPI.EXPECT().RevokeSecret(uri, "", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
+	s.secretsAPI.EXPECT().RevokeSecret(gomock.Any(), uri, "", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRevokeCommandForTest(s.store, s.secretsAPI), uri.String(), "gitlab,mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *revokeSuite) TestRevokeByName(c *gc.C) {
+func (s *revokeSuite) TestRevokeByName(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretsAPI.EXPECT().RevokeSecret(nil, "my-secret", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
+	s.secretsAPI.EXPECT().RevokeSecret(gomock.Any(), nil, "my-secret", []string{"gitlab", "mysql"}).Return([]error{nil, nil}, nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRevokeCommandForTest(s.store, s.secretsAPI), "my-secret", "gitlab,mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *revokeSuite) TestRevokeEmptyData(c *gc.C) {
+func (s *revokeSuite) TestRevokeEmptyData(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRevokeCommandForTest(s.store, s.secretsAPI), "arg1")
-	c.Assert(err, gc.ErrorMatches, `missing secret URI or application name`)
+	c.Assert(err, tc.ErrorMatches, `missing secret URI or application name`)
 }

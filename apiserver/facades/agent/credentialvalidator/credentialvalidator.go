@@ -5,197 +5,262 @@ package credentialvalidator
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+	"gopkg.in/tomb.v2"
 
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	jujucloud "github.com/juju/juju/cloud"
-	"github.com/juju/juju/core/credential"
-	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/apiserver/internal"
+	corecredential "github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/watcher"
 	credentialerrors "github.com/juju/juju/domain/credential/errors"
+	modelerrors "github.com/juju/juju/domain/model/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state/watcher"
 )
 
-// CredentialValidatorV2 defines the methods on version 2 facade for the
-// credentialvalidator API endpoint.
-type CredentialValidatorV2 interface {
-	InvalidateModelCredential(context.Context, params.InvalidateCredentialArg) (params.ErrorResult, error)
-	ModelCredential(context.Context) (params.ModelCredential, error)
-	WatchCredential(context.Context, params.Entity) (params.NotifyWatchResult, error)
-	WatchModelCredential(context.Context) (params.NotifyWatchResult, error)
-}
-
+// CredentialService exposes service methods for interacting with any model's
+// credentials. This is used to define the exact interface that is required by
+// [credentialServiceShim].
 type CredentialService interface {
-	common.CredentialService
-	InvalidateCredential(ctx context.Context, key credential.Key, reason string) error
+	// GetModelCredentialStatus returns the credential key that is in use by the
+	// model and also a bool indicating if the credential is considered valid.
+	// The following errors can be expected:
+	// - [credentialerrors.ModelCredentialNotSet] when the model does not have
+	// any credential set.
+	// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+	// not exist.
+	GetModelCredentialStatus(context.Context, coremodel.UUID) (corecredential.Key, bool, error)
+
+	// InvalidateModelCredential marks the cloud credential that is being used
+	// by the model uuid as invalid. This will affect all models that are using
+	// the credential.
+	// The following errors can be expected:
+	// - [github.com/juju/juju/core/errors.NotValid] when the modelUUID is not
+	// valid.
+	// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+	// not exist.
+	InvalidateModelCredential(context.Context, coremodel.UUID, string) error
 }
 
+// credentialServiceShim is a shim that implements the [ModelCredentialService]
+// on top of an existing [CredentialService]. This exists so that the caller
+// is scoped to that of a single model and cannot move sideways to other models
+// in the controller.
+type credentialServiceShim struct {
+	modelUUID coremodel.UUID
+	service   CredentialService
+}
+
+// ModelCredentialService exposes State methods needed by credential manager.
+type ModelCredentialService interface {
+	// GetModelCredentialStatus returns the credential key that is in use by the
+	// model and also a bool indicating of the credential is considered valid.
+	// The following errors can be expected:
+	// - [credentialerrors.ModelCredentialNotSet] when the model does not have
+	// any credential set.
+	// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+	// not exist.
+	GetModelCredentialStatus(context.Context) (corecredential.Key, bool, error)
+
+	// InvalidateModelCredential marks the cloud credential that is in by the
+	// model as invalid. This will affect all models that are using the
+	// credential.
+	// The following errors can be expected:
+	// - [github.com/juju/juju/core/errors.NotValid] when the modelUUID is not
+	// valid.
+	// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+	// not exist.
+	InvalidateModelCredential(context.Context, string) error
+}
+
+// CredentialValidatorAPIV2 implements the credential validator API V2.
+type CredentialValidatorAPIV2 struct {
+	*CredentialValidatorAPI
+}
+
+// CredentialValidatorAPI implements the credential validator API.
 type CredentialValidatorAPI struct {
-	*credentialcommon.CredentialManagerAPI
-
-	logger            logger.Logger
-	backend           StateAccessor
-	cloudService      common.CloudService
-	credentialService CredentialService
-	resources         facade.Resources
+	credentialService            ModelCredentialService
+	modelTag                     names.ModelTag
+	modelCredentialWatcherGetter func(ctx context.Context) (watcher.NotifyWatcher, error)
+	watcherRegistry              facade.WatcherRegistry
 }
 
-var (
-	_ CredentialValidatorV2 = (*CredentialValidatorAPI)(nil)
-)
+// GetModelCredentialStatus returns the credential key that is in use by the
+// model and also a bool indicating of the credential is considered valid.
+// The following errors can be expected:
+// - [credentialerrors.ModelCredentialNotSet] when the model does not have
+// any credential set.
+// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+// not exist.
+//
+// Implements [ModelCredentialService].
+func (s *credentialServiceShim) GetModelCredentialStatus(
+	ctx context.Context,
+) (corecredential.Key, bool, error) {
+	return s.service.GetModelCredentialStatus(ctx, s.modelUUID)
+}
 
-func internalNewCredentialValidatorAPI(
-	backend StateAccessor, cloudService common.CloudService, credentialService CredentialService, resources facade.Resources,
-	authorizer facade.Authorizer, logger logger.Logger,
-) (*CredentialValidatorAPI, error) {
-	if !(authorizer.AuthMachineAgent() || authorizer.AuthUnitAgent() || authorizer.AuthApplicationAgent()) {
-		return nil, apiservererrors.ErrPerm
-	}
+// InvalidateModelCredential marks the cloud credential that is in use for
+// by the model as invalid. This will affect all models that are using the
+// credential.
+// The following errors can be expected:
+// - [github.com/juju/juju/core/errors.NotValid] when the modelUUID is not
+// valid.
+// - [github.com/juju/juju/domain/model/errors.NotFound] when the model does
+// not exist.
+// - [github.com/juju/juju/domain/credential/errors.ModelCredentialNotSet] when
+// the model has no cloud credential set.
+//
+// Implements [ModelCredentialService].
+func (s *credentialServiceShim) InvalidateModelCredential(
+	ctx context.Context,
+	reason string,
+) error {
+	return s.service.InvalidateModelCredential(ctx, s.modelUUID, reason)
+}
 
+func NewCredentialValidatorAPI(
+	modelUUID coremodel.UUID,
+	credentialService ModelCredentialService,
+	modelCredentialWatcherGetter func(ctx context.Context) (watcher.NotifyWatcher, error),
+	watcherRegistry facade.WatcherRegistry,
+) *CredentialValidatorAPI {
 	return &CredentialValidatorAPI{
-		CredentialManagerAPI: credentialcommon.NewCredentialManagerAPI(backend, credentialService),
-		resources:            resources,
-		backend:              backend,
-		cloudService:         cloudService,
-		credentialService:    credentialService,
-		logger:               logger,
-	}, nil
+		modelTag:                     names.NewModelTag(modelUUID.String()),
+		credentialService:            credentialService,
+		modelCredentialWatcherGetter: modelCredentialWatcherGetter,
+		watcherRegistry:              watcherRegistry,
+	}
 }
 
-// WatchCredential returns a NotifyWatcher that observes
-// changes to a given cloud credential.
-func (api *CredentialValidatorAPI) WatchCredential(ctx context.Context, tag params.Entity) (params.NotifyWatchResult, error) {
-	fail := func(failure error) (params.NotifyWatchResult, error) {
-		return params.NotifyWatchResult{}, apiservererrors.ServerError(failure)
-	}
+// noopNotifyWatcher provides a notify watcher that fires the
+// first event and then sits dormant.
+// Used for a compatibility WatchCredential api method.
+type noopNotifyWatcher struct {
+	tomb tomb.Tomb
+	ch   <-chan struct{}
+}
 
-	credentialTag, err := names.ParseCloudCredentialTag(tag.Tag)
-	if err != nil {
-		return fail(err)
-	}
-	// Is credential used by the model that has created this backend?
-	modelCredentialTag, exists, err := api.backend.CloudCredentialTag()
-	if err != nil {
-		return fail(err)
-	}
-	if !exists || credentialTag != modelCredentialTag {
-		return fail(apiservererrors.ErrPerm)
-	}
+func newNoopNotifyWatcher() *noopNotifyWatcher {
+	ch := make(chan struct{}, 1)
+	// Initial event.
+	ch <- struct{}{}
+	w := &noopNotifyWatcher{ch: ch}
+	w.tomb.Go(func() error {
+		<-w.tomb.Dying()
+		return tomb.ErrDying
+	})
+	return w
+}
 
+func (w *noopNotifyWatcher) Changes() <-chan struct{} {
+	return w.ch
+}
+
+func (w *noopNotifyWatcher) Stop() error {
+	w.Kill()
+	return w.Wait()
+}
+
+func (w *noopNotifyWatcher) Kill() {
+	w.tomb.Kill(nil)
+}
+
+func (w *noopNotifyWatcher) Err() error {
+	return w.tomb.Err()
+}
+
+func (w *noopNotifyWatcher) Wait() error {
+	return w.tomb.Wait()
+}
+
+// WatchCredential returns a NotifyWatcher.
+// This is only called by 3.6 agents and is a noop since
+// [WatchModelCredential] is the only watcher needed for 4.x.
+func (api *CredentialValidatorAPIV2) WatchCredential(ctx context.Context, tag params.Entity) (params.NotifyWatchResult, error) {
 	result := params.NotifyWatchResult{}
-	watch, err := api.credentialService.WatchCredential(ctx, credential.KeyFromTag(credentialTag))
-	if errors.Is(err, credentialerrors.NotFound) {
-		err = fmt.Errorf("credential %q %w", credentialTag, errors.NotFound)
-	}
+	var err error
+	result.NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(ctx, api.watcherRegistry, newNoopNotifyWatcher())
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
-		return result, nil
-	}
-	// Consume the initial event. Technically, API calls to Watch
-	// 'transmit' the initial event in the Watch response. But
-	// NotifyWatchers have no state to transmit.
-	if _, ok := <-watch.Changes(); ok {
-		result.NotifyWatcherId = api.resources.Register(watch)
-	} else {
-		watch.Kill()
-		result.Error = apiservererrors.ServerError(watch.Wait())
 	}
 	return result, nil
 }
 
 // ModelCredential returns cloud credential information for a  model.
 func (api *CredentialValidatorAPI) ModelCredential(ctx context.Context) (params.ModelCredential, error) {
-	c, err := api.modelCredential(ctx)
+	exists := true
+	credKey, valid, err := api.credentialService.GetModelCredentialStatus(ctx)
+	switch {
+	case errors.Is(err, credentialerrors.ModelCredentialNotSet):
+		valid = true
+		exists = false
+	case errors.Is(err, modelerrors.NotFound):
+		return params.ModelCredential{}, internalerrors.New(
+			"model does not exist",
+		).Add(coreerrors.NotFound)
+	case err != nil:
+		return params.ModelCredential{}, internalerrors.Errorf(
+			"getting model credential status information: %w", err,
+		)
+	}
+
+	credTag, err := credKey.Tag()
 	if err != nil {
-		return params.ModelCredential{}, apiservererrors.ServerError(err)
+		return params.ModelCredential{}, internalerrors.Errorf(
+			"parsing credential key %q to tag: %w", credKey, err,
+		)
 	}
 
 	return params.ModelCredential{
-		Model:           c.Model.String(),
-		CloudCredential: c.Credential.String(),
-		Exists:          c.Exists,
-		Valid:           c.Valid,
+		Model:           api.modelTag.String(),
+		CloudCredential: credTag.String(),
+		Exists:          exists,
+		Valid:           valid,
 	}, nil
-}
-
-func (api *CredentialValidatorAPI) modelCredential(ctx context.Context) (*ModelCredential, error) {
-	m, err := api.backend.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	modelCredentialTag, exists, err := api.backend.CloudCredentialTag()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	result := &ModelCredential{Model: m.ModelTag(), Exists: exists}
-	if !exists {
-		// A model credential is not set, we must check if the model
-		// is on the cloud that requires a credential.
-		supportsEmptyAuth, err := api.cloudSupportsNoAuth(ctx, m.CloudName())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		result.Valid = supportsEmptyAuth
-		if !supportsEmptyAuth {
-			// TODO (anastasiamac 2018-11-12) Figure out how to notify the users here - maybe set a model status?...
-			api.logger.Warningf("model credential is not set for the model but the cloud requires it")
-		}
-		return result, nil
-	}
-
-	result.Credential = modelCredentialTag
-	credential, err := api.credentialService.CloudCredential(ctx, credential.KeyFromTag(modelCredentialTag))
-	if err != nil {
-		if !errors.Is(err, credentialerrors.CredentialNotFound) {
-			return nil, errors.Trace(err)
-		}
-		// In this situation, a model refers to a credential that does not exist in credentials collection.
-		// TODO (anastasiamac 2018-11-12) Figure out how to notify the users here - maybe set a model status?...
-		api.logger.Warningf("cloud credential reference is set for the model but the credential content is no longer on the controller")
-		result.Valid = false
-		return result, nil
-	}
-	result.Valid = !credential.Invalid
-	return result, nil
-}
-
-func (api *CredentialValidatorAPI) cloudSupportsNoAuth(ctx context.Context, cloudName string) (bool, error) {
-	cloud, err := api.cloudService.Cloud(ctx, cloudName)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	for _, authType := range cloud.AuthTypes {
-		if authType == jujucloud.EmptyAuthType {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // WatchModelCredential returns a NotifyWatcher that watches what cloud credential a model uses.
 func (api *CredentialValidatorAPI) WatchModelCredential(ctx context.Context) (params.NotifyWatchResult, error) {
 	result := params.NotifyWatchResult{}
-	m, err := api.backend.Model()
+	watcher, err := api.modelCredentialWatcherGetter(ctx)
 	if err != nil {
 		return result, apiservererrors.ServerError(err)
 	}
-	watch := m.WatchModelCredential()
 
-	// Consume the initial event. Technically, API calls to Watch
-	// 'transmit' the initial event in the Watch response. But
-	// NotifyWatchers have no state to transmit.
-	if _, ok := <-watch.Changes(); ok {
-		result.NotifyWatcherId = api.resources.Register(watch)
-	} else {
-		err = watcher.EnsureErr(watch)
+	result.NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(ctx, api.watcherRegistry, watcher)
+	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 	}
 	return result, nil
+}
+
+// InvalidateModelCredential marks the cloud credential for this model as invalid.
+// This is only used by 3.6 agents and can be dropped in 4.x when we no
+// longer need to support migrating 3.6 models.
+func (api *CredentialValidatorAPIV2) InvalidateModelCredential(ctx context.Context, args params.InvalidateCredentialArg) (params.ErrorResult, error) {
+	err := api.credentialService.InvalidateModelCredential(ctx, args.Reason)
+	switch {
+	case errors.Is(err, modelerrors.NotFound):
+		return params.ErrorResult{
+			Error: apiservererrors.ParamsErrorf(
+				params.CodeNotFound,
+				"model does not exist",
+			),
+		}, nil
+	// We don't care if the model has no credential set. We just ignore the
+	// error and treat this as a noop.
+	case errors.Is(err, credentialerrors.ModelCredentialNotSet):
+		return params.ErrorResult{}, nil
+	case err != nil:
+		return params.ErrorResult{}, err
+	}
+
+	return params.ErrorResult{}, nil
 }

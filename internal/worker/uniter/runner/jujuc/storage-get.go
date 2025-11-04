@@ -4,12 +4,14 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StorageGetCommand implements the storage-get command.
@@ -22,9 +24,9 @@ type StorageGetCommand struct {
 	out             cmd.Output
 }
 
-func NewStorageGetCommand(ctx Context) (cmd.Command, error) {
-	c := &StorageGetCommand{ctx: ctx}
-	sV, err := newStorageIdValue(ctx, &c.storageTag)
+func NewStorageGetCommand(cmdCtx Context) (cmd.Command, error) {
+	c := &StorageGetCommand{ctx: cmdCtx}
+	sV, err := newStorageIdValue(context.Background(), cmdCtx, &c.storageTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -35,12 +37,34 @@ func NewStorageGetCommand(ctx Context) (cmd.Command, error) {
 func (c *StorageGetCommand) Info() *cmd.Info {
 	doc := `
 When no <key> is supplied, all keys values are printed.
+
+Further details:
+storage-get obtains information about storage being attached
+to, or detaching from, the unit.
+
+If the executing hook is a storage hook, information about
+the storage related to the hook will be reported; this may
+be overridden by specifying the name of the storage as reported
+by storage-list, and must be specified for non-storage hooks.
+
+storage-get can be used to identify the storage location during
+storage-attached and storage-detaching hooks. The exception to
+this is when the charm specifies a static location for
+singleton stores.
+`
+	examples := `
+    # retrieve information by UUID
+    storage-get 21127934-8986-11e5-af63-feff819cdc9f
+
+    # retrieve information by name
+    storage-get -s data/0
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "storage-get",
-		Args:    "[<key>]",
-		Purpose: "print information for storage instance with specified id",
-		Doc:     doc,
+		Name:     "storage-get",
+		Args:     "[<key>]",
+		Purpose:  "Print information for the storage instance with the specified ID.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -62,7 +86,7 @@ func (c *StorageGetCommand) Init(args []string) error {
 }
 
 func (c *StorageGetCommand) Run(ctx *cmd.Context) error {
-	storage, err := c.ctx.Storage(c.storageTag)
+	storage, err := c.ctx.Storage(ctx, c.storageTag)
 	if err != nil {
 		return errors.Trace(err)
 	}

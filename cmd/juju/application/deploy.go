@@ -4,15 +4,14 @@
 package application
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -34,18 +33,21 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
 	apiparams "github.com/juju/juju/rpc/params"
 )
 
 // SpacesAPI defines the necessary API methods needed for listing spaces.
 type SpacesAPI interface {
-	ListSpaces() ([]apiparams.Space, error)
+	ListSpaces(ctx context.Context) ([]apiparams.Space, error)
 }
 
 type CharmsAPI interface {
@@ -81,7 +83,7 @@ func (a *deployAPIAdaptor) ModelUUID() (string, bool) {
 	return tag.Id(), ok
 }
 
-func (a *deployAPIAdaptor) Deploy(args application.DeployArgs) error {
+func (a *deployAPIAdaptor) Deploy(ctx context.Context, args application.DeployArgs) error {
 	for i, p := range args.Placement {
 		if p.Scope == "model-uuid" {
 			p.Scope = a.applicationClient.ModelUUID()
@@ -89,55 +91,55 @@ func (a *deployAPIAdaptor) Deploy(args application.DeployArgs) error {
 		args.Placement[i] = p
 	}
 
-	return errors.Trace(a.applicationClient.Deploy(args))
+	return errors.Trace(a.applicationClient.Deploy(ctx, args))
 }
 
-func (a *deployAPIAdaptor) SetAnnotation(annotations map[string]map[string]string) ([]apiparams.ErrorResult, error) {
-	return a.annotationsClient.Set(annotations)
+func (a *deployAPIAdaptor) SetAnnotation(ctx context.Context, annotations map[string]map[string]string) ([]apiparams.ErrorResult, error) {
+	return a.annotationsClient.Set(ctx, annotations)
 }
 
-func (a *deployAPIAdaptor) GetAnnotations(tags []string) ([]apiparams.AnnotationsGetResult, error) {
-	return a.annotationsClient.Get(tags)
+func (a *deployAPIAdaptor) GetAnnotations(ctx context.Context, tags []string) ([]apiparams.AnnotationsGetResult, error) {
+	return a.annotationsClient.Get(ctx, tags)
 }
 
-func (a *deployAPIAdaptor) GetModelConstraints() (constraints.Value, error) {
-	return a.modelConfigClient.GetModelConstraints()
+func (a *deployAPIAdaptor) GetModelConstraints(ctx context.Context) (constraints.Value, error) {
+	return a.modelConfigClient.GetModelConstraints(ctx)
 }
 
-func (a *deployAPIAdaptor) AddCharm(curl *charm.URL, origin commoncharm.Origin, force bool) (commoncharm.Origin, error) {
-	return a.charmsClient.AddCharm(curl, origin, force)
+func (a *deployAPIAdaptor) AddCharm(ctx context.Context, curl *charm.URL, origin commoncharm.Origin, force bool) (commoncharm.Origin, error) {
+	return a.charmsClient.AddCharm(ctx, curl, origin, force)
 }
 
 type modelGetter interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 }
 
-func agentVersion(c modelGetter) (version.Number, error) {
-	attrs, err := c.ModelGet()
+func agentVersion(ctx context.Context, c modelGetter) (semversion.Number, error) {
+	attrs, err := c.ModelGet(ctx)
 	if err != nil {
-		return version.Zero, errors.Trace(err)
+		return semversion.Zero, errors.Trace(err)
 	}
 	cfg, err := config.New(config.NoDefaults, attrs)
 	if err != nil {
-		return version.Zero, errors.Trace(err)
+		return semversion.Zero, errors.Trace(err)
 	}
 	agentVersion, ok := cfg.AgentVersion()
 	if !ok {
-		return version.Zero, errors.New("model config missing agent version")
+		return semversion.Zero, errors.New("model config missing agent version")
 	}
 	return agentVersion, nil
 }
 
-func (a *deployAPIAdaptor) AddLocalCharm(url *charm.URL, c charm.Charm, b bool) (*charm.URL, error) {
-	agentVersion, err := agentVersion(a.modelConfigClient)
+func (a *deployAPIAdaptor) AddLocalCharm(ctx context.Context, url *charm.URL, c charm.Charm, b bool) (*charm.URL, error) {
+	agentVersion, err := agentVersion(ctx, a.modelConfigClient)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return a.localCharmsClient.AddLocalCharm(url, c, b, agentVersion)
 }
 
-func (a *deployAPIAdaptor) Status(opts *apiclient.StatusArgs) (*apiparams.FullStatus, error) {
-	return a.legacyClient.Status(opts)
+func (a *deployAPIAdaptor) Status(ctx context.Context, opts *apiclient.StatusArgs) (*apiparams.FullStatus, error) {
+	return a.legacyClient.Status(ctx, opts)
 }
 
 // NewDeployCommand returns a command to deploy applications.
@@ -153,13 +155,13 @@ func newDeployCommand() *DeployCommand {
 	deployCmd.NewCharmsAPI = func(api base.APICallCloser) CharmsAPI {
 		return apicharms.NewClient(api)
 	}
-	deployCmd.NewDownloadClient = func() (store.DownloadBundleClient, error) {
-		apiRoot, err := deployCmd.newAPIRoot()
+	deployCmd.NewDownloadClient = func(ctx context.Context) (store.DownloadBundleClient, error) {
+		apiRoot, err := deployCmd.newAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		modelConfigClient := deployCmd.NewModelConfigAPI(apiRoot)
-		charmHubURL, err := deployCmd.getCharmHubURL(modelConfigClient)
+		charmHubURL, err := deployCmd.getCharmHubURL(ctx, modelConfigClient)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -169,12 +171,12 @@ func newDeployCommand() *DeployCommand {
 			Logger: logger,
 		})
 	}
-	deployCmd.NewDeployAPI = func() (deployer.DeployerAPI, error) {
-		apiRoot, err := deployCmd.newAPIRoot()
+	deployCmd.NewDeployAPI = func(ctx context.Context) (deployer.DeployerAPI, error) {
+		apiRoot, err := deployCmd.newAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		controllerAPIRoot, err := deployCmd.newControllerAPIRoot()
+		controllerAPIRoot, err := deployCmd.newControllerAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -195,8 +197,8 @@ func newDeployCommand() *DeployCommand {
 			spacesClient:         spaces.NewAPI(apiRoot),
 		}, nil
 	}
-	deployCmd.NewConsumeDetailsAPI = func(url *charm.OfferURL) (deployer.ConsumeDetails, error) {
-		root, err := deployCmd.CommandBase.NewAPIRoot(deployCmd.ClientStore(), url.Source, "")
+	deployCmd.NewConsumeDetailsAPI = func(ctx context.Context, url crossmodel.OfferURL) (deployer.ConsumeDetails, error) {
+		root, err := deployCmd.CommandBase.NewAPIRoot(ctx, deployCmd.ClientStore(), url.Source, "")
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -208,10 +210,11 @@ func newDeployCommand() *DeployCommand {
 	}
 	return deployCmd
 }
-func (c *DeployCommand) newAPIRoot() (api.Connection, error) {
+
+func (c *DeployCommand) newAPIRoot(ctx context.Context) (api.Connection, error) {
 	if c.apiRoot == nil {
 		var err error
-		c.apiRoot, err = c.NewAPIRoot()
+		c.apiRoot, err = c.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -219,10 +222,10 @@ func (c *DeployCommand) newAPIRoot() (api.Connection, error) {
 	return c.apiRoot, nil
 }
 
-func (c *DeployCommand) newControllerAPIRoot() (api.Connection, error) {
+func (c *DeployCommand) newControllerAPIRoot(ctx context.Context) (api.Connection, error) {
 	if c.controllerAPIRoot == nil {
 		var err error
-		c.controllerAPIRoot, err = c.NewControllerAPIRoot()
+		c.controllerAPIRoot, err = c.NewControllerAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -301,10 +304,10 @@ type DeployCommand struct {
 	BundleMachines map[string]string
 
 	// NewDeployAPI stores a function which returns a new deploy client.
-	NewDeployAPI func() (deployer.DeployerAPI, error)
+	NewDeployAPI func(ctx context.Context) (deployer.DeployerAPI, error)
 
 	// NewDownloadClient stores a function for getting a charm/bundle.
-	NewDownloadClient func() (store.DownloadBundleClient, error)
+	NewDownloadClient func(ctx context.Context) (store.DownloadBundleClient, error)
 
 	// NewModelConfigAPI stores a function which returns a new model config
 	// client. This is used to get the model config.
@@ -321,7 +324,7 @@ type DeployCommand struct {
 
 	// NewConsumeDetailsAPI stores a function which will return a new API
 	// for consume details API using the url as the source.
-	NewConsumeDetailsAPI func(url *charm.OfferURL) (deployer.ConsumeDetails, error)
+	NewConsumeDetailsAPI func(ctx context.Context, url crossmodel.OfferURL) (deployer.ConsumeDetails, error)
 
 	// DeployResources stores a function which deploys charm resources.
 	DeployResources deployer.DeployResourcesFunc
@@ -346,13 +349,13 @@ const deployDoc = `
 A charm or bundle can be referred to by its simple name and a base, revision,
 or channel can optionally be specified:
 
-  juju deploy postgresql
-  juju deploy ch:postgresql --base ubuntu@22.04
-  juju deploy ch:postgresql --channel edge
-  juju deploy ch:ubuntu --revision 17 --channel edge
+    juju deploy postgresql
+    juju deploy ch:postgresql --base ubuntu@22.04
+    juju deploy ch:postgresql --channel edge
+    juju deploy ch:ubuntu --revision 17 --channel edge
 
 All the above deployments use remote charms found in Charmhub, denoted by the
-'ch:' prefix.  Remote charms with no prefix will be deployed from Charmhub.
+` + "`ch:`" + ` prefix.  Remote charms with no prefix will be deployed from Charmhub.
 
 If a channel is specified, it will be used as the source for looking up the
 charm or bundle from Charmhub. When used in a bundle deployment context,
@@ -366,33 +369,39 @@ when refreshing the application in the future.
 
 A local charm may be deployed by giving the path to its directory:
 
-  juju deploy /path/to/charm
-  juju deploy /path/to/charm --base ubuntu@22.04
+    juju deploy /path/to/charm
+    juju deploy /path/to/charm --base ubuntu@22.04
 
 You will need to be explicit if there is an ambiguity between a local and a
 remote charm:
 
-  juju deploy ./pig
-  juju deploy ch:pig
+  juju deploy ./postgresql.charm
+  juju deploy ch:postgresql
+
+A local charm may be deploy by giving the path to the charm package:
+
+   juju deploy /path/to/example.charm
+
+A charm package is created with charmcraft pack command.
 
 A bundle can be expressed similarly to a charm:
 
-  juju deploy mediawiki-single
-  juju deploy mediawiki-single --base ubuntu@22.04
-  juju deploy ch:mediawiki-single
+    juju deploy mediawiki-single
+    juju deploy mediawiki-single --base ubuntu@22.04
+    juju deploy ch:mediawiki-single
 
 A local bundle may be deployed by specifying the path to its YAML file:
 
-  juju deploy /path/to/bundle.yaml
+    juju deploy /path/to/bundle.yaml
 
 The final charm/machine base is determined using an order of precedence (most
 preferred to least):
 
- - the '--base' command option
- - for a bundle, the series stated in each charm URL (in the bundle file)
- - for a bundle, the series given at the top level (in the bundle file)
- - the 'default-base' model key
- - the first base specified in the charm's manifest file
+- the ` + "`--base`" + ` command option
+- for a bundle, the base stated in each charm URL (in the bundle file)
+- for a bundle, the base given at the top level (in the bundle file)
+- the ` + "`default-base`" + ` model configuration key
+- the first base specified in the charm's manifest file
 
 An 'application name' provides an alternate name for the application. It works
 only for charms; it is silently ignored for bundles (although the same can be
@@ -400,108 +409,108 @@ done at the bundle file level). Such a name must consist only of lower-case
 letters (a-z), numbers (0-9), and single hyphens (-). The name must begin with
 a letter and not have a group of all numbers follow a hyphen:
 
-  Valid:   myappname, custom-app, app2-scat-23skidoo
-  Invalid: myAppName, custom--app, app2-scat-23, areacode-555-info
+- Valid:  ` + "`myappname`" + `, ` + "`custom-app`" + `, ` + "`app2-scat-23skidoo`" + `
+- Invalid: ` + "`myAppName`" + `, ` + "`custom--app`" + `, ` + "`app2-scat-23`" + `, ` + "`areacode-555-info`" + `
 
-Use the '--constraints' option to specify hardware requirements for new machines.
+Use the ` + "`--constraints`" + ` option to specify hardware requirements for new machines.
 These become the application's default constraints (i.e. they are used if the
 application is later scaled out with the ` + "`add-unit`" + ` command). To overcome this
 behaviour use the ` + "`set-constraints`" + ` command to change the application's default
 constraints or add a machine (` + "`add-machine`" + `) with a certain constraint and then
-target that machine with ` + "`add-unit`" + ` by using the '--to' option.
+target that machine with ` + "`add-unit`" + ` by using the ` + "`--to`" + `option.
 
-Use the '--device' option to specify GPU device requirements (with Kubernetes).
+Use the ` + "`--device`" + ` option to specify GPU device requirements (with Kubernetes).
 The below format is used for this option's value, where the 'label' is named in
 the charm metadata file:
 
-  <label>=[<count>,]<device-class>|<vendor/type>[,<attributes>]
+    <label>=[<count>,]<device-class>|<vendor/type>[,<attributes>]
 
-Use the '--config' option to specify application configuration values. This
+Use the ` + "`--config`" + ` option to specify application configuration values. This
 option accepts either a path to a YAML-formatted file or a key=value pair. A
 file should be of this format:
 
-  <charm name>:
-	<option name>: <option value>
+    <charm name>:
+      <option name>: <option value>
 	...
 
 For example, to deploy 'mediawiki' with file 'mycfg.yaml' that contains:
 
-  mediawiki:
-	name: my media wiki
-	admins: me:pwdOne
-	debug: true
+    mediawiki:
+	  name: my media wiki
+	  admins: me:pwdOne
+	  debug: true
 
 use
 
-  juju deploy mediawiki --config mycfg.yaml
+    juju deploy mediawiki --config mycfg.yaml
 
 Key=value pairs can also be passed directly in the command. For example, to
 declare the 'name' key:
 
-  juju deploy mediawiki --config name='my media wiki'
+    juju deploy mediawiki --config name='my media wiki'
 
 To define multiple keys:
 
-  juju deploy mediawiki --config name='my media wiki' --config debug=true
+    juju deploy mediawiki --config name='my media wiki' --config debug=true
 
 If a key gets defined multiple times the last value will override any earlier
 values. For example,
 
-  juju deploy mediawiki --config name='my media wiki' --config mycfg.yaml
+    juju deploy mediawiki --config name='my media wiki' --config mycfg.yaml
 
-Similar to the 'juju config' command, if the value begins with an '@' character,
+Similar to the ` + "`juju config`" + ` command, if the value begins with an '@' character,
 it will be treated as a path to a config file and its contents will be assigned
 to the specified key. For example,
 
-  juju deploy mediawiki --config name='@wiki-name.txt"
+    juju deploy mediawiki --config name='@wiki-name.txt"
 
 will set the 'name' key to the contents of file 'wiki-name.txt'.
 
 If mycfg.yaml contains a value for 'name', it will override the earlier 'my
 media wiki' value. The same applies to single value options. For example,
 
-  juju deploy mediawiki --config name='a media wiki' --config name='my wiki'
+    juju deploy mediawiki --config name='a media wiki' --config name='my wiki'
 
 the value of 'my wiki' will be used.
 
-Use the '--resource' option to specify the resources you want to use for your charm.
+Use the ` + "`--resource`" + ` option to specify the resources you want to use for your charm.
 The format is
 
     --resource <resource name>=<resource>
 
-where the resource name is the name from the metadata.yaml file of the charm
+where the resource name is the name from the ` + "`metadata.yaml`" + ` file of the charm
 and where, depending on the type of the resource, the resource can be specified
-as follows: 
+as follows:
 
-(1) If the resource is type 'file', you can specify it by providing
-(a) the resource revision number or
-(b) a path to a local file.
+- If the resource is type ` + "`file`" + `, you can specify it by providing one of the following:
 
-(2) If the resource is type 'oci-image', you can specify it by providing
-(a) the resource revision number,
-(b) a path to a local file = private OCI image,
-(c) a link to a public OCI image.
+    a. the resource revision number.
 
+    b. a path to a local file. Caveat: If you choose this, you will not be able
+	 to go back to using a resource from Charmhub.
 
-Note: If you choose (1b) or (2b-c), i.e., a resource that is not from Charmhub:
-You will not be able to go back to using a resource from Charmhub.
+- If the resource is type ` + "`oci-image`" + `, you can specify it by providing one of the following:
 
-Note: If you choose (1b) or (2b): This uploads a file from your loal disk to the juju
-controller to be streamed to the charm when "resource-get" is called by a hook.
+    a. the resource revision number.
 
-Note: If you choose (2b): You will need to specify:
-(i) the local path to the private OCI image as well as
-(ii) the username/password required to access the private OCI image.
+	b. a path to the local file for your private OCI image as well as the
+	username and password required to access the private OCI image.
+	Caveat: If you choose this, you will not be able to go back to using a
+	resource from Charmhub.
+
+    c. a link to a public OCI image. Caveat: If you choose this, you will not be
+	 able to go back to using a resource from Charmhub.
+
 
 Note: If multiple resources are needed, repeat the option.
 
 
-Use the '--to' option to deploy to an existing machine or container by
+Use the ` + "`--to`" + ` option to deploy to an existing machine or container by
 specifying a "placement directive". The ` + "`status`" + ` command should be used for
 guidance on how to refer to machines. A few placement directives are
-provider-dependent (e.g.: 'zone').
+provider-dependent (e.g.: ` + "`zone`" + `).
 
-In more complex scenarios, "network spaces" are used to partition the cloud
+In more complex scenarios, network spaces are used to partition the cloud
 networking layer into sets of subnets. Instances hosting units inside the same
 space can communicate with each other without any firewalls. Traffic crossing
 space boundaries could be subject to firewall and access restrictions. Using
@@ -511,31 +520,30 @@ high availability for applications. Spaces help isolate applications and their
 units, both for security purposes and to manage both traffic segregation and
 congestion.
 
-When deploying an application or adding machines, the 'spaces' constraint can
+When deploying an application or adding machines, the ` + "`spaces `" + ` constraint can
 be used to define a comma-delimited list of required and forbidden spaces (the
 latter prefixed with '^', similar to the 'tags' constraint).
 
 When deploying bundles, machines specified in the bundle are added to the model
-as new machines. Use the '--map-machines=existing' option to make use of any
+as new machines. Use the ` + "`--map-machines=existing`" + ` option to make use of any
 existing machines. To map particular existing machines to machines defined in
-the bundle, multiple comma separated values of the form 'bundle-id=existing-id'
+the bundle, multiple comma separated values of the form ` + "`bundle-id=existing-id`" + `
 can be passed. For example, for a bundle that specifies machines 1, 2, and 3;
 and a model that has existing machines 1, 2, 3, and 4, the below deployment
 would have existing machines 1 and 2 assigned to machines 1 and 2 defined in
 the bundle and have existing machine 4 assigned to machine 3 defined in the
 bundle.
 
-  juju deploy mybundle --map-machines=existing,3=4
+    juju deploy mybundle --map-machines=existing,3=4
 
 Only top level machines can be mapped in this way, just as only top level
 machines can be defined in the machines section of the bundle.
 
 When charms that include LXD profiles are deployed the profiles are validated
 for security purposes by allowing only certain configurations and devices. Use
-the '--force' option to bypass this check. Doing so is not recommended as it
+the ` + "`--force`" + ` option to bypass this check. Doing so is not recommended as it
 can lead to unexpected behaviour.
 
-Further reading: https://juju.is/docs/olm/manage-applications
 `
 
 const deployExamples = `
@@ -584,11 +592,11 @@ Deploy to a machine that is in the 'dmz' network space but not in either the
 
     juju deploy haproxy -n 2 --constraints spaces=dmz,^cms,^database
 
-Deploy a k8s charm that requires a single Nvidia GPU:
+Deploy a Kubernetes charm that requires a single Nvidia GPU:
 
     juju deploy mycharm --device miner=1,nvidia.com/gpu
 
-Deploy a k8s charm that requires two Nvidia GPUs that have an
+Deploy a Kubernetes charm that requires two Nvidia GPUs that have an
 attribute of 'gpu=nvidia-tesla-p100':
 
     juju deploy mycharm --device \
@@ -654,18 +662,6 @@ func (c *DeployCommand) Init(args []string) error {
 	// a bundle does not require a channel, today you cannot refresh/upgrade
 	// a bundle, only the components. These flags will be verified in the
 	// GetDeployer instead.
-	if err := c.validateStorageByModelType(); err != nil {
-		if !errors.Is(err, errors.NotFound) {
-			return errors.Trace(err)
-		}
-		// It is possible that we will not be able to get model type to validate with.
-		// For example, if current client does not know about a model, we
-		// would have queried the controller about the model. However,
-		// at Init() we do not yet have an API connection.
-		// So we do not want to fail here if we encountered NotFoundErr, we want to
-		// do a late validation at Run().
-		c.unknownModel = true
-	}
 	switch len(args) {
 	case 2:
 		if err := names.ValidateApplicationName(args[1]); err != nil {
@@ -691,7 +687,7 @@ func (c *DeployCommand) Init(args []string) error {
 	if err := c.UnitCommandBase.Init(args); err != nil {
 		return err
 	}
-	if err := c.validatePlacementByModelType(); err != nil {
+	if err := c.validatePlacementByModelType(context.Background()); err != nil {
 		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
@@ -712,22 +708,8 @@ func (c *DeployCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *DeployCommand) validateStorageByModelType() error {
-	modelType, err := c.ModelType()
-	if err != nil {
-		return err
-	}
-	if modelType == model.IAAS {
-		return nil
-	}
-	if len(c.AttachStorage) > 0 {
-		return errors.New("--attach-storage cannot be used on k8s models")
-	}
-	return nil
-}
-
-func (c *DeployCommand) validatePlacementByModelType() error {
-	modelType, err := c.ModelType()
+func (c *DeployCommand) validatePlacementByModelType(ctx context.Context) error {
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -783,10 +765,7 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if c.unknownModel {
-		if err := c.validateStorageByModelType(); err != nil {
-			return errors.Trace(err)
-		}
-		if err := c.validatePlacementByModelType(); err != nil {
+		if err := c.validatePlacementByModelType(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -794,7 +773,7 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	deployAPI, err := c.NewDeployAPI()
+	deployAPI, err := c.NewDeployAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -807,16 +786,16 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		}
 	}()
 
-	if c.ModelConstraints, err = deployAPI.GetModelConstraints(); err != nil {
+	if c.ModelConstraints, err = deployAPI.GetModelConstraints(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	if err := c.parseBindFlag(deployAPI); err != nil {
+	if err := c.parseBindFlag(ctx, deployAPI); err != nil {
 		return errors.Trace(err)
 	}
 
-	downloadClientFn := func() (store.DownloadBundleClient, error) {
-		return c.NewDownloadClient()
+	downloadClientFn := func(ctx context.Context) (store.DownloadBundleClient, error) {
+		return c.NewDownloadClient(ctx)
 	}
 
 	charmAPIClient := c.NewCharmsAPI(c.apiRoot)
@@ -831,13 +810,13 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 	return block.ProcessBlockedError(deploy.PrepareAndDeploy(ctx, deployAPI, charmAdaptor), block.BlockChange)
 }
 
-func (c *DeployCommand) parseBindFlag(api SpacesAPI) error {
+func (c *DeployCommand) parseBindFlag(ctx context.Context, api SpacesAPI) error {
 	if c.BindToSpaces == "" {
 		return nil
 	}
 
 	// Fetch known spaces from server
-	knownSpaces, err := api.ListSpaces()
+	knownSpaces, err := api.ListSpaces(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -895,8 +874,8 @@ func (c *DeployCommand) getDeployerFactory(base corebase.Base, defaultCharmSchem
 	return c.NewDeployerFactory(dep), cfg
 }
 
-func (c *DeployCommand) getCharmHubURL(modelConfigClient ModelConfigGetter) (string, error) {
-	attrs, err := modelConfigClient.ModelGet()
+func (c *DeployCommand) getCharmHubURL(ctx context.Context, modelConfigClient ModelConfigGetter) (string, error) {
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

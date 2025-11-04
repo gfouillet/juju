@@ -5,6 +5,7 @@
 package machineactions
 
 import (
+	"context"
 	"encoding/base64"
 	"os"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/utils/v4/exec"
 
-	"github.com/juju/juju/core/actions"
+	coreoperation "github.com/juju/juju/core/operation"
 )
 
 // RunAsUser is the user that the machine juju-exec action is executed as.
@@ -23,7 +24,7 @@ var RunAsUser = "ubuntu"
 // HandleAction receives a name and a map of parameters for a given machine action.
 // It will handle that action in a specific way and return a results map suitable for ActionFinish.
 func HandleAction(name string, params map[string]interface{}) (results map[string]interface{}, err error) {
-	spec, ok := actions.PredefinedActionsSpec[name]
+	spec, ok := coreoperation.PredefinedActionsSpec[name]
 	if !ok {
 		return nil, errors.Errorf("unexpected action %s", name)
 	}
@@ -31,7 +32,7 @@ func HandleAction(name string, params map[string]interface{}) (results map[strin
 		return nil, errors.Errorf("invalid action parameters")
 	}
 
-	if actions.IsJujuExecAction(name) {
+	if coreoperation.IsJujuExecAction(name) {
 		return handleJujuExecAction(params)
 	} else {
 		return nil, errors.Errorf("unexpected action %s", name)
@@ -41,7 +42,7 @@ func HandleAction(name string, params map[string]interface{}) (results map[strin
 func handleJujuExecAction(params map[string]interface{}) (results map[string]interface{}, err error) {
 	// The spec checks that the parameters are available so we don't need to check again here
 	command, _ := params["command"].(string)
-	logger.Tracef("juju run %q", command)
+	logger.Tracef(context.TODO(), "juju run %q", command)
 
 	// The timeout is passed in in nanoseconds(which are represented in go as int64)
 	// But due to serialization it comes out as float64

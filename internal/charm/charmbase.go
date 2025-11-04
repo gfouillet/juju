@@ -7,12 +7,24 @@ package charm
 // a charm archive and directory.
 type charmBase struct {
 	meta       *Meta
-	config     *Config
+	config     *ConfigSpec
 	actions    *Actions
 	lxdProfile *LXDProfile
 	manifest   *Manifest
-	revision   int
 	version    string
+	revision   int
+}
+
+// NewCharmBase creates a new charmBase with the given metadata, config,
+// actions, lxdProfile, and manifest.
+func NewCharmBase(meta *Meta, manifest *Manifest, config *ConfigSpec, actions *Actions, lxdProfile *LXDProfile) *charmBase {
+	return &charmBase{
+		meta:       meta,
+		manifest:   manifest,
+		config:     config,
+		actions:    actions,
+		lxdProfile: lxdProfile,
+	}
 }
 
 // Revision returns the revision number for the charm
@@ -34,7 +46,7 @@ func (c *charmBase) Meta() *Meta {
 
 // Config returns the Config representing the config.yaml file
 // for the charm expanded in dir.
-func (c *charmBase) Config() *Config {
+func (c *charmBase) Config() *ConfigSpec {
 	return c.config
 }
 
@@ -56,10 +68,9 @@ func (c *charmBase) Manifest() *Manifest {
 	return c.manifest
 }
 
-// SetRevision changes the charm revision number. This affects
-// the revision reported by Revision and the revision of the
+// SetVersion changes the charm version. This affects
+// the version reported by Version and the version of the
 // charm created.
-// The revision file in the charm directory is not modified.
-func (c *charmBase) SetRevision(revision int) {
-	c.revision = revision
+func (c *charmBase) SetVersion(version string) {
+	c.version = version
 }

@@ -1,193 +1,102 @@
-// Copyright 2016 Canonical Ltd.
+// Copyright 2025 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package undertaker_test
+package undertaker
 
 import (
 	"context"
+	"testing"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
-	dt "github.com/juju/worker/v4/dependency/testing"
-	gc "gopkg.in/check.v1"
-
-	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/environs"
-	loggertesting "github.com/juju/juju/internal/logger/testing"
-	"github.com/juju/juju/internal/worker/common"
-	"github.com/juju/juju/internal/worker/undertaker"
+	dependencytesting "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
 )
 
 type manifoldSuite struct {
-	testing.IsolationSuite
-	modelType string
+	baseSuite
 }
 
-type CAASManifoldSuite struct {
-	manifoldSuite
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &manifoldSuite{})
 }
 
-type IAASManifoldSuite struct {
-	manifoldSuite
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	cfg := s.getConfig()
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
+
+	cfg = s.getConfig()
+	cfg.DBAccessorName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.DomainServicesName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.NewWorker = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.GetControllerModelService = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.GetRemovalServiceGetter = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.Clock = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.Logger = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
-var (
-	_ = gc.Suite(&IAASManifoldSuite{})
-	_ = gc.Suite(&CAASManifoldSuite{})
-)
-
-func (s *CAASManifoldSuite) SetUpTest(c *gc.C) {
-	s.modelType = "caas"
-}
-
-func (s *IAASManifoldSuite) SetUpTest(c *gc.C) {
-	s.modelType = "iaas"
-}
-
-func (s *manifoldSuite) namesConfig(c *gc.C) undertaker.ManifoldConfig {
-	return undertaker.ManifoldConfig{
-		APICallerName: "api-caller",
-		Logger:        loggertesting.WrapCheckLog(c),
-		NewCredentialValidatorFacade: func(base.APICaller) (common.CredentialAPI, error) {
-			return &fakeCredentialAPI{}, nil
+func (s *manifoldSuite) getConfig() ManifoldConfig {
+	return ManifoldConfig{
+		DBAccessorName:     "db-accessor",
+		DomainServicesName: "domain-services",
+		Logger:             s.logger,
+		Clock:              clock.WallClock,
+		NewWorker: func(c Config) (worker.Worker, error) {
+			return workertest.NewErrorWorker(nil), nil
 		},
-		NewCloudDestroyerFunc: func(ctx context.Context, params environs.OpenParams) (environs.CloudDestroyer, error) {
-			return &fakeEnviron{}, nil
+		GetControllerModelService: func(ctx context.Context, getter dependency.Getter, domainServicesName string) (ControllerModelService, error) {
+			return s.controllerModelService, nil
+		},
+		GetRemovalServiceGetter: func(ctx context.Context, getter dependency.Getter, domainServicesName string) (RemovalServiceGetter, error) {
+			return s.removalServiceGetter, nil
 		},
 	}
 }
 
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	manifold := undertaker.Manifold(s.namesConfig(c))
-	c.Check(manifold.Inputs, jc.DeepEquals, []string{
-		"api-caller",
-	})
-}
-
-func (s *manifoldSuite) TestOutput(c *gc.C) {
-	manifold := undertaker.Manifold(s.namesConfig(c))
-	c.Check(manifold.Output, gc.IsNil)
-}
-
-func (s *manifoldSuite) TestAPICallerMissing(c *gc.C) {
-	resources := resourcesMissing("api-caller")
-	manifold := undertaker.Manifold(s.namesConfig(c))
-
-	worker, err := manifold.Start(context.Background(), resources.Getter())
-	c.Check(errors.Cause(err), gc.Equals, dependency.ErrMissing)
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *manifoldSuite) TestNewFacadeError(c *gc.C) {
-	resources := resourcesMissing()
-	config := s.namesConfig(c)
-	config.NewFacade = func(apiCaller base.APICaller) (undertaker.Facade, error) {
-		checkResource(c, apiCaller, resources, "api-caller")
-		return nil, errors.New("blort")
+func (s *manifoldSuite) newGetter() dependency.Getter {
+	resources := map[string]any{
+		"db-accessor":     s.dbDeleter,
+		"domain-services": s.controllerModelService,
 	}
-	manifold := undertaker.Manifold(config)
-
-	worker, err := manifold.Start(context.Background(), resources.Getter())
-	c.Check(err, gc.ErrorMatches, "blort")
-	c.Check(worker, gc.IsNil)
+	return dependencytesting.StubGetter(resources)
 }
 
-func (s *manifoldSuite) TestNewCredentialAPIError(c *gc.C) {
-	config := s.namesConfig(c)
-	config.NewFacade = func(_ base.APICaller) (undertaker.Facade, error) {
-		return &fakeFacade{}, nil
-	}
-	config.NewCredentialValidatorFacade = func(apiCaller base.APICaller) (common.CredentialAPI, error) {
-		return nil, errors.New("blort")
-	}
-	manifold := undertaker.Manifold(config)
+var expectedInputs = []string{"db-accessor", "domain-services"}
 
-	resources := resourcesMissing()
-	worker, err := manifold.Start(context.Background(), resources.Getter())
-	c.Check(err, gc.ErrorMatches, "blort")
-	c.Check(worker, gc.IsNil)
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig()).Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *manifoldSuite) TestNewWorkerError(c *gc.C) {
-	resources := resourcesMissing()
-	expectFacade := &fakeFacade{}
-	config := s.namesConfig(c)
-	config.NewFacade = func(_ base.APICaller) (undertaker.Facade, error) {
-		return expectFacade, nil
-	}
-	config.NewWorker = func(cfg undertaker.Config) (worker.Worker, error) {
-		c.Check(cfg.Facade, gc.Equals, expectFacade)
-		return nil, errors.New("lhiis")
-	}
-	manifold := undertaker.Manifold(config)
+func (s *manifoldSuite) TestStart(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	worker, err := manifold.Start(context.Background(), resources.Getter())
-	c.Check(err, gc.ErrorMatches, "lhiis")
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *manifoldSuite) TestNewWorkerSuccess(c *gc.C) {
-	expectWorker := &fakeWorker{}
-	config := s.namesConfig(c)
-	var gotConfig undertaker.Config
-	config.NewFacade = func(_ base.APICaller) (undertaker.Facade, error) {
-		return &fakeFacade{}, nil
-	}
-	config.NewWorker = func(workerConfig undertaker.Config) (worker.Worker, error) {
-		gotConfig = workerConfig
-		return expectWorker, nil
-	}
-	manifold := undertaker.Manifold(config)
-	resources := resourcesMissing()
-
-	worker, err := manifold.Start(context.Background(), resources.Getter())
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(worker, gc.Equals, expectWorker)
-	c.Assert(gotConfig.Logger, gc.Equals, loggertesting.WrapCheckLog(c))
-}
-
-func resourcesMissing(missing ...string) dt.StubResources {
-	resources := dt.StubResources{
-		"api-caller": dt.NewStubResource(&fakeAPICaller{}),
-		"environ":    dt.NewStubResource(&fakeEnviron{}),
-		"broker":     dt.NewStubResource(&fakeBroker{}),
-	}
-	for _, name := range missing {
-		resources[name] = dt.StubResource{Error: dependency.ErrMissing}
-	}
-	return resources
-}
-
-func checkResource(c *gc.C, actual interface{}, resources dt.StubResources, name string) {
-	c.Check(actual, gc.Equals, resources[name].Outputs[0])
-}
-
-type fakeAPICaller struct {
-	base.APICaller
-}
-
-type fakeEnviron struct {
-	environs.Environ
-}
-
-type fakeBroker struct {
-	caas.Broker
-}
-
-type fakeFacade struct {
-	undertaker.Facade
-}
-
-type fakeWorker struct {
-	worker.Worker
-}
-
-type fakeCredentialAPI struct{}
-
-func (*fakeCredentialAPI) InvalidateModelCredential(_ context.Context, reason string) error {
-	return nil
+	w, err := Manifold(s.getConfig()).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIsNil)
+	workertest.CleanKill(c, w)
 }

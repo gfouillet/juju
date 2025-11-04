@@ -12,7 +12,7 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 
 	"github.com/juju/juju/api/client/application"
@@ -20,11 +20,11 @@ import (
 	"github.com/juju/juju/api/client/client"
 	"github.com/juju/juju/api/client/sshclient"
 	controllerapi "github.com/juju/juju/api/controller/controller"
-	"github.com/juju/juju/caas/kubernetes/provider"
-	k8sexec "github.com/juju/juju/caas/kubernetes/provider/exec"
 	environsbootstrap "github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/cloudspec"
 	jujussh "github.com/juju/juju/internal/network/ssh"
+	"github.com/juju/juju/internal/provider/kubernetes"
+	k8sexec "github.com/juju/juju/internal/provider/kubernetes/exec"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -32,12 +32,13 @@ import (
 // and DebugHooksCommand for CAAS model.
 type sshContainer struct {
 	leaderResolver
-	target    string
-	container string
-	args      []string
-	modelUUID string
-	modelName string
-	namespace string
+	target         string
+	container      string
+	args           []string
+	modelUUID      string
+	controllerUUID string
+	modelName      string
+	namespace      string
 
 	applicationAPI   ApplicationAPI
 	charmAPI         CharmAPI
@@ -54,7 +55,7 @@ func (c *sshContainer) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *sshContainer) setHostChecker(_ jujussh.ReachableChecker) {}
 
-func (c *sshContainer) setLeaderAPI(leaderAPI LeaderAPI) {
+func (c *sshContainer) setLeaderAPI(ctx context.Context, leaderAPI LeaderAPI) {
 	c.leaderAPI = leaderAPI
 }
 
@@ -90,18 +91,26 @@ func (c *sshContainer) initRun(ctx context.Context, mc ModelCommand) (err error)
 	}
 
 	if len(c.modelUUID) == 0 {
-		_, mDetails, err := mc.ModelDetails()
+		_, mDetails, err := mc.ModelDetails(ctx)
 		if err != nil {
 			return err
 		}
 		c.modelUUID = mDetails.ModelUUID
 	}
 
-	cAPI, err := mc.NewControllerAPIRoot()
+	if len(c.controllerUUID) == 0 {
+		controllerDetails, err := mc.ControllerDetails()
+		if err != nil {
+			return err
+		}
+		c.controllerUUID = controllerDetails.ControllerUUID
+	}
+
+	cAPI, err := mc.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	root, err := mc.NewAPIRoot()
+	root, err := mc.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -123,11 +132,11 @@ func (c *sshContainer) initRun(ctx context.Context, mc ModelCommand) (err error)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		c.namespace = provider.DecideControllerNamespace(controllerCfg.ControllerName())
+		c.namespace = kubernetes.DecideControllerNamespace(controllerCfg.ControllerName())
 	}
 
 	if c.execClient == nil {
-		if c.execClient, err = c.getExecClient(); err != nil {
+		if c.execClient, err = c.getExecClient(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -170,18 +179,25 @@ func (c *sshContainer) cleanupRun() {
 
 const charmContainerName = "charm"
 
-func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
+func (c *sshContainer) resolveTarget(ctx context.Context, target string) (*resolvedTarget, error) {
 	if modelNameWithoutUsername(c.modelName) == environsbootstrap.ControllerModelName && names.IsValidMachine(target) {
 		// TODO(caas): change here to controller unit tag once we refactored controller to an application.
 		if target != "0" {
 			// HA is not enabled on CaaS controller yet.
 			return nil, errors.NotFoundf("target %q", target)
 		}
+		if c.container == "" {
+			c.container = "api-server"
+		} else if c.container != "api-server" && c.container != "charm" {
+			return nil, errors.Errorf(
+				"container %q must be one of api-server, charm", c.container,
+			)
+		}
 		return &resolvedTarget{entity: fmt.Sprintf("%s-%s", environsbootstrap.ControllerModelName, target)}, nil
 	}
 	// If the user specified a leader unit, try to resolve it to the
 	// appropriate unit name and override the requested target name.
-	resolvedTargetName, err := c.maybeResolveLeaderUnit(target)
+	resolvedTargetName, err := c.maybeResolveLeaderUnit(ctx, target)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -191,7 +207,7 @@ func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
 	}
 	unitTag := names.NewUnitTag(resolvedTargetName)
 
-	unitInfoResults, err := c.applicationAPI.UnitsInfo([]names.UnitTag{unitTag})
+	unitInfoResults, err := c.applicationAPI.UnitsInfo(ctx, []names.UnitTag{unitTag})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -200,7 +216,7 @@ func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
 		return nil, errors.Annotatef(unit.Error, "getting unit %q", resolvedTargetName)
 	}
 
-	charmInfo, err := c.charmAPI.CharmInfo(unit.Charm)
+	charmInfo, err := c.charmAPI.CharmInfo(ctx, unit.Charm)
 	if err != nil {
 		return nil, errors.Annotatef(err, "getting charm info for %q", resolvedTargetName)
 	}
@@ -236,17 +252,19 @@ type Context interface {
 }
 
 func (c *sshContainer) ssh(ctx Context, enablePty bool, target *resolvedTarget) (err error) {
-	args := c.args
-	if len(args) == 0 {
-		args = []string{"exec", "sh"}
-	}
 	cancel, stop := getInterruptAbortChan(ctx)
 	defer stop()
 	var env []string
+	args := c.args
 	if enablePty {
 		if term := os.Getenv("TERM"); term != "" {
 			env = append(env, "TERM="+term)
 		}
+		if len(args) == 0 {
+			args = []string{"exec", "bash", "--login"}
+		}
+	} else if len(args) == 0 {
+		args = []string{"exec", "sh"}
 	}
 	return c.execClient.Exec(
 		ctx,
@@ -292,11 +310,11 @@ func (c *sshContainer) copy(ctx Context) error {
 		return errors.New("only one source and one destination are allowed for a k8s application")
 	}
 
-	srcSpec, err := c.expandSCPArg(args[0])
+	srcSpec, err := c.expandSCPArg(ctx, args[0])
 	if err != nil {
 		return err
 	}
-	destSpec, err := c.expandSCPArg(args[1])
+	destSpec, err := c.expandSCPArg(ctx, args[1])
 	if err != nil {
 		return err
 	}
@@ -306,13 +324,13 @@ func (c *sshContainer) copy(ctx Context) error {
 	return c.execClient.Copy(ctx, k8sexec.CopyParams{Src: srcSpec, Dest: destSpec}, cancel)
 }
 
-func (c *sshContainer) expandSCPArg(arg string) (o k8sexec.FileResource, err error) {
+func (c *sshContainer) expandSCPArg(ctx context.Context, arg string) (o k8sexec.FileResource, err error) {
 	if i := strings.Index(arg, ":"); i == -1 {
 		return k8sexec.FileResource{Path: arg}, nil
 	} else if i > 0 {
 		o.Path = arg[i+1:]
 
-		resolvedTarget, err := c.resolveTarget(arg[:i])
+		resolvedTarget, err := c.resolveTarget(ctx, arg[:i])
 		if err != nil {
 			return o, err
 		}
@@ -331,14 +349,14 @@ func modelNameWithoutUsername(modelName string) string {
 	return modelName
 }
 
-func (c *sshContainer) getExecClient() (k8sexec.Executor, error) {
-	cloudSpec, err := c.sshClient.ModelCredentialForSSH()
+func (c *sshContainer) getExecClient(ctx context.Context) (k8sexec.Executor, error) {
+	cloudSpec, err := c.sshClient.ModelCredentialForSSH(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return c.execClientGetter(c.namespace, cloudSpec)
 }
 
-func (c *sshContainer) maybePopulateTargetViaField(_ *resolvedTarget, _ func(*client.StatusArgs) (*params.FullStatus, error)) error {
+func (c *sshContainer) maybePopulateTargetViaField(ctx context.Context, _ *resolvedTarget, _ func(context.Context, *client.StatusArgs) (*params.FullStatus, error)) error {
 	return nil
 }

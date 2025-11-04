@@ -5,18 +5,18 @@ package application
 
 import (
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/core/application"
+	"github.com/juju/juju/internal/configschema"
 )
 
 const defaultTrustLevel = false
 
-var trustFields = environschema.Fields{
+var trustFields = configschema.Fields{
 	application.TrustConfigOptionName: {
 		Description: "Does this application have access to trusted credentials",
-		Type:        environschema.Tbool,
-		Group:       environschema.JujuGroup,
+		Type:        configschema.Tbool,
+		Group:       configschema.JujuGroup,
 	},
 }
 

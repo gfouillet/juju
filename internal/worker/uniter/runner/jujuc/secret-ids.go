@@ -4,10 +4,10 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretIdsCommand struct {
@@ -31,14 +31,15 @@ func (c *secretIdsCommand) SetFlags(f *gnuflag.FlagSet) {
 func (c *secretIdsCommand) Info() *cmd.Info {
 	doc := `
 Returns the secret ids for secrets owned by the application.
-
-Examples:
+`
+	examples := `
     secret-ids
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-ids",
-		Purpose: "print secret ids",
-		Doc:     doc,
+		Name:     "secret-ids",
+		Purpose:  "Print secret IDs.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -49,7 +50,7 @@ func (c *secretIdsCommand) Init(args []string) error {
 
 // Run implements cmd.Command.
 func (c *secretIdsCommand) Run(ctx *cmd.Context) error {
-	result, err := c.ctx.SecretMetadata()
+	result, err := c.ctx.SecretMetadata(ctx)
 	if err != nil {
 		return err
 	}

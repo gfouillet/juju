@@ -1,326 +1,163 @@
 // Copyright 2013 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package agent_test
+package agent
 
 import (
 	"context"
-	"time"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v4/workertest"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	gomock "go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/common"
-	commonmocks "github.com/juju/juju/apiserver/common/mocks"
-	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/apiserver/facade/facadetest"
-	"github.com/juju/juju/apiserver/facades/agent/agent"
-	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/credential"
-	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/watcher/watchertest"
-	"github.com/juju/juju/juju/testing"
-	jujutesting "github.com/juju/juju/juju/testing"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/unit"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	ttesting "github.com/juju/juju/testing"
 )
 
 type agentSuite struct {
-	jujutesting.ApiServerSuite
+	testhelpers.IsolationSuite
 
-	resources  *common.Resources
-	authorizer apiservertesting.FakeAuthorizer
-
-	machine0  *state.Machine
-	machine1  *state.Machine
-	container *state.Machine
-
-	store objectstore.ObjectStore
+	passwordService *MockAgentPasswordService
 }
 
-var _ = gc.Suite(&agentSuite{})
+func TestAgentSuite(t *testing.T) {
+	tc.Run(t, &agentSuite{})
+}
 
-func (s *agentSuite) SetUpTest(c *gc.C) {
-	s.ApiServerSuite.SetUpTest(c)
+func (s *agentSuite) TestSetUnitPassword(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	st := s.ControllerModel(c).State()
-	var err error
-	s.machine0, err = st.AddMachine(s.InstancePrechecker(c, st), state.UbuntuBase("12.10"), state.JobManageModel)
-	c.Assert(err, jc.ErrorIsNil)
+	s.passwordService.EXPECT().
+		SetUnitPassword(gomock.Any(), unit.Name("foo/1"), "password").
+		Return(nil)
 
-	s.machine1, err = st.AddMachine(s.InstancePrechecker(c, st), state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	}
-	s.container, err = st.AddMachineInsideMachine(template, s.machine1.Id(), instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.resources = common.NewResources()
-	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
-
-	// Create a FakeAuthorizer so we can check permissions,
-	// set up assuming machine 1 has logged in.
-	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag: s.machine1.Tag(),
+	api := &AgentAPI{
+		PasswordChanger: common.NewPasswordChanger(s.passwordService, alwaysAllow),
 	}
 
-	s.store = testing.NewObjectStore(c, s.ControllerModelUUID())
-}
-
-func (s *agentSuite) agentAPI(c *gc.C, auth facade.Authorizer, credentialService common.CredentialService) (*agent.AgentAPI, error) {
-	return agent.NewAgentAPI(
-		auth,
-		s.resources,
-		s.ControllerModel(c).State(),
-		nil,
-		nil,
-		nil,
-		credentialService,
-	)
-}
-
-func (s *agentSuite) TestAgentFailsWithNonAgent(c *gc.C) {
-	auth := s.authorizer
-	auth.Tag = names.NewUserTag("admin")
-	ctx := facadetest.ModelContext{
-		Auth_: auth,
-	}
-	_, err := agent.NewAgentAPIV3(ctx)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-}
-
-func (s *agentSuite) TestAgentSucceedsWithUnitAgent(c *gc.C) {
-	auth := s.authorizer
-	auth.Tag = names.NewUnitTag("foosball/1")
-	_, err := s.agentAPI(c, auth, nil)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *agentSuite) TestGetEntities(c *gc.C) {
-	err := s.container.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{
-		Entities: []params.Entity{
-			{Tag: "machine-1"},
-			{Tag: "machine-0"},
-			{Tag: "machine-1-lxd-0"},
-			{Tag: "machine-42"},
-		},
-	}
-	api, err := s.agentAPI(c, s.authorizer, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	results := api.GetEntities(context.Background(), args)
-	c.Assert(results, gc.DeepEquals, params.AgentGetEntitiesResults{
-		Entities: []params.AgentGetEntitiesResult{
+	result, err := api.SetPasswords(c.Context(), params.EntityPasswords{
+		Changes: []params.EntityPassword{
 			{
-				Life: "alive",
-				Jobs: []model.MachineJob{model.JobHostUnits},
+				Tag:      names.NewUnitTag("foo/1").String(),
+				Password: "password",
 			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
-}
-
-func (s *agentSuite) TestGetEntitiesContainer(c *gc.C) {
-	auth := s.authorizer
-	auth.Tag = s.container.Tag()
-	err := s.container.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-
-	api, err := s.agentAPI(c, auth, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{
-		Entities: []params.Entity{
-			{Tag: "machine-1"},
-			{Tag: "machine-0"},
-			{Tag: "machine-1-lxd-0"},
-			{Tag: "machine-42"},
-		},
-	}
-	results := api.GetEntities(context.Background(), args)
-	c.Assert(results, gc.DeepEquals, params.AgentGetEntitiesResults{
-		Entities: []params.AgentGetEntitiesResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
 			{
-				Life:          "dying",
-				Jobs:          []model.MachineJob{model.JobHostUnits},
-				ContainerType: instance.LXD,
+				Error: nil,
 			},
-			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
 }
 
-func (s *agentSuite) TestGetEntitiesNotFound(c *gc.C) {
-	// Destroy the container first, so we can destroy its parent.
-	err := s.container.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.container.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.container.Remove(testing.NewObjectStore(c, s.ControllerModelUUID()))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *agentSuite) TestSetUnitPasswordUnitNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	err = s.machine1.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine1.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine1.Remove(testing.NewObjectStore(c, s.ControllerModelUUID()))
-	c.Assert(err, jc.ErrorIsNil)
+	s.passwordService.EXPECT().
+		SetUnitPassword(gomock.Any(), unit.Name("foo/1"), "password").
+		Return(applicationerrors.UnitNotFound)
 
-	api, err := s.agentAPI(c, s.authorizer, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	results := api.GetEntities(context.Background(), params.Entities{
-		Entities: []params.Entity{{Tag: "machine-1"}},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.AgentGetEntitiesResults{
-		Entities: []params.AgentGetEntitiesResult{{
-			Error: &params.Error{
-				Code:    params.CodeNotFound,
-				Message: "machine 1 not found",
-			},
-		}},
-	})
-}
+	api := &AgentAPI{
+		PasswordChanger: common.NewPasswordChanger(s.passwordService, alwaysAllow),
+	}
 
-func (s *agentSuite) TestSetPasswords(c *gc.C) {
-	api, err := s.agentAPI(c, s.authorizer, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	results, err := api.SetPasswords(
-		context.Background(),
-		params.EntityPasswords{
-			Changes: []params.EntityPassword{
-				{Tag: "machine-0", Password: "xxx-12345678901234567890"},
-				{Tag: "machine-1", Password: "yyy-12345678901234567890"},
-				{Tag: "machine-42", Password: "zzz-12345678901234567890"},
+	result, err := api.SetPasswords(c.Context(), params.EntityPasswords{
+		Changes: []params.EntityPassword{
+			{
+				Tag:      names.NewUnitTag("foo/1").String(),
+				Password: "password",
 			},
 		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.ErrorResults{
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	changed := s.machine1.PasswordValid("yyy-12345678901234567890")
-	c.Assert(changed, jc.IsTrue)
-}
-
-func (s *agentSuite) TestSetPasswordsShort(c *gc.C) {
-	api, err := s.agentAPI(c, s.authorizer, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	results, err := api.SetPasswords(
-		context.Background(),
-		params.EntityPasswords{
-			Changes: []params.EntityPassword{
-				{Tag: "machine-1", Password: "yyy"},
+			{
+				Error: apiservererrors.ServerError(errors.NotFoundf(`unit "foo/1"`)),
 			},
 		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"password is only 3 bytes long, and is not a valid Agent password")
+	})
 }
 
-func (s *agentSuite) TestClearReboot(c *gc.C) {
-	api, err := s.agentAPI(c, s.authorizer, nil)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *agentSuite) TestSetMachinePassword(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	err = s.machine1.SetRebootFlag(true)
-	c.Assert(err, jc.ErrorIsNil)
+	s.passwordService.EXPECT().
+		SetMachinePassword(gomock.Any(), machine.Name("1"), "password").
+		Return(nil)
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: s.machine0.Tag().String()},
-		{Tag: s.machine1.Tag().String()},
-	}}
+	api := &AgentAPI{
+		PasswordChanger: common.NewPasswordChanger(s.passwordService, alwaysAllow),
+	}
 
-	rFlag, err := s.machine1.GetRebootFlag()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rFlag, jc.IsTrue)
-
-	result, err := api.ClearReboot(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: nil},
+	result, err := api.SetPasswords(c.Context(), params.EntityPasswords{
+		Changes: []params.EntityPassword{
+			{
+				Tag:      names.NewMachineTag("1").String(),
+				Password: "password",
+			},
 		},
 	})
-
-	rFlag, err = s.machine1.GetRebootFlag()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rFlag, jc.IsFalse)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{
+				Error: nil,
+			},
+		},
+	})
 }
 
-func (s *agentSuite) TestWatchCredentials(c *gc.C) {
-	authorizer := apiservertesting.FakeAuthorizer{
-		Tag:        names.NewMachineTag("0"),
-		Controller: true,
+func (s *agentSuite) TestSetMachinePasswordMachineNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.passwordService.EXPECT().
+		SetMachinePassword(gomock.Any(), machine.Name("1"), "password").
+		Return(machineerrors.MachineNotFound)
+
+	api := &AgentAPI{
+		PasswordChanger: common.NewPasswordChanger(s.passwordService, alwaysAllow),
 	}
-	tag := names.NewCloudCredentialTag("dummy/fred/default")
 
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-	credentialService := commonmocks.NewMockCredentialService(ctrl)
-
-	ch := make(chan struct{}, 1)
-	// Initial event.
-	ch <- struct{}{}
-
-	nw := watchertest.NewMockNotifyWatcher(ch)
-	credentialService.EXPECT().WatchCredential(gomock.Any(), credential.KeyFromTag(tag)).Return(nw, nil)
-	api, err := s.agentAPI(c, authorizer, credentialService)
-	c.Assert(err, jc.ErrorIsNil)
-	result, err := api.WatchCredentials(context.Background(), params.Entities{Entities: []params.Entity{{Tag: tag.String()}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, params.NotifyWatchResults{Results: []params.NotifyWatchResult{{NotifyWatcherId: "1", Error: nil}}})
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-
-	w := s.resources.Get("1")
-	defer workertest.CleanKill(c, w)
-
-	// Check that the Watch has consumed the initial events ("returned" in the Watch call)
-	wc := statetesting.NewNotifyWatcherC(c, w.(state.NotifyWatcher))
-	wc.AssertNoChange()
-
-	select {
-	case ch <- struct{}{}:
-	case <-time.After(ttesting.LongWait):
-		c.Fatalf("timeout sending credential change event")
-	}
-	wc.AssertOneChange()
+	result, err := api.SetPasswords(c.Context(), params.EntityPasswords{
+		Changes: []params.EntityPassword{
+			{
+				Tag:      names.NewMachineTag("1").String(),
+				Password: "password",
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{
+				Error: apiservererrors.ServerError(errors.NotFoundf(`machine "1"`)),
+			},
+		},
+	})
 }
 
-func (s *agentSuite) TestWatchAuthError(c *gc.C) {
-	authorizer := apiservertesting.FakeAuthorizer{
-		Tag:        names.NewMachineTag("1"),
-		Controller: false,
-	}
+func (s *agentSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-	credentialService := commonmocks.NewMockCredentialService(ctrl)
 
-	api, err := s.agentAPI(c, authorizer, credentialService)
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = api.WatchCredentials(context.Background(), params.Entities{})
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+	s.passwordService = NewMockAgentPasswordService(ctrl)
+
+	return ctrl
+}
+
+func alwaysAllow(context.Context) (common.AuthFunc, error) {
+	return func(tag names.Tag) bool {
+		return true
+	}, nil
 }

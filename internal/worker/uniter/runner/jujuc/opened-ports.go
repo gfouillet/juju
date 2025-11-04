@@ -8,12 +8,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // OpenedPortsCommand implements the opened-ports command.
@@ -31,7 +31,7 @@ func NewOpenedPortsCommand(ctx Context) (cmd.Command, error) {
 func (c *OpenedPortsCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:    "opened-ports",
-		Purpose: "list all ports or port ranges opened by the unit",
+		Purpose: "List all ports or port ranges opened by the unit.",
 		Doc: `
 opened-ports lists all ports or port ranges opened by a unit.
 
@@ -45,6 +45,13 @@ augmented with a comma-delimited list of endpoints that the port range
 applies to (e.g. "80/tcp (endpoint1, endpoint2)"). If a port range applies to
 all endpoints, this will be indicated by the presence of a '*' character
 (e.g. "80/tcp (*)").
+
+Opening ports is transactional (i.e. will take place on successfully exiting
+the current hook), and therefore opened-ports will not return any values for
+pending open-port operations run from within the same hook.
+`,
+		Examples: `
+    opened-ports
 `,
 	})
 }

@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -34,9 +34,11 @@ type RemoveCommand struct {
 const removeCommandDoc = `
 Removes an existing Juju network space with the given name. Any subnets
 associated with the space will be transferred to the default space.
-The command will fail if existing constraints, bindings or controller settings are bound to the given space.
+The command will fail if existing constraints, bindings or controller settings
+are bound to the given space.
 
-If the --force option is specified, the space will be deleted even if there are existing bindings, constraints or settings.
+If the ` + "`--force`" + ` option is specified, the space will be deleted even
+if there are existing bindings, constraints or settings.
 
 `
 
@@ -51,7 +53,7 @@ Remove a space by name with force, without need for confirmation:
 `
 
 var removeSpaceMsgNoBounds = `
-WARNING! This command will remove the space. 
+WARNING! This command will remove the space.
 Safe removal possible. No constraints, bindings or controller config found with dependency on the given space.
 `[1:]
 
@@ -125,7 +127,7 @@ func (c *RemoveCommand) Run(ctx *cmd.Context) error {
 			}
 		}
 
-		space, err := api.RemoveSpace(c.name, c.force, false)
+		space, err := api.RemoveSpace(ctx, c.name, c.force, false)
 		if err != nil {
 			return errors.Annotatef(err, "cannot remove space %q", c.name)
 		}
@@ -145,7 +147,7 @@ func (c *RemoveCommand) Run(ctx *cmd.Context) error {
 }
 
 func (c *RemoveCommand) handleForceOption(api SpaceAPI, currentModel string, ctx *cmd.Context) error {
-	space, err := api.RemoveSpace(c.name, false, true)
+	space, err := api.RemoveSpace(ctx, c.name, false, true)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -157,7 +159,7 @@ func (c *RemoveCommand) handleForceOption(api SpaceAPI, currentModel string, ctx
 
 	errorList := buildRemoveErrorList(result, currentModel)
 	if len(errorList) == 0 {
-		fmt.Fprintf(ctx.Stderr, removeSpaceMsgNoBounds)
+		fmt.Fprint(ctx.Stderr, removeSpaceMsgNoBounds)
 	} else {
 		fmt.Fprintf(ctx.Stderr, removeSpaceMsgBounds, strings.Join(errorList, "\n"))
 	}

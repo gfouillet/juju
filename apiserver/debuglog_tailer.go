@@ -67,7 +67,7 @@ func handleDebugLogRequest(
 			}
 
 			lineCount++
-			if reqParams.maxLines > 0 && lineCount == reqParams.maxLines {
+			if reqParams.noTail && reqParams.initialLines > 0 && lineCount == reqParams.initialLines {
 				return nil
 			}
 		}
@@ -75,26 +75,23 @@ func handleDebugLogRequest(
 }
 
 func makeLogTailerParams(reqParams debugLogParams) logtailer.LogTailerParams {
-	tailerParams := logtailer.LogTailerParams{
+	return logtailer.LogTailerParams{
 		MinLevel:      reqParams.filterLevel,
 		NoTail:        reqParams.noTail,
 		Firehose:      reqParams.firehose,
 		StartTime:     reqParams.startTime,
-		InitialLines:  int(reqParams.backlog),
+		InitialLines:  int(reqParams.initialLines),
 		IncludeEntity: reqParams.includeEntity,
 		ExcludeEntity: reqParams.excludeEntity,
 		IncludeModule: reqParams.includeModule,
 		ExcludeModule: reqParams.excludeModule,
 		IncludeLabels: reqParams.includeLabels,
 		ExcludeLabels: reqParams.excludeLabels,
+		FromTheStart:  reqParams.fromTheStart,
 	}
-	if reqParams.fromTheStart {
-		tailerParams.InitialLines = 0
-	}
-	return tailerParams
 }
 
-func formatLogRecord(r *corelogger.LogRecord) *params.LogMessage {
+func formatLogRecord(r corelogger.LogRecord) *params.LogMessage {
 	return &params.LogMessage{
 		ModelUUID: r.ModelUUID,
 		Entity:    r.Entity,

@@ -4,19 +4,12 @@
 package controller_test
 
 import (
-	"testing"
+	"github.com/juju/tc"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
-
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
 
 type baseControllerSuite struct {
 	coretesting.FakeJujuXDGDataHomeSuite
@@ -25,7 +18,7 @@ type baseControllerSuite struct {
 	expectedOutput, expectedErr               string
 }
 
-func (s *baseControllerSuite) SetUpTest(c *gc.C) {
+func (s *baseControllerSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	s.controllersYaml = testControllersYaml
 	s.modelsYaml = testModelsYaml
@@ -33,15 +26,15 @@ func (s *baseControllerSuite) SetUpTest(c *gc.C) {
 	s.store = jujuclienttesting.MinimalStore()
 }
 
-func (s *baseControllerSuite) createTestClientStore(c *gc.C) *jujuclient.MemStore {
+func (s *baseControllerSuite) createTestClientStore(c *tc.C) *jujuclient.MemStore {
 	controllers, err := jujuclient.ParseControllers([]byte(s.controllersYaml))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	models, err := jujuclient.ParseModels([]byte(s.modelsYaml))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	accounts, err := jujuclient.ParseAccounts([]byte(s.accountsYaml))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	store := jujuclient.NewMemStore()
 	store.Controllers = controllers.Controllers
@@ -107,7 +100,7 @@ controllers:
       controller:
         uuid: ghi
         type: iaas
-    current-model: admin/controller
+    current-model: prod/controller
   mallards:
     models:
       model0:
@@ -116,7 +109,7 @@ controllers:
       my-model:
         uuid: def
         type: iaas
-    current-model: admin/my-model
+    current-model: prod/my-model
   k8s-controller:
     models:
       controller:
@@ -125,7 +118,7 @@ controllers:
       my-k8s-model:
         uuid: def
         type: caas
-    current-model: admin/my-k8s-model
+    current-model: prod/my-k8s-model
 `
 
 const testAccountsYaml = `

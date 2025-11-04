@@ -5,51 +5,33 @@ package objectstore
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
-	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/objectstore"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type baseObjectStoreSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	clock         *MockClock
 	claimer       *MockClaimer
 	claimExtender *MockClaimExtender
 }
 
-var _ = gc.Suite(&baseObjectStoreSuite{})
-
-func (s *baseObjectStoreSuite) TestScopedContext(c *gc.C) {
-	w := &baseObjectStore{}
-
-	ctx, cancel := w.scopedContext()
-	c.Assert(ctx.Err(), gc.IsNil)
-
-	cancel()
-	c.Assert(ctx.Err(), jc.ErrorIs, context.Canceled)
+func TestBaseObjectStoreSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &baseObjectStoreSuite{})
 }
 
-func (s *baseObjectStoreSuite) TestScopedContextTomb(c *gc.C) {
-	w := &baseObjectStore{}
-
-	ctx, _ := w.scopedContext()
-	c.Assert(ctx.Err(), gc.IsNil)
-
-	w.tomb.Kill(nil)
-
-	c.Assert(ctx.Err(), jc.ErrorIs, context.Canceled)
-}
-
-func (s *baseObjectStoreSuite) TestLockOnCancelledContext(c *gc.C) {
+func (s *baseObjectStoreSuite) TestLockOnCancelledContext(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect the claimer to be called and then released when the lock is
@@ -59,18 +41,18 @@ func (s *baseObjectStoreSuite) TestLockOnCancelledContext(c *gc.C) {
 		claimer: s.claimer,
 	}
 
-	ctx, cancel := w.scopedContext()
-	c.Assert(ctx.Err(), jc.ErrorIsNil)
+	ctx, cancel := context.WithCancel(c.Context())
+	c.Assert(ctx.Err(), tc.ErrorIsNil)
 
 	cancel()
 
 	err := w.withLock(ctx, "hash", func(ctx context.Context) error {
 		return nil
 	})
-	c.Assert(err, jc.ErrorIs, context.Canceled)
+	c.Assert(err, tc.ErrorIs, context.Canceled)
 }
 
-func (s *baseObjectStoreSuite) TestLocking(c *gc.C) {
+func (s *baseObjectStoreSuite) TestLocking(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect the claimer to be called and then released when the lock is
@@ -88,19 +70,16 @@ func (s *baseObjectStoreSuite) TestLocking(c *gc.C) {
 		clock:   s.clock,
 	}
 
-	ctx, _ := w.scopedContext()
-	c.Assert(ctx.Err(), jc.ErrorIsNil)
-
 	var called bool
-	err := w.withLock(ctx, "hash", func(ctx context.Context) error {
+	err := w.withLock(c.Context(), "hash", func(ctx context.Context) error {
 		called = true
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(called, jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(called, tc.IsTrue)
 }
 
-func (s *baseObjectStoreSuite) TestLockingForBlockedFunc(c *gc.C) {
+func (s *baseObjectStoreSuite) TestLockingForBlockedFunc(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect the claimer to be called and then released when the lock is
@@ -113,36 +92,33 @@ func (s *baseObjectStoreSuite) TestLockingForBlockedFunc(c *gc.C) {
 	s.expectClaimRelease("hash")
 	s.expectClockAfter(wait)
 	s.expectExtendDuration(time.Second)
-	s.expectClockAfter(make(chan time.Time))
+	s.maybeExpectClockAfter(make(chan time.Time))
 
 	w := &baseObjectStore{
 		claimer: s.claimer,
 		clock:   s.clock,
 	}
 
-	ctx, _ := w.scopedContext()
-	c.Assert(ctx.Err(), jc.ErrorIsNil)
-
 	s.claimExtender.EXPECT().Extend(gomock.Any()).DoAndReturn(func(ctx context.Context) error {
 		close(block)
 		return nil
 	})
 
-	err := w.withLock(ctx, "hash", func(ctx context.Context) error {
+	err := w.withLock(c.Context(), "hash", func(ctx context.Context) error {
 		close(wait)
 
 		select {
 		case <-block:
 			return nil
-		case <-time.After(testing.LongWait):
+		case <-time.After(testhelpers.LongWait):
 			c.Fatal("timed out waiting for block")
 			return nil
 		}
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *baseObjectStoreSuite) TestBlockedLock(c *gc.C) {
+func (s *baseObjectStoreSuite) TestBlockedLock(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect the claimer to be called and then released when the lock is
@@ -161,25 +137,22 @@ func (s *baseObjectStoreSuite) TestBlockedLock(c *gc.C) {
 		clock:   clock.WallClock,
 	}
 
-	ctx, _ := w.scopedContext()
-	c.Assert(ctx.Err(), jc.ErrorIsNil)
-
 	var called bool
-	err := w.withLock(ctx, "hash", func(ctx context.Context) error {
+	err := w.withLock(c.Context(), "hash", func(ctx context.Context) error {
 		time.Sleep(time.Second)
 		called = true
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(called, jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(called, tc.IsTrue)
 
 	// Make sure we've extended the lock. 5 is just arbitrary, but should be
 	// enough to ensure we've extended the lock. In theory it should be at
 	// least 9, but we have to account for slowness of runners.
-	c.Check(attempts > 5, jc.IsTrue)
+	c.Check(attempts > 5, tc.IsTrue)
 }
 
-func (s *baseObjectStoreSuite) TestLockingForTombKill(c *gc.C) {
+func (s *baseObjectStoreSuite) TestLockingForCancel(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect the claimer to be called and then released when the lock is
@@ -196,17 +169,16 @@ func (s *baseObjectStoreSuite) TestLockingForTombKill(c *gc.C) {
 		clock:   clock.WallClock,
 	}
 
-	ctx, _ := w.scopedContext()
-	c.Assert(ctx.Err(), jc.ErrorIsNil)
-
 	wait := make(chan struct{})
+
+	ctx, cancel := context.WithCancel(c.Context())
 
 	go func() {
 		select {
 		case <-block:
-			w.Kill()
+			cancel()
 			close(wait)
-		case <-time.After(testing.LongWait):
+		case <-time.After(testhelpers.LongWait):
 			c.Fatal("timed out waiting for block")
 		}
 	}()
@@ -214,18 +186,18 @@ func (s *baseObjectStoreSuite) TestLockingForTombKill(c *gc.C) {
 	err := w.withLock(ctx, "hash", func(ctx context.Context) error {
 		close(block)
 		time.Sleep(time.Millisecond * 100)
-		return nil
+		return ctx.Err()
 	})
-	c.Assert(err, jc.ErrorIs, tomb.ErrDying)
+	c.Assert(err, tc.ErrorIs, context.Canceled)
 
 	select {
 	case <-wait:
-	case <-time.After(testing.LongWait):
+	case <-time.After(testhelpers.LongWait):
 		c.Fatal("timed out waiting for complete state")
 	}
 }
 
-func (s *baseObjectStoreSuite) TestPruneWithNoData(c *gc.C) {
+func (s *baseObjectStoreSuite) TestPruneWithNoData(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Ensure that we don't panic if we have no data to prune.
@@ -244,11 +216,11 @@ func (s *baseObjectStoreSuite) TestPruneWithNoData(c *gc.C) {
 		return nil
 	}
 
-	err := w.prune(context.Background(), list, delete)
-	c.Assert(err, jc.ErrorIsNil)
+	err := w.prune(c.Context(), list, delete)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *baseObjectStoreSuite) TestPruneWithJustMetadata(c *gc.C) {
+func (s *baseObjectStoreSuite) TestPruneWithJustMetadata(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// If we only have metadata and no objects, we expect no pruning to occur.
@@ -261,7 +233,7 @@ func (s *baseObjectStoreSuite) TestPruneWithJustMetadata(c *gc.C) {
 
 	list := func(ctx context.Context) ([]objectstore.Metadata, []string, error) {
 		return []objectstore.Metadata{{
-			Hash: "hash",
+			SHA384: "hash",
 		}}, nil, nil
 	}
 	delete := func(ctx context.Context, hash string) error {
@@ -269,11 +241,11 @@ func (s *baseObjectStoreSuite) TestPruneWithJustMetadata(c *gc.C) {
 		return nil
 	}
 
-	err := w.prune(context.Background(), list, delete)
-	c.Assert(err, jc.ErrorIsNil)
+	err := w.prune(c.Context(), list, delete)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *baseObjectStoreSuite) TestPruneWithJustObjects(c *gc.C) {
+func (s *baseObjectStoreSuite) TestPruneWithJustObjects(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect that we delete the objects if we have no metadata.
@@ -291,15 +263,15 @@ func (s *baseObjectStoreSuite) TestPruneWithJustObjects(c *gc.C) {
 		return nil, []string{"foo"}, nil
 	}
 	delete := func(ctx context.Context, hash string) error {
-		c.Check(hash, gc.Equals, "foo")
+		c.Check(hash, tc.Equals, "foo")
 		return nil
 	}
 
-	err := w.prune(context.Background(), list, delete)
-	c.Assert(err, jc.ErrorIsNil)
+	err := w.prune(c.Context(), list, delete)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *baseObjectStoreSuite) TestPruneWithMatches(c *gc.C) {
+func (s *baseObjectStoreSuite) TestPruneWithMatches(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Expect that we delete the objects if we have no metadata and ignore
@@ -316,19 +288,19 @@ func (s *baseObjectStoreSuite) TestPruneWithMatches(c *gc.C) {
 
 	list := func(ctx context.Context) ([]objectstore.Metadata, []string, error) {
 		return []objectstore.Metadata{{
-			Hash: "bar",
+			SHA384: "bar",
 		}}, []string{"bar", "foo"}, nil
 	}
 	delete := func(ctx context.Context, hash string) error {
-		c.Check(hash, gc.Equals, "foo")
+		c.Check(hash, tc.Equals, "foo")
 		return nil
 	}
 
-	err := w.prune(context.Background(), list, delete)
-	c.Assert(err, jc.ErrorIsNil)
+	err := w.prune(c.Context(), list, delete)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *baseObjectStoreSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseObjectStoreSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.clock = NewMockClock(ctrl)

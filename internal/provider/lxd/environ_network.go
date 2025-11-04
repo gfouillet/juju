@@ -4,6 +4,7 @@
 package lxd
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -13,32 +14,18 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 )
 
 var _ environs.Networking = (*environ)(nil)
 
 // Subnets returns basic information about subnets known by the provider for
 // the environment.
-func (e *environ) Subnets(ctx envcontext.ProviderCallContext, inst instance.Id, subnetIDs []network.Id) ([]network.SubnetInfo, error) {
+func (e *environ) Subnets(ctx context.Context, subnetIDs []network.Id) ([]network.SubnetInfo, error) {
 	srv := e.server()
-
-	// All containers will have the same view on the LXD network. If an
-	// instance ID is provided, the best we can do is to also ensure the
-	// container actually exists at the cost of an additional API call.
-	if inst != instance.UnknownId {
-		contList, err := srv.FilterContainers(string(inst))
-		if err != nil {
-			return nil, errors.Trace(err)
-		} else if len(contList) == 0 {
-			return nil, errors.NotFoundf("container with instance ID %q", inst)
-		}
-	}
 
 	availabilityZones, err := e.AvailabilityZones(ctx)
 	if err != nil {
@@ -73,12 +60,8 @@ func (e *environ) Subnets(ctx envcontext.ProviderCallContext, inst instance.Id, 
 		networkName := networkDetails.Name
 		state, err := srv.GetNetworkState(networkName)
 		if err != nil {
-			// Unfortunately, LXD on bionic and earlier does not
-			// support the network_state extension out of the box
-			// so this call will fail. If that's the case then
-			// use a fallback method for detecting subnets.
 			if isErrMissingAPIExtension(err, "network_state") {
-				return e.subnetDetectionFallback(srv, inst, keepList, availabilityZones)
+				return nil, errors.Errorf("network_state extension unsupported; upgrade to a newer version of LXD")
 			}
 			return nil, errors.Annotatef(err, "querying lxd server for state of network %q", networkName)
 		}
@@ -107,82 +90,6 @@ func (e *environ) Subnets(ctx envcontext.ProviderCallContext, inst instance.Id, 
 
 			uniqueSubnetIDs.Add(subnetID)
 			subnets = append(subnets, makeSubnetInfo(network.Id(subnetID), makeNetworkID(networkName), cidr, availabilityZones))
-		}
-	}
-
-	return subnets, nil
-}
-
-// subnetDetectionFallback provides a fallback mechanism for subnet discovery
-// on older LXD versions (e.g. the ones that ship with xenial and bionic) which
-// do not come with the network_state API extension enabled.
-//
-// The fallback exploits the fact that subnet discovery is performed after the
-// controller spins up. To this end, the method will query any of the available
-// juju containers and attempt to reconstruct the subnet information based on
-// the devices present inside the container.
-//
-// Caveat: this method offers lower data fidelity compared to Subnets() as it
-// cannot accurately detect the CIDRs for any host devices that are not bridged
-// into the container.
-func (e *environ) subnetDetectionFallback(srv Server, inst instance.Id, keepSubnetIDs set.Strings, availabilityZones network.AvailabilityZones) ([]network.SubnetInfo, error) {
-	logger.Warningf("falling back to subnet discovery via introspection of devices bridged to the controller container; consider upgrading to a newer LXD version and running 'juju reload-spaces' to get full subnet discovery for the LXD host")
-
-	// If no instance ID is specified, list the alive containers, query the
-	// state of the first one on the list and use it to extrapolate the
-	// subnet layout.
-	if inst == instance.UnknownId {
-		aliveConts, err := srv.AliveContainers("juju-")
-		if err != nil {
-			return nil, errors.Trace(err)
-		} else if len(aliveConts) == 0 {
-			return nil, errors.New("no alive containers detected")
-		}
-		inst = instance.Id(aliveConts[0].Name)
-	}
-
-	container, state, err := getContainerDetails(srv, string(inst))
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	var (
-		subnets         []network.SubnetInfo
-		uniqueSubnetIDs = set.NewStrings()
-	)
-
-	for guestNetworkName, netInfo := range state.Network {
-		hostNetworkName := hostNetworkForGuestNetwork(container, guestNetworkName)
-		if hostNetworkName == "" { // doesn't have a parent; assume non-bridged NIC
-			continue
-		}
-
-		// Ignore loopback devices and NICs in down state.
-		if detectInterfaceType(netInfo.Type) == network.LoopbackDevice || netInfo.State != "up" {
-			continue
-		}
-
-		for _, guestAddr := range netInfo.Addresses {
-			netAddr := network.NewMachineAddress(guestAddr.Address).AsProviderAddress()
-			if netAddr.Scope == network.ScopeLinkLocal || netAddr.Scope == network.ScopeMachineLocal {
-				continue
-			}
-
-			// Use the detected host network name and the guest
-			// address details to generate a subnetID for the host.
-			subnetID, cidr, err := makeSubnetIDForNetwork(hostNetworkName, guestAddr.Address, guestAddr.Netmask)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-
-			if uniqueSubnetIDs.Contains(subnetID) {
-				continue
-			} else if keepSubnetIDs != nil && !keepSubnetIDs.Contains(subnetID) {
-				continue
-			}
-
-			uniqueSubnetIDs.Add(subnetID)
-			subnets = append(subnets, makeSubnetInfo(network.Id(subnetID), makeNetworkID(hostNetworkName), cidr, availabilityZones))
 		}
 	}
 
@@ -220,7 +127,7 @@ func makeSubnetInfo(subnetID network.Id, networkID network.Id, cidr string, avai
 // was no other error, it will return ErrNoInstances. If some but not all of
 // the instances were found, the returned slice will have some nil slots, and
 // an ErrPartialInstances error will be returned.
-func (e *environ) NetworkInterfaces(_ envcontext.ProviderCallContext, ids []instance.Id) ([]network.InterfaceInfos, error) {
+func (e *environ) NetworkInterfaces(_ context.Context, ids []instance.Id) ([]network.InterfaceInfos, error) {
 	var (
 		missing int
 		srv     = e.server()
@@ -242,8 +149,8 @@ func (e *environ) NetworkInterfaces(_ envcontext.ProviderCallContext, ids []inst
 		// Sort interfaces by name to ensure consistent device indexes
 		// across calls when we iterate the container's network map.
 		guestNetworkNames := make([]string, 0, len(state.Network))
-		for network := range state.Network {
-			guestNetworkNames = append(guestNetworkNames, network)
+		for net := range state.Network {
+			guestNetworkNames = append(guestNetworkNames, net)
 		}
 		sort.Strings(guestNetworkNames)
 
@@ -270,7 +177,7 @@ func (e *environ) NetworkInterfaces(_ envcontext.ProviderCallContext, ids []inst
 	}
 
 	if missing > 0 {
-		// Found at least one instance
+		// Found at least one instance.
 		if missing != len(res) {
 			return res, environs.ErrPartialInstances
 		}
@@ -288,6 +195,7 @@ func makeInterfaceInfo(container *lxdapi.Instance, guestNetworkName string, netI
 		ParentInterfaceName: hostNetworkForGuestNetwork(container, guestNetworkName),
 		InterfaceType:       detectInterfaceType(netInfo.Type),
 		Origin:              network.OriginProvider,
+		ProviderId:          network.Id(fmt.Sprintf("nic-%s", netInfo.Hwaddr)),
 	}
 
 	// We cannot tell from the API response whether the
@@ -296,10 +204,6 @@ func makeInterfaceInfo(container *lxdapi.Instance, guestNetworkName string, netI
 	configType := network.ConfigStatic
 	if ni.InterfaceType == network.LoopbackDevice {
 		configType = network.ConfigLoopback
-	}
-
-	if ni.ParentInterfaceName != "" {
-		ni.ProviderNetworkId = makeNetworkID(ni.ParentInterfaceName)
 	}
 
 	// Iterate the list of addresses assigned to this interface ignoring
@@ -321,17 +225,8 @@ func makeInterfaceInfo(container *lxdapi.Instance, guestNetworkName string, netI
 
 		netAddr.CIDR = cidr
 		netAddr.ConfigType = configType
+		netAddr.ProviderSubnetID = network.Id(subnetID)
 		ni.Addresses = append(ni.Addresses, netAddr)
-
-		// Only set provider IDs based on the first address.
-		// TODO (manadart 2021-03-24): We should associate the provider ID for
-		// the subnet with the address.
-		if len(ni.Addresses) > 1 {
-			continue
-		}
-
-		ni.ProviderSubnetId = network.Id(subnetID)
-		ni.ProviderId = network.Id(fmt.Sprintf("nic-%s", netInfo.Hwaddr))
 	}
 
 	return ni, nil
@@ -405,28 +300,9 @@ func isErrMissingAPIExtension(err error, ext string) bool {
 // SupportsSpaces returns whether the current environment supports
 // spaces. The returned error satisfies errors.IsNotSupported(),
 // unless a general API failure occurs.
-func (e *environ) SupportsSpaces(envcontext.ProviderCallContext) (bool, error) {
+func (e *environ) SupportsSpaces() (bool, error) {
 	// Really old lxd versions (e.g. xenial/ppc64) do not even support the
 	// network API extension so the subnet discovery code path will not
 	// work there.
 	return e.server().HasExtension("network"), nil
-}
-
-// SupportsContainerAddresses returns true if the current environment is
-// able to allocate addresses for containers.
-func (*environ) SupportsContainerAddresses(envcontext.ProviderCallContext) (bool, error) {
-	return false, nil
-}
-
-// AllocateContainerAddresses allocates a static subnets for each of the
-// container NICs in preparedInfo, hosted by the hostInstanceID. Returns the
-// network config including all allocated addresses on success.
-func (*environ) AllocateContainerAddresses(envcontext.ProviderCallContext, instance.Id, names.MachineTag, network.InterfaceInfos) (network.InterfaceInfos, error) {
-	return nil, errors.NotSupportedf("container address allocation")
-}
-
-// ReleaseContainerAddresses releases the previously allocated
-// addresses matching the interface details passed in.
-func (*environ) ReleaseContainerAddresses(envcontext.ProviderCallContext, []network.ProviderInterfaceInfo) error {
-	return errors.NotSupportedf("container address allocation")
 }

@@ -4,28 +4,29 @@
 package service
 
 import (
-	"context"
+	"testing"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 )
 
-type serviceSuite struct {
+type configServiceSuite struct {
 	st *MockState
 }
 
-var _ = gc.Suite(&serviceSuite{})
+func TestConfigServiceSuite(t *testing.T) {
+	tc.Run(t, &configServiceSuite{})
+}
 
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *configServiceSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.st = NewMockState(ctrl)
 	return ctrl
 }
 
-func (s *serviceSuite) TestInitialise(c *gc.C) {
+func (s *configServiceSuite) TestInitialise(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().InitialiseBakeryConfig(
@@ -37,54 +38,54 @@ func (s *serviceSuite) TestInitialise(c *gc.C) {
 	).Return(nil)
 
 	srv := NewBakeryConfigService(s.st)
-	err := srv.InitialiseBakeryConfig(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	err := srv.InitialiseBakeryConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestGetLocalUsersKey(c *gc.C) {
+func (s *configServiceSuite) TestGetLocalUsersKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	testKey := bakery.MustGenerateKey()
 	s.st.EXPECT().GetLocalUsersKey(gomock.Any()).Return(testKey, nil)
 
 	srv := NewBakeryConfigService(s.st)
-	key, err := srv.GetLocalUsersKey(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(key, gc.DeepEquals, testKey)
+	key, err := srv.GetLocalUsersKey(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(key, tc.DeepEquals, testKey)
 }
 
-func (s *serviceSuite) TestGetLocalUsersThirdPartyKey(c *gc.C) {
+func (s *configServiceSuite) TestGetLocalUsersThirdPartyKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	testKey := bakery.MustGenerateKey()
 	s.st.EXPECT().GetLocalUsersThirdPartyKey(gomock.Any()).Return(testKey, nil)
 
 	srv := NewBakeryConfigService(s.st)
-	key, err := srv.GetLocalUsersThirdPartyKey(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(key, gc.DeepEquals, testKey)
+	key, err := srv.GetLocalUsersThirdPartyKey(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(key, tc.DeepEquals, testKey)
 }
 
-func (s *serviceSuite) TestGetExternalUsersThirdPartyKey(c *gc.C) {
+func (s *configServiceSuite) TestGetExternalUsersThirdPartyKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	testKey := bakery.MustGenerateKey()
 	s.st.EXPECT().GetExternalUsersThirdPartyKey(gomock.Any()).Return(testKey, nil)
 
 	srv := NewBakeryConfigService(s.st)
-	key, err := srv.GetExternalUsersThirdPartyKey(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(key, gc.DeepEquals, testKey)
+	key, err := srv.GetExternalUsersThirdPartyKey(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(key, tc.DeepEquals, testKey)
 }
 
-func (s *serviceSuite) TestGetOffersThirdPartyKey(c *gc.C) {
+func (s *configServiceSuite) TestGetOffersThirdPartyKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	testKey := bakery.MustGenerateKey()
 	s.st.EXPECT().GetOffersThirdPartyKey(gomock.Any()).Return(testKey, nil)
 
 	srv := NewBakeryConfigService(s.st)
-	key, err := srv.GetOffersThirdPartyKey(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(key, gc.DeepEquals, testKey)
+	key, err := srv.GetOffersThirdPartyKey(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(key, tc.DeepEquals, testKey)
 }

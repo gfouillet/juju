@@ -6,12 +6,13 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/webbrowser"
@@ -20,21 +21,22 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/ssh"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/proxy"
 	proxyfactory "github.com/juju/juju/internal/proxy/factory"
 )
 
 // ControllerAPI is used to get dashboard info from the controller.
 type ControllerAPI interface {
-	DashboardConnectionInfo(controller.ProxierFactory) (controller.DashboardConnectionInfo, error)
+	DashboardConnectionInfo(context.Context, controller.ProxierFactory) (controller.DashboardConnectionInfo, error)
 	Close() error
 }
 
 // NewDashboardCommand creates and returns a new dashboard command.
 func NewDashboardCommand() cmd.Command {
 	d := &dashboardCommand{}
-	d.newAPIFunc = func() (ControllerAPI, bool, error) {
-		return d.newControllerAPI()
+	d.newAPIFunc = func(ctx context.Context) (ControllerAPI, bool, error) {
+		return d.newControllerAPI(ctx)
 	}
 	d.embeddedSSHCmd = ssh.NewSSHCommand(nil, nil, ssh.DefaultSSHRetryStrategy, ssh.DefaultSSHPublicKeyRetryStrategy)
 	d.signalCh = make(chan os.Signal)
@@ -48,7 +50,7 @@ type dashboardCommand struct {
 	hideCreds bool
 	browser   bool
 
-	newAPIFunc func() (ControllerAPI, bool, error)
+	newAPIFunc func(ctx context.Context) (ControllerAPI, bool, error)
 
 	port           int
 	embeddedSSHCmd cmd.Command
@@ -58,8 +60,8 @@ type dashboardCommand struct {
 type urlCallBack func(url string)
 type connectionRunner func(ctx context.Context, callBack urlCallBack) error
 
-func (c *dashboardCommand) newControllerAPI() (ControllerAPI, bool, error) {
-	root, err := c.NewControllerAPIRoot()
+func (c *dashboardCommand) newControllerAPI(ctx context.Context) (ControllerAPI, bool, error) {
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, false, errors.Trace(err)
 	}
@@ -117,7 +119,7 @@ func (c *dashboardCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Run implements the cmd.Command interface.
 func (c *dashboardCommand) Run(ctx *cmd.Context) error {
-	api, _, err := c.newAPIFunc()
+	api, _, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -134,7 +136,7 @@ func (c *dashboardCommand) Run(ctx *cmd.Context) error {
 		return errors.Annotate(err, "creating default proxy factory to support dashboard connection")
 	}
 
-	res, err := api.DashboardConnectionInfo(factory)
+	res, err := api.DashboardConnectionInfo(ctx, factory)
 	if errors.Is(err, errors.NotFound) {
 		return errors.New(dashboardNotAvailableMessage)
 	} else if err != nil {
@@ -223,7 +225,7 @@ func tunnelSSHRunner(
 		args = append(args, "-m", tunnel.Model, tunnel.Entity)
 	}
 	args = append(args, "-N", "-L",
-		fmt.Sprintf("%d:%s:%s", localPort, tunnel.Host, tunnel.Port))
+		fmt.Sprintf("%d:%s", localPort, net.JoinHostPort(tunnel.Host, tunnel.Port)))
 
 	return func(ctx context.Context, callBack urlCallBack) error {
 		f := &gnuflag.FlagSet{}
@@ -237,7 +239,11 @@ func tunnelSSHRunner(
 			return errors.Trace(err)
 		}
 
-		callBack(fmt.Sprintf("http://localhost:%d", localPort))
+		u := url.URL{
+			Scheme: "http",
+			Host:   net.JoinHostPort("localhost", strconv.Itoa(localPort)),
+		}
+		callBack(u.String())
 
 		// TODO(wallyworld) - extract the core ssh machinery and use directly.
 		defCtx, err := cmd.DefaultContext()
@@ -256,7 +262,11 @@ func tunnelProxyRunner(ctx context.Context, p proxy.TunnelProxier) connectionRun
 		}
 		defer p.Stop()
 
-		callBack(fmt.Sprintf("http://%s:%s", p.Host(), p.Port()))
+		u := url.URL{
+			Scheme: "http",
+			Host:   net.JoinHostPort(p.Host(), p.Port()),
+		}
+		callBack(u.String())
 		select {
 		case <-ctx.Done():
 		}

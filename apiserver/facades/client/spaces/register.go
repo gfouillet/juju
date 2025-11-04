@@ -7,10 +7,10 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/credentialcommon"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 )
 
@@ -24,26 +24,24 @@ func Register(registry facade.FacadeRegistry) {
 // newAPI creates a new Space API server-side facade with a
 // state.State backing.
 func newAPI(ctx facade.ModelContext) (*API, error) {
-	st := ctx.State()
-
-	serviceFactory := ctx.ServiceFactory()
-	cloudService := serviceFactory.Cloud()
-	credentialService := serviceFactory.Credential()
-	stateShim, err := NewStateShim(st, cloudService, credentialService)
-	if err != nil {
-		return nil, errors.Trace(err)
+	// Only clients can access the Spaces facade.
+	auth := ctx.Auth()
+	if !auth.AuthClient() {
+		return nil, apiservererrors.ErrPerm
 	}
 
-	credentialInvalidatorGetter := credentialcommon.CredentialInvalidatorGetter(ctx)
-	check := common.NewBlockChecker(st)
-	auth := ctx.Auth()
-	return newAPIWithBacking(apiConfig{
-		NetworkService:              ctx.ServiceFactory().Network(),
-		Backing:                     stateShim,
-		Check:                       check,
-		CredentialInvalidatorGetter: credentialInvalidatorGetter,
-		Resources:                   ctx.Resources(),
-		Authorizer:                  auth,
-		logger:                      ctx.Logger().Child("spaces"),
-	})
+	domainServices := ctx.DomainServices()
+
+	check := common.NewBlockChecker(domainServices.BlockCommand())
+
+	return &API{
+		auth:                    auth,
+		modelTag:                names.NewModelTag(ctx.ModelUUID().String()),
+		controllerConfigService: domainServices.ControllerConfig(),
+		networkService:          domainServices.Network(),
+		applicationService:      domainServices.Application(),
+		machineService:          domainServices.Machine(),
+		check:                   check,
+		logger:                  ctx.Logger().Child("spaces"),
+	}, nil
 }

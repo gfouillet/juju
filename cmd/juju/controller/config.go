@@ -10,11 +10,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"gopkg.in/juju/environschema.v1"
 
 	apicontroller "github.com/juju/juju/api/controller/controller"
 	jujucmd "github.com/juju/juju/cmd"
@@ -23,6 +21,8 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/configschema"
 )
 
 var ctrConfigBase = config.ConfigCommandBase{
@@ -49,61 +49,44 @@ type configCommand struct {
 
 const (
 	configCommandHelpDocPart1 = `
-To view all configuration values for the current controller, run
-    juju controller-config
-You can target a specific controller using the -c flag:
-    juju controller-config -c <controller>
-By default, the config will be printed in a tabular format. You can instead
-print it in json or yaml format using the --format flag:
-    juju controller-config --format json
-    juju controller-config --format yaml
-
-To view the value of a single config key, run
-    juju controller-config key
-To set config values, run
-    juju controller-config key1=val1 key2=val2 ...
-
-Config values can be imported from a yaml file using the --file flag:
-    juju controller-config --file=path/to/cfg.yaml
-This allows you to e.g. save a controller's config to a file:
-    juju controller-config --format=yaml > cfg.yaml
-and then import the config later. Note that the output of controller-config
-may include read-only values, which will cause an error when importing later.
-To prevent the error, use the --ignore-read-only-fields flag:
-    juju controller-config --file=cfg.yaml --ignore-read-only-fields
-
-You can also read from stdin using "-", which allows you to pipe config values
-from one controller to another:
-    juju controller-config -c c1 --format=yaml \
-      | juju controller-config -c c2 --file=- --ignore-read-only-fields
-You can simultaneously read config from a yaml file and set config keys
-as above. The command-line args will override any values specified in the file.
 `
 	controllerConfigHelpDocKeys = `
-The following keys are available:
+Controller configuration keys:
 `
 	configCommandHelpDocPart2 = `
 `
 	configCommandHelpExamples = `
-Print all config values for the current controller:
 
-    juju controller-config
+To view the value of a single config key for the current controller:
 
-Print the value of "api-port" for the current controller:
+    juju controller-config <key>
 
-    juju controller-config api-port
+To view the value of all config keys for the current controller in the json format:
 
-Print all config values for the controller "mycontroller":
+    juju controller-config --format json
 
-    juju controller-config -c mycontroller
+To view the values of all config keys for a different controller:
 
-Set the "auditing-enabled" and "audit-log-max-backups" keys:
+    juju controller-config -c <controller>
 
-    juju controller-config auditing-enabled=true audit-log-max-backups=5
+To set two keys in the current controller to a different value:
 
-Set the current controller's config from a yaml file:
+    juju controller-config <key>=<value> <key>=<value>
 
-    juju controller-config --file path/to/file.yaml
+To save a controller's current config to a yaml file:
+
+    juju controller-config --format=yaml > <configuration-filename>.yaml
+
+To set the current controller's config from a yaml file ignoring read-only fields,
+then override the value for one key:
+
+    juju controller-config --file path/to/file.yaml --ignore-read-only-fields <key>=<value>
+
+To view all the configs from one file in yaml, then apply the same config values
+to another controller from stdin using ` + "`|`" + ` and ` + "`-`" + ` (in ` + "`--file=-`" + `):
+
+    juju controller-config -c <controller> --format=yaml \
+      | juju controller-config -c <controller> --file=- --ignore-read-only-fields
 `
 )
 
@@ -149,7 +132,7 @@ func (c *configCommand) SetFlags(f *gnuflag.FlagSet) {
 		"tabular": formatConfigTabular,
 		"yaml":    cmd.FormatYaml,
 	})
-	f.BoolVar(&c.ignoreReadOnlyFields, "ignore-read-only-fields", false, "Ignore read only fields that might cause errors to be emitted while processing yaml documents")
+	f.BoolVar(&c.ignoreReadOnlyFields, "ignore-read-only-fields", false, "Ignore read-only fields that might cause errors to be emitted while processing yaml documents")
 }
 
 // Init initialised the command from the arguments - it's part of
@@ -161,14 +144,14 @@ func (c *configCommand) Init(args []string) error {
 type controllerAPI interface {
 	Close() error
 	ControllerConfig(context.Context) (controller.Config, error)
-	ConfigSet(map[string]interface{}) error
+	ConfigSet(context.Context, map[string]interface{}) error
 }
 
-func (c *configCommand) getAPI() (controllerAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (controllerAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -178,7 +161,7 @@ func (c *configCommand) getAPI() (controllerAPI, error) {
 // Run executes the command as directed by the options and
 // arguments. It's part of cmd.Command.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -190,14 +173,14 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		case config.GetOne:
 			err = c.getConfig(client, ctx)
 		case config.SetArgs:
-			err = c.setConfig(client, c.configBase.ValsToSet)
+			err = c.setConfig(ctx, client, c.configBase.ValsToSet)
 		case config.SetFile:
 			var attrs config.Attrs
 			attrs, err = c.configBase.ReadFile(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			err = c.setConfig(client, attrs)
+			err = c.setConfig(ctx, client, attrs)
 		default:
 			err = c.getAllConfig(client, ctx)
 		}
@@ -244,8 +227,36 @@ func (c *configCommand) getConfig(client controllerAPI, ctx *cmd.Context) error 
 		c.configBase.KeysToGet[0], controllerName)
 }
 
+// filterOutReadOnly removes in-situ read-only attributes from the provided
+// configuration attributes map.
+func (c *configCommand) filterOutReadOnly(attrs config.Attrs) error {
+	extraValues := set.NewStrings()
+	for k := range attrs {
+		if !controller.AllowedUpdateConfigAttributes.Contains(k) {
+			extraValues.Add(k)
+			delete(attrs, k)
+		}
+	}
+
+	// No readonly
+	if extraValues.Size() == 0 {
+		return nil
+	}
+	if !c.ignoreReadOnlyFields {
+		return errors.Errorf("invalid or read-only controller config values cannot be updated: %v", extraValues.SortedValues())
+	}
+
+	logger.Warningf(context.TODO(), "invalid or read-only controller config values ignored: %v", extraValues.SortedValues())
+	return nil
+}
+
 // setConfig sets config values from the provided config.Attrs.
-func (c *configCommand) setConfig(client controllerAPI, attrs config.Attrs) error {
+func (c *configCommand) setConfig(ctx context.Context, client controllerAPI, attrs config.Attrs) error {
+	err := c.filterOutReadOnly(attrs)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
 	store := c.ClientStore()
 	controllerName, err := store.CurrentController()
 	if err != nil {
@@ -255,6 +266,10 @@ func (c *configCommand) setConfig(client controllerAPI, attrs config.Attrs) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
+
+	// Despite its name, NewConfig has a desired side effect:
+	// It replaces all complex string values from `attrs` by their object counter part.
+	// ex: [value1,value2] will be replaced by a slice []string{"value1", "value2"}
 	_, err = controller.NewConfig(ctrl.ControllerUUID, ctrl.CACert, attrs)
 	if err != nil {
 		return errors.Trace(err)
@@ -266,32 +281,20 @@ func (c *configCommand) setConfig(client controllerAPI, attrs config.Attrs) erro
 		return errors.Trace(err)
 	}
 
-	extraValues := set.NewStrings()
 	values := make(map[string]interface{})
 	for k := range attrs {
-		if controller.AllowedUpdateConfigAttributes.Contains(k) {
-			if field, ok := fields[k]; ok {
-				v, err := field.Coerce(attrs[k], []string{k})
-				if err != nil {
-					return errors.Trace(err)
-				}
-				values[k] = v
-			} else {
-				values[k] = attrs[k]
+		if field, ok := fields[k]; ok {
+			v, err := field.Coerce(attrs[k], []string{k})
+			if err != nil {
+				return err
 			}
+			values[k] = v
 		} else {
-			extraValues.Add(k)
-		}
-	}
-	if extraValues.Size() > 0 {
-		if c.ignoreReadOnlyFields {
-			logger.Warningf("invalid or read-only controller config values ignored: %v", extraValues.SortedValues())
-		} else {
-			return errors.Errorf("invalid or read-only controller config values cannot be updated: %v", extraValues.SortedValues())
+			values[k] = attrs[k]
 		}
 	}
 
-	return errors.Trace(client.ConfigSet(values))
+	return errors.Trace(client.ConfigSet(ctx, values))
 }
 
 // ConfigDetailsUpdatable gets information about the controller config
@@ -309,18 +312,18 @@ func ConfigDetailsUpdatable() (map[string]interface{}, error) {
 
 // ConfigDetailsAll gets information about all the controller config
 // attributes, including those only settable during bootstrap.
-func ConfigDetailsAll() (map[string]interface{}, error) {
-	specifics := make(map[string]interface{})
+func ConfigDetailsAll() (map[string]common.PrintConfigSchema, error) {
+	specifics := make(map[string]common.PrintConfigSchema, len(controller.ConfigSchema))
 	for key, attr := range controller.ConfigSchema {
 		specifics[key] = attrToPrintSchema(attr)
 	}
 	return specifics, nil
 }
 
-func attrToPrintSchema(attr environschema.Attr) common.PrintConfigSchema {
+func attrToPrintSchema(attr configschema.Attr) common.PrintConfigSchema {
 	return common.PrintConfigSchema{
 		Description: attr.Description,
-		Type:        fmt.Sprintf("%s", attr.Type),
+		Type:        string(attr.Type),
 	}
 }
 
@@ -331,7 +334,7 @@ func formatConfigTabular(writer io.Writer, value interface{}) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 
 	valueNames := make(set.Strings)
 	for name := range controllerConfig {

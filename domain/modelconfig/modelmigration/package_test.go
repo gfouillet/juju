@@ -3,15 +3,5 @@
 
 package modelmigration
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
 //go:generate go run go.uber.org/mock/mockgen -typed -package modelmigration -destination migrations_mock_test.go github.com/juju/juju/domain/modelconfig/modelmigration Coordinator,ImportService,ExportService
 //go:generate go run go.uber.org/mock/mockgen -typed -package modelmigration -destination service_mock_test.go github.com/juju/juju/domain/modelconfig/service ModelDefaultsProvider
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}

@@ -1,21 +1,17 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package storage_test
+package storage
 
 import (
-	"context"
 	"fmt"
+	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/apiserver/facades/client/storage"
-	apiserverstorage "github.com/juju/juju/apiserver/facades/client/storage"
 	domainstorage "github.com/juju/juju/domain/storage"
-	internalstorage "github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/storage/provider"
 	"github.com/juju/juju/rpc/params"
 )
@@ -24,75 +20,137 @@ type poolSuite struct {
 	baseStorageSuite
 }
 
-var _ = gc.Suite(&poolSuite{})
+func TestPoolSuite(t *testing.T) {
+	tc.Run(t, &poolSuite{})
+}
 
 const (
 	tstName = "testpool"
 )
 
-func (s *poolSuite) TestEnsureStoragePoolFilter(c *gc.C) {
-	filter := params.StoragePoolFilter{}
-	c.Assert(filter.Providers, gc.HasLen, 0)
-	c.Assert(apiserverstorage.EnsureStoragePoolFilter(s.apiCaas, filter).Providers, jc.DeepEquals, []string{"kubernetes"})
-}
+func (s *poolSuite) TestListByNames(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *poolSuite) TestList(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+	s.storageService.EXPECT().ListStoragePoolsByNames(gomock.Any(),
+		domainstorage.Names{
+			fmt.Sprintf("%v%v", tstName, 0),
+		},
+	).Return([]domainstorage.StoragePool{
+		{
+			Name:     fmt.Sprintf("%v%v", tstName, 0),
+			Provider: string(provider.LoopProviderType),
+		},
+	}, nil)
 
-	s.storageService = storage.NewMockStorageService(ctrl)
-
-	p, err := internalstorage.NewConfig(fmt.Sprintf("%v%v", tstName, 0), provider.LoopProviderType, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.storageService.EXPECT().ListStoragePools(gomock.Any(), domainstorage.NilNames, domainstorage.NilProviders).
-		Return([]*internalstorage.Config{p}, nil)
-
-	results, err := s.api.ListPools(context.Background(), params.StoragePoolFilters{[]params.StoragePoolFilter{{}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
+	results, err := s.api.ListPools(c.Context(), params.StoragePoolFilters{
+		Filters: []params.StoragePoolFilter{{
+			Names: []string{fmt.Sprintf("%v%v", tstName, 0)},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
 	one := results.Results[0]
-	c.Assert(one.Error, gc.IsNil)
-	c.Assert(one.Result, gc.HasLen, 1)
-	c.Assert(one.Result[0].Name, gc.Equals, fmt.Sprintf("%v%v", tstName, 0))
-	c.Assert(one.Result[0].Provider, gc.Equals, string(provider.LoopProviderType))
+	c.Assert(one.Error, tc.IsNil)
+	c.Assert(one.Result, tc.HasLen, 1)
+	c.Assert(one.Result[0].Name, tc.Equals, fmt.Sprintf("%v%v", tstName, 0))
+	c.Assert(one.Result[0].Provider, tc.Equals, string(provider.LoopProviderType))
 }
 
-func (s *poolSuite) TestListManyResults(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolSuite) TestListByProviders(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
+	s.storageService.EXPECT().ListStoragePoolsByProviders(gomock.Any(),
+		domainstorage.Providers{
+			string(provider.LoopProviderType),
+		},
+	).Return([]domainstorage.StoragePool{
+		{
+			Name:     fmt.Sprintf("%v%v", tstName, 0),
+			Provider: string(provider.LoopProviderType),
+		},
+	}, nil)
 
-	p, err := internalstorage.NewConfig(fmt.Sprintf("%v%v", tstName, 0), provider.LoopProviderType, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	p2, err := internalstorage.NewConfig(fmt.Sprintf("%v%v", tstName, 1), provider.LoopProviderType, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.storageService.EXPECT().ListStoragePools(gomock.Any(), domainstorage.NilNames, domainstorage.NilProviders).
-		Return([]*internalstorage.Config{p, p2}, nil)
+	results, err := s.api.ListPools(c.Context(), params.StoragePoolFilters{
+		Filters: []params.StoragePoolFilter{{
+			Providers: []string{string(provider.LoopProviderType)},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	one := results.Results[0]
+	c.Assert(one.Error, tc.IsNil)
+	c.Assert(one.Result, tc.HasLen, 1)
+	c.Assert(one.Result[0].Name, tc.Equals, fmt.Sprintf("%v%v", tstName, 0))
+	c.Assert(one.Result[0].Provider, tc.Equals, string(provider.LoopProviderType))
+}
 
-	results, err := s.api.ListPools(context.Background(), params.StoragePoolFilters{[]params.StoragePoolFilter{{}}})
-	c.Assert(err, jc.ErrorIsNil)
+func (s *poolSuite) TestList(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.storageService.EXPECT().ListStoragePoolsByNamesAndProviders(gomock.Any(),
+		domainstorage.Names{
+			fmt.Sprintf("%v%v", tstName, 0),
+		}, domainstorage.Providers{
+			string(provider.LoopProviderType),
+		},
+	).Return([]domainstorage.StoragePool{
+		{
+			Name:     fmt.Sprintf("%v%v", tstName, 0),
+			Provider: string(provider.LoopProviderType),
+		},
+	}, nil)
+
+	results, err := s.api.ListPools(c.Context(), params.StoragePoolFilters{
+		Filters: []params.StoragePoolFilter{{
+			Names:     []string{fmt.Sprintf("%v%v", tstName, 0)},
+			Providers: []string{string(provider.LoopProviderType)},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	one := results.Results[0]
+	c.Assert(one.Error, tc.IsNil)
+	c.Assert(one.Result, tc.HasLen, 1)
+	c.Assert(one.Result[0].Name, tc.Equals, fmt.Sprintf("%v%v", tstName, 0))
+	c.Assert(one.Result[0].Provider, tc.Equals, string(provider.LoopProviderType))
+}
+
+func (s *poolSuite) TestListAll(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.storageService.EXPECT().ListStoragePools(gomock.Any()).
+		Return([]domainstorage.StoragePool{
+			{
+				Name:     fmt.Sprintf("%v%v", tstName, 0),
+				Provider: string(provider.LoopProviderType),
+			},
+			{
+				Name:     fmt.Sprintf("%v%v", tstName, 1),
+				Provider: string(provider.LoopProviderType),
+			},
+		}, nil)
+
+	results, err := s.api.ListPools(c.Context(), params.StoragePoolFilters{[]params.StoragePoolFilter{{}}})
+	c.Assert(err, tc.ErrorIsNil)
 	assertPoolNames(c, results.Results[0].Result, "testpool0", "testpool1")
 }
 
-func assertPoolNames(c *gc.C, results []params.StoragePool, expected ...string) {
+func assertPoolNames(c *tc.C, results []params.StoragePool, expected ...string) {
 	expectedNames := set.NewStrings(expected...)
-	c.Assert(len(expectedNames), gc.Equals, len(results))
+	c.Assert(len(expectedNames), tc.Equals, len(results))
 	for _, one := range results {
-		c.Assert(expectedNames.Contains(one.Name), jc.IsTrue)
+		c.Assert(expectedNames.Contains(one.Name), tc.IsTrue)
 	}
 }
 
-func (s *poolSuite) TestListNoPools(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolSuite) TestListNoPools(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
-	s.storageService.EXPECT().ListStoragePools(gomock.Any(), domainstorage.NilNames, domainstorage.NilProviders).
-		Return([]*internalstorage.Config{}, nil)
+	s.storageService.EXPECT().ListStoragePools(gomock.Any()).
+		Return([]domainstorage.StoragePool{}, nil)
 
-	results, err := s.api.ListPools(context.Background(), params.StoragePoolFilters{[]params.StoragePoolFilter{{}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Result, gc.HasLen, 0)
+	results, err := s.api.ListPools(c.Context(), params.StoragePoolFilters{[]params.StoragePoolFilter{{}}})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Result, tc.HasLen, 0)
 }

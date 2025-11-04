@@ -4,30 +4,26 @@
 package space_test
 
 import (
+	"context"
 	"strings"
-	stdtesting "testing"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/juju/space"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/spacesapi_mock.go github.com/juju/juju/cmd/juju/space SpaceAPI,SubnetAPI,API
-
-func TestPackage(t *stdtesting.T) {
-	gc.TestingT(t)
-}
 
 // BaseSpaceSuite is used for embedding in other suites.
 type BaseSpaceSuite struct {
@@ -38,37 +34,39 @@ type BaseSpaceSuite struct {
 	api        *StubAPI
 }
 
-var _ = gc.Suite(&BaseSpaceSuite{})
+func TestBaseSpaceSuite(t *testing.T) {
+	tc.Run(t, &BaseSpaceSuite{})
+}
 
-func (s *BaseSpaceSuite) SetUpSuite(c *gc.C) {
+func (s *BaseSpaceSuite) SetUpSuite(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpSuite(c)
 	s.BaseSuite.SetUpSuite(c)
 }
 
-func (s *BaseSpaceSuite) TearDownSuite(c *gc.C) {
+func (s *BaseSpaceSuite) TearDownSuite(c *tc.C) {
 	s.BaseSuite.TearDownSuite(c)
 	s.FakeJujuXDGDataHomeSuite.TearDownSuite(c)
 }
 
-func (s *BaseSpaceSuite) SetUpTest(c *gc.C) {
+func (s *BaseSpaceSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 
 	s.api = NewStubAPI()
-	c.Assert(s.api, gc.NotNil)
+	c.Assert(s.api, tc.NotNil)
 
 	// All subcommand suites embedding this one should initialize
 	// s.newCommand immediately after calling this method!
 }
 
-func (s *BaseSpaceSuite) TearDownTest(c *gc.C) {
+func (s *BaseSpaceSuite) TearDownTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.TearDownTest(c)
 	s.BaseSuite.TearDownTest(c)
 }
 
 // InitCommand creates a command with s.newCommand and runs its
 // Init method only. It returns the inner command and any error.
-func (s *BaseSpaceSuite) InitCommand(c *gc.C, args ...string) (cmd.Command, error) {
+func (s *BaseSpaceSuite) InitCommand(c *tc.C, args ...string) (cmd.Command, error) {
 	cmd := s.newCommandForTest()
 	err := cmdtesting.InitCommand(cmd, args)
 	return modelcmd.InnerCommand(cmd), err
@@ -77,7 +75,7 @@ func (s *BaseSpaceSuite) InitCommand(c *gc.C, args ...string) (cmd.Command, erro
 // RunCommand creates a command with s.newCommand and executes it,
 // passing any args and returning the stdout and stderr output as
 // strings, as well as any error.
-func (s *BaseSpaceSuite) RunCommand(c *gc.C, args ...string) (string, string, error) {
+func (s *BaseSpaceSuite) RunCommand(c *tc.C, args ...string) (string, string, error) {
 	cmd := s.newCommandForTest()
 	ctx, err := cmdtesting.RunCommand(c, cmd, args...)
 	return cmdtesting.Stdout(ctx), cmdtesting.Stderr(ctx), err
@@ -98,31 +96,31 @@ func (s *BaseSpaceSuite) newCommandForTest() modelcmd.ModelCommand {
 // AssertRunSpacesNotSupported is a shortcut for calling RunCommand with the
 // passed args then asserting the output is empty and the error is the
 // spaces not supported, finally returning the error.
-func (s *BaseSpaceSuite) AssertRunSpacesNotSupported(c *gc.C, expectErr string, args ...string) error {
+func (s *BaseSpaceSuite) AssertRunSpacesNotSupported(c *tc.C, expectErr string, args ...string) error {
 	stdout, stderr, err := s.RunCommand(c, args...)
-	c.Assert(err, gc.ErrorMatches, expectErr)
-	c.Assert(stdout, gc.Equals, "")
-	c.Assert(stderr, gc.Equals, expectErr+"\n")
+	c.Assert(err, tc.ErrorMatches, expectErr)
+	c.Assert(stdout, tc.Equals, "")
+	c.Assert(stderr, tc.Equals, expectErr+"\n")
 	return err
 }
 
 // AssertRunFailsUnauthoirzed is a shortcut for calling RunCommand with the
 // passed args then asserting the error is as expected, finally returning the
 // error.
-func (s *BaseSpaceSuite) AssertRunFailsUnauthorized(c *gc.C, expectErr string, args ...string) error {
+func (s *BaseSpaceSuite) AssertRunFailsUnauthorized(c *tc.C, expectErr string, args ...string) error {
 	_, stderr, err := s.RunCommand(c, args...)
-	c.Assert(strings.Replace(stderr, "\n", " ", -1), gc.Matches, `.*juju grant.*`)
+	c.Assert(strings.Replace(stderr, "\n", " ", -1), tc.Matches, `.*juju grant.*`)
 	return err
 }
 
 // AssertRunFails is a shortcut for calling RunCommand with the
 // passed args then asserting the output is empty and the error is as
 // expected, finally returning the error.
-func (s *BaseSpaceSuite) AssertRunFails(c *gc.C, expectErr string, args ...string) error {
+func (s *BaseSpaceSuite) AssertRunFails(c *tc.C, expectErr string, args ...string) error {
 	stdout, stderr, err := s.RunCommand(c, args...)
-	c.Assert(err, gc.ErrorMatches, expectErr)
-	c.Assert(stdout, gc.Equals, "")
-	c.Assert(stderr, gc.Equals, "")
+	c.Assert(err, tc.ErrorMatches, expectErr)
+	c.Assert(stdout, tc.Equals, "")
+	c.Assert(stderr, tc.Equals, "")
 	return err
 }
 
@@ -130,11 +128,11 @@ func (s *BaseSpaceSuite) AssertRunFails(c *gc.C, expectErr string, args ...strin
 // the passed args then asserting the stderr output matches
 // expectStderr, stdout is equal to expectStdout, and the error is
 // nil.
-func (s *BaseSpaceSuite) AssertRunSucceeds(c *gc.C, expectStderr, expectStdout string, args ...string) {
+func (s *BaseSpaceSuite) AssertRunSucceeds(c *tc.C, expectStderr, expectStdout string, args ...string) {
 	stdout, stderr, err := s.RunCommand(c, args...)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(stdout, gc.Equals, expectStdout)
-	c.Assert(stderr, gc.Matches, expectStderr)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(stdout, tc.Equals, expectStdout)
+	c.Assert(stderr, tc.Matches, expectStderr)
 }
 
 // Strings is makes tests taking a slice of strings slightly easier to
@@ -145,7 +143,7 @@ func (s *BaseSpaceSuite) Strings(values ...string) []string {
 
 // StubAPI defines a testing stub for the SpaceAPI interface.
 type StubAPI struct {
-	*testing.Stub
+	*testhelpers.Stub
 
 	Spaces  []params.Space
 	Subnets []params.Subnet
@@ -190,14 +188,14 @@ func NewStubAPI() *StubAPI {
 		VLANTag:    42,
 	}}
 	spaces := []params.Space{{
-		Id:   "0",
-		Name: network.AlphaSpaceName,
+		Id:   network.AlphaSpaceId.String(),
+		Name: network.AlphaSpaceName.String(),
 	}, {
-		Id:      "1",
+		Id:      "deadbeef1",
 		Name:    "space1",
 		Subnets: append([]params.Subnet{}, subnets[:2]...),
 	}, {
-		Id:      "2",
+		Id:      "deadbeef2",
 		Name:    "space2",
 		Subnets: append([]params.Subnet{}, subnets[2:]...),
 	}}
@@ -214,7 +212,7 @@ func NewStubAPI() *StubAPI {
 	}
 	moveSubnets := params.MoveSubnetsResult{
 		MovedSubnets: []params.MovedSubnet{{
-			SubnetTag:   "1",
+			SubnetTag:   "0195847b-95bb-7ca1-a7ee-2211d802d5b3",
 			OldSpaceTag: "space-internal",
 			CIDR:        subnets[0].CIDR,
 		}},
@@ -222,15 +220,15 @@ func NewStubAPI() *StubAPI {
 	}
 	subnetsByCIDR := []params.SubnetsResult{{
 		Subnets: []params.SubnetV2{{
-			ID:     "1",
+			ID:     "0195847b-95bb-7ca1-a7ee-2211d802d5b3",
 			Subnet: subnets[0],
 		}, {
-			ID:     "2",
+			ID:     "0195847b-95bb-7ca1-a7ee-2211d802d5b4",
 			Subnet: subnets[2],
 		}},
 	}}
 	return &StubAPI{
-		Stub:              &testing.Stub{},
+		Stub:              &testhelpers.Stub{},
 		Spaces:            spaces,
 		Subnets:           subnets,
 		ShowSpaceResp:     showSpace,
@@ -244,7 +242,7 @@ func (sa *StubAPI) Close() error {
 	return sa.NextErr()
 }
 
-func (sa *StubAPI) ListSpaces() ([]params.Space, error) {
+func (sa *StubAPI) ListSpaces(ctx context.Context) ([]params.Space, error) {
 	sa.MethodCall(sa, "ListSpaces")
 	if err := sa.NextErr(); err != nil {
 		return nil, err
@@ -252,27 +250,27 @@ func (sa *StubAPI) ListSpaces() ([]params.Space, error) {
 	return sa.Spaces, nil
 }
 
-func (sa *StubAPI) AddSpace(name string, subnetIds []string, public bool) error {
+func (sa *StubAPI) AddSpace(ctx context.Context, name string, subnetIds []string, public bool) error {
 	sa.MethodCall(sa, "AddSpace", name, subnetIds, public)
 	return sa.NextErr()
 }
 
-func (sa *StubAPI) RemoveSpace(name string, force bool, dryRun bool) (params.RemoveSpaceResult, error) {
+func (sa *StubAPI) RemoveSpace(ctx context.Context, name string, force bool, dryRun bool) (params.RemoveSpaceResult, error) {
 	sa.MethodCall(sa, "RemoveSpace", name)
 	return params.RemoveSpaceResult{}, sa.NextErr()
 }
 
-func (sa *StubAPI) RenameSpace(name, newName string) error {
+func (sa *StubAPI) RenameSpace(ctx context.Context, name, newName string) error {
 	sa.MethodCall(sa, "RenameSpace", name, newName)
 	return sa.NextErr()
 }
 
-func (sa *StubAPI) ReloadSpaces() error {
+func (sa *StubAPI) ReloadSpaces(ctx context.Context) error {
 	sa.MethodCall(sa, "ReloadSpaces")
 	return sa.NextErr()
 }
 
-func (sa *StubAPI) ShowSpace(name string) (params.ShowSpaceResult, error) {
+func (sa *StubAPI) ShowSpace(ctx context.Context, name string) (params.ShowSpaceResult, error) {
 	sa.MethodCall(sa, "ShowSpace", name)
 	if err := sa.NextErr(); err != nil {
 		return params.ShowSpaceResult{}, err
@@ -280,12 +278,12 @@ func (sa *StubAPI) ShowSpace(name string) (params.ShowSpaceResult, error) {
 	return sa.ShowSpaceResp, nil
 }
 
-func (sa *StubAPI) MoveSubnets(name names.SpaceTag, tags []names.SubnetTag, force bool) (params.MoveSubnetsResult, error) {
+func (sa *StubAPI) MoveSubnets(ctx context.Context, name names.SpaceTag, tags []names.SubnetTag, force bool) (params.MoveSubnetsResult, error) {
 	sa.MethodCall(sa, "MoveSubnets", name, tags, force)
 	return sa.MoveSubnetsResp, sa.NextErr()
 }
 
-func (sa *StubAPI) SubnetsByCIDR(cidrs []string) ([]params.SubnetsResult, error) {
+func (sa *StubAPI) SubnetsByCIDR(ctx context.Context, cidrs []string) ([]params.SubnetsResult, error) {
 	sa.MethodCall(sa, "SubnetsByCIDR", cidrs)
 	return sa.SubnetsByCIDRResp, sa.NextErr()
 }

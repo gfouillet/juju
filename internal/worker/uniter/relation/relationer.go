@@ -93,7 +93,7 @@ func (r *relationer) Join(ctx stdcontext.Context) error {
 	}
 	// uniter.RelationUnit.EnterScope() sets the unit's private address
 	// internally automatically, so no need to set it here.
-	return r.ru.EnterScope()
+	return r.ru.EnterScope(ctx)
 }
 
 // SetDying informs the relationer that the unit is departing the relation,
@@ -111,7 +111,7 @@ func (r *relationer) SetDying(ctx stdcontext.Context) error {
 // die is run when the relationer has no further responsibilities; it leaves
 // relation scope, and removes relation state.
 func (r *relationer) die(ctx stdcontext.Context) error {
-	err := r.ru.LeaveScope()
+	err := r.ru.LeaveScope(ctx)
 	if err != nil && !params.IsCodeNotFoundOrCodeUnauthorized(err) {
 		return errors.Annotatef(err, "leaving scope of relation %q", r.ru.Relation())
 	}
@@ -126,7 +126,7 @@ func (r *relationer) PrepareHook(hi hook.Info) (string, error) {
 	if r.IsImplicit() {
 		// Implicit relations always return ErrNoOperation from
 		// NextOp.  Something broken if we reach here.
-		r.logger.Errorf("implicit relations must not run hooks")
+		r.logger.Errorf(stdcontext.Background(), "implicit relations must not run hooks")
 		return "", dependency.ErrBounce
 	}
 	st, err := r.stateMgr.Relation(hi.RelationId)
@@ -145,7 +145,7 @@ func (r *relationer) CommitHook(ctx stdcontext.Context, hi hook.Info) error {
 	if r.IsImplicit() {
 		// Implicit relations always return ErrNoOperation from
 		// NextOp.  Something broken if we reach here.
-		r.logger.Errorf("implicit relations must not run hooks")
+		r.logger.Errorf(ctx, "implicit relations must not run hooks")
 		return dependency.ErrBounce
 	}
 	if hi.Kind == hooks.RelationBroken {

@@ -4,10 +4,7 @@
 package charm
 
 import (
-	"os"
-
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 )
 
 // CharmMeta describes methods that inform charm operation.
@@ -20,28 +17,10 @@ type CharmMeta interface {
 // may be handled as a charm.
 type Charm interface {
 	CharmMeta
-	Config() *Config
+	Config() *ConfigSpec
 	Actions() *Actions
 	Revision() int
-}
-
-// ReadCharm reads a Charm from path, which can point to either a charm archive or a
-// charm directory.
-func ReadCharm(path string) (charm Charm, err error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if info.IsDir() {
-		charm, err = ReadCharmDir(path)
-	} else {
-		charm, err = ReadCharmArchive(path)
-	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return charm, errors.Trace(CheckMeta(charm))
+	Version() string
 }
 
 // FormatSelectionReason represents the reason for a format version selection.

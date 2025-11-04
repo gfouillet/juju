@@ -5,11 +5,8 @@ package bootstrap
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
 	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/permission"
@@ -18,38 +15,8 @@ import (
 	"github.com/juju/juju/domain/access/state"
 	"github.com/juju/juju/internal/auth"
 	internaldatabase "github.com/juju/juju/internal/database"
+	"github.com/juju/juju/internal/errors"
 )
-
-// AddUser is responsible for registering a new user in the system at bootstrap
-// time. Sometimes it is required that we are need to register the existence of a
-// user for ownership purposes but may not necessarily want to have local
-// controller authentication for the user. The user created by this function is
-// owned by itself.
-//
-// If the username passed to this function is invalid an error satisfying
-// [github.com/juju/juju/domain/access/errors.UsernameNotValid] is returned.
-func AddUser(name string, access permission.AccessSpec) (user.UUID, internaldatabase.BootstrapOpt) {
-	if !names.IsValidUser(name) {
-		return "", bootstrapErr(errors.Annotatef(usererrors.UserNameNotValid, "%q", name))
-	}
-
-	uuid, err := user.NewUUID()
-	if err != nil {
-		return "", bootstrapErr(
-			fmt.Errorf("generating bootstrap user %q uuid: %w", name, err))
-	}
-
-	return uuid, func(ctx context.Context, controller, model database.TxnRunner) error {
-		err := controller.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-			return state.AddUser(ctx, tx, uuid, name, "", uuid, access)
-		})
-
-		if err != nil {
-			return fmt.Errorf("adding bootstrap user %q: %w", name, err)
-		}
-		return nil
-	}
-}
 
 // AddUserWithPassword is responsible for adding a new user in the system at
 // bootstrap time with an associated authentication password. The user created
@@ -57,50 +24,51 @@ func AddUser(name string, access permission.AccessSpec) (user.UUID, internaldata
 //
 // If the username passed to this function is invalid an error satisfying
 // [github.com/juju/juju/domain/access/errors.UsernameNotValid] is returned.
-func AddUserWithPassword(name string, password auth.Password, access permission.AccessSpec) (user.UUID, internaldatabase.BootstrapOpt) {
+func AddUserWithPassword(name user.Name, password auth.Password, access permission.AccessSpec) (user.UUID, internaldatabase.BootstrapOpt) {
 	defer password.Destroy()
 
-	if !names.IsValidUser(name) {
-		return "", bootstrapErr(errors.Annotatef(usererrors.UserNameNotValid, "%q", name))
+	if name.IsZero() {
+		return "", bootstrapErr(errors.Errorf("%q: %w", name, usererrors.UserNameNotValid))
 	}
 
 	uuid, err := user.NewUUID()
 	if err != nil {
-		return "", bootstrapErr(fmt.Errorf(
+		return "", bootstrapErr(errors.Errorf(
 			"generating uuid for bootstrap add user %q with password: %w",
 			name, err))
 	}
 
 	salt, err := auth.NewSalt()
 	if err != nil {
-		return "", bootstrapErr(fmt.Errorf(
+		return "", bootstrapErr(errors.Errorf(
 			"generating salt for bootstrap add user %q with password: %w",
 			name, err))
 	}
 
 	pwHash, err := auth.HashPassword(password, salt)
 	if err != nil {
-		return "", bootstrapErr(fmt.Errorf(
+		return "", bootstrapErr(errors.Errorf(
 			"generating password hash for bootstrap add user %q with password: %w",
 			name, err))
 	}
 
 	return uuid, func(ctx context.Context, controller, model database.TxnRunner) error {
-		return errors.Trace(controller.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		return errors.Capture(controller.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 			if err = state.AddUserWithPassword(
 				ctx, tx,
 				uuid,
-				name, name,
+				name, name.Name(),
 				uuid,
 				access,
 				pwHash, salt,
 			); err != nil {
-				return fmt.Errorf("adding bootstrap user %q with password: %w",
-					name, err,
-				)
+				return errors.Errorf("adding bootstrap user %q with password: %w",
+					name, err)
+
 			}
 			return nil
 		}))
+
 	}
 }
 

@@ -6,7 +6,7 @@ package ssh
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/client"
@@ -21,7 +21,7 @@ import (
 
 // StatusClientAPI defines status related APIs.
 type StatusClientAPI interface {
-	Status(args *client.StatusArgs) (*params.FullStatus, error)
+	Status(ctx context.Context, args *client.StatusArgs) (*params.FullStatus, error)
 	Close() error
 }
 
@@ -35,31 +35,31 @@ type CloudCredentialAPI interface {
 
 // ApplicationAPI defines application related APIs.
 type ApplicationAPI interface {
-	Leader(string) (string, error)
+	Leader(context.Context, string) (string, error)
 	Close() error
-	UnitsInfo(units []names.UnitTag) ([]application.UnitInfo, error)
-	GetCharmURLOrigin(branchName, applicationName string) (*charm.URL, apicharm.Origin, error)
+	UnitsInfo(ctx context.Context, units []names.UnitTag) ([]application.UnitInfo, error)
+	GetCharmURLOrigin(ctx context.Context, applicationName string) (*charm.URL, apicharm.Origin, error)
 }
 
 // CharmAPI defines charm related APIs.
 type CharmAPI interface {
-	CharmInfo(charmURL string) (*charms.CharmInfo, error)
+	CharmInfo(ctx context.Context, charmURL string) (*charms.CharmInfo, error)
 	Close() error
 }
 
 type coreSSHClient interface {
-	PublicAddress(target string) (string, error)
-	PrivateAddress(target string) (string, error)
-	AllAddresses(target string) ([]string, error)
-	PublicKeys(target string) ([]string, error)
-	Proxy() (bool, error)
+	PublicAddress(ctx context.Context, target string) (string, error)
+	PrivateAddress(ctx context.Context, target string) (string, error)
+	AllAddresses(ctx context.Context, target string) ([]string, error)
+	PublicKeys(ctx context.Context, target string) ([]string, error)
+	Proxy(ctx context.Context) (bool, error)
 	Close() error
 }
 
 // SSHClientAPI defines ssh client related APIs.
 type SSHClientAPI interface {
 	coreSSHClient
-	ModelCredentialForSSH() (cloudspec.CloudSpec, error)
+	ModelCredentialForSSH(ctx context.Context) (cloudspec.CloudSpec, error)
 }
 
 // SSHControllerAPI defines controller related APIs.

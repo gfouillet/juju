@@ -6,11 +6,11 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // RelationListCommand implements the relation-list command.
@@ -37,13 +37,19 @@ func NewRelationListCommand(ctx Context) (cmd.Command, error) {
 }
 
 func (c *RelationListCommand) Info() *cmd.Info {
-	doc := "-r must be specified when not in a relation hook"
+	doc := `
+-r must be specified when not in a relation hook
+
+relation-list outputs a list of all the related units for a relation identifier.
+If not running in a relation hook context, -r needs to be specified with a
+relation identifier similar to the relation-get and relation-set commands.
+`
 	if _, err := c.ctx.HookRelation(); err == nil {
 		doc = ""
 	}
 	return jujucmd.Info(&cmd.Info{
 		Name:    "relation-list",
-		Purpose: "list relation units",
+		Purpose: "List relation units.",
 		Doc:     doc,
 	})
 }

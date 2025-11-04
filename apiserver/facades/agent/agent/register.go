@@ -9,8 +9,6 @@ import (
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/core/credential"
-	"github.com/juju/juju/core/watcher"
 )
 
 // Register is called to expose a package of facades onto a given registry.
@@ -20,10 +18,6 @@ func Register(registry facade.FacadeRegistry) {
 	}, reflect.TypeOf((*AgentAPI)(nil)))
 }
 
-type CredentialService interface {
-	WatchCredential(ctx context.Context, key credential.Key) (watcher.NotifyWatcher, error)
-}
-
 // NewAgentAPIV3 returns an object implementing version 3 of the Agent API
 // with the given authorizer representing the currently logged in client.
 func NewAgentAPIV3(ctx facade.ModelContext) (*AgentAPI, error) {
@@ -31,14 +25,19 @@ func NewAgentAPIV3(ctx facade.ModelContext) (*AgentAPI, error) {
 	if !ctx.Auth().AuthMachineAgent() && !ctx.Auth().AuthUnitAgent() {
 		return nil, apiservererrors.ErrPerm
 	}
+	services := ctx.DomainServices()
 
 	return NewAgentAPI(
 		ctx.Auth(),
-		ctx.Resources(),
-		ctx.State(),
-		ctx.ServiceFactory().ControllerConfig(),
-		ctx.ServiceFactory().ExternalController(),
-		ctx.ServiceFactory().Cloud(),
-		ctx.ServiceFactory().Credential(),
-	)
+		ctx.WatcherRegistry(),
+		services.AgentPassword(),
+		services.Controller(),
+		services.ControllerConfig(),
+		services.ControllerNode(),
+		services.ExternalController(),
+		services.Model(),
+		services.Machine(),
+		services.Config(),
+		services.Application(),
+	), nil
 }

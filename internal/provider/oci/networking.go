@@ -13,14 +13,11 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
-	envcontext "github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
-	providerCommon "github.com/juju/juju/internal/provider/oci/common"
 )
 
 const (
@@ -88,8 +85,8 @@ func (e *Environ) allVCNs(controllerUUID, modelUUID string) ([]ociCore.Vcn, erro
 	return ret, nil
 }
 
-func (e *Environ) getVCN(controllerUUID, modelUUID string) (ociCore.Vcn, error) {
-	vcns, err := e.allVCNs(controllerUUID, modelUUID)
+func (e *Environ) getVCN(modelUUID string) (ociCore.Vcn, error) {
+	vcns, err := e.allVCNs(e.controllerUUID, modelUUID)
 	if err != nil {
 		return ociCore.Vcn{}, errors.Trace(err)
 	}
@@ -107,8 +104,8 @@ func (e *Environ) secListName(controllerUUID, modelUUID string) string {
 	return fmt.Sprintf("%s-%s-%s", SecListNamePrefix, controllerUUID, modelUUID)
 }
 
-func (e *Environ) ensureVCN(controllerUUID, modelUUID string) (ociCore.Vcn, error) {
-	if vcn, err := e.getVCN(controllerUUID, modelUUID); err != nil {
+func (e *Environ) ensureVCN(ctx context.Context, modelUUID string) (ociCore.Vcn, error) {
+	if vcn, err := e.getVCN(modelUUID); err != nil {
 		if !errors.Is(err, errors.NotFound) {
 			return ociCore.Vcn{}, errors.Trace(err)
 		}
@@ -116,15 +113,15 @@ func (e *Environ) ensureVCN(controllerUUID, modelUUID string) (ociCore.Vcn, erro
 		return vcn, nil
 	}
 
-	name := e.vcnName(controllerUUID, modelUUID)
-	logger.Debugf("creating new VCN %s", name)
+	name := e.vcnName(e.controllerUUID, modelUUID)
+	logger.Debugf(ctx, "creating new VCN %s", name)
 
 	vcnDetails := ociCore.CreateVcnDetails{
 		CidrBlock:     e.ecfg().addressSpace(),
 		CompartmentId: e.ecfg().compartmentID(),
 		DisplayName:   &name,
 		FreeformTags: map[string]string{
-			tags.JujuController: controllerUUID,
+			tags.JujuController: e.controllerUUID,
 			tags.JujuModel:      modelUUID,
 		},
 	}
@@ -136,7 +133,7 @@ func (e *Environ) ensureVCN(controllerUUID, modelUUID string) (ociCore.Vcn, erro
 	if err != nil {
 		return ociCore.Vcn{}, errors.Trace(err)
 	}
-	logger.Debugf("VCN %s created. Waiting for status: %s", *result.Vcn.Id, string(ociCore.VcnLifecycleStateAvailable))
+	logger.Debugf(ctx, "VCN %s created. Waiting for status: %s", *result.Vcn.Id, string(ociCore.VcnLifecycleStateAvailable))
 
 	err = e.waitForResourceStatus(
 		e.getVCNStatus, result.Vcn.Id,
@@ -187,7 +184,7 @@ func (e *Environ) jujuSecurityLists(vcnId *string) ([]ociCore.SecurityList, erro
 	return ret, nil
 }
 
-func (e *Environ) getSecurityList(controllerUUID, modelUUID string, vcnId *string) (ociCore.SecurityList, error) {
+func (e *Environ) getSecurityList(vcnId *string) (ociCore.SecurityList, error) {
 	seclist, err := e.jujuSecurityLists(vcnId)
 	if err != nil {
 		return ociCore.SecurityList{}, errors.Trace(err)
@@ -204,8 +201,8 @@ func (e *Environ) getSecurityList(controllerUUID, modelUUID string, vcnId *strin
 	return seclist[0], nil
 }
 
-func (e *Environ) ensureSecurityList(controllerUUID, modelUUID string, vcnid *string) (ociCore.SecurityList, error) {
-	if seclist, err := e.getSecurityList(controllerUUID, modelUUID, vcnid); err != nil {
+func (e *Environ) ensureSecurityList(ctx context.Context, modelUUID string, vcnid *string) (ociCore.SecurityList, error) {
+	if seclist, err := e.getSecurityList(vcnid); err != nil {
 		if !errors.Is(err, errors.NotFound) {
 			return ociCore.SecurityList{}, errors.Trace(err)
 		}
@@ -213,8 +210,8 @@ func (e *Environ) ensureSecurityList(controllerUUID, modelUUID string, vcnid *st
 		return seclist, nil
 	}
 
-	name := e.secListName(controllerUUID, modelUUID)
-	logger.Debugf("creating new security list %s", name)
+	name := e.secListName(e.controllerUUID, modelUUID)
+	logger.Debugf(ctx, "creating new security list %s", name)
 
 	// Hopefully just temporary, open all ingress/egress ports
 	prefix := AllowAllPrefix
@@ -223,7 +220,7 @@ func (e *Environ) ensureSecurityList(controllerUUID, modelUUID string, vcnid *st
 		VcnId:         vcnid,
 		DisplayName:   &name,
 		FreeformTags: map[string]string{
-			tags.JujuController: controllerUUID,
+			tags.JujuController: e.controllerUUID,
 			tags.JujuMachine:    modelUUID,
 		},
 		EgressSecurityRules: []ociCore.EgressSecurityRule{
@@ -248,7 +245,7 @@ func (e *Environ) ensureSecurityList(controllerUUID, modelUUID string, vcnid *st
 	if err != nil {
 		return ociCore.SecurityList{}, errors.Trace(err)
 	}
-	logger.Debugf("security list %s created. Waiting for status: %s",
+	logger.Debugf(ctx, "security list %s created. Waiting for status: %s",
 		*response.SecurityList.Id, string(ociCore.SecurityListLifecycleStateAvailable))
 
 	err = e.waitForResourceStatus(
@@ -261,7 +258,11 @@ func (e *Environ) ensureSecurityList(controllerUUID, modelUUID string, vcnid *st
 	return response.SecurityList, nil
 }
 
-func (e *Environ) allSubnets(controllerUUID, modelUUID string, vcnID *string) (map[string][]ociCore.Subnet, error) {
+func (e *Environ) allSubnets(
+	ctx context.Context,
+	controllerUUID, modelUUID string,
+	vcnID *string,
+) (map[string][]ociCore.Subnet, error) {
 	subnets, err := e.Networking.ListSubnets(context.Background(), e.ecfg().compartmentID(), vcnID)
 	if err != nil {
 		return nil, err
@@ -281,7 +282,7 @@ func (e *Environ) allSubnets(controllerUUID, modelUUID string, vcnID *string) (m
 		}
 		cidr := *val.CidrBlock
 		if valid, err := e.validateCidrBlock(cidr); err != nil || !valid {
-			logger.Warningf("failed to validate CIDR block %s: %s", cidr, err)
+			logger.Warningf(ctx, "failed to validate CIDR block %s: %s", cidr, err)
 			continue
 		}
 		ret[*val.AvailabilityDomain] = append(ret[*val.AvailabilityDomain], val)
@@ -346,9 +347,9 @@ func (e *Environ) getSubnetStatus(resourceID *string) (string, error) {
 }
 
 func (e *Environ) createSubnet(
-	controllerUUID, modelUUID, ad, cidr string, vcnID *string, seclists []string, routeTableId *string,
+	modelUUID, ad, cidr string, vcnID *string, seclists []string, routeTableId *string,
 ) (ociCore.Subnet, error) {
-	displayName := fmt.Sprintf("juju-%s-%s-%s", ad, controllerUUID, modelUUID)
+	displayName := fmt.Sprintf("juju-%s-%s-%s", ad, e.controllerUUID, modelUUID)
 	compartment := e.ecfg().compartmentID()
 	// TODO(gsamfira): maybe "local" would be better?
 	subnetDetails := ociCore.CreateSubnetDetails{
@@ -360,7 +361,7 @@ func (e *Environ) createSubnet(
 		RouteTableId:       routeTableId,
 		SecurityListIds:    seclists,
 		FreeformTags: map[string]string{
-			tags.JujuController: controllerUUID,
+			tags.JujuController: e.controllerUUID,
 			tags.JujuModel:      modelUUID,
 		},
 	}
@@ -384,23 +385,20 @@ func (e *Environ) createSubnet(
 }
 
 func (e *Environ) ensureSubnets(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	vcn ociCore.Vcn,
 	secList ociCore.SecurityList,
-	controllerUUID string,
 	modelUUID string,
 	routeTableId *string,
 ) (map[string][]ociCore.Subnet, error) {
 	az, err := e.AvailabilityZones(ctx)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
-	allSubnets, err := e.allSubnets(controllerUUID, modelUUID, vcn.Id)
+	allSubnets, err := e.allSubnets(ctx, e.controllerUUID, modelUUID, vcn.Id)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	existingCidrBlocks := map[string]bool{}
 	missing := map[string]bool{}
@@ -422,14 +420,12 @@ func (e *Environ) ensureSubnets(
 		for ad := range missing {
 			newIPNet, err := e.getFreeSubnet(existingCidrBlocks)
 			if err != nil {
-				providerCommon.HandleCredentialError(err, ctx)
-				return nil, errors.Trace(err)
+				return nil, e.HandleCredentialError(ctx, err)
 			}
 			newSubnet, err := e.createSubnet(
-				controllerUUID, modelUUID, ad, newIPNet, vcn.Id, []string{*secList.Id}, routeTableId)
+				modelUUID, ad, newIPNet, vcn.Id, []string{*secList.Id}, routeTableId)
 			if err != nil {
-				providerCommon.HandleCredentialError(err, ctx)
-				return nil, errors.Trace(err)
+				return nil, e.HandleCredentialError(ctx, err)
 			}
 			allSubnets[ad] = []ociCore.Subnet{
 				newSubnet,
@@ -442,14 +438,14 @@ func (e *Environ) ensureSubnets(
 // ensureNetworksAndSubnets creates VCNs, security lists and subnets that will
 // be used throughout the life-cycle of this juju deployment.
 func (e *Environ) ensureNetworksAndSubnets(
-	ctx envcontext.ProviderCallContext, controllerUUID, modelUUID string,
+	ctx context.Context, modelUUID string,
 ) (map[string][]ociCore.Subnet, error) {
 	// if we have the subnets field populated, it means we already checked/created
 	// the necessary resources. Simply return.
 	if e.subnets != nil {
 		return e.subnets, nil
 	}
-	vcn, err := e.ensureVCN(controllerUUID, modelUUID)
+	vcn, err := e.ensureVCN(ctx, modelUUID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -464,12 +460,12 @@ func (e *Environ) ensureNetworksAndSubnets(
 	// * There is no way to specify the target prefix for an Ingress/Egress rule, thus making
 	// instance level firewalling, impossible.
 	// For now, we open all ports until we decide how to properly take care of this.
-	secList, err := e.ensureSecurityList(controllerUUID, modelUUID, vcn.Id)
+	secList, err := e.ensureSecurityList(ctx, modelUUID, vcn.Id)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	ig, err := e.ensureInternetGateway(controllerUUID, modelUUID, vcn.Id)
+	ig, err := e.ensureInternetGateway(ctx, modelUUID, vcn.Id)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -484,12 +480,12 @@ func (e *Environ) ensureNetworksAndSubnets(
 			NetworkEntityId: ig.Id,
 		},
 	}
-	routeTable, err := e.ensureRouteTable(controllerUUID, modelUUID, vcn.Id, routeRules)
+	routeTable, err := e.ensureRouteTable(ctx, modelUUID, vcn.Id, routeRules)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	subnets, err := e.ensureSubnets(ctx, vcn, secList, controllerUUID, modelUUID, routeTable.Id)
+	subnets, err := e.ensureSubnets(ctx, vcn, secList, modelUUID, routeTable.Id)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -528,7 +524,7 @@ func (e *Environ) removeSubnets(subnets map[string][]ociCore.Subnet) error {
 	return nil
 }
 
-func (e *Environ) removeSecurityLists(secLists []ociCore.SecurityList) error {
+func (e *Environ) removeSecurityLists(ctx context.Context, secLists []ociCore.SecurityList) error {
 	for _, secList := range secLists {
 		if secList.Id == nil {
 			return nil
@@ -536,7 +532,7 @@ func (e *Environ) removeSecurityLists(secLists []ociCore.SecurityList) error {
 		request := ociCore.DeleteSecurityListRequest{
 			SecurityListId: secList.Id,
 		}
-		logger.Debugf("deleting security list %s", *secList.Id)
+		logger.Debugf(ctx, "deleting security list %s", *secList.Id)
 		response, err := e.Firewall.DeleteSecurityList(context.Background(), request)
 		if err != nil && !e.isNotFound(response.RawResponse) {
 			return nil
@@ -552,7 +548,7 @@ func (e *Environ) removeSecurityLists(secLists []ociCore.SecurityList) error {
 	return nil
 }
 
-func (e *Environ) removeVCN(vcn ociCore.Vcn) error {
+func (e *Environ) removeVCN(ctx context.Context, vcn ociCore.Vcn) error {
 	if vcn.Id == nil {
 		return nil
 	}
@@ -560,7 +556,7 @@ func (e *Environ) removeVCN(vcn ociCore.Vcn) error {
 		VcnId: vcn.Id,
 	}
 
-	logger.Infof("deleting VCN: %s", *vcn.Id)
+	logger.Infof(ctx, "deleting VCN: %s", *vcn.Id)
 	response, err := e.Networking.DeleteVcn(context.Background(), requestDeleteVcn)
 	if err != nil && !e.isNotFound(response.RawResponse) {
 		return err
@@ -579,7 +575,7 @@ func (e *Environ) removeVCN(vcn ociCore.Vcn) error {
 // been used by this juju deployment. This function should only be called when
 // destroying the environment, and only after destroying any resources that may be attached
 // to a network.
-func (e *Environ) cleanupNetworksAndSubnets(controllerUUID, modelUUID string) error {
+func (e *Environ) cleanupNetworksAndSubnets(ctx context.Context, controllerUUID, modelUUID string) error {
 	vcns, err := e.allVCNs(controllerUUID, modelUUID)
 	if err != nil {
 		return errors.Trace(err)
@@ -589,7 +585,7 @@ func (e *Environ) cleanupNetworksAndSubnets(controllerUUID, modelUUID string) er
 	}
 
 	for _, vcn := range vcns {
-		allSubnets, err := e.allSubnets(controllerUUID, modelUUID, vcn.Id)
+		allSubnets, err := e.allSubnets(ctx, controllerUUID, modelUUID, vcn.Id)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -602,7 +598,7 @@ func (e *Environ) cleanupNetworksAndSubnets(controllerUUID, modelUUID string) er
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if err := e.removeSecurityLists(secLists); err != nil {
+		if err := e.removeSecurityLists(ctx, secLists); err != nil {
 			return errors.Trace(err)
 		}
 
@@ -614,7 +610,7 @@ func (e *Environ) cleanupNetworksAndSubnets(controllerUUID, modelUUID string) er
 			return errors.Trace(err)
 		}
 
-		if err := e.removeVCN(vcn); err != nil {
+		if err := e.removeVCN(ctx, vcn); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -657,7 +653,7 @@ func (e *Environ) internetGatewayName(controllerUUID, modelUUID string) string {
 	return fmt.Sprintf("%s-%s-%s", InternetGatewayPrefix, controllerUUID, modelUUID)
 }
 
-func (e *Environ) ensureInternetGateway(controllerUUID, modelUUID string, vcnID *string) (ociCore.InternetGateway, error) {
+func (e *Environ) ensureInternetGateway(ctx context.Context, modelUUID string, vcnID *string) (ociCore.InternetGateway, error) {
 	if ig, err := e.getInternetGateway(vcnID); err != nil {
 		if !errors.Is(err, errors.NotFound) {
 			return ociCore.InternetGateway{}, errors.Trace(err)
@@ -666,8 +662,8 @@ func (e *Environ) ensureInternetGateway(controllerUUID, modelUUID string, vcnID 
 		return ig, nil
 	}
 
-	name := e.internetGatewayName(controllerUUID, modelUUID)
-	logger.Debugf("creating new internet gateway %s", name)
+	name := e.internetGatewayName(e.controllerUUID, modelUUID)
+	logger.Debugf(ctx, "creating new internet gateway %s", name)
 
 	enabled := true
 	details := ociCore.CreateInternetGatewayDetails{
@@ -800,7 +796,8 @@ func (e *Environ) getRouteTableStatus(resourceID *string) (string, error) {
 }
 
 func (e *Environ) ensureRouteTable(
-	controllerUUID, modelUUID string, vcnId *string, routeRules []ociCore.RouteRule,
+	ctx context.Context,
+	modelUUID string, vcnId *string, routeRules []ociCore.RouteRule,
 ) (ociCore.RouteTable, error) {
 	if rt, err := e.getRouteTable(vcnId); err != nil {
 		if !errors.Is(err, errors.NotFound) {
@@ -810,8 +807,8 @@ func (e *Environ) ensureRouteTable(
 		return rt, nil
 	}
 
-	name := e.routeTableName(controllerUUID, modelUUID)
-	logger.Debugf("creating new route table %s", name)
+	name := e.routeTableName(e.controllerUUID, modelUUID)
+	logger.Debugf(ctx, "creating new route table %s", name)
 
 	details := ociCore.CreateRouteTableDetails{
 		VcnId:         vcnId,
@@ -819,7 +816,7 @@ func (e *Environ) ensureRouteTable(
 		RouteRules:    routeRules,
 		DisplayName:   &name,
 		FreeformTags: map[string]string{
-			tags.JujuController: controllerUUID,
+			tags.JujuController: e.controllerUUID,
 			tags.JujuModel:      modelUUID,
 		},
 	}
@@ -832,7 +829,7 @@ func (e *Environ) ensureRouteTable(
 	if err != nil {
 		return ociCore.RouteTable{}, errors.Trace(err)
 	}
-	logger.Debugf("route table %s created. Waiting for status: %s",
+	logger.Debugf(ctx, "route table %s created. Waiting for status: %s",
 		*response.RouteTable.Id, string(ociCore.RouteTableLifecycleStateAvailable))
 
 	if err := e.waitForResourceStatus(
@@ -915,8 +912,9 @@ func (e *Environ) allSubnetsAsMap(modelUUID string) (map[string]ociCore.Subnet, 
 }
 
 // Subnets is defined on the environs.Networking interface.
+// This implementation also creates the subnets if none exist.
 func (e *Environ) Subnets(
-	ctx envcontext.ProviderCallContext, id instance.Id, subnets []network.Id,
+	ctx context.Context, subnets []network.Id,
 ) ([]network.SubnetInfo, error) {
 	var results []network.SubnetInfo
 	subIdSet := set.NewStrings()
@@ -926,58 +924,37 @@ func (e *Environ) Subnets(
 
 	allSubnets, err := e.allSubnetsAsMap(e.Config().UUID())
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
+
+	// If no subnets exist for this model, create them.
+	if len(allSubnets) == 0 {
+		subnetMap, err := e.ensureNetworksAndSubnets(ctx, e.Config().UUID())
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		allSubnets = make(map[string]ociCore.Subnet, len(subnetMap))
+		for _, subnets := range subnetMap {
+			for _, subnet := range subnets {
+				allSubnets[*subnet.Id] = subnet
+			}
+		}
+	}
+
 	hasSubnetList := false
 	if len(subIdSet) > 0 {
 		hasSubnetList = true
 	}
-	if id != instance.UnknownId {
-		oInst, err := e.getOCIInstance(ctx, id)
-		if err != nil {
-			providerCommon.HandleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
-		}
-
-		vnics, err := oInst.getVnics()
-		if err != nil {
-			providerCommon.HandleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
-		}
-		for _, nic := range vnics {
-			if nic.Vnic.SubnetId == nil {
+	for subnetId, subnet := range allSubnets {
+		if hasSubnetList {
+			if !subIdSet.Contains(subnetId) {
 				continue
+			} else {
+				subIdSet.Remove(subnetId)
 			}
-			if hasSubnetList {
-				if !subIdSet.Contains(*nic.Vnic.SubnetId) {
-					continue
-				} else {
-					subIdSet.Remove(*nic.Vnic.SubnetId)
-				}
-			}
-			subnet, ok := allSubnets[*nic.Vnic.SubnetId]
-			if !ok {
-				continue
-			}
-			info := network.SubnetInfo{
-				CIDR:       *subnet.CidrBlock,
-				ProviderId: network.Id(*nic.Vnic.SubnetId),
-			}
+		}
+		if info, err := makeSubnetInfo(subnet); err == nil {
 			results = append(results, info)
-		}
-	} else {
-		for subnetId, subnet := range allSubnets {
-			if hasSubnetList {
-				if !subIdSet.Contains(subnetId) {
-					continue
-				} else {
-					subIdSet.Remove(subnetId)
-				}
-			}
-			if info, err := makeSubnetInfo(subnet); err == nil {
-				results = append(results, info)
-			}
 		}
 	}
 	if hasSubnetList && !subIdSet.IsEmpty() {
@@ -1010,7 +987,7 @@ func makeSubnetInfo(subnet ociCore.Subnet) (network.SubnetInfo, error) {
 	return info, nil
 }
 
-func (e *Environ) NetworkInterfaces(ctx envcontext.ProviderCallContext, ids []instance.Id) ([]network.InterfaceInfos, error) {
+func (e *Environ) NetworkInterfaces(ctx context.Context, ids []instance.Id) ([]network.InterfaceInfos, error) {
 	var (
 		infos = make([]network.InterfaceInfos, len(ids))
 		err   error
@@ -1025,23 +1002,20 @@ func (e *Environ) NetworkInterfaces(ctx envcontext.ProviderCallContext, ids []in
 	return infos, nil
 }
 
-func (e *Environ) networkInterfacesForInstance(ctx envcontext.ProviderCallContext, instId instance.Id) (network.InterfaceInfos, error) {
+func (e *Environ) networkInterfacesForInstance(ctx context.Context, instId instance.Id) (network.InterfaceInfos, error) {
 	oInst, err := e.getOCIInstance(ctx, instId)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	info := network.InterfaceInfos{}
 	vnics, err := oInst.getVnics()
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	subnets, err := e.allSubnetsAsMap(e.Config().UUID())
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	for _, iface := range vnics {
 		if iface.Vnic.Id == nil || iface.Vnic.MacAddress == nil || iface.Vnic.SubnetId == nil {
@@ -1061,11 +1035,10 @@ func (e *Environ) networkInterfacesForInstance(ctx envcontext.ProviderCallContex
 					*iface.Vnic.PrivateIp,
 					network.WithScope(network.ScopeCloudLocal),
 					network.WithCIDR(*subnet.CidrBlock),
-				).AsProviderAddress(),
+				).AsProviderAddress(network.WithProviderSubnetID(network.Id(*iface.Vnic.SubnetId))),
 			},
-			InterfaceType:    network.EthernetDevice,
-			ProviderSubnetId: network.Id(*iface.Vnic.SubnetId),
-			Origin:           network.OriginProvider,
+			InterfaceType: network.EthernetDevice,
+			Origin:        network.OriginProvider,
 		}
 		if iface.Vnic.PublicIp != nil {
 			nic.ShadowAddresses = append(nic.ShadowAddresses,
@@ -1080,23 +1053,6 @@ func (e *Environ) networkInterfacesForInstance(ctx envcontext.ProviderCallContex
 	return info, nil
 }
 
-func (e *Environ) SupportsSpaces(envcontext.ProviderCallContext) (bool, error) {
+func (e *Environ) SupportsSpaces() (bool, error) {
 	return false, nil
-}
-
-func (e *Environ) SupportsContainerAddresses(ctx envcontext.ProviderCallContext) (bool, error) {
-	return false, errors.NotSupportedf("container addresses")
-}
-
-func (e *Environ) AllocateContainerAddresses(
-	ctx envcontext.ProviderCallContext,
-	hostInstanceID instance.Id,
-	containerTag names.MachineTag,
-	preparedInfo network.InterfaceInfos,
-) (network.InterfaceInfos, error) {
-	return nil, errors.NotSupportedf("AllocateContainerAddresses")
-}
-
-func (e *Environ) ReleaseContainerAddresses(ctx envcontext.ProviderCallContext, interfaces []network.ProviderInterfaceInfo) error {
-	return errors.NotSupportedf("ReleaseContainerAddresses")
 }

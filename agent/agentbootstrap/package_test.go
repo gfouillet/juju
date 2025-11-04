@@ -4,11 +4,10 @@
 package agentbootstrap_test
 
 import (
+	"os"
 	stdtesting "testing"
-
-	"github.com/juju/juju/testing"
 )
 
-func Test(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
+func TestMain(m *stdtesting.M) {
+	os.Exit(m.Run())
 }

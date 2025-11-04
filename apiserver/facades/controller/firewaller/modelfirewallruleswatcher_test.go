@@ -4,25 +4,28 @@
 package firewaller_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/apiserver/facades/controller/firewaller"
 	"github.com/juju/juju/core/testing"
 	"github.com/juju/juju/core/watcher/watchertest"
 	"github.com/juju/juju/environs/config"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
-var _ = gc.Suite(&ModelFirewallRulesWatcherSuite{})
+func TestModelFirewallRulesWatcherSuite(t *stdtesting.T) {
+	tc.Run(t, &ModelFirewallRulesWatcherSuite{})
+}
 
 type ModelFirewallRulesWatcherSuite struct {
 	modelConfigService *MockModelConfigService
 }
 
-func (s *ModelFirewallRulesWatcherSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *ModelFirewallRulesWatcherSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.modelConfigService = NewMockModelConfigService(ctrl)
@@ -30,25 +33,25 @@ func (s *ModelFirewallRulesWatcherSuite) setupMocks(c *gc.C) *gomock.Controller 
 	return ctrl
 }
 
-func cfg(c *gc.C, in map[string]interface{}) *config.Config {
+func cfg(c *tc.C, in map[string]interface{}) *config.Config {
 	attrs := coretesting.FakeConfig().Merge(in)
 	cfg, err := config.New(config.UseDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return cfg
 }
 
-func (s *ModelFirewallRulesWatcherSuite) TestInitial(c *gc.C) {
+func (s *ModelFirewallRulesWatcherSuite) TestInitial(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	notifyCh := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(notifyCh)
-	s.modelConfigService.EXPECT().Watch().Return(watcher, nil)
+	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
 	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg(c, map[string]interface{}{config.SSHAllowKey: "0.0.0.0/0"}), nil)
 
 	w, err := firewaller.NewModelFirewallRulesWatcher(s.modelConfigService)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 	wc := watchertest.NewNotifyWatcherC(c, w)
 
@@ -57,19 +60,19 @@ func (s *ModelFirewallRulesWatcherSuite) TestInitial(c *gc.C) {
 	wc.AssertChanges(testing.ShortWait)
 }
 
-func (s *ModelFirewallRulesWatcherSuite) TestConfigChange(c *gc.C) {
+func (s *ModelFirewallRulesWatcherSuite) TestConfigChange(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	notifyCh := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(notifyCh)
-	s.modelConfigService.EXPECT().Watch().Return(watcher, nil)
+	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
 	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg(c, map[string]interface{}{config.SSHAllowKey: "0.0.0.0/0"}), nil)
 	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg(c, map[string]interface{}{config.SSHAllowKey: "192.168.0.0/24"}), nil)
 
 	w, err := firewaller.NewModelFirewallRulesWatcher(s.modelConfigService)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 	wc := watchertest.NewNotifyWatcherC(c, w)
 
@@ -82,19 +85,19 @@ func (s *ModelFirewallRulesWatcherSuite) TestConfigChange(c *gc.C) {
 	wc.AssertChanges(testing.ShortWait)
 }
 
-func (s *ModelFirewallRulesWatcherSuite) TestIrrelevantConfigChange(c *gc.C) {
+func (s *ModelFirewallRulesWatcherSuite) TestIrrelevantConfigChange(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	notifyCh := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(notifyCh)
-	s.modelConfigService.EXPECT().Watch().Return(watcher, nil)
+	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
 	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg(c, map[string]interface{}{config.SSHAllowKey: "0.0.0.0/0"}), nil)
 	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg(c, map[string]interface{}{config.SSHAllowKey: "0.0.0.0/0"}), nil)
 
 	w, err := firewaller.NewModelFirewallRulesWatcher(s.modelConfigService)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 	wc := watchertest.NewNotifyWatcherC(c, w)
 

@@ -6,8 +6,12 @@ package secretsmanager
 import (
 	"context"
 
-	"github.com/juju/juju/core/leadership"
+	"gopkg.in/macaroon.v2"
+
+	coreapplication "github.com/juju/juju/core/application"
+	corerelation "github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/watcher"
 	secretservice "github.com/juju/juju/domain/secret/service"
 	secretbackendservice "github.com/juju/juju/domain/secretbackend/service"
@@ -18,20 +22,21 @@ import (
 type SecretTriggers interface {
 	WatchSecretRevisionsExpiryChanges(ctx context.Context, owners ...secretservice.CharmSecretOwner) (watcher.SecretTriggerWatcher, error)
 	WatchSecretsRotationChanges(ctx context.Context, owners ...secretservice.CharmSecretOwner) (watcher.SecretTriggerWatcher, error)
-	WatchObsolete(ctx context.Context, owners ...secretservice.CharmSecretOwner) (watcher.StringsWatcher, error)
+	WatchObsoleteSecrets(ctx context.Context, owners ...secretservice.CharmSecretOwner) (watcher.StringsWatcher, error)
+	WatchDeletedSecrets(ctx context.Context, owners ...secretservice.CharmSecretOwner) (watcher.StringsWatcher, error)
 	SecretRotated(ctx context.Context, uri *secrets.URI, params secretservice.SecretRotatedParams) error
 }
 
 // SecretsConsumer instances provide secret consumer apis.
 type SecretsConsumer interface {
-	GetSecretConsumer(ctx context.Context, uri *secrets.URI, unitName string) (*secrets.SecretConsumerMetadata, error)
-	GetSecretConsumerAndLatest(ctx context.Context, uri *secrets.URI, unitName string) (*secrets.SecretConsumerMetadata, int, error)
-	GetURIByConsumerLabel(ctx context.Context, label string, unitName string) (*secrets.URI, error)
-	SaveSecretConsumer(ctx context.Context, uri *secrets.URI, unitName string, md *secrets.SecretConsumerMetadata) error
+	GetSecretConsumer(ctx context.Context, uri *secrets.URI, unitName unit.Name) (*secrets.SecretConsumerMetadata, error)
+	GetSecretConsumerAndLatest(ctx context.Context, uri *secrets.URI, unitName unit.Name) (*secrets.SecretConsumerMetadata, int, error)
+	GetURIByConsumerLabel(ctx context.Context, label string, unitName unit.Name) (*secrets.URI, error)
+	SaveSecretConsumer(ctx context.Context, uri *secrets.URI, unitName unit.Name, md secrets.SecretConsumerMetadata) error
 	GetConsumedRevision(
-		ctx context.Context, uri *secrets.URI, unitName string,
+		ctx context.Context, uri *secrets.URI, unitName unit.Name,
 		refresh, peek bool, labelToUpdate *string) (int, error)
-	WatchConsumedSecretsChanges(ctx context.Context, unitName string) (watcher.StringsWatcher, error)
+	WatchConsumedSecretsChanges(ctx context.Context, unitName unit.Name) (watcher.StringsWatcher, error)
 	GrantSecretAccess(context.Context, *secrets.URI, secretservice.SecretAccessParams) error
 	RevokeSecretAccess(context.Context, *secrets.URI, secretservice.SecretAccessParams) error
 }
@@ -39,13 +44,10 @@ type SecretsConsumer interface {
 // SecretService provides core secrets operations.
 type SecretService interface {
 	CreateSecretURIs(ctx context.Context, count int) ([]*secrets.URI, error)
-	CreateCharmSecret(context.Context, *secrets.URI, secretservice.CreateCharmSecretParams) error
-	UpdateCharmSecret(context.Context, *secrets.URI, secretservice.UpdateCharmSecretParams) error
-	DeleteSecret(context.Context, *secrets.URI, secretservice.DeleteSecretParams) error
 	GetSecretValue(context.Context, *secrets.URI, int, secretservice.SecretAccessor) (secrets.SecretValue, *secrets.ValueRef, error)
 	ListCharmSecrets(context.Context, ...secretservice.CharmSecretOwner) ([]*secrets.SecretMetadata, [][]*secrets.SecretRevisionMetadata, error)
 	ProcessCharmSecretConsumerLabel(
-		ctx context.Context, unitName string, uri *secrets.URI, label string, token leadership.Token,
+		ctx context.Context, unitName unit.Name, uri *secrets.URI, label string,
 	) (*secrets.URI, *string, error)
 	ChangeSecretBackend(ctx context.Context, uri *secrets.URI, revision int, params secretservice.ChangeSecretBackendParams) error
 	GetSecretGrants(ctx context.Context, uri *secrets.URI, role secrets.SecretRole) ([]secretservice.SecretAccess, error)
@@ -62,4 +64,16 @@ type SecretBackendService interface {
 	BackendConfigInfo(
 		ctx context.Context, p secretbackendservice.BackendConfigParams,
 	) (*provider.ModelBackendConfigInfo, error)
+}
+
+// ApplicationService provides access to the application service.
+type ApplicationService interface {
+	// GetApplicationUUIDByName returns an application UUID by application name.
+	GetApplicationUUIDByName(ctx context.Context, name string) (coreapplication.UUID, error)
+}
+
+// CrossModelRelationService provides access to the cross model relation service.
+type CrossModelRelationService interface {
+	// GetMacaroonForRelation gets the given macaroon for the specified remote relation.
+	GetMacaroonForRelation(ctx context.Context, relationUUID corerelation.UUID) (*macaroon.Macaroon, error)
 }

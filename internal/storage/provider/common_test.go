@@ -6,44 +6,26 @@ package provider_test
 import (
 	"os"
 	"path/filepath"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/storage/provider"
 )
 
 type providerCommonSuite struct{}
 
-var _ = gc.Suite(&providerCommonSuite{})
-
-func (s *providerCommonSuite) TestCommonProvidersExported(c *gc.C) {
-	registry := provider.CommonStorageProviders()
-	var common []storage.ProviderType
-	pTypes, err := registry.StorageProviderTypes()
-	c.Assert(err, jc.ErrorIsNil)
-	for _, pType := range pTypes {
-		common = append(common, pType)
-		p, err := registry.StorageProvider(pType)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(p, gc.NotNil)
-	}
-	c.Assert(common, jc.SameContents, []storage.ProviderType{
-		provider.LoopProviderType,
-		provider.RootfsProviderType,
-		provider.TmpfsProviderType,
-	})
+func TestProviderCommonSuite(t *testing.T) {
+	tc.Run(t, &providerCommonSuite{})
 }
 
 // testDetachFilesystems is a test-case for detaching filesystems that use
 // the common "maybeUnmount" method.
 func testDetachFilesystems(
-	c *gc.C, commands *mockRunCommand,
+	c *tc.C, commands *mockRunCommand,
 	source storage.FilesystemSource,
-	callCtx envcontext.ProviderCallContext,
 	mounted bool,
 	etcDir, fstab string,
 ) {
@@ -51,24 +33,31 @@ func testDetachFilesystems(
 		commands.expect("umount", testMountPoint)
 	}
 
-	results, err := source.DetachFilesystems(callCtx, []storage.FilesystemAttachmentParams{{
-		Filesystem:   names.NewFilesystemTag("0/0"),
-		FilesystemId: "filesystem-0-0",
+	results, err := source.DetachFilesystems(c.Context(), []storage.FilesystemAttachmentParams{{
+		Filesystem: names.NewFilesystemTag("0/0"),
+		ProviderId: "filesystem-0-0",
 		AttachmentParams: storage.AttachmentParams{
 			Machine:    names.NewMachineTag("0"),
 			InstanceId: "inst-id",
 		},
 		Path: testMountPoint,
 	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.HasLen, 1)
-	c.Assert(results[0], jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.HasLen, 1)
+	c.Assert(results[0], tc.ErrorIsNil)
 
 	data, err := os.ReadFile(filepath.Join(etcDir, "fstab"))
 	if os.IsNotExist(err) {
-		c.Assert(fstab, gc.Equals, "")
+		c.Assert(fstab, tc.Equals, "")
 		return
 	}
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(data), gc.Equals, fstab)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(data), tc.Equals, fstab)
+}
+
+func (s *providerCommonSuite) TestAllowedContainerProvider(c *tc.C) {
+	c.Assert(provider.AllowedContainerProvider(provider.LoopProviderType), tc.IsTrue)
+	c.Assert(provider.AllowedContainerProvider(provider.RootfsProviderType), tc.IsTrue)
+	c.Assert(provider.AllowedContainerProvider(provider.TmpfsProviderType), tc.IsTrue)
+	c.Assert(provider.AllowedContainerProvider("somestorage"), tc.IsFalse)
 }

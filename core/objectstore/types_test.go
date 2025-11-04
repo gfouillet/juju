@@ -5,18 +5,22 @@ package objectstore
 
 import (
 	"strings"
+	"testing"
 
-	"github.com/juju/testing"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type objectStoreSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&objectStoreSuite{})
+func TestObjectStoreSuite(t *testing.T) {
+	tc.Run(t, &objectStoreSuite{})
+}
 
-func (s *objectStoreSuite) TestObjectStore(c *gc.C) {
+func (s *objectStoreSuite) TestObjectStore(c *tc.C) {
 	tests := []struct {
 		value string
 		err   string
@@ -34,15 +38,15 @@ func (s *objectStoreSuite) TestObjectStore(c *gc.C) {
 
 		backend, err := ParseObjectStoreType(test.value)
 		if test.err != "" {
-			c.Assert(err, gc.ErrorMatches, test.err)
+			c.Assert(err, tc.ErrorMatches, test.err)
 			continue
 		}
-		c.Assert(err, gc.IsNil)
-		c.Assert(backend, gc.Equals, BackendType(test.value))
+		c.Assert(err, tc.IsNil)
+		c.Assert(backend, tc.Equals, BackendType(test.value))
 	}
 }
 
-func (s *objectStoreSuite) TestBucketName(c *gc.C) {
+func (s *objectStoreSuite) TestBucketName(c *tc.C) {
 	tests := []struct {
 		value string
 		err   string
@@ -94,10 +98,10 @@ func (s *objectStoreSuite) TestBucketName(c *gc.C) {
 
 		s, err := ParseObjectStoreBucketName(test.value)
 		if test.err != "" {
-			c.Assert(err, gc.ErrorMatches, test.err)
+			c.Assert(err, tc.ErrorMatches, test.err)
 			continue
 		}
-		c.Assert(err, gc.IsNil)
-		c.Assert(s, gc.Equals, test.value)
+		c.Assert(err, tc.IsNil)
+		c.Assert(s, tc.Equals, test.value)
 	}
 }

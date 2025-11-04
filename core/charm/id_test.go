@@ -4,32 +4,35 @@
 package charm
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type CharmSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&CharmSuite{})
+func TestCharmSuite(t *testing.T) {
+	tc.Run(t, &CharmSuite{})
+}
 
-func (*CharmSuite) TestIDValidate(c *gc.C) {
+func (*CharmSuite) TestIDValidate(c *tc.C) {
 	tests := []struct {
 		uuid string
 		err  error
 	}{
 		{
 			uuid: "",
-			err:  errors.NotValid,
+			err:  coreerrors.NotValid,
 		},
 		{
 			uuid: "invalid",
-			err:  errors.NotValid,
+			err:  coreerrors.NotValid,
 		},
 		{
 			uuid: uuid.MustNewUUID().String(),
@@ -41,10 +44,10 @@ func (*CharmSuite) TestIDValidate(c *gc.C) {
 		err := ID(test.uuid).Validate()
 
 		if test.err == nil {
-			c.Check(err, gc.IsNil)
+			c.Check(err, tc.IsNil)
 			continue
 		}
 
-		c.Check(err, jc.ErrorIs, test.err)
+		c.Check(err, tc.ErrorIs, test.err)
 	}
 }

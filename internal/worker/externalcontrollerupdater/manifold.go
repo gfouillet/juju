@@ -53,7 +53,8 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	}
 }
 
-// manifoldStart returns a unitassigner worker using the supplied APICaller.
+// manifoldStart returns a externalcontrollerupdater worker using the supplied
+// APICaller.
 func manifoldStart(
 	apiCaller base.APICaller,
 	newExternalControllerWatcherClient NewExternalControllerWatcherClientFunc,
@@ -63,6 +64,7 @@ func manifoldStart(
 		client,
 		newExternalControllerWatcherClient,
 		clock.WallClock,
+		nil,
 	)
 	if err != nil {
 		return nil, errors.Trace(err)

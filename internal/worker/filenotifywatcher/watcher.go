@@ -4,6 +4,7 @@
 package filenotifywatcher
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -109,7 +110,7 @@ func NewWatcher(fileName string, opts ...Option) (FileWatcher, error) {
 	// Ensure that we create the watch path.
 	if _, err := os.Stat(o.path); err != nil && os.IsNotExist(err) {
 		if err := os.MkdirAll(o.path, 0755); err != nil {
-			o.logger.Infof("failed watching file %q in path %q: %v", fileName, o.path, err)
+			o.logger.Infof(context.Background(), "failed watching file %q in path %q: %v", fileName, o.path, err)
 			return newNoopFileWatcher(), nil
 		}
 	}
@@ -122,7 +123,7 @@ func NewWatcher(fileName string, opts ...Option) (FileWatcher, error) {
 	if err := watcher.Watch(o.path); err != nil {
 		// As this is only used for debugging, we don't want to fail if we can't
 		// watch the folder.
-		o.logger.Infof("failed watching file %q in path %q: %v", fileName, o.path, err)
+		o.logger.Infof(context.Background(), "failed watching file %q in path %q: %v", fileName, o.path, err)
 		_ = watcher.Close()
 		return newNoopFileWatcher(), nil
 	}
@@ -136,6 +137,7 @@ func NewWatcher(fileName string, opts ...Option) (FileWatcher, error) {
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "file-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -161,6 +163,9 @@ func (w *Watcher) Changes() <-chan bool {
 }
 
 func (w *Watcher) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	defer func() {
 		_ = w.watcher.Close()
 		close(w.changes)
@@ -172,7 +177,7 @@ func (w *Watcher) loop() error {
 			return w.catacomb.ErrDying()
 		case event := <-w.watcher.Events():
 			if w.logger.IsLevelEnabled(logger.TRACE) {
-				w.logger.Tracef("inotify event for %v", event)
+				w.logger.Tracef(ctx, "inotify event for %v", event)
 			}
 			// Ignore events for other files in the directory.
 			if event.Name != w.watchPath {
@@ -185,15 +190,19 @@ func (w *Watcher) loop() error {
 			}
 
 			if w.logger.IsLevelEnabled(logger.TRACE) {
-				w.logger.Tracef("dispatch event for fileName %q: %v", w.fileName, event)
+				w.logger.Tracef(ctx, "dispatch event for fileName %q: %v", w.fileName, event)
 			}
 
 			w.changes <- opType == created
 
 		case err := <-w.watcher.Errors():
-			w.logger.Errorf("error watching fileName %q with %v", w.fileName, err)
+			w.logger.Errorf(ctx, "error watching fileName %q with %v", w.fileName, err)
 		}
 	}
+}
+
+func (w *Watcher) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }
 
 // opType normalizes the fsnotify op type, to known types.

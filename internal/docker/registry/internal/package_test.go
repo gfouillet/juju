@@ -4,27 +4,18 @@
 package internal
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-
 	"github.com/juju/juju/internal/docker"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
 type (
-	AzureContainerRegistry         = azureContainerRegistry
-	BaseClient                     = baseClient
-	Dockerhub                      = dockerhub
-	GoogleContainerRegistry        = googleContainerRegistry
-	GithubContainerRegistry        = githubContainerRegistry
-	GitlabContainerRegistry        = gitlabContainerRegistry
-	QuayContainerRegistry          = quayContainerRegistry
-	ElasticContainerRegistry       = elasticContainerRegistry
-	ElasticContainerRegistryPublic = elasticContainerRegistryPublic
+	AzureContainerRegistry   = azureContainerRegistry
+	BaseClient               = baseClient
+	Dockerhub                = dockerhub
+	GoogleContainerRegistry  = googleContainerRegistry
+	GithubContainerRegistry  = githubContainerRegistry
+	GitlabContainerRegistry  = gitlabContainerRegistry
+	QuayContainerRegistry    = quayContainerRegistry
+	ElasticContainerRegistry = elasticContainerRegistry
 )
 
 var (
@@ -34,7 +25,7 @@ var (
 	NewTokenTransport                  = newTokenTransport
 	NewElasticContainerRegistryForTest = newElasticContainerRegistryForTest
 	NewAzureContainerRegistry          = newAzureContainerRegistry
-	GetArchitecture                    = getArchitecture
+	GetArchitectures                   = getArchitectures
 	UnwrapNetError                     = unwrapNetError
 )
 

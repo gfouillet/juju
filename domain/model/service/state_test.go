@@ -5,20 +5,26 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"time"
 
-	"github.com/juju/errors"
-
+	"github.com/juju/juju/cloud"
+	corecloud "github.com/juju/juju/core/cloud"
 	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/life"
 	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/user"
-	coreuser "github.com/juju/juju/core/user"
+	"github.com/juju/juju/core/version"
 	usererrors "github.com/juju/juju/domain/access/errors"
 	clouderrors "github.com/juju/juju/domain/cloud/errors"
+	credentialerrors "github.com/juju/juju/domain/credential/errors"
+	domainlife "github.com/juju/juju/domain/life"
 	"github.com/juju/juju/domain/model"
 	modelerrors "github.com/juju/juju/domain/model/errors"
 	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	"github.com/juju/juju/internal/errors"
+	jujutesting "github.com/juju/juju/internal/testing"
 )
 
 type dummyStateCloud struct {
@@ -27,11 +33,18 @@ type dummyStateCloud struct {
 }
 
 type dummyState struct {
-	clouds             map[string]dummyStateCloud
-	models             map[coremodel.UUID]coremodel.Model
-	nonActivatedModels map[coremodel.UUID]coremodel.Model
-	users              map[user.UUID]string
-	secretBackends     []string
+	clouds              map[string]dummyStateCloud
+	models              map[coremodel.UUID]coremodel.Model
+	nonActivatedModels  map[coremodel.UUID]coremodel.Model
+	users               map[user.UUID]user.Name
+	secretBackends      []string
+	controllerModelUUID coremodel.UUID
+	credentialName      string
+}
+
+func (d *dummyState) CheckModelExists(ctx context.Context, uuid coremodel.UUID) (bool, error) {
+	_, exists := d.models[uuid]
+	return exists, nil
 }
 
 type dummyDeleter struct {
@@ -39,8 +52,19 @@ type dummyDeleter struct {
 }
 
 func (d *dummyDeleter) DeleteDB(namespace string) error {
+	if namespace == deletedID {
+		return modelerrors.NotFound
+	}
 	d.deleted[namespace] = struct{}{}
 	return nil
+}
+
+func (d *dummyState) CloudSupportsAuthType(
+	_ context.Context,
+	name string,
+	authType cloud.AuthType,
+) (bool, error) {
+	return true, nil
 }
 
 func (d *dummyState) CloudType(
@@ -55,30 +79,36 @@ func (d *dummyState) CloudType(
 	return "aws", nil
 }
 
+func (d *dummyState) ListModelUUIDsForUser(_ context.Context, _ user.UUID) ([]coremodel.UUID, error) {
+	return nil, nil
+}
+
 func (d *dummyState) Create(
 	_ context.Context,
 	modelID coremodel.UUID,
 	modelType coremodel.ModelType,
-	args model.ModelCreationArgs,
+	args model.GlobalModelCreationArgs,
 ) error {
 	if _, exists := d.models[modelID]; exists {
-		return fmt.Errorf("%w %q", modelerrors.AlreadyExists, modelID)
+		return errors.Errorf("%w %q", modelerrors.AlreadyExists, modelID)
 	}
 
 	for _, v := range d.models {
-		if v.Name == args.Name && v.Owner == args.Owner {
-			return fmt.Errorf("%w for name %q and owner %q", modelerrors.AlreadyExists, v.Name, v.Owner)
+		if v.Name == args.Name && v.Qualifier == args.Qualifier {
+			return errors.Errorf("%w for name %s/%s", modelerrors.AlreadyExists, v.Qualifier, v.Name)
 		}
 	}
 
 	cloud, exists := d.clouds[args.Cloud]
 	if !exists {
-		return fmt.Errorf("%w cloud %q", errors.NotFound, args.Cloud)
+		return errors.Errorf("%w cloud %q", coreerrors.NotFound, args.Cloud)
 	}
 
-	userName, exists := d.users[user.UUID(args.Owner.String())]
-	if !exists {
-		return fmt.Errorf("%w for owner %q", usererrors.UserNotFound, args.Owner)
+	for _, u := range args.AdminUsers {
+		_, exists = d.users[u]
+		if !exists {
+			return errors.Errorf("%w for creator %q", usererrors.UserNotFound, u)
+		}
 	}
 
 	hasRegion := false
@@ -88,12 +118,12 @@ func (d *dummyState) Create(
 		}
 	}
 	if !hasRegion {
-		return fmt.Errorf("%w cloud %q region %q", errors.NotFound, args.Cloud, args.CloudRegion)
+		return errors.Errorf("%w cloud %q region %q", coreerrors.NotFound, args.Cloud, args.CloudRegion)
 	}
 
 	if !args.Credential.IsZero() {
 		if _, exists := cloud.Credentials[args.Credential.String()]; !exists {
-			return fmt.Errorf("%w credential %q", errors.NotFound, args.Credential.String())
+			return errors.Errorf("%w credential %q", coreerrors.NotFound, args.Credential.String())
 		}
 	}
 
@@ -109,16 +139,14 @@ func (d *dummyState) Create(
 	}
 
 	d.nonActivatedModels[modelID] = coremodel.Model{
-		AgentVersion: args.AgentVersion,
-		Name:         args.Name,
-		UUID:         modelID,
-		ModelType:    modelType,
-		Cloud:        args.Cloud,
-		CloudRegion:  args.CloudRegion,
-		Credential:   args.Credential,
-		Owner:        args.Owner,
-		OwnerName:    userName,
-		Life:         life.Alive,
+		Name:        args.Name,
+		Qualifier:   args.Qualifier,
+		UUID:        modelID,
+		ModelType:   modelType,
+		Cloud:       args.Cloud,
+		CloudRegion: args.CloudRegion,
+		Credential:  args.Credential,
+		Life:        life.Alive,
 	}
 	return nil
 }
@@ -145,18 +173,28 @@ func (d *dummyState) GetModel(
 ) (coremodel.Model, error) {
 	info, exists := d.models[uuid]
 	if !exists {
-		return coremodel.Model{}, fmt.Errorf("%w %q", modelerrors.NotFound, uuid)
+		return coremodel.Model{}, errors.Errorf("%w %q", modelerrors.NotFound, uuid)
+	}
+	return info, nil
+}
+
+func (d *dummyState) GetControllerModel(
+	_ context.Context,
+) (coremodel.Model, error) {
+	info, exists := d.models[d.controllerModelUUID]
+	if !exists {
+		return coremodel.Model{}, modelerrors.NotFound
 	}
 	return info, nil
 }
 
 func (d *dummyState) GetModelByName(
 	_ context.Context,
-	userName string,
+	qualifier string,
 	modelName string,
 ) (coremodel.Model, error) {
 	for _, model := range d.models {
-		if model.OwnerName == userName && model.Name == modelName {
+		if model.Qualifier.String() == qualifier && model.Name == modelName {
 			return model, nil
 		}
 	}
@@ -169,7 +207,7 @@ func (d *dummyState) GetModelType(
 ) (coremodel.ModelType, error) {
 	info, exists := d.models[uuid]
 	if !exists {
-		return "", fmt.Errorf("%w %q", modelerrors.NotFound, uuid)
+		return "", errors.Errorf("%w %q", modelerrors.NotFound, uuid)
 	}
 	return info.ModelType, nil
 }
@@ -179,7 +217,7 @@ func (d *dummyState) Delete(
 	uuid coremodel.UUID,
 ) error {
 	if _, exists := d.models[uuid]; !exists {
-		return fmt.Errorf("%w %q", modelerrors.NotFound, uuid)
+		return errors.Errorf("%w %q", modelerrors.NotFound, uuid)
 	}
 	delete(d.models, uuid)
 	return nil
@@ -198,11 +236,15 @@ func (d *dummyState) ListAllModels(
 
 func (d *dummyState) ListModelsForUser(
 	_ context.Context,
-	userID coreuser.UUID,
+	userID user.UUID,
 ) ([]coremodel.Model, error) {
 	rval := []coremodel.Model{}
 	for _, m := range d.models {
-		if m.Owner == userID {
+		userName, ok := d.users[userID]
+		if !ok {
+			continue
+		}
+		if m.Qualifier.String() == userName.String() {
 			rval = append(rval, m)
 		}
 	}
@@ -210,7 +252,7 @@ func (d *dummyState) ListModelsForUser(
 	return rval, nil
 }
 
-func (d *dummyState) ListModelIDs(
+func (d *dummyState) ListModelUUIDs(
 	_ context.Context,
 ) ([]coremodel.UUID, error) {
 	rval := make([]coremodel.UUID, 0, len(d.models))
@@ -221,24 +263,24 @@ func (d *dummyState) ListModelIDs(
 	return rval, nil
 }
 
-func (d *dummyState) ModelCloudNameAndCredential(
+func (d *dummyState) GetControllerModelUUID(
 	_ context.Context,
-	modelName string,
-	ownerName string,
-) (string, credential.Key, error) {
-	var ownerUUID user.UUID
-	for k, v := range d.users {
-		if v == ownerName {
-			ownerUUID = k
-		}
-	}
+) (coremodel.UUID, error) {
+	return coremodel.UUID(""), nil
+}
 
-	for _, model := range d.models {
-		if model.Owner == ownerUUID && model.Name == modelName {
-			return model.Cloud, model.Credential, nil
-		}
-	}
-	return "", credential.Key{}, modelerrors.NotFound
+func (d *dummyState) GetModelCloudInfo(
+	_ context.Context,
+	_ coremodel.UUID,
+) (string, string, error) {
+	return "", "", errors.Errorf("not implemented")
+}
+
+func (d *dummyState) GetModelCloudAndCredential(
+	_ context.Context,
+	_ coremodel.UUID,
+) (corecloud.UUID, credential.UUID, error) {
+	return "", "", errors.Errorf("not implemented")
 }
 
 func (d *dummyState) UpdateCredential(
@@ -248,21 +290,115 @@ func (d *dummyState) UpdateCredential(
 ) error {
 	info, exists := d.models[uuid]
 	if !exists {
-		return fmt.Errorf("%w %q", modelerrors.NotFound, uuid)
+		return errors.Errorf("%w %q", modelerrors.NotFound, uuid)
 	}
 
 	cloud, exists := d.clouds[credentialKey.Cloud]
 	if !exists {
-		return fmt.Errorf("%w cloud %q", errors.NotFound, credentialKey.Cloud)
+		return errors.Errorf("%w cloud %q", coreerrors.NotFound, credentialKey.Cloud)
 	}
 
 	if _, exists := cloud.Credentials[credentialKey.String()]; !exists {
-		return fmt.Errorf("%w credential %q", errors.NotFound, credentialKey.String())
+		return errors.Errorf("%w credential %q", coreerrors.NotFound, credentialKey.String())
 	}
 
 	if info.Cloud != credentialKey.Cloud {
-		return fmt.Errorf("%w credential cloud is different to that of the model", errors.NotValid)
+		return errors.Errorf("%w credential cloud is different to that of the model", coreerrors.NotValid)
 	}
 
 	return nil
+}
+
+func (d *dummyState) DefaultCloudCredentialNameForOwner(ctx context.Context, owner user.Name, cloudName string) (string, error) {
+	if d.credentialName != "" {
+		return "", credentialerrors.NotFound
+	}
+	return d.credentialName, nil
+}
+
+func (d *dummyState) GetModelUsers(_ context.Context, _ coremodel.UUID) ([]coremodel.ModelUserInfo, error) {
+	var rval []coremodel.ModelUserInfo
+	for _, name := range d.users {
+		rval = append(rval, coremodel.ModelUserInfo{
+			Name:           name,
+			DisplayName:    name.Name(),
+			Access:         permission.AdminAccess,
+			LastModelLogin: time.Time{},
+		})
+	}
+	return rval, nil
+}
+
+func (d *dummyState) ListModelSummariesForUser(_ context.Context, userName user.Name) ([]coremodel.UserModelSummary, error) {
+	var rval []coremodel.UserModelSummary
+	for _, m := range d.models {
+		if m.Qualifier.String() == userName.String() {
+			rval = append(rval, coremodel.UserModelSummary{
+				UserAccess: permission.AdminAccess,
+				ModelSummary: coremodel.ModelSummary{
+					Name:           m.Name,
+					UUID:           m.UUID,
+					ModelType:      m.ModelType,
+					CloudName:      m.Cloud,
+					CloudType:      m.CloudType,
+					CloudRegion:    m.CloudRegion,
+					ControllerUUID: jujutesting.ControllerTag.Id(),
+					IsController:   m.UUID == d.controllerModelUUID,
+					Qualifier:      m.Qualifier,
+					Life:           m.Life,
+					AgentVersion:   version.Current,
+				},
+			})
+		}
+	}
+	return rval, nil
+}
+
+func (d *dummyState) ListAllModelSummaries(_ context.Context) ([]coremodel.ModelSummary, error) {
+	var rval []coremodel.ModelSummary
+	for _, m := range d.models {
+		rval = append(rval, coremodel.ModelSummary{
+			Name:           m.Name,
+			UUID:           m.UUID,
+			ModelType:      m.ModelType,
+			CloudName:      m.Cloud,
+			CloudType:      m.CloudType,
+			CloudRegion:    m.CloudRegion,
+			ControllerUUID: jujutesting.ControllerTag.Id(),
+			IsController:   m.UUID == d.controllerModelUUID,
+			Qualifier:      m.Qualifier,
+			Life:           m.Life,
+			AgentVersion:   version.Current,
+		})
+	}
+	return rval, nil
+}
+
+func (d *dummyState) InitialWatchActivatedModelsStatement() (string, string) {
+	return "model", "SELECT activated from model"
+}
+
+func (d *dummyState) InitialWatchModelTableName() string {
+	return "model"
+}
+
+func (d *dummyState) GetActivatedModelUUIDs(ctx context.Context, uuids []coremodel.UUID) ([]coremodel.UUID, error) {
+	return nil, nil
+}
+
+func (d *dummyState) GetDeadModels(ctx context.Context) ([]coremodel.UUID, error) {
+	return nil, nil
+}
+
+func (d *dummyState) GetModelLife(ctx context.Context, uuid coremodel.UUID) (domainlife.Life, error) {
+	switch d.models[uuid].Life {
+	case life.Alive:
+		return domainlife.Alive, nil
+	case life.Dead:
+		return domainlife.Dead, nil
+	case life.Dying:
+		return domainlife.Dying, nil
+	default:
+		return domainlife.Life(0), errors.Errorf("invalid life value %v", d.models[uuid].Life)
+	}
 }

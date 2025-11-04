@@ -9,10 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/database"
 	modeltesting "github.com/juju/juju/core/model/testing"
@@ -20,15 +19,18 @@ import (
 	"github.com/juju/juju/internal/database/app"
 	"github.com/juju/juju/internal/database/client"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type bootstrapSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&bootstrapSuite{})
+func TestBootstrapSuite(t *testing.T) {
+	tc.Run(t, &bootstrapSuite{})
+}
 
-func (s *bootstrapSuite) TestBootstrapSuccess(c *gc.C) {
+func (s *bootstrapSuite) TestBootstrapSuccess(c *tc.C) {
 	mgr := &testNodeManager{c: c}
 
 	// check tests the variadic operation functionality
@@ -56,7 +58,7 @@ func (s *bootstrapSuite) TestBootstrapSuccess(c *gc.C) {
 			}
 
 			// Ensure we have a nodeID in the controller node.
-			row := tx.QueryRowContext(ctx, "SELECT controller_id, dqlite_node_id, bind_address FROM controller_node")
+			row := tx.QueryRowContext(ctx, "SELECT controller_id, dqlite_node_id, dqlite_bind_address FROM controller_node")
 			var controllerID, nodeID uint64
 			var bindAddress string
 			err = row.Scan(&controllerID, &nodeID, &bindAddress)
@@ -71,20 +73,20 @@ func (s *bootstrapSuite) TestBootstrapSuccess(c *gc.C) {
 				return fmt.Errorf("expected dqlite_node_id to be non-zero")
 			}
 			if bindAddress != "127.0.0.1" {
-				return fmt.Errorf("expected bind_address to be 127.0.0.1")
+				return fmt.Errorf("expected dqlite_bind_address to be 127.0.0.1")
 			}
 
 			return nil
 		})
 	}
 
-	err := BootstrapDqlite(context.Background(), mgr, modeltesting.GenModelUUID(c), loggertesting.WrapCheckLog(c), check)
-	c.Assert(err, jc.ErrorIsNil)
+	err := BootstrapDqlite(c.Context(), mgr, modeltesting.GenModelUUID(c), loggertesting.WrapCheckLog(c), check)
+	c.Assert(err, tc.ErrorIsNil)
 
 }
 
 type testNodeManager struct {
-	c       *gc.C
+	c       *tc.C
 	dataDir string
 	port    int
 }
@@ -107,8 +109,8 @@ func (f *testNodeManager) WithPreferredCloudLocalAddressOption(network.ConfigSou
 func (f *testNodeManager) WithLoopbackAddressOption() app.Option {
 	if f.port == 0 {
 		l, err := net.Listen("tcp", ":0")
-		f.c.Assert(err, jc.ErrorIsNil)
-		f.c.Assert(l.Close(), jc.ErrorIsNil)
+		f.c.Assert(err, tc.ErrorIsNil)
+		f.c.Assert(l.Close(), tc.ErrorIsNil)
 		f.port = l.Addr().(*net.TCPAddr).Port
 	}
 	return app.WithAddress(fmt.Sprintf("127.0.0.1:%d", f.port))

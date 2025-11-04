@@ -4,47 +4,48 @@
 package gate_test
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/gate"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	manifold dependency.Manifold
 	worker   worker.Worker
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.manifold = gate.Manifold()
-	w, err := s.manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := s.manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.worker = w
 }
 
-func (s *ManifoldSuite) TearDownTest(c *gc.C) {
+func (s *ManifoldSuite) TearDownTest(c *tc.C) {
 	if s.worker != nil {
 		checkStop(c, s.worker)
 	}
 	s.IsolationSuite.TearDownTest(c)
 }
 
-func (s *ManifoldSuite) TestLocked(c *gc.C) {
+func (s *ManifoldSuite) TestLocked(c *tc.C) {
 	w := waiter(c, s.manifold, s.worker)
 	assertLocked(c, w)
 }
 
-func (s *ManifoldSuite) TestUnlock(c *gc.C) {
+func (s *ManifoldSuite) TestUnlock(c *tc.C) {
 	u := unlocker(c, s.manifold, s.worker)
 	w := waiter(c, s.manifold, s.worker)
 
@@ -52,7 +53,7 @@ func (s *ManifoldSuite) TestUnlock(c *gc.C) {
 	assertUnlocked(c, w)
 }
 
-func (s *ManifoldSuite) TestUnlockAgain(c *gc.C) {
+func (s *ManifoldSuite) TestUnlockAgain(c *tc.C) {
 	u := unlocker(c, s.manifold, s.worker)
 	w := waiter(c, s.manifold, s.worker)
 
@@ -61,28 +62,28 @@ func (s *ManifoldSuite) TestUnlockAgain(c *gc.C) {
 	assertUnlocked(c, w)
 }
 
-func (s *ManifoldSuite) TestRestartLocks(c *gc.C) {
+func (s *ManifoldSuite) TestRestartLocks(c *tc.C) {
 	u := unlocker(c, s.manifold, s.worker)
 	u.Unlock()
 
 	workertest.CleanKill(c, s.worker)
-	worker, err := s.manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	worker, err := s.manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, worker)
 
 	w := waiter(c, s.manifold, worker)
 	assertLocked(c, w)
 }
 
-func (s *ManifoldSuite) TestManifoldWithLockWorkersConnected(c *gc.C) {
+func (s *ManifoldSuite) TestManifoldWithLockWorkersConnected(c *tc.C) {
 	lock := gate.NewLock()
 	manifold := gate.ManifoldEx(lock)
-	worker, err := manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	worker, err := manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, worker)
 
-	worker2, err := manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	worker2, err := manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, worker2)
 
 	u := unlocker(c, manifold, worker)
@@ -92,10 +93,10 @@ func (s *ManifoldSuite) TestManifoldWithLockWorkersConnected(c *gc.C) {
 	assertUnlocked(c, w)
 }
 
-func (s *ManifoldSuite) TestLockOutput(c *gc.C) {
+func (s *ManifoldSuite) TestLockOutput(c *tc.C) {
 	var lock gate.Lock
 	err := s.manifold.Output(s.worker, &lock)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	w := waiter(c, s.manifold, s.worker)
 	assertLocked(c, w)
@@ -103,10 +104,10 @@ func (s *ManifoldSuite) TestLockOutput(c *gc.C) {
 	assertUnlocked(c, w)
 }
 
-func (s *ManifoldSuite) TestDifferentManifoldWorkersUnconnected(c *gc.C) {
+func (s *ManifoldSuite) TestDifferentManifoldWorkersUnconnected(c *tc.C) {
 	manifold2 := gate.Manifold()
-	worker2, err := manifold2.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	worker2, err := manifold2.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer checkStop(c, worker2)
 
 	u := unlocker(c, s.manifold, s.worker)
@@ -116,20 +117,20 @@ func (s *ManifoldSuite) TestDifferentManifoldWorkersUnconnected(c *gc.C) {
 	assertLocked(c, w)
 }
 
-func (s *ManifoldSuite) TestAlreadyUnlockedIsUnlocked(c *gc.C) {
+func (s *ManifoldSuite) TestAlreadyUnlockedIsUnlocked(c *tc.C) {
 	w := gate.AlreadyUnlocked{}
 	assertUnlocked(c, w)
 }
 
-func (s *ManifoldSuite) TestManifoldEx(c *gc.C) {
+func (s *ManifoldSuite) TestManifoldEx(c *tc.C) {
 	lock := gate.NewLock()
 
 	manifold := gate.ManifoldEx(lock)
 	var waiter1 gate.Waiter = lock
 	var unlocker1 gate.Unlocker = lock
 
-	worker, err := manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
+	worker, err := manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer checkStop(c, worker)
 	waiter2 := waiter(c, manifold, worker)
 
@@ -141,24 +142,24 @@ func (s *ManifoldSuite) TestManifoldEx(c *gc.C) {
 	assertUnlocked(c, waiter2)
 }
 
-func unlocker(c *gc.C, m dependency.Manifold, w worker.Worker) gate.Unlocker {
+func unlocker(c *tc.C, m dependency.Manifold, w worker.Worker) gate.Unlocker {
 	var unlocker gate.Unlocker
 	err := m.Output(w, &unlocker)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unlocker, gc.NotNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(unlocker, tc.NotNil)
 	return unlocker
 }
 
-func waiter(c *gc.C, m dependency.Manifold, w worker.Worker) gate.Waiter {
+func waiter(c *tc.C, m dependency.Manifold, w worker.Worker) gate.Waiter {
 	var waiter gate.Waiter
 	err := m.Output(w, &waiter)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(waiter, gc.NotNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(waiter, tc.NotNil)
 	return waiter
 }
 
-func assertLocked(c *gc.C, waiter gate.Waiter) {
-	c.Assert(waiter.IsUnlocked(), jc.IsFalse)
+func assertLocked(c *tc.C, waiter gate.Waiter) {
+	c.Assert(waiter.IsUnlocked(), tc.IsFalse)
 	select {
 	case <-waiter.Unlocked():
 		c.Fatalf("expected gate to be locked")
@@ -166,8 +167,8 @@ func assertLocked(c *gc.C, waiter gate.Waiter) {
 	}
 }
 
-func assertUnlocked(c *gc.C, waiter gate.Waiter) {
-	c.Assert(waiter.IsUnlocked(), jc.IsTrue)
+func assertUnlocked(c *tc.C, waiter gate.Waiter) {
+	c.Assert(waiter.IsUnlocked(), tc.IsTrue)
 	select {
 	case <-waiter.Unlocked():
 	default:
@@ -175,7 +176,7 @@ func assertUnlocked(c *gc.C, waiter gate.Waiter) {
 	}
 }
 
-func checkStop(c *gc.C, w worker.Worker) {
+func checkStop(c *tc.C, w worker.Worker) {
 	err := worker.Stop(w)
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(err, tc.ErrorIsNil)
 }

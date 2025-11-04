@@ -59,7 +59,7 @@ func (p vaultProvider) Initialise(cfg *provider.ModelBackendConfig) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logger.Debugf("kv mounts: %v", mounts)
+	logger.Debugf(context.TODO(), "kv mounts: %v", mounts)
 	modelUUID := cfg.ModelUUID
 	mountPath := modelPathPrefix(cfg.ModelName, modelUUID)
 	if _, ok := mounts[mountPath+"/"]; ok {
@@ -84,12 +84,12 @@ func (p vaultProvider) Initialise(cfg *provider.ModelBackendConfig) error {
 }
 
 // CleanupModel deletes all secrets and policies associated with the model.
-func (p vaultProvider) CleanupModel(cfg *provider.ModelBackendConfig) (err error) {
+func (p vaultProvider) CleanupModel(ctx context.Context, cfg *provider.ModelBackendConfig) (err error) {
 	defer func() {
 		if err != nil && strings.HasSuffix(err.Error(), "no route to host") {
 			// There is nothing we can do now, so just log the error and continue.
 			err = nil
-			logger.Warningf("failed to cleanup secrets for model %q: %v", cfg.ModelUUID, err)
+			logger.Warningf(context.TODO(), "failed to cleanup secrets for model %q: %v", cfg.ModelUUID, err)
 		}
 	}()
 
@@ -101,7 +101,6 @@ func (p vaultProvider) CleanupModel(cfg *provider.ModelBackendConfig) (err error
 	sys := k.client.Sys()
 
 	// First remove any policies.
-	ctx := context.Background()
 	policies, err := sys.ListPoliciesWithContext(ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -140,7 +139,7 @@ func (p vaultProvider) CleanupModel(cfg *provider.ModelBackendConfig) (err error
 }
 
 // CleanupSecrets removes policies associated with the removed secrets.
-func (p vaultProvider) CleanupSecrets(ctx context.Context, cfg *provider.ModelBackendConfig, _ string, removed provider.SecretRevisions) error {
+func (p vaultProvider) CleanupSecrets(ctx context.Context, cfg *provider.ModelBackendConfig, _ secrets.Accessor, removed provider.SecretRevisions) error {
 	modelPath := modelPathPrefix(cfg.ModelName, cfg.ModelUUID)
 	client, err := p.newBackend(modelPath, &cfg.BackendConfig)
 	if err != nil {
@@ -199,35 +198,21 @@ func (p vaultProvider) RestrictedConfig(
 		// Because we may run into a situation that the worker creates a secret in the vault but gets killed/restarted
 		// before it can update the secret to the new backend, we need to allow the worker to update the content
 		// after it's coming up again.
-		rule := fmt.Sprintf(`path "%s/*" {capabilities = ["update"]}`, mountPath)
-		policyName := mountPath + "-update"
-		err = sys.PutPolicyWithContext(ctx, policyName, rule)
-		if err != nil {
-			return nil, errors.Annotatef(err, "creating update policy for model %q for the drain worker", mountPath)
+		if err := ensurePolicy(ctx, sys, &policies, mountPath, "update"); err != nil {
+			return nil, errors.Trace(err)
 		}
-		policies = append(policies, policyName)
-	}
-	if adminUser {
+	} else if adminUser {
 		// For admin users, all secrets for the model can be read.
-		rule := fmt.Sprintf(`path "%s/*" {capabilities = ["read"]}`, mountPath)
-		policyName := mountPath + "-read"
-		err = sys.PutPolicyWithContext(ctx, policyName, rule)
-		if err != nil {
-			return nil, errors.Annotatef(err, "creating read policy for model %q", mountPath)
+		if err := ensurePolicy(ctx, sys, &policies, mountPath, "read"); err != nil {
+			return nil, errors.Trace(err)
 		}
-		policies = append(policies, policyName)
-	} else {
-		// Agents can create new secrets in the model.
-		rule := fmt.Sprintf(`path "%s/*" {capabilities = ["create"]}`, mountPath)
-		policyName := mountPath + "-create"
-		err = sys.PutPolicyWithContext(ctx, policyName, rule)
-		if err != nil {
-			return nil, errors.Annotatef(err, "creating create policy for model %q", mountPath)
-		}
-		policies = append(policies, policyName)
+	}
+	// Agents, drain workers and admin users (creates user secrets) can create new secrets in the model.
+	if err := ensurePolicy(ctx, sys, &policies, mountPath, "create"); err != nil {
+		return nil, errors.Trace(err)
 	}
 	// Any secrets owned by the agent can be updated/deleted etc.
-	logger.Debugf("owned secrets: %#v", owned)
+	logger.Debugf(context.TODO(), "owned secrets: %#v", owned)
 	for id := range owned {
 		rule := fmt.Sprintf(`path "%s/%s-*" {capabilities = ["create", "read", "update", "delete", "list"]}`, mountPath, id)
 		policyName := fmt.Sprintf("%s-%s-owner", mountPath, id)
@@ -239,7 +224,7 @@ func (p vaultProvider) RestrictedConfig(
 	}
 
 	// Any secrets consumed by the agent can be read etc.
-	logger.Debugf("consumed secrets: %#v", read)
+	logger.Debugf(context.TODO(), "consumed secrets: %#v", read)
 	for id := range read {
 		rule := fmt.Sprintf(`path "%s/%s-*" {capabilities = ["read"]}`, mountPath, id)
 		policyName := fmt.Sprintf("%s-%s-read", mountPath, id)
@@ -249,7 +234,7 @@ func (p vaultProvider) RestrictedConfig(
 		}
 		policies = append(policies, policyName)
 	}
-	logger.Tracef("policies: %#v", policies)
+	logger.Tracef(context.TODO(), "policies: %#v", policies)
 	s, err := backend.client.Auth().Token().Create(&api.TokenCreateRequest{
 		TTL:             "10m", // 10 minutes for now, can configure later.
 		NoDefaultPolicy: true,
@@ -262,6 +247,17 @@ func (p vaultProvider) RestrictedConfig(
 	cfg := adminCfg.BackendConfig
 	cfg.Config[TokenKey] = s.Auth.ClientToken
 	return &cfg, nil
+}
+
+func ensurePolicy(ctx context.Context, sys *api.Sys, policies *[]string, mountPath, capability string) error {
+	rule := fmt.Sprintf(`path "%s/*" {capabilities = [%q]}`, mountPath, capability)
+	policyName := fmt.Sprintf("%s-%s", mountPath, capability)
+	err := sys.PutPolicyWithContext(ctx, policyName, rule)
+	if err != nil {
+		return errors.Annotatef(err, "creating create policy for model %q", mountPath)
+	}
+	*policies = append(*policies, policyName)
+	return nil
 }
 
 // NewVaultClient is patched for testing.
@@ -334,7 +330,7 @@ func (p vaultProvider) newBackendNoMount(cfg *provider.BackendConfig) (*vaultBac
 }
 
 // RefreshAuth implements SupportAuthRefresh.
-func (p vaultProvider) RefreshAuth(backendConfig provider.BackendConfig, validFor time.Duration) (_ *provider.BackendConfig, err error) {
+func (p vaultProvider) RefreshAuth(_ context.Context, backendConfig provider.BackendConfig, validFor time.Duration) (_ *provider.BackendConfig, err error) {
 	defer func() {
 		err = maybePermissionDenied(err)
 	}()

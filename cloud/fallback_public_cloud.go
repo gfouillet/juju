@@ -22,6 +22,8 @@ clouds:
         endpoint: https://ec2.us-west-2.amazonaws.com
       ca-central-1:
         endpoint: https://ec2.ca-central-1.amazonaws.com
+      mx-central-1:
+        endpoint: https://ec2.mx-central-1.amazonaws.com
       eu-west-1:
         endpoint: https://ec2.eu-west-1.amazonaws.com
       eu-west-2:
@@ -54,6 +56,10 @@ clouds:
         endpoint: https://ec2.ap-southeast-3.amazonaws.com
       ap-southeast-4:
         endpoint: https://ec2.ap-southeast-4.amazonaws.com
+      ap-southeast-5:
+        endpoint: https://ec2.ap-southeast-5.amazonaws.com
+      ap-southeast-7:
+        endpoint: https://ec2.ap-southeast-7.amazonaws.com
       ap-northeast-1:
         endpoint: https://ec2.ap-northeast-1.amazonaws.com
       ap-northeast-2:
@@ -66,6 +72,8 @@ clouds:
         endpoint: https://ec2.me-central-1.amazonaws.com
       sa-east-1:
         endpoint: https://ec2.sa-east-1.amazonaws.com
+      il-central-1:
+        endpoint: https://ec2.il-central-1.amazonaws.com
   aws-china:
     type: ec2
     description: Amazon China
@@ -144,7 +152,7 @@ clouds:
     # recent Juju versions, and are retained for compatibility only.
     type: azure
     description: Microsoft Azure
-    auth-types: [ interactive, service-principal-secret ]
+    auth-types: [ interactive, service-principal-secret, managed-identity ]
     regions:
       centralus:
         endpoint: https://management.azure.com
@@ -322,6 +330,38 @@ clouds:
         endpoint: https://management.azure.com
         storage-endpoint: https://core.windows.net
         identity-endpoint: https://graph.windows.net
+      chilecentral:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      indonesiacentral:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      israelcentral:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      italynorth:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      malaysiawest:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      mexicocentral:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      newzealandnorth:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
+      spaincentral:
+        endpoint: https://management.azure.com
+        storage-endpoint: https://core.windows.net
+        identity-endpoint: https://login.microsoftonline.com
   azure-china:
     type: azure
     description: Microsoft Azure China
@@ -448,59 +488,4 @@ clouds:
         endpoint: https://iaas.us-phoenix-1.oraclecloud.com
       us-sanjose-1:
         endpoint: https://iaas.us-sanjose-1.oraclecloud.com
-  equinix:
-    type: equinix
-    description: Equinix Metal
-    auth-types: [access-key]
-    regions:
-      px:
-        endpoint: https://api.equinix.com/metal/v1/
-      dc:
-        endpoint: https://api.equinix.com/metal/v1/
-      at:
-        endpoint: https://api.equinix.com/metal/v1/
-      hk:
-        endpoint: https://api.equinix.com/metal/v1/
-      am:
-        endpoint: https://api.equinix.com/metal/v1/
-      ny:
-        endpoint: https://api.equinix.com/metal/v1/
-      sl:
-        endpoint: https://api.equinix.com/metal/v1/
-      ty:
-        endpoint: https://api.equinix.com/metal/v1/
-      fr:
-        endpoint: https://api.equinix.com/metal/v1/
-      sy:
-        endpoint: https://api.equinix.com/metal/v1/
-      ld:
-        endpoint: https://api.equinix.com/metal/v1/
-      sg:
-        endpoint: https://api.equinix.com/metal/v1/
-      kc:
-        endpoint: https://api.equinix.com/metal/v1/
-      pa:
-        endpoint: https://api.equinix.com/metal/v1/
-      tr:
-        endpoint: https://api.equinix.com/metal/v1/
-      mr:
-        endpoint: https://api.equinix.com/metal/v1/
-      YYZ:
-        endpoint: https://api.equinix.com/metal/v1/
-      ho:
-        endpoint: https://api.equinix.com/metal/v1/
-      se:
-        endpoint: https://api.equinix.com/metal/v1/
-      sv:
-        endpoint: https://api.equinix.com/metal/v1/
-      la:
-        endpoint: https://api.equinix.com/metal/v1/
-      ch:
-        endpoint: https://api.equinix.com/metal/v1/
-      da:
-        endpoint: https://api.equinix.com/metal/v1/
-      pi:
-        endpoint: https://api.equinix.com/metal/v1/
-      dt:
-        endpoint: https://api.equinix.com/metal/v1/
 `

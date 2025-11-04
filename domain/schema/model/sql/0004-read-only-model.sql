@@ -9,15 +9,22 @@ CREATE TABLE model (
     uuid TEXT NOT NULL PRIMARY KEY,
     controller_uuid TEXT NOT NULL,
     name TEXT NOT NULL,
+    qualifier TEXT NOT NULL,
     type TEXT NOT NULL,
-    target_agent_version TEXT NOT NULL,
     cloud TEXT NOT NULL,
     cloud_type TEXT NOT NULL,
     cloud_region TEXT,
     credential_owner TEXT,
-    credential_name TEXT
+    credential_name TEXT,
+    is_controller_model BOOLEAN DEFAULT FALSE
 );
 
 -- A unique constraint over a constant index ensures only 1 entry matching the
 -- condition can exist.
 CREATE UNIQUE INDEX idx_singleton_model ON model ((1));
+
+CREATE VIEW v_model_metrics AS
+SELECT
+    (SELECT COUNT(DISTINCT uuid) FROM application) AS application_count,
+    (SELECT COUNT(DISTINCT uuid) FROM machine) AS machine_count,
+    (SELECT COUNT(DISTINCT uuid) FROM unit) AS unit_count;

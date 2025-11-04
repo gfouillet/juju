@@ -4,14 +4,15 @@
 package jujuc
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -53,19 +54,62 @@ any changes that have been made with "relation-set".
 When reading remote relation data, a charm can call relation-get --app - to get
 the data for the application data bag that is set by the remote applications
 leader.
+
+Further details:
+relation-get reads the settings of the local unit, or of any remote unit, in a given
+relation (set with -r, defaulting to the current relation identifier, as in relation-set).
+The first argument specifies the settings key, and the second the remote unit, which may
+be omitted if a default is available (that is, when running a relation hook other
+than -relation-broken).
+
+If the first argument is omitted, a dictionary of all current keys and values will be
+printed; all values are always plain strings without any interpretation. If you need to
+specify a remote unit but want to see all settings, use - for the first argument.
+
+The environment variable JUJU_REMOTE_UNIT stores the default remote unit.
+
+You should never depend upon the presence of any given key in relation-get output.
+Processing that depends on specific values (other than private-address) should be
+restricted to -relation-changed hooks for the relevant unit, and the absence of a
+remote unit’s value should never be treated as an error in the local unit.
+
+In practice, it is common and encouraged for -relation-changed hooks to exit early,
+without error, after inspecting relation-get output and determining the data is
+inadequate; and for all other hooks to be resilient in the face of missing keys,
+such that -relation-changed hooks will be sufficient to complete all configuration
+that depends on remote unit settings.
+
+Key value pairs for remote units that have departed remain accessible for the lifetime
+of the relation.
+`
+	examples := `
+    # Getting the settings of the default unit in the default relation is done with:
+    $ relation-get
+    username: jim
+    password: "12345"
+
+    # To get a specific setting from the default remote unit in the default relation
+    $ relation-get username
+    jim
+
+    # To get all settings from a particular remote unit in a particular relation you
+    $ relation-get -r database:7 - mongodb/5
+    username: bob
+    password: 2db673e81ffa264c
 `
 	// There's nothing we can really do about the error here.
 	if name, err := c.ctx.RemoteUnitName(); err == nil {
 		args = "[<key> [<unit id>]]"
 		doc += fmt.Sprintf("Current default unit id is %q.", name)
 	} else if !errors.Is(err, errors.NotFound) {
-		logger.Errorf("Failed to retrieve remote unit name: %v", err)
+		logger.Errorf(context.Background(), "Failed to retrieve remote unit name: %v", err)
 	}
 	return jujucmd.Info(&cmd.Info{
-		Name:    "relation-get",
-		Args:    args,
-		Purpose: "get relation settings",
-		Doc:     doc,
+		Name:     "relation-get",
+		Args:     args,
+		Purpose:  "Get relation settings.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -180,7 +224,7 @@ func (c *RelationGetCommand) Run(ctx *cmd.Context) error {
 		settingsReaderFn = c.readRemoteUnitOrAppSettings
 	}
 
-	settings, err := settingsReaderFn(r)
+	settings, err := settingsReaderFn(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -218,16 +262,16 @@ func (c *RelationGetCommand) mustReadSettingsFromController() (bool, error) {
 	return true, nil
 }
 
-func (c *RelationGetCommand) readLocalUnitOrAppSettings(r ContextRelation) (params.Settings, error) {
+func (c *RelationGetCommand) readLocalUnitOrAppSettings(ctx context.Context, r ContextRelation) (params.Settings, error) {
 	var (
 		node Settings
 		err  error
 	)
 
 	if c.Application {
-		node, err = r.ApplicationSettings()
+		node, err = r.ApplicationSettings(ctx)
 	} else {
-		node, err = r.Settings()
+		node, err = r.Settings(ctx)
 	}
 	if err != nil {
 		return nil, err
@@ -236,10 +280,10 @@ func (c *RelationGetCommand) readLocalUnitOrAppSettings(r ContextRelation) (para
 	return node.Map(), nil
 }
 
-func (c *RelationGetCommand) readRemoteUnitOrAppSettings(r ContextRelation) (params.Settings, error) {
+func (c *RelationGetCommand) readRemoteUnitOrAppSettings(ctx context.Context, r ContextRelation) (params.Settings, error) {
 	if !c.Application {
-		return r.ReadSettings(c.UnitOrAppName)
+		return r.ReadSettings(ctx, c.UnitOrAppName)
 	}
 
-	return r.ReadApplicationSettings(c.UnitOrAppName)
+	return r.ReadApplicationSettings(ctx, c.UnitOrAppName)
 }

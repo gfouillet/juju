@@ -14,7 +14,7 @@ func UnitDisplayStatus(unitStatus, containerStatus StatusInfo) StatusInfo {
 	}
 	if containerStatus.Status == "" {
 		// No container update received from k8s yet.
-		// Unit may have set sttaus, in which case use it.
+		// Unit may have set status, in which case use it.
 		if isStatusModified(unitStatus) {
 			return unitStatus
 		}
@@ -50,39 +50,6 @@ func UnitDisplayStatus(unitStatus, containerStatus StatusInfo) StatusInfo {
 		}
 	}
 	return unitStatus
-}
-
-// ApplicationDisplayStatus determines which of the two statuses to use when
-// displaying application status in a CAAS model.
-func ApplicationDisplayStatus(applicationStatus, operatorStatus StatusInfo) StatusInfo {
-	appStatus := applicationStatus.Status
-	opStatus := operatorStatus.Status
-
-	// We don't care about the operator status if;
-	// - the application is terminated, or
-	// - the operator is running/active
-	if appStatus == Terminated || opStatus == Running || opStatus == Active {
-		return applicationStatus
-	}
-
-	// We want the operator status if it's terminated, allocating or unknown
-	if opStatus == Terminated || opStatus == Allocating || opStatus == Unknown {
-		return operatorStatus
-	}
-
-	// Check if the application status has been set to a higher severity status
-	// than the operator status (e.g. set to maintenance by the charm)
-	if statusSeverities[appStatus] > statusSeverities[opStatus] {
-		return applicationStatus
-	}
-
-	// If the operator is waiting and this is not a caas application, we must be
-	// installing the agent.
-	if opStatus == Waiting {
-		operatorStatus.Message = MessageInstallingAgent
-	}
-	return operatorStatus
-
 }
 
 func isStatusModified(unitStatus StatusInfo) bool {

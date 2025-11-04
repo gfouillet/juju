@@ -30,7 +30,7 @@ type ControllerConfigService interface {
 
 	// WatchControllerConfig returns a watcher that returns keys for any changes
 	// to controller config.
-	WatchControllerConfig() (watcher.StringsWatcher, error)
+	WatchControllerConfig(context.Context) (watcher.StringsWatcher, error)
 }
 
 // AuditLogFactory is a function that will return an audit log given
@@ -65,6 +65,7 @@ func newWorker(
 		logFactory:              logFactory,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "audit-config-updater",
 		Site: &u.catacomb,
 		Work: u.loop,
 	})
@@ -157,7 +158,7 @@ func (u *updater) CurrentConfig() auditlog.Config {
 // watchForConfigChanges starts a watcher for changes to controller config.
 // It returns a channel which will receive events if the watcher fires.
 func (u *updater) watchForConfigChanges(ctx context.Context) (<-chan []string, error) {
-	watcher, err := u.controllerConfigService.WatchControllerConfig()
+	watcher, err := u.controllerConfigService.WatchControllerConfig(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

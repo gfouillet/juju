@@ -14,8 +14,7 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 	"golang.org/x/crypto/pbkdf2"
 
@@ -23,11 +22,15 @@ import (
 	charmmetrics "github.com/juju/juju/core/charm/metrics"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/charmhub/path"
 	"github.com/juju/juju/internal/charmhub/transport"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/uuid"
-	"github.com/juju/juju/version"
 )
+
+// Metrics is a map of metrics data to be sent to the charmhub.
+type Metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricValueKey]string
 
 // action represents the type of refresh is performed.
 type action string
@@ -97,9 +100,9 @@ func newRefreshClient(path path.Path, client RESTClient, logger corelogger.Logge
 // Refresh is used to refresh installed charms to a more suitable revision.
 func (c *refreshClient) Refresh(ctx context.Context, config RefreshConfig) ([]transport.RefreshResponse, error) {
 	if c.logger.IsLevelEnabled(corelogger.TRACE) {
-		c.logger.Tracef("Refresh(%s)", pretty.Sprint(config))
+		c.logger.Tracef(ctx, "Refresh(%s)", pretty.Sprint(config))
 	}
-	req, err := config.Build()
+	req, err := config.Build(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -108,11 +111,11 @@ func (c *refreshClient) Refresh(ctx context.Context, config RefreshConfig) ([]tr
 
 // RefreshWithRequestMetrics is to get refreshed charm data and provide metrics
 // at the same time.  Used as part of the charm revision updater facade.
-func (c *refreshClient) RefreshWithRequestMetrics(ctx context.Context, config RefreshConfig, metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricKey]string) ([]transport.RefreshResponse, error) {
+func (c *refreshClient) RefreshWithRequestMetrics(ctx context.Context, config RefreshConfig, metrics Metrics) ([]transport.RefreshResponse, error) {
 	if c.logger.IsLevelEnabled(corelogger.TRACE) {
-		c.logger.Tracef("RefreshWithRequestMetrics(%s, %+v)", pretty.Sprint(config), metrics)
+		c.logger.Tracef(ctx, "RefreshWithRequestMetrics(%s, %+v)", pretty.Sprint(config), metrics)
 	}
-	req, err := config.Build()
+	req, err := config.Build(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -126,8 +129,8 @@ func (c *refreshClient) RefreshWithRequestMetrics(ctx context.Context, config Re
 
 // RefreshWithMetricsOnly is to provide metrics without context or actions. Used
 // as part of the charm revision updater facade.
-func (c *refreshClient) RefreshWithMetricsOnly(ctx context.Context, metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricKey]string) error {
-	c.logger.Tracef("RefreshWithMetricsOnly(%+v)", metrics)
+func (c *refreshClient) RefreshWithMetricsOnly(ctx context.Context, metrics Metrics) error {
+	c.logger.Tracef(ctx, "RefreshWithMetricsOnly(%+v)", metrics)
 	m, err := contextMetrics(metrics)
 	if err != nil {
 		return errors.Trace(err)
@@ -145,7 +148,7 @@ func (c *refreshClient) RefreshWithMetricsOnly(ctx context.Context, metrics map[
 	return err
 }
 
-func contextMetrics(metrics map[charmmetrics.MetricKey]map[charmmetrics.MetricKey]string) (transport.RequestMetrics, error) {
+func contextMetrics(metrics Metrics) (transport.RequestMetrics, error) {
 	m := make(transport.RequestMetrics)
 	for k, v := range metrics {
 		// verify top level "model" and "controller" keys
@@ -180,9 +183,9 @@ func (c *refreshClient) refresh(ctx context.Context, ensure func(responses []tra
 		return nil, errors.Trace(err)
 	}
 	if restResp.StatusCode == http.StatusNotFound {
-		return nil, logAndReturnError(errors.NotFoundf("refresh"))
+		return nil, logAndReturnError(ctx, errors.NotFoundf("refresh"))
 	}
-	if err := handleBasicAPIErrors(resp.ErrorList, c.logger); err != nil {
+	if err := handleBasicAPIErrors(ctx, resp.ErrorList, c.logger); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// Ensure that all the results contain the correct instance keys.
@@ -206,15 +209,15 @@ func (c *refreshClient) refresh(ctx context.Context, ensure func(responses []tra
 	}
 
 	if c.logger.IsLevelEnabled(corelogger.TRACE) {
-		c.logger.Tracef("Refresh() unmarshalled: %s", pretty.Sprint(results))
+		c.logger.Tracef(ctx, "Refresh() unmarshalled: %s", pretty.Sprint(results))
 	}
 	return results, nil
 }
 
 // RefreshOne creates a request config for requesting only one charm.
-func RefreshOne(key, id string, revision int, channel string, base RefreshBase) (RefreshConfig, error) {
+func RefreshOne(ctx context.Context, key, id string, revision int, channel string, base RefreshBase) (RefreshConfig, error) {
 	if id == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty id"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty id"))
 	}
 	if key == "" {
 		// This is for compatibility reasons.  With older clients, the
@@ -222,12 +225,12 @@ func RefreshOne(key, id string, revision int, channel string, base RefreshBase) 
 		// the client.  Since a key is required, ensure we have one.
 		uuid, err := uuid.NewUUID()
 		if err != nil {
-			return nil, logAndReturnError(err)
+			return nil, logAndReturnError(ctx, err)
 		}
 		key = uuid.String()
 	}
 	if err := validateBase(base); err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return refreshOne{
 		instanceKey: key,
@@ -244,20 +247,20 @@ func RefreshOne(key, id string, revision int, channel string, base RefreshBase) 
 // on the charmhub side, see LP:1944582.  Rather than saving in
 // state, use the model uuid + the app name, which are unique.  Modeled
 // after the applicationDoc DocID and globalKey in state.
-func CreateInstanceKey(app names.ApplicationTag, model names.ModelTag) string {
-	h := pbkdf2.Key([]byte(app.Id()), []byte(model.Id()), 8192, 32, sha512.New)
+func CreateInstanceKey(appName string, model names.ModelTag) string {
+	h := pbkdf2.Key([]byte(appName), []byte(model.Id()), 8192, 32, sha512.New)
 	return base64.RawURLEncoding.EncodeToString(h)
 }
 
 // InstallOneFromRevision creates a request config using the revision and not
 // the channel for requesting only one charm.
-func InstallOneFromRevision(name string, revision int) (RefreshConfig, error) {
+func InstallOneFromRevision(ctx context.Context, name string, revision int) (RefreshConfig, error) {
 	if name == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty name"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty name"))
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOneByRevision{
 		action:      installAction,
@@ -287,7 +290,7 @@ func AddResource(config RefreshConfig, name string, revision int) (RefreshConfig
 
 // AddConfigMetrics adds metrics to a refreshOne config.  All values are
 // applied at once, subsequent calls, replace all values.
-func AddConfigMetrics(config RefreshConfig, metrics map[charmmetrics.MetricKey]string) (RefreshConfig, error) {
+func AddConfigMetrics(config RefreshConfig, metrics map[charmmetrics.MetricValueKey]string) (RefreshConfig, error) {
 	c, ok := config.(refreshOne)
 	if !ok {
 		return config, nil // error?
@@ -304,16 +307,16 @@ func AddConfigMetrics(config RefreshConfig, metrics map[charmmetrics.MetricKey]s
 
 // InstallOneFromChannel creates a request config using the channel and not the
 // revision for requesting only one charm.
-func InstallOneFromChannel(name string, channel string, base RefreshBase) (RefreshConfig, error) {
+func InstallOneFromChannel(ctx context.Context, name string, channel string, base RefreshBase) (RefreshConfig, error) {
 	if name == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty name"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty name"))
 	}
 	if err := validateBase(base); err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOne{
 		action:      installAction,
@@ -327,13 +330,13 @@ func InstallOneFromChannel(name string, channel string, base RefreshBase) (Refre
 
 // DownloadOneFromRevision creates a request config using the revision and not
 // the channel for requesting only one charm.
-func DownloadOneFromRevision(id string, revision int) (RefreshConfig, error) {
+func DownloadOneFromRevision(ctx context.Context, id string, revision int) (RefreshConfig, error) {
 	if id == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty id"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty id"))
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOneByRevision{
 		action:      downloadAction,
@@ -346,13 +349,13 @@ func DownloadOneFromRevision(id string, revision int) (RefreshConfig, error) {
 
 // DownloadOneFromRevisionByName creates a request config using the revision and not
 // the channel for requesting only one charm.
-func DownloadOneFromRevisionByName(name string, revision int) (RefreshConfig, error) {
+func DownloadOneFromRevisionByName(ctx context.Context, name string, revision int) (RefreshConfig, error) {
 	if name == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty name"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty name"))
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOneByRevision{
 		action:      downloadAction,
@@ -365,16 +368,16 @@ func DownloadOneFromRevisionByName(name string, revision int) (RefreshConfig, er
 
 // DownloadOneFromChannel creates a request config using the channel and not the
 // revision for requesting only one charm.
-func DownloadOneFromChannel(id string, channel string, base RefreshBase) (RefreshConfig, error) {
+func DownloadOneFromChannel(ctx context.Context, id string, channel string, base RefreshBase) (RefreshConfig, error) {
 	if id == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty id"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty id"))
 	}
 	if err := validateBase(base); err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOne{
 		action:      downloadAction,
@@ -388,16 +391,16 @@ func DownloadOneFromChannel(id string, channel string, base RefreshBase) (Refres
 
 // DownloadOneFromChannelByName creates a request config using the channel and not the
 // revision for requesting only one charm.
-func DownloadOneFromChannelByName(name string, channel string, base RefreshBase) (RefreshConfig, error) {
+func DownloadOneFromChannelByName(ctx context.Context, name string, channel string, base RefreshBase) (RefreshConfig, error) {
 	if name == "" {
-		return nil, logAndReturnError(errors.NotValidf("empty name"))
+		return nil, logAndReturnError(ctx, errors.NotValidf("empty name"))
 	}
 	if err := validateBase(base); err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return nil, logAndReturnError(err)
+		return nil, logAndReturnError(ctx, err)
 	}
 	return executeOne{
 		action:      downloadAction,
@@ -411,9 +414,9 @@ func DownloadOneFromChannelByName(name string, channel string, base RefreshBase)
 
 // constructRefreshBase creates a refresh request base that allows for
 // partial base queries.
-func constructRefreshBase(base RefreshBase) (transport.Base, error) {
+func constructRefreshBase(ctx context.Context, base RefreshBase) (transport.Base, error) {
 	if base.Architecture == "" {
-		return transport.Base{}, logAndReturnError(errors.NotValidf("refresh arch"))
+		return transport.Base{}, logAndReturnError(ctx, errors.NotValidf("refresh arch"))
 	}
 
 	name := base.Name
@@ -436,7 +439,7 @@ func constructRefreshBase(base RefreshBase) (transport.Base, error) {
 		var err error
 		channel, err = sanitiseChannel(base.Channel)
 		if err != nil {
-			return transport.Base{}, logAndReturnError(errors.Trace(err))
+			return transport.Base{}, logAndReturnError(ctx, errors.Trace(err))
 		}
 	}
 
@@ -499,11 +502,11 @@ func ExtractConfigInstanceKey(cfg RefreshConfig) string {
 // the functions that create a RefreshConfig like RefreshOne don't take
 // loggers. This logging can sometimes be quite useful to avoid error sources
 // getting lost across the wire, so leave as is for now.
-var logger = loggo.GetLoggerWithTags("juju.charmhub", corelogger.CHARMHUB)
+var logger = internallogger.GetLogger("juju.charmhub", corelogger.CHARMHUB)
 
-func logAndReturnError(err error) error {
+func logAndReturnError(ctx context.Context, err error) error {
 	err = errors.Trace(err)
-	logger.Errorf(err.Error())
+	logger.Errorf(ctx, err.Error())
 	return err
 }
 

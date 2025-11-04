@@ -4,16 +4,15 @@
 package machine
 
 import (
-	"github.com/juju/cmd/v4"
-
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const showMachineCommandDoc = `
-Show a specified machine on a model.  Default format is in yaml,
-other formats can be specified with the "--format" option.
-Available formats are yaml, tabular, and json
+Show a specified machine on a model.  The default format is ` + "`yaml`" + `;
+other formats can be specified with the ` + "`--format`" + ` option.
+Available formats are ` + "`yaml`" + `, ` + "`tabular`" + `, and ` + "`json`" + `.
 `
 
 const showMachineExamples = `
@@ -46,6 +45,9 @@ func (c *showMachineCommand) Info() *cmd.Info {
 		Purpose:  "Show a machine's status.",
 		Doc:      showMachineCommandDoc,
 		Examples: showMachineExamples,
+		SeeAlso: []string{
+			"add-machine",
+		},
 	})
 }
 

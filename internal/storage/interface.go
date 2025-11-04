@@ -4,10 +4,11 @@
 package storage
 
 import (
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/environs/envcontext"
 )
 
 // ProviderType uniquely identifies a storage provider, such as "ebs" or "loop".
@@ -26,6 +27,14 @@ const (
 
 // ProviderRegistry is an interface for obtaining storage providers.
 type ProviderRegistry interface {
+	// RecommendedPoolForKind returns a recommended storage pool to use for
+	// providing the specified kind of storage, or nil if no recommendations
+	// exist.
+	//
+	// It is guaranteed that the storage pool returned from this func is for a
+	// provider type that exists in this registry.
+	RecommendedPoolForKind(StorageKind) *Config
+
 	// StorageProviderTypes returns the storage provider types
 	// contained within this registry.
 	//
@@ -98,23 +107,23 @@ type VolumeSource interface {
 	// CreateVolumes creates volumes with the specified parameters. If the
 	// volumes are initially attached, then CreateVolumes returns
 	// information about those attachments too.
-	CreateVolumes(ctx envcontext.ProviderCallContext, params []VolumeParams) ([]CreateVolumesResult, error)
+	CreateVolumes(ctx context.Context, params []VolumeParams) ([]CreateVolumesResult, error)
 
 	// ListVolumes lists the provider volume IDs for every volume
 	// created by this volume source.
-	ListVolumes(ctx envcontext.ProviderCallContext) ([]string, error)
+	ListVolumes(ctx context.Context) ([]string, error)
 
 	// DescribeVolumes returns the properties of the volumes with the
 	// specified provider volume IDs.
-	DescribeVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]DescribeVolumesResult, error)
+	DescribeVolumes(ctx context.Context, volIds []string) ([]DescribeVolumesResult, error)
 
 	// DestroyVolumes destroys the volumes with the specified provider
 	// volume IDs.
-	DestroyVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]error, error)
+	DestroyVolumes(ctx context.Context, volIds []string) ([]error, error)
 
 	// ReleaseVolumes releases the volumes with the specified provider
 	// volume IDs from the model/controller.
-	ReleaseVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]error, error)
+	ReleaseVolumes(ctx context.Context, volIds []string) ([]error, error)
 
 	// ValidateVolumeParams validates the provided volume creation
 	// parameters, returning an error if they are invalid.
@@ -130,7 +139,7 @@ type VolumeSource interface {
 	// recording in state. For example, the ec2 provider must reject
 	// an attempt to attach a volume to an instance if they are in
 	// different availability zones.
-	AttachVolumes(ctx envcontext.ProviderCallContext, params []VolumeAttachmentParams) ([]AttachVolumesResult, error)
+	AttachVolumes(ctx context.Context, params []VolumeAttachmentParams) ([]AttachVolumesResult, error)
 
 	// DetachVolumes detaches the volumes with the specified provider
 	// volume IDs from the instances with the corresponding index.
@@ -138,7 +147,7 @@ type VolumeSource interface {
 	// TODO(axw) we need to record in state whether or not volumes
 	// are detachable, and reject attempts to attach/detach on
 	// that basis.
-	DetachVolumes(ctx envcontext.ProviderCallContext, params []VolumeAttachmentParams) ([]error, error)
+	DetachVolumes(ctx context.Context, params []VolumeAttachmentParams) ([]error, error)
 }
 
 // FilesystemSource provides an interface for creating, destroying and
@@ -150,15 +159,15 @@ type FilesystemSource interface {
 	ValidateFilesystemParams(params FilesystemParams) error
 
 	// CreateFilesystems creates filesystems with the specified size, in MiB.
-	CreateFilesystems(ctx envcontext.ProviderCallContext, params []FilesystemParams) ([]CreateFilesystemsResult, error)
+	CreateFilesystems(ctx context.Context, params []FilesystemParams) ([]CreateFilesystemsResult, error)
 
 	// DestroyFilesystems destroys the filesystems with the specified
 	// providerd filesystem IDs.
-	DestroyFilesystems(ctx envcontext.ProviderCallContext, fsIds []string) ([]error, error)
+	DestroyFilesystems(ctx context.Context, fsIds []string) ([]error, error)
 
 	// ReleaseFilesystems releases the filesystems with the specified provider
 	// filesystem IDs from the model/controller.
-	ReleaseFilesystems(ctx envcontext.ProviderCallContext, volIds []string) ([]error, error)
+	ReleaseFilesystems(ctx context.Context, volIds []string) ([]error, error)
 
 	// AttachFilesystems attaches filesystems to machines.
 	//
@@ -170,12 +179,12 @@ type FilesystemSource interface {
 	// recording in state. For example, the ec2 provider must reject
 	// an attempt to attach a volume to an instance if they are in
 	// different availability zones.
-	AttachFilesystems(ctx envcontext.ProviderCallContext, params []FilesystemAttachmentParams) ([]AttachFilesystemsResult, error)
+	AttachFilesystems(ctx context.Context, params []FilesystemAttachmentParams) ([]AttachFilesystemsResult, error)
 
 	// DetachFilesystems detaches the filesystems with the specified
 	// provider filesystem IDs from the instances with the corresponding
 	// index.
-	DetachFilesystems(ctx envcontext.ProviderCallContext, params []FilesystemAttachmentParams) ([]error, error)
+	DetachFilesystems(ctx context.Context, params []FilesystemAttachmentParams) ([]error, error)
 }
 
 // FilesystemImporter provides an interface for importing filesystems
@@ -193,7 +202,7 @@ type FilesystemImporter interface {
 	// filesystem is not in use before allowing the import to proceed.
 	// Once it is imported, it is assumed to be in a detached state.
 	ImportFilesystem(
-		ctx envcontext.ProviderCallContext,
+		ctx context.Context,
 		filesystemId string,
 		resourceTags map[string]string,
 	) (FilesystemInfo, error)
@@ -214,9 +223,11 @@ type VolumeImporter interface {
 	// volume is not in use before allowing the import to proceed.
 	// Once it is imported, it is assumed to be in a detached state.
 	ImportVolume(
-		ctx envcontext.ProviderCallContext,
+		ctx context.Context,
 		volumeId string,
+		storageName string,
 		resourceTags map[string]string,
+		force bool,
 	) (VolumeInfo, error)
 }
 
@@ -334,9 +345,9 @@ type FilesystemAttachmentParams struct {
 	// should be attached/detached.
 	Filesystem names.FilesystemTag
 
-	// FilesystemId is the unique provider-supplied ID for the filesystem that
+	// ProviderId is the unique provider-supplied ID for the filesystem that
 	// should be attached/detached.
-	FilesystemId string
+	ProviderId string
 
 	// Path is the path at which the filesystem is to be mounted on the machine that
 	// this attachment corresponds to.
@@ -378,4 +389,10 @@ type CreateFilesystemsResult struct {
 type AttachFilesystemsResult struct {
 	FilesystemAttachment *FilesystemAttachment
 	Error                error
+}
+
+// String returns the string representation of [ProviderType]. This implements
+// the [fmt.Stringer] interface.
+func (p ProviderType) String() string {
+	return string(p)
 }

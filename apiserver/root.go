@@ -6,39 +6,38 @@ package apiserver
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
 	"github.com/juju/juju/core/changestream"
 	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/flightrecorder"
+	corehttp "github.com/juju/juju/core/http"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/core/modelmigration"
+	coremodelmigration "github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/trace"
-	"github.com/juju/juju/core/watcher/registry"
-	"github.com/juju/juju/environs"
+	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/domain/modelmigration"
 	"github.com/juju/juju/internal/migration"
 	"github.com/juju/juju/internal/rpcreflect"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
 type objectKey struct {
@@ -51,8 +50,6 @@ type objectKey struct {
 // after it has logged in. It contains an rpc.Root which it
 // uses to dispatch API calls appropriately.
 type apiHandler struct {
-	state   *state.State
-	model   *state.Model
 	rpcConn *rpc.Conn
 
 	// TODO (stickupkid): The "shared" concept is an abomination, we should
@@ -64,15 +61,15 @@ type apiHandler struct {
 	// the request model UUID is empty.
 	tracer trace.Tracer
 
-	// serviceFactory is the service factory for the resolved model UUID. This
+	// domainServices is the domain services for the resolved model UUID. This
 	// is either the request model UUID, or it's the system state model UUID, if
 	// the request model UUID is empty.
-	serviceFactory servicefactory.ServiceFactory
+	domainServices services.DomainServices
 
-	// serviceFactoryGetter allows the retrieval of an service factory for a
+	// domainServicesGetter allows the retrieval of an domain services for a
 	// given model UUID. This should not be used unless you're sure you need to
-	// access a different model's service factory.
-	serviceFactoryGetter servicefactory.ServiceFactoryGetter
+	// access a different model's domain services.
+	domainServicesGetter services.DomainServicesGetter
 
 	// objectStore is the object store for the resolved model UUID. This is
 	// either the request model UUID, or it's the system state model UUID, if
@@ -91,17 +88,23 @@ type apiHandler struct {
 
 	// watcherRegistry is the registry for tracking watchers between API calls
 	// for a given model UUID.
-	watcherRegistry facade.WatcherRegistry
+	watcherRegistry watcherregistry.WatcherRegistry
 
 	// authInfo represents the authentication info established with this client
 	// connection.
 	authInfo authentication.AuthInfo
 
-	// An empty modelUUID means that the user has logged in through the
-	// root of the API server rather than the /model/:model-uuid/api
-	// path, logins processed with v2 or later will only offer the
-	// user manager and model manager api endpoints from here.
-	modelUUID string
+	// modelUUID is the UUID of the model that the client is connected to.
+	// All facades for a given context will be scoped to the model UUID.
+	// Facade methods should only scoped to the model UUID they are operating
+	// on. There are some exceptions to this rule, but they are exceptions that
+	// prove the rule.
+	modelUUID model.UUID
+
+	// controllerOnlyLogin is true if the client is using controller
+	// routes. Ultimately, this just indicates that no model UUID was specified
+	// in the request query (:modeluuid).
+	controllerOnlyLogin bool
 
 	// connectionID is shared between the API observer (including API
 	// requests and responses in the agent log) and the audit logger.
@@ -111,8 +114,9 @@ type apiHandler struct {
 	// connected to.
 	serverHost string
 
-	// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-	resources *common.Resources
+	// crossModelAuthContext is the cross model authentication context
+	// used for cross model operations.
+	crossModelAuthContext facade.CrossModelAuthContext
 }
 
 var _ = (*apiHandler)(nil)
@@ -129,119 +133,83 @@ var (
 func newAPIHandler(
 	ctx context.Context,
 	srv *Server,
-	st *state.State,
 	rpcConn *rpc.Conn,
-	serviceFactory servicefactory.ServiceFactory,
-	serviceFactoryGetter servicefactory.ServiceFactoryGetter,
+	domainServices services.DomainServices,
+	domainServicesGetter services.DomainServicesGetter,
 	tracer trace.Tracer,
 	objectStore objectstore.ObjectStore,
 	objectStoreGetter objectstore.ObjectStoreGetter,
 	controllerObjectStore objectstore.ObjectStore,
-	modelUUID string,
+	watcherRegistry watcherregistry.WatcherRegistry,
+	modelUUID model.UUID,
+	controllerOnlyLogin bool,
 	connectionID uint64,
 	serverHost string,
+	crossModelAuthContext facade.CrossModelAuthContext,
 ) (*apiHandler, error) {
-	m, err := st.Model()
+	exists, err := domainServices.Model().CheckModelExists(ctx, modelUUID)
 	if err != nil {
-		if !errors.Is(err, errors.NotFound) {
-			return nil, errors.Trace(err)
-		}
-
+		return nil, errors.Trace(err)
+	}
+	if !exists {
 		// If this model used to be hosted on this controller but got
 		// migrated allow clients to connect and wait for a login
 		// request to decide whether the users should be redirected to
 		// the new controller for this model or not.
-		if _, migErr := st.CompletedMigration(); migErr != nil {
-			return nil, errors.Trace(err) // return original NotFound error
+		if _, migErr := domainServices.Model().ModelRedirection(ctx, modelUUID); migErr != nil {
+			// Return not found on any error.
+			// TODO (stickupkid): This is very brute force. What if there
+			// is an error with the database? The caller will assume that it
+			// is no longer on this controller. If we return a different error
+			// then it can at least retry the request.
+			return nil, errors.NotFoundf("model %q", modelUUID)
 		}
 	}
 
-	registry, err := registry.NewRegistry(srv.clock, registry.WithLogger(logger.Child("registry", corelogger.WATCHERS)))
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	r := &apiHandler{
-		state:                 st,
-		serviceFactory:        serviceFactory,
-		serviceFactoryGetter:  serviceFactoryGetter,
+		domainServices:        domainServices,
+		domainServicesGetter:  domainServicesGetter,
 		tracer:                tracer,
 		objectStore:           objectStore,
 		objectStoreGetter:     objectStoreGetter,
 		controllerObjectStore: controllerObjectStore,
-		model:                 m,
-		resources:             common.NewResources(),
-		watcherRegistry:       registry,
+		watcherRegistry:       watcherRegistry,
 		shared:                srv.shared,
 		rpcConn:               rpcConn,
 		modelUUID:             modelUUID,
+		controllerOnlyLogin:   controllerOnlyLogin,
 		connectionID:          connectionID,
 		serverHost:            serverHost,
+		crossModelAuthContext: crossModelAuthContext,
 	}
 
-	// Facades involved with managing application offers need the auth context
-	// to mint and validate macaroons.
-	offerAccessEndpoint := &url.URL{
-		Scheme: "https",
-		Host:   serverHost,
-		Path:   localOfferAccessLocationPath,
-	}
-
-	contollerConfigService := serviceFactory.ControllerConfig()
-	controllerConfig, err := contollerConfigService.ControllerConfig(ctx)
-	if err != nil {
-		return nil, errors.Annotate(err, "unable to get controller config")
-	}
-	loginTokenRefreshURL := controllerConfig.LoginTokenRefreshURL()
-	if loginTokenRefreshURL != "" {
-		offerAccessEndpoint, err = url.Parse(loginTokenRefreshURL)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
-	offerAuthCtxt, err := srv.offerAuthCtxt.WithDischargeURL(ctx, offerAccessEndpoint.String())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if err := r.resources.RegisterNamed(
-		"offerAccessAuthContext",
-		common.NewValueResource(offerAuthCtxt),
-	); err != nil {
-		return nil, errors.Trace(err)
-	}
 	return r, nil
-}
-
-// Resources returns the common resources.
-// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-func (r *apiHandler) Resources() *common.Resources {
-	return r.resources
 }
 
 // WatcherRegistry returns the watcher registry for tracking watchers between
 // API calls.
-func (r *apiHandler) WatcherRegistry() facade.WatcherRegistry {
+func (r *apiHandler) WatcherRegistry() watcherregistry.WatcherRegistry {
 	return r.watcherRegistry
 }
 
-// State returns the underlying state.
-func (r *apiHandler) State() *state.State {
-	return r.state
+// DomainServices returns the domain services.
+func (r *apiHandler) DomainServices() services.DomainServices {
+	return r.domainServices
 }
 
-// ServiceFactory returns the service factory.
-func (r *apiHandler) ServiceFactory() servicefactory.ServiceFactory {
-	return r.serviceFactory
-}
-
-// ServiceFactoryGetter returns the service factory getter.
-func (r *apiHandler) ServiceFactoryGetter() servicefactory.ServiceFactoryGetter {
-	return r.serviceFactoryGetter
+// DomainServicesGetter returns the domain services getter.
+func (r *apiHandler) DomainServicesGetter() services.DomainServicesGetter {
+	return r.domainServicesGetter
 }
 
 // Tracer returns the tracer for opentelemetry.
 func (r *apiHandler) Tracer() trace.Tracer {
 	return r.tracer
+}
+
+// FlightRecorder returns the flight recorder.
+func (r *apiHandler) FlightRecorder() flightrecorder.FlightRecorder {
+	return r.shared.flightRecorder
 }
 
 // ObjectStore returns the object store.
@@ -270,6 +238,17 @@ func (r *apiHandler) Authorizer() facade.Authorizer {
 	return r
 }
 
+// CrossModelAuthContext provides methods to create and authorize macaroons
+// for cross model operations.
+func (r *apiHandler) CrossModelAuthContext() facade.CrossModelAuthContext {
+	return r.crossModelAuthContext
+}
+
+// ModelUUID returns the UUID of the model that the API is operating on.
+func (r *apiHandler) ModelUUID() model.UUID {
+	return r.modelUUID
+}
+
 // CloseConn closes the underlying connection.
 func (r *apiHandler) CloseConn() error {
 	return r.rpcConn.Close()
@@ -278,11 +257,9 @@ func (r *apiHandler) CloseConn() error {
 // Kill implements rpc.Killer, cleaning up any resources that need
 // cleaning up to ensure that all outstanding requests return.
 func (r *apiHandler) Kill() {
-	r.watcherRegistry.Kill()
-	if err := r.watcherRegistry.Wait(); err != nil {
-		logger.Infof("error waiting for watcher registry to stop: %v", err)
+	if err := r.watcherRegistry.StopAll(); err != nil {
+		r.shared.logger.Warningf(context.TODO(), "error stopping watchers: %v", err)
 	}
-	r.resources.StopAll()
 }
 
 // AuthMachineAgent returns whether the current client is a machine agent.
@@ -320,11 +297,7 @@ func (r *apiHandler) AuthOwner(tag names.Tag) bool {
 // AuthController returns whether the authenticated user is a
 // machine with running the ManageEnviron job.
 func (r *apiHandler) AuthController() bool {
-	type hasIsManager interface {
-		IsManager() bool
-	}
-	m, ok := r.authInfo.Entity.(hasIsManager)
-	return ok && m.IsManager()
+	return r.authInfo.Controller
 }
 
 // AuthClient returns whether the authenticated entity is a client
@@ -336,18 +309,7 @@ func (r *apiHandler) AuthClient() bool {
 
 // GetAuthTag returns the tag of the authenticated entity, if any.
 func (r *apiHandler) GetAuthTag() names.Tag {
-	if r.authInfo.Entity == nil {
-		return nil
-	}
-	return r.authInfo.Entity.Tag()
-}
-
-// ConnectedModel returns the UUID of the model authenticated
-// against. It's possible for it to be empty if the login was made
-// directly to the root of the API instead of a model endpoint, but
-// that method is deprecated.
-func (r *apiHandler) ConnectedModel() string {
-	return r.modelUUID
+	return r.authInfo.Tag
 }
 
 // HasPermission is responsible for reporting if the logged in user is
@@ -357,8 +319,8 @@ func (r *apiHandler) ConnectedModel() string {
 // to provide a permission error. All permissions errors returned satisfy
 // errors.Is(err, ErrorEntityMissingPermission) to distinguish before errors and
 // no permissions errors. If error is nil then the user has permission.
-func (r *apiHandler) HasPermission(operation permission.Access, target names.Tag) error {
-	return r.EntityHasPermission(r.GetAuthTag(), operation, target)
+func (r *apiHandler) HasPermission(ctx context.Context, operation permission.Access, target names.Tag) error {
+	return r.EntityHasPermission(ctx, r.GetAuthTag(), operation, target)
 }
 
 // EntityHasPermission is responsible for reporting if the supplied entity is
@@ -368,14 +330,16 @@ func (r *apiHandler) HasPermission(operation permission.Access, target names.Tag
 // to provide a permission error. All permissions errors returned satisfy
 // errors.Is(err, ErrorEntityMissingPermission) to distinguish before errors and
 // no permissions errors. If error is nil then the user has permission.
-func (r *apiHandler) EntityHasPermission(entity names.Tag, operation permission.Access, target names.Tag) error {
-	var userAccessFunc common.UserAccessFunc = func(entity names.UserTag, subject names.Tag) (permission.Access, error) {
+func (r *apiHandler) EntityHasPermission(
+	ctx context.Context, entity names.Tag, operation permission.Access, target names.Tag,
+) error {
+	var userAccessFunc common.UserAccessFunc = func(ctx context.Context, userName user.Name, target permission.ID) (permission.Access, error) {
 		if r.authInfo.Delegator == nil {
 			return permission.NoAccess, fmt.Errorf("permissions %w for auth info", errors.NotImplemented)
 		}
-		return r.authInfo.Delegator.SubjectPermissions(authentication.TagToEntity(entity), subject)
+		return r.authInfo.Delegator.SubjectPermissions(ctx, userName.Name(), target)
 	}
-	has, err := common.HasPermission(userAccessFunc, entity, operation, target)
+	has, err := common.HasPermission(ctx, userAccessFunc, entity, operation, target)
 	if err != nil {
 		return fmt.Errorf("checking entity %q has permission: %w", entity, err)
 	}
@@ -422,14 +386,14 @@ func (s *srvCaller) Call(ctx context.Context, objId string, arg reflect.Value) (
 
 type apiRootHandler interface {
 	rpc.Killer
-	// State returns the underlying state.
-	State() *state.State
-	// ServiceFactory returns the service factory.
-	ServiceFactory() servicefactory.ServiceFactory
-	// ServiceFactoryGetter returns the service factory getter.
-	ServiceFactoryGetter() servicefactory.ServiceFactoryGetter
+	// DomainServices returns the domain services.
+	DomainServices() services.DomainServices
+	// DomainServicesGetter returns the domain services getter.
+	DomainServicesGetter() services.DomainServicesGetter
 	// Tracer returns the tracer for opentelemetry.
 	Tracer() trace.Tracer
+	// FlightRecorder returns the flight recorder.
+	FlightRecorder() flightrecorder.FlightRecorder
 	// ObjectStore returns the object store.
 	ObjectStore() objectstore.ObjectStore
 	// ObjectStoreGetter returns the object store getter.
@@ -439,37 +403,43 @@ type apiRootHandler interface {
 	ControllerObjectStore() objectstore.ObjectStore
 	// SharedContext returns the server shared context.
 	SharedContext() *sharedServerContext
-	// Resources returns the common resources.
-	// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-	Resources() *common.Resources
 	// WatcherRegistry returns the watcher registry for tracking watchers
 	// between API calls.
-	WatcherRegistry() facade.WatcherRegistry
+	WatcherRegistry() watcherregistry.WatcherRegistry
 	// Authorizer returns the authorizer used for accessing API method calls.
 	Authorizer() facade.Authorizer
+	// CrossModelAuthContext provides methods to create and authorize macaroons
+	// for cross model operations.
+	CrossModelAuthContext() facade.CrossModelAuthContext
+	// ModelUUID returns the UUID of the model that the API is operating on.
+	ModelUUID() model.UUID
 }
 
 // apiRoot implements basic method dispatching to the facade registry.
 type apiRoot struct {
 	rpc.Killer
 	clock                 clock.Clock
-	state                 *state.State
-	serviceFactory        servicefactory.ServiceFactory
-	serviceFactoryGetter  servicefactory.ServiceFactoryGetter
+	domainServices        services.DomainServices
+	domainServicesGetter  services.DomainServicesGetter
 	tracer                trace.Tracer
 	objectStore           objectstore.ObjectStore
 	objectStoreGetter     objectstore.ObjectStoreGetter
 	controllerObjectStore objectstore.ObjectStore
 	shared                *sharedServerContext
 	facades               *facade.Registry
-	watcherRegistry       facade.WatcherRegistry
+	watcherRegistry       watcherregistry.WatcherRegistry
 	authorizer            facade.Authorizer
 	objectMutex           sync.RWMutex
 	objectCache           map[objectKey]reflect.Value
 	requestRecorder       facade.RequestRecorder
+	crossModelAuthContext facade.CrossModelAuthContext
 
-	// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-	resources *common.Resources
+	// modelUUID is the UUID of the model that the client is connected to.
+	// All facades for a given context will be scoped to the model UUID.
+	// Facade methods should only scoped to the model UUID they are operating
+	// on. There are some exceptions to this rule, but they are exceptions that
+	// prove the rule.
+	modelUUID model.UUID
 }
 
 // newAPIRoot returns a new apiRoot.
@@ -482,20 +452,20 @@ func newAPIRoot(
 	return &apiRoot{
 		Killer:                root,
 		clock:                 clock,
-		state:                 root.State(),
-		serviceFactory:        root.ServiceFactory(),
-		serviceFactoryGetter:  root.ServiceFactoryGetter(),
+		domainServices:        root.DomainServices(),
+		domainServicesGetter:  root.DomainServicesGetter(),
 		tracer:                root.Tracer(),
 		objectStore:           root.ObjectStore(),
 		objectStoreGetter:     root.ObjectStoreGetter(),
 		controllerObjectStore: root.ControllerObjectStore(),
 		shared:                root.SharedContext(),
 		facades:               facades,
-		resources:             root.Resources(),
 		watcherRegistry:       root.WatcherRegistry(),
 		authorizer:            root.Authorizer(),
 		objectCache:           make(map[objectKey]reflect.Value),
 		requestRecorder:       requestRecorder,
+		modelUUID:             root.ModelUUID(),
+		crossModelAuthContext: root.CrossModelAuthContext(),
 	}, nil
 }
 
@@ -505,14 +475,15 @@ func newAPIRoot(
 func restrictAPIRoot(
 	srv *Server,
 	apiRoot rpc.Root,
-	model *state.Model,
+	migrationMode modelmigration.MigrationMode,
+	modelType model.ModelType,
 	auth authResult,
 ) (rpc.Root, error) {
 	if !auth.controllerMachineLogin {
 		// Controller agents are allowed to
 		// connect even during maintenance.
 		restrictedRoot, err := restrictAPIRootDuringMaintenance(
-			srv, apiRoot, model, auth.tag,
+			srv, apiRoot, migrationMode, auth.tag,
 		)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -523,7 +494,7 @@ func restrictAPIRoot(
 		apiRoot = restrictRoot(apiRoot, controllerFacadesOnly)
 	} else {
 		apiRoot = restrictRoot(apiRoot, modelFacadesOnly)
-		if model.Type() == state.ModelTypeCAAS {
+		if modelType == model.CAAS {
 			apiRoot = restrictRoot(apiRoot, caasModelFacadesOnly)
 		}
 	}
@@ -536,7 +507,7 @@ func restrictAPIRoot(
 func restrictAPIRootDuringMaintenance(
 	srv *Server,
 	apiRoot rpc.Root,
-	model *state.Model,
+	migrationMode modelmigration.MigrationMode,
 	authTag names.Tag,
 ) (rpc.Root, error) {
 	describeLogin := func() string {
@@ -558,12 +529,12 @@ func restrictAPIRootDuringMaintenance(
 
 	// For user logins, we limit access during migrations.
 	if _, ok := authTag.(names.UserTag); ok {
-		switch model.MigrationMode() {
-		case state.MigrationModeImporting:
+		switch migrationMode {
+		case modelmigration.MigrationModeImporting:
 			// The user is not able to access a model that is currently being
 			// imported until the model has been activated.
 			apiRoot = restrictAll(apiRoot, errors.New("migration in progress, model is importing"))
-		case state.MigrationModeExporting:
+		case modelmigration.MigrationModeExporting:
 			// The user is not allowed to change anything in a model that is
 			// currently being moved to another controller.
 			apiRoot = restrictRoot(apiRoot, migrationClientMethodsOnly)
@@ -578,6 +549,10 @@ func restrictAPIRootDuringMaintenance(
 func (r *apiRoot) StartTrace(ctx context.Context) (context.Context, trace.Span) {
 	ctx = trace.WithTracer(ctx, r.tracer)
 	return trace.Start(ctx, trace.NameFromFunc())
+}
+
+func (r *apiRoot) FlightRecorder() flightrecorder.FlightRecorder {
+	return r.shared.flightRecorder
 }
 
 // FindMethod looks up the given rootName and version in our facade registry
@@ -614,7 +589,7 @@ func (r *apiRoot) FindMethod(rootName string, version int, methodName string) (r
 			// check.
 			return reflect.Value{}, err
 		}
-		obj, err := factory(ctx, r.facadeContext(objKey))
+		obj, err := factory(ctx, r.createFacadeContext(objKey))
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -675,7 +650,7 @@ func (r *apiRoot) dispose(key objectKey) {
 	delete(r.objectCache, key)
 }
 
-func (r *apiRoot) facadeContext(key objectKey) *facadeContext {
+func (r *apiRoot) createFacadeContext(key objectKey) *facadeContext {
 	return &facadeContext{
 		r:   r,
 		key: key,
@@ -736,50 +711,41 @@ func (ctx *facadeContext) Auth() facade.Authorizer {
 	return ctx.r.authorizer
 }
 
+// CrossModelAuthContext provides methods to create and authorize macaroons
+// for cross model operations.
+func (ctx *facadeContext) CrossModelAuthContext() facade.CrossModelAuthContext {
+	return ctx.r.crossModelAuthContext
+}
+
 // Dispose is part of the facade.ModelContext interface.
 func (ctx *facadeContext) Dispose() {
 	ctx.r.dispose(ctx.key)
 }
 
-// Resources is part of the facade.ModelContext interface.
-// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-func (ctx *facadeContext) Resources() facade.Resources {
-	return ctx.r.resources
-}
-
 // WatcherRegistry is part of the facade.ModelContext interface.
-func (ctx *facadeContext) WatcherRegistry() facade.WatcherRegistry {
+func (ctx *facadeContext) WatcherRegistry() watcherregistry.WatcherRegistry {
 	return ctx.r.watcherRegistry
-}
-
-// Presence implements facade.ModelContext.
-func (ctx *facadeContext) Presence() facade.Presence {
-	return ctx
-}
-
-// ModelPresence implements facade.ModelPresence.
-func (ctx *facadeContext) ModelPresence(modelUUID string) facade.ModelPresence {
-	return ctx.r.shared.presence.Connections().ForModel(modelUUID)
-}
-
-// Hub implements facade.ModelContext.
-func (ctx *facadeContext) Hub() facade.Hub {
-	return ctx.r.shared.centralHub
-}
-
-// State is part of the facade.ModelContext interface.
-func (ctx *facadeContext) State() *state.State {
-	return ctx.r.state
-}
-
-// StatePool is part of the facade.ModelContext interface.
-func (ctx *facadeContext) StatePool() *state.StatePool {
-	return ctx.r.shared.statePool
 }
 
 // ControllerUUID returns the controller unique identifier.
 func (ctx *facadeContext) ControllerUUID() string {
 	return ctx.r.shared.controllerUUID
+}
+
+// ControllerModelUUID returns the controller model unique identifier.
+func (ctx *facadeContext) ControllerModelUUID() model.UUID {
+	return ctx.r.shared.controllerModelUUID
+}
+
+// IsControllerModelScoped returns whether the context is scoped to the
+// controller model.
+func (ctx *facadeContext) IsControllerModelScoped() bool {
+	return ctx.ModelUUID() == ctx.ControllerModelUUID()
+}
+
+// ModelUUID returns the model unique identifier.
+func (ctx *facadeContext) ModelUUID() model.UUID {
+	return ctx.r.modelUUID
 }
 
 // ID is part of the facade.ModelContext interface.
@@ -796,7 +762,7 @@ func (ctx *facadeContext) RequestRecorder() facade.RequestRecorder {
 func (ctx *facadeContext) LeadershipChecker() (leadership.Checker, error) {
 	checker, err := ctx.r.shared.leaseManager.Checker(
 		lease.ApplicationLeadershipNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -808,7 +774,7 @@ func (ctx *facadeContext) LeadershipChecker() (leadership.Checker, error) {
 func (ctx *facadeContext) SingularClaimer() (lease.Claimer, error) {
 	return ctx.r.shared.leaseManager.Claimer(
 		lease.SingularControllerNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 }
 
@@ -816,7 +782,7 @@ func (ctx *facadeContext) SingularClaimer() (lease.Claimer, error) {
 func (ctx *facadeContext) LeadershipClaimer() (leadership.Claimer, error) {
 	claimer, err := ctx.r.shared.leaseManager.Claimer(
 		lease.ApplicationLeadershipNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -828,7 +794,7 @@ func (ctx *facadeContext) LeadershipClaimer() (leadership.Claimer, error) {
 func (ctx *facadeContext) LeadershipRevoker() (leadership.Revoker, error) {
 	revoker, err := ctx.r.shared.leaseManager.Revoker(
 		lease.ApplicationLeadershipNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -841,7 +807,7 @@ func (ctx *facadeContext) LeadershipRevoker() (leadership.Revoker, error) {
 func (ctx *facadeContext) LeadershipPinner() (leadership.Pinner, error) {
 	pinner, err := ctx.r.shared.leaseManager.Pinner(
 		lease.ApplicationLeadershipNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -855,7 +821,7 @@ func (ctx *facadeContext) LeadershipPinner() (leadership.Pinner, error) {
 func (ctx *facadeContext) LeadershipReader() (leadership.Reader, error) {
 	reader, err := ctx.r.shared.leaseManager.Reader(
 		lease.ApplicationLeadershipNamespace,
-		ctx.State().ModelUUID(),
+		ctx.ModelUUID().String(),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -863,58 +829,111 @@ func (ctx *facadeContext) LeadershipReader() (leadership.Reader, error) {
 	return leadershipReader{reader: reader}, nil
 }
 
-func (ctx *facadeContext) HTTPClient(purpose facade.HTTPClientPurpose) facade.HTTPClient {
-	switch purpose {
-	case facade.CharmhubHTTPClient:
-		return ctx.r.shared.charmhubHTTPClient
-	default:
-		// TODO (stickupkid): This feels like it should at least log an
-		// info/warning about missing purpose.
-		return nil
-	}
-}
+// HTTPClient returns an HTTP client to use for the given purpose. The following
+// errors can be expected:
+// - [ErrorHTTPClientPurposeInvalid] when the requested purpose is not
+// understood by the context.
+// - [ErrorHTTPClientForPurposeNotFound] when no http client can be found for
+// the requested [HTTPClientPurpose].
+func (ctx *facadeContext) HTTPClient(purpose corehttp.Purpose) (facade.HTTPClient, error) {
+	var client facade.HTTPClient
 
-var storageRegistryGetter = func(ctx *facadeContext) func() (storage.ProviderRegistry, error) {
-	return func() (storage.ProviderRegistry, error) {
-		dbModel, err := ctx.State().Model()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return stateenvirons.NewStorageProviderRegistryForModel(
-			dbModel, ctx.ServiceFactory().Cloud(), ctx.ServiceFactory().Credential(),
-			stateenvirons.GetNewEnvironFunc(environs.New),
-			stateenvirons.GetNewCAASBrokerFunc(caas.New),
+	switch purpose {
+	case corehttp.CharmhubPurpose:
+		client = ctx.r.shared.charmhubHTTPClient
+	default:
+		return nil, fmt.Errorf(
+			"cannot get http client for purpose %q, purpose is not understood by the facade context%w",
+			purpose, errors.Hide(facade.ErrorHTTPClientPurposeInvalid),
 		)
 	}
+
+	if client == nil {
+		return nil, fmt.Errorf(
+			"cannot get http client for purpose %q: http client not found%w",
+			purpose, errors.Hide(facade.ErrorHTTPClientForPurposeNotFound),
+		)
+	}
+
+	return client, nil
+}
+
+type modelStorageRegistry func(context.Context) (storage.ProviderRegistry, error)
+
+// GetStorageRegistry returns a storage registry for the given namespace.
+func (c modelStorageRegistry) GetStorageRegistry(ctx context.Context) (storage.ProviderRegistry, error) {
+	return c(ctx)
+}
+
+type modelObjectStore func(context.Context) (objectstore.ObjectStore, error)
+
+// GetObjectStore returns the object store for the current model.
+func (c modelObjectStore) GetObjectStore(ctx context.Context) (objectstore.ObjectStore, error) {
+	return c(ctx)
 }
 
 // ModelExporter returns a model exporter for the current model.
-func (ctx *facadeContext) ModelExporter(backend facade.LegacyStateExporter) facade.ModelExporter {
-	return migration.NewModelExporter(
-		backend,
-		ctx.migrationScope(ctx.State().ModelUUID()),
-		storageRegistryGetter(ctx),
-		ctx.Logger(),
+func (ctx *facadeContext) ModelExporter(c context.Context, modelUUID model.UUID) (facade.ModelExporter, error) {
+	logger := ctx.Logger()
+	clock := ctx.r.clock
+
+	domainServices, err := ctx.DomainServicesForModel(c, modelUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	coordinator := coremodelmigration.NewCoordinator(logger)
+
+	objectStoreGetter := modelObjectStore(func(stdCtx context.Context) (objectstore.ObjectStore, error) {
+		return ctx.r.objectStoreGetter.GetObjectStore(stdCtx, ctx.ModelUUID().String())
+	})
+
+	exporter := modelmigration.NewExporter(
+		coordinator,
+		modelStorageRegistry(func(ctx context.Context) (storage.ProviderRegistry, error) {
+			storageService := domainServices.Storage()
+			return storageService.GetStorageRegistry(ctx)
+		}),
+		objectStoreGetter,
+		clock,
+		logger,
 	)
+	return migration.NewModelExporter(
+		exporter,
+		ctx.migrationScope(modelUUID),
+		modelStorageRegistry(func(ctx context.Context) (storage.ProviderRegistry, error) {
+			storageService := domainServices.Storage()
+			return storageService.GetStorageRegistry(ctx)
+		}),
+		coordinator,
+		logger,
+		clock,
+	), nil
 }
 
 // ModelImporter returns a model importer.
 func (ctx *facadeContext) ModelImporter() facade.ModelImporter {
-	pool := ctx.r.shared.statePool
+	domainServices := ctx.DomainServices()
+
 	return migration.NewModelImporter(
-		state.NewController(pool),
 		ctx.migrationScope,
-		ctx.ServiceFactory().ControllerConfig(),
-		ctx.r.serviceFactoryGetter,
-		environs.ProviderConfigSchemaSource,
-		storageRegistryGetter(ctx),
+		ctx.DomainServices().ControllerConfig(),
+		ctx.r.domainServicesGetter,
+		modelStorageRegistry(func(ctx context.Context) (storage.ProviderRegistry, error) {
+			storageService := domainServices.Storage()
+			return storageService.GetStorageRegistry(ctx)
+		}),
+		modelObjectStore(func(stdCtx context.Context) (objectstore.ObjectStore, error) {
+			return ctx.r.objectStoreGetter.GetObjectStore(stdCtx, ctx.ModelUUID().String())
+		}),
 		ctx.Logger(),
+		ctx.r.clock,
 	)
 }
 
-// ServiceFactory returns the services factory for the current model.
-func (ctx *facadeContext) ServiceFactory() servicefactory.ServiceFactory {
-	return ctx.r.serviceFactory
+// DomainServices returns the services factory for the current model.
+func (ctx *facadeContext) DomainServices() services.DomainServices {
+	return ctx.r.domainServices
 }
 
 // Tracer returns the tracer for the current model.
@@ -953,39 +972,47 @@ func (ctx *facadeContext) Logger() corelogger.Logger {
 	return ctx.r.shared.logger
 }
 
+// Clock returns the clock instance.
+func (ctx *facadeContext) Clock() clock.Clock {
+	return ctx.r.clock
+}
+
 // controllerDB is a protected method, do not expose this directly in to the
 // facade context. It is expect that users of the facade context will use the
 // higher level abstractions.
-func (ctx *facadeContext) controllerDB() (changestream.WatchableDB, error) {
-	db, err := ctx.r.shared.dbGetter.GetWatchableDB(coredatabase.ControllerNS)
+func (ctx *facadeContext) controllerDB(c context.Context) (changestream.WatchableDB, error) {
+	db, err := ctx.r.shared.dbGetter.GetWatchableDB(c, coredatabase.ControllerNS)
 	return db, errors.Trace(err)
 }
 
 // modelDB is a protected method, do not expose this directly in to the
 // facade context. It is expected that users of the facade context will use the
 // higher level abstractions.
-func (ctx *facadeContext) modelDB(modelUUID string) (changestream.WatchableDB, error) {
-	db, err := ctx.r.shared.dbGetter.GetWatchableDB(modelUUID)
+func (ctx *facadeContext) modelDB(c context.Context, modelUUID model.UUID) (changestream.WatchableDB, error) {
+	if err := modelUUID.Validate(); err != nil {
+		return nil, errors.Annotate(err, "validating model uuid")
+	}
+	db, err := ctx.r.shared.dbGetter.GetWatchableDB(c, modelUUID.String())
 	return db, errors.Trace(err)
 }
 
 // migrationScope is a protected method, do not expose this directly in to the
 // facade context. It is expect that users of the facade context will use the
 // higher level abstractions.
-func (ctx *facadeContext) migrationScope(modelUUID string) modelmigration.Scope {
-	return modelmigration.NewScope(
+func (ctx *facadeContext) migrationScope(modelUUID model.UUID) coremodelmigration.Scope {
+	return coremodelmigration.NewScope(
 		changestream.NewTxnRunnerFactory(ctx.controllerDB),
-		changestream.NewTxnRunnerFactory(func() (changestream.WatchableDB, error) {
-			return ctx.modelDB(modelUUID)
+		changestream.NewTxnRunnerFactory(func(c context.Context) (changestream.WatchableDB, error) {
+			return ctx.modelDB(c, modelUUID)
 		}),
 		ctx.r.shared.dbDeleter,
 	)
 }
 
-// ServiceFactoryForModel returns the services factory for a given
+// DomainServicesForModel returns the services factory for a given
 // model uuid.
-func (ctx *facadeContext) ServiceFactoryForModel(uuid model.UUID) servicefactory.ServiceFactory {
-	return ctx.r.serviceFactoryGetter.FactoryForModel(uuid.String())
+func (ctx *facadeContext) DomainServicesForModel(c context.Context, uuid model.UUID) (services.DomainServices, error) {
+	return ctx.r.domainServicesGetter.ServicesForModel(c, uuid)
 }
 
 // ObjectStoreForModel returns the object store for a given model uuid.

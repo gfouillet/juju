@@ -11,6 +11,7 @@ import (
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/internal/errors"
 )
 
 // NamespaceWatcherFactory implements a simple NamespaceWatcher creation process
@@ -48,7 +49,7 @@ func (f *NamespaceWatcherFactory) FeedChange(
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("unable to feed watcher change for namespace %q: %w", namespace, ctx.Err())
+		return errors.Errorf("unable to feed watcher change for namespace %q: %w", namespace, ctx.Err())
 	case ch <- change:
 	}
 	return nil
@@ -56,10 +57,14 @@ func (f *NamespaceWatcherFactory) FeedChange(
 
 // NewNamespaceWatcher implements WatcherFactory.NewNamespaceWatcher
 func (f *NamespaceWatcherFactory) NewNamespaceWatcher(
-	namespace string,
-	changeMask changestream.ChangeType,
 	initialStateQuery eventsource.NamespaceQuery,
+	filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
 ) (watcher.StringsWatcher, error) {
+	if len(filterOptions) > 0 {
+		return nil, fmt.Errorf("filter options are not supported in testing")
+	}
+
+	namespace := filterOption.Namespace()
 	ch, exists := f.WatcherChans[namespace]
 	if !exists {
 		f.WatcherChans[namespace] = make(chan []string, 1)
@@ -68,7 +73,7 @@ func (f *NamespaceWatcherFactory) NewNamespaceWatcher(
 	if f.InitialStateFunc != nil {
 		state, err := f.InitialStateFunc()
 		if err != nil {
-			return nil, fmt.Errorf("fetching initial state for watcher: %w", err)
+			return nil, errors.Errorf("fetching initial state for watcher: %w", err)
 		}
 		ch <- state
 	}

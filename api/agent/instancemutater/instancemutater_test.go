@@ -4,20 +4,19 @@
 package instancemutater_test
 
 import (
-	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/agent/instancemutater"
 	"github.com/juju/juju/api/agent/instancemutater/mocks"
 	apitesting "github.com/juju/juju/api/base/testing"
+	jujutesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	jujutesting "github.com/juju/juju/testing"
 )
 
 type instanceMutaterSuite struct {
@@ -29,14 +28,16 @@ type instanceMutaterSuite struct {
 	apiCaller *mocks.MockAPICaller
 }
 
-var _ = gc.Suite(&instanceMutaterSuite{})
+func TestInstanceMutaterSuite(t *testing.T) {
+	tc.Run(t, &instanceMutaterSuite{})
+}
 
-func (s *instanceMutaterSuite) SetUpTest(c *gc.C) {
+func (s *instanceMutaterSuite) SetUpTest(c *tc.C) {
 	s.tag = names.NewMachineTag("0")
 	s.BaseSuite.SetUpTest(c)
 }
 
-func (s *instanceMutaterSuite) TestMachineCallsLife(c *gc.C) {
+func (s *instanceMutaterSuite) TestMachineCallsLife(c *tc.C) {
 	// We have tested separately the Life method, here we just check
 	// it's called internally.
 	expectedResults := params.LifeResults{
@@ -49,21 +50,21 @@ func (s *instanceMutaterSuite) TestMachineCallsLife(c *gc.C) {
 	}
 	apiCaller := successAPICaller(c, "Life", entitiesArgs, expectedResults)
 	api := instancemutater.NewClient(apiCaller)
-	m, err := api.Machine(context.Background(), names.NewMachineTag("0"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apiCaller.CallCount, gc.Equals, 1)
-	c.Assert(m.Tag().String(), gc.Equals, s.tag.String())
+	m, err := api.Machine(c.Context(), names.NewMachineTag("0"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(apiCaller.CallCount, tc.Equals, 1)
+	c.Assert(m.Tag().String(), tc.Equals, s.tag.String())
 }
 
-func (s *instanceMutaterSuite) TestWatchMachines(c *gc.C) {
+func (s *instanceMutaterSuite) TestWatchMachines(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.clientForScenario(c,
 		s.expectWatchModelMachines,
 		s.expectStringsWatcher,
 	)
-	ch, err := api.WatchModelMachines(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	ch, err := api.WatchModelMachines(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// watch for the changes
 	for i := 0; i < 2; i++ {
@@ -75,17 +76,17 @@ func (s *instanceMutaterSuite) TestWatchMachines(c *gc.C) {
 	}
 }
 
-func (s *instanceMutaterSuite) TestWatchMachinesServerError(c *gc.C) {
+func (s *instanceMutaterSuite) TestWatchMachinesServerError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.clientForScenario(c,
 		s.expectWatchModelMachinesWithError,
 	)
-	_, err := api.WatchModelMachines(context.Background())
-	c.Assert(err, gc.ErrorMatches, "failed")
+	_, err := api.WatchModelMachines(c.Context())
+	c.Assert(err, tc.ErrorMatches, "failed")
 }
 
-func (s *instanceMutaterSuite) setup(c *gc.C) *gomock.Controller {
+func (s *instanceMutaterSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.fCaller = mocks.NewMockFacadeCaller(ctrl)
@@ -94,7 +95,7 @@ func (s *instanceMutaterSuite) setup(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *instanceMutaterSuite) clientForScenario(c *gc.C, behaviours ...func()) *instancemutater.Client {
+func (s *instanceMutaterSuite) clientForScenario(c *tc.C, behaviours ...func()) *instancemutater.Client {
 	for _, b := range behaviours {
 		b()
 	}
@@ -120,7 +121,7 @@ func (s *instanceMutaterSuite) expectWatchModelMachinesWithError() {
 	aExp.APICall(gomock.Any(), "InstanceMutater", 1, "", "WatchModelMachines", nil, gomock.Any()).Return(errors.New("failed"))
 }
 
-func successAPICaller(c *gc.C, method string, expectArgs, useResults interface{}) *apitesting.CallChecker {
+func successAPICaller(c *tc.C, method string, expectArgs, useResults interface{}) *apitesting.CallChecker {
 	return apitesting.APICallChecker(c, apitesting.APICall{
 		Facade:        "InstanceMutater",
 		VersionIsZero: true,

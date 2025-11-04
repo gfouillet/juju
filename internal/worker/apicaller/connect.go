@@ -9,7 +9,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 
 	"github.com/juju/juju/agent"
@@ -49,13 +49,13 @@ var (
 )
 
 // OnlyConnect logs into the API using the supplied agent's credentials.
-func OnlyConnect(_ context.Context, a agent.Agent, apiOpen api.OpenFunc, logger logger.Logger) (api.Connection, error) {
+func OnlyConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logger logger.Logger) (api.Connection, error) {
 	agentConfig := a.CurrentConfig()
 	info, ok := agentConfig.APIInfo()
 	if !ok {
 		return nil, errors.New("API info not available")
 	}
-	conn, _, err := connectFallback(apiOpen, info, agentConfig.OldPassword(), logger)
+	conn, _, err := connectFallback(ctx, apiOpen, info, agentConfig.OldPassword(), logger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -82,6 +82,7 @@ func OnlyConnect(_ context.Context, a agent.Agent, apiOpen api.OpenFunc, logger 
 // until it's managed to log in, and any suicide-cutoff point we pick here
 // will be objectively bad in some circumstances.)
 func connectFallback(
+	ctx context.Context,
 	apiOpen api.OpenFunc, info *api.Info,
 	fallbackPassword string,
 	logger logger.Logger,
@@ -93,7 +94,7 @@ func connectFallback(
 	// atom in a func currently seems to be less treacherous
 	// than the alternatives.
 	var tryConnect = func() {
-		conn, err = apiOpen(info, api.DialOpts{
+		conn, err = apiOpen(ctx, info, api.DialOpts{
 			// The DialTimeout is for connecting to the underlying
 			// socket. We use three seconds because it should be fast
 			// but it is possible to add a manual machine to a distant
@@ -117,7 +118,7 @@ func connectFallback(
 	// passwords if necessary; and update info, and remember
 	// which password we used.
 	if !didFallback {
-		logger.Debugf("connecting with current password")
+		logger.Debugf(ctx, "connecting with current password")
 		tryConnect()
 		if params.IsCodeUnauthorized(err) || errors.Cause(err) == apiservererrors.ErrUnauthorized {
 			didFallback = true
@@ -130,7 +131,7 @@ func connectFallback(
 		infoCopy := *info
 		info = &infoCopy
 		info.Password = fallbackPassword
-		logger.Debugf("connecting with old password")
+		logger.Debugf(ctx, "connecting with old password")
 		tryConnect()
 	}
 
@@ -161,10 +162,10 @@ func connectFallback(
 	// At this point we've run out of reasons to retry connecting,
 	// and just go with whatever error we last saw (if any).
 	if err != nil {
-		logger.Debugf("[%s] failed to connect", shortModelUUID(info.ModelTag))
+		logger.Debugf(ctx, "[%s] failed to connect", shortModelUUID(info.ModelTag))
 		return nil, false, errors.Trace(err)
 	}
-	logger.Infof("[%s] %q successfully connected to %q",
+	logger.Infof(ctx, "[%s] %q successfully connected to %q",
 		shortModelUUID(info.ModelTag),
 		info.Tag.String(),
 		conn.Addr())
@@ -210,12 +211,12 @@ func ScaryConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logg
 		default:
 			return
 		}
-		logger.Errorf("Failed to connect to controller: %v", err)
+		logger.Errorf(ctx, "Failed to connect to controller: %v", err)
 		err = ErrConnectImpossible
 	}()
 
 	// Start connection...
-	conn, usedOldPassword, err := connectFallback(apiOpen, info, oldPassword, logger)
+	conn, usedOldPassword, err := connectFallback(ctx, apiOpen, info, oldPassword, logger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -224,7 +225,7 @@ func ScaryConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logg
 	defer func() {
 		if err != nil {
 			if err := conn.Close(); err != nil {
-				logger.Errorf("while closing API connection: %v", err)
+				logger.Errorf(ctx, "while closing API connection: %v", err)
 			}
 		}
 	}()
@@ -256,12 +257,12 @@ func ScaryConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logg
 	// for expeditious retry than it is to mess around with those
 	// responsibilities in here.
 	if usedOldPassword {
-		logger.Debugf("changing password...")
+		logger.Debugf(ctx, "changing password...")
 		err := changePassword(ctx, oldPassword, a, facade)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		logger.Infof("[%s] password changed for %q",
+		logger.Infof(ctx, "[%s] password changed for %q",
 			shortModelUUID(agentConfig.Model()), entity.String())
 		return nil, ErrChangedPassword
 	}
@@ -304,12 +305,12 @@ func changePassword(ctx context.Context, oldPassword string, a agent.Agent, faca
 
 // NewExternalControllerConnectionFunc returns a function returning an
 // api connection to a controller with the specified api info.
-type NewExternalControllerConnectionFunc func(*api.Info) (api.Connection, error)
+type NewExternalControllerConnectionFunc func(context.Context, *api.Info) (api.Connection, error)
 
 // NewExternalControllerConnection returns an api connection to a controller
 // with the specified api info.
-func NewExternalControllerConnection(apiInfo *api.Info) (api.Connection, error) {
-	return api.Open(apiInfo, api.DialOpts{
+func NewExternalControllerConnection(ctx context.Context, apiInfo *api.Info) (api.Connection, error) {
+	return api.Open(ctx, apiInfo, api.DialOpts{
 		Timeout:    2 * time.Second,
 		RetryDelay: 500 * time.Millisecond,
 	})

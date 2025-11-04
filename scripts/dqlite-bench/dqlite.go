@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/canonical/go-dqlite/app"
+	"github.com/canonical/go-dqlite/v3/app"
 )
 
 type DQLiteDBModelProvider struct {

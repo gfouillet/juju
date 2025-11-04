@@ -4,13 +4,13 @@
 package user
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const logoutDoc = `
@@ -18,9 +18,9 @@ If another client has logged in as the same user, they will remain logged
 in. This command only affects the local client.
 
 The command will fail if the user has not yet set a password
-(` + "`juju change-user-password`" + `). This scenario is only possible after 
+(` + "`juju change-user-password`" + `). This scenario is only possible after
 ` + "`juju bootstrap`" + `since ` + "`juju register`" + ` sets a password. The
-failing behaviour can be overridden with the '--force' option.
+failing behaviour can be overridden with the ` + "`--force`" + ` option.
 
 If the same user is logged in with another client system, that user session
 will not be affected by this command; it only affects the local client.

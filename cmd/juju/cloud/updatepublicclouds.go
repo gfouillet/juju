@@ -12,21 +12,21 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/crypto/openpgp"
 	"golang.org/x/crypto/openpgp/clearsign"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/cmd"
 	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/juju/keys"
-	"github.com/juju/juju/jujuclient"
 )
 
 type updatePublicCloudsCommand struct {
@@ -35,7 +35,7 @@ type updatePublicCloudsCommand struct {
 	publicSigningKey string
 	publicCloudURL   string
 
-	addCloudAPIFunc func() (updatePublicCloudAPI, error)
+	addCloudAPIFunc func(ctx context.Context) (updatePublicCloudAPI, error)
 }
 
 var updatePublicCloudsDoc = `
@@ -43,10 +43,10 @@ If any new information for public clouds (such as regions and connection
 endpoints) are available this command will update Juju accordingly. It is
 suggested to run this command periodically.
 
-Use --controller option to update public cloud(s) on a controller. The command
-will only update the clouds that a controller knows about. 
+Use ` + "`--controller`" + ` to update public cloud(s) on a controller. The command
+will only update the clouds that a controller knows about.
 
-Use --client to update a definition of public cloud(s) on this client.
+Use ` + "`--client`" + ` to update a definition of public cloud(s) on this client.
 `
 
 const updatePublicCloudsExamples = `
@@ -166,7 +166,7 @@ func (c *updatePublicCloudsCommand) Run(ctxt *cmd.Context) error {
 		returnedErr = cmd.ErrSilent
 	}
 	if msg != "" {
-		ctxt.Infof(msg)
+		ctxt.Infof("%s", msg)
 	}
 	if c.ControllerName != "" {
 		if err := c.updateControllerCopy(ctxt, publishedClouds); err != nil {
@@ -219,13 +219,13 @@ func updateClientCopy(publishedClouds map[string]jujucloud.Cloud) (string, error
 }
 
 func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publishedClouds map[string]jujucloud.Cloud) error {
-	api, err := c.addCloudAPIFunc()
+	api, err := c.addCloudAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	allClouds, err := api.Clouds()
+	allClouds, err := api.Clouds(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -242,7 +242,7 @@ func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publ
 		}
 		oldCopies[cloudName] = currentCopy
 		newCopies[cloudName] = updatedCopy
-		if err := api.UpdateCloud(updatedCopy); err != nil {
+		if err := api.UpdateCloud(ctxt, updatedCopy); err != nil {
 			fmt.Fprintln(ctxt.Stderr, fmt.Sprintf("ERROR updating public cloud data on controller %q: %v", c.ControllerName, err))
 			continue
 		}
@@ -259,11 +259,11 @@ func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publ
 
 type updatePublicCloudAPI interface {
 	updateCloudAPI
-	Clouds() (map[names.CloudTag]jujucloud.Cloud, error)
+	Clouds(ctx context.Context) (map[names.CloudTag]jujucloud.Cloud, error)
 }
 
-func (c *updatePublicCloudsCommand) cloudAPI() (updatePublicCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *updatePublicCloudsCommand) cloudAPI(ctx context.Context) (updatePublicCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

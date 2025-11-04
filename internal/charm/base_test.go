@@ -6,23 +6,25 @@ package charm_test
 import (
 	"encoding/json"
 	"strings"
+	"testing"
 
 	"github.com/juju/os/v2"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v4/arch"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type baseSuite struct {
-	testing.CleanupSuite
+	testhelpers.CleanupSuite
 }
 
-var _ = gc.Suite(&baseSuite{})
+func TestBaseSuite(t *testing.T) {
+	tc.Run(t, &baseSuite{})
+}
 
-func (s *baseSuite) TestParseBase(c *gc.C) {
+func (s *baseSuite) TestParseBase(c *tc.C) {
 	tests := []struct {
 		str        string
 		parsedBase charm.Base
@@ -33,62 +35,30 @@ func (s *baseSuite) TestParseBase(c *gc.C) {
 			parsedBase: charm.Base{},
 			err:        `base string must contain exactly one @. "ubuntu" not valid`,
 		}, {
-			str:        "windows",
-			parsedBase: charm.Base{},
-			err:        `base string must contain exactly one @. "windows" not valid`,
-		}, {
-			str:        "mythicalos@channel",
-			parsedBase: charm.Base{},
-			err:        `invalid base string "mythicalos@channel": os "mythicalos" not valid`,
-		}, {
-			str:        "ubuntu@20.04/stable",
-			parsedBase: charm.Base{Name: strings.ToLower(os.Ubuntu.String()), Channel: mustParseChannel("20.04/stable")},
-		}, {
-			str:        "windows@win10/stable",
-			parsedBase: charm.Base{},
-			err:        `invalid base string "windows@win10/stable": os "windows" not valid`,
-		}, {
 			str:        "ubuntu@20.04/edge",
 			parsedBase: charm.Base{Name: strings.ToLower(os.Ubuntu.String()), Channel: mustParseChannel("20.04/edge")},
 		},
 	}
 	for i, v := range tests {
-		comment := gc.Commentf("test %d", i)
+		comment := tc.Commentf("test %d", i)
 		s, err := charm.ParseBase(v.str)
 		if v.err != "" {
-			c.Check(err, gc.ErrorMatches, v.err, comment)
+			c.Check(err, tc.ErrorMatches, v.err, comment)
 		} else {
-			c.Check(err, jc.ErrorIsNil, comment)
+			c.Assert(err, tc.ErrorIsNil, comment)
 		}
-		c.Check(s, jc.DeepEquals, v.parsedBase, comment)
+		c.Check(s, tc.DeepEquals, v.parsedBase, comment)
 	}
 }
 
-func (s *baseSuite) TestParseBaseWithArchitectures(c *gc.C) {
+func (s *baseSuite) TestParseBaseWithArchitectures(c *tc.C) {
 	tests := []struct {
 		str        string
 		baseString string
 		archs      []string
 		parsedBase charm.Base
-		err        string
 	}{
 		{
-			baseString: "ubuntu@",
-			str:        "ubuntu on amd64",
-			archs:      []string{"amd64"},
-			parsedBase: charm.Base{},
-			err:        `invalid base string "ubuntu@" with architectures "amd64": channel not valid`,
-		}, {
-			baseString: "ubuntu@",
-			str:        "ubuntu",
-			parsedBase: charm.Base{},
-			err:        `invalid base string "ubuntu@": channel not valid`,
-		}, {
-			baseString: "mythicalos@channel",
-			str:        "mythicalos",
-			parsedBase: charm.Base{},
-			err:        `invalid base string "mythicalos@channel": os "mythicalos" not valid`,
-		}, {
 			baseString: "ubuntu@20.04/stable",
 			archs:      []string{arch.AMD64, "ppc64"},
 			str:        "ubuntu@20.04/stable on amd64, ppc64el",
@@ -96,27 +66,19 @@ func (s *baseSuite) TestParseBaseWithArchitectures(c *gc.C) {
 				Name:          strings.ToLower(os.Ubuntu.String()),
 				Channel:       mustParseChannel("20.04/stable"),
 				Architectures: []string{arch.AMD64, arch.PPC64EL}},
-		}, {
-			baseString: "ubuntu@24.04/stable",
-			archs:      []string{"testme"},
-			str:        "ubuntu@24.04/stable",
-			parsedBase: charm.Base{},
-			err:        `invalid base string "ubuntu@24.04/stable" with architectures "testme": architecture "testme" not valid`,
 		},
 	}
 	for i, v := range tests {
-		comment := gc.Commentf("test %d", i)
+		comment := tc.Commentf("test %d", i)
 		s, err := charm.ParseBase(v.baseString, v.archs...)
-		if v.err != "" {
-			c.Check(err, gc.ErrorMatches, v.err, comment)
-		} else {
-			c.Check(err, jc.ErrorIsNil, comment)
-		}
-		c.Check(s, jc.DeepEquals, v.parsedBase, comment)
+
+		c.Assert(err, tc.ErrorIsNil, comment)
+
+		c.Check(s, tc.DeepEquals, v.parsedBase, comment)
 	}
 }
 
-func (s *baseSuite) TestStringifyBase(c *gc.C) {
+func (s *baseSuite) TestStringifyBase(c *tc.C) {
 	tests := []struct {
 		base charm.Base
 		str  string
@@ -144,24 +106,24 @@ func (s *baseSuite) TestStringifyBase(c *gc.C) {
 		},
 	}
 	for i, v := range tests {
-		comment := gc.Commentf("test %d", i)
-		c.Assert(v.base.Validate(), jc.ErrorIsNil)
-		c.Assert(v.base.String(), gc.Equals, v.str, comment)
+		comment := tc.Commentf("test %d", i)
+		c.Assert(v.base.Validate(), tc.ErrorIsNil)
+		c.Assert(v.base.String(), tc.Equals, v.str, comment)
 	}
 }
 
-func (s *baseSuite) TestJSONEncoding(c *gc.C) {
+func (s *baseSuite) TestJSONEncoding(c *tc.C) {
 	sys := charm.Base{
 		Name:    "ubuntu",
 		Channel: mustParseChannel("20.04/stable"),
 	}
 	bytes, err := json.Marshal(sys)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(bytes), gc.Equals, `{"name":"ubuntu","channel":{"track":"20.04","risk":"stable"}}`)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(bytes), tc.Equals, `{"name":"ubuntu","channel":{"track":"20.04","risk":"stable"}}`)
 	sys2 := charm.Base{}
 	err = json.Unmarshal(bytes, &sys2)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(sys2, jc.DeepEquals, sys)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(sys2, tc.DeepEquals, sys)
 }
 
 // MustParseChannel parses a given string or returns a panic.

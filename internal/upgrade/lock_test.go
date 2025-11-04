@@ -4,40 +4,43 @@
 package upgrade
 
 import (
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type lockSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	lock        *MockLock
 	agent       *MockAgent
 	agentConfig *MockConfig
 }
 
-var _ = gc.Suite(&lockSuite{})
+func TestLockSuite(t *testing.T) {
+	tc.Run(t, &lockSuite{})
+}
 
-func (s *lockSuite) TestNewLockSameVersionUnlocked(c *gc.C) {
+func (s *lockSuite) TestNewLockSameVersionUnlocked(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.agentConfig.EXPECT().UpgradedToVersion().Return(jujuversion.Current)
-	c.Assert(NewLock(s.agentConfig, jujuversion.Current).IsUnlocked(), jc.IsTrue)
+	c.Assert(NewLock(s.agentConfig, jujuversion.Current).IsUnlocked(), tc.IsTrue)
 }
 
-func (s *lockSuite) TestNewLockOldVersionLocked(c *gc.C) {
+func (s *lockSuite) TestNewLockOldVersionLocked(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.agentConfig.EXPECT().UpgradedToVersion().Return(version.Number{})
-	c.Assert(NewLock(s.agentConfig, jujuversion.Current).IsUnlocked(), jc.IsFalse)
+	s.agentConfig.EXPECT().UpgradedToVersion().Return(semversion.Number{})
+	c.Assert(NewLock(s.agentConfig, jujuversion.Current).IsUnlocked(), tc.IsFalse)
 }
 
-func (s *lockSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *lockSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.lock = NewMockLock(ctrl)

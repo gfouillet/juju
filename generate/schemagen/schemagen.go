@@ -4,7 +4,6 @@
 package main
 
 import (
-	stdcontext "context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,24 +14,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/juju/juju/apiserver"
-	"github.com/juju/juju/apiserver/common"
-	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/core/changestream"
-	coredatabase "github.com/juju/juju/core/database"
-	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/watcher/registry"
-	"github.com/juju/juju/domain/servicefactory/testing"
 	"github.com/juju/juju/generate/schemagen/gen"
-	"github.com/juju/juju/internal/servicefactory"
-	"github.com/juju/juju/state"
 )
 
 // Strings represents a way to have multiple values passed to the flags
@@ -56,9 +43,10 @@ func main() {
 	var (
 		facadeGroups Strings
 		adminFacades = flag.Bool("admin-facades", false, "add the admin facades when generating the schema")
+		comments     = flag.Bool("comments", false, "add comments from go source")
 	)
 
-	flag.Var(&facadeGroups, "facade-group", "facade group to export (latest, all, client, jimm)")
+	flag.Var(&facadeGroups, "facade-group", "facade group to export (latest, all, client, agent, jimm)")
 	flag.Parse()
 	args := flag.Args()
 
@@ -87,17 +75,17 @@ func main() {
 		groups = append(groups, g)
 	}
 
-	watcherRegistry, err := registry.NewRegistry(clock.WallClock)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	linker := defaultLinker{
-		watcherRegistry: watcherRegistry,
+	var packages gen.PackageRegistry
+	if *comments {
+		// Resolving comments requires being able to load the go source.
+		packages = defaultPackages{
+			path: "github.com/juju/juju/apiserver",
+		}
+	} else {
+		packages = noPackages{}
 	}
 
-	result, err := gen.Generate(defaultPackages{
-		path: "github.com/juju/juju/apiserver",
-	}, linker, apiServerShim{},
+	result, err := gen.Generate(packages, apiServerShim{},
 		gen.WithAdminFacades(*adminFacades),
 		gen.WithFacadeGroups(groups),
 	)
@@ -126,6 +114,12 @@ func (apiServerShim) AdminFacadeDetails() []facade.Details {
 	return apiserver.AdminFacadeDetails()
 }
 
+type noPackages struct{}
+
+func (p noPackages) LoadPackage() (*packages.Package, error) {
+	return nil, nil
+}
+
 type defaultPackages struct {
 	path string
 }
@@ -146,161 +140,4 @@ func (p defaultPackages) LoadPackage() (*packages.Package, error) {
 		return nil, errors.Errorf("packages.Load returned %d packages, not 1", len(pkgs))
 	}
 	return pkgs[0], nil
-}
-
-type defaultLinker struct {
-	watcherRegistry facade.WatcherRegistry
-}
-
-func (l defaultLinker) Links(facadeName string, factory facade.MultiModelFactory) []string {
-	var a []string
-	for i, kindStr := range kinds {
-		if l.isAvailable(facadeName, factory, entityKind(i)) {
-			a = append(a, kindStr)
-		}
-	}
-	return a
-}
-
-func (l defaultLinker) isAvailable(facadeName string, factory facade.MultiModelFactory, kind entityKind) (ok bool) {
-	if factory == nil {
-		// Admin facade only.
-		return true
-	}
-	if kind == kindControllerUser && !apiserver.IsControllerFacade(facadeName) {
-		return false
-	}
-	if kind == kindModelUser && !apiserver.IsModelFacade(facadeName) {
-		return false
-	}
-	defer func() {
-		err := recover()
-		if err == nil {
-			return
-		}
-		ok = true
-	}()
-	ctx := context{
-		auth: authorizer{
-			kind: kind,
-		},
-		watcherRegistry: l.watcherRegistry,
-	}
-	_, err := factory(stdcontext.Background(), ctx)
-	return errors.Cause(err) != apiservererrors.ErrPerm
-}
-
-type entityKind int
-
-const (
-	kindControllerMachine = entityKind(iota)
-	kindMachineAgent
-	kindUnitAgent
-	kindControllerUser
-	kindModelUser
-)
-
-func (k entityKind) String() string {
-	return kinds[k]
-}
-
-var kinds = []string{
-	kindControllerMachine: "controller-machine-agent",
-	kindMachineAgent:      "machine-agent",
-	kindUnitAgent:         "unit-agent",
-	kindControllerUser:    "controller-user",
-	kindModelUser:         "model-user",
-}
-
-type context struct {
-	facade.MultiModelContext
-	auth            authorizer
-	watcherRegistry facade.WatcherRegistry
-}
-
-func (c context) Auth() facade.Authorizer {
-	return c.auth
-}
-
-func (c context) ControllerUUID() string {
-	return ""
-}
-
-func (c context) ID() string {
-	return ""
-}
-
-func (c context) State() *state.State {
-	return new(state.State)
-}
-
-func (c context) StatePool() *state.StatePool {
-	return new(state.StatePool)
-}
-
-func (c context) Resources() facade.Resources {
-	return common.NewResources()
-}
-
-func (c context) WatcherRegistry() facade.WatcherRegistry {
-	return c.watcherRegistry
-}
-
-func (c context) ControllerTag() names.ControllerTag {
-	return names.NewControllerTag("xxxx")
-}
-
-func (c context) Dispose() {}
-
-func (c context) ControllerDB() (changestream.WatchableDB, error) {
-	return nil, nil
-}
-
-func (c context) DBDeleter() coredatabase.DBDeleter {
-	return nil
-}
-
-func (c context) ObjectStore() objectstore.ObjectStore {
-	return nil
-}
-
-func (c context) ServiceFactory() servicefactory.ServiceFactory {
-	return testing.NewTestingServiceFactory()
-}
-
-type authorizer struct {
-	facade.Authorizer
-	kind entityKind
-}
-
-func (a authorizer) AuthController() bool {
-	return a.kind == kindControllerMachine
-}
-
-func (a authorizer) HasPermission(operation permission.Access, target names.Tag) error {
-	return nil
-}
-
-func (a authorizer) AuthMachineAgent() bool {
-	return a.kind == kindMachineAgent || a.kind == kindControllerMachine
-}
-
-func (a authorizer) AuthUnitAgent() bool {
-	return a.kind == kindUnitAgent
-}
-
-func (a authorizer) AuthClient() bool {
-	return a.kind == kindControllerUser || a.kind == kindModelUser
-}
-
-func (a authorizer) GetAuthTag() names.Tag {
-	switch a.kind {
-	case kindControllerUser, kindModelUser:
-		return names.NewUserTag("bob")
-	case kindUnitAgent:
-		return names.NewUnitTag("xx/0")
-	case kindMachineAgent, kindControllerMachine:
-		return names.NewMachineTag("0")
-	}
-	panic("unknown kind")
 }

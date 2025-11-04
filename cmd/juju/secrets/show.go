@@ -4,7 +4,8 @@
 package secrets
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -12,13 +13,14 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	coresecrets "github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type showSecretsCommand struct {
 	modelcmd.ModelCommandBase
 	out cmd.Output
 
-	listSecretsAPIFunc func() (ListSecretsAPI, error)
+	listSecretsAPIFunc func(ctx context.Context) (ListSecretsAPI, error)
 	uri                *coresecrets.URI
 	name               string
 	revealSecrets      bool
@@ -30,10 +32,10 @@ var showSecretsDoc = `
 Displays the details of a specified secret.
 
 For controller/model admins, the actual secret content is exposed
-with the '--reveal' option in json or yaml formats.
+with the ` + "`--reveal`" + ` option in the ` + "`json`" + ` or ` + "`yaml`" + ` formats.
 
-Use --revision to inspect a particular revision, else latest is used.
-Use --revisions to see the metadata for each revision.
+Use ` + "`--revision`" + ` to inspect a particular revision, else latest is used.
+Use ` + "`--revisions`" + ` to see the metadata for each revision.
 `
 
 const showSecretsExamples = `
@@ -53,8 +55,8 @@ func NewShowSecretsCommand() cmd.Command {
 	return modelcmd.Wrap(c)
 }
 
-func (c *showSecretsCommand) secretsAPI() (ListSecretsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *showSecretsCommand) secretsAPI(ctx context.Context) (ListSecretsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -70,6 +72,11 @@ func (c *showSecretsCommand) Info() *cmd.Info {
 		Purpose:  "Shows details for a specific secret.",
 		Doc:      showSecretsDoc,
 		Examples: showSecretsExamples,
+		SeeAlso: []string{
+			"add-secret",
+			"update-secret",
+			"remove-secret",
+		},
 	})
 }
 
@@ -116,7 +123,7 @@ func (c *showSecretsCommand) Run(ctxt *cmd.Context) error {
 		c.revealSecrets = false
 	}
 
-	api, err := c.listSecretsAPIFunc()
+	api, err := c.listSecretsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -131,7 +138,7 @@ func (c *showSecretsCommand) Run(ctxt *cmd.Context) error {
 	if c.name != "" {
 		filter.Label = &c.name
 	}
-	result, err := api.ListSecrets(c.revealSecrets, filter)
+	result, err := api.ListSecrets(ctxt, c.revealSecrets, filter)
 	if err != nil {
 		return errors.Trace(err)
 	}

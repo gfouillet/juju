@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/logger"
@@ -55,7 +55,7 @@ func (s *storageResolver) NextOp(
 	if remoteState.Life == life.Dying {
 		// The unit is dying, so destroy all of its storage.
 		if !s.dying {
-			if err := s.storage.SetDying(); err != nil {
+			if err := s.storage.SetDying(ctx); err != nil {
 				return nil, errors.Trace(err)
 			}
 			s.dying = true
@@ -66,7 +66,7 @@ func (s *storageResolver) NextOp(
 		}
 	}
 
-	if err := s.maybeShortCircuitRemoval(remoteState.Storage); err != nil {
+	if err := s.maybeShortCircuitRemoval(ctx, remoteState.Storage); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -115,7 +115,7 @@ func (s *storageResolver) NextOp(
 
 	// This message is only interesting for IAAS models.
 	if s.modelType == model.IAAS && !localState.Installed && s.storage.Pending() == 0 {
-		s.logger.Infof("initial storage attachments ready")
+		s.logger.Infof(ctx, "initial storage attachments ready")
 	}
 
 	for tag, snap := range remoteState.Storage {
@@ -126,7 +126,7 @@ func (s *storageResolver) NextOp(
 		return op, err
 	}
 	if s.storage.Pending() > 0 {
-		s.logger.Debugf("still pending %v", s.storage.pending.SortedValues())
+		s.logger.Debugf(ctx, "still pending %v", s.storage.pending.SortedValues())
 		// For IAAS models, storage hooks are run before install.
 		// If the install hook has not yet run and there's still
 		// pending storage, we wait. We don't wait after the
@@ -142,13 +142,13 @@ func (s *storageResolver) NextOp(
 
 // maybeShortCircuitRemoval removes any storage that is not alive,
 // and has not had a storage-attached hook committed.
-func (s *storageResolver) maybeShortCircuitRemoval(remote map[names.StorageTag]remotestate.StorageSnapshot) error {
+func (s *storageResolver) maybeShortCircuitRemoval(ctx context.Context, remote map[names.StorageTag]remotestate.StorageSnapshot) error {
 	for tag, snap := range remote {
 		attached, ok := s.storage.storageState.Attached(tag.Id())
 		if (ok && attached) || snap.Life == life.Alive {
 			continue
 		}
-		if err := s.storage.removeStorageAttachment(tag); err != nil {
+		if err := s.storage.removeStorageAttachment(ctx, tag); err != nil {
 			return errors.Trace(err)
 		}
 		delete(remote, tag)
@@ -162,7 +162,7 @@ func (s *storageResolver) nextHookOp(
 	opFactory operation.Factory,
 ) (operation.Operation, error) {
 
-	s.logger.Debugf("next hook op for %v: %+v", tag, snap)
+	s.logger.Debugf(context.TODO(), "next hook op for %v: %+v", tag, snap)
 
 	if snap.Life == life.Dead {
 		// Storage must have been Dying to become Dead;

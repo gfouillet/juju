@@ -4,6 +4,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"regexp"
@@ -11,11 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/juju/ansiterm"
 	"github.com/juju/errors"
-	"github.com/juju/naturalsort"
-	"github.com/juju/version/v2"
 
 	cmdcrossmodel "github.com/juju/juju/cmd/juju/crossmodel"
 	"github.com/juju/juju/cmd/juju/storage"
@@ -24,10 +23,12 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charm/hooks"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/internal/naturalsort"
 )
 
 const (
@@ -76,7 +77,7 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	versionPos := indexOf("Version", header)
 	w.Print(values[:versionPos]...)
 	if fs.Model.Version != "" {
-		modelVersionNum, err := version.Parse(fs.Model.Version)
+		modelVersionNum, err := semversion.Parse(fs.Model.Version)
 		if err == nil && jujuversion.Current.Compare(modelVersionNum) > 0 {
 			w.PrintColor(output.WarningHighlight, fs.Model.Version)
 		} else {
@@ -85,9 +86,6 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	}
 
 	w.Println(values[versionPos:]...)
-	if len(fs.Branches) > 0 {
-		printBranches(tw, fs.Branches)
-	}
 
 	if len(fs.RemoteApplications) > 0 {
 		printRemoteApplications(tw, fs.RemoteApplications)
@@ -246,9 +244,6 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		}
 		if u.Leader {
 			name += "*"
-		}
-		if u.Branch != "" {
-			name += " " + u.Branch
 		}
 		w.Print(indent("", level*2, name))
 		w.PrintStatus(u.WorkloadStatusInfo.Current)
@@ -430,17 +425,6 @@ func printPorts(w OutputWriter, ps []string) {
 	w.Print("") //Print empty tab after the ports
 }
 
-func printBranches(tw *ansiterm.TabWriter, branches map[string]branchStatus) {
-	w := startSection(tw, false, "Branch", "Ref", "Created", "Created By")
-	for _, branchName := range naturalsort.Sort(stringKeysFromMap(branches)) {
-		b := branches[branchName]
-		if b.Active {
-			branchName = branchName + "*"
-		}
-		w.Println(branchName, b.Ref, b.Created, b.CreatedBy)
-	}
-}
-
 func printRemoteApplications(tw *ansiterm.TabWriter, remoteApplications map[string]remoteApplicationStatus) {
 	w := startSection(tw, false, "SAAS", "Status", "Store", "URL")
 	for _, appName := range naturalsort.Sort(stringKeysFromMap(remoteApplications)) {
@@ -456,7 +440,7 @@ func printRemoteApplications(tw *ansiterm.TabWriter, remoteApplications map[stri
 			}
 		} else {
 			// This is not expected.
-			logger.Errorf("invalid offer URL %q: %v", app.OfferURL, err)
+			logger.Errorf(context.TODO(), "invalid offer URL %q: %v", app.OfferURL, err)
 			store = "unknown"
 			urlPath = app.OfferURL
 		}
@@ -562,7 +546,7 @@ func printMachine(w *output.Wrapper, m machineStatus) {
 	// We want to display availability zone so extract from hardware info".
 	hw, err := instance.ParseHardware(m.Hardware)
 	if err != nil {
-		logger.Warningf("invalid hardware info %s for machine %v", m.Hardware, m)
+		logger.Warningf(context.TODO(), "invalid hardware info %s for machine %v", m.Hardware, m)
 	}
 	az := ""
 	if hw.AvailabilityZone != nil {

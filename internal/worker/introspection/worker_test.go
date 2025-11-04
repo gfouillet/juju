@@ -10,212 +10,192 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"runtime"
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/juju/clock/testclock"
-	"github.com/juju/loggo/v2"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/workertest"
 	"github.com/prometheus/client_golang/prometheus"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/internal/pubsub/agent"
+	"github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/introspection"
-	_ "github.com/juju/juju/state"
+	"github.com/juju/juju/juju/sockets"
 )
 
 type suite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&suite{})
+func TestSuite(t *testing.T) {
+	tc.Run(t, &suite{})
+}
 
-func (s *suite) TestConfigValidation(c *gc.C) {
-	w, err := introspection.NewWorker(introspection.Config{})
-	c.Check(w, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "empty SocketName not valid")
-	w, err = introspection.NewWorker(introspection.Config{
-		SocketName: "socket",
+func (s *suite) TestConfigValidation(c *tc.C) {
+	socketName := path.Join(c.MkDir(), "introspection-test.socket")
+	_, err := introspection.NewWorker(introspection.Config{})
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+
+	_, err = introspection.NewWorker(introspection.Config{
+		SocketName: socketName,
 	})
-	c.Check(w, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "nil PrometheusGatherer not valid")
-	w, err = introspection.NewWorker(introspection.Config{
-		SocketName:         "socket",
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+
+	_, err = introspection.NewWorker(introspection.Config{
+		SocketName:         socketName,
 		PrometheusGatherer: newPrometheusGatherer(),
-		LocalHub:           pubsub.NewSimpleHub(&pubsub.SimpleHubConfig{}),
 	})
-	c.Check(w, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "nil Clock not valid")
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+
+	w, err := introspection.NewWorker(introspection.Config{
+		SocketName:         socketName,
+		PrometheusGatherer: newPrometheusGatherer(),
+		FlightRecorder:     flightRecorder{},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+	defer workertest.CleanKill(c, w)
 }
 
-func (s *suite) TestStartStop(c *gc.C) {
+func (s *suite) TestStartStop(c *tc.C) {
 	if runtime.GOOS != "linux" {
 		c.Skip("introspection worker not supported on non-linux")
 	}
 
+	socketName := path.Join(c.MkDir(), "introspection-test.socket")
 	w, err := introspection.NewWorker(introspection.Config{
-		SocketName:         "introspection-test",
+		SocketName:         socketName,
 		PrometheusGatherer: prometheus.NewRegistry(),
+		FlightRecorder:     flightRecorder{},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	workertest.CheckKill(c, w)
+	c.Assert(err, tc.ErrorIsNil)
+	_ = workertest.CheckKill(c, w)
 }
 
 type introspectionSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
-	name       string
-	worker     worker.Worker
-	reporter   introspection.DepEngineReporter
-	gatherer   prometheus.Gatherer
-	recorder   presence.Recorder
-	localHub   *pubsub.SimpleHub
-	centralHub introspection.StructuredHub
-	clock      *testclock.Clock
+	name           string
+	worker         worker.Worker
+	depEngine      introspection.DependencyEngine
+	gatherer       prometheus.Gatherer
+	flightRecorder flightrecorder.FlightRecorder
 }
 
-var _ = gc.Suite(&introspectionSuite{})
+func TestIntrospectionSuite(t *testing.T) {
+	tc.Run(t, &introspectionSuite{})
+}
 
-func (s *introspectionSuite) SetUpTest(c *gc.C) {
+func (s *introspectionSuite) SetUpTest(c *tc.C) {
 	if runtime.GOOS != "linux" {
 		c.Skip("introspection worker not supported on non-linux")
 	}
 	s.IsolationSuite.SetUpTest(c)
-	s.reporter = nil
+	s.depEngine = nil
 	s.worker = nil
-	s.recorder = nil
 	s.gatherer = newPrometheusGatherer()
-	s.localHub = pubsub.NewSimpleHub(&pubsub.SimpleHubConfig{Logger: loggo.GetLogger("test.localhub")})
-	s.centralHub = pubsub.NewStructuredHub(&pubsub.StructuredHubConfig{Logger: loggo.GetLogger("test.centralhub")})
-	s.clock = testclock.NewClock(time.Now())
+	s.flightRecorder = flightRecorder{}
 	s.startWorker(c)
 }
 
-func (s *introspectionSuite) startWorker(c *gc.C) {
-	s.name = fmt.Sprintf("introspection-test-%d", os.Getpid())
+func (s *introspectionSuite) startWorker(c *tc.C) {
+	s.name = path.Join(c.MkDir(), fmt.Sprintf("introspection-test-%d.socket", os.Getpid()))
 	w, err := introspection.NewWorker(introspection.Config{
 		SocketName:         s.name,
-		DepEngine:          s.reporter,
+		DepEngine:          s.depEngine,
 		PrometheusGatherer: s.gatherer,
-		Presence:           s.recorder,
-		Clock:              s.clock,
-		LocalHub:           s.localHub,
-		CentralHub:         s.centralHub,
+		FlightRecorder:     s.flightRecorder,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.worker = w
-	s.AddCleanup(func(c *gc.C) {
+	s.AddCleanup(func(c *tc.C) {
 		workertest.CleanKill(c, w)
 	})
 }
 
-func (s *introspectionSuite) call(c *gc.C, path string) *http.Response {
-	client := unixSocketHTTPClient("@" + s.name)
-	c.Assert(strings.HasPrefix(path, "/"), jc.IsTrue)
+func (s *introspectionSuite) call(c *tc.C, path string) *http.Response {
+	client := unixSocketHTTPClient(s.name)
+	c.Assert(strings.HasPrefix(path, "/"), tc.IsTrue)
 	targetURL, err := url.Parse("http://unix.socket" + path)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	resp, err := client.Get(targetURL.String())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return resp
 }
 
-func (s *introspectionSuite) post(c *gc.C, path string, values url.Values) *http.Response {
-	client := unixSocketHTTPClient("@" + s.name)
-	c.Assert(strings.HasPrefix(path, "/"), jc.IsTrue)
-	targetURL, err := url.Parse("http://unix.socket" + path)
-	c.Assert(err, jc.ErrorIsNil)
-
-	resp, err := client.PostForm(targetURL.String(), values)
-	c.Assert(err, jc.ErrorIsNil)
-	return resp
-}
-
-func (s *introspectionSuite) body(c *gc.C, r *http.Response) string {
+func (s *introspectionSuite) body(c *tc.C, r *http.Response) string {
 	response, err := io.ReadAll(r.Body)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return string(response)
 }
 
-func (s *introspectionSuite) assertBody(c *gc.C, response *http.Response, value string) {
+func (s *introspectionSuite) assertBody(c *tc.C, response *http.Response, value string) {
 	body := s.body(c, response)
-	c.Assert(body, gc.Equals, value+"\n")
+	c.Assert(body, tc.Equals, value+"\n")
 }
 
-func (s *introspectionSuite) assertContains(c *gc.C, value, expected string) {
-	c.Assert(strings.Contains(value, expected), jc.IsTrue,
-		gc.Commentf("missing %q in %v", expected, value))
+func (s *introspectionSuite) assertContains(c *tc.C, value, expected string) {
+	c.Assert(strings.Contains(value, expected), tc.IsTrue,
+		tc.Commentf("missing %q in %v", expected, value))
 }
 
-func (s *introspectionSuite) assertBodyContains(c *gc.C, response *http.Response, value string) {
+func (s *introspectionSuite) assertBodyContains(c *tc.C, response *http.Response, value string) {
 	body := s.body(c, response)
 	s.assertContains(c, body, value)
 }
 
-func (s *introspectionSuite) TestCmdLine(c *gc.C) {
+func (s *introspectionSuite) TestCmdLine(c *tc.C) {
 	response := s.call(c, "/debug/pprof/cmdline")
+	defer response.Body.Close()
 	s.assertBodyContains(c, response, "/introspection.test")
 }
 
-func (s *introspectionSuite) TestGoroutineProfile(c *gc.C) {
+func (s *introspectionSuite) TestGoroutineProfile(c *tc.C) {
 	response := s.call(c, "/debug/pprof/goroutine?debug=1")
+	defer response.Body.Close()
 	body := s.body(c, response)
-	c.Check(body, gc.Matches, `(?s)^goroutine profile: total \d+.*`)
+	c.Check(body, tc.Matches, `(?s)^goroutine profile: total \d+.*`)
 }
 
-func (s *introspectionSuite) TestTrace(c *gc.C) {
+func (s *introspectionSuite) TestTrace(c *tc.C) {
 	response := s.call(c, "/debug/pprof/trace?seconds=1")
-	c.Assert(response.Header.Get("Content-Type"), gc.Equals, "application/octet-stream")
+	defer response.Body.Close()
+	c.Assert(response.Header.Get("Content-Type"), tc.Equals, "application/octet-stream")
 }
 
-func (s *introspectionSuite) TestMissingDepEngineReporter(c *gc.C) {
+func (s *introspectionSuite) TestMissingDepEngineReporter(c *tc.C) {
 	response := s.call(c, "/depengine")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
+	defer response.Body.Close()
+	c.Assert(response.StatusCode, tc.Equals, http.StatusNotFound)
 	s.assertBody(c, response, "missing dependency engine reporter")
 }
 
-func (s *introspectionSuite) TestMissingStatePoolReporter(c *gc.C) {
-	response := s.call(c, "/statepool")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
-	s.assertBody(c, response, `"State Pool" introspection not supported`)
-}
-
-func (s *introspectionSuite) TestMissingPubSubReporter(c *gc.C) {
-	response := s.call(c, "/pubsub")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
-	s.assertBody(c, response, `"PubSub Report" introspection not supported`)
-}
-
-func (s *introspectionSuite) TestMissingMachineLock(c *gc.C) {
+func (s *introspectionSuite) TestMissingMachineLock(c *tc.C) {
 	response := s.call(c, "/machinelock")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
+	defer response.Body.Close()
+	c.Assert(response.StatusCode, tc.Equals, http.StatusNotFound)
 	s.assertBody(c, response, "missing machine lock reporter")
 }
 
-func (s *introspectionSuite) TestStateTrackerReporter(c *gc.C) {
-	response := s.call(c, "/debug/pprof/juju/state/tracker?debug=1")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
-	s.assertBodyContains(c, response, "juju/state/tracker profile: total")
-}
-
-func (s *introspectionSuite) TestEngineReporter(c *gc.C) {
+func (s *introspectionSuite) TestEngineReporter(c *tc.C) {
 	// We need to make sure the existing worker is shut down
 	// so we can connect to the socket.
-	workertest.CheckKill(c, s.worker)
-	s.reporter = &reporter{
+	workertest.CleanKill(c, s.worker)
+	s.depEngine = &depEngine{
 		values: map[string]interface{}{
 			"working": true,
 		},
 	}
 	s.startWorker(c)
 	response := s.call(c, "/depengine")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
+	defer response.Body.Close()
+	c.Assert(response.StatusCode, tc.Equals, http.StatusOK)
 	// TODO: perhaps make the output of the dependency engine YAML parseable.
 	// This could be done by having the first line start with a '#'.
 	s.assertBody(c, response, `
@@ -224,158 +204,21 @@ Dependency Engine Report
 working: true`[1:])
 }
 
-func (s *introspectionSuite) TestMissingPresenceReporter(c *gc.C) {
-	response := s.call(c, "/presence")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
-	s.assertBody(c, response, `"Presence" introspection not supported`)
-}
-
-func (s *introspectionSuite) TestDisabledPresenceReporter(c *gc.C) {
-	// We need to make sure the existing worker is shut down
-	// so we can connect to the socket.
-	workertest.CheckKill(c, s.worker)
-	s.recorder = presence.New(testclock.NewClock(time.Now()))
-	s.startWorker(c)
-
-	response := s.call(c, "/presence")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusNotFound)
-	s.assertBody(c, response, "agent is not an apiserver")
-}
-
-func (s *introspectionSuite) TestEnabledPresenceReporter(c *gc.C) {
-	// We need to make sure the existing worker is shut down
-	// so we can connect to the socket.
-	workertest.CheckKill(c, s.worker)
-	s.recorder = presence.New(testclock.NewClock(time.Now()))
-	s.recorder.Enable()
-	s.recorder.Connect("server", "model-uuid", "agent-1", 42, false, "")
-	s.startWorker(c)
-
-	response := s.call(c, "/presence")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
-	s.assertBody(c, response, `
-[model-uuid]
-
-AGENT    SERVER  CONN ID  STATUS
-agent-1  server  42       alive
-`[1:])
-}
-
-func (s *introspectionSuite) TestPrometheusMetrics(c *gc.C) {
+func (s *introspectionSuite) TestPrometheusMetrics(c *tc.C) {
 	response := s.call(c, "/metrics")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
+	defer response.Body.Close()
+	c.Assert(response.StatusCode, tc.Equals, http.StatusOK)
 	body := s.body(c, response)
 	s.assertContains(c, body, "# HELP tau Tau")
 	s.assertContains(c, body, "# TYPE tau counter")
 	s.assertContains(c, body, "tau 6.283185")
 }
 
-func (s *introspectionSuite) TestUnitMissingAction(c *gc.C) {
-	response := s.call(c, "/units")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusBadRequest)
-	s.assertBody(c, response, "missing action")
-}
-
-func (s *introspectionSuite) TestUnitUnknownAction(c *gc.C) {
-	response := s.post(c, "/units", url.Values{"action": {"foo"}})
-	c.Assert(response.StatusCode, gc.Equals, http.StatusBadRequest)
-	s.assertBody(c, response, `unknown action: "foo"`)
-}
-
-func (s *introspectionSuite) TestUnitStartWithGet(c *gc.C) {
-	response := s.call(c, "/units?action=start")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusMethodNotAllowed)
-	s.assertBody(c, response, `start requires a POST request, got "GET"`)
-}
-
-func (s *introspectionSuite) TestUnitStartMissingUnits(c *gc.C) {
-	response := s.post(c, "/units", url.Values{"action": {"start"}})
-	c.Assert(response.StatusCode, gc.Equals, http.StatusBadRequest)
-	s.assertBody(c, response, "missing unit")
-}
-
-func (s *introspectionSuite) TestUnitStartUnits(c *gc.C) {
-	unsub := s.localHub.Subscribe(agent.StartUnitTopic, func(topic string, data interface{}) {
-		_, ok := data.(agent.Units)
-		if !ok {
-			c.Fatalf("bad data type: %T", data)
-			return
-		}
-		s.localHub.Publish(agent.StartUnitResponseTopic, agent.StartStopResponse{
-			"one": "started",
-			"two": "not found",
-		})
-	})
-	defer unsub()
-
-	response := s.post(c, "/units", url.Values{"action": {"start"}, "unit": {"one", "two"}})
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
-	s.assertBody(c, response, "one: started\ntwo: not found")
-}
-
-func (s *introspectionSuite) TestUnitStopWithGet(c *gc.C) {
-	response := s.call(c, "/units?action=stop")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusMethodNotAllowed)
-	s.assertBody(c, response, `stop requires a POST request, got "GET"`)
-}
-
-func (s *introspectionSuite) TestUnitStopMissingUnits(c *gc.C) {
-	response := s.post(c, "/units", url.Values{"action": {"stop"}})
-	c.Assert(response.StatusCode, gc.Equals, http.StatusBadRequest)
-	s.assertBody(c, response, "missing unit")
-}
-
-func (s *introspectionSuite) TestUnitStopUnits(c *gc.C) {
-	unsub := s.localHub.Subscribe(agent.StopUnitTopic, func(topic string, data interface{}) {
-		_, ok := data.(agent.Units)
-		if !ok {
-			c.Fatalf("bad data type: %T", data)
-			return
-		}
-		s.localHub.Publish(agent.StopUnitResponseTopic, agent.StartStopResponse{
-			"one": "stopped",
-			"two": "not found",
-		})
-	})
-	defer unsub()
-
-	response := s.post(c, "/units", url.Values{"action": {"stop"}, "unit": {"one", "two"}})
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
-	s.assertBody(c, response, "one: stopped\ntwo: not found")
-}
-
-func (s *introspectionSuite) TestUnitStatus(c *gc.C) {
-	unsub := s.localHub.Subscribe(agent.UnitStatusTopic, func(string, interface{}) {
-		s.localHub.Publish(agent.UnitStatusResponseTopic, agent.Status{
-			"one": "running",
-			"two": "stopped",
-		})
-	})
-	defer unsub()
-
-	response := s.call(c, "/units?action=status")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusOK)
-	s.assertBody(c, response, `
-one: running
-two: stopped`[1:])
-}
-
-func (s *introspectionSuite) TestUnitStatusTimeout(c *gc.C) {
-	unsub := s.localHub.Subscribe(agent.UnitStatusTopic, func(string, interface{}) {
-		s.clock.WaitAdvance(10*time.Second, time.Second, 1)
-	})
-	defer unsub()
-
-	response := s.call(c, "/units?action=status")
-	c.Assert(response.StatusCode, gc.Equals, http.StatusInternalServerError)
-	s.assertBody(c, response, "response timed out")
-}
-
-type reporter struct {
+type depEngine struct {
 	values map[string]interface{}
 }
 
-func (r *reporter) Report() map[string]interface{} {
+func (r *depEngine) Report() map[string]interface{} {
 	return r.values
 }
 
@@ -397,7 +240,14 @@ func unixSocketHTTPClient(socketPath string) *http.Client {
 func unixSocketHTTPTransport(socketPath string) *http.Transport {
 	return &http.Transport{
 		Dial: func(proto, addr string) (net.Conn, error) {
-			return net.Dial("unix", socketPath)
+			return sockets.Dialer(sockets.Socket{
+				Network: "unix",
+				Address: socketPath,
+			})
 		},
 	}
+}
+
+type flightRecorder struct {
+	flightrecorder.FlightRecorder
 }

@@ -4,7 +4,8 @@
 package application
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -12,6 +13,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageUnexposeSummary = `
@@ -22,28 +24,19 @@ Adjusts the firewall rules and any relevant security mechanisms of the
 cloud to deny public access to the application.
 
 Applications are unexposed by default when they get created. If exposed via
-the "juju expose" command, they can be unexposed by running the "juju unexpose"
-command.  
+the ` + "`juju expose`" + ` command, they can be unexposed by running the ` + "`juju unexpose`" + `
+command.
 
 If no additional options are specified, the command will unexpose the
-application (if exposed). For example, to unexpose the apache2 application,
-you can run:
+application (if exposed).
 
-juju unexpose apache2
+The ` + "`--endpoints`" + ` option may be used to restrict the effect of this command to
+the list of ports opened for a comma-delimited list of endpoints.
 
-The --endpoints option may be used to restrict the effect of this command to 
-the list of ports opened for a comma-delimited list of endpoints. For instance,
-to only unexpose the ports opened by apache2 for the "www" endpoint, you can 
-run:
-
-juju unexpose apache2 --endpoints www
-
-Note that when the --endpoints option is provided, the application will still
+Note that when the ` + "`--endpoints`" + ` option is provided, the application will still
 remain exposed if any other of its endpoints are still exposed. However, if
-none of its endpoints remain exposed, the application will be instead unexposed. 
-
-See also: 
-    expose`[1:]
+none of its endpoints remain exposed, the application will become unexposed.
+`[1:]
 
 // NewUnexposeCommand returns a command to unexpose applications.
 func NewUnexposeCommand() modelcmd.ModelCommand {
@@ -59,12 +52,26 @@ type unexposeCommand struct {
 	api ApplicationExposeAPI
 }
 
+const unexposeCommandExample = `
+    juju unexpose apache2
+
+To unexpose only the ports that charms have opened for the "www", or "www" and "logs" endpoints:
+
+    juju unexpose apache2 --endpoints www
+
+    juju unexpose apache2 --endpoints www,logs
+`
+
 func (c *unexposeCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "unexpose",
-		Args:    "<application name>",
-		Purpose: usageUnexposeSummary,
-		Doc:     usageUnexposeDetails,
+		Name:     "unexpose",
+		Args:     "<application name>",
+		Purpose:  usageUnexposeSummary,
+		Doc:      usageUnexposeDetails,
+		Examples: unexposeCommandExample,
+		SeeAlso: []string{
+			"expose",
+		},
 	})
 }
 
@@ -81,11 +88,11 @@ func (c *unexposeCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args[1:])
 }
 
-func (c *unexposeCommand) getAPI() (ApplicationExposeAPI, error) {
+func (c *unexposeCommand) getAPI(ctx context.Context) (ApplicationExposeAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -94,13 +101,13 @@ func (c *unexposeCommand) getAPI() (ApplicationExposeAPI, error) {
 
 // Run changes the juju-managed firewall to hide any
 // ports that were also explicitly marked by units as closed.
-func (c *unexposeCommand) Run(_ *cmd.Context) error {
-	client, err := c.getAPI()
+func (c *unexposeCommand) Run(ctx *cmd.Context) error {
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	endpoints := splitCommaDelimitedList(c.ExposedEndpointsList)
-	return block.ProcessBlockedError(client.Unexpose(c.ApplicationName, endpoints), block.BlockChange)
+	return block.ProcessBlockedError(client.Unexpose(ctx, c.ApplicationName, endpoints), block.BlockChange)
 }

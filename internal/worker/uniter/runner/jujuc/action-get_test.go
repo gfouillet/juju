@@ -6,12 +6,12 @@ package jujuc_test
 
 import (
 	"fmt"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc/jujuctesting"
 )
@@ -20,7 +20,9 @@ type ActionGetSuite struct {
 	jujuctesting.ContextSuite
 }
 
-var _ = gc.Suite(&ActionGetSuite{})
+func TestActionGetSuite(t *testing.T) {
+	tc.Run(t, &ActionGetSuite{})
+}
 
 type actionGetContext struct {
 	actionParams map[string]interface{}
@@ -39,19 +41,19 @@ func (ctx *nonActionContext) ActionParams() (map[string]interface{}, error) {
 	return nil, fmt.Errorf("ActionParams queried from non-Action hook context")
 }
 
-func (s *ActionGetSuite) TestNonActionRunFail(c *gc.C) {
+func (s *ActionGetSuite) TestNonActionRunFail(c *tc.C) {
 	hctx := &nonActionContext{}
 	com, err := jujuc.NewCommand(hctx, "action-get")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{})
-	c.Check(code, gc.Equals, 1)
-	c.Check(bufferString(ctx.Stdout), gc.Equals, "")
+	c.Check(code, tc.Equals, 1)
+	c.Check(bufferString(ctx.Stdout), tc.Equals, "")
 	expect := fmt.Sprintf(`(\n)*ERROR %s\n`, "ActionParams queried from non-Action hook context")
-	c.Check(bufferString(ctx.Stderr), gc.Matches, expect)
+	c.Check(bufferString(ctx.Stderr), tc.Matches, expect)
 }
 
-func (s *ActionGetSuite) TestActionGet(c *gc.C) {
+func (s *ActionGetSuite) TestActionGet(c *tc.C) {
 	var actionGetTestMaps = []map[string]interface{}{
 		{
 			"outfile": "foo.bz2",
@@ -254,43 +256,17 @@ func (s *ActionGetSuite) TestActionGet(c *gc.C) {
 		hctx := &actionGetContext{}
 		hctx.actionParams = t.actionParams
 		com, err := jujuc.NewCommand(hctx, "action-get")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.args)
-		c.Check(code, gc.Equals, t.code)
+		c.Check(code, tc.Equals, t.code)
 		if code == 0 {
-			c.Check(bufferString(ctx.Stdout), gc.Equals, t.out)
-			c.Check(bufferString(ctx.Stderr), gc.Equals, "")
+			c.Check(bufferString(ctx.Stdout), tc.Equals, t.out)
+			c.Check(bufferString(ctx.Stderr), tc.Equals, "")
 		} else {
-			c.Check(bufferString(ctx.Stdout), gc.Equals, "")
+			c.Check(bufferString(ctx.Stdout), tc.Equals, "")
 			expect := fmt.Sprintf(`(\n)*ERROR %s\n`, t.errMsg)
-			c.Check(bufferString(ctx.Stderr), gc.Matches, expect)
+			c.Check(bufferString(ctx.Stderr), tc.Matches, expect)
 		}
 	}
-}
-
-func (s *ActionGetSuite) TestHelp(c *gc.C) {
-	hctx := &actionGetContext{}
-	com, err := jujuc.NewCommand(hctx, "action-get")
-	c.Assert(err, jc.ErrorIsNil)
-	ctx := cmdtesting.Context(c)
-	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"--help"})
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(bufferString(ctx.Stdout), gc.Equals, `Usage: action-get [options] [<key>[.<key>.<key>...]]
-
-Summary:
-get action parameters
-
-Options:
---format  (= smart)
-    Specify output format (json|smart|yaml)
--o, --output (= "")
-    Specify an output file
-
-Details:
-action-get will print the value of the parameter at the given key, serialized
-as YAML.  If multiple keys are passed, action-get will recurse into the param
-map as needed.
-`)
-	c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
 }

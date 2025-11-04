@@ -4,32 +4,35 @@
 package logger_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
+
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/agent/logger"
 	"github.com/juju/juju/api/base/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type loggerSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&loggerSuite{})
+func TestLoggerSuite(t *stdtesting.T) {
+	tc.Run(t, &loggerSuite{})
+}
 
-func (s *loggerSuite) TestLoggingConfig(c *gc.C) {
+func (s *loggerSuite) TestLoggingConfig(c *tc.C) {
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Logger")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "LoggingConfig")
-		c.Check(arg, jc.DeepEquals, params.Entities{Entities: []params.Entity{{
+		c.Check(objType, tc.Equals, "Logger")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "LoggingConfig")
+		c.Check(arg, tc.DeepEquals, params.Entities{Entities: []params.Entity{{
 			Tag: "machine-666",
 		}}})
-		c.Assert(result, gc.FitsTypeOf, &params.StringResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.StringResults{})
 		*(result.(*params.StringResults)) = params.StringResults{
 			Results: []params.StringResult{{Result: "juju.worker=TRACE"}},
 		}
@@ -38,21 +41,21 @@ func (s *loggerSuite) TestLoggingConfig(c *gc.C) {
 
 	client := logger.NewClient(apiCaller)
 	tag := names.NewMachineTag("666")
-	result, err := client.LoggingConfig(tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.Equals, "juju.worker=TRACE")
+	result, err := client.LoggingConfig(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.Equals, "juju.worker=TRACE")
 }
 
-func (s *loggerSuite) TestWatchLoggingConfig(c *gc.C) {
+func (s *loggerSuite) TestWatchLoggingConfig(c *tc.C) {
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Logger")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "WatchLoggingConfig")
-		c.Check(arg, jc.DeepEquals, params.Entities{Entities: []params.Entity{{
+		c.Check(objType, tc.Equals, "Logger")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "WatchLoggingConfig")
+		c.Check(arg, tc.DeepEquals, params.Entities{Entities: []params.Entity{{
 			Tag: "machine-666",
 		}}})
-		c.Assert(result, gc.FitsTypeOf, &params.NotifyWatchResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.NotifyWatchResults{})
 		*(result.(*params.NotifyWatchResults)) = params.NotifyWatchResults{
 			Results: []params.NotifyWatchResult{{
 				Error: &params.Error{Message: "FAIL"},
@@ -63,6 +66,6 @@ func (s *loggerSuite) TestWatchLoggingConfig(c *gc.C) {
 
 	client := logger.NewClient(apiCaller)
 	tag := names.NewMachineTag("666")
-	_, err := client.WatchLoggingConfig(tag)
-	c.Assert(err, gc.ErrorMatches, "FAIL")
+	_, err := client.WatchLoggingConfig(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }

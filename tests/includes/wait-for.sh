@@ -29,6 +29,10 @@ wait_for() {
 		elapsed=$(date -u +%s)-$start_time
 		if [[ ${elapsed} -ge ${timeout} ]]; then
 			echo "[-] $(red 'timed out waiting for')" "$(red "${name}")"
+			echo "    (controller) juju debug-log output"
+			juju debug-log -m controller --replay --no-tail 2>&1 | sed 's/^/    | /g'
+			echo "    (model) juju debug-log output"
+			juju debug-log --replay --no-tail 2>&1 | sed 's/^/    | /g'
 			exit 1
 		fi
 
@@ -48,24 +52,22 @@ idle_condition() {
 	local name app_index unit_index
 
 	name=${1}
-	app_index=${2:-0}
-	unit_index=${3:-0}
+	unit_index=${2:-0}
 
-	path=".[\"$name\"] | .units | .[\"$name/$unit_index\"]"
+	path=".units | .[\"$name/$unit_index\"]"
 
-	echo ".applications | select(($path | .[\"juju-status\"] | .current == \"idle\") and ($path | .[\"workload-status\"] | .current != \"error\")) | keys[$app_index]"
+	echo ".applications | pick(.\"$name\") | map_values(select(($path | .[\"juju-status\"] | .current == \"idle\") and ($path | .[\"workload-status\"] | .current != \"error\"))) | keys[0]"
 }
 
 active_idle_condition() {
 	local name app_index unit_index
 
 	name=${1}
-	app_index=${2:-0}
-	unit_index=${3:-0}
+	unit_index=${2:-0}
 
-	path=".[\"$name\"] | .units | .[\"$name/$unit_index\"]"
+	path=".units | .[\"$name/$unit_index\"]"
 
-	echo ".applications | select(($path | .[\"juju-status\"] | .current == \"idle\") and ($path | .[\"workload-status\"] | .current == \"active\")) | keys[$app_index]"
+	echo ".applications | pick(.\"$name\") | map_values(select(($path | .[\"juju-status\"] | .current == \"idle\") and ($path | .[\"workload-status\"] | .current == \"active\"))) | keys[0]"
 }
 
 idle_subordinate_condition() {

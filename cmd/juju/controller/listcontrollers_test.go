@@ -6,19 +6,19 @@ package controller_test
 import (
 	"encoding/json"
 	"fmt"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/juju/controller"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 )
 
 type ListControllersSuite struct {
@@ -26,69 +26,71 @@ type ListControllersSuite struct {
 	api func(string) controller.ControllerAccessAPI
 }
 
-var _ = gc.Suite(&ListControllersSuite{})
-
-func (s *ListControllersSuite) TestListControllersEmptyStore(c *gc.C) {
-	s.store = jujuclient.NewMemStore()
-	_, err := s.runListControllers(c)
-	c.Check(errors.Cause(err), gc.Equals, modelcmd.ErrNoControllersDefined)
+func TestListControllersSuite(t *testing.T) {
+	tc.Run(t, &ListControllersSuite{})
 }
 
-func (s *ListControllersSuite) TestListControllers(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersEmptyStore(c *tc.C) {
+	s.store = jujuclient.NewMemStore()
+	_, err := s.runListControllers(c)
+	c.Check(errors.Cause(err), tc.Equals, modelcmd.ErrNoControllersDefined)
+}
+
+func (s *ListControllersSuite) TestListControllers(c *tc.C) {
 	store := s.createTestClientStore(c)
 	delete(store.Accounts, "aws-test")
 	originallyInStore := &jujuclient.ControllerModels{
-		CurrentModel: "admin/my-model",
+		CurrentModel: "prod/my-model",
 		Models: map[string]jujuclient.ModelDetails{
 			"model0":   {ModelUUID: "abc", ModelType: model.IAAS},
 			"my-model": {ModelUUID: "def", ModelType: model.IAAS},
 		},
 	}
-	c.Assert(store.Models["mallards"], gc.DeepEquals, originallyInStore)
+	c.Assert(store.Models["mallards"], tc.DeepEquals, originallyInStore)
 
 	s.expectedOutput = `
 Use --refresh option with this command to see the latest information.
 
-Controller           Model             User   Access     Cloud/Region        Models  Nodes  HA  Version
-aws-test             admin/controller  -      -          aws/us-east-1            1      5   -  2.0.1      
-k8s-controller       my-k8s-model      admin  superuser  microk8s/localhost       2      3   -  6.6.6      
-mallards*            my-model          admin  superuser  mallards/mallards1       2      -   -  (unknown)  
-mark-test-prodstack  -                 admin  (unknown)  prodstack                -      -   -  (unknown)  
+Controller           Model              User   Access     Cloud/Region        Models  Nodes  HA  Version
+aws-test             prod/controller    -      -          aws/us-east-1            1      5   -  2.0.1      
+k8s-controller       prod/my-k8s-model  admin  superuser  microk8s/localhost       2      3   -  6.6.6      
+mallards*            prod/my-model      admin  superuser  mallards/mallards1       2      -   -  (unknown)  
+mark-test-prodstack  -                  admin  (unknown)  prodstack                -      -   -  (unknown)  
 `[1:]
 
 	s.assertListControllers(c)
 	// Check store was not updated.
-	c.Assert(store.Models["mallards"], gc.DeepEquals, originallyInStore)
+	c.Assert(store.Models["mallards"], tc.DeepEquals, originallyInStore)
 }
 
-func (s *ListControllersSuite) TestListControllersRefresh(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersRefresh(c *tc.C) {
 	store := s.createTestClientStore(c)
 	originallyInStore := &jujuclient.ControllerModels{
-		CurrentModel: "admin/my-model",
+		CurrentModel: "prod/my-model",
 		Models: map[string]jujuclient.ModelDetails{
 			"model0":   {ModelUUID: "abc", ModelType: model.IAAS},
 			"my-model": {ModelUUID: "def", ModelType: model.IAAS},
 		},
 	}
-	c.Assert(store.Models["mallards"], gc.DeepEquals, originallyInStore)
+	c.Assert(store.Models["mallards"], tc.DeepEquals, originallyInStore)
 	s.api = func(controllerName string) controller.ControllerAccessAPI {
 		fakeController := &fakeController{controllerName: controllerName}
 		return fakeController
 	}
 	s.expectedOutput = `
-Controller           Model         User   Access     Cloud/Region        Models  Nodes  HA  Version
-aws-test             controller    admin  (unknown)  aws/us-east-1            1      2   -  2.0.1      
-k8s-controller       my-k8s-model  admin  superuser  microk8s/localhost       2      4   -  6.6.6      
-mallards*            my-model      admin  superuser  mallards/mallards1       2      4   -  (unknown)  
-mark-test-prodstack  -             admin  (unknown)  prodstack                -      -   -  (unknown)  
+Controller           Model              User   Access     Cloud/Region        Models  Nodes  HA  Version
+aws-test             prod/controller    admin  (unknown)  aws/us-east-1            1      2   -  2.0.1      
+k8s-controller       prod/my-k8s-model  admin  superuser  microk8s/localhost       2      4   -  6.6.6      
+mallards*            prod/my-model      admin  superuser  mallards/mallards1       2      4   -  (unknown)  
+mark-test-prodstack  -                  admin  (unknown)  prodstack                -      -   -  (unknown)  
 `[1:]
 	s.assertListControllers(c, "--refresh")
 	// Check store was updated.
-	c.Assert(store.Models["mallards"], gc.DeepEquals, &jujuclient.ControllerModels{
-		CurrentModel: "admin/my-model",
+	c.Assert(store.Models["mallards"], tc.DeepEquals, &jujuclient.ControllerModels{
+		CurrentModel: "prod/my-model",
 		Models: map[string]jujuclient.ModelDetails{
-			"admin/controller": {ModelUUID: "abc", ModelType: model.IAAS},
-			"admin/my-model":   {ModelUUID: "def", ModelType: model.IAAS},
+			"prod/controller": {ModelUUID: "abc", ModelType: model.IAAS},
+			"prod/my-model":   {ModelUUID: "def", ModelType: model.IAAS},
 		},
 	})
 }
@@ -100,27 +102,27 @@ func (s *ListControllersSuite) setupAPIForControllerMachines() {
 		case "aws-test":
 			fakeController.machines = map[string][]base.Machine{
 				"ghi": {
-					{Id: "1", HasVote: true, WantsVote: true, Status: "active"},
-					{Id: "2", HasVote: true, WantsVote: true, Status: "down"},
-					{Id: "3", HasVote: false, WantsVote: true, Status: "active"},
+					{Id: "1", Status: "active"},
+					{Id: "2", Status: "down"},
+					{Id: "3", Status: "active"},
 				},
 			}
 		case "mallards":
 			fakeController.machines = map[string][]base.Machine{
 				"abc": {
-					{Id: "1", HasVote: true, WantsVote: true, Status: "active"},
+					{Id: "1", Status: "active"},
 				},
 				"def": {
-					{Id: "2", HasVote: true, WantsVote: true, Status: "active"},
+					{Id: "2", Status: "active"},
 				},
 			}
 		case "k8s-controller":
 			fakeController.machines = map[string][]base.Machine{
 				"xyz": {
-					{Id: "1", HasVote: true, WantsVote: true, Status: "active"},
+					{Id: "1", Status: "active"},
 				},
 				"def": {
-					{Id: "2", HasVote: true, WantsVote: true, Status: "active"},
+					{Id: "2", Status: "active"},
 				},
 			}
 		}
@@ -128,24 +130,24 @@ func (s *ListControllersSuite) setupAPIForControllerMachines() {
 	}
 }
 
-func (s *ListControllersSuite) TestListControllersKnownHAStatus(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersKnownHAStatus(c *tc.C) {
 	s.createTestClientStore(c)
 	s.setupAPIForControllerMachines()
 	s.expectedOutput = `
-Controller           Model         User   Access     Cloud/Region        Models  Nodes    HA  Version
-aws-test             controller    admin  (unknown)  aws/us-east-1            1      2   1/3  2.0.1      
-k8s-controller       my-k8s-model  admin  superuser  microk8s/localhost       2      4     -  6.6.6      
-mallards*            my-model      admin  superuser  mallards/mallards1       2      4  none  (unknown)  
-mark-test-prodstack  -             admin  (unknown)  prodstack                -      -     -  (unknown)  
+Controller           Model              User   Access     Cloud/Region        Models  Nodes    HA  Version
+aws-test             prod/controller    admin  (unknown)  aws/us-east-1            1      2   2/3  2.0.1      
+k8s-controller       prod/my-k8s-model  admin  superuser  microk8s/localhost       2      4     -  6.6.6      
+mallards*            prod/my-model      admin  superuser  mallards/mallards1       2      4  none  (unknown)  
+mark-test-prodstack  -                  admin  (unknown)  prodstack                -      -     -  (unknown)  
 `[1:]
 	s.assertListControllers(c, "--refresh")
 }
 
-func (s *ListControllersSuite) TestListControllersYaml(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersYaml(c *tc.C) {
 	s.expectedOutput = `
 controllers:
   aws-test:
-    current-model: controller
+    current-model: prod/controller
     user: admin
     recent-server: this-is-aws-test-of-many-api-endpoints
     controller-uuid: this-is-the-aws-test-uuid
@@ -157,10 +159,10 @@ controllers:
     model-count: 1
     machine-count: 2
     controller-machines:
-      active: 1
+      active: 2
       total: 3
   k8s-controller:
-    current-model: my-k8s-model
+    current-model: prod/my-k8s-model
     user: admin
     access: superuser
     recent-server: this-is-one-of-many-k8s-api-endpoints
@@ -176,7 +178,7 @@ controllers:
       active: 1
       total: 1
   mallards:
-    current-model: my-model
+    current-model: prod/my-model
     user: admin
     access: superuser
     recent-server: this-is-another-of-many-api-endpoints
@@ -238,18 +240,18 @@ ovZN0RbUHrO8q9Eazh0qPO4mwW9jbGTDz126uNrLoz1g3TyWxIas1wRJ8IbCgxLy
 XUrBZO5UPZab66lJWXyseA==
 -----END CERTIFICATE-----`
 
-func (s *ListControllersSuite) TestListControllersJson(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersJson(c *tc.C) {
 	s.expectedOutput = ""
 	s.createTestClientStore(c)
 	jsonOut := s.assertListControllers(c, "--format", "json")
 	var result controller.ControllerSet
 	err := json.Unmarshal([]byte(jsonOut), &result)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, controller.ControllerSet{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, controller.ControllerSet{
 		Controllers: map[string]controller.ControllerItem{
 			"aws-test": {
 				ControllerUUID: "this-is-the-aws-test-uuid",
-				ModelName:      "controller",
+				ModelName:      "prod/controller",
 				User:           "admin",
 				Server:         "this-is-aws-test-of-many-api-endpoints",
 				APIEndpoints:   []string{"this-is-aws-test-of-many-api-endpoints"},
@@ -262,7 +264,7 @@ func (s *ListControllersSuite) TestListControllersJson(c *gc.C) {
 			},
 			"mallards": {
 				ControllerUUID: "deadbeef-1bad-500d-9000-4b1d0d06f00d",
-				ModelName:      "my-model",
+				ModelName:      "prod/my-model",
 				User:           "admin",
 				Access:         "superuser",
 				Server:         "this-is-another-of-many-api-endpoints",
@@ -274,7 +276,7 @@ func (s *ListControllersSuite) TestListControllersJson(c *gc.C) {
 			},
 			"k8s-controller": {
 				ControllerUUID: "this-is-a-k8s-uuid",
-				ModelName:      "my-k8s-model",
+				ModelName:      "prod/my-k8s-model",
 				User:           "admin",
 				Access:         "superuser",
 				Server:         "this-is-one-of-many-k8s-api-endpoints",
@@ -299,7 +301,7 @@ func (s *ListControllersSuite) TestListControllersJson(c *gc.C) {
 	})
 }
 
-func (s *ListControllersSuite) TestListControllersReadFromStoreErr(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersReadFromStoreErr(c *tc.C) {
 	msg := "fail getting all controllers"
 	errStore := jujuclienttesting.NewStubStore()
 	errStore.SetErrors(errors.New(msg))
@@ -309,25 +311,25 @@ func (s *ListControllersSuite) TestListControllersReadFromStoreErr(c *gc.C) {
 	errStore.CheckCallNames(c, "AllControllers")
 }
 
-func (s *ListControllersSuite) TestListControllersUnrecognizedArg(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersUnrecognizedArg(c *tc.C) {
 	s.createTestClientStore(c)
 	s.expectedErr = `unrecognized args: \["whoops"\]`
 	s.assertListControllersFailed(c, "whoops")
 }
 
-func (s *ListControllersSuite) TestListControllersUnrecognizedFlag(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersUnrecognizedFlag(c *tc.C) {
 	s.createTestClientStore(c)
 	s.expectedErr = `option provided but not defined: -m`
 	s.assertListControllersFailed(c, "-m", "my.world")
 }
 
-func (s *ListControllersSuite) TestListControllersUnrecognizedOptionFlag(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersUnrecognizedOptionFlag(c *tc.C) {
 	s.createTestClientStore(c)
 	s.expectedErr = `option provided but not defined: --model`
 	s.assertListControllersFailed(c, "--model", "still.my.world")
 }
 
-func (s *ListControllersSuite) TestListControllersNoControllers(c *gc.C) {
+func (s *ListControllersSuite) TestListControllersNoControllers(c *tc.C) {
 	store := s.createTestClientStore(c)
 	store.Controllers = map[string]jujuclient.ControllerDetails{}
 	s.expectedErr = `No controllers registered.
@@ -338,21 +340,27 @@ another controller that you have been given access to using "juju register".
 	s.assertListControllersFailed(c)
 }
 
-func (s *ListControllersSuite) runListControllers(c *gc.C, args ...string) (*cmd.Context, error) {
+func (s *ListControllersSuite) TestListControllersManagedFlag(c *tc.C) {
+	s.createTestClientStore(c)
+	_, err := s.runListControllers(c, "--managed")
+	c.Assert(err, tc.ErrorIs, cmd.ErrCommandMissing)
+}
+
+func (s *ListControllersSuite) runListControllers(c *tc.C, args ...string) (*cmd.Context, error) {
 	return cmdtesting.RunCommand(c, controller.NewListControllersCommandForTest(s.store, s.api), args...)
 }
 
-func (s *ListControllersSuite) assertListControllersFailed(c *gc.C, args ...string) {
+func (s *ListControllersSuite) assertListControllersFailed(c *tc.C, args ...string) {
 	_, err := s.runListControllers(c, args...)
-	c.Assert(err, gc.ErrorMatches, s.expectedErr)
+	c.Assert(err, tc.ErrorMatches, s.expectedErr)
 }
 
-func (s *ListControllersSuite) assertListControllers(c *gc.C, args ...string) string {
+func (s *ListControllersSuite) assertListControllers(c *tc.C, args ...string) string {
 	context, err := s.runListControllers(c, args...)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	output := cmdtesting.Stdout(context)
 	if s.expectedOutput != "" {
-		c.Assert(output, gc.Equals, s.expectedOutput)
+		c.Assert(output, tc.Equals, s.expectedOutput)
 	}
 	return output
 }

@@ -4,90 +4,130 @@
 package bootstrap
 
 import (
-	"testing"
-
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	"go.uber.org/goleak"
+	"github.com/juju/clock"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/domain"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination addressfinder_mock_test.go github.com/juju/juju/environs InstanceLister
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination providertracker_mock_test.go github.com/juju/juju/core/providertracker ProviderFactory
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination caas_broker_mock_test.go github.com/juju/juju/caas ServiceManager
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination instance_mock_test.go github.com/juju/juju/environs/instances Instance
 //go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination agent_mock_test.go github.com/juju/juju/agent Agent,Config
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination state_mock_test.go github.com/juju/juju/internal/worker/state StateTracker
 //go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination objectstore_mock_test.go github.com/juju/juju/core/objectstore ObjectStore
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination storage_mock_test.go github.com/juju/juju/core/storage StorageRegistryGetter
 //go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination lock_mock_test.go github.com/juju/juju/internal/worker/gate Unlocker
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination bootstrap_mock_test.go github.com/juju/juju/internal/worker/bootstrap ControllerConfigService,FlagService,ObjectStoreGetter,SystemState,HTTPClient,CredentialService,CloudService,StorageService,ApplicationService,NetworkService,UserService,BakeryConfigService
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination deployer_mock_test.go github.com/juju/juju/internal/bootstrap Model
-
-func TestPackage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination bootstrap_mock_test.go github.com/juju/juju/internal/worker/bootstrap AgentBinaryStore,ControllerConfigService,FlagService,ObjectStoreGetter,HTTPClient,CloudService,StorageService,ApplicationService,ModelConfigService,NetworkService,UserService,BakeryConfigService,KeyManagerService,MachineService,AgentPasswordService,ControllerNodeService,ModelInfoService
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination http_client_mock_test.go github.com/juju/juju/core/http HTTPClientGetter
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination domainservices_mock_test.go github.com/juju/juju/internal/services DomainServices
 
 type baseSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 
 	dataDir string
 
-	agent                   *MockAgent
-	agentConfig             *MockConfig
-	state                   *MockSystemState
-	stateTracker            *MockStateTracker
-	objectStore             *MockObjectStore
-	objectStoreGetter       *MockObjectStoreGetter
-	bootstrapUnlocker       *MockUnlocker
-	controllerConfigService *MockControllerConfigService
-	cloudService            *MockCloudService
-	credentialService       *MockCredentialService
-	storageService          *MockStorageService
-	applicationService      *MockApplicationService
-	userService             *MockUserService
-	networkService          *MockNetworkService
-	bakeryConfigService     *MockBakeryConfigService
-	flagService             *MockFlagService
-	httpClient              *MockHTTPClient
-	stateModel              *MockModel
+	agent                      *MockAgent
+	agentConfig                *MockConfig
+	controllerAgentBinaryStore *MockAgentBinaryStore
+	objectStore                *MockObjectStore
+	objectStoreGetter          *MockObjectStoreGetter
+	bootstrapUnlocker          *MockUnlocker
+	domainServices             *MockDomainServices
+	controllerConfigService    *MockControllerConfigService
+	cloudService               *MockCloudService
+	storageService             *MockStorageService
+	keyManagerService          *MockKeyManagerService
+	agentPasswordService       *MockAgentPasswordService
+	applicationService         *MockApplicationService
+	controllerNodeService      *MockControllerNodeService
+	modelConfigService         *MockModelConfigService
+	modelInfoService           *MockModelInfoService
+	machineService             *MockMachineService
+	userService                *MockUserService
+	networkService             *MockNetworkService
+	bakeryConfigService        *MockBakeryConfigService
+	flagService                *MockFlagService
+	httpClient                 *MockHTTPClient
+	httpClientGetter           *MockHTTPClientGetter
 
-	logger logger.Logger
+	statusHistory StatusHistory
+	logger        logger.Logger
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.dataDir = c.MkDir()
 
 	s.agent = NewMockAgent(ctrl)
 	s.agentConfig = NewMockConfig(ctrl)
-	s.state = NewMockSystemState(ctrl)
-	s.stateTracker = NewMockStateTracker(ctrl)
+	s.controllerAgentBinaryStore = NewMockAgentBinaryStore(ctrl)
 	s.objectStore = NewMockObjectStore(ctrl)
 	s.objectStoreGetter = NewMockObjectStoreGetter(ctrl)
 	s.bootstrapUnlocker = NewMockUnlocker(ctrl)
+	s.domainServices = NewMockDomainServices(ctrl)
 	s.controllerConfigService = NewMockControllerConfigService(ctrl)
 	s.cloudService = NewMockCloudService(ctrl)
-	s.credentialService = NewMockCredentialService(ctrl)
 	s.storageService = NewMockStorageService(ctrl)
+	s.agentPasswordService = NewMockAgentPasswordService(ctrl)
 	s.applicationService = NewMockApplicationService(ctrl)
+	s.controllerNodeService = NewMockControllerNodeService(ctrl)
+	s.modelConfigService = NewMockModelConfigService(ctrl)
+	s.modelInfoService = NewMockModelInfoService(ctrl)
+	s.machineService = NewMockMachineService(ctrl)
+	s.keyManagerService = NewMockKeyManagerService(ctrl)
 	s.userService = NewMockUserService(ctrl)
 	s.networkService = NewMockNetworkService(ctrl)
 	s.bakeryConfigService = NewMockBakeryConfigService(ctrl)
 	s.flagService = NewMockFlagService(ctrl)
 	s.httpClient = NewMockHTTPClient(ctrl)
-	s.stateModel = NewMockModel(ctrl)
+	s.httpClientGetter = NewMockHTTPClientGetter(ctrl)
 
 	s.logger = loggertesting.WrapCheckLog(c)
+	s.statusHistory = domain.NewStatusHistory(s.logger, clock.WallClock)
+
+	c.Cleanup(func() {
+		s.agent = nil
+		s.agentConfig = nil
+		s.controllerAgentBinaryStore = nil
+		s.objectStore = nil
+		s.objectStoreGetter = nil
+		s.bootstrapUnlocker = nil
+		s.domainServices = nil
+		s.controllerConfigService = nil
+		s.cloudService = nil
+		s.storageService = nil
+		s.agentPasswordService = nil
+		s.applicationService = nil
+		s.controllerNodeService = nil
+		s.modelConfigService = nil
+		s.modelInfoService = nil
+		s.machineService = nil
+		s.keyManagerService = nil
+		s.userService = nil
+		s.networkService = nil
+		s.bakeryConfigService = nil
+		s.flagService = nil
+		s.httpClient = nil
+		s.httpClientGetter = nil
+
+		s.logger = nil
+		s.statusHistory = nil
+	})
 
 	return ctrl
 }
 
 func (s *baseSuite) expectGateUnlock() {
 	s.bootstrapUnlocker.EXPECT().Unlock()
+	s.domainServices.EXPECT().Flag().AnyTimes()
 }
 
 func (s *baseSuite) expectAgentConfig() {

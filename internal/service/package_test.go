@@ -3,14 +3,4 @@
 
 package service_test
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/service.go github.com/juju/juju/internal/service Service
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}

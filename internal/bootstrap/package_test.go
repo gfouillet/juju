@@ -4,65 +4,60 @@
 package bootstrap
 
 import (
-	"testing"
-
-	jujutesting "github.com/juju/testing"
+	"github.com/juju/clock"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/controller"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/logger"
+	network "github.com/juju/juju/core/network"
 	"github.com/juju/juju/internal/charm"
-	"github.com/juju/juju/internal/charm/services"
+	"github.com/juju/juju/internal/charm/repository"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination bootstrap_mock_test.go github.com/juju/juju/internal/bootstrap AgentBinaryStorage,ControllerCharmDeployer,HTTPClient,CloudService,CloudServiceGetter,OperationApplier,Machine,MachineGetter,StateBackend,Application,Charm,Unit,Model,CharmUploader,ApplicationService
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination bootstrap_mock_test.go github.com/juju/juju/internal/bootstrap AgentBinaryStore,ControllerCharmDeployer,HTTPClient,ApplicationService,IAASApplicationService,CAASApplicationService,ModelConfigService,Downloader,AgentPasswordService,ServiceManager
 //go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination objectstore_mock_test.go github.com/juju/juju/core/objectstore ObjectStore
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination charm_mock_test.go github.com/juju/juju/core/charm Repository
-//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination downloader_mock_test.go github.com/juju/juju/apiserver/facades/client/charms/interfaces Downloader
-
-func Test(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination core_charm_mock_test.go github.com/juju/juju/core/charm Repository
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination internal_charm_mock_test.go github.com/juju/juju/internal/charm Charm
+//go:generate go run go.uber.org/mock/mockgen -typed -package bootstrap -destination clock_mock_test.go github.com/juju/clock Clock
 
 type baseSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 
-	storage            *MockAgentBinaryStorage
-	deployer           *MockControllerCharmDeployer
-	httpClient         *MockHTTPClient
-	objectStore        *MockObjectStore
-	unit               *MockUnit
-	model              *MockModel
-	application        *MockApplication
-	stateBackend       *MockStateBackend
-	applicationService *MockApplicationService
-	charmUploader      *MockCharmUploader
-	charmDownloader    *MockDownloader
-	charmRepo          *MockRepository
-	charm              *MockCharm
+	agentBinaryStore       *MockAgentBinaryStore
+	deployer               *MockControllerCharmDeployer
+	httpClient             *MockHTTPClient
+	objectStore            *MockObjectStore
+	agentPasswordService   *MockAgentPasswordService
+	applicationService     *MockApplicationService
+	iaasApplicationService *MockIAASApplicationService
+	caasApplicationService *MockCAASApplicationService
+	modelConfigService     *MockModelConfigService
+	charmDownloader        *MockDownloader
+	charmRepo              *MockRepository
+	charm                  *MockCharm
 
 	logger logger.Logger
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.storage = NewMockAgentBinaryStorage(ctrl)
+	s.agentBinaryStore = NewMockAgentBinaryStore(ctrl)
 	s.deployer = NewMockControllerCharmDeployer(ctrl)
 	s.httpClient = NewMockHTTPClient(ctrl)
 	s.objectStore = NewMockObjectStore(ctrl)
 
-	s.unit = NewMockUnit(ctrl)
-	s.model = NewMockModel(ctrl)
-	s.application = NewMockApplication(ctrl)
-	s.stateBackend = NewMockStateBackend(ctrl)
+	s.agentPasswordService = NewMockAgentPasswordService(ctrl)
 	s.applicationService = NewMockApplicationService(ctrl)
-	s.charmUploader = NewMockCharmUploader(ctrl)
+	s.iaasApplicationService = NewMockIAASApplicationService(ctrl)
+	s.caasApplicationService = NewMockCAASApplicationService(ctrl)
+	s.modelConfigService = NewMockModelConfigService(ctrl)
 	s.charmDownloader = NewMockDownloader(ctrl)
 	s.charmRepo = NewMockRepository(ctrl)
 	s.charm = NewMockCharm(ctrl)
@@ -72,34 +67,47 @@ func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *baseSuite) newConfig(c *gc.C) BaseDeployerConfig {
+func (s *baseSuite) newConfig(c *tc.C) BaseDeployerConfig {
 	controllerUUID := uuid.MustNewUUID()
 
 	return BaseDeployerConfig{
-		DataDir:            c.MkDir(),
-		StateBackend:       s.stateBackend,
-		CharmUploader:      s.charmUploader,
-		ApplicationService: s.applicationService,
-		ObjectStore:        s.objectStore,
-		Constraints:        constraints.Value{},
+		DataDir:              c.MkDir(),
+		AgentPasswordService: s.agentPasswordService,
+		ApplicationService:   s.applicationService,
+		ModelConfigService:   s.modelConfigService,
+		ObjectStore:          s.objectStore,
+		Constraints:          constraints.Value{},
 		ControllerConfig: controller.Config{
 			controller.ControllerUUIDKey: controllerUUID.String(),
 			controller.IdentityURL:       "https://inferi.com",
 			controller.PublicDNSAddress:  "obscura.com",
 			controller.APIPort:           1234,
 		},
-		NewCharmRepo: func(services.CharmRepoFactoryConfig) (corecharm.Repository, error) {
+		BootstrapAddresses: network.ProviderAddresses{
+			{
+				MachineAddress: network.MachineAddress{
+					Value: "10.0.0.1",
+					Type:  network.IPv4Address,
+					Scope: network.ScopeMachineLocal,
+				},
+			},
+			{
+				MachineAddress: network.MachineAddress{
+					Value: "203.0.113.1",
+					Type:  network.IPv4Address,
+					Scope: network.ScopePublic,
+				},
+			},
+		},
+		NewCharmHubRepo: func(repository.CharmHubRepositoryConfig) (corecharm.Repository, error) {
 			return s.charmRepo, nil
 		},
-		NewCharmDownloader: func(services.CharmDownloaderConfig) (Downloader, error) {
-			return s.charmDownloader, nil
+		NewCharmDownloader: func(h HTTPClient, l logger.Logger) Downloader {
+			return s.charmDownloader
 		},
 		CharmhubHTTPClient: s.httpClient,
 		Channel:            charm.Channel{},
 		Logger:             s.logger,
+		Clock:              clock.WallClock,
 	}
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }

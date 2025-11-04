@@ -5,14 +5,12 @@ package jujuc
 
 import (
 	"context"
-	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/payloads"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
@@ -27,7 +25,9 @@ var ErrRestrictedContext = errors.NotImplementedf("not implemented for restricte
 type RestrictedContext struct{}
 
 // ConfigSettings implements hooks.Context.
-func (*RestrictedContext) ConfigSettings() (charm.Settings, error) { return nil, ErrRestrictedContext }
+func (*RestrictedContext) ConfigSettings(context.Context) (charm.Config, error) {
+	return nil, ErrRestrictedContext
+}
 
 // GoalState implements hooks.Context.
 func (*RestrictedContext) GoalState(context.Context) (*application.GoalState, error) {
@@ -88,7 +88,9 @@ func (*RestrictedContext) RequestReboot(prio RebootPriority) error {
 }
 
 // PublicAddress implements hooks.Context.
-func (*RestrictedContext) PublicAddress() (string, error) { return "", ErrRestrictedContext }
+func (*RestrictedContext) PublicAddress(_ context.Context) (string, error) {
+	return "", ErrRestrictedContext
+}
 
 // PrivateAddress implements hooks.Context.
 func (*RestrictedContext) PrivateAddress() (string, error) { return "", ErrRestrictedContext }
@@ -107,39 +109,25 @@ func (*RestrictedContext) ClosePortRange(string, network.PortRange) error {
 func (*RestrictedContext) OpenedPortRanges() network.GroupedPortRanges { return nil }
 
 // NetworkInfo implements hooks.Context.
-func (*RestrictedContext) NetworkInfo(bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error) {
+func (*RestrictedContext) NetworkInfo(_ context.Context, bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error) {
 	return map[string]params.NetworkInfoResult{}, ErrRestrictedContext
 }
 
 // IsLeader implements hooks.Context.
 func (*RestrictedContext) IsLeader() (bool, error) { return false, ErrRestrictedContext }
 
-// LeaderSettings implements hooks.Context.
-func (*RestrictedContext) LeaderSettings() (map[string]string, error) {
+// StorageTags implements hooks.Context.
+func (*RestrictedContext) StorageTags(_ context.Context) ([]names.StorageTag, error) {
 	return nil, ErrRestrictedContext
 }
 
-// WriteLeaderSettings implements hooks.Context.
-func (*RestrictedContext) WriteLeaderSettings(map[string]string) error { return ErrRestrictedContext }
-
-// AddMetric implements hooks.Context.
-func (*RestrictedContext) AddMetric(string, string, time.Time) error { return ErrRestrictedContext }
-
-// AddMetricLabels implements hooks.Context.
-func (*RestrictedContext) AddMetricLabels(string, string, time.Time, map[string]string) error {
-	return ErrRestrictedContext
-}
-
-// StorageTags implements hooks.Context.
-func (*RestrictedContext) StorageTags() ([]names.StorageTag, error) { return nil, ErrRestrictedContext }
-
 // Storage implements hooks.Context.
-func (*RestrictedContext) Storage(names.StorageTag) (ContextStorageAttachment, error) {
+func (*RestrictedContext) Storage(context.Context, names.StorageTag) (ContextStorageAttachment, error) {
 	return nil, ErrRestrictedContext
 }
 
 // HookStorage implements hooks.Context.
-func (*RestrictedContext) HookStorage() (ContextStorageAttachment, error) {
+func (*RestrictedContext) HookStorage(_ context.Context) (ContextStorageAttachment, error) {
 	return nil, ErrRestrictedContext
 }
 
@@ -151,36 +139,6 @@ func (*RestrictedContext) AddUnitStorage(map[string]params.StorageDirectives) er
 // DownloadResource implements hooks.Context.
 func (ctx *RestrictedContext) DownloadResource(_ context.Context, name string) (filePath string, _ error) {
 	return "", ErrRestrictedContext
-}
-
-// GetPayload implements hooks.Context.
-func (ctx *RestrictedContext) GetPayload(class, id string) (*payloads.Payload, error) {
-	return nil, ErrRestrictedContext
-}
-
-// TrackPayload implements hooks.Context.
-func (ctx *RestrictedContext) TrackPayload(payload payloads.Payload) error {
-	return ErrRestrictedContext
-}
-
-// UntrackPayload implements hooks.Context.
-func (ctx *RestrictedContext) UntrackPayload(class, id string) error {
-	return ErrRestrictedContext
-}
-
-// SetPayloadStatus implements hooks.Context.
-func (ctx *RestrictedContext) SetPayloadStatus(class, id, status string) error {
-	return ErrRestrictedContext
-}
-
-// ListPayloads implements hooks.Context.
-func (ctx *RestrictedContext) ListPayloads() ([]string, error) {
-	return nil, ErrRestrictedContext
-}
-
-// FlushPayloads pushes the hook context data out to state.
-func (ctx *RestrictedContext) FlushPayloads() error {
-	return ErrRestrictedContext
 }
 
 // Relation implements hooks.Context.
@@ -213,7 +171,9 @@ func (*RestrictedContext) UpdateActionResults(keys []string, value interface{}) 
 }
 
 // LogActionMessage implements hooks.Context.
-func (*RestrictedContext) LogActionMessage(string) error { return ErrRestrictedContext }
+func (*RestrictedContext) LogActionMessage(context.Context, string) error {
+	return ErrRestrictedContext
+}
 
 // SetActionMessage implements hooks.Context.
 func (*RestrictedContext) SetActionMessage(string) error { return ErrRestrictedContext }
@@ -237,34 +197,34 @@ func (*RestrictedContext) WorkloadName() (string, error) {
 }
 
 // GetSecret implements runner.Context.
-func (ctx *RestrictedContext) GetSecret(*secrets.URI, string, bool, bool) (secrets.SecretValue, error) {
+func (ctx *RestrictedContext) GetSecret(context.Context, *secrets.URI, string, bool, bool) (secrets.SecretValue, error) {
 	return nil, ErrRestrictedContext
 }
 
 // CreateSecret implements runner.Context.
-func (ctx *RestrictedContext) CreateSecret(args *SecretCreateArgs) (*secrets.URI, error) {
+func (ctx *RestrictedContext) CreateSecret(_ context.Context, args *SecretCreateArgs) (*secrets.URI, error) {
 	return nil, ErrRestrictedContext
 }
 
 // UpdateSecret implements runner.Context.
-func (ctx *RestrictedContext) UpdateSecret(*secrets.URI, *SecretUpdateArgs) error {
+func (ctx *RestrictedContext) UpdateSecret(context.Context, *secrets.URI, *SecretUpdateArgs) error {
 	return ErrRestrictedContext
 }
 
-func (ctx *RestrictedContext) RemoveSecret(*secrets.URI, *int) error {
+func (ctx *RestrictedContext) RemoveSecret(context.Context, *secrets.URI, *int) error {
 	return ErrRestrictedContext
 }
 
-func (ctx *RestrictedContext) SecretMetadata() (map[string]SecretMetadata, error) {
+func (ctx *RestrictedContext) SecretMetadata(context.Context) (map[string]SecretMetadata, error) {
 	return nil, ErrRestrictedContext
 }
 
 // GrantSecret implements runner.Context.
-func (c *RestrictedContext) GrantSecret(*secrets.URI, *SecretGrantRevokeArgs) error {
+func (c *RestrictedContext) GrantSecret(context.Context, *secrets.URI, *SecretGrantRevokeArgs) error {
 	return ErrRestrictedContext
 }
 
 // RevokeSecret implements runner.Context.
-func (c *RestrictedContext) RevokeSecret(*secrets.URI, *SecretGrantRevokeArgs) error {
+func (c *RestrictedContext) RevokeSecret(context.Context, *secrets.URI, *SecretGrantRevokeArgs) error {
 	return ErrRestrictedContext
 }

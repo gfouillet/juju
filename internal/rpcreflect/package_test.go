@@ -7,14 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"testing"
-
-	gc "gopkg.in/check.v1"
 )
-
-func Test(t *testing.T) {
-	gc.TestingT(t)
-}
 
 func callName(narg, nret int, retErr bool) string {
 	e := ""

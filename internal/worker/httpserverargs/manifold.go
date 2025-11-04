@@ -14,17 +14,15 @@ import (
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/common"
-	workerstate "github.com/juju/juju/internal/worker/state"
 )
 
 // ManifoldConfig holds the resources needed to run an httpserverargs
 // worker.
 type ManifoldConfig struct {
 	ClockName          string
-	StateName          string
-	ServiceFactoryName string
+	DomainServicesName string
 
 	NewStateAuthenticator NewStateAuthenticatorFunc
 }
@@ -34,11 +32,8 @@ func (config ManifoldConfig) Validate() error {
 	if config.ClockName == "" {
 		return errors.NotValidf("empty ClockName")
 	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
-	}
-	if config.ServiceFactoryName == "" {
-		return errors.NotValidf("empty ServiceFactoryName")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.NewStateAuthenticator == nil {
 		return errors.NotValidf("nil NewStateAuthenticator")
@@ -56,34 +51,27 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 		return nil, errors.Trace(err)
 	}
 
-	var controllerServiceFactory servicefactory.ControllerServiceFactory
-	if err := getter.Get(config.ServiceFactoryName, &controllerServiceFactory); err != nil {
+	var controllerDomainServices services.ControllerDomainServices
+	if err := getter.Get(config.DomainServicesName, &controllerDomainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := getter.Get(config.StateName, &stTracker); err != nil {
-		return nil, errors.Trace(err)
-	}
-	statePool, _, err := stTracker.Use()
-	if err != nil {
+	var domainServicesGetter services.DomainServicesGetter
+	if err := getter.Get(config.DomainServicesName, &domainServicesGetter); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	w, err := newWorker(context, workerConfig{
-		statePool:               statePool,
-		controllerConfigService: controllerServiceFactory.ControllerConfig(),
-		userService:             controllerServiceFactory.Access(),
-		bakeryConfigService:     controllerServiceFactory.Macaroon(),
+	w, err := newWorker(workerConfig{
+		domainServicesGetter:    domainServicesGetter,
+		controllerConfigService: controllerDomainServices.ControllerConfig(),
+		accessService:           controllerDomainServices.Access(),
+		macaroonService:         controllerDomainServices.Macaroon(),
+		modelService:            controllerDomainServices.Model(),
 		mux:                     apiserverhttp.NewMux(),
 		clock:                   clock,
 		newStateAuthenticatorFn: config.NewStateAuthenticator,
 	})
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-	return common.NewCleanupWorker(w, func() { _ = stTracker.Done() }), nil
+	return w, errors.Trace(err)
 }
 
 // Manifold returns a dependency.Manifold to run a worker to hold the
@@ -94,8 +82,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
 			config.ClockName,
-			config.StateName,
-			config.ServiceFactoryName,
+			config.DomainServicesName,
 		},
 		Start:  config.start,
 		Output: manifoldOutput,

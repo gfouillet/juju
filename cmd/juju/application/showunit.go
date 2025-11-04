@@ -4,39 +4,54 @@
 package application
 
 import (
+	"context"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/naturalsort"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/naturalsort"
 )
 
 const showUnitDoc = `
 The command takes deployed unit names as an argument.
 
 Optionally, relation data for only a specified endpoint
-or related unit may be shown, or just the application data. 
+or related unit may be shown, or just the application data.
 `
 
 const showUnitExamples = `
+To show information about a unit:
+
     juju show-unit mysql/0
+
+To show information about multiple units:
+
     juju show-unit mysql/0 wordpress/1
+
+To show only the application relation data for a unit:
+
     juju show-unit mysql/0 --app
+
+To show only the relation data for a specific endpoint:
+
     juju show-unit mysql/0 --endpoint db
+
+To show only the relation data for a specific related unit:
+
     juju show-unit mysql/0 --related-unit wordpress/2
 `
 
 // NewShowUnitCommand returns a command that displays unit info.
 func NewShowUnitCommand() cmd.Command {
 	s := &showUnitCommand{}
-	s.newAPIFunc = func() (UnitsInfoAPI, error) {
-		return s.newUnitAPI()
+	s.newAPIFunc = func(ctx context.Context) (UnitsInfoAPI, error) {
+		return s.newUnitAPI(ctx)
 	}
 	return modelcmd.Wrap(s)
 }
@@ -50,7 +65,7 @@ type showUnitCommand struct {
 	relatedUnit string
 	appOnly     bool
 
-	newAPIFunc func() (UnitsInfoAPI, error)
+	newAPIFunc func(ctx context.Context) (UnitsInfoAPI, error)
 }
 
 // Info implements Command.Info.
@@ -61,6 +76,10 @@ func (c *showUnitCommand) Info() *cmd.Info {
 		Purpose:  "Displays information about a unit.",
 		Doc:      showUnitDoc,
 		Examples: showUnitExamples,
+		SeeAlso: []string{
+			"add-unit",
+			"remove-unit",
+		},
 	}
 	return jujucmd.Info(showCmd)
 }
@@ -94,19 +113,19 @@ func (c *showUnitCommand) Init(args []string) error {
 func (c *showUnitCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	c.out.AddFlags(f, "yaml", cmd.DefaultFormatters.Formatters())
-	f.StringVar(&c.endpoint, "endpoint", "", "only show relation data for the specified endpoint")
-	f.StringVar(&c.relatedUnit, "related-unit", "", "only show relation data for the specified unit")
-	f.BoolVar(&c.appOnly, "app", false, "only show application relation data")
+	f.StringVar(&c.endpoint, "endpoint", "", "Only show relation data for the specified endpoint")
+	f.StringVar(&c.relatedUnit, "related-unit", "", "Only show relation data for the specified unit")
+	f.BoolVar(&c.appOnly, "app", false, "Only show application relation data")
 }
 
 // UnitsInfoAPI defines the API methods that show-unit command uses.
 type UnitsInfoAPI interface {
 	Close() error
-	UnitsInfo([]names.UnitTag) ([]application.UnitInfo, error)
+	UnitsInfo(context.Context, []names.UnitTag) ([]application.UnitInfo, error)
 }
 
-func (c *showUnitCommand) newUnitAPI() (UnitsInfoAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *showUnitCommand) newUnitAPI(ctx context.Context) (UnitsInfoAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -115,7 +134,7 @@ func (c *showUnitCommand) newUnitAPI() (UnitsInfoAPI, error) {
 
 // Info implements Command.Run.
 func (c *showUnitCommand) Run(ctx *cmd.Context) error {
-	client, err := c.newAPIFunc()
+	client, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
@@ -126,7 +145,7 @@ func (c *showUnitCommand) Run(ctx *cmd.Context) error {
 		return err
 	}
 
-	results, err := client.UnitsInfo(tags)
+	results, err := client.UnitsInfo(ctx, tags)
 	if err != nil {
 		return errors.Trace(err)
 	}

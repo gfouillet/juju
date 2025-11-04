@@ -8,11 +8,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/utils/v4/keyvalues"
 	"gopkg.in/yaml.v3"
+
+	"github.com/juju/juju/internal/cmd"
 )
 
 // Action represents the action we want to perform here.
@@ -60,7 +61,7 @@ type ConfigCommandBase struct {
 
 // SetFlags implements cmd.Command.SetFlags.
 func (c *ConfigCommandBase) SetFlags(f *gnuflag.FlagSet) {
-	f.Var(&c.ConfigFile, "file", "path to yaml-formatted configuration file")
+	f.Var(&c.ConfigFile, "file", "Path to yaml-formatted configuration file")
 	f.BoolVar(&c.Color, "color", false, "Use ANSI color codes in output")
 	f.BoolVar(&c.NoColor, "no-color", false, "Disable ANSI color codes in tabular output")
 	if c.Resettable {

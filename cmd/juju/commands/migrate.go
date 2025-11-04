@@ -4,22 +4,23 @@
 package commands
 
 import (
+	"context"
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/client/usermanager"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -37,41 +38,41 @@ type migrateCommand struct {
 	targetController string
 
 	// Overridden by tests
-	newAPIRoot func(jujuclient.ClientStore, string, string) (api.Connection, error)
+	newAPIRoot func(context.Context, jujuclient.ClientStore, string, string) (api.Connection, error)
 	migAPI     map[string]migrateAPI
 	modelAPI   modelInfoAPI
 	userAPI    userListAPI
 }
 
 type migrateAPI interface {
-	InitiateMigration(spec controller.MigrationSpec) (string, error)
-	IdentityProviderURL() (string, error)
+	InitiateMigration(ctx context.Context, spec controller.MigrationSpec) (string, error)
+	IdentityProviderURL(ctx context.Context) (string, error)
 	Close() error
 }
 
 type modelInfoAPI interface {
-	ModelInfo([]names.ModelTag) ([]params.ModelInfoResult, error)
+	ModelInfo(context.Context, []names.ModelTag) ([]params.ModelInfoResult, error)
 	Close() error
 }
 
 type userListAPI interface {
-	UserInfo([]string, usermanager.IncludeDisabled) ([]params.UserInfo, error)
+	UserInfo(context.Context, []string, usermanager.IncludeDisabled) ([]params.UserInfo, error)
 	Close() error
 }
 
 const migrateDoc = `
-The 'migrate' command begins the migration of a workload model from
+The ` + "`juju migrate`" + ` command begins the migration of a workload model from
 its current controller to a new controller. This is useful for load
 balancing when a controller is too busy, or as a way to upgrade a
 model's controller to a newer Juju version.
 
 In order to start a migration, the target controller must be in the
-juju client's local configuration cache. See the 'login' command
+` + "`juju`" + ` client's local configuration cache. See the ` + "`login`" + ` command
 for details of how to do this.
 
-The 'migrate' command only starts a model migration - it does not wait
+The ` + "`migrate`" + ` command only starts a model migration -- it does not wait
 for its completion. The progress of a migration can be tracked using
-the 'status' command and by consulting the logs.
+the ` + "`status`" + ` command and by consulting the logs.
 
 Once the migration is complete, the model's machine and unit agents
 will be connected to the new controller. The model will no longer be
@@ -120,7 +121,7 @@ func (c *migrateCommand) Init(args []string) error {
 
 // Run implements cmd.Command.
 func (c *migrateCommand) Run(ctx *cmd.Context) error {
-	spec, err := c.getMigrationSpec()
+	spec, err := c.getMigrationSpec(ctx)
 	if err != nil {
 		return err
 	}
@@ -128,24 +129,24 @@ func (c *migrateCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	uuids, err := c.ModelUUIDs([]string{modelName})
+	uuids, err := c.ModelUUIDs(ctx, []string{modelName})
 	if err != nil {
 		return errors.Trace(err)
 	}
 	spec.ModelUUID = uuids[0]
-	if err := c.checkMigrationFeasibility(spec); err != nil {
+	if err := c.checkMigrationFeasibility(ctx, spec); err != nil {
 		return errors.Trace(err)
 	}
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return err
 	}
-	api, err := c.getMigrationAPI(controllerName)
+	api, err := c.getMigrationAPI(ctx, controllerName)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = api.Close() }()
-	id, err := api.InitiateMigration(*spec)
+	id, err := api.InitiateMigration(ctx, *spec)
 	if err != nil {
 		return err
 	}
@@ -153,7 +154,7 @@ func (c *migrateCommand) Run(ctx *cmd.Context) error {
 	return nil
 }
 
-func (c *migrateCommand) getMigrationSpec() (*controller.MigrationSpec, error) {
+func (c *migrateCommand) getMigrationSpec(ctx context.Context) (*controller.MigrationSpec, error) {
 	store := c.ClientStore()
 
 	controllerInfo, err := store.ControllerByName(c.targetController)
@@ -169,7 +170,7 @@ func (c *migrateCommand) getMigrationSpec() (*controller.MigrationSpec, error) {
 	var macs []macaroon.Slice
 	if accountInfo.Password == "" {
 		var err error
-		macs, err = c.getTargetControllerMacaroons()
+		macs, err = c.getTargetControllerMacaroons(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -186,12 +187,12 @@ func (c *migrateCommand) getMigrationSpec() (*controller.MigrationSpec, error) {
 	}, nil
 }
 
-func (c *migrateCommand) getMigrationAPI(controllerName string) (migrateAPI, error) {
+func (c *migrateCommand) getMigrationAPI(ctx context.Context, controllerName string) (migrateAPI, error) {
 	if c.migAPI != nil && c.migAPI[controllerName] != nil {
 		return c.migAPI[controllerName], nil
 	}
 
-	apiRoot, err := c.newAPIRoot(c.ClientStore(), controllerName, "")
+	apiRoot, err := c.newAPIRoot(ctx, c.ClientStore(), controllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -199,7 +200,7 @@ func (c *migrateCommand) getMigrationAPI(controllerName string) (migrateAPI, err
 	return controller.NewClient(apiRoot), nil
 }
 
-func (c *migrateCommand) getModelAPI() (modelInfoAPI, error) {
+func (c *migrateCommand) getModelAPI(ctx context.Context) (modelInfoAPI, error) {
 	if c.modelAPI != nil {
 		return c.modelAPI, nil
 	}
@@ -209,26 +210,26 @@ func (c *migrateCommand) getModelAPI() (modelInfoAPI, error) {
 		return nil, err
 	}
 
-	apiRoot, err := c.newAPIRoot(c.ClientStore(), controllerName, "")
+	apiRoot, err := c.newAPIRoot(ctx, c.ClientStore(), controllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return modelmanager.NewClient(apiRoot), nil
 }
 
-func (c *migrateCommand) getTargetControllerUserAPI() (userListAPI, error) {
+func (c *migrateCommand) getTargetControllerUserAPI(ctx context.Context) (userListAPI, error) {
 	if c.userAPI != nil {
 		return c.userAPI, nil
 	}
 
-	apiRoot, err := c.newAPIRoot(c.ClientStore(), c.targetController, "")
+	apiRoot, err := c.newAPIRoot(ctx, c.ClientStore(), c.targetController, "")
 	if err != nil {
 		return nil, errors.Annotate(err, "connecting to target controller")
 	}
 	return usermanager.NewClient(apiRoot), nil
 }
 
-func (c *migrateCommand) getTargetControllerMacaroons() ([]macaroon.Slice, error) {
+func (c *migrateCommand) getTargetControllerMacaroons(ctx context.Context) ([]macaroon.Slice, error) {
 	jar, err := c.CommandBase.CookieJar(c.ClientStore(), c.targetController)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -239,7 +240,7 @@ func (c *migrateCommand) getTargetControllerMacaroons() ([]macaroon.Slice, error
 	//
 	// TODO(axw,mjs) add a controller API that returns a macaroon that
 	// may be used for the sole purpose of migration.
-	api, err := c.newAPIRoot(c.ClientStore(), c.targetController, "")
+	api, err := c.newAPIRoot(ctx, c.ClientStore(), c.targetController, "")
 	if err != nil {
 		return nil, errors.Annotate(err, "connecting to target controller")
 	}
@@ -247,17 +248,17 @@ func (c *migrateCommand) getTargetControllerMacaroons() ([]macaroon.Slice, error
 	return httpbakery.MacaroonsForURL(jar, api.CookieURL()), nil
 }
 
-func (c *migrateCommand) checkMigrationFeasibility(spec *controller.MigrationSpec) error {
+func (c *migrateCommand) checkMigrationFeasibility(ctx context.Context, spec *controller.MigrationSpec) error {
 	var (
 		srcUsers, dstUsers set.Strings
 		srcControllerName  string
 		err                error
 	)
 
-	if srcUsers, err = c.getModelUsers(names.NewModelTag(spec.ModelUUID)); err != nil {
+	if srcUsers, err = c.getModelUsers(ctx, names.NewModelTag(spec.ModelUUID)); err != nil {
 		return err
 	}
-	if dstUsers, err = c.getTargetControllerUsers(); err != nil {
+	if dstUsers, err = c.getTargetControllerUsers(ctx); err != nil {
 		return err
 	}
 
@@ -273,12 +274,12 @@ func (c *migrateCommand) checkMigrationFeasibility(spec *controller.MigrationSpe
 		if srcControllerName, err = c.ControllerName(); err != nil {
 			return err
 		}
-		srcIdentityURL, err := c.getIdentityProviderURL(srcControllerName)
+		srcIdentityURL, err := c.getIdentityProviderURL(ctx, srcControllerName)
 		if err != nil {
 			return errors.Annotate(err, "looking up source controller identity provider URL")
 		}
 
-		dstIdentityURL, err := c.getIdentityProviderURL(c.targetController)
+		dstIdentityURL, err := c.getIdentityProviderURL(ctx, c.targetController)
 		if err != nil {
 			return errors.Annotate(err, "looking up target controller identity provider URL")
 		}
@@ -325,24 +326,24 @@ users to the destination controller or remove them from the current model:
 	return nil
 }
 
-func (c *migrateCommand) getIdentityProviderURL(controllerName string) (string, error) {
-	api, err := c.getMigrationAPI(controllerName)
+func (c *migrateCommand) getIdentityProviderURL(ctx context.Context, controllerName string) (string, error) {
+	api, err := c.getMigrationAPI(ctx, controllerName)
 	if err != nil {
 		return "", err
 	}
 	defer api.Close()
 
-	return api.IdentityProviderURL()
+	return api.IdentityProviderURL(ctx)
 }
 
-func (c *migrateCommand) getModelUsers(modelTag names.ModelTag) (set.Strings, error) {
-	api, err := c.getModelAPI()
+func (c *migrateCommand) getModelUsers(ctx context.Context, modelTag names.ModelTag) (set.Strings, error) {
+	api, err := c.getModelAPI(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer api.Close()
 
-	infoRes, err := api.ModelInfo([]names.ModelTag{modelTag})
+	infoRes, err := api.ModelInfo(ctx, []names.ModelTag{modelTag})
 	if err != nil {
 		return nil, err
 	}
@@ -358,14 +359,14 @@ func (c *migrateCommand) getModelUsers(modelTag names.ModelTag) (set.Strings, er
 	return users, nil
 }
 
-func (c *migrateCommand) getTargetControllerUsers() (set.Strings, error) {
-	api, err := c.getTargetControllerUserAPI()
+func (c *migrateCommand) getTargetControllerUsers(ctx context.Context) (set.Strings, error) {
+	api, err := c.getTargetControllerUserAPI(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer api.Close()
 
-	userInfo, err := api.UserInfo(nil, usermanager.AllUsers)
+	userInfo, err := api.UserInfo(ctx, nil, usermanager.AllUsers)
 	if err != nil {
 		return nil, errors.Annotate(err, "looking up model users in target controller")
 	}

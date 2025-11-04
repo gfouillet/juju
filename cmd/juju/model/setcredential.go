@@ -4,9 +4,10 @@
 package model
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	cloudapi "github.com/juju/juju/api/client/cloud"
@@ -16,19 +17,20 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ModelCredentialAPI defines methods used to replace model credential.
 type ModelCredentialAPI interface {
 	Close() error
-	ChangeModelCredential(model names.ModelTag, credential names.CloudCredentialTag) error
+	ChangeModelCredential(ctx context.Context, model names.ModelTag, credential names.CloudCredentialTag) error
 }
 
 // CloudAPI defines methods used to detemine if cloud credential exists on the controller.
 type CloudAPI interface {
 	Close() error
-	UserCredentials(names.UserTag, names.CloudTag) ([]names.CloudCredentialTag, error)
-	AddCredential(tag string, credential cloud.Credential) error
+	UserCredentials(context.Context, names.UserTag, names.CloudTag) ([]names.CloudCredentialTag, error)
+	AddCredential(ctx context.Context, tag string, credential cloud.Credential) error
 }
 
 // modelCredentialCommand allows to change, replace a cloud credential for a model.
@@ -38,7 +40,7 @@ type modelCredentialCommand struct {
 	cloud      string
 	credential string
 
-	newAPIRootFunc            func() (base.APICallCloser, error)
+	newAPIRootFunc            func(ctx context.Context) (base.APICallCloser, error)
 	newModelCredentialAPIFunc func(base.APICallCloser) ModelCredentialAPI
 	newCloudAPIFunc           func(base.APICallCloser) CloudAPI
 }
@@ -52,8 +54,8 @@ func NewModelCredentialCommand() cmd.Command {
 			return cloudapi.NewClient(root)
 		},
 	}
-	command.newAPIRootFunc = func() (base.APICallCloser, error) {
-		return command.NewControllerAPIRoot()
+	command.newAPIRootFunc = func(ctx context.Context) (base.APICallCloser, error) {
+		return command.NewControllerAPIRoot(ctx)
 	}
 	return modelcmd.Wrap(command)
 }
@@ -97,7 +99,7 @@ func (c *modelCredentialCommand) Run(ctx *cmd.Context) error {
 		return e
 	}
 
-	root, err := c.newAPIRootFunc()
+	root, err := c.newAPIRootFunc(ctx)
 	if err != nil {
 		return fail(errors.Annotate(err, "opening API connection"))
 	}
@@ -118,7 +120,7 @@ func (c *modelCredentialCommand) Run(ctx *cmd.Context) error {
 	defer cloudClient.Close()
 
 	remote := false
-	remoteCredentials, err := cloudClient.UserCredentials(userTag, cloudTag)
+	remoteCredentials, err := cloudClient.UserCredentials(ctx, userTag, cloudTag)
 	if err != nil {
 		// This is ok - we can proceed with local ones anyway.
 		ctx.Infof("Could not determine if there are remote credentials for the user: %v", err)
@@ -140,13 +142,13 @@ func (c *modelCredentialCommand) Run(ctx *cmd.Context) error {
 			return fail((err))
 		}
 		ctx.Infof("Uploading local credential to the controller.")
-		err = cloudClient.AddCredential(credentialTag.String(), *credential)
+		err = cloudClient.AddCredential(ctx, credentialTag.String(), *credential)
 		if err != nil {
 			return fail(err)
 		}
 	}
 
-	modelName, modelDetails, err := c.ModelDetails()
+	modelName, modelDetails, err := c.ModelDetails(ctx)
 	if err != nil {
 		return fail(errors.Trace(err))
 	}
@@ -155,7 +157,7 @@ func (c *modelCredentialCommand) Run(ctx *cmd.Context) error {
 	modelClient := c.newModelCredentialAPIFunc(root)
 	defer modelClient.Close()
 
-	err = modelClient.ChangeModelCredential(modelTag, credentialTag)
+	err = modelClient.ChangeModelCredential(ctx, modelTag, credentialTag)
 	if err != nil {
 		return block.ProcessBlockedError(errors.Annotate(err, "could not set model credential"), block.BlockChange)
 	}
@@ -202,7 +204,7 @@ to models.
 `
 
 const modelCredentialExamples = `
-For cloud 'aws', relate remote credential 'bob' to model 'trinity':
+For cloud ` + "`aws`" + `, relate remote credential ` + "`bob`" + ` to model ` + "`trinity`" + `:
 
     juju set-credential -m trinity aws bob
 `

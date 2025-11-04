@@ -7,46 +7,47 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	jujuhttp "github.com/juju/juju/internal/http"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
-	jtesting "github.com/juju/juju/testing"
 )
 
 type clientCredentialsLoginProviderProviderSuite struct {
-	coretesting.BaseSuite
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&clientCredentialsLoginProviderProviderSuite{})
-
+func TestClientCredentialsLoginProviderProviderSuite(t *stdtesting.T) {
+	tc.Run(t, &clientCredentialsLoginProviderProviderSuite{})
+}
 func (s *clientCredentialsLoginProviderProviderSuite) APIInfo() *api.Info {
 	srv := apiservertesting.NewAPIServer(func(modelUUID string) (interface{}, error) {
 		var err error
-		if modelUUID != "" && modelUUID != jtesting.ModelTag.Id() {
+		if modelUUID != "" && modelUUID != testing.ModelTag.Id() {
 			err = fmt.Errorf("%w: %q", apiservererrors.UnknownModelError, modelUUID)
 		}
 		return &testRootAPI{}, err
 	})
-	s.AddCleanup(func(_ *gc.C) { srv.Close() })
+	s.AddCleanup(func(_ *tc.C) { srv.Close() })
 	info := &api.Info{
 		Addrs:          srv.Addrs,
-		CACert:         jtesting.CACert,
-		ControllerUUID: jtesting.ControllerTag.Id(),
-		ModelTag:       jtesting.ModelTag,
+		CACert:         testing.CACert,
+		ControllerUUID: testing.ControllerTag.Id(),
+		ModelTag:       testing.ModelTag,
 	}
 	return info
 }
 
-func (s *clientCredentialsLoginProviderProviderSuite) Test(c *gc.C) {
+func (s *clientCredentialsLoginProviderProviderSuite) TestClientCredentialsLogin(c *tc.C) {
 	info := s.APIInfo()
 
 	clientID := "test-client-id"
@@ -89,14 +90,33 @@ func (s *clientCredentialsLoginProviderProviderSuite) Test(c *gc.C) {
 		return nil
 	})
 
-	apiState, err := api.Open(&api.Info{
+	lp := api.NewClientCredentialsLoginProvider(clientID, clientSecret)
+	apiState, err := api.Open(c.Context(), &api.Info{
 		Addrs:          info.Addrs,
 		ControllerUUID: info.ControllerUUID,
 		CACert:         info.CACert,
 	}, api.DialOpts{
-		LoginProvider: api.NewClientCredentialsLoginProvider(clientID, clientSecret),
+		LoginProvider: lp,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = apiState.Close() }()
+	c.Check(err, tc.ErrorIsNil)
+}
+
+// A separate suite for tests that don't need to communicate with a Juju controller.
+type clientCredentialsLoginProviderBasicSuite struct {
+	testing.BaseSuite
+}
+
+func TestClientCredentialsLoginProviderBasicSuite(t *stdtesting.T) {
+	tc.Run(t, &clientCredentialsLoginProviderBasicSuite{})
+}
+func (s *clientCredentialsLoginProviderBasicSuite) TestClientCredentialsAuthHeader(c *tc.C) {
+	clientID := "test-client-id"
+	clientSecret := "test-client-secret"
+	lp := api.NewClientCredentialsLoginProvider(clientID, clientSecret)
+	expectedHeader := jujuhttp.BasicAuthHeader(clientID, clientSecret)
+	got, err := lp.AuthHeader()
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(got, tc.DeepEquals, expectedHeader)
 }

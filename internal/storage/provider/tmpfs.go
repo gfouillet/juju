@@ -4,15 +4,15 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4"
 
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/storage"
 )
 
@@ -20,17 +20,25 @@ const (
 	TmpfsProviderType = storage.ProviderType("tmpfs")
 )
 
-// tmpfsProviders create storage sources which provide access to filesystems.
-type tmpfsProvider struct {
+// TmpfsProvider is a storage provider that uses tmpfs to create ephemeral
+// filesystems on a host.
+type TmpfsProvider struct {
 	// run is a function type used for running commands on the local machine.
-	run runCommandFunc
+	run RunCommandFunc
 }
 
 var (
-	_ storage.Provider = (*tmpfsProvider)(nil)
+	_ storage.Provider = (*TmpfsProvider)(nil)
 )
 
-func (p *tmpfsProvider) ValidateForK8s(attributes map[string]any) error {
+// NewTmpfsProvider creates a new tmpfs storage provider.
+func NewTmpfsProvider(run RunCommandFunc) storage.Provider {
+	return &TmpfsProvider{
+		run: run,
+	}
+}
+
+func (p *TmpfsProvider) ValidateForK8s(attributes map[string]any) error {
 	if attributes == nil {
 		return nil
 	}
@@ -40,7 +48,7 @@ func (p *tmpfsProvider) ValidateForK8s(attributes map[string]any) error {
 }
 
 // ValidateConfig is defined on the Provider interface.
-func (p *tmpfsProvider) ValidateConfig(cfg *storage.Config) error {
+func (p *TmpfsProvider) ValidateConfig(cfg *storage.Config) error {
 	// Tmpfs provider has no configuration.
 	return nil
 }
@@ -48,7 +56,7 @@ func (p *tmpfsProvider) ValidateConfig(cfg *storage.Config) error {
 // validateFullConfig validates a fully-constructed storage config,
 // combining the user-specified config and any internally specified
 // config.
-func (p *tmpfsProvider) validateFullConfig(cfg *storage.Config) error {
+func (p *TmpfsProvider) validateFullConfig(cfg *storage.Config) error {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return err
 	}
@@ -60,12 +68,12 @@ func (p *tmpfsProvider) validateFullConfig(cfg *storage.Config) error {
 }
 
 // VolumeSource is defined on the Provider interface.
-func (p *tmpfsProvider) VolumeSource(providerConfig *storage.Config) (storage.VolumeSource, error) {
+func (p *TmpfsProvider) VolumeSource(providerConfig *storage.Config) (storage.VolumeSource, error) {
 	return nil, errors.NotSupportedf("volumes")
 }
 
 // FilesystemSource is defined on the Provider interface.
-func (p *tmpfsProvider) FilesystemSource(sourceConfig *storage.Config) (storage.FilesystemSource, error) {
+func (p *TmpfsProvider) FilesystemSource(sourceConfig *storage.Config) (storage.FilesystemSource, error) {
 	if err := p.validateFullConfig(sourceConfig); err != nil {
 		return nil, err
 	}
@@ -79,33 +87,43 @@ func (p *tmpfsProvider) FilesystemSource(sourceConfig *storage.Config) (storage.
 }
 
 // Supports is defined on the Provider interface.
-func (*tmpfsProvider) Supports(k storage.StorageKind) bool {
+func (*TmpfsProvider) Supports(k storage.StorageKind) bool {
 	return k == storage.StorageKindFilesystem
 }
 
 // Scope is defined on the Provider interface.
-func (*tmpfsProvider) Scope() storage.Scope {
+func (*TmpfsProvider) Scope() storage.Scope {
 	return storage.ScopeMachine
 }
 
 // Dynamic is defined on the Provider interface.
-func (*tmpfsProvider) Dynamic() bool {
+func (*TmpfsProvider) Dynamic() bool {
 	return true
 }
 
 // Releasable is defined on the Provider interface.
-func (*tmpfsProvider) Releasable() bool {
+func (*TmpfsProvider) Releasable() bool {
 	return false
 }
 
-// DefaultPools is defined on the Provider interface.
-func (*tmpfsProvider) DefaultPools() []*storage.Config {
-	return nil
+// DefaultPools provides the default storage pools available through this
+// provider.
+//
+// This pool offers one default pool named after it self.
+//
+// Implements [storage.Provider] interface.
+func (*TmpfsProvider) DefaultPools() []*storage.Config {
+	pool, _ := storage.NewConfig(
+		TmpfsProviderType.String(),
+		TmpfsProviderType,
+		storage.Attrs{},
+	)
+	return []*storage.Config{pool}
 }
 
 type tmpfsFilesystemSource struct {
 	dirFuncs   dirFuncs
-	run        runCommandFunc
+	run        RunCommandFunc
 	storageDir string
 }
 
@@ -120,7 +138,7 @@ func (s *tmpfsFilesystemSource) ValidateFilesystemParams(params storage.Filesyst
 }
 
 // CreateFilesystems is defined on the FilesystemSource interface.
-func (s *tmpfsFilesystemSource) CreateFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemParams) ([]storage.CreateFilesystemsResult, error) {
+func (s *tmpfsFilesystemSource) CreateFilesystems(ctx context.Context, args []storage.FilesystemParams) ([]storage.CreateFilesystemsResult, error) {
 	results := make([]storage.CreateFilesystemsResult, len(args))
 	for i, arg := range args {
 		filesystem, err := s.createFilesystem(arg)
@@ -148,8 +166,8 @@ func (s *tmpfsFilesystemSource) createFilesystem(params storage.FilesystemParams
 	}
 
 	info := storage.FilesystemInfo{
-		FilesystemId: params.Tag.String(),
-		Size:         sizeInMiB,
+		ProviderId: params.Tag.String(),
+		Size:       sizeInMiB,
 	}
 
 	// Creating the mount is the responsibility of AttachFilesystems.
@@ -164,7 +182,7 @@ func (s *tmpfsFilesystemSource) createFilesystem(params storage.FilesystemParams
 }
 
 // DestroyFilesystems is defined on the FilesystemSource interface.
-func (s *tmpfsFilesystemSource) DestroyFilesystems(ctx envcontext.ProviderCallContext, filesystemIds []string) ([]error, error) {
+func (s *tmpfsFilesystemSource) DestroyFilesystems(ctx context.Context, filesystemIds []string) ([]error, error) {
 	// DestroyFilesystems is a no-op; there is nothing to destroy,
 	// since the filesystem is ephemeral and disappears once
 	// detached.
@@ -172,15 +190,15 @@ func (s *tmpfsFilesystemSource) DestroyFilesystems(ctx envcontext.ProviderCallCo
 }
 
 // ReleaseFilesystems is defined on the FilesystemSource interface.
-func (s *tmpfsFilesystemSource) ReleaseFilesystems(ctx envcontext.ProviderCallContext, filesystemIds []string) ([]error, error) {
+func (s *tmpfsFilesystemSource) ReleaseFilesystems(ctx context.Context, filesystemIds []string) ([]error, error) {
 	return make([]error, len(filesystemIds)), nil
 }
 
 // AttachFilesystems is defined on the FilesystemSource interface.
-func (s *tmpfsFilesystemSource) AttachFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemAttachmentParams) ([]storage.AttachFilesystemsResult, error) {
+func (s *tmpfsFilesystemSource) AttachFilesystems(ctx context.Context, args []storage.FilesystemAttachmentParams) ([]storage.AttachFilesystemsResult, error) {
 	results := make([]storage.AttachFilesystemsResult, len(args))
 	for i, arg := range args {
-		attachment, err := s.attachFilesystem(arg)
+		attachment, err := s.attachFilesystem(ctx, arg)
 		if err != nil {
 			results[i].Error = err
 			continue
@@ -190,7 +208,10 @@ func (s *tmpfsFilesystemSource) AttachFilesystems(ctx envcontext.ProviderCallCon
 	return results, nil
 }
 
-func (s *tmpfsFilesystemSource) attachFilesystem(arg storage.FilesystemAttachmentParams) (*storage.FilesystemAttachment, error) {
+func (s *tmpfsFilesystemSource) attachFilesystem(
+	ctx context.Context,
+	arg storage.FilesystemAttachmentParams,
+) (*storage.FilesystemAttachment, error) {
 	path := arg.Path
 	if path == "" {
 		return nil, errNoMountPoint
@@ -204,7 +225,7 @@ func (s *tmpfsFilesystemSource) attachFilesystem(arg storage.FilesystemAttachmen
 	}
 
 	// Check if the mount already exists.
-	source, err := s.dirFuncs.mountPointSource(path)
+	source, err := s.dirFuncs.mountPointSource(ctx, path)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -217,6 +238,7 @@ func (s *tmpfsFilesystemSource) attachFilesystem(arg storage.FilesystemAttachmen
 			options += ",ro"
 		}
 		if _, err := s.run(
+			ctx,
 			"mount", "-t", "tmpfs", arg.Filesystem.String(), path, "-o", options,
 		); err != nil {
 			os.Remove(path)
@@ -235,10 +257,10 @@ func (s *tmpfsFilesystemSource) attachFilesystem(arg storage.FilesystemAttachmen
 }
 
 // DetachFilesystems is defined on the FilesystemSource interface.
-func (s *tmpfsFilesystemSource) DetachFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemAttachmentParams) ([]error, error) {
+func (s *tmpfsFilesystemSource) DetachFilesystems(ctx context.Context, args []storage.FilesystemAttachmentParams) ([]error, error) {
 	results := make([]error, len(args))
 	for i, arg := range args {
-		if err := maybeUnmount(s.run, s.dirFuncs, arg.Path); err != nil {
+		if err := maybeUnmount(ctx, s.run, s.dirFuncs, arg.Path); err != nil {
 			results[i] = err
 		}
 	}
@@ -269,8 +291,8 @@ func (s *tmpfsFilesystemSource) readFilesystemInfo(tag names.FilesystemTag) (sto
 		return storage.FilesystemInfo{}, errors.New("invalid filesystem info: missing size")
 	}
 	return storage.FilesystemInfo{
-		FilesystemId: tag.String(),
-		Size:         *info.Size,
+		ProviderId: tag.String(),
+		Size:       *info.Size,
 	}, nil
 }
 

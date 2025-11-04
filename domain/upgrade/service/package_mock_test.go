@@ -13,12 +13,12 @@ import (
 	context "context"
 	reflect "reflect"
 
-	changestream "github.com/juju/juju/core/changestream"
+	model "github.com/juju/juju/core/model"
+	semversion "github.com/juju/juju/core/semversion"
 	upgrade "github.com/juju/juju/core/upgrade"
 	watcher "github.com/juju/juju/core/watcher"
 	eventsource "github.com/juju/juju/core/watcher/eventsource"
 	upgrade0 "github.com/juju/juju/domain/upgrade"
-	version "github.com/juju/version/v2"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -124,7 +124,7 @@ func (c *MockStateAllProvisionedControllersReadyCall) DoAndReturn(f func(context
 }
 
 // CreateUpgrade mocks base method.
-func (m *MockState) CreateUpgrade(arg0 context.Context, arg1, arg2 version.Number) (upgrade0.UUID, error) {
+func (m *MockState) CreateUpgrade(arg0 context.Context, arg1, arg2 semversion.Number) (upgrade0.UUID, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CreateUpgrade", arg0, arg1, arg2)
 	ret0, _ := ret[0].(upgrade0.UUID)
@@ -151,13 +151,128 @@ func (c *MockStateCreateUpgradeCall) Return(arg0 upgrade0.UUID, arg1 error) *Moc
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStateCreateUpgradeCall) Do(f func(context.Context, version.Number, version.Number) (upgrade0.UUID, error)) *MockStateCreateUpgradeCall {
+func (c *MockStateCreateUpgradeCall) Do(f func(context.Context, semversion.Number, semversion.Number) (upgrade0.UUID, error)) *MockStateCreateUpgradeCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStateCreateUpgradeCall) DoAndReturn(f func(context.Context, version.Number, version.Number) (upgrade0.UUID, error)) *MockStateCreateUpgradeCall {
+func (c *MockStateCreateUpgradeCall) DoAndReturn(f func(context.Context, semversion.Number, semversion.Number) (upgrade0.UUID, error)) *MockStateCreateUpgradeCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetAllModelUUIDs mocks base method.
+func (m *MockState) GetAllModelUUIDs(arg0 context.Context) ([]model.UUID, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetAllModelUUIDs", arg0)
+	ret0, _ := ret[0].([]model.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetAllModelUUIDs indicates an expected call of GetAllModelUUIDs.
+func (mr *MockStateMockRecorder) GetAllModelUUIDs(arg0 any) *MockStateGetAllModelUUIDsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAllModelUUIDs", reflect.TypeOf((*MockState)(nil).GetAllModelUUIDs), arg0)
+	return &MockStateGetAllModelUUIDsCall{Call: call}
+}
+
+// MockStateGetAllModelUUIDsCall wrap *gomock.Call
+type MockStateGetAllModelUUIDsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStateGetAllModelUUIDsCall) Return(arg0 []model.UUID, arg1 error) *MockStateGetAllModelUUIDsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStateGetAllModelUUIDsCall) Do(f func(context.Context) ([]model.UUID, error)) *MockStateGetAllModelUUIDsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStateGetAllModelUUIDsCall) DoAndReturn(f func(context.Context) ([]model.UUID, error)) *MockStateGetAllModelUUIDsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// NamespaceForWatchUpgradeReady mocks base method.
+func (m *MockState) NamespaceForWatchUpgradeReady() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NamespaceForWatchUpgradeReady")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// NamespaceForWatchUpgradeReady indicates an expected call of NamespaceForWatchUpgradeReady.
+func (mr *MockStateMockRecorder) NamespaceForWatchUpgradeReady() *MockStateNamespaceForWatchUpgradeReadyCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NamespaceForWatchUpgradeReady", reflect.TypeOf((*MockState)(nil).NamespaceForWatchUpgradeReady))
+	return &MockStateNamespaceForWatchUpgradeReadyCall{Call: call}
+}
+
+// MockStateNamespaceForWatchUpgradeReadyCall wrap *gomock.Call
+type MockStateNamespaceForWatchUpgradeReadyCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStateNamespaceForWatchUpgradeReadyCall) Return(arg0 string) *MockStateNamespaceForWatchUpgradeReadyCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStateNamespaceForWatchUpgradeReadyCall) Do(f func() string) *MockStateNamespaceForWatchUpgradeReadyCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStateNamespaceForWatchUpgradeReadyCall) DoAndReturn(f func() string) *MockStateNamespaceForWatchUpgradeReadyCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// NamespaceForWatchUpgradeState mocks base method.
+func (m *MockState) NamespaceForWatchUpgradeState() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NamespaceForWatchUpgradeState")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// NamespaceForWatchUpgradeState indicates an expected call of NamespaceForWatchUpgradeState.
+func (mr *MockStateMockRecorder) NamespaceForWatchUpgradeState() *MockStateNamespaceForWatchUpgradeStateCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NamespaceForWatchUpgradeState", reflect.TypeOf((*MockState)(nil).NamespaceForWatchUpgradeState))
+	return &MockStateNamespaceForWatchUpgradeStateCall{Call: call}
+}
+
+// MockStateNamespaceForWatchUpgradeStateCall wrap *gomock.Call
+type MockStateNamespaceForWatchUpgradeStateCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStateNamespaceForWatchUpgradeStateCall) Return(arg0 string) *MockStateNamespaceForWatchUpgradeStateCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStateNamespaceForWatchUpgradeStateCall) Do(f func() string) *MockStateNamespaceForWatchUpgradeStateCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStateNamespaceForWatchUpgradeStateCall) DoAndReturn(f func() string) *MockStateNamespaceForWatchUpgradeStateCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -414,41 +529,46 @@ func (m *MockWatcherFactory) EXPECT() *MockWatcherFactoryMockRecorder {
 	return m.recorder
 }
 
-// NewValueMapperWatcher mocks base method.
-func (m *MockWatcherFactory) NewValueMapperWatcher(arg0, arg1 string, arg2 changestream.ChangeType, arg3 eventsource.Mapper) (watcher.Watcher[struct{}], error) {
+// NewNotifyMapperWatcher mocks base method.
+func (m *MockWatcherFactory) NewNotifyMapperWatcher(arg0 context.Context, arg1 string, arg2 eventsource.Mapper, arg3 eventsource.FilterOption, arg4 ...eventsource.FilterOption) (watcher.Watcher[struct{}], error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NewValueMapperWatcher", arg0, arg1, arg2, arg3)
+	varargs := []any{arg0, arg1, arg2, arg3}
+	for _, a := range arg4 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "NewNotifyMapperWatcher", varargs...)
 	ret0, _ := ret[0].(watcher.Watcher[struct{}])
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// NewValueMapperWatcher indicates an expected call of NewValueMapperWatcher.
-func (mr *MockWatcherFactoryMockRecorder) NewValueMapperWatcher(arg0, arg1, arg2, arg3 any) *MockWatcherFactoryNewValueMapperWatcherCall {
+// NewNotifyMapperWatcher indicates an expected call of NewNotifyMapperWatcher.
+func (mr *MockWatcherFactoryMockRecorder) NewNotifyMapperWatcher(arg0, arg1, arg2, arg3 any, arg4 ...any) *MockWatcherFactoryNewNotifyMapperWatcherCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewValueMapperWatcher", reflect.TypeOf((*MockWatcherFactory)(nil).NewValueMapperWatcher), arg0, arg1, arg2, arg3)
-	return &MockWatcherFactoryNewValueMapperWatcherCall{Call: call}
+	varargs := append([]any{arg0, arg1, arg2, arg3}, arg4...)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNotifyMapperWatcher", reflect.TypeOf((*MockWatcherFactory)(nil).NewNotifyMapperWatcher), varargs...)
+	return &MockWatcherFactoryNewNotifyMapperWatcherCall{Call: call}
 }
 
-// MockWatcherFactoryNewValueMapperWatcherCall wrap *gomock.Call
-type MockWatcherFactoryNewValueMapperWatcherCall struct {
+// MockWatcherFactoryNewNotifyMapperWatcherCall wrap *gomock.Call
+type MockWatcherFactoryNewNotifyMapperWatcherCall struct {
 	*gomock.Call
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockWatcherFactoryNewValueMapperWatcherCall) Return(arg0 watcher.Watcher[struct{}], arg1 error) *MockWatcherFactoryNewValueMapperWatcherCall {
+func (c *MockWatcherFactoryNewNotifyMapperWatcherCall) Return(arg0 watcher.Watcher[struct{}], arg1 error) *MockWatcherFactoryNewNotifyMapperWatcherCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockWatcherFactoryNewValueMapperWatcherCall) Do(f func(string, string, changestream.ChangeType, eventsource.Mapper) (watcher.Watcher[struct{}], error)) *MockWatcherFactoryNewValueMapperWatcherCall {
+func (c *MockWatcherFactoryNewNotifyMapperWatcherCall) Do(f func(context.Context, string, eventsource.Mapper, eventsource.FilterOption, ...eventsource.FilterOption) (watcher.Watcher[struct{}], error)) *MockWatcherFactoryNewNotifyMapperWatcherCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockWatcherFactoryNewValueMapperWatcherCall) DoAndReturn(f func(string, string, changestream.ChangeType, eventsource.Mapper) (watcher.Watcher[struct{}], error)) *MockWatcherFactoryNewValueMapperWatcherCall {
+func (c *MockWatcherFactoryNewNotifyMapperWatcherCall) DoAndReturn(f func(context.Context, string, eventsource.Mapper, eventsource.FilterOption, ...eventsource.FilterOption) (watcher.Watcher[struct{}], error)) *MockWatcherFactoryNewNotifyMapperWatcherCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

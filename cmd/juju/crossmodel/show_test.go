@@ -4,23 +4,24 @@
 package crossmodel
 
 import (
+	"context"
 	"os"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/modelcmd"
 	jujucrossmodel "github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient"
 )
 
 func newShowEndpointsCommandForTest(store jujuclient.ClientStore, api ShowAPI) cmd.Command {
-	aCmd := &showCommand{newAPIFunc: func(controllerName string) (ShowAPI, error) {
+	aCmd := &showCommand{newAPIFunc: func(ctx context.Context, controllerName string) (ShowAPI, error) {
 		return api, nil
 	}}
 	aCmd.SetClientStore(store)
@@ -32,56 +33,58 @@ type showSuite struct {
 	mockAPI *mockShowAPI
 }
 
-var _ = gc.Suite(&showSuite{})
+func TestShowSuite(t *testing.T) {
+	tc.Run(t, &showSuite{})
+}
 
-func (s *showSuite) SetUpTest(c *gc.C) {
+func (s *showSuite) SetUpTest(c *tc.C) {
 	s.BaseCrossModelSuite.SetUpTest(c)
 
 	s.mockAPI = &mockShowAPI{
 		desc:     "IBM DB2 Express Server Edition is an entry level database system",
-		offerURL: "fred/model.db2",
+		offerURL: "prod/model.db2",
 	}
 }
 
-func (s *showSuite) runShow(c *gc.C, args ...string) (*cmd.Context, error) {
+func (s *showSuite) runShow(c *tc.C, args ...string) (*cmd.Context, error) {
 	return cmdtesting.RunCommand(c, newShowEndpointsCommandForTest(s.store, s.mockAPI), args...)
 }
 
-func (s *showSuite) TestShowNoUrl(c *gc.C) {
+func (s *showSuite) TestShowNoUrl(c *tc.C) {
 	s.assertShowError(c, nil, ".*must specify endpoint URL.*")
 }
 
-func (s *showSuite) TestShowApiError(c *gc.C) {
+func (s *showSuite) TestShowApiError(c *tc.C) {
 	s.mockAPI.msg = "fail"
-	s.assertShowError(c, []string{"fred/model.db2"}, ".*fail.*")
+	s.assertShowError(c, []string{"prod/model.db2"}, ".*fail.*")
 }
 
-func (s *showSuite) TestShowURLError(c *gc.C) {
-	s.assertShowError(c, []string{"fred/model.foo/db2"}, "application offer URL has invalid form.*")
+func (s *showSuite) TestShowURLError(c *tc.C) {
+	s.assertShowError(c, []string{"prod/model.foo/db2"}, "offer URL has invalid form.*")
 }
 
-func (s *showSuite) TestShowWrongModelError(c *gc.C) {
-	s.assertShowError(c, []string{"db2"}, `application offer "fred/test.db2" not found`)
+func (s *showSuite) TestShowWrongModelError(c *tc.C) {
+	s.assertShowError(c, []string{"db2"}, `application offer "prod/test.db2" not found`)
 }
 
-func (s *showSuite) TestShowNameOnly(c *gc.C) {
-	// CurrentModel is fred/test, so ensure api believes offer is in this model
-	s.mockAPI.offerURL = "fred/test.db2"
+func (s *showSuite) TestShowNameOnly(c *tc.C) {
+	// CurrentModel is prod/test, so ensure api believes offer is in this model
+	s.mockAPI.offerURL = "prod/test.db2"
 	s.assertShowYaml(c, "db2")
 }
 
-func (s *showSuite) TestShowNameAndEnvvarOnly(c *gc.C) {
-	// Ensure envvar (fred/model) overrides CurrentModel (fred/test)
-	os.Setenv(osenv.JujuModelEnvKey, "fred/model")
-	defer func() { os.Unsetenv(osenv.JujuModelEnvKey) }()
+func (s *showSuite) TestShowNameAndEnvvarOnly(c *tc.C) {
+	// Ensure envvar (prod/model) overrides CurrentModel (prod/test)
+	os.Setenv(osenv.JujuModelEnvKey, "prod/model")
+	defer func() { _ = os.Unsetenv(osenv.JujuModelEnvKey) }()
 	s.assertShowYaml(c, "db2")
 }
 
-func (s *showSuite) TestShowYaml(c *gc.C) {
-	s.assertShowYaml(c, "fred/model.db2")
+func (s *showSuite) TestShowYaml(c *tc.C) {
+	s.assertShowYaml(c, "prod/model.db2")
 }
 
-func (s *showSuite) assertShowYaml(c *gc.C, arg string) {
+func (s *showSuite) assertShowYaml(c *tc.C, arg string) {
 	s.assertShow(
 		c,
 		[]string{arg, "--format", "yaml"},
@@ -104,39 +107,39 @@ test-master:`[1:]+s.mockAPI.offerURL+`:
 	)
 }
 
-func (s *showSuite) TestShowTabular(c *gc.C) {
+func (s *showSuite) TestShowTabular(c *tc.C) {
 	s.assertShow(
 		c,
-		[]string{"fred/model.db2", "--format", "tabular"},
+		[]string{"prod/model.db2", "--format", "tabular"},
 		`
 Store        URL             Access   Description                                 Endpoint  Interface  Role
-test-master  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry  db2       http       requirer
+test-master  prod/model.db2  consume  IBM DB2 Express Server Edition is an entry  db2       http       requirer
                                       level database system                       log       http       provider
 `[1:],
 	)
 }
 
-func (s *showSuite) TestShowDifferentController(c *gc.C) {
+func (s *showSuite) TestShowDifferentController(c *tc.C) {
 	s.mockAPI.controllerName = "different"
 	s.assertShow(
 		c,
-		[]string{"different:fred/model.db2", "--format", "tabular"},
+		[]string{"different:prod/model.db2", "--format", "tabular"},
 		`
 Store      URL             Access   Description                                 Endpoint  Interface  Role
-different  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry  db2       http       requirer
+different  prod/model.db2  consume  IBM DB2 Express Server Edition is an entry  db2       http       requirer
                                     level database system                       log       http       provider
 `[1:],
 	)
 }
 
-func (s *showSuite) TestShowTabularExactly180Desc(c *gc.C) {
+func (s *showSuite) TestShowTabularExactly180Desc(c *tc.C) {
 	s.mockAPI.desc = s.mockAPI.desc + s.mockAPI.desc + s.mockAPI.desc[:52]
 	s.assertShow(
 		c,
-		[]string{"fred/model.db2", "--format", "tabular"},
+		[]string{"prod/model.db2", "--format", "tabular"},
 		`
 Store        URL             Access   Description                                   Endpoint  Interface  Role
-test-master  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry    db2       http       requirer
+test-master  prod/model.db2  consume  IBM DB2 Express Server Edition is an entry    db2       http       requirer
                                       level database systemIBM DB2 Express Server   log       http       provider
                                       Edition is an entry level database systemIBM                       
                                       DB2 Express Server Edition is an entry level                       
@@ -145,14 +148,14 @@ test-master  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry
 	)
 }
 
-func (s *showSuite) TestShowTabularMoreThan180Desc(c *gc.C) {
+func (s *showSuite) TestShowTabularMoreThan180Desc(c *tc.C) {
 	s.mockAPI.desc = s.mockAPI.desc + s.mockAPI.desc + s.mockAPI.desc
 	s.assertShow(
 		c,
-		[]string{"fred/model.db2", "--format", "tabular"},
+		[]string{"prod/model.db2", "--format", "tabular"},
 		`
 Store        URL             Access   Description                                   Endpoint  Interface  Role
-test-master  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry    db2       http       requirer
+test-master  prod/model.db2  consume  IBM DB2 Express Server Edition is an entry    db2       http       requirer
                                       level database systemIBM DB2 Express Server   log       http       provider
                                       Edition is an entry level database systemIBM                       
                                       DB2 Express Server Edition is an entry level                       
@@ -161,17 +164,17 @@ test-master  fred/model.db2  consume  IBM DB2 Express Server Edition is an entry
 	)
 }
 
-func (s *showSuite) assertShow(c *gc.C, args []string, expected string) {
+func (s *showSuite) assertShow(c *tc.C, args []string, expected string) {
 	context, err := s.runShow(c, args...)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	obtained := cmdtesting.Stdout(context)
-	c.Assert(obtained, gc.Matches, expected)
+	c.Assert(obtained, tc.Matches, expected)
 }
 
-func (s *showSuite) assertShowError(c *gc.C, args []string, expected string) {
+func (s *showSuite) assertShowError(c *tc.C, args []string, expected string) {
 	_, err := s.runShow(c, args...)
-	c.Assert(err, gc.ErrorMatches, expected)
+	c.Assert(err, tc.ErrorMatches, expected)
 }
 
 type mockShowAPI struct {
@@ -184,7 +187,7 @@ func (s mockShowAPI) Close() error {
 	return nil
 }
 
-func (s mockShowAPI) ApplicationOffer(url string) (*jujucrossmodel.ApplicationOfferDetails, error) {
+func (s mockShowAPI) ApplicationOffer(ctx context.Context, url string) (*jujucrossmodel.ApplicationOfferDetails, error) {
 	if s.msg != "" {
 		return nil, errors.New(s.msg)
 	}

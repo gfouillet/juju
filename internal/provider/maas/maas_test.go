@@ -4,20 +4,17 @@
 package maas
 
 import (
-	"context"
-
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gomaasapi/v2"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/cloud"
+	"github.com/juju/juju/core/version"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	coretesting "github.com/juju/juju/testing"
-	"github.com/juju/juju/version"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 var maasEnvAttrs = coretesting.Attrs{
@@ -33,13 +30,13 @@ type maasSuite struct {
 }
 
 func (suite *maasSuite) injectController(controller gomaasapi.Controller) {
-	mockGetController := func(maasServer, apiKey string) (gomaasapi.Controller, error) {
+	mockGetController := func(args gomaasapi.ControllerArgs) (gomaasapi.Controller, error) {
 		return controller, nil
 	}
 	suite.PatchValue(&GetMAASController, mockGetController)
 }
 
-func (suite *maasSuite) makeEnviron(c *gc.C, controller gomaasapi.Controller) *maasEnviron {
+func (suite *maasSuite) makeEnviron(c *tc.C, controller gomaasapi.Controller) *maasEnviron {
 	if controller != nil {
 		suite.injectController(controller)
 	}
@@ -62,16 +59,16 @@ func (suite *maasSuite) makeEnviron(c *gc.C, controller gomaasapi.Controller) *m
 	attrs := coretesting.FakeConfig().Merge(testAttrs)
 	suite.controllerUUID = coretesting.FakeControllerConfig().ControllerUUID()
 	cfg, err := config.New(config.NoDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
-	env, err := NewEnviron(context.Background(), cloud, cfg, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(env, gc.NotNil)
+	c.Assert(err, tc.ErrorIsNil)
+	env, err := NewEnviron(c.Context(), cloud, cfg, suite.credentialInvalidator, nil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(env, tc.NotNil)
 	return env
 }
 
 type fakeController struct {
 	gomaasapi.Controller
-	*testing.Stub
+	*testhelpers.Stub
 
 	domains            []gomaasapi.Domain
 	bootResources      []gomaasapi.BootResource
@@ -99,7 +96,7 @@ type fakeController struct {
 
 func newFakeController() *fakeController {
 	return &fakeController{
-		Stub: &testing.Stub{},
+		Stub: &testhelpers.Stub{},
 		zones: []gomaasapi.Zone{
 			&fakeZone{name: "mossack"},
 			&fakeZone{name: "fonseca"},
@@ -188,6 +185,7 @@ func (c *fakeController) StaticRoutes() ([]gomaasapi.StaticRoute, error) {
 	}
 	return c.staticRoutes, nil
 }
+
 func (c *fakeController) Files(prefix string) ([]gomaasapi.File, error) {
 	c.MethodCall(c, "Files", prefix)
 	return c.files, c.NextErr()
@@ -235,7 +233,7 @@ func (r *fakeBootResource) Architecture() string {
 
 type fakeMachine struct {
 	gomaasapi.Machine
-	*testing.Stub
+	*testhelpers.Stub
 
 	zoneName      string
 	hostname      string
@@ -254,7 +252,7 @@ type fakeMachine struct {
 
 func newFakeMachine(systemID, architecture, statusName string) *fakeMachine {
 	return &fakeMachine{
-		Stub:         &testing.Stub{},
+		Stub:         &testhelpers.Stub{},
 		systemID:     systemID,
 		architecture: architecture,
 		statusName:   statusName,
@@ -455,7 +453,7 @@ func (v fakeVLAN) MTU() int {
 }
 
 type fakeInterface struct {
-	*testing.Stub
+	*testhelpers.Stub
 
 	id         int
 	name       string
@@ -626,7 +624,7 @@ func (part fakePartition) Size() uint64 {
 }
 
 type fakeDevice struct {
-	*testing.Stub
+	*testhelpers.Stub
 
 	interfaceSet []gomaasapi.Interface
 	systemID     string

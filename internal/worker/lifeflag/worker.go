@@ -4,19 +4,22 @@
 package lifeflag
 
 import (
+	"context"
+	"sync"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4/catacomb"
 
-	apilifeflag "github.com/juju/juju/api/common/lifeflag"
+	apilifeflag "github.com/juju/juju/api/agent/lifeflag"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/watcher"
 )
 
 // Facade exposes capabilities required by the worker.
 type Facade interface {
-	Watch(names.Tag) (watcher.NotifyWatcher, error)
-	Life(names.Tag) (life.Value, error)
+	Watch(context.Context, names.Tag) (watcher.NotifyWatcher, error)
+	Life(context.Context, names.Tag) (life.Value, error)
 }
 
 // Config holds the configuration and dependencies for a worker.
@@ -55,7 +58,7 @@ const (
 // New returns a worker that exposes the result of the configured
 // predicate when applied to the configured entity's life value,
 // and fails with ErrValueChanged when the result changes.
-func New(config Config) (*Worker, error) {
+func New(ctx context.Context, config Config) (*Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -64,6 +67,7 @@ func New(config Config) (*Worker, error) {
 		config: config,
 	}
 	plan := catacomb.Plan{
+		Name: "life-flag",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}
@@ -74,7 +78,7 @@ func New(config Config) (*Worker, error) {
 	// before we start the internal watcher, we'll need an additional
 	// read triggered by the first change event; this will *probably*
 	// be the same value, but we can't assume it.
-	w.life, err = config.Facade.Life(config.Entity)
+	w.life, err = config.Facade.Life(ctx, config.Entity)
 	if config.NotFoundIsDead && errors.Is(err, ErrNotFound) {
 		// If we handle notfound as dead, we will always be dead.
 		w.life = life.Dead
@@ -95,7 +99,9 @@ func New(config Config) (*Worker, error) {
 type Worker struct {
 	catacomb catacomb.Catacomb
 	config   Config
-	life     life.Value
+
+	mutex sync.Mutex
+	life  life.Value
 }
 
 // Kill is part of the worker.Worker interface.
@@ -110,6 +116,9 @@ func (w *Worker) Wait() error {
 
 // Check is part of the util.Flag interface.
 func (w *Worker) Check() bool {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
 	return w.config.Result(w.life)
 }
 
@@ -122,7 +131,10 @@ func (w *Worker) alwaysDead() error {
 }
 
 func (w *Worker) loop() error {
-	watcher, err := w.config.Facade.Watch(w.config.Entity)
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	watcher, err := w.config.Facade.Watch(ctx, w.config.Entity)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -134,15 +146,32 @@ func (w *Worker) loop() error {
 		case <-w.catacomb.Dying():
 			return w.catacomb.ErrDying()
 		case <-watcher.Changes():
-			l, err := w.config.Facade.Life(w.config.Entity)
-			if w.config.NotFoundIsDead && errors.Is(err, ErrNotFound) {
-				l = life.Dead
-			} else if err != nil {
-				return errors.Trace(err)
-			}
-			if w.config.Result(l) != w.Check() {
-				return ErrValueChanged
+			current := w.Check()
+
+			if err := w.lifeChanged(ctx, current); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func (w *Worker) lifeChanged(ctx context.Context, current bool) error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	var err error
+	w.life, err = w.config.Facade.Life(ctx, w.config.Entity)
+	if w.config.NotFoundIsDead && errors.Is(err, ErrNotFound) {
+		w.life = life.Dead
+	} else if err != nil {
+		return errors.Trace(err)
+	}
+	if w.config.Result(w.life) != current {
+		return ErrValueChanged
+	}
+	return nil
+}
+
+func (w *Worker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }

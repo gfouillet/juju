@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // StatusHistoryFilter holds arguments that can be use to filter a status history backlog.
@@ -31,20 +33,15 @@ func (f *StatusHistoryFilter) Validate() error {
 
 	switch {
 	case !(s || t || d):
-		return errors.NotValidf("missing filter parameters")
+		return errors.Errorf("missing filter parameters %w", coreerrors.NotValid)
 	case s && t:
-		return errors.NotValidf("Size and Date together")
+		return errors.Errorf("Size and Date together %w", coreerrors.NotValid)
 	case s && d:
-		return errors.NotValidf("Size and Delta together")
+		return errors.Errorf("Size and Delta together %w", coreerrors.NotValid)
 	case t && d:
-		return errors.NotValidf("Date and Delta together")
+		return errors.Errorf("Date and Delta together %w", coreerrors.NotValid)
 	}
 	return nil
-}
-
-// StatusHistoryGetter instances can fetch their status history.
-type StatusHistoryGetter interface {
-	StatusHistory(filter StatusHistoryFilter) ([]StatusInfo, error)
 }
 
 // InstanceStatusHistoryGetter instances can fetch their instance status history.
@@ -94,6 +91,12 @@ const (
 	KindContainerInstance HistoryKind = "container"
 	// KindContainer represents an entry for a container agent.
 	KindContainer HistoryKind = "juju-container"
+	// KindFilesystem represents an entry for a filesystem.
+	KindFilesystem HistoryKind = "filesystem"
+	// KindVolume represents an entry for a volume.
+	KindVolume HistoryKind = "volume"
+	// KindTask represents a task in an operation.
+	KindTask HistoryKind = "task"
 )
 
 // String returns a string representation of the HistoryKind.
@@ -107,7 +110,8 @@ func (k HistoryKind) Valid() bool {
 	case KindModel, KindUnit, KindUnitAgent, KindWorkload,
 		KindApplication, KindSAAS,
 		KindMachineInstance, KindMachine,
-		KindContainerInstance, KindContainer:
+		KindContainerInstance, KindContainer,
+		KindFilesystem, KindVolume, KindTask:
 		return true
 	}
 	return false
@@ -126,5 +130,8 @@ func AllHistoryKind() map[HistoryKind]string {
 		KindMachine:           "status of the agent that is managing a machine",
 		KindContainerInstance: "statuses from the agent that is managing containers",
 		KindContainer:         "statuses from the containers only and not their host machines",
+		KindFilesystem:        "statuses from the specified filesystem",
+		KindVolume:            "statuses from the specified volume",
+		KindTask:              "statuses for the task",
 	}
 }

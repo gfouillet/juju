@@ -4,14 +4,13 @@
 package machine
 
 import (
+	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/client/machinemanager"
@@ -19,6 +18,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -48,19 +48,19 @@ const destroyMachineDoc = `
 Machines are specified by their numbers, which may be retrieved from the
 output of ` + "`juju status`." + `
 
-It is possible to remove machine from Juju model without affecting
-the corresponding cloud instance by using --keep-instance option.
+It is possible to remove a machine from Juju model without affecting
+the corresponding cloud instance by using the ` + "`--keep-instance`" + ` option.
 
 Machines responsible for the model cannot be removed.
 
-Machines running units or containers can be removed using the '--force'
+Machines running units or containers can be removed using the ` + "`--force`" + `
 option; this will also remove those units and containers without giving
 them an opportunity to shut down cleanly.
 
 Machine removal is a multi-step process. Under normal circumstances, Juju will not
-proceed to the next step until the current step has finished. 
-However, when using --force, users can also specify --no-wait to progress through steps 
-without delay waiting for each step to complete.
+proceed to the next step until the current step has finished.
+However, when using ` + "`--force`" + `, users can also specify ` + "`--no-wait`" + `
+to progress through steps without delay waiting for each step to complete.
 `
 
 const destroyMachineExamples = `
@@ -70,13 +70,7 @@ const destroyMachineExamples = `
     juju remove-machine 7 --keep-instance
 `
 
-var removeMachineMsgNoDryRun = `
-This command will remove machine(s) %q
-Your controller does not support dry runs`[1:]
-
 var removeMachineMsgPrefix = "This command will perform the following actions:"
-
-var errDryRunNotSupported = errors.New("Your controller does not support `--dry-run`")
 
 // Info implements Command.Info.
 func (c *removeCommand) Info() *cmd.Info {
@@ -120,34 +114,34 @@ func (c *removeCommand) Init(args []string) error {
 }
 
 type RemoveMachineAPI interface {
-	DestroyMachinesWithParams(force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
+	DestroyMachinesWithParams(ctx context.Context, force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
 	BestAPIVersion() int
 	Close() error
 }
 
-func (c *removeCommand) getAPIRoot() (api.Connection, error) {
+func (c *removeCommand) getAPIRoot(ctx context.Context) (api.Connection, error) {
 	if c.apiRoot != nil {
 		return c.apiRoot, nil
 	}
-	return c.NewAPIRoot()
+	return c.NewAPIRoot(ctx)
 }
 
-func (c *removeCommand) getRemoveMachineAPI() (RemoveMachineAPI, error) {
+func (c *removeCommand) getRemoveMachineAPI(ctx context.Context) (RemoveMachineAPI, error) {
 	if c.machineAPI != nil {
 		return c.machineAPI, nil
 	}
-	root, err := c.getAPIRoot()
+	root, err := c.getAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return machinemanager.NewClient(root), nil
 }
 
-func (c *removeCommand) getModelConfigAPI() (ModelConfigAPI, error) {
+func (c *removeCommand) getModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.modelConfigApi != nil {
 		return c.modelConfigApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -162,13 +156,13 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 		maxWait = &zeroSec
 	}
 
-	client, err := c.getRemoveMachineAPI()
+	client, err := c.getRemoveMachineAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -178,12 +172,10 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 		return c.performDryRun(ctx, client)
 	}
 
-	needsConfirmation := c.NeedsConfirmation(modelConfigClient)
+	needsConfirmation := c.NeedsConfirmation(ctx, modelConfigClient)
 	if needsConfirmation {
 		err := c.performDryRun(ctx, client)
-		if err == errDryRunNotSupported {
-			ctx.Warningf(removeMachineMsgNoDryRun, strings.Join(c.MachineIds, ", "))
-		} else if err != nil {
+		if err != nil {
 			return err
 		}
 		if err := jujucmd.UserConfirmYes(ctx); err != nil {
@@ -191,7 +183,7 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	results, err := client.DestroyMachinesWithParams(c.Force, c.KeepInstance, false, maxWait, c.MachineIds...)
+	results, err := client.DestroyMachinesWithParams(ctx, c.Force, c.KeepInstance, false, maxWait, c.MachineIds...)
 	if err := block.ProcessBlockedError(err, block.BlockRemove); err != nil {
 		return errors.Trace(err)
 	}
@@ -205,11 +197,7 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 }
 
 func (c *removeCommand) performDryRun(ctx *cmd.Context, client RemoveMachineAPI) error {
-	// TODO(jack-w-shaw) Drop this once machinemanager 9 support is dropped
-	if client.BestAPIVersion() < 10 {
-		return errDryRunNotSupported
-	}
-	results, err := client.DestroyMachinesWithParams(c.Force, c.KeepInstance, true, nil, c.MachineIds...)
+	results, err := client.DestroyMachinesWithParams(ctx, c.Force, c.KeepInstance, true, nil, c.MachineIds...)
 	if err := block.ProcessBlockedError(err, block.BlockRemove); err != nil {
 		return errors.Trace(err)
 	}

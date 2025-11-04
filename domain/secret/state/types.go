@@ -7,13 +7,30 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/errors"
-
+	coreapplication "github.com/juju/juju/core/application"
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
 	coresecrets "github.com/juju/juju/core/secrets"
+	coreunit "github.com/juju/juju/core/unit"
 	domainsecret "github.com/juju/juju/domain/secret"
+	"github.com/juju/juju/internal/errors"
 )
 
 // These structs represent the persistent secretMetadata entity schema in the database.
+
+type modelUUID struct {
+	UUID coremodel.UUID `db:"uuid"`
+}
+
+type relationUUID struct {
+	UUID string `db:"uuid"`
+}
+
+type endpointIdentifier struct {
+	ApplicationName string `db:"application_name"`
+	EndpointName    string `db:"endpoint_name"`
+	Role            string `db:"role"`
+}
 
 type secretID struct {
 	ID string `db:"id"`
@@ -29,12 +46,16 @@ type revisionUUID struct {
 
 type entityRef struct {
 	UUID string `db:"uuid"`
-	ID   string `db:"id"`
 }
 
 type unit struct {
-	UUID string `db:"uuid"`
-	Name string `db:"name"`
+	UUID coreunit.UUID `db:"uuid"`
+	Name coreunit.Name `db:"name"`
+}
+
+type application struct {
+	UUID coreapplication.UUID `db:"uuid"`
+	Name string               `db:"name"`
 }
 
 type secretRef struct {
@@ -44,24 +65,26 @@ type secretRef struct {
 }
 
 type secretMetadata struct {
-	ID             string    `db:"secret_id"`
-	Version        int       `db:"version"`
-	Description    string    `db:"description"`
-	AutoPrune      bool      `db:"auto_prune"`
-	RotatePolicyID int       `db:"rotate_policy_id"`
-	CreateTime     time.Time `db:"create_time"`
-	UpdateTime     time.Time `db:"update_time"`
+	ID                     string    `db:"secret_id"`
+	Version                int       `db:"version"`
+	Description            string    `db:"description"`
+	AutoPrune              bool      `db:"auto_prune"`
+	RotatePolicyID         int       `db:"rotate_policy_id"`
+	CreateTime             time.Time `db:"create_time"`
+	UpdateTime             time.Time `db:"update_time"`
+	LatestRevisionChecksum string    `db:"latest_revision_checksum"`
 }
 
 // secretInfo is used because sqlair doesn't seem to like struct embedding.
 type secretInfo struct {
-	ID           string    `db:"secret_id"`
-	Version      int       `db:"version"`
-	Description  string    `db:"description"`
-	RotatePolicy string    `db:"policy"`
-	AutoPrune    bool      `db:"auto_prune"`
-	CreateTime   time.Time `db:"create_time"`
-	UpdateTime   time.Time `db:"update_time"`
+	ID                     string    `db:"secret_id"`
+	Version                int       `db:"version"`
+	Description            string    `db:"description"`
+	RotatePolicy           string    `db:"policy"`
+	AutoPrune              bool      `db:"auto_prune"`
+	LatestRevisionChecksum string    `db:"latest_revision_checksum"`
+	CreateTime             time.Time `db:"create_time"`
+	UpdateTime             time.Time `db:"update_time"`
 
 	NextRotateTime     time.Time `db:"next_rotation_time"`
 	LatestExpireTime   time.Time `db:"latest_expire_time"`
@@ -148,20 +171,23 @@ type secretExternalRevision struct {
 }
 
 type secretUnitConsumer struct {
-	UnitUUID        string `db:"unit_uuid"`
+	UnitUUID        coreunit.UUID `db:"unit_uuid"`
+	SecretID        string        `db:"secret_id"`
+	SourceModelUUID string        `db:"source_model_uuid"`
+	Label           string        `db:"label"`
+	CurrentRevision int           `db:"current_revision"`
+}
+
+type secretUnitConsumerInfo struct {
 	SecretID        string `db:"secret_id"`
-	SourceModelUUID string `db:"source_model_uuid"`
+	SourceModelID   string `db:"source_model_uuid"`
+	UnitName        string `db:"unit_name"`
 	Label           string `db:"label"`
 	CurrentRevision int    `db:"current_revision"`
+	LatestRevision  int    `db:"latest_revision"`
 }
 
-type secretRemoteUnitConsumer struct {
-	UnitName        string `db:"unit_name"`
-	SecretID        string `db:"secret_id"`
-	CurrentRevision int    `db:"current_revision"`
-}
-
-type remoteSecret struct {
+type lastestSecretRevision struct {
 	SecretID       string `db:"secret_id"`
 	LatestRevision int    `db:"latest_revision"`
 }
@@ -173,6 +199,10 @@ type secretPermission struct {
 	SubjectTypeID domainsecret.GrantSubjectType `db:"subject_type_id"`
 	ScopeUUID     string                        `db:"scope_uuid"`
 	ScopeTypeID   domainsecret.GrantScopeType   `db:"scope_type_id"`
+}
+
+type secretRole struct {
+	Role string `db:"role"`
 }
 
 type secretAccessor struct {
@@ -195,6 +225,7 @@ var secretAccessorTypeParam = secretAccessorType{
 }
 
 type secretAccessScope struct {
+	ScopeUUID   string                      `db:"scope_uuid"`
 	ScopeID     string                      `db:"scope_id"`
 	ScopeTypeID domainsecret.GrantScopeType `db:"scope_type_id"`
 }
@@ -223,7 +254,7 @@ func (rows secretInfos) toSecretMetadata(secretOwners []secretOwner) ([]*coresec
 	for i, row := range rows {
 		uri, err := coresecrets.ParseURI(row.ID)
 		if err != nil {
-			return nil, errors.NotValidf("secret URI %q", row.ID)
+			return nil, errors.Errorf("secret URI %q %w", row.ID, coreerrors.NotValid)
 		}
 		result[i] = &coresecrets.SecretMetadata{
 			URI:         uri,
@@ -234,11 +265,12 @@ func (rows secretInfos) toSecretMetadata(secretOwners []secretOwner) ([]*coresec
 				Kind: coresecrets.OwnerKind(secretOwners[i].OwnerKind),
 				ID:   secretOwners[i].OwnerID,
 			},
-			CreateTime:     row.CreateTime,
-			UpdateTime:     row.UpdateTime,
-			LatestRevision: row.LatestRevision,
-			AutoPrune:      row.AutoPrune,
-			RotatePolicy:   coresecrets.RotatePolicy(row.RotatePolicy),
+			CreateTime:             row.CreateTime,
+			UpdateTime:             row.UpdateTime,
+			LatestRevision:         row.LatestRevision,
+			LatestRevisionChecksum: row.LatestRevisionChecksum,
+			AutoPrune:              row.AutoPrune,
+			RotatePolicy:           coresecrets.RotatePolicy(row.RotatePolicy),
 		}
 		if tm := row.NextRotateTime; !tm.IsZero() {
 			result[i].NextRotateTime = &tm
@@ -260,7 +292,7 @@ func (rows secretInfos) toSecretRevisionRef(refs secretValueRefs) ([]*coresecret
 	for i, row := range rows {
 		uri, err := coresecrets.ParseURI(row.ID)
 		if err != nil {
-			return nil, errors.NotValidf("secret URI %q", row.ID)
+			return nil, errors.Errorf("secret URI %q %w", row.ID, coreerrors.NotValid)
 		}
 		result[i] = &coresecrets.SecretRevisionRef{
 			URI:        uri,
@@ -290,7 +322,7 @@ func (rows secretIDs) toSecretMetadataForDrain(revRows secretExternalRevisions) 
 			// Encountered a new record.
 			uri, err := coresecrets.ParseURI(row.ID)
 			if err != nil {
-				return nil, errors.NotValidf("secret URI %q", row.ID)
+				return nil, errors.Errorf("secret URI %q %w", row.ID, coreerrors.NotValid)
 			}
 			md := coresecrets.SecretMetadataForDrain{
 				URI: uri,
@@ -356,29 +388,6 @@ func (rows secretValues) toSecretData() coresecrets.SecretData {
 
 type secretValueRefs []secretValueRef
 
-func (rows secretValueRefs) toValueRefs() []coresecrets.ValueRef {
-	result := make([]coresecrets.ValueRef, len(rows))
-	for i, row := range rows {
-		result[i] = coresecrets.ValueRef{
-			BackendID:  row.BackendUUID,
-			RevisionID: row.RevisionID,
-		}
-	}
-	return result
-}
-
-type secretRemoteUnitConsumers []secretRemoteUnitConsumer
-
-func (rows secretRemoteUnitConsumers) toSecretConsumers() []*coresecrets.SecretConsumerMetadata {
-	result := make([]*coresecrets.SecretConsumerMetadata, len(rows))
-	for i, row := range rows {
-		result[i] = &coresecrets.SecretConsumerMetadata{
-			CurrentRevision: row.CurrentRevision,
-		}
-	}
-	return result
-}
-
 type secretUnitConsumers []secretUnitConsumer
 
 func (rows secretUnitConsumers) toSecretConsumers() []*coresecrets.SecretConsumerMetadata {
@@ -392,31 +401,83 @@ func (rows secretUnitConsumers) toSecretConsumers() []*coresecrets.SecretConsume
 	return result
 }
 
+type secretUnitConsumerInfos []secretUnitConsumerInfo
+
+func (rows secretUnitConsumerInfos) toRemoteSecrets() []domainsecret.RemoteSecretInfo {
+	result := make([]domainsecret.RemoteSecretInfo, len(rows))
+	for i, row := range rows {
+		result[i] = domainsecret.RemoteSecretInfo{
+			URI:             &coresecrets.URI{ID: row.SecretID, SourceUUID: row.SourceModelID},
+			SubjectTypeID:   domainsecret.SubjectUnit,
+			SubjectID:       row.UnitName,
+			Label:           row.Label,
+			CurrentRevision: row.CurrentRevision,
+			LatestRevision:  row.LatestRevision,
+		}
+	}
+	return result
+}
+
+func (rows secretUnitConsumerInfos) toSecretConsumersBySecret() map[string][]domainsecret.ConsumerInfo {
+	result := make(map[string][]domainsecret.ConsumerInfo, len(rows))
+	for _, row := range rows {
+		info := domainsecret.ConsumerInfo{
+			SubjectTypeID:   domainsecret.SubjectUnit,
+			SubjectID:       row.UnitName,
+			Label:           row.Label,
+			CurrentRevision: row.CurrentRevision,
+		}
+		result[row.SecretID] = append(result[row.SecretID], info)
+	}
+	return result
+}
+
 type secretAccessors []secretAccessor
 
 type secretAccessScopes []secretAccessScope
 
-func (rows secretAccessors) toSecretGrants(scopes secretAccessScopes) ([]domainsecret.GrantParams, error) {
+func (rows secretAccessors) toSecretGrants(scopes secretAccessScopes) ([]domainsecret.GrantDetails, error) {
 	if len(rows) != len(scopes) {
 		// Should never happen.
 		return nil, errors.New("row length mismatch composing grant results")
 	}
-	result := make([]domainsecret.GrantParams, len(rows))
+	result := make([]domainsecret.GrantDetails, len(rows))
 	for i, row := range rows {
-		result[i] = domainsecret.GrantParams{
+		result[i] = domainsecret.GrantDetails{
 			SubjectTypeID: row.SubjectTypeID,
 			SubjectID:     row.SubjectID,
 			RoleID:        row.RoleID,
 			ScopeTypeID:   scopes[i].ScopeTypeID,
 			ScopeID:       scopes[i].ScopeID,
+			ScopeUUID:     scopes[i].ScopeUUID,
 		}
+	}
+	return result, nil
+}
+
+func (rows secretAccessors) toSecretGrantsBySecret(scopes secretAccessScopes) (map[string][]domainsecret.GrantDetails, error) {
+	if len(rows) != len(scopes) {
+		// Should never happen.
+		return nil, errors.New("row length mismatch composing grant results")
+	}
+	result := make(map[string][]domainsecret.GrantDetails, len(rows))
+	for i, row := range rows {
+		params := domainsecret.GrantDetails{
+			SubjectTypeID: row.SubjectTypeID,
+			SubjectID:     row.SubjectID,
+			RoleID:        row.RoleID,
+			ScopeTypeID:   scopes[i].ScopeTypeID,
+			ScopeID:       scopes[i].ScopeID,
+			ScopeUUID:     scopes[i].ScopeUUID,
+		}
+		result[row.SecretID] = append(result[row.SecretID], params)
 	}
 	return result, nil
 }
 
 type obsoleteRevisionRow struct {
 	SecretID string `db:"secret_id"`
-	Revision string `db:"revision"`
+	Revision int    `db:"revision"`
 }
 
 type obsoleteRevisionRows []obsoleteRevisionRow
@@ -424,7 +485,18 @@ type obsoleteRevisionRows []obsoleteRevisionRow
 func (rows obsoleteRevisionRows) toRevIDs() []string {
 	result := make([]string, len(rows))
 	for i, row := range rows {
-		result[i] = fmt.Sprintf("%s/%s", row.SecretID, row.Revision)
+		result[i] = getRevisionID(row.SecretID, row.Revision)
 	}
 	return result
+}
+
+type count struct {
+	// Num is the number of rows.
+	Num int `db:"num"`
+}
+
+// getRevisionID returns a unique identifier for a secret revision.
+// The format is "secretID/revision".
+func getRevisionID(secretID string, revision int) string {
+	return fmt.Sprintf("%s/%d", secretID, revision)
 }

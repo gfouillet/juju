@@ -4,19 +4,23 @@
 package applicationoffers
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-
 	"github.com/juju/juju/api/base"
 )
 
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}
-
 func NewClientFromCaller(caller base.FacadeCaller) *Client {
 	return &Client{
-		facade: caller,
+		facade:       caller,
+		ClientFacade: &mockClient{},
 	}
+}
+
+type mockClient struct {
+}
+
+func (m *mockClient) BestAPIVersion() int {
+	return 6
+}
+
+func (*mockClient) Close() error {
+	return nil
 }

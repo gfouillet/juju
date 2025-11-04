@@ -5,6 +5,7 @@ package status
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -15,10 +16,10 @@ import (
 	"github.com/juju/ansiterm/tabwriter"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/naturalsort"
 
 	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/naturalsort"
 )
 
 func (c *statusCommand) formatSummary(writer io.Writer, value interface{}) error {
@@ -228,7 +229,7 @@ func (f *summaryFormatter) resolveAndTrackIp(publicDns string) {
 	// TODO(katco-): We may be able to utilize upcoming work which will expose these addresses outright.
 	ip, err := net.ResolveIPAddr("ip4", publicDns)
 	if err != nil {
-		logger.Warningf(
+		logger.Warningf(context.TODO(),
 			"unable to resolve %s to an IP address. Status may be incorrect: %v",
 			publicDns,
 			err,

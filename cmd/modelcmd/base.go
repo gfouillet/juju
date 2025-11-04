@@ -13,31 +13,30 @@ import (
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/authentication"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
-	k8sproxy "github.com/juju/juju/caas/kubernetes/provider/proxy"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/cmd/internal/loginprovider"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/pki"
+	k8sproxy "github.com/juju/juju/internal/provider/kubernetes/proxy"
 	proxyerrors "github.com/juju/juju/internal/proxy/errors"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
 	"github.com/juju/juju/rpc/params"
 )
 
 var errNoNameSpecified = errors.New("no name specified")
+var errNotLogged = errors.New("not logged")
 
 type modelMigratedError string
 
@@ -113,7 +112,7 @@ type Command interface {
 
 // ModelAPI provides access to the model client facade methods.
 type ModelAPI interface {
-	ListModels(user string) ([]base.UserModel, error)
+	ListModels(ctx context.Context, user string) ([]base.UserModel, error)
 	Close() error
 }
 
@@ -128,7 +127,10 @@ type CommandBase struct {
 	apiOpenFunc   api.OpenFunc
 	authOpts      AuthOpts
 	runStarted    bool
-	refreshModels func(jujuclient.ClientStore, string) error
+	refreshModels func(context.Context, jujuclient.ClientStore, string) error
+	// sessionLoginFactory provides an session token based
+	// login provider used to mock out oauth based login.
+	sessionLoginFactory SessionLoginFactory
 
 	// StdContext is the Go context.
 	StdContext context.Context
@@ -157,7 +159,7 @@ func (c *CommandBase) setRunStarted() {
 func (c *CommandBase) closeAPIContexts() {
 	for name, ctx := range c.apiContexts {
 		if err := ctx.Close(); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 		}
 		delete(c.apiContexts, name)
 	}
@@ -189,16 +191,20 @@ func (c *CommandBase) SetAPIOpen(apiOpen api.OpenFunc) {
 }
 
 // SetModelRefresh sets the function used for refreshing models.
-func (c *CommandBase) SetModelRefresh(refresh func(jujuclient.ClientStore, string) error) {
+func (c *CommandBase) SetModelRefresh(refresh func(context.Context, jujuclient.ClientStore, string) error) {
 	c.refreshModels = refresh
 }
 
-func (c *CommandBase) modelAPI(store jujuclient.ClientStore, controllerName string) (ModelAPI, error) {
+func (c *CommandBase) SetSessionLoginFactory(loginFactory SessionLoginFactory) {
+	c.sessionLoginFactory = loginFactory
+}
+
+func (c *CommandBase) modelAPI(ctx context.Context, store jujuclient.ClientStore, controllerName string) (ModelAPI, error) {
 	c.assertRunStarted()
 	if c.modelAPI_ != nil {
 		return c.modelAPI_, nil
 	}
-	conn, err := c.NewAPIRoot(store, controllerName, "")
+	conn, err := c.NewAPIRoot(ctx, store, controllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -209,44 +215,18 @@ func (c *CommandBase) modelAPI(store jujuclient.ClientStore, controllerName stri
 // NewAPIRoot returns a new connection to the API server for the given
 // model or controller.
 func (c *CommandBase) NewAPIRoot(
+	ctx context.Context,
 	store jujuclient.ClientStore,
 	controllerName, modelName string,
 ) (api.Connection, error) {
-	return c.NewAPIRootWithDialOpts(store, controllerName, modelName, nil, nil)
-}
-
-func processAccountDetails(accountDetails *jujuclient.AccountDetails) *jujuclient.AccountDetails {
-	if accountDetails != nil && accountDetails.Type != "" && accountDetails.Type != jujuclient.UserPassAccountDetailsType {
-		return accountDetails
-	}
-	// If there are no account details or there's no logged-in
-	// user or the user is external, then trigger macaroon authentication
-	// by using an empty AccountDetails.
-	if accountDetails == nil || accountDetails.User == "" {
-		accountDetails = &jujuclient.AccountDetails{}
-	} else {
-		u := names.NewUserTag(accountDetails.User)
-		if !u.IsLocal() {
-			if len(accountDetails.Macaroons) == 0 {
-				accountDetails = &jujuclient.AccountDetails{}
-			} else {
-				// If the account has macaroon set, use those to login
-				// to avoid an unnecessary auth round trip.
-				// Used for embedded commands.
-				accountDetails = &jujuclient.AccountDetails{
-					User:      u.Id(),
-					Macaroons: accountDetails.Macaroons,
-				}
-			}
-		}
-	}
-	return accountDetails
+	return c.NewAPIRootWithDialOpts(ctx, store, controllerName, modelName, nil, nil)
 }
 
 // NewAPIRootWithDialOpts returns a new connection to the API server for the
 // given model or controller (the default dial options will be overridden if
 // dialOpts is not nil).
 func (c *CommandBase) NewAPIRootWithDialOpts(
+	ctx context.Context,
 	store jujuclient.ClientStore,
 	controllerName, modelName string,
 	addressOverride []string,
@@ -258,8 +238,6 @@ func (c *CommandBase) NewAPIRootWithDialOpts(
 		return nil, errors.Trace(err)
 	}
 
-	accountDetails = processAccountDetails(accountDetails)
-
 	param, err := c.NewAPIConnectionParams(
 		store, controllerName, modelName, accountDetails,
 	)
@@ -270,9 +248,18 @@ func (c *CommandBase) NewAPIRootWithDialOpts(
 	if dialOpts != nil {
 		param.DialOpts = *dialOpts
 	}
-	conn, err := juju.NewAPIConnection(param)
+	conn, err := juju.NewAPIConnection(ctx, param)
 	if modelName != "" && params.ErrCode(err) == params.CodeModelNotFound {
 		return nil, c.missingModelError(store, controllerName, modelName)
+	}
+	// Update the account details after each successful login.
+	// Some login providers, for example, refresh a user's token.
+	if err == nil && param.AccountDetails != nil {
+		param.AccountDetails.LastKnownAccess = conn.ControllerAccess()
+		err := store.UpdateAccount(controllerName, *param.AccountDetails)
+		if err != nil {
+			logger.Errorf(context.TODO(), "cannot update account information: %v", err)
+		}
 	}
 	if redirErr, ok := errors.Cause(err).(*api.RedirectError); ok {
 		return nil, newModelMigratedError(store, modelName, redirErr)
@@ -281,7 +268,7 @@ func (c *CommandBase) NewAPIRootWithDialOpts(
 		return nil, errors.New("no controller API addresses; is bootstrap still in progress?")
 	}
 	if proxyerrors.IsProxyConnectError(err) {
-		logger.Debugf("proxy connection error: %v", err)
+		logger.Debugf(context.TODO(), "proxy connection error: %v", err)
 		if proxyerrors.ProxyType(err) == k8sproxy.ProxierTypeKey {
 			return nil, errors.Annotate(err, "cannot connect to k8s api server; try running 'juju update-k8s --client <k8s cloud name>'")
 		}
@@ -302,15 +289,15 @@ func (c *CommandBase) NewAPIRootWithDialOpts(
 func (c *CommandBase) RemoveModelFromClientStore(store jujuclient.ClientStore, controllerName, modelName string) {
 	err := store.RemoveModel(controllerName, modelName)
 	if err != nil && !errors.Is(err, errors.NotFound) {
-		logger.Warningf("cannot remove unknown model from cache: %v", err)
+		logger.Warningf(context.TODO(), "cannot remove unknown model from cache: %v", err)
 	}
 	if c.CanClearCurrentModel {
 		currentModel, err := store.CurrentModel(controllerName)
 		if err != nil {
-			logger.Warningf("cannot read current model: %v", err)
+			logger.Warningf(context.TODO(), "cannot read current model: %v", err)
 		} else if currentModel == modelName {
 			if err := store.SetCurrentModel(controllerName, ""); err != nil {
-				logger.Warningf("cannot reset current model: %v", err)
+				logger.Warningf(context.TODO(), "cannot reset current model: %v", err)
 			}
 		}
 	}
@@ -359,6 +346,7 @@ func (c *CommandBase) NewAPIConnectionParams(
 		c.apiOpen,
 		getPassword,
 		cmdOut,
+		c.sessionTokenLoginFactory(),
 	)
 }
 
@@ -390,32 +378,46 @@ func (c *CommandBase) BakeryClient(store jujuclient.CookieStore, controllerName 
 // APIOpen establishes a connection to the API server using the
 // the given api.Info and api.DialOpts, and associating any stored
 // authorization tokens with the given controller name.
-func (c *CommandBase) APIOpen(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+func (c *CommandBase) APIOpen(ctx context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 	c.assertRunStarted()
-	return c.apiOpen(info, opts)
+	return c.apiOpen(ctx, info, opts)
 }
 
 // apiOpen establishes a connection to the API server using the
 // the give api.Info and api.DialOpts.
-func (c *CommandBase) apiOpen(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+func (c *CommandBase) apiOpen(ctx context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 	if c.apiOpenFunc != nil {
-		return c.apiOpenFunc(info, opts)
+		return c.apiOpenFunc(ctx, info, opts)
 	}
-	return api.Open(info, opts)
+	return api.Open(ctx, info, opts)
+}
+
+// sessionTokenLoginFactory returns a session token based login
+// object that is used for tests to enable mocking out OAuth login flows.
+func (c *CommandBase) SessionTokenLoginFactory() SessionLoginFactory {
+	c.assertRunStarted()
+	return c.sessionTokenLoginFactory()
+}
+
+func (c *CommandBase) sessionTokenLoginFactory() SessionLoginFactory {
+	if c.sessionLoginFactory != nil {
+		return c.sessionLoginFactory
+	}
+	return api.SessionTokenLoginFactory{}
 }
 
 // RefreshModels refreshes the local models cache for the current user
 // on the specified controller.
-func (c *CommandBase) RefreshModels(store jujuclient.ClientStore, controllerName string) error {
+func (c *CommandBase) RefreshModels(ctx context.Context, store jujuclient.ClientStore, controllerName string) error {
 	if c.refreshModels == nil {
-		return c.doRefreshModels(store, controllerName)
+		return c.doRefreshModels(ctx, store, controllerName)
 	}
-	return c.refreshModels(store, controllerName)
+	return c.refreshModels(ctx, store, controllerName)
 }
 
-func (c *CommandBase) doRefreshModels(store jujuclient.ClientStore, controllerName string) error {
+func (c *CommandBase) doRefreshModels(ctx context.Context, store jujuclient.ClientStore, controllerName string) error {
 	c.assertRunStarted()
-	modelManager, err := c.modelAPI(store, controllerName)
+	modelManager, err := c.modelAPI(ctx, store, controllerName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -426,7 +428,7 @@ func (c *CommandBase) doRefreshModels(store jujuclient.ClientStore, controllerNa
 		return errors.Trace(err)
 	}
 
-	models, err := modelManager.ListModels(accountDetails.User)
+	models, err := modelManager.ListModels(ctx, accountDetails.User)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -440,8 +442,7 @@ func (c *CommandBase) SetControllerModels(store jujuclient.ClientStore, controll
 	modelsToStore := make(map[string]jujuclient.ModelDetails, len(models))
 	for _, model := range models {
 		modelDetails := jujuclient.ModelDetails{ModelUUID: model.UUID, ModelType: model.Type}
-		owner := names.NewUserTag(model.Owner)
-		modelName := jujuclient.JoinOwnerModelName(owner, model.Name)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		modelsToStore[modelName] = modelDetails
 	}
 	if err := store.SetModels(controllerName, modelsToStore); err != nil {
@@ -451,14 +452,14 @@ func (c *CommandBase) SetControllerModels(store jujuclient.ClientStore, controll
 }
 
 // ModelUUIDs returns the model UUIDs for the given model names.
-func (c *CommandBase) ModelUUIDs(store jujuclient.ClientStore, controllerName string, modelNames []string) ([]string, error) {
+func (c *CommandBase) ModelUUIDs(ctx context.Context, store jujuclient.ClientStore, controllerName string, modelNames []string) ([]string, error) {
 	var result []string
 	for _, modelName := range modelNames {
 		model, err := store.ModelByName(controllerName, modelName)
 		if errors.Is(err, errors.NotFound) {
 			// The model isn't known locally, so query the models available in the controller.
-			logger.Infof("model %q not cached locally, refreshing models from controller", modelName)
-			if err := c.RefreshModels(store, controllerName); err != nil {
+			logger.Infof(context.TODO(), "model %q not cached locally, refreshing models from controller", modelName)
+			if err := c.RefreshModels(ctx, store, controllerName); err != nil {
 				return nil, errors.Annotatef(err, "refreshing model %q", modelName)
 			}
 			model, err = store.ModelByName(controllerName, modelName)
@@ -569,6 +570,10 @@ func (w *baseCommandWrapper) Run(ctx *cmd.Context) error {
 	return w.Command.Run(ctx)
 }
 
+type SessionLoginFactory interface {
+	NewLoginProvider(token string, output io.Writer, tokenCallback func(token string)) api.LoginProvider
+}
+
 func newAPIConnectionParams(
 	store jujuclient.ClientStore,
 	controllerName,
@@ -579,6 +584,7 @@ func newAPIConnectionParams(
 	apiOpen api.OpenFunc,
 	getPassword func(string) (string, error),
 	cmdOut io.Writer,
+	sessionLoginFactory SessionLoginFactory,
 ) (juju.NewAPIConnectionParams, error) {
 	if controllerName == "" {
 		return juju.NewAPIConnectionParams{}, errors.Trace(errNoNameSpecified)
@@ -594,14 +600,21 @@ func newAPIConnectionParams(
 	dialOpts := api.DefaultDialOpts()
 	dialOpts.BakeryClient = bakery
 
-	if accountDetails.Type == jujuclient.OAuth2DeviceFlowAccountDetailsType {
-		dialOpts.LoginProvider = loginprovider.NewSessionTokenLoginProvider(
+	if accountDetails == nil {
+		return juju.NewAPIConnectionParams{}, errors.Annotatef(errNotLogged, "controller %q", controllerName)
+	}
+
+	controllerDetails, err := store.ControllerByName(controllerName)
+	if err != nil {
+		return juju.NewAPIConnectionParams{}, errors.Annotatef(err, "getting controller %q", controllerName)
+	}
+
+	if controllerDetails.OIDCLogin {
+		dialOpts.LoginProvider = sessionLoginFactory.NewLoginProvider(
 			accountDetails.SessionToken,
 			cmdOut,
-			func(sessionToken string) error {
-				accountDetails.Type = jujuclient.OAuth2DeviceFlowAccountDetailsType
+			func(sessionToken string) {
 				accountDetails.SessionToken = sessionToken
-				return store.UpdateAccount(controllerName, *accountDetails)
 			},
 		)
 	}
@@ -615,19 +628,19 @@ func newAPIConnectionParams(
 	}
 
 	return juju.NewAPIConnectionParams{
-		Store:          store,
-		ControllerName: controllerName,
-		AccountDetails: accountDetails,
-		ModelUUID:      modelUUID,
-		DialOpts:       dialOpts,
-		OpenAPI:        OpenAPIFuncWithMacaroons(apiOpen, store, controllerName),
+		ControllerStore: store,
+		ControllerName:  controllerName,
+		AccountDetails:  accountDetails,
+		ModelUUID:       modelUUID,
+		DialOpts:        dialOpts,
+		OpenAPI:         OpenAPIFuncWithMacaroons(apiOpen, store, controllerName),
 	}, nil
 }
 
 // OpenAPIFuncWithMacaroons is a middleware to ensure that we have a set of
 // macaroons for a given open request.
 func OpenAPIFuncWithMacaroons(apiOpen api.OpenFunc, store jujuclient.ClientStore, controllerName string) api.OpenFunc {
-	return func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	return func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		// When attempting to connect to the non websocket fronted HTTPS
 		// endpoints, we need to ensure that we have a series of macaroons
 		// correctly set if there isn't a password.
@@ -637,11 +650,11 @@ func OpenAPIFuncWithMacaroons(apiOpen api.OpenFunc, store jujuclient.ClientStore
 				return nil, errors.Trace(err)
 			}
 
-			cookieURL := api.CookieURLFromHost(api.PerferredHost(info))
+			cookieURL := api.CookieURLFromHost(api.PreferredHost(info))
 			info.Macaroons = httpbakery.MacaroonsForURL(cookieJar, cookieURL)
 		}
 
-		return apiOpen(info, dialOpts)
+		return apiOpen(ctx, info, dialOpts)
 	}
 }
 
@@ -651,7 +664,7 @@ func NewGetBootstrapConfigParamsFunc(
 	ctx *cmd.Context,
 	store jujuclient.ClientStore,
 	providerRegistry environs.ProviderRegistry,
-) func(string) (*jujuclient.BootstrapConfig, *environs.PrepareConfigParams, error) {
+) func(string) (*jujuclient.BootstrapConfig, *environscloudspec.CloudSpec, *config.Config, error) {
 	return bootstrapConfigGetter{ctx, store, providerRegistry}.getBootstrapConfigParams
 }
 
@@ -661,14 +674,14 @@ type bootstrapConfigGetter struct {
 	registry environs.ProviderRegistry
 }
 
-func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (*jujuclient.BootstrapConfig, *environs.PrepareConfigParams, error) {
+func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (*jujuclient.BootstrapConfig, *environscloudspec.CloudSpec, *config.Config, error) {
 	controllerDetails, err := g.store.ControllerByName(controllerName)
 	if err != nil {
-		return nil, nil, errors.Annotate(err, "resolving controller name")
+		return nil, nil, nil, errors.Annotate(err, "resolving controller name")
 	}
 	bootstrapConfig, err := g.store.BootstrapConfigForController(controllerName)
 	if err != nil {
-		return nil, nil, errors.Annotate(err, "getting bootstrap config")
+		return nil, nil, nil, errors.Annotate(err, "getting bootstrap config")
 	}
 
 	var credential *cloud.Credential
@@ -695,17 +708,17 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 			},
 		)
 		if err != nil {
-			return nil, nil, errors.Trace(err)
+			return nil, nil, nil, errors.Trace(err)
 		}
 	} else {
 		// The credential was auto-detected; run auto-detection again.
 		provider, err := g.registry.Provider(bootstrapConfig.CloudType)
 		if err != nil {
-			return nil, nil, errors.Trace(err)
+			return nil, nil, nil, errors.Trace(err)
 		}
 		cloudCredential, err := DetectCredential(bootstrapConfig.Cloud, provider)
 		if err != nil {
-			return nil, nil, errors.Trace(err)
+			return nil, nil, nil, errors.Trace(err)
 		}
 		// DetectCredential ensures that there is only one credential
 		// to choose from. It's still in a map, though, hence for..range.
@@ -718,7 +731,7 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 		}
 		credential, err = FinalizeFileContent(credential, provider)
 		if err != nil {
-			return nil, nil, AnnotateWithFinalizationError(err, credentialName, bootstrapCloud.Name)
+			return nil, nil, nil, AnnotateWithFinalizationError(err, credentialName, bootstrapCloud.Name)
 		}
 		credential, err = provider.FinalizeCredential(
 			g.ctx, environs.FinalizeCredentialParams{
@@ -730,7 +743,7 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 			},
 		)
 		if err != nil {
-			return nil, nil, errors.Trace(err)
+			return nil, nil, nil, errors.Trace(err)
 		}
 	}
 
@@ -738,10 +751,9 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 	bootstrapConfig.Config[config.UUIDKey] = bootstrapConfig.ControllerModelUUID
 	cfg, err := config.New(config.NoDefaults, bootstrapConfig.Config)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, nil, errors.Trace(err)
 	}
-	return bootstrapConfig, &environs.PrepareConfigParams{
-		Cloud: environscloudspec.CloudSpec{
+	return bootstrapConfig, &environscloudspec.CloudSpec{
 			Type:              bootstrapConfig.CloudType,
 			Name:              bootstrapConfig.Cloud,
 			Region:            bootstrapConfig.CloudRegion,
@@ -753,8 +765,7 @@ func (g bootstrapConfigGetter) getBootstrapConfigParams(controllerName string) (
 			SkipTLSVerify:     bootstrapConfig.SkipTLSVerify,
 			IsControllerCloud: bootstrapConfig.Cloud == controllerDetails.Cloud,
 		},
-		Config: cfg,
-	}, nil
+		cfg, nil
 }
 
 // TODO(axw) this is now in three places: change-password,

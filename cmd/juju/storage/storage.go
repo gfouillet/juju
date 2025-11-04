@@ -4,8 +4,10 @@
 package storage
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/storage"
 	"github.com/juju/juju/cmd/juju/common"
@@ -21,8 +23,8 @@ type StorageCommandBase struct {
 
 // NewStorageAPI returns a storage api for the root api endpoint
 // that the environment command returns.
-func (c *StorageCommandBase) NewStorageAPI() (*storage.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *StorageCommandBase) NewStorageAPI(ctx context.Context) (*storage.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}

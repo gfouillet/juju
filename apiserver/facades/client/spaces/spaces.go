@@ -5,113 +5,116 @@ package spaces
 
 import (
 	"context"
-	stdcontext "context"
 	"fmt"
 
-	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common/networkingcommon"
+	commonnetwork "github.com/juju/juju/apiserver/common/network"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/controller"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
+	domainnetwork "github.com/juju/juju/domain/network"
 	"github.com/juju/juju/rpc/params"
 )
 
 // ControllerConfigService is an interface that provides controller
 // configuration.
 type ControllerConfigService interface {
-	ControllerConfig(stdcontext.Context) (controller.Config, error)
+	ControllerConfig(context.Context) (controller.Config, error)
 }
 
 // NetworkService is the interface that is used to interact with the
 // network spaces/subnets.
 type NetworkService interface {
 	// AddSpace creates and returns a new space.
-	AddSpace(ctx context.Context, space network.SpaceInfo) (network.Id, error)
-	// Space returns a space from state that matches the input ID.
-	// An error is returned if the space does not exist or if there was a problem
-	// accessing its information.
-	Space(ctx context.Context, uuid string) (*network.SpaceInfo, error)
-	// SpaceByName returns a space from state that matches the input name.
-	// An error is returned that satisfied errors.NotFound if the space was not found
-	// or an error static any problems fetching the given space.
-	SpaceByName(ctx context.Context, name string) (*network.SpaceInfo, error)
+	AddSpace(context.Context, network.SpaceInfo) (network.SpaceUUID, error)
+
+	// SpaceByName returns a space from state that matches the input name. If
+	// the space is not found, an error is returned satisfying
+	// [github.com/juju/juju/domain/network/errors.SpaceNotFound].
+	SpaceByName(context.Context, network.SpaceName) (*network.SpaceInfo, error)
+
 	// GetAllSpaces returns all spaces for the model.
-	GetAllSpaces(ctx context.Context) (network.SpaceInfos, error)
-	// UpdateSpace updates the space name identified by the passed uuid.
-	UpdateSpace(ctx context.Context, uuid string, name string) error
-	// RemoveSpace deletes a space identified by its uuid.
-	RemoveSpace(ctx context.Context, uuid string) error
+	GetAllSpaces(context.Context) (network.SpaceInfos, error)
+
+	// UpdateSpace updates the space name identified by the passed uuid. If
+	// the space is not found, an error is returned satisfying
+	// [github.com/juju/juju/domain/network/errors.SpaceNotFound].
+	UpdateSpace(context.Context, network.SpaceUUID, network.SpaceName) error
+
+	// RemoveSpace removes a space identified by the given name.
+	// It can handle forced removal and supports dry-run mode.
+	// [github.com/juju/juju/domain/network/errors.SpaceNotFound].
+	RemoveSpace(ctx context.Context, name network.SpaceName, force bool,
+		dryRun bool) (domainnetwork.RemoveSpaceViolations, error)
+
 	// ReloadSpaces loads spaces and subnets from the provider into state.
-	ReloadSpaces(ctx context.Context) error
+	ReloadSpaces(context.Context) error
+
 	// GetAllSubnets returns all the subnets for the model.
-	GetAllSubnets(ctx context.Context) (network.SubnetInfos, error)
+	GetAllSubnets(context.Context) (network.SubnetInfos, error)
+
 	// SubnetsByCIDR returns the subnets matching the input CIDRs.
 	SubnetsByCIDR(ctx context.Context, cidrs ...string) ([]network.SubnetInfo, error)
+
 	// Subnet returns the subnet identified by the input UUID,
 	// or an error if it is not found.
 	Subnet(ctx context.Context, uuid string) (*network.SubnetInfo, error)
-	// UpdateSubnet updates the spaceUUID of the subnet identified by the input
-	// UUID.
-	UpdateSubnet(ctx context.Context, uuid, spaceUUID string) error
+	// MoveSubnetsToSpace moves a list of subnets identified by their UUIDs to a
+	// specified network space.
+	// It validates input, computes a new topology, checks its integrity, and
+	// applies changes if valid.
+	// Returns the list of moved subnets or an error if any step fails.
+	MoveSubnetsToSpace(ctx context.Context,
+		subnets []domainnetwork.SubnetUUID, space network.SpaceName, force bool) ([]domainnetwork.MovedSubnets, error)
+	// SupportsSpaces returns whether the current environment supports spaces.
+	SupportsSpaces(context.Context) (bool, error)
+
+	// SupportsSpaceDiscovery returns whether the current environment supports
+	// discovering spaces from the provider.
+	SupportsSpaceDiscovery(context.Context) (bool, error)
+}
+
+// ApplicationService provides access to applications.
+type ApplicationService interface {
+	// GetApplicationsBoundToSpace returns the names of the applications bound to
+	// the given space.
+	GetApplicationsBoundToSpace(context.Context, network.SpaceUUID) ([]string, error)
+}
+
+// MachineService defines the methods that the facade assumes from the Machine
+// service.
+type MachineService interface {
+	// CountMachinesInSpace counts the number of machines with address in a given
+	// space. This method counts the distinct occurrences of net nodes of the
+	// addresses, meaning that if a machine has multiple addresses in the same
+	// subnet it will be counted only once.
+	CountMachinesInSpace(context.Context, network.SpaceUUID) (int64, error)
 }
 
 // API provides the spaces API facade for version 6.
 type API struct {
 	controllerConfigService ControllerConfigService
+	networkService          NetworkService
+	applicationService      ApplicationService
+	machineService          MachineService
 
-	networkService              NetworkService
-	backing                     Backing
-	resources                   facade.Resources
-	auth                        facade.Authorizer
-	credentialInvalidatorGetter envcontext.ModelCredentialInvalidatorGetter
+	modelTag names.ModelTag
+
+	auth facade.Authorizer
 
 	check  BlockChecker
 	logger corelogger.Logger
 }
 
-type apiConfig struct {
-	NetworkService              NetworkService
-	ControllerConfigService     ControllerConfigService
-	Backing                     Backing
-	Check                       BlockChecker
-	CredentialInvalidatorGetter envcontext.ModelCredentialInvalidatorGetter
-	Resources                   facade.Resources
-	Authorizer                  facade.Authorizer
-	logger                      corelogger.Logger
-}
-
-// newAPIWithBacking creates a new server-side Spaces API facade with
-// the given Backing.
-func newAPIWithBacking(cfg apiConfig) (*API, error) {
-	// Only clients can access the Spaces facade.
-	if !cfg.Authorizer.AuthClient() {
-		return nil, apiservererrors.ErrPerm
-	}
-
-	return &API{
-		networkService:              cfg.NetworkService,
-		controllerConfigService:     cfg.ControllerConfigService,
-		backing:                     cfg.Backing,
-		resources:                   cfg.Resources,
-		auth:                        cfg.Authorizer,
-		credentialInvalidatorGetter: cfg.CredentialInvalidatorGetter,
-		check:                       cfg.Check,
-		logger:                      cfg.logger,
-	}, nil
-}
-
 // CreateSpaces creates a new Juju network space, associating the
 // specified subnets with it (optional; can be empty).
-func (api *API) CreateSpaces(ctx stdcontext.Context, args params.CreateSpacesParams) (results params.ErrorResults, err error) {
-	err = api.auth.HasPermission(permission.AdminAccess, api.backing.ModelTag())
+func (api *API) CreateSpaces(ctx context.Context, args params.CreateSpacesParams) (results params.ErrorResults, err error) {
+	err = api.auth.HasPermission(ctx, permission.AdminAccess, api.modelTag)
 	if err != nil {
 		return results, err
 	}
@@ -169,8 +172,8 @@ func (api *API) createOneSpace(ctx context.Context, args params.CreateSpaceParam
 }
 
 // ListSpaces lists all the available spaces and their associated subnets.
-func (api *API) ListSpaces(ctx stdcontext.Context) (results params.ListSpacesResults, err error) {
-	err = api.auth.HasPermission(permission.ReadAccess, api.backing.ModelTag())
+func (api *API) ListSpaces(ctx context.Context) (results params.ListSpacesResults, err error) {
+	err = api.auth.HasPermission(ctx, permission.ReadAccess, api.modelTag)
 	if err != nil {
 		return results, err
 	}
@@ -188,8 +191,8 @@ func (api *API) ListSpaces(ctx stdcontext.Context) (results params.ListSpacesRes
 	results.Results = make([]params.Space, len(spaces))
 	for i, space := range spaces {
 		result := params.Space{}
-		result.Id = space.ID
-		result.Name = string(space.Name)
+		result.Id = space.ID.String()
+		result.Name = space.Name.String()
 
 		if err != nil {
 			err = errors.Annotatef(err, "fetching spaces")
@@ -201,7 +204,7 @@ func (api *API) ListSpaces(ctx stdcontext.Context) (results params.ListSpacesRes
 
 		result.Subnets = make([]params.Subnet, len(subnets))
 		for i, subnet := range subnets {
-			result.Subnets[i] = networkingcommon.SubnetInfoToParamsSubnet(subnet)
+			result.Subnets[i] = commonnetwork.SubnetInfoToParamsSubnet(subnet)
 		}
 		results.Results[i] = result
 	}
@@ -209,8 +212,8 @@ func (api *API) ListSpaces(ctx stdcontext.Context) (results params.ListSpacesRes
 }
 
 // ShowSpace shows the spaces for a set of given entities.
-func (api *API) ShowSpace(ctx stdcontext.Context, entities params.Entities) (params.ShowSpaceResults, error) {
-	err := api.auth.HasPermission(permission.ReadAccess, api.backing.ModelTag())
+func (api *API) ShowSpace(ctx context.Context, entities params.Entities) (params.ShowSpaceResults, error) {
+	err := api.auth.HasPermission(ctx, permission.ReadAccess, api.modelTag)
 	if err != nil {
 		return params.ShowSpaceResults{}, err
 	}
@@ -220,44 +223,32 @@ func (api *API) ShowSpace(ctx stdcontext.Context, entities params.Entities) (par
 		return params.ShowSpaceResults{}, apiservererrors.ServerError(errors.Trace(err))
 	}
 
-	// Retrieve the list of all spaces, needed for the bindings.
-	allSpaces, err := api.networkService.GetAllSpaces(ctx)
-	if err != nil {
-		return params.ShowSpaceResults{}, apiservererrors.ServerError(errors.Trace(err))
-	}
-	// Retrieve the list of all subnets, needed for the machine spaces.
-	allSubnets, err := api.networkService.GetAllSubnets(ctx)
-	if err != nil {
-		return params.ShowSpaceResults{}, apiservererrors.ServerError(errors.Trace(err))
-	}
-
 	results := make([]params.ShowSpaceResult, len(entities.Entities))
 	for i, entity := range entities.Entities {
-		spaceName, err := names.ParseSpaceTag(entity.Tag)
+		spaceTag, err := names.ParseSpaceTag(entity.Tag)
 		if err != nil {
 			results[i].Error = apiservererrors.ServerError(errors.Trace(err))
 			continue
 		}
+		spaceName := network.SpaceName(spaceTag.Id())
+
 		var result params.ShowSpaceResult
-		space, err := api.networkService.SpaceByName(ctx, spaceName.Id())
+		space, err := api.networkService.SpaceByName(ctx, spaceName)
 		if err != nil {
 			newErr := errors.Annotatef(err, "fetching space %q", spaceName)
 			results[i].Error = apiservererrors.ServerError(newErr)
 			continue
 		}
-		result.Space.Name = string(space.Name)
-		result.Space.Id = space.ID
+		result.Space.Name = space.Name.String()
+		result.Space.Id = space.ID.String()
 		subnets := space.Subnets
 
 		result.Space.Subnets = make([]params.Subnet, len(subnets))
 		for i, subnet := range subnets {
-			result.Space.Subnets[i] = networkingcommon.SubnetInfoToParamsSubnet(subnet)
+			result.Space.Subnets[i] = commonnetwork.SubnetInfoToParamsSubnet(subnet)
 		}
 
-		// TODO(nvinuesa): This logic should be implemented in the
-		// network service once we finish migrating applications to
-		// dqlite.
-		applications, err := api.applicationsBoundToSpace(space.ID, allSpaces)
+		applications, err := api.applicationService.GetApplicationsBoundToSpace(ctx, space.ID)
 		if err != nil {
 			newErr := errors.Annotatef(err, "fetching applications")
 			results[i].Error = apiservererrors.ServerError(newErr)
@@ -265,17 +256,14 @@ func (api *API) ShowSpace(ctx stdcontext.Context, entities params.Entities) (par
 		}
 		result.Applications = applications
 
-		// TODO(nvinuesa): This logic should be implemented in the
-		// network service once we finish migrating machines to
-		// dqlite.
-		machineCount, err := api.getMachineCountBySpaceID(space.ID, allSubnets)
+		machineCount, err := api.machineService.CountMachinesInSpace(ctx, space.ID)
 		if err != nil {
 			newErr := errors.Annotatef(err, "fetching machine count")
 			results[i].Error = apiservererrors.ServerError(newErr)
 			continue
 		}
 
-		result.MachineCount = machineCount
+		result.MachineCount = int(machineCount)
 		results[i] = result
 	}
 
@@ -283,8 +271,8 @@ func (api *API) ShowSpace(ctx stdcontext.Context, entities params.Entities) (par
 }
 
 // ReloadSpaces refreshes spaces from substrate
-func (api *API) ReloadSpaces(ctx stdcontext.Context) error {
-	err := api.auth.HasPermission(permission.AdminAccess, api.backing.ModelTag())
+func (api *API) ReloadSpaces(ctx context.Context) error {
+	err := api.auth.HasPermission(ctx, permission.AdminAccess, api.modelTag)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -295,63 +283,21 @@ func (api *API) ReloadSpaces(ctx stdcontext.Context) error {
 }
 
 // checkSupportsSpaces checks if the environment implements NetworkingEnviron
-// and also if it supports spaces.
-func (api *API) checkSupportsSpaces(ctx stdcontext.Context) error {
-	env, err := environs.GetEnviron(ctx, api.backing, environs.New)
-	if err != nil {
-		return errors.Annotate(err, "getting environ")
-	}
-	invalidatorFunc, err := api.credentialInvalidatorGetter()
-	if err != nil {
+// and also if it supports spaces. If we don't support spaces, an
+// [errors.NotSupported] error will be returned.
+func (api *API) checkSupportsSpaces(ctx context.Context) error {
+	if supported, err := api.networkService.SupportsSpaces(ctx); err != nil {
 		return errors.Trace(err)
-	}
-	callCtx := envcontext.WithCredentialInvalidator(ctx, invalidatorFunc)
-	if !environs.SupportsSpaces(callCtx, env) {
+	} else if !supported {
 		return errors.NotSupportedf("spaces")
 	}
 	return nil
 }
 
-func (api *API) getMachineCountBySpaceID(spaceID string, allSubnets network.SubnetInfos) (int, error) {
-	var count int
-	machines, err := api.backing.AllMachines()
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	for _, machine := range machines {
-		spacesSet, err := machine.AllSpaces(allSubnets)
-		if err != nil {
-			return 0, errors.Trace(err)
-		}
-		if spacesSet.Contains(spaceID) {
-			count++
-		}
-	}
-	return count, nil
-}
-
-func (api *API) applicationsBoundToSpace(spaceID string, allSpaces network.SpaceInfos) ([]string, error) {
-	allBindings, err := api.backing.AllEndpointBindings()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	applications := set.NewStrings()
-	for app, bindings := range allBindings {
-		for _, boundSpace := range bindings.Map() {
-			if boundSpace == spaceID {
-				applications.Add(app)
-				break
-			}
-		}
-	}
-	return applications.SortedValues(), nil
-}
-
 // ensureSpacesAreMutable checks that the current user
 // is allowed to edit the Space topology.
-func (api *API) ensureSpacesAreMutable(ctx stdcontext.Context) error {
-	err := api.auth.HasPermission(permission.AdminAccess, api.backing.ModelTag())
+func (api *API) ensureSpacesAreMutable(ctx context.Context) error {
+	err := api.auth.HasPermission(ctx, permission.AdminAccess, api.modelTag)
 	if err != nil {
 		return err
 	}
@@ -368,28 +314,11 @@ func (api *API) ensureSpacesAreMutable(ctx stdcontext.Context) error {
 // NetworkingEnviron and also if it supports provider spaces.
 // An error is returned if it is the provider and not the Juju operator
 // that determines the space topology.
-func (api *API) ensureSpacesNotProviderSourced(ctx stdcontext.Context) error {
-	env, err := environs.GetEnviron(ctx, api.backing, environs.New)
-	if err != nil {
-		return errors.Annotate(err, "retrieving environ")
-	}
-
-	netEnv, ok := env.(environs.NetworkingEnviron)
-	if !ok {
-		return errors.NotSupportedf("provider networking")
-	}
-
-	invalidatorFunc, err := api.credentialInvalidatorGetter()
+func (api *API) ensureSpacesNotProviderSourced(ctx context.Context) error {
+	supported, err := api.networkService.SupportsSpaceDiscovery(ctx)
 	if err != nil {
 		return errors.Trace(err)
-	}
-	callCtx := envcontext.WithCredentialInvalidator(ctx, invalidatorFunc)
-	providerSourced, err := netEnv.SupportsSpaceDiscovery(callCtx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if providerSourced {
+	} else if supported {
 		return errors.NotSupportedf("modifying provider-sourced spaces")
 	}
 	return nil

@@ -19,5 +19,9 @@ func Register(registry facade.FacadeRegistry) {
 
 // newExternalFacade is used for API registration.
 func newExternalFacade(ctx facade.ModelContext) (*Facade, error) {
-	return NewFacade(backendShim{ctx.State()}, ctx.Resources(), ctx.Auth())
+	return NewFacade(
+		ctx.WatcherRegistry(),
+		ctx.Auth(),
+		ctx.DomainServices().Operation(),
+	)
 }

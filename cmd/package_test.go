@@ -11,16 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	stdtesting "testing"
+	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 )
-
-func Test(t *stdtesting.T) {
-	gc.TestingT(t)
-}
 
 var disallowedCalls = map[string]set.Strings{
 	"os": set.NewStrings(
@@ -80,7 +75,9 @@ var ignoredPackages = set.NewStrings(
 
 type OSCallTest struct{}
 
-var _ = gc.Suite(&OSCallTest{})
+func TestOSCallTest(t *testing.T) {
+	tc.Run(t, &OSCallTest{})
+}
 
 // TestNoRestrictedCalls ensures Juju CLI commands do
 // not make restricted os level calls, namely:
@@ -88,7 +85,7 @@ var _ = gc.Suite(&OSCallTest{})
 // - directly execute commands via the "exec" package
 // This ensures embedded commands do not accidentally bypass
 // the restrictions to filesystem or exec access.
-func (s *OSCallTest) TestNoRestrictedCalls(c *gc.C) {
+func (s *OSCallTest) TestNoRestrictedCalls(c *tc.C) {
 	fset := token.NewFileSet()
 	calls := make(map[string]set.Strings)
 
@@ -103,8 +100,8 @@ func (s *OSCallTest) TestNoRestrictedCalls(c *gc.C) {
 			s.parseDir(fset, calls, path)
 			return nil
 		})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(calls, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(calls, tc.HasLen, 0)
 }
 
 type callCheckContext struct {

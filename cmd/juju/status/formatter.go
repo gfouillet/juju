@@ -4,12 +4,10 @@
 package status
 
 import (
+	"context"
 	"fmt"
-	"time"
 
-	"github.com/juju/collections/set"
-	"github.com/juju/names/v5"
-	"github.com/juju/naturalsort"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/storage"
@@ -27,12 +25,6 @@ type statusFormatter struct {
 	relations              map[int]params.RelationStatus
 	storage                *storage.CombinedStorage
 	isoTime, showRelations bool
-
-	// Ideally this map should not be here.  It is used to facilitate
-	// getting an active branch ref number for a subordinate unit.
-	// Additionally it is used to set the active Branch as we get it locally and not from the facade.
-	formattedBranches map[string]branchStatus
-	activeBranch      string
 }
 
 // NewStatusFormatterParams contains the parameters required
@@ -42,7 +34,6 @@ type NewStatusFormatterParams struct {
 	Status         *params.FullStatus
 	ControllerName string
 	OutputName     string
-	ActiveBranch   string
 	ISOTime        bool
 	ShowRelations  bool
 }
@@ -58,7 +49,6 @@ func NewStatusFormatter(p NewStatusFormatterParams) *statusFormatter {
 		isoTime:        p.ISOTime,
 		showRelations:  p.ShowRelations,
 		outputName:     p.OutputName,
-		activeBranch:   p.ActiveBranch,
 	}
 	if p.ShowRelations {
 		for _, relation := range p.Status.Relations {
@@ -93,7 +83,6 @@ func (sf *statusFormatter) Format() (formattedStatus, error) {
 		RemoteApplications: make(map[string]remoteApplicationStatus),
 		Offers:             make(map[string]offerStatus),
 		Relations:          make([]relationStatus, len(sf.relations)),
-		Branches:           make(map[string]branchStatus),
 	}
 	if sf.status.ControllerTimestamp != nil {
 		out.Controller = &controllerStatus{
@@ -103,28 +92,16 @@ func (sf *statusFormatter) Format() (formattedStatus, error) {
 	for k, m := range sf.status.Machines {
 		out.Machines[k] = sf.formatMachine(m)
 	}
-	// format Branch status before Applications to create reference
-	// numbers to be used by Units.  Sort here to give continuity to
-	// branch ref numbers provided the map of active branches does not
-	// change.
-	i := 1
-	for _, name := range naturalsort.Sort(stringKeysFromMap(sf.status.Branches)) {
-		s := sf.status.Branches[name]
-		isActiveBranch := name == sf.activeBranch
-		out.Branches[name] = sf.formatBranch(i, s, isActiveBranch)
-		i += 1
-	}
-	sf.formattedBranches = out.Branches
 	for name, app := range sf.status.Applications {
 		out.Applications[name] = sf.formatApplication(name, app)
 	}
-	for name, app := range sf.status.RemoteApplications {
+	for name, app := range sf.status.RemoteApplicationOfferers {
 		out.RemoteApplications[name] = sf.formatRemoteApplication(name, app)
 	}
 	for name, offer := range sf.status.Offers {
 		out.Offers[name] = sf.formatOffer(name, offer)
 	}
-	i = 0
+	i := 0
 	for _, rel := range sf.relations {
 		out.Relations[i] = sf.formatRelation(rel)
 		i++
@@ -233,7 +210,7 @@ func (sf *statusFormatter) formatApplication(name string, application params.App
 	if curl, err := charm.ParseURL(application.Charm); err != nil {
 		// We should never fail to parse a charm url sent back
 		// but if we do, don't crash.
-		logger.Errorf("failed to parse charm: %v", err)
+		logger.Errorf(context.TODO(), "failed to parse charm: %v", err)
 	} else {
 		switch {
 		case charm.CharmHub.Matches(curl.Schema):
@@ -284,7 +261,6 @@ func (sf *statusFormatter) formatApplication(name string, application params.App
 			unit:            m,
 			unitName:        k,
 			applicationName: name,
-			branchRef:       sf.branchRefForUnit(k),
 		})
 	}
 
@@ -457,7 +433,6 @@ type unitFormatInfo struct {
 	unit            params.UnitStatus
 	unitName        string
 	applicationName string
-	branchRef       string
 }
 
 func (sf *statusFormatter) formatUnit(info unitFormatInfo) unitStatus {
@@ -475,7 +450,6 @@ func (sf *statusFormatter) formatUnit(info unitFormatInfo) unitStatus {
 		Charm:              info.unit.Charm,
 		Subordinates:       make(map[string]unitStatus),
 		Leader:             info.unit.Leader,
-		Branch:             info.branchRef,
 	}
 
 	for k, m := range info.unit.Subordinates {
@@ -483,7 +457,6 @@ func (sf *statusFormatter) formatUnit(info unitFormatInfo) unitStatus {
 			unit:            m,
 			unitName:        k,
 			applicationName: info.applicationName,
-			branchRef:       sf.branchRefForUnit(k),
 		})
 	}
 	return out
@@ -548,37 +521,6 @@ func (sf *statusFormatter) updateUnitStatusInfo(unit *params.UnitStatus, applica
 		}
 	}
 }
-func (sf *statusFormatter) formatBranch(ref int, branch params.BranchStatus, isActiveBranch bool) branchStatus {
-	created := time.Unix(branch.Created, 0)
-	if sf.outputName == "tabular" {
-		return branchStatus{
-			Ref:       fmt.Sprintf("#%d", ref),
-			Created:   common.UserFriendlyDuration(created, time.Now()),
-			CreatedBy: branch.CreatedBy,
-			Active:    isActiveBranch,
-		}
-	}
-	return branchStatus{
-		Created:   common.FormatTimeAsTimestamp(&created, sf.isoTime),
-		CreatedBy: branch.CreatedBy,
-		Active:    isActiveBranch,
-	}
-}
-
-func (sf *statusFormatter) branchRefForUnit(unitName string) string {
-	for branchName, bs := range sf.status.Branches {
-		for _, units := range bs.AssignedUnits {
-			unitSet := set.NewStrings(units...)
-			if unitSet.Contains(unitName) {
-				if sf.outputName == "tabular" {
-					return sf.formattedBranches[branchName].Ref
-				}
-				return branchName
-			}
-		}
-	}
-	return ""
-}
 
 func makeHAStatus(hasVote, wantsVote bool) string {
 	var s string
@@ -600,7 +542,7 @@ func getRelationIdFromData(unit *params.UnitStatus) int {
 		if relationId, ok := relationId_.(float64); ok {
 			return int(relationId)
 		} else {
-			logger.Infof("relation-id found status data but was unexpected "+
+			logger.Infof(context.TODO(), "relation-id found status data but was unexpected "+
 				"type: %q. Status output may be lacking some detail.", relationId_)
 		}
 	}

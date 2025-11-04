@@ -9,7 +9,6 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
@@ -48,12 +47,6 @@ func (r *rebootResolver) NextOp(ctx context.Context, localState resolver.LocalSt
 		return nil, resolver.ErrNoOperation
 	}
 
-	// If we performing a series upgrade, suppress start hooks until the
-	// upgrade is complete.
-	if remoteState.UpgradeMachineStatus != model.UpgradeSeriesNotStarted {
-		return nil, resolver.ErrNoOperation
-	}
-
 	// If we did reboot but the charm has not been installed yet then we
 	// can safely skip the start hook.
 	if !localState.Started {
@@ -71,7 +64,7 @@ func (r *rebootResolver) NextOp(ctx context.Context, localState resolver.LocalSt
 		return nil, errors.Trace(err)
 	}
 
-	r.logger.Infof("reboot detected; triggering implicit start hook to notify charm")
+	r.logger.Infof(ctx, "reboot detected; triggering implicit start hook to notify charm")
 
 	r.rebootDetected = false
 	return op, nil

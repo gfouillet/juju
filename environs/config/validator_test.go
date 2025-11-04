@@ -4,23 +4,24 @@
 package config_test
 
 import (
-	"context"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type validatorSuite struct {
 }
 
-var _ = gc.Suite(&validatorSuite{})
+func TestValidatorSuite(t *stdtesting.T) {
+	tc.Run(t, &validatorSuite{})
+}
 
-func (_ *validatorSuite) TestControllerNotContainingValidator(c *gc.C) {
+func (*validatorSuite) TestControllerNotContainingValidator(c *tc.C) {
 	cfg, err := config.New(config.NoDefaults, map[string]any{
 		config.NameKey:                 "wallyworld",
 		config.UUIDKey:                 testing.ModelTag.Id(),
@@ -28,38 +29,38 @@ func (_ *validatorSuite) TestControllerNotContainingValidator(c *gc.C) {
 		controller.AllowModelAccessKey: "bar",
 		controller.ControllerName:      "bar",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	rval, err := config.NoControllerAttributesValidator().Validate(context.Background(), cfg, nil)
+	rval, err := config.NoControllerAttributesValidator().Validate(c.Context(), cfg, nil)
 	valErr, is := errors.AsType[*config.ValidationError](err)
-	c.Assert(is, jc.IsTrue)
-	c.Assert(valErr.InvalidAttrs, jc.DeepEquals, []string{controller.AllowModelAccessKey, controller.ControllerName})
+	c.Assert(is, tc.IsTrue)
+	c.Assert(valErr.InvalidAttrs, tc.DeepEquals, []string{controller.AllowModelAccessKey, controller.ControllerName})
 
 	// Confirm no modification was done to the config.
-	c.Assert(rval.AllAttrs(), jc.DeepEquals, cfg.AllAttrs())
+	c.Assert(rval.AllAttrs(), tc.DeepEquals, cfg.AllAttrs())
 }
 
-func (_ *validatorSuite) TestModelValidator(c *gc.C) {
+func (*validatorSuite) TestModelValidator(c *tc.C) {
 	cfg, err := config.New(config.NoDefaults, map[string]any{
 		config.NameKey:         "wallyworld",
 		config.UUIDKey:         testing.ModelTag.Id(),
 		config.TypeKey:         "peachy",
 		config.AgentVersionKey: "3.11.1",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	rval, err := config.ModelValidator().Validate(context.Background(), cfg, nil)
+	rval, err := config.ModelValidator().Validate(c.Context(), cfg, nil)
 	valErr, is := errors.AsType[*config.ValidationError](err)
-	c.Assert(is, jc.IsTrue)
-	c.Assert(valErr.InvalidAttrs, jc.DeepEquals, []string{config.AgentVersionKey})
+	c.Assert(is, tc.IsTrue)
+	c.Assert(valErr.InvalidAttrs, tc.DeepEquals, []string{config.AgentVersionKey})
 
 	// Confirm no modification was done to the config.
-	c.Assert(rval.AllAttrs(), jc.DeepEquals, cfg.AllAttrs())
+	c.Assert(rval.AllAttrs(), tc.DeepEquals, cfg.AllAttrs())
 }
 
 // Asserting the fact that model config validation when controller only config
 // attributes are used.
-func (_ *validatorSuite) TestModelValidatorFailsForControllerAttrs(c *gc.C) {
+func (*validatorSuite) TestModelValidatorFailsForControllerAttrs(c *tc.C) {
 	cfg, err := config.New(config.NoDefaults, map[string]any{
 		config.NameKey:                 "wallyworld",
 		config.UUIDKey:                 testing.ModelTag.Id(),
@@ -67,13 +68,13 @@ func (_ *validatorSuite) TestModelValidatorFailsForControllerAttrs(c *gc.C) {
 		controller.AllowModelAccessKey: "bar",
 		controller.ControllerName:      "bar",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	rval, err := config.ModelValidator().Validate(context.Background(), cfg, nil)
+	rval, err := config.ModelValidator().Validate(c.Context(), cfg, nil)
 	valErr, is := errors.AsType[*config.ValidationError](err)
-	c.Assert(is, jc.IsTrue)
-	c.Assert(valErr.InvalidAttrs, jc.DeepEquals, []string{controller.AllowModelAccessKey, controller.ControllerName})
+	c.Assert(is, tc.IsTrue)
+	c.Assert(valErr.InvalidAttrs, tc.DeepEquals, []string{controller.AllowModelAccessKey, controller.ControllerName})
 
 	// Confirm no modification was done to the config.
-	c.Assert(rval.AllAttrs(), jc.DeepEquals, cfg.AllAttrs())
+	c.Assert(rval.AllAttrs(), tc.DeepEquals, cfg.AllAttrs())
 }

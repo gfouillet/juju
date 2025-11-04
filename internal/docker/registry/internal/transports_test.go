@@ -9,30 +9,32 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/internal/docker/registry/internal"
 	"github.com/juju/juju/internal/docker/registry/mocks"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type transportSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&transportSuite{})
+func TestTransportSuite(t *testing.T) {
+	tc.Run(t, &transportSuite{})
+}
 
-func (s *transportSuite) TestErrorTransport(c *gc.C) {
+func (s *transportSuite) TestErrorTransport(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
 		resps := &http.Response{
@@ -43,22 +45,22 @@ func (s *transportSuite) TestErrorTransport(c *gc.C) {
 		return resps, nil
 	})
 	t := internal.NewErrorTransport(mockRoundTripper)
-	_, err = t.RoundTrip(&http.Request{URL: url})
-	c.Assert(err, gc.ErrorMatches, `non-successful response status=403`)
+	_, err = t.RoundTrip(&http.Request{URL: url}) //nolint:bodyclose
+	c.Assert(err, tc.ErrorMatches, `non-successful response status=403`)
 }
 
-func (s *transportSuite) TestBasicTransport(c *gc.C) {
+func (s *transportSuite) TestBasicTransport(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// username + password.
 	mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("username:pwd"))}})
+			c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("username:pwd"))}})
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -67,16 +69,16 @@ func (s *transportSuite) TestBasicTransport(c *gc.C) {
 		},
 	)
 	t := internal.NewBasicTransport(mockRoundTripper, "username", "pwd", "")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// auth token.
 	mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+			c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -85,16 +87,16 @@ func (s *transportSuite) TestBasicTransport(c *gc.C) {
 		},
 	)
 	t = internal.NewBasicTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// no credentials.
 	mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.Header, jc.DeepEquals, http.Header{})
+			c.Assert(req.Header, tc.DeepEquals, http.Header{})
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -103,52 +105,52 @@ func (s *transportSuite) TestBasicTransport(c *gc.C) {
 		},
 	)
 	t = internal.NewBasicTransport(mockRoundTripper, "", "", "")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *transportSuite) TestTokenTransportOAuthTokenProvided(c *gc.C) {
+func (s *transportSuite) TestTokenTransportOAuthTokenProvided(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
 	)
 	t := internal.NewTokenTransport(mockRoundTripper, "", "", "", "OAuth-jwt-token", false)
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *transportSuite) TestTokenTransportTokenRefresh(c *gc.C) {
+func (s *transportSuite) TestTokenTransportTokenRefresh(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		// 1st try failed - bearer token was missing.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -164,8 +166,8 @@ func (s *transportSuite) TestTokenTransportTokenRefresh(c *gc.C) {
 		// Refresh OAuth Token.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -176,33 +178,33 @@ func (s *transportSuite) TestTokenTransportTokenRefresh(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
 	)
 	t := internal.NewTokenTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==", "", false)
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *transportSuite) TestTokenTransportTokenRefreshFailedRealmMissing(c *gc.C) {
+func (s *transportSuite) TestTokenTransportTokenRefreshFailedRealmMissing(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -217,26 +219,26 @@ func (s *transportSuite) TestTokenTransportTokenRefreshFailedRealmMissing(c *gc.
 		),
 	)
 	t := internal.NewTokenTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==", "", false)
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, gc.ErrorMatches, `refreshing OAuth token: no realm specified for token auth challenge`)
+	c.Assert(err, tc.ErrorMatches, `refreshing OAuth token: no realm specified for token auth challenge`)
 }
 
-func (s *transportSuite) TestTokenTransportTokenRefreshFailedServiceMissing(c *gc.C) {
+func (s *transportSuite) TestTokenTransportTokenRefreshFailedServiceMissing(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -251,41 +253,41 @@ func (s *transportSuite) TestTokenTransportTokenRefreshFailedServiceMissing(c *g
 		),
 	)
 	t := internal.NewTokenTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==", "", false)
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, gc.ErrorMatches, `refreshing OAuth token: no service specified for token auth challenge`)
+	c.Assert(err, tc.ErrorMatches, `refreshing OAuth token: no service specified for token auth challenge`)
 }
 
-func (s *transportSuite) TestUnwrapNetError(c *gc.C) {
+func (s *transportSuite) TestUnwrapNetError(c *tc.C) {
 	originalErr := errors.NotFoundf("jujud-operator:2.6.6")
-	c.Assert(originalErr, jc.ErrorIs, errors.NotFound)
+	c.Assert(originalErr, tc.ErrorIs, errors.NotFound)
 	var urlErr error = &url.Error{
 		Op:  "Get",
 		URL: "https://example.com",
 		Err: originalErr,
 	}
 	unwrapedErr := internal.UnwrapNetError(urlErr)
-	c.Assert(unwrapedErr, gc.NotNil)
-	c.Assert(unwrapedErr, jc.ErrorIs, errors.NotFound)
-	c.Assert(unwrapedErr, gc.ErrorMatches, `Get "https://example.com": jujud-operator:2.6.6 not found`)
+	c.Assert(unwrapedErr, tc.NotNil)
+	c.Assert(unwrapedErr, tc.ErrorIs, errors.NotFound)
+	c.Assert(unwrapedErr, tc.ErrorMatches, `Get "https://example.com": jujud-operator:2.6.6 not found`)
 }
 
-func (s *transportSuite) TestChallengeTransportTokenRefresh(c *gc.C) {
+func (s *transportSuite) TestChallengeTransportTokenRefresh(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		// 1st try failed - bearer token was missing.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -301,8 +303,8 @@ func (s *transportSuite) TestChallengeTransportTokenRefresh(c *gc.C) {
 		// Refresh OAuth Token.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -313,34 +315,34 @@ func (s *transportSuite) TestChallengeTransportTokenRefresh(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
 	)
 	t := internal.NewChallengeTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *transportSuite) TestChallengeTransportBasic(c *gc.C) {
+func (s *transportSuite) TestChallengeTransportBasic(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		// 1st try failed - bearer token was missing.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -356,34 +358,34 @@ func (s *transportSuite) TestChallengeTransportBasic(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
 	)
 	t := internal.NewChallengeTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
+func (s *transportSuite) TestChallengeTransportMulti(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	mockRoundTripper := mocks.NewMockRoundTripper(ctrl)
 
 	url, err := url.Parse(`https://example.com`)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	gomock.InOrder(
 		// 1st try failed - bearer token was missing.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -400,16 +402,16 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(nil)}, nil
 			},
 		),
 		// Refresh OAuth Token.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -420,8 +422,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
@@ -429,8 +431,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// re-use last successful
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -447,8 +449,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// Refresh OAuth Token.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -459,8 +461,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// retry.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
@@ -468,8 +470,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// re-use last successful
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -486,8 +488,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// Refresh OAuth Token.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://auth.example.com/token?scope=repository%3Ajujuqa%2Fjujud-operator%3Apull&service=registry.example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -498,8 +500,8 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// still bad
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Bearer " + `OAuth-jwt-token`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusUnauthorized,
@@ -516,30 +518,30 @@ func (s *transportSuite) TestChallengeTransportMulti(c *gc.C) {
 		// retry with basic again.
 		mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.Header, jc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
-				c.Assert(req.URL.String(), gc.Equals, `https://example.com`)
+				c.Assert(req.Header, tc.DeepEquals, http.Header{"Authorization": []string{"Basic " + `dXNlcm5hbWU6cHdkMQ==`}})
+				c.Assert(req.URL.String(), tc.Equals, `https://example.com`)
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(nil)}, nil
 			},
 		),
 	)
 	t := internal.NewChallengeTransport(mockRoundTripper, "", "", "dXNlcm5hbWU6cHdkMQ==")
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Reuse
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Reauth
-	_, err = t.RoundTrip(&http.Request{
+	_, err = t.RoundTrip(&http.Request{ //nolint:bodyclose // nop closer in mock
 		Header: http.Header{},
 		URL:    url,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

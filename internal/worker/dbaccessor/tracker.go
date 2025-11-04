@@ -22,6 +22,7 @@ import (
 	"github.com/juju/juju/domain/schema"
 	"github.com/juju/juju/internal/database"
 	"github.com/juju/juju/internal/database/pragma"
+	"github.com/juju/juju/internal/database/txn"
 )
 
 const (
@@ -88,9 +89,10 @@ type trackedDBWorker struct {
 	mutex sync.RWMutex
 	db    *sqlair.DB
 
-	clock   clock.Clock
-	logger  logger.Logger
-	metrics *Collector
+	clock        clock.Clock
+	logger       logger.Logger
+	metrics      *Collector
+	dbTxnMetrics txn.Metrics
 
 	pingDBFunc func(context.Context, *sql.DB) error
 
@@ -105,7 +107,9 @@ func NewTrackedDBWorker(
 }
 
 func newTrackedDBWorker(
-	ctx context.Context, internalStates chan string, dbApp DBApp, namespace string, opts ...TrackedDBWorkerOption,
+	ctx context.Context, internalStates chan string,
+	dbApp DBApp, namespace string,
+	opts ...TrackedDBWorkerOption,
 ) (TrackedDB, error) {
 	w := &trackedDBWorker{
 		internalStates: internalStates,
@@ -120,13 +124,12 @@ func newTrackedDBWorker(
 		opt(w)
 	}
 
-	db, err := w.dbApp.Open(ctx, w.namespace)
+	// Set the db transaction metrics for the namespace.
+	w.dbTxnMetrics = w.metrics.DBMetricsForNamespace(namespace)
+
+	db, err := w.openDatabase(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
-	}
-
-	if err := pragma.SetPragma(ctx, db, pragma.ForeignKeysPragma, true); err != nil {
-		return nil, errors.Annotate(err, "setting foreign keys pragma")
 	}
 
 	w.db = sqlair.NewDB(db)
@@ -144,6 +147,31 @@ func newTrackedDBWorker(
 	w.tomb.Go(w.loop)
 
 	return w, nil
+}
+
+func (w *trackedDBWorker) openDatabase(ctx context.Context) (*sql.DB, error) {
+	// Set a timeout for the starting of the worker. This prevents us
+	// locking up indefinitely if something goes wrong. This will stall the
+	// controller completely if it's stuck on the controller database, but
+	// it will eventually timeout and return an error. Allowing another
+	// attempt later on.
+	ctx, cancel := context.WithTimeout(ctx, dbOpenTimeout)
+	defer cancel()
+
+	db, err := w.dbApp.Open(ctx, w.namespace)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	applyDBLimits(db)
+
+	// Ensure that foreign keys are enabled, as we rely on them for referential
+	// integrity.
+	if err := pragma.SetPragma(ctx, db, pragma.ForeignKeysPragma, true); err != nil {
+		return nil, errors.Annotate(err, "setting foreign keys pragma")
+	}
+
+	return db, nil
 }
 
 func (w *trackedDBWorker) ensureModelDBInitialised(ctx context.Context) error {
@@ -206,6 +234,13 @@ func (w *trackedDBWorker) StdTxn(ctx context.Context, fn func(context.Context, *
 	})
 }
 
+// Dying returns a channel that is closed when the database connection
+// is no longer usable. This can be used to detect when the database is
+// shutting down or has been closed.
+func (w *trackedDBWorker) Dying() <-chan struct{} {
+	return w.tomb.Dying()
+}
+
 // Err returns the error that caused the worker to stop.
 func (w *trackedDBWorker) Err() error {
 	return w.tomb.Err()
@@ -216,6 +251,9 @@ func (w *trackedDBWorker) run(ctx context.Context, fn func(*sqlair.DB) error) er
 
 	// Tie the tomb to the context for the retry semantics.
 	ctx = corecontext.WithSourceableError(w.tomb.Context(ctx), w)
+
+	// Inject the metrics into the context for the txn.
+	ctx = txn.WithMetrics(ctx, w.dbTxnMetrics)
 
 	// Retry the so long as the tomb and the context are valid.
 	return database.Retry(ctx, func() (err error) {
@@ -277,6 +315,9 @@ func (w *trackedDBWorker) Report() map[string]any {
 }
 
 func (w *trackedDBWorker) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	defer func() {
 		w.mutex.Lock()
 		defer w.mutex.Unlock()
@@ -286,7 +327,7 @@ func (w *trackedDBWorker) loop() error {
 		}
 		err := w.db.PlainDB().Close()
 		if err != nil {
-			w.logger.Debugf("Closed database connection: %v", err)
+			w.logger.Debugf(ctx, "Closed database connection: %v", err)
 		}
 	}()
 
@@ -308,12 +349,20 @@ func (w *trackedDBWorker) loop() error {
 			currentDB := w.db.PlainDB()
 			w.mutex.RUnlock()
 
-			newDB, err := w.ensureDBAliveAndOpenIfRequired(currentDB)
+			newDB, err := w.ensureDBAliveAndOpenIfRequired(ctx, currentDB)
+			if errors.Is(err, context.Canceled) {
+				select {
+				case <-w.tomb.Dying():
+					return tomb.ErrDying
+				default:
+					return errors.Trace(err)
+				}
+			}
 			if err != nil {
 				// If we get an error, ensure we close the underlying db and
 				// mark the tracked db in an error state.
 				if err := currentDB.Close(); err != nil {
-					w.logger.Errorf("error closing database: %v", err)
+					w.logger.Errorf(ctx, "error closing database: %v", err)
 				}
 
 				// As we failed attempting to verify the db, we're in a fatal
@@ -325,10 +374,11 @@ func (w *trackedDBWorker) loop() error {
 			// We've got a new DB. Close the old one and replace it with the
 			// new one, if they're not the same.
 			if newDB != currentDB {
-				w.mutex.Lock()
 				if err := currentDB.Close(); err != nil {
-					w.logger.Errorf("error closing database: %v", err)
+					w.logger.Errorf(ctx, "error closing database: %v", err)
 				}
+
+				w.mutex.Lock()
 				w.db = sqlair.NewDB(newDB)
 				w.report.Set(func(r *report) {
 					r.dbReplacements++
@@ -348,15 +398,14 @@ func (w *trackedDBWorker) loop() error {
 // ensureDBAliveAndOpenNewIfRequired is a bit long-winded, but it is a way to
 // ensure that the underlying database is alive and well. If it is not, we
 // attempt to open a new one. If that fails, we return an error.
-func (w *trackedDBWorker) ensureDBAliveAndOpenIfRequired(db *sql.DB) (*sql.DB, error) {
+func (w *trackedDBWorker) ensureDBAliveAndOpenIfRequired(ctx context.Context, db *sql.DB) (*sql.DB, error) {
 	// Allow killing the tomb to cancel the context,
 	// so shutdown/restart can not be blocked by this call.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	ctx = w.tomb.Context(ctx)
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
 	defer cancel()
 
 	if w.logger.IsLevelEnabled(logger.TRACE) {
-		w.logger.Tracef("ensuring database %q is alive", w.namespace)
+		w.logger.Tracef(ctx, "ensuring database %q is alive", w.namespace)
 	}
 
 	// There are multiple levels of retries here.
@@ -364,7 +413,7 @@ func (w *trackedDBWorker) ensureDBAliveAndOpenIfRequired(db *sql.DB) (*sql.DB, e
 	//   These might be DB-locked or busy-syncing errors for example.
 	// - If the error is fatal, we discard the DB instance and reconnect
 	//   before attempting health verification again.
-	for i := 0; i < DefaultVerifyAttempts; i++ {
+	for i := range DefaultVerifyAttempts {
 		// Verify that we don't have a potential nil database from the retry
 		// semantics.
 		if db == nil {
@@ -376,7 +425,7 @@ func (w *trackedDBWorker) ensureDBAliveAndOpenIfRequired(db *sql.DB) (*sql.DB, e
 		var pingAttempts uint32 = 0
 		err := database.Retry(ctx, func() error {
 			if w.logger.IsLevelEnabled(logger.TRACE) {
-				w.logger.Tracef("pinging database %q", w.namespace)
+				w.logger.Tracef(ctx, "pinging database %q", w.namespace)
 			}
 			pingAttempts++
 			return w.pingDBFunc(ctx, db)
@@ -406,17 +455,13 @@ func (w *trackedDBWorker) ensureDBAliveAndOpenIfRequired(db *sql.DB) (*sql.DB, e
 
 		// We got an error that is non-retryable, attempt to open a new database
 		// connection and see if that works.
-		w.logger.Warningf("unable to ping database %q: attempting to reopen the database before trying again: %v",
+		w.logger.Warningf(ctx, "unable to ping database %q: attempting to reopen the database before trying again: %v",
 			w.namespace, err)
 
 		// Attempt to open a new database. If there is an error, just crash
 		// the worker, we can't do anything else.
-		if db, err = w.dbApp.Open(ctx, w.namespace); err != nil {
+		if db, err = w.openDatabase(ctx); err != nil {
 			return nil, errors.Trace(err)
-		}
-
-		if err := pragma.SetPragma(ctx, db, pragma.ForeignKeysPragma, true); err != nil {
-			return nil, errors.Annotate(err, "setting foreign keys pragma")
 		}
 	}
 	return nil, errors.NotValidf("database")
@@ -428,6 +473,10 @@ func (w *trackedDBWorker) reportInternalState(state string) {
 	case w.internalStates <- state:
 	default:
 	}
+}
+
+func (w *trackedDBWorker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }
 
 func defaultPingDBFunc(ctx context.Context, db *sql.DB) error {
@@ -476,4 +525,26 @@ func (r *report) Set(f func(*report)) {
 // same time.
 func jitter(interval time.Duration, factor float64) time.Duration {
 	return time.Duration(float64(interval) * (1 + factor*(2*rand.Float64()-1)))
+}
+
+func applyDBLimits(db *sql.DB) {
+	// Set the maximum number of idle and open connections to be the same and
+	// set to 2 (default is 0 for MaxOpenConns). From testing, it's better to
+	// have both set to the same value, and not setting these values can lead to
+	// a large number of open connections being created and not closed, which
+	// can lead to unbounded connections.
+	//
+	// If and when we change this number, be aware that a database will have 2
+	// connections per database, per dqlite App. So if we have 100 databases
+	// then that is 200 connections per dqlite App. Changing that number to
+	// match runtime.GOMAXPROCS will then be len(database) * runtime.GOMAXPROCS
+	// per dqlite App. This can lead to a lot of open connections, so be
+	// careful.
+	// If we ever move to sharding model databases across dqlite Apps,
+	// then this number can be increased, as the number of connections per
+	// dqlite App will be less because the number of databases per dqlite App
+	// will be less. Testing will need to be done to determine the best number
+	// for this.
+	db.SetMaxIdleConns(2)
+	db.SetMaxOpenConns(2)
 }

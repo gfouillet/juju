@@ -6,19 +6,21 @@ package domain
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"testing"
 	"time"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/collections/transform"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/watcher/eventsource"
 	schematesting "github.com/juju/juju/domain/schema/testing"
-	jujutesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/errors"
+	jujutesting "github.com/juju/juju/internal/testing"
 )
 
 type watcherSuite struct {
@@ -28,30 +30,33 @@ type watcherSuite struct {
 	events *MockEventSource
 }
 
-var _ = gc.Suite(&watcherSuite{})
+func TestWatcherSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &watcherSuite{})
+}
 
-func (*watcherSuite) TestNewUUIDsWatcherFail(c *gc.C) {
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
+func (*watcherSuite) TestNewUUIDsWatcherFail(c *tc.C) {
+	factory := NewWatcherFactory(func(context.Context) (changestream.WatchableDB, error) {
 		return nil, errors.New("fail getting db instance")
 	}, nil)
 
-	_, err := factory.NewUUIDsWatcher("random_namespace", changestream.All)
-	c.Assert(err, gc.ErrorMatches, "creating base watcher: fail getting db instance")
+	_, err := factory.NewUUIDsWatcher(c.Context(), "random_namespace", "test watcher", changestream.All)
+	c.Assert(err, tc.ErrorMatches, "creating base watcher: fail getting db instance")
 }
 
-func (s *watcherSuite) TestNewUUIDsWatcherSuccess(c *gc.C) {
+func (s *watcherSuite) TestNewUUIDsWatcherSuccess(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectSourceWithSub()
 
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
+	factory := NewWatcherFactory(func(context.Context) (changestream.WatchableDB, error) {
 		return &watchableDB{
 			TxnRunner:   s.TxnRunner(),
 			EventSource: s.events,
 		}, nil
 	}, nil)
 
-	w, err := factory.NewUUIDsWatcher("external_controller", changestream.All)
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := factory.NewUUIDsWatcher(c.Context(), "external_controller", "test watcher", changestream.All)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case <-w.Changes():
@@ -62,20 +67,21 @@ func (s *watcherSuite) TestNewUUIDsWatcherSuccess(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *watcherSuite) TestNewNamespaceWatcherSuccess(c *gc.C) {
+func (s *watcherSuite) TestNewNamespaceWatcherSuccess(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectSourceWithSub()
 
-	s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE some_namespace (
-				uuid TEXT PRIMARY KEY
+				uuid TEXT NOT NULL PRIMARY KEY
 			);
 		`)
 		return err
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
+	factory := NewWatcherFactory(func(context.Context) (changestream.WatchableDB, error) {
 		return &watchableDB{
 			TxnRunner:   s.TxnRunner(),
 			EventSource: s.events,
@@ -83,10 +89,12 @@ func (s *watcherSuite) TestNewNamespaceWatcherSuccess(c *gc.C) {
 	}, nil)
 
 	w, err := factory.NewNamespaceWatcher(
-		"some-namespace", changestream.All,
+		c.Context(),
 		eventsource.InitialNamespaceChanges("SELECT uuid from some_namespace"),
+		"test watcher",
+		eventsource.NamespaceFilter("some_namespace", changestream.All),
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case <-w.Changes():
@@ -97,20 +105,21 @@ func (s *watcherSuite) TestNewNamespaceWatcherSuccess(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *watcherSuite) TestNewNamespaceMapperWatcherSuccess(c *gc.C) {
+func (s *watcherSuite) TestNewNamespaceMapperWatcherSuccess(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectSourceWithSub()
 
-	s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			CREATE TABLE some_namespace (
-				uuid TEXT PRIMARY KEY
+				uuid TEXT NOT NULL PRIMARY KEY
 			);
 		`)
 		return err
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
+	factory := NewWatcherFactory(func(context.Context) (changestream.WatchableDB, error) {
 		return &watchableDB{
 			TxnRunner:   s.TxnRunner(),
 			EventSource: s.events,
@@ -118,63 +127,17 @@ func (s *watcherSuite) TestNewNamespaceMapperWatcherSuccess(c *gc.C) {
 	}, nil)
 
 	w, err := factory.NewNamespaceMapperWatcher(
-		"some-namespace", changestream.All,
+		c.Context(),
 		eventsource.InitialNamespaceChanges("SELECT uuid from some_namespace"),
-		func(ctx context.Context, tr database.TxnRunner, ce []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
-			return ce, nil
-		})
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-w.Changes():
-	case <-time.After(jujutesting.ShortWait):
-		c.Fatal("timed out waiting for change event")
-	}
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *watcherSuite) TestNewNamespaceNotifyWatcherSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.expectSourceWithSub()
-
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
-		return &watchableDB{
-			TxnRunner:   s.TxnRunner(),
-			EventSource: s.events,
-		}, nil
-	}, nil)
-
-	w, err := factory.NewNamespaceNotifyWatcher("some-namespace", changestream.All)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-w.Changes():
-	case <-time.After(jujutesting.ShortWait):
-		c.Fatal("timed out waiting for change event")
-	}
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *watcherSuite) TestNewNamespaceNotifyMapperWatcherSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.expectSourceWithSub()
-
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
-		return &watchableDB{
-			TxnRunner:   s.TxnRunner(),
-			EventSource: s.events,
-		}, nil
-	}, nil)
-
-	w, err := factory.NewNamespaceNotifyMapperWatcher(
-		"some-namespace", changestream.All,
-		func(ctx context.Context, tr database.TxnRunner, ce []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
-			return ce, nil
+		"test watcher",
+		func(ctx context.Context, ce []changestream.ChangeEvent) ([]string, error) {
+			return transform.Slice(ce, func(c changestream.ChangeEvent) string {
+				return c.Changed()
+			}), nil
 		},
+		eventsource.NamespaceFilter("some_namespace", changestream.All),
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case <-w.Changes():
@@ -185,58 +148,7 @@ func (s *watcherSuite) TestNewNamespaceNotifyMapperWatcherSuccess(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *watcherSuite) TestNewValueWatcherSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.expectSourceWithSub()
-
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
-		return &watchableDB{
-			TxnRunner:   s.TxnRunner(),
-			EventSource: s.events,
-		}, nil
-	}, nil)
-
-	w, err := factory.NewValueWatcher("some-namespace", "some-id-from-namespace", changestream.All)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-w.Changes():
-	case <-time.After(jujutesting.ShortWait):
-		c.Fatal("timed out waiting for change event")
-	}
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *watcherSuite) TestNewValueMapperWatcherSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.expectSourceWithSub()
-
-	factory := NewWatcherFactory(func() (changestream.WatchableDB, error) {
-		return &watchableDB{
-			TxnRunner:   s.TxnRunner(),
-			EventSource: s.events,
-		}, nil
-	}, nil)
-
-	w, err := factory.NewValueMapperWatcher(
-		"some-namespace", "some-id-from-namespace", changestream.All,
-		func(ctx context.Context, tr database.TxnRunner, ce []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
-			return ce, nil
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-w.Changes():
-	case <-time.After(jujutesting.ShortWait):
-		c.Fatal("timed out waiting for change event")
-	}
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *watcherSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *watcherSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.sub = NewMockSubscription(ctrl)
@@ -253,10 +165,10 @@ func (s *watcherSuite) expectSourceWithSub() {
 	// We are only testing that the factory produces a functioning worker.
 	// The workers themselves are properly tested at their package sites.
 	s.sub.EXPECT().Changes().Return(changes)
-	s.sub.EXPECT().Unsubscribe()
+	s.sub.EXPECT().Kill()
 	s.sub.EXPECT().Done().Return(done).AnyTimes()
 
-	s.events.EXPECT().Subscribe(gomock.Any()).Return(s.sub, nil)
+	s.events.EXPECT().Subscribe(gomock.Any(), gomock.Any()).Return(s.sub, nil)
 }
 
 type watchableDB struct {

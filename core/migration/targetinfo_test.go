@@ -4,24 +4,26 @@
 package migration_test
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 	"gopkg.in/macaroon.v2"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/migration"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/uuid"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type TargetInfoSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(new(TargetInfoSuite))
+func TestTargetInfoSuite(t *testing.T) {
+	tc.Run(t, new(TargetInfoSuite))
+}
 
-func (s *TargetInfoSuite) TestValidation(c *gc.C) {
+func (s *TargetInfoSuite) TestValidation(c *tc.C) {
 	tests := []struct {
 		label        string
 		tweakInfo    func(*migration.TargetInfo)
@@ -29,13 +31,13 @@ func (s *TargetInfoSuite) TestValidation(c *gc.C) {
 	}{{
 		"empty ControllerTag",
 		func(info *migration.TargetInfo) {
-			info.ControllerTag = names.NewControllerTag("fooo")
+			info.ControllerUUID = "fooo"
 		},
 		"ControllerTag not valid",
 	}, {
 		"invalid ControllerTag",
 		func(info *migration.TargetInfo) {
-			info.ControllerTag = names.NewControllerTag("")
+			info.ControllerUUID = ""
 		},
 		"ControllerTag not valid",
 	}, {
@@ -53,10 +55,10 @@ func (s *TargetInfoSuite) TestValidation(c *gc.C) {
 	}, {
 		"AuthTag",
 		func(info *migration.TargetInfo) {
-			info.AuthTag = names.UserTag{}
+			info.User = ""
 			info.Macaroons = nil
 		},
-		"empty AuthTag not valid",
+		"empty User not valid",
 	}, {
 		"Success - empty CACert",
 		func(info *migration.TargetInfo) {
@@ -64,12 +66,13 @@ func (s *TargetInfoSuite) TestValidation(c *gc.C) {
 		},
 		"",
 	}, {
-		"Password & Macaroons",
+		"Empty Password, Macaroons & Token",
 		func(info *migration.TargetInfo) {
 			info.Password = ""
 			info.Macaroons = nil
+			info.Token = ""
 		},
-		"missing Password & Macaroons not valid",
+		"missing Password, Macaroons or Token not valid",
 	}, {
 		"Success - empty Password",
 		func(info *migration.TargetInfo) {
@@ -83,9 +86,30 @@ func (s *TargetInfoSuite) TestValidation(c *gc.C) {
 		},
 		"",
 	}, {
+		"Success - empty Macaroons and Token",
+		func(info *migration.TargetInfo) {
+			info.Macaroons = nil
+			info.Token = ""
+		},
+		"",
+	}, {
+		"Success - empty Macaroons and Password",
+		func(info *migration.TargetInfo) {
+			info.Macaroons = nil
+			info.Password = ""
+		},
+		"",
+	}, {
+		"Success - empty Password and Token",
+		func(info *migration.TargetInfo) {
+			info.Password = ""
+			info.Token = ""
+		},
+		"",
+	}, {
 		"Success - empty AuthTag with macaroons",
 		func(info *migration.TargetInfo) {
-			info.AuthTag = names.UserTag{}
+			info.User = ""
 		},
 		"",
 	}, {
@@ -100,23 +124,24 @@ func (s *TargetInfoSuite) TestValidation(c *gc.C) {
 		test.tweakInfo(&info)
 		err := info.Validate()
 		if test.errorPattern == "" {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		} else {
-			c.Check(err, jc.ErrorIs, errors.NotValid)
-			c.Check(err, gc.ErrorMatches, test.errorPattern)
+			c.Check(err, tc.ErrorIs, coreerrors.NotValid)
+			c.Check(err, tc.ErrorMatches, test.errorPattern)
 		}
 	}
 }
 
-func makeValidTargetInfo(c *gc.C) migration.TargetInfo {
+func makeValidTargetInfo(c *tc.C) migration.TargetInfo {
 	mac, err := macaroon.New([]byte("secret"), []byte("id"), "location", macaroon.LatestVersion)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return migration.TargetInfo{
-		ControllerTag: names.NewControllerTag(uuid.MustNewUUID().String()),
-		Addrs:         []string{"1.2.3.4:5555"},
-		CACert:        "cert",
-		AuthTag:       names.NewUserTag("user"),
-		Password:      "password",
-		Macaroons:     []macaroon.Slice{{mac}},
+		ControllerUUID: uuid.MustNewUUID().String(),
+		Addrs:          []string{"1.2.3.4:5555"},
+		CACert:         "cert",
+		User:           "user",
+		Password:       "password",
+		Macaroons:      []macaroon.Slice{{mac}},
+		Token:          "token",
 	}
 }

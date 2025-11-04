@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretRemoveCommand struct {
@@ -29,15 +29,16 @@ func NewSecretRemoveCommand(ctx Context) (cmd.Command, error) {
 func (c *secretRemoveCommand) Info() *cmd.Info {
 	doc := `
 Remove a secret with the specified URI.
-
-Examples:
+`
+	examples := `
     secret-remove secret:9m4e2mr0ui3e8a215n4g
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-remove",
-		Args:    "<ID>",
-		Purpose: "remove a existing secret",
-		Doc:     doc,
+		Name:     "secret-remove",
+		Args:     "<ID>",
+		Purpose:  "Remove an existing secret.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -64,5 +65,5 @@ func (c *secretRemoveCommand) Run(ctx *cmd.Context) error {
 	if c.revision > 0 {
 		rev = &c.revision
 	}
-	return c.ctx.RemoveSecret(c.secretURI, rev)
+	return c.ctx.RemoveSecret(ctx, c.secretURI, rev)
 }

@@ -9,8 +9,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
+
+	"github.com/juju/juju/internal/cmd"
 )
 
 // This file contains helper functions for generic operations commonly needed
@@ -18,7 +19,7 @@ import (
 
 const yesNoMsg = "\nContinue [y/N]? "
 
-var nameVerificationMsg = "\nTo continue, enter the name of the %s to be destroyed: "
+var nameVerificationMsg = "\nTo continue, enter the name of the %s to be unregistered: "
 
 type userAbortedError string
 

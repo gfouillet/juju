@@ -5,24 +5,25 @@ package user
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/authentication"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
 )
 
 const userChangePasswordDoc = `
@@ -31,11 +32,11 @@ the ` + "`juju show-user`" + ` command.
 
 If no controller is specified, the current controller will be used.
 
-A controller administrator can change the password for another user 
-by providing desired username as an argument. 
+A controller administrator can change the password for another user
+by providing desired username as an argument.
 
-A controller administrator can also reset the password with a --reset option. 
-This will invalidate any passwords that were previously set 
+A controller administrator can also reset the password with a ` + "`--reset`" + ` option.
+This will invalidate any passwords that were previously set
 and registration strings that were previously issued for a user.
 This option will issue a new registration string to be used with
 ` + "`juju register`" + `.`
@@ -57,7 +58,7 @@ func NewChangePasswordCommand() cmd.Command {
 // changePasswordCommand changes the password for a user.
 type changePasswordCommand struct {
 	modelcmd.ControllerCommandBase
-	newAPIConnection func(juju.NewAPIConnectionParams) (api.Connection, error)
+	newAPIConnection func(context.Context, juju.NewAPIConnectionParams) (api.Connection, error)
 	api              ChangePasswordAPI
 
 	// Input arguments
@@ -73,8 +74,8 @@ type changePasswordCommand struct {
 }
 
 func (c *changePasswordCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.BoolVar(&c.Reset, "reset", false, "Reset user password")
-	f.BoolVar(&c.noPrompt, "no-prompt", false, "don't prompt for password and just read a line from stdin")
+	f.BoolVar(&c.Reset, "reset", false, "Reset user password.")
+	f.BoolVar(&c.noPrompt, "no-prompt", false, "Don't prompt for password; instead, read a line from stdin.")
 }
 
 // Info implements Command.Info.
@@ -105,8 +106,8 @@ func (c *changePasswordCommand) Init(args []string) error {
 // ChangePasswordAPI defines the usermanager API methods that the change
 // password command uses.
 type ChangePasswordAPI interface {
-	SetPassword(username, password string) error
-	ResetPassword(username string) ([]byte, error)
+	SetPassword(ctx context.Context, username, password string) error
+	ResetPassword(ctx context.Context, username string) ([]byte, error)
 	Close() error
 }
 
@@ -116,7 +117,7 @@ func (c *changePasswordCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 	if c.api == nil {
-		api, err := c.NewUserManagerAPIClient()
+		api, err := c.NewUserManagerAPIClient(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -182,7 +183,7 @@ func (c *changePasswordCommand) ensureControllerName() error {
 }
 
 func (c *changePasswordCommand) resetUserPassword(ctx *cmd.Context) error {
-	key, err := c.api.ResetPassword(c.userTag.Id())
+	key, err := c.api.ResetPassword(ctx, c.userTag.Id())
 	if err != nil {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
@@ -219,7 +220,7 @@ func (c *changePasswordCommand) updateUserPassword(ctx *cmd.Context) error {
 		return errors.Errorf("password cannot be empty")
 	}
 
-	if err := c.api.SetPassword(c.userTag.Id(), newPassword); err != nil {
+	if err := c.api.SetPassword(ctx, c.userTag.Id(), newPassword); err != nil {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
 	if c.accountDetails == nil {
@@ -229,7 +230,7 @@ func (c *changePasswordCommand) updateUserPassword(ctx *cmd.Context) error {
 			// Log back in with macaroon authentication, so we can
 			// discard the password without having to log back in
 			// immediately.
-			if err := c.recordMacaroon(newPassword); err != nil {
+			if err := c.recordMacaroon(ctx, newPassword); err != nil {
 				return errors.Annotate(err, "recording macaroon")
 			}
 			// Wipe the password from disk. In the event of an
@@ -246,7 +247,7 @@ func (c *changePasswordCommand) updateUserPassword(ctx *cmd.Context) error {
 	return nil
 }
 
-func (c *changePasswordCommand) recordMacaroon(password string) error {
+func (c *changePasswordCommand) recordMacaroon(ctx context.Context, password string) error {
 	accountDetails := &jujuclient.AccountDetails{User: c.accountDetails.User}
 	args, err := c.NewAPIConnectionParams(
 		c.ClientStore(), c.controllerName, "", accountDetails,
@@ -260,7 +261,7 @@ func (c *changePasswordCommand) recordMacaroon(password string) error {
 		}),
 		httpbakery.WebBrowserInteractor{},
 	}
-	api, err := c.newAPIConnection(args)
+	api, err := c.newAPIConnection(ctx, args)
 	if err != nil {
 		return errors.Annotate(err, "connecting to API")
 	}

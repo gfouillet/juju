@@ -10,7 +10,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 
@@ -30,7 +30,7 @@ const (
 
 type Facade interface {
 	ControllerConfig(context.Context) (controller.Config, error)
-	WatchControllerConfig() (watcher.StringsWatcher, error)
+	WatchControllerConfig(context.Context) (watcher.StringsWatcher, error)
 }
 
 type CAASBroker interface {
@@ -101,6 +101,7 @@ func NewWorker(config Config) (worker.Worker, error) {
 		registryFunc: config.RegistryFunc,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-model-config-manager",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -121,7 +122,10 @@ func (w *manager) Wait() error {
 }
 
 func (w *manager) loop() (err error) {
-	watcher, err := w.config.Facade.WatchControllerConfig()
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	watcher, err := w.config.Facade.WatchControllerConfig(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -148,9 +152,6 @@ func (w *manager) loop() (err error) {
 
 	signal := make(chan struct{})
 	close(signal)
-
-	ctx, cancel := w.scopedContext()
-	defer cancel()
 
 	for {
 		select {
@@ -193,9 +194,9 @@ func (w *manager) loop() (err error) {
 			}
 		case <-refresh:
 			refresh = nil
-			next, err := w.ensureImageRepoSecret(context.TODO(), reg, first)
+			next, err := w.ensureImageRepoSecret(ctx, reg, first)
 			if err != nil {
-				w.logger.Errorf("failed to update repository secret: %s", err.Error())
+				w.logger.Errorf(ctx, "failed to update repository secret: %s", err.Error())
 				next = retryDuration
 			} else {
 				first = false
@@ -217,12 +218,12 @@ func (w *manager) ensureImageRepoSecret(ctx context.Context, reg registry.Regist
 		return nextRefresh, nil
 	}
 
-	w.logger.Debugf("refreshing auth token for %q", w.name)
+	w.logger.Debugf(ctx, "refreshing auth token for %q", w.name)
 	if err := reg.RefreshAuth(); err != nil {
 		return time.Duration(0), errors.Annotatef(err, "refreshing registry auth token for %q", w.name)
 	}
 
-	w.logger.Debugf("applying refreshed auth token for %q", w.name)
+	w.logger.Debugf(ctx, "applying refreshed auth token for %q", w.name)
 	err := w.config.Broker.EnsureImageRepoSecret(ctx, reg.ImageRepoDetails())
 	if err != nil {
 		return time.Duration(0), errors.Annotatef(err, "ensuring image repository secret for %q", w.name)

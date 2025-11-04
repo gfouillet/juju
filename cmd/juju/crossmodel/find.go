@@ -4,14 +4,17 @@
 package crossmodel
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const findCommandDoc = `
@@ -23,11 +26,11 @@ This command is aimed for a user who wants to discover what endpoints are availa
 const findCommandExamples = `
     juju find-offers
     juju find-offers mycontroller:
-    juju find-offers fred/prod
+    juju find-offers staging/mymodel
     juju find-offers --interface mysql
-    juju find-offers --url fred/prod.db2
+    juju find-offers --url staging/mymodel.db2
     juju find-offers --offer db2
-   
+
 `
 
 type findCommand struct {
@@ -35,21 +38,21 @@ type findCommand struct {
 
 	url            string
 	source         string
-	modelOwnerName string
+	modelQualifier model.Qualifier
 	modelName      string
 	offerName      string
 	interfaceName  string
 
 	out        cmd.Output
-	newAPIFunc func(string) (FindAPI, error)
+	newAPIFunc func(context.Context, string) (FindAPI, error)
 }
 
 // NewFindEndpointsCommand constructs command that
 // allows to find offered application endpoints.
 func NewFindEndpointsCommand() cmd.Command {
 	findCmd := &findCommand{}
-	findCmd.newAPIFunc = func(controllerName string) (FindAPI, error) {
-		return findCmd.NewRemoteEndpointsAPI(controllerName)
+	findCmd.newAPIFunc = func(ctx context.Context, controllerName string) (FindAPI, error) {
+		return findCmd.NewRemoteEndpointsAPI(ctx, controllerName)
 	}
 	return modelcmd.Wrap(findCmd)
 }
@@ -88,9 +91,9 @@ func (c *findCommand) Info() *cmd.Info {
 // SetFlags implements Command.SetFlags.
 func (c *findCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.RemoteEndpointsCommandBase.SetFlags(f)
-	f.StringVar(&c.url, "url", "", "return results matching the offer URL")
-	f.StringVar(&c.interfaceName, "interface", "", "return results matching the interface name")
-	f.StringVar(&c.offerName, "offer", "", "return results matching the offer name")
+	f.StringVar(&c.url, "url", "", "Return results matching the offer URL")
+	f.StringVar(&c.interfaceName, "interface", "", "Return results matching the interface name")
+	f.StringVar(&c.offerName, "offer", "", "Return results matching the offer name")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
 		"yaml":    cmd.FormatYaml,
 		"json":    cmd.FormatJson,
@@ -109,23 +112,23 @@ func (c *findCommand) Run(ctx *cmd.Context) (err error) {
 	}
 	loggedInUser := accountDetails.User
 
-	api, err := c.newAPIFunc(c.source)
+	api, err := c.newAPIFunc(ctx, c.source)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	filter := crossmodel.ApplicationOfferFilter{
-		OwnerName: c.modelOwnerName,
-		ModelName: c.modelName,
-		OfferName: c.offerName,
+		ModelQualifier: c.modelQualifier,
+		ModelName:      c.modelName,
+		OfferName:      c.offerName,
 	}
 	if c.interfaceName != "" {
 		filter.Endpoints = []crossmodel.EndpointFilterTerm{{
 			Interface: c.interfaceName,
 		}}
 	}
-	found, err := api.FindApplicationOffers(filter)
+	found, err := api.FindApplicationOffers(ctx, filter)
 	if err != nil {
 		return err
 	}
@@ -159,24 +162,24 @@ func (c *findCommand) validateOrSetURL() error {
 	} else {
 		c.source = controllerName
 	}
-	user := urlParts.User
-	if user == "" {
+	qualifier := model.Qualifier(urlParts.ModelQualifier)
+	if qualifier == "" {
 		accountDetails, err := c.CurrentAccountDetails()
 		if err != nil {
 			return errors.Trace(err)
 		}
-		user = accountDetails.User
+		qualifier = model.QualifierFromUserTag(names.NewUserTag(accountDetails.User))
 	}
-	c.modelOwnerName = user
+	c.modelQualifier = qualifier
 	c.modelName = urlParts.ModelName
-	c.offerName = urlParts.ApplicationName
+	c.offerName = urlParts.Name
 	return nil
 }
 
 // FindAPI defines the API methods that cross model find command uses.
 type FindAPI interface {
 	Close() error
-	FindApplicationOffers(filters ...crossmodel.ApplicationOfferFilter) ([]*crossmodel.ApplicationOfferDetails, error)
+	FindApplicationOffers(ctx context.Context, filters ...crossmodel.ApplicationOfferFilter) ([]*crossmodel.ApplicationOfferDetails, error)
 }
 
 // ApplicationOfferResult defines the serialization behaviour of an application offer.

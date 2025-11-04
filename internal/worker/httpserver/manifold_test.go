@@ -6,19 +6,17 @@ package httpserver_test
 import (
 	"context"
 	"crypto/tls"
+	"testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	dt "github.com/juju/worker/v4/dependency/testing"
 	"github.com/juju/worker/v4/workertest"
 	"golang.org/x/crypto/acme/autocert"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/controller"
@@ -28,45 +26,42 @@ import (
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/pki"
 	pkitest "github.com/juju/juju/internal/pki/test"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/httpserver"
-	"github.com/juju/juju/state"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	authority              pki.Authority
 	config                 httpserver.ManifoldConfig
 	manifold               dependency.Manifold
 	getter                 dependency.Getter
-	state                  stubStateTracker
-	hub                    *pubsub.StructuredHub
 	mux                    *apiserverhttp.Mux
 	clock                  *testclock.Clock
-	prometheusRegisterer   stubPrometheusRegisterer
 	tlsConfig              *tls.Config
 	controllerConfig       controller.Config
-	serviceFactory         servicefactory.ServiceFactory
+	domainServices         services.DomainServices
 	autocertCacheGetter    *autocertcacheservice.Service
 	controllerConfigGetter *controllerconfigservice.WatchableService
 
-	stub testing.Stub
+	stub testhelpers.Stub
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	authority, err := pkitest.NewTestAuthority()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.authority = authority
 
 	s.mux = &apiserverhttp.Mux{}
-	s.hub = pubsub.NewStructuredHub(nil)
 	s.clock = testclock.NewClock(time.Now())
-	s.prometheusRegisterer = stubPrometheusRegisterer{}
 	s.tlsConfig = &tls.Config{}
 	s.controllerConfig = map[string]interface{}{
 		"api-port":            1024,
@@ -76,7 +71,7 @@ func (s *ManifoldSuite) SetUpTest(c *gc.C) {
 
 	s.autocertCacheGetter = &autocertcacheservice.Service{}
 	s.controllerConfigGetter = &controllerconfigservice.WatchableService{}
-	s.serviceFactory = stubServiceFactory{
+	s.domainServices = stubDomainServices{
 		controllerConfigGetter: s.controllerConfigGetter,
 		autocertCacheGetter:    s.autocertCacheGetter,
 	}
@@ -84,37 +79,28 @@ func (s *ManifoldSuite) SetUpTest(c *gc.C) {
 
 	s.getter = s.newGetter(nil)
 	s.config = httpserver.ManifoldConfig{
-		AgentName:            "machine-42",
-		AuthorityName:        "authority",
-		HubName:              "hub",
-		StateName:            "state",
-		ServiceFactoryName:   "service-factory",
-		MuxName:              "mux",
-		APIServerName:        "api-server",
-		Clock:                s.clock,
-		PrometheusRegisterer: &s.prometheusRegisterer,
-		MuxShutdownWait:      1 * time.Minute,
-		LogDir:               "log-dir",
-		GetControllerConfig:  s.getControllerConfig,
-		NewTLSConfig:         s.newTLSConfig,
-		NewWorker:            s.newWorker,
-		Logger:               loggertesting.WrapCheckLog(c),
+		AgentName:           "machine-42",
+		AuthorityName:       "authority",
+		DomainServicesName:  "domain-services",
+		MuxName:             "mux",
+		APIServerName:       "api-server",
+		Clock:               s.clock,
+		MuxShutdownWait:     1 * time.Minute,
+		LogDir:              "log-dir",
+		GetControllerConfig: s.getControllerConfig,
+		NewTLSConfig:        s.newTLSConfig,
+		NewWorker:           s.newWorker,
+		Logger:              loggertesting.WrapCheckLog(c),
 	}
 	s.manifold = httpserver.Manifold(s.config)
-	s.state = stubStateTracker{
-		pool:   &state.StatePool{},
-		system: &state.State{},
-	}
 }
 
 func (s *ManifoldSuite) newGetter(overlay map[string]interface{}) dependency.Getter {
 	resources := map[string]interface{}{
 		"authority":       s.authority,
-		"state":           &s.state,
-		"hub":             s.hub,
 		"mux":             s.mux,
 		"api-server":      nil,
-		"service-factory": s.serviceFactory,
+		"domain-services": s.domainServices,
 	}
 	for k, v := range overlay {
 		resources[k] = v
@@ -146,59 +132,55 @@ func (s *ManifoldSuite) newWorker(config httpserver.Config) (worker.Worker, erro
 	if err := s.stub.NextErr(); err != nil {
 		return nil, err
 	}
-	return worker.NewRunner(worker.RunnerParams{}), nil
+	return worker.NewRunner(worker.RunnerParams{
+		Name: "httpserver",
+	})
 }
 
 var expectedInputs = []string{
 	"authority",
-	"state",
 	"mux",
-	"hub",
 	"api-server",
-	"service-factory",
+	"domain-services",
 }
 
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(s.manifold.Inputs, jc.SameContents, expectedInputs)
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(s.manifold.Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *ManifoldSuite) TestMissingInputs(c *gc.C) {
+func (s *ManifoldSuite) TestMissingInputs(c *tc.C) {
 	for _, input := range expectedInputs {
 		getter := s.newGetter(map[string]interface{}{
 			input: dependency.ErrMissing,
 		})
-		_, err := s.manifold.Start(context.Background(), getter)
-		c.Assert(errors.Cause(err), gc.Equals, dependency.ErrMissing)
+		_, err := s.manifold.Start(c.Context(), getter)
+		c.Assert(errors.Cause(err), tc.Equals, dependency.ErrMissing)
 	}
 }
 
-func (s *ManifoldSuite) TestStart(c *gc.C) {
+func (s *ManifoldSuite) TestStart(c *tc.C) {
 	w := s.startWorkerClean(c)
 	workertest.CleanKill(c, w)
 
 	s.stub.CheckCallNames(c, "GetControllerConfig", "NewTLSConfig", "NewWorker")
 	newWorkerArgs := s.stub.Calls()[2].Args
-	c.Assert(newWorkerArgs, gc.HasLen, 1)
-	c.Assert(newWorkerArgs[0], gc.FitsTypeOf, httpserver.Config{})
+	c.Assert(newWorkerArgs, tc.HasLen, 1)
+	c.Assert(newWorkerArgs[0], tc.FitsTypeOf, httpserver.Config{})
 	config := newWorkerArgs[0].(httpserver.Config)
 
-	c.Assert(config, jc.DeepEquals, httpserver.Config{
-		AgentName:            "machine-42",
-		Clock:                s.clock,
-		PrometheusRegisterer: &s.prometheusRegisterer,
-		Hub:                  s.hub,
-		TLSConfig:            s.tlsConfig,
-		Mux:                  s.mux,
-		APIPort:              1024,
-		APIPortOpenDelay:     5 * time.Second,
-		ControllerAPIPort:    2048,
-		MuxShutdownWait:      1 * time.Minute,
-		LogDir:               "log-dir",
-		Logger:               s.config.Logger,
+	c.Assert(config, tc.DeepEquals, httpserver.Config{
+		AgentName:       "machine-42",
+		Clock:           s.clock,
+		TLSConfig:       s.tlsConfig,
+		Mux:             s.mux,
+		APIPort:         1024,
+		MuxShutdownWait: 1 * time.Minute,
+		LogDir:          "log-dir",
+		Logger:          s.config.Logger,
 	})
 }
 
-func (s *ManifoldSuite) TestValidate(c *gc.C) {
+func (s *ManifoldSuite) TestValidate(c *tc.C) {
 	type test struct {
 		f      func(*httpserver.ManifoldConfig)
 		expect string
@@ -210,11 +192,8 @@ func (s *ManifoldSuite) TestValidate(c *gc.C) {
 		f:      func(cfg *httpserver.ManifoldConfig) { cfg.AuthorityName = "" },
 		expect: "empty AuthorityName not valid",
 	}, {
-		f:      func(cfg *httpserver.ManifoldConfig) { cfg.StateName = "" },
-		expect: "empty StateName not valid",
-	}, {
-		f:      func(cfg *httpserver.ManifoldConfig) { cfg.ServiceFactoryName = "" },
-		expect: "empty ServiceFactoryName not valid",
+		f:      func(cfg *httpserver.ManifoldConfig) { cfg.DomainServicesName = "" },
+		expect: "empty DomainServicesName not valid",
 	}, {
 		f:      func(cfg *httpserver.ManifoldConfig) { cfg.MuxName = "" },
 		expect: "empty MuxName not valid",
@@ -227,9 +206,6 @@ func (s *ManifoldSuite) TestValidate(c *gc.C) {
 	}, {
 		f:      func(cfg *httpserver.ManifoldConfig) { cfg.APIServerName = "" },
 		expect: "empty APIServerName not valid",
-	}, {
-		f:      func(cfg *httpserver.ManifoldConfig) { cfg.PrometheusRegisterer = nil },
-		expect: "nil PrometheusRegisterer not valid",
 	}, {
 		f:      func(cfg *httpserver.ManifoldConfig) { cfg.GetControllerConfig = nil },
 		expect: "nil GetControllerConfig not valid",
@@ -245,29 +221,29 @@ func (s *ManifoldSuite) TestValidate(c *gc.C) {
 		config := s.config
 		test.f(&config)
 		manifold := httpserver.Manifold(config)
-		w, err := manifold.Start(context.Background(), s.getter)
+		w, err := manifold.Start(c.Context(), s.getter)
 		workertest.CheckNilOrKill(c, w)
-		c.Check(err, gc.ErrorMatches, test.expect)
+		c.Check(err, tc.ErrorMatches, test.expect)
 	}
 }
 
-func (s *ManifoldSuite) startWorkerClean(c *gc.C) worker.Worker {
-	w, err := s.manifold.Start(context.Background(), s.getter)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *ManifoldSuite) startWorkerClean(c *tc.C) worker.Worker {
+	w, err := s.manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CheckAlive(c, w)
 	return w
 }
 
-type stubServiceFactory struct {
-	servicefactory.ServiceFactory
+type stubDomainServices struct {
+	services.DomainServices
 	controllerConfigGetter *controllerconfigservice.WatchableService
 	autocertCacheGetter    *autocertcacheservice.Service
 }
 
-func (s stubServiceFactory) AutocertCache() *autocertcacheservice.Service {
+func (s stubDomainServices) AutocertCache() *autocertcacheservice.Service {
 	return s.autocertCacheGetter
 }
 
-func (s stubServiceFactory) ControllerConfig() *controllerconfigservice.WatchableService {
+func (s stubDomainServices) ControllerConfig() *controllerconfigservice.WatchableService {
 	return s.controllerConfigGetter
 }

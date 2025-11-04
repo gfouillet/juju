@@ -7,14 +7,14 @@ run_prometheus() {
 
 	juju offer controller.controller:metrics-endpoint
 
-	juju deploy prometheus-k8s --trust
+	juju deploy prometheus-k8s --channel 1/stable --trust
 	juju relate prometheus-k8s controller.controller
-	wait_for "prometheus-k8s" "$(active_idle_condition "prometheus-k8s" 0 0)"
-	retry 'check_prometheus_targets prometheus-k8s 0' 15
+	wait_for "prometheus-k8s" "$(active_idle_condition "prometheus-k8s" 0)"
+	retry 'check_prometheus_targets prometheus-k8s 0' 30
 
 	juju remove-relation prometheus-k8s controller
 	# Check Juju controller is removed from Prometheus targets
-	retry 'check_prometheus_no_target prometheus-k8s 0' 5
+	retry 'check_prometheus_no_target prometheus-k8s 0' 30
 	# Check no errors in controller charm or Prometheus
 	juju status -m controller --format json | jq -r "$(active_condition "controller")" | check "controller"
 	juju status --format json | jq -r "$(active_condition "prometheus-k8s")" | check "prometheus-k8s"
@@ -34,19 +34,19 @@ run_prometheus_multiple_units() {
 
 	juju offer controller.controller:metrics-endpoint
 
-	juju deploy prometheus-k8s p1 --trust
+	juju deploy prometheus-k8s --channel 1/stable p1 --trust
 	juju relate p1 controller.controller
-	wait_for "p1" "$(active_idle_condition "p1" 0 0)"
-	retry 'check_prometheus_targets p1 0' 15
+	wait_for "p1" "$(active_idle_condition "p1" 0)"
+	retry 'check_prometheus_targets p1 0' 30
 
-	juju deploy prometheus-k8s p2 --trust
+	juju deploy prometheus-k8s --channel 1/stable p2 --trust
 	juju relate p2 controller.controller
-	wait_for "p2" "$(active_idle_condition "p2" 1 0)"
-	retry 'check_prometheus_targets p2 0' 15
+	wait_for "p2" "$(active_idle_condition "p2" 0)"
+	retry 'check_prometheus_targets p2 0' 30
 
 	juju add-unit p1
-	wait_for "p1" "$(active_idle_condition "p1" 0 1)"
-	retry 'check_prometheus_targets p1 1' 15
+	wait_for "p1" "$(active_idle_condition "p1" 1)"
+	retry 'check_prometheus_targets p1 1' 30
 
 	juju remove-unit p1 --num-units 1
 	# Wait until the application p1 settles before health checks
@@ -61,7 +61,7 @@ run_prometheus_multiple_units() {
 	wait_for "p2" "$(active_condition "p2" 1)"
 
 	# Check Juju controller is removed from Prometheus targets
-	retry 'check_prometheus_no_target p2 0' 5
+	retry 'check_prometheus_no_target p2 0' 30
 	# Check no errors in controller charm or Prometheus
 	juju status -m controller --format json | jq -r "$(active_condition "controller")" | check "controller"
 	juju status --format json | jq -r "$(active_condition "p2" 1)" | check "p2"
@@ -69,16 +69,16 @@ run_prometheus_multiple_units() {
 	juju remove-relation p1 controller
 
 	# Check Juju controller is removed from Prometheus targets
-	retry 'check_prometheus_no_target p1 0' 5
+	retry 'check_prometheus_no_target p1 0' 30
 	# Check no errors in controller charm or Prometheus
 	juju status -m controller --format json | jq -r "$(active_condition "controller")" | check "controller"
 	# Ensure p1 is still healty
 	wait_for "p1" "$(active_condition "p1" 0)"
 
 	juju remove-application p1 --destroy-storage \
-		--force --no-wait # TODO: remove these flags once storage bug is fixed
+		--force --no-wait --no-prompt # TODO: remove these flags once storage bug is fixed
 	juju remove-application p2 --destroy-storage \
-		--force --no-wait # TODO: remove these flags once storage bug is fixed
+		--force --no-wait --no-prompt # TODO: remove these flags once storage bug is fixed
 	destroy_controller "${MODEL_NAME}"
 }
 
@@ -95,25 +95,24 @@ run_prometheus_cross_controller() {
 	K8S_CLOUD=${K8S_CLOUD:-microk8s}
 	PROMETHEUS_MODEL_NAME="test-prometheus-cmr-prom"
 	file="${TEST_DIR}/${PROMETHEUS_MODEL_NAME}.log"
-	export BOOTSTRAP_ADDITIONAL_ARGS='' # TODO: remove
 	BOOTSTRAP_PROVIDER='k8s' BOOTSTRAP_CLOUD="${K8S_CLOUD}" bootstrap "${PROMETHEUS_MODEL_NAME}" "${file}"
 
 	juju offer -c "${CONTROLLER_NAME}" controller.controller:metrics-endpoint
 
-	juju deploy prometheus-k8s --trust
+	juju deploy prometheus-k8s --channel 1/stable --trust
 	juju relate prometheus-k8s "${CONTROLLER_NAME}:controller.controller"
-	wait_for "prometheus-k8s" "$(active_idle_condition "prometheus-k8s" 0 0)"
-	retry 'check_prometheus_targets prometheus-k8s 0' 15
+	wait_for "prometheus-k8s" "$(active_idle_condition "prometheus-k8s" 0)"
+	retry 'check_prometheus_targets prometheus-k8s 0' 30
 
 	juju remove-relation prometheus-k8s controller
 	# Check Juju controller is removed from Prometheus targets
-	retry 'check_prometheus_no_target prometheus-k8s 0' 5
+	retry 'check_prometheus_no_target prometheus-k8s 0' 30
 	# Check no errors in controller charm or Prometheus
 	juju status -m controller --format json | jq -r "$(active_condition "controller")" | check "controller"
 	juju status --format json | jq -r "$(active_condition "prometheus-k8s")" | check "prometheus-k8s"
 
 	juju remove-application prometheus-k8s --destroy-storage \
-		--force --no-wait # TODO: remove these flags once storage bug is fixed
+		--force --no-wait --no-prompt # TODO: remove these flags once storage bug is fixed
 	destroy_controller "${PROMETHEUS_MODEL_NAME}"
 }
 

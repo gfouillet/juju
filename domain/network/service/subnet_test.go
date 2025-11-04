@@ -5,25 +5,29 @@ package service
 
 import (
 	"context"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/network"
+	networktesting "github.com/juju/juju/core/network/testing"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type subnetSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	st *MockState
 }
 
-var _ = gc.Suite(&subnetSuite{})
+func TestSubnetSuite(t *testing.T) {
+	tc.Run(t, &subnetSuite{})
+}
 
-func (s *subnetSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *subnetSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.st = NewMockState(ctrl)
@@ -31,7 +35,7 @@ func (s *subnetSuite) setupMocks(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *subnetSuite) TestFailAddSubnet(c *gc.C) {
+func (s *subnetSuite) TestFailAddSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subnetInfo := network.SubnetInfo{
@@ -48,18 +52,18 @@ func (s *subnetSuite) TestFailAddSubnet(c *gc.C) {
 				ctx context.Context,
 				subnet network.SubnetInfo,
 			) error {
-				c.Assert(subnet.CIDR, gc.Equals, subnetInfo.CIDR)
-				c.Assert(subnet.ProviderId, gc.Equals, subnetInfo.ProviderId)
-				c.Assert(subnet.ProviderNetworkId, gc.Equals, subnetInfo.ProviderNetworkId)
-				c.Assert(subnet.AvailabilityZones, jc.SameContents, subnetInfo.AvailabilityZones)
+				c.Assert(subnet.CIDR, tc.Equals, subnetInfo.CIDR)
+				c.Assert(subnet.ProviderId, tc.Equals, subnetInfo.ProviderId)
+				c.Assert(subnet.ProviderNetworkId, tc.Equals, subnetInfo.ProviderNetworkId)
+				c.Assert(subnet.AvailabilityZones, tc.SameContents, subnetInfo.AvailabilityZones)
 				return errors.New("boom")
 			})
 
-	_, err := NewService(s.st, nil).AddSubnet(context.Background(), subnetInfo)
-	c.Assert(err, gc.ErrorMatches, "boom")
+	_, err := NewService(s.st, nil).AddSubnet(c.Context(), subnetInfo)
+	c.Assert(err, tc.ErrorMatches, "boom")
 }
 
-func (s *subnetSuite) TestAddSubnet(c *gc.C) {
+func (s *subnetSuite) TestAddSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subnetInfo := network.SubnetInfo{
@@ -77,21 +81,21 @@ func (s *subnetSuite) TestAddSubnet(c *gc.C) {
 				ctx context.Context,
 				subnet network.SubnetInfo,
 			) error {
-				c.Assert(subnet.CIDR, gc.Equals, subnetInfo.CIDR)
-				c.Assert(subnet.ProviderId, gc.Equals, subnetInfo.ProviderId)
-				c.Assert(subnet.ProviderNetworkId, gc.Equals, subnetInfo.ProviderNetworkId)
-				c.Assert(subnet.AvailabilityZones, jc.SameContents, subnetInfo.AvailabilityZones)
+				c.Assert(subnet.CIDR, tc.Equals, subnetInfo.CIDR)
+				c.Assert(subnet.ProviderId, tc.Equals, subnetInfo.ProviderId)
+				c.Assert(subnet.ProviderNetworkId, tc.Equals, subnetInfo.ProviderNetworkId)
+				c.Assert(subnet.AvailabilityZones, tc.SameContents, subnetInfo.AvailabilityZones)
 				expectedUUID = subnet.ID
 				return nil
 			})
 
-	returnedUUID, err := NewService(s.st, nil).AddSubnet(context.Background(), subnetInfo)
-	c.Assert(err, jc.ErrorIsNil)
+	returnedUUID, err := NewService(s.st, nil).AddSubnet(c.Context(), subnetInfo)
+	c.Assert(err, tc.ErrorIsNil)
 	// Verify that the passed UUID is also returned.
-	c.Assert(returnedUUID, gc.Equals, expectedUUID)
+	c.Assert(returnedUUID, tc.Equals, expectedUUID)
 }
 
-func (s *subnetSuite) TestRetrieveAllSubnets(c *gc.C) {
+func (s *subnetSuite) TestRetrieveAllSubnets(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subnetInfos := network.SubnetInfos{
@@ -103,75 +107,77 @@ func (s *subnetSuite) TestRetrieveAllSubnets(c *gc.C) {
 		},
 	}
 	s.st.EXPECT().GetAllSubnets(gomock.Any()).Return(subnetInfos, nil)
-	subnets, err := NewService(s.st, nil).GetAllSubnets(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subnets, jc.SameContents, subnetInfos)
+	subnets, err := NewService(s.st, nil).GetAllSubnets(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(subnets, tc.SameContents, subnetInfos)
 }
 
-func (s *subnetSuite) TestRetrieveSubnetByID(c *gc.C) {
+func (s *subnetSuite) TestRetrieveSubnetByID(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().GetSubnet(gomock.Any(), "subnet0")
-	_, err := NewService(s.st, nil).Subnet(context.Background(), "subnet0")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := NewService(s.st, nil).Subnet(c.Context(), "subnet0")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *subnetSuite) TestFailRetrieveSubnetByID(c *gc.C) {
+func (s *subnetSuite) TestFailRetrieveSubnetByID(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().GetSubnet(gomock.Any(), "unknown-subnet").
-		Return(nil, errors.NotFoundf("subnet %q", "unknown-subnet"))
-	_, err := NewService(s.st, nil).Subnet(context.Background(), "unknown-subnet")
-	c.Assert(err, gc.ErrorMatches, "subnet \"unknown-subnet\" not found")
+		Return(nil, errors.Errorf("subnet %q %w", "unknown-subnet", coreerrors.NotFound))
+	_, err := NewService(s.st, nil).Subnet(c.Context(), "unknown-subnet")
+	c.Assert(err, tc.ErrorMatches, "subnet \"unknown-subnet\" not found")
 }
 
-func (s *subnetSuite) TestRetrieveSubnetByCIDRs(c *gc.C) {
+func (s *subnetSuite) TestRetrieveSubnetByCIDRs(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().GetSubnetsByCIDR(gomock.Any(), "192.168.1.1", "10.0.0.1")
-	_, err := NewService(s.st, nil).SubnetsByCIDR(context.Background(), "192.168.1.1", "10.0.0.1")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := NewService(s.st, nil).SubnetsByCIDR(c.Context(), "192.168.1.1", "10.0.0.1")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *subnetSuite) TestFailRetrieveSubnetByCIDRs(c *gc.C) {
+func (s *subnetSuite) TestFailRetrieveSubnetByCIDRs(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().GetSubnetsByCIDR(gomock.Any(), "192.168.1.1", "10.0.0.1").
 		Return(nil, errors.New("querying subnets"))
-	_, err := NewService(s.st, nil).SubnetsByCIDR(context.Background(), "192.168.1.1", "10.0.0.1")
-	c.Assert(err, gc.ErrorMatches, "querying subnets")
+	_, err := NewService(s.st, nil).SubnetsByCIDR(c.Context(), "192.168.1.1", "10.0.0.1")
+	c.Assert(err, tc.ErrorMatches, "querying subnets")
 }
 
-func (s *subnetSuite) TestUpdateSubnet(c *gc.C) {
+func (s *subnetSuite) TestUpdateSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.st.EXPECT().UpdateSubnet(gomock.Any(), "subnet0", "space0")
-	err := NewService(s.st, nil).UpdateSubnet(context.Background(), "subnet0", "space0")
-	c.Assert(err, jc.ErrorIsNil)
+	spUUID := networktesting.GenSpaceUUID(c)
+	s.st.EXPECT().UpdateSubnet(gomock.Any(), "subnet0", spUUID)
+	err := NewService(s.st, nil).UpdateSubnet(c.Context(), "subnet0", spUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *subnetSuite) TestFailUpdateSubnet(c *gc.C) {
+func (s *subnetSuite) TestFailUpdateSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.st.EXPECT().UpdateSubnet(gomock.Any(), "unknown-subnet", "space0").
-		Return(errors.NotFoundf("subnet %q", "unknown-subnet"))
-	err := NewService(s.st, nil).UpdateSubnet(context.Background(), "unknown-subnet", "space0")
-	c.Assert(err, gc.ErrorMatches, "subnet \"unknown-subnet\" not found")
+	spUUID := networktesting.GenSpaceUUID(c)
+	s.st.EXPECT().UpdateSubnet(gomock.Any(), "unknown-subnet", spUUID).
+		Return(errors.Errorf("subnet %q %w", "unknown-subnet", coreerrors.NotFound))
+	err := NewService(s.st, nil).UpdateSubnet(c.Context(), "unknown-subnet", spUUID)
+	c.Assert(err, tc.ErrorMatches, "subnet \"unknown-subnet\" not found")
 }
 
-func (s *subnetSuite) TestRemoveSubnet(c *gc.C) {
+func (s *subnetSuite) TestRemoveSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().DeleteSubnet(gomock.Any(), "subnet0")
-	err := NewService(s.st, nil).RemoveSubnet(context.Background(), "subnet0")
-	c.Assert(err, jc.ErrorIsNil)
+	err := NewService(s.st, nil).RemoveSubnet(c.Context(), "subnet0")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *subnetSuite) TestFailRemoveSubnet(c *gc.C) {
+func (s *subnetSuite) TestFailRemoveSubnet(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.st.EXPECT().DeleteSubnet(gomock.Any(), "unknown-subnet").
-		Return(errors.NotFoundf("subnet %q", "unknown-subnet"))
-	err := NewService(s.st, nil).RemoveSubnet(context.Background(), "unknown-subnet")
-	c.Assert(err, gc.ErrorMatches, "subnet \"unknown-subnet\" not found")
+		Return(errors.Errorf("subnet %q %w", "unknown-subnet", coreerrors.NotFound))
+	err := NewService(s.st, nil).RemoveSubnet(c.Context(), "unknown-subnet")
+	c.Assert(err, tc.ErrorMatches, "subnet \"unknown-subnet\" not found")
 }

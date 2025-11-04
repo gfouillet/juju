@@ -18,7 +18,7 @@ import (
 )
 
 // NewClientFunc is the function signature for creating a new client.
-type NewClientFunc func(context.Context, coretrace.TaggedTracerNamespace, string, bool, float64) (Client, ClientTracerProvider, ClientTracer, error)
+type NewClientFunc func(context.Context, coretrace.TaggedTracerNamespace, string, bool, float64, time.Duration, logger.Logger) (Client, ClientTracerProvider, ClientTracer, error)
 
 type tracer struct {
 	tomb tomb.Tomb
@@ -39,10 +39,11 @@ func NewTracerWorker(
 	insecureSkipVerify bool,
 	stackTracesEnabled bool,
 	sampleRatio float64,
+	tailSamplingThreshold time.Duration,
 	logger logger.Logger,
 	newClient NewClientFunc,
 ) (TrackedTracer, error) {
-	client, clientProvider, clientTracer, err := newClient(ctx, namespace, endpoint, insecureSkipVerify, sampleRatio)
+	client, clientProvider, clientTracer, err := newClient(ctx, namespace, endpoint, insecureSkipVerify, sampleRatio, tailSamplingThreshold, logger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -99,8 +100,11 @@ func (t *tracer) Start(ctx context.Context, name string, opts ...coretrace.Optio
 
 	ctx, span = t.clientTracer.Start(ctx, name, trace.WithAttributes(attrs...))
 
-	if spanContext := span.SpanContext(); spanContext.IsSampled() {
-		t.logger.Debugf("SpanContext: trace-id %s, span-id %s", spanContext.TraceID(), spanContext.SpanID())
+	// If the span is sampled then we should log the trace and span ID.
+	if t.logger.IsLevelEnabled(logger.TRACE) {
+		if spanContext := span.SpanContext(); spanContext.IsSampled() {
+			t.logger.Tracef(ctx, "SpanContext: trace-id %s, span-id %s", spanContext.TraceID(), spanContext.SpanID())
+		}
 	}
 
 	managed := &managedSpan{
@@ -135,15 +139,15 @@ func (t *tracer) loop() error {
 		defer cancel()
 
 		if err := t.clientProvider.ForceFlush(ctx); err != nil {
-			t.logger.Infof("failed to flush client: %v", err)
+			t.logger.Infof(ctx, "failed to flush client: %v", err)
 		}
 
 		if err := t.client.Stop(ctx); err != nil {
-			t.logger.Infof("failed to stop client: %v", err)
+			t.logger.Infof(ctx, "failed to stop client: %v", err)
 		}
 
 		if err := t.clientProvider.Shutdown(ctx); err != nil {
-			t.logger.Infof("failed to shutdown provider: %v", err)
+			t.logger.Infof(ctx, "failed to shutdown provider: %v", err)
 		}
 	}()
 
@@ -161,10 +165,11 @@ func (w *tracer) scopedContext(ctx context.Context) (context.Context, context.Ca
 
 // buildRequestContext returns a context that may contain a remote span context.
 func (t *tracer) buildRequestContext(ctx context.Context) context.Context {
-	traceHex, spanHex, flags := coretrace.ScopeFromContext(ctx)
-	if traceHex == "" || spanHex == "" {
+	traceHex, spanHex, flags, ok := coretrace.ScopeFromContext(ctx)
+	if !ok {
 		return ctx
 	}
+
 	traceID, err := trace.TraceIDFromHex(traceHex)
 	if err != nil {
 		// There is clearly something wrong with the trace ID, so we
@@ -193,7 +198,10 @@ func (t *tracer) buildRequestContext(ctx context.Context) context.Context {
 	// We have a remote span context, so we should use it. We should then remove
 	// the traceID and spanID from the context so that we don't attempt to parse
 	// them again.
-	ctx = coretrace.WithTraceScope(ctx, "", "", 0)
+	ctx = coretrace.RemoveTraceScope(ctx)
+
+	// Add the trace ID to the context so that we can log it.
+	ctx = coretrace.WithTraceID(ctx, traceID.String())
 	return trace.ContextWithRemoteSpanContext(ctx, sc)
 }
 
@@ -276,7 +284,7 @@ type limitedSpan struct {
 }
 
 func (s *limitedSpan) End(attrs ...coretrace.Attribute) {
-	s.logger.Warningf("attempted to end a span that you don't own")
+	s.logger.Warningf(context.Background(), "attempted to end a span that you don't own")
 }
 
 func attributes(attrs []coretrace.Attribute) []attribute.KeyValue {

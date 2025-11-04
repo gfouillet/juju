@@ -4,15 +4,13 @@
 package modelmigration
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/internal/storage"
+	domainstorage "github.com/juju/juju/domain/storage"
 )
 
 type exportSuite struct {
@@ -20,9 +18,11 @@ type exportSuite struct {
 	service     *MockExportService
 }
 
-var _ = gc.Suite(&exportSuite{})
+func TestExportSuite(t *testing.T) {
+	tc.Run(t, &exportSuite{})
+}
 
-func (s *exportSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *exportSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.coordinator = NewMockCoordinator(ctrl)
@@ -37,31 +37,33 @@ func (s *exportSuite) newExportOperation() *exportOperation {
 	}
 }
 
-func (s *exportSuite) TestExport(c *gc.C) {
+func (s *exportSuite) TestExport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
 	dst.AddMachine(description.MachineArgs{
-		Id: names.NewMachineTag("666"),
+		Id: "666",
 	})
-	c.Assert(dst.StoragePools(), gc.HasLen, 0)
+	c.Assert(dst.StoragePools(), tc.HasLen, 0)
 
-	sc, err := storage.NewConfig("ebs-fast", "ebs", map[string]any{"foo": "bar"})
-	c.Assert(err, jc.ErrorIsNil)
-	builtIn, err := storage.NewConfig("loop", "loop", nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.service.EXPECT().AllStoragePools(gomock.Any()).
+	s.service.EXPECT().ListStoragePools(gomock.Any()).
 		Times(1).
-		Return([]*storage.Config{sc, builtIn}, nil)
+		Return([]domainstorage.StoragePool{
+			{
+				Name:     "ebs-fast",
+				Provider: "ebs",
+				Attrs:    map[string]string{"foo": "bar"},
+			},
+		}, nil)
 
 	op := s.newExportOperation()
-	err = op.Execute(context.Background(), dst)
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorIsNil)
 
 	pools := dst.StoragePools()
-	c.Assert(pools, gc.HasLen, 1)
+	c.Assert(pools, tc.HasLen, 1)
 	sp := pools[0]
-	c.Check(sp.Name(), gc.Equals, "ebs-fast")
-	c.Check(sp.Provider(), gc.Equals, "ebs")
-	c.Assert(sp.Attributes(), jc.DeepEquals, map[string]any{"foo": "bar"})
+	c.Check(sp.Name(), tc.Equals, "ebs-fast")
+	c.Check(sp.Provider(), tc.Equals, "ebs")
+	c.Assert(sp.Attributes(), tc.DeepEquals, map[string]any{"foo": "bar"})
 }

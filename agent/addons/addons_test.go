@@ -5,33 +5,34 @@ package addons_test
 
 import (
 	"runtime"
+	"testing"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent/addons"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/introspection"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type introspectionSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&introspectionSuite{})
+func TestIntrospectionSuite(t *testing.T) {
+	tc.Run(t, &introspectionSuite{})
+}
 
-func (s *introspectionSuite) TestStartNonLinux(c *gc.C) {
+func (s *introspectionSuite) TestStartNonLinux(c *tc.C) {
 	if runtime.GOOS == "linux" {
 		c.Skip("testing for non-linux")
 	}
@@ -46,18 +47,17 @@ func (s *introspectionSuite) TestStartNonLinux(c *gc.C) {
 	}
 
 	err := addons.StartIntrospection(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(started, jc.IsFalse)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(started, tc.IsFalse)
 }
 
-func (s *introspectionSuite) TestStartError(c *gc.C) {
+func (s *introspectionSuite) TestStartError(c *tc.C) {
 	if runtime.GOOS != "linux" {
 		c.Skip("introspection worker not supported on non-linux")
 	}
 
 	cfg := addons.IntrospectionConfig{
-		AgentTag:      names.NewMachineTag("42"),
-		NewSocketName: addons.DefaultIntrospectionSocketName,
+		AgentDir: c.MkDir(),
 		WorkerFunc: func(_ introspection.Config) (worker.Worker, error) {
 			return nil, errors.New("boom")
 		},
@@ -65,10 +65,10 @@ func (s *introspectionSuite) TestStartError(c *gc.C) {
 	}
 
 	err := addons.StartIntrospection(cfg)
-	c.Check(err, gc.ErrorMatches, "boom")
+	c.Check(err, tc.ErrorMatches, "boom")
 }
 
-func (s *introspectionSuite) TestStartSuccess(c *gc.C) {
+func (s *introspectionSuite) TestStartSuccess(c *tc.C) {
 	if runtime.GOOS != "linux" {
 		c.Skip("introspection worker not supported on non-linux")
 	}
@@ -84,12 +84,11 @@ func (s *introspectionSuite) TestStartSuccess(c *gc.C) {
 		Logger:     loggo.GetLogger("juju.worker.dependency"),
 	}
 	engine, err := dependency.NewEngine(config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	cfg := addons.IntrospectionConfig{
-		AgentTag:      names.NewMachineTag("42"),
-		Engine:        engine,
-		NewSocketName: func(tag names.Tag) string { return "bananas" },
+		AgentDir: c.MkDir(),
+		Engine:   engine,
 		WorkerFunc: func(cfg introspection.Config) (worker.Worker, error) {
 			fake.config = cfg
 			return fake, nil
@@ -98,10 +97,10 @@ func (s *introspectionSuite) TestStartSuccess(c *gc.C) {
 	}
 
 	err = addons.StartIntrospection(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(fake.config.DepEngine, gc.Equals, engine)
-	c.Check(fake.config.SocketName, gc.Equals, "bananas")
+	c.Check(fake.config.DepEngine, tc.Equals, engine)
+	c.Check(fake.config.SocketName, tc.HasSuffix, "introspection.socket")
 
 	// Stopping the engine causes the introspection worker to stop.
 	engine.Kill()
@@ -111,11 +110,6 @@ func (s *introspectionSuite) TestStartSuccess(c *gc.C) {
 	case <-time.After(coretesting.LongWait):
 		c.Fatalf("worker did not get stopped")
 	}
-}
-
-func (s *introspectionSuite) TestDefaultIntrospectionSocketName(c *gc.C) {
-	name := addons.DefaultIntrospectionSocketName(names.NewMachineTag("42"))
-	c.Assert(name, gc.Equals, "jujud-machine-42")
 }
 
 type dummyWorker struct {
@@ -133,12 +127,14 @@ func (d *dummyWorker) Wait() error {
 }
 
 type registerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&registerSuite{})
+func TestRegisterSuite(t *testing.T) {
+	tc.Run(t, &registerSuite{})
+}
 
-func (s *registerSuite) TestRegisterEngineMetrics(c *gc.C) {
+func (s *registerSuite) TestRegisterEngineMetrics(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -160,13 +156,13 @@ func (s *registerSuite) TestRegisterEngineMetrics(c *gc.C) {
 	}
 
 	err := addons.RegisterEngineMetrics(registry, collector, worker, sink)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	worker.Kill()
 
 	select {
 	case <-done:
-	case <-time.After(testing.ShortWait):
+	case <-time.After(testhelpers.ShortWait):
 	}
 }
 

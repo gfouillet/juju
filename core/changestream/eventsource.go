@@ -4,9 +4,10 @@
 package changestream
 
 import (
-	"github.com/juju/errors"
+	"context"
 
 	"github.com/juju/juju/core/database"
+	"github.com/juju/juju/internal/errors"
 )
 
 // EventSource describes the ability to subscribe
@@ -14,7 +15,7 @@ import (
 type EventSource interface {
 	// Subscribe returns a subscription that can receive events from
 	// a change stream according to the input subscription options.
-	Subscribe(opts ...SubscriptionOption) (Subscription, error)
+	Subscribe(summary string, opts ...SubscriptionOption) (Subscription, error)
 }
 
 // WatchableDB describes the ability to run transactions against a database
@@ -27,7 +28,7 @@ type WatchableDB interface {
 // WatchableDBGetter describes the ability to get
 // a WatchableDB for a particular namespace.
 type WatchableDBGetter interface {
-	GetWatchableDB(string) (WatchableDB, error)
+	GetWatchableDB(context.Context, string) (WatchableDB, error)
 }
 
 // NewTxnRunnerFactory returns a TxnRunnerFactory for the input
@@ -37,21 +38,21 @@ type WatchableDBGetter interface {
 // State objects should only be concerned with persistence and retrieval.
 // Watchers are the concern of the service layer.
 func NewTxnRunnerFactory(f WatchableDBFactory) database.TxnRunnerFactory {
-	return func() (database.TxnRunner, error) {
-		r, err := f()
-		return r, errors.Trace(err)
+	return func(ctx context.Context) (database.TxnRunner, error) {
+		r, err := f(ctx)
+		return r, errors.Capture(err)
 	}
 }
 
 // WatchableDBFactory provides a function for getting a database.TxnRunner or
 // an error.
-type WatchableDBFactory = func() (WatchableDB, error)
+type WatchableDBFactory = func(context.Context) (WatchableDB, error)
 
 // NewWatchableDBFactoryForNamespace returns a WatchableDBFactory
 // for the input namespaced factory function and namespace.
-func NewWatchableDBFactoryForNamespace[T WatchableDB](f func(string) (T, error), ns string) WatchableDBFactory {
-	return func() (WatchableDB, error) {
-		r, err := f(ns)
-		return r, errors.Trace(err)
+func NewWatchableDBFactoryForNamespace[T WatchableDB](f func(context.Context, string) (T, error), ns string) WatchableDBFactory {
+	return func(ctx context.Context) (WatchableDB, error) {
+		r, err := f(ctx, ns)
+		return r, errors.Capture(err)
 	}
 }

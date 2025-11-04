@@ -4,6 +4,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,17 +13,16 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/viddy"
 
 	"github.com/juju/juju/api/client/client"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/storage"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/rpc/params"
@@ -31,7 +31,7 @@ import (
 var logger = internallogger.GetLogger("juju.cmd.juju.status")
 
 type statusAPI interface {
-	Status(*client.StatusArgs) (*params.FullStatus, error)
+	Status(context.Context, *client.StatusArgs) (*params.FullStatus, error)
 	Close() error
 }
 
@@ -71,9 +71,6 @@ type statusCommand struct {
 
 	// storage indicates if 'storage' section is displayed
 	storage bool
-
-	// watch indicates the time to wait between consecutive status queries
-	watch time.Duration
 }
 
 var usageSummary = `
@@ -86,68 +83,55 @@ do not match.
 
     juju status [<selector> [...]]
 
-<selector> selects machines, units or applications from the model to display.
-Wildcard characters (*) enable multiple entities to be matched at the same
+` + "`<selector>`" + ` selects machines, units or applications from the model to display.
+Wildcard characters (` + "`*`" + `) enable multiple entities to be matched at the same
 time.
 
     (<machine>|<unit>|<application>)[*]
 
-When an entity that matches <selector> is integrated with other applications, the 
-status of those applications will also be presented. By default (without a 
-<selector>) the status of all applications and their units will be displayed.
+When an entity that matches <selector> is integrated with other applications, the
+status of those applications will also be presented. By default (without a
+` + "`<selector>`" + `) the status of all applications and their units will be displayed.
 
 
-Altering the output format
+### Altering the output format
 
-The '--format' option allows you to specify how the status report is formatted.
+The ` + "`--format`" + ` option allows you to specify how the status report is formatted.
 
-  --format=tabular  (default)
-                    Display information about all aspects of the model in a 
-                    human-centric manner. Omits some information by default.
-                    Use the '--integrations' and '--storage' options to include
-                    all available information.
+- ` + "`--format=tabular`" + ` (default):
+Displays information about all aspects of the model in a human-centric manner.
+Omits some information by default.
+Use the ` + "`--relations`" + ` and ` + "`--storage`" + ` options to include all available information.
+- ` + "`--format=line`" + `, ` + "`--format=short`" + `, ` + "`--format=oneline `" + `:
+Reports information from units. Includes their IP address, open ports and the status of the workload and agent.
+- ` + "`--format=summary`" + `:
+Reports aggregated information about the model. Includes a description of subnets and ports that are in use,
+the counts of applications, units, and machines by status code.
+- ` + "`--format=json`" + `, ` + "`--format=yaml`" + `:
+Provides information in a ` + "`JSON`" + ` or ` + "`YAML`" + ` format for programmatic use.
 
-  --format=line
-  --format=short
-  --format=oneline
-                    Reports information from units. Includes their IP address,
-                    open ports and the status of the workload and agent.
-
-  --format=summary
-                    Reports aggregated information about the model. Includes 
-                    a description of subnets and ports that are in use, the
-                    counts of applications, units, and machines by status code.
-
-  --format=json
-  --format=yaml
-                    Provide information in a JSON or YAML formats for 
-                    programmatic use.
 `
 
 const usageExamples = `
-Report the status of units hosted on machine 0:
+Report the status of units hosted on machine ` + "`0`" + `:
 
     juju status 0
 
-Report the status of the the mysql application:
+Report the status of the ` + "`mysql`" + ` application:
 
     juju status mysql
 
-Report the status for applications that start with nova-:
+Report the status for applications that start with ` + "`nova-`" + `:
 
     juju status nova-*
 
-Include information about storage and integrations in output:
+Include information about storage and relations in output:
 
-    juju status --storage --integrations
+    juju status --storage --relations
 
-Provide output as valid JSON:
+Provide output as valid ` + "`JSON`" + `:
 
     juju status --format=json
-
-Watch the status every five seconds:
-
-    juju status --watch 5s
 
 Show only applications/units in active status:
 
@@ -180,14 +164,12 @@ func (c *statusCommand) SetFlags(f *gnuflag.FlagSet) {
 
 	f.BoolVar(&c.color, "color", false, "Use ANSI color codes in tabular output")
 	f.BoolVar(&c.noColor, "no-color", false, "Disable ANSI color codes in tabular output")
-	f.BoolVar(&c.integrations, "integrations", false, "Show 'integrations' section in tabular output")
-	f.BoolVar(&c.relations, "relations", false, "The same as '--integrations'")
-	f.BoolVar(&c.storage, "storage", false, "Show 'storage' section in tabular output")
+	f.BoolVar(&c.integrations, "integrations", false, "Same as `--relations`")
+	f.BoolVar(&c.relations, "relations", false, "Show relations section in tabular output")
+	f.BoolVar(&c.storage, "storage", false, "Show storage section in tabular output")
 
 	f.IntVar(&c.retryCount, "retry-count", 3, "Number of times to retry API failures")
 	f.DurationVar(&c.retryDelay, "retry-delay", 100*time.Millisecond, "Time to wait between retry attempts")
-
-	f.DurationVar(&c.watch, "watch", 0, "Watch the status every period of time")
 
 	c.checkProvidedIgnoredFlagF = func() set.Strings {
 		ignoredFlagForNonTabularFormat := set.NewStrings(
@@ -242,9 +224,9 @@ func (c *statusCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *statusCommand) getStatusAPI() (statusAPI, error) {
+func (c *statusCommand) getStatusAPI(ctx context.Context) (statusAPI, error) {
 	if c.statusAPI == nil {
-		api, err := c.NewAPIClient()
+		api, err := c.NewAPIClient(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -261,12 +243,12 @@ func (c *statusCommand) close() {
 	}
 }
 
-func (c *statusCommand) getStatus(includeStorage bool) (*params.FullStatus, error) {
-	apiclient, err := c.getStatusAPI()
+func (c *statusCommand) getStatus(ctx context.Context, includeStorage bool) (*params.FullStatus, error) {
+	apiclient, err := c.getStatusAPI(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return apiclient.Status(&client.StatusArgs{
+	return apiclient.Status(ctx, &client.StatusArgs{
 		Patterns:       c.patterns,
 		IncludeStorage: includeStorage,
 	})
@@ -292,14 +274,14 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 	}
 
 	// Always attempt to get the status at least once, and retry if it fails.
-	status, err := c.getStatus(showStorage)
+	status, err := c.getStatus(ctx, showStorage)
 	if err != nil && !modelcmd.IsModelMigratedError(err) {
 		for i := 0; i < c.retryCount; i++ {
 			// fun bit - make sure a new api connection is used for each new call
 			c.SetModelAPI(nil)
 			// Wait for a bit before retries.
 			<-c.clock.After(c.retryDelay)
-			status, err = c.getStatus(showStorage)
+			status, err = c.getStatus(ctx, showStorage)
 			if err == nil || modelcmd.IsModelMigratedError(err) {
 				break
 			}
@@ -321,10 +303,6 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	activeBranch, err := c.ActiveBranch()
-	if err != nil {
-		return errors.Trace(err)
-	}
 
 	formatterParams := NewStatusFormatterParams{
 		Status:         status,
@@ -332,7 +310,6 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 		OutputName:     c.out.Name(),
 		ISOTime:        c.isoTime,
 		ShowRelations:  showIntegrations,
-		ActiveBranch:   activeBranch,
 	}
 	if showStorage {
 		// TODO: move this into StatusFormatter
@@ -383,52 +360,22 @@ func (c *statusCommand) runStatus(ctx *cmd.Context) error {
 	return nil
 }
 
-// statusCommandForViddy returns the full juju command including all args
-// except the '--watch' flag.
-func (c *statusCommand) statusCommandForViddy(args []string) []string {
-	var jujuStatusArgsWithoutWatchFlag []string
-
-	for i := range args {
-		// In order to support gnu flags, we must first check if the
-		// watch flag is using gnu style. In that case, we must remove
-		// the entire arg, since it's one entire string (e.g.
-		// --watch=1s).
-		if strings.HasPrefix(args[i], "--watch=") {
-			jujuStatusArgsWithoutWatchFlag = append(args[:i], args[i+1:]...)
-			break
-		}
-		// If the flag is not using gnu style, we must remove both the
-		// flag and the argument (e.g --watch 1s)
-		if args[i] == "--watch" {
-			jujuStatusArgsWithoutWatchFlag = append(args[:i], args[i+2:]...)
-			break
-		}
-	}
+// statusCommandAllArgs returns the full juju command including all args
+func (c *statusCommand) statusCommandAllArgs(args []string) []string {
+	jujuStatusArgs := args
 
 	if !c.noColor {
-		jujuStatusArgsWithoutWatchFlag = append(jujuStatusArgsWithoutWatchFlag, "--color")
+		jujuStatusArgs = append(jujuStatusArgs, "--color")
 	}
-	return jujuStatusArgsWithoutWatchFlag
+	return jujuStatusArgs
 }
 
 func (c *statusCommand) Run(ctx *cmd.Context) error {
 	defer c.close()
 
-	if c.watch != 0 {
-		jujuStatusArgs := c.statusCommandForViddy(os.Args)
-
-		viddyArgs := append([]string{"--no-title", "--interval", c.watch.String()}, jujuStatusArgs...)
-
-		// Define tview styles and launch preconfiged Viddy watcher
-		app := viddy.NewPreconfigedViddy(viddyArgs)
-		if err := app.Run(); err != nil {
-			return errors.Annotate(err, "unable to run Viddy (watcher for status command)")
-		}
-	} else {
-		err := c.runStatus(ctx)
-		if err != nil {
-			return err
-		}
+	err := c.runStatus(ctx)
+	if err != nil {
+		return err
 	}
 
 	return nil

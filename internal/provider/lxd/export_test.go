@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/juju/clock"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/internal/container/lxd"
@@ -87,10 +88,10 @@ func ExposeEnvServer(env *environ) Server {
 	return env.server()
 }
 
-func GetImageSources(env environs.Environ) ([]lxd.ServerSpec, error) {
+func GetImageSources(c *tc.C, env environs.Environ) ([]lxd.ServerSpec, error) {
 	lxdEnv, ok := env.(*environ)
 	if !ok {
 		return nil, errors.New("not a LXD environ")
 	}
-	return lxdEnv.getImageSources()
+	return lxdEnv.getImageSources(c.Context())
 }

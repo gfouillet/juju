@@ -4,32 +4,33 @@
 package secretbackends_test
 
 import (
+	"testing"
 	"time"
 
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/errors"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	apisecretbackends "github.com/juju/juju/api/client/secretbackends"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/secretbackends"
-	"github.com/juju/juju/cmd/juju/secretbackends/mocks"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/jujuclient"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type ListSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	store             *jujuclient.MemStore
-	secretBackendsAPI *mocks.MockListSecretBackendsAPI
+	secretBackendsAPI *secretbackends.MockListSecretBackendsAPI
 }
 
-var _ = gc.Suite(&ListSuite{})
+func TestListSuite(t *testing.T) {
+	tc.Run(t, &ListSuite{})
+}
 
-func (s *ListSuite) SetUpTest(c *gc.C) {
+func (s *ListSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	store := jujuclient.NewMemStore()
 	store.Controllers["mycontroller"] = jujuclient.ControllerDetails{}
@@ -37,10 +38,10 @@ func (s *ListSuite) SetUpTest(c *gc.C) {
 	s.store = store
 }
 
-func (s *ListSuite) setup(c *gc.C) *gomock.Controller {
+func (s *ListSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.secretBackendsAPI = mocks.NewMockListSecretBackendsAPI(ctrl)
+	s.secretBackendsAPI = secretbackends.NewMockListSecretBackendsAPI(ctrl)
 
 	return ctrl
 }
@@ -49,10 +50,10 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-func (s *ListSuite) TestListTabular(c *gc.C) {
+func (s *ListSuite) TestListTabular(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretBackendsAPI.EXPECT().ListSecretBackends(nil, false).Return(
+	s.secretBackendsAPI.EXPECT().ListSecretBackends(gomock.Any(), nil, false).Return(
 		[]apisecretbackends.SecretBackend{{
 			Name:                "myvault",
 			BackendType:         "vault",
@@ -73,19 +74,19 @@ func (s *ListSuite) TestListTabular(c *gc.C) {
 	s.secretBackendsAPI.EXPECT().Close().Return(nil)
 
 	ctx, err := cmdtesting.RunCommand(c, secretbackends.NewListCommandForTest(s.store, s.secretBackendsAPI))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
+	c.Assert(out, tc.Equals, `
 Name      Type        Secrets  Message
 internal  controller  668                              
 myvault   vault       666      error: vault is sealed  
 `[1:])
 }
 
-func (s *ListSuite) TestListYAML(c *gc.C) {
+func (s *ListSuite) TestListYAML(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretBackendsAPI.EXPECT().ListSecretBackends(nil, true).Return(
+	s.secretBackendsAPI.EXPECT().ListSecretBackends(gomock.Any(), nil, true).Return(
 		[]apisecretbackends.SecretBackend{{
 			ID:                  "vault-id",
 			Name:                "myvault",
@@ -109,9 +110,9 @@ func (s *ListSuite) TestListYAML(c *gc.C) {
 	s.secretBackendsAPI.EXPECT().Close().Return(nil)
 
 	ctx, err := cmdtesting.RunCommand(c, secretbackends.NewListCommandForTest(s.store, s.secretBackendsAPI), "--reveal", "--format", "yaml")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
+	c.Assert(out, tc.Equals, `
 error-999:
   secrets: 0
   status: error
@@ -133,10 +134,10 @@ myvault:
 `[1:])
 }
 
-func (s *ListSuite) TestListJSON(c *gc.C) {
+func (s *ListSuite) TestListJSON(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretBackendsAPI.EXPECT().ListSecretBackends(nil, true).Return(
+	s.secretBackendsAPI.EXPECT().ListSecretBackends(gomock.Any(), nil, true).Return(
 		[]apisecretbackends.SecretBackend{{
 			Name:        "internal",
 			BackendType: "controller",
@@ -146,9 +147,9 @@ func (s *ListSuite) TestListJSON(c *gc.C) {
 	s.secretBackendsAPI.EXPECT().Close().Return(nil)
 
 	ctx, err := cmdtesting.RunCommand(c, secretbackends.NewListCommandForTest(s.store, s.secretBackendsAPI), "--reveal", "--format", "json")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	out := cmdtesting.Stdout(ctx)
-	c.Assert(out, gc.Equals, `
+	c.Assert(out, tc.Equals, `
 {"internal":{"backend":"controller","secrets":668,"status":"active"}}
 `[1:])
 }

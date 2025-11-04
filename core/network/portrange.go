@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // GroupedPortRanges represents a list of PortRange instances grouped by a
-// particular featureflag.
+// particular feature. (e.g. endpoint, unit name)
 type GroupedPortRanges map[string][]PortRange
 
 // MergePendingOpenPortRanges will merge this group's port ranges with the
@@ -95,8 +95,8 @@ func (grp GroupedPortRanges) UniquePortRanges() []PortRange {
 
 // Clone returns a copy of this port range grouping.
 func (grp GroupedPortRanges) Clone() GroupedPortRanges {
-	if len(grp) == 0 {
-		return nil
+	if grp == nil {
+		return make(GroupedPortRanges)
 	}
 
 	grpCopy := make(GroupedPortRanges, len(grp))
@@ -268,7 +268,7 @@ func ParsePortRange(inPortRange string) (PortRange, error) {
 	// Parse the ports.
 	portRange, err := parsePortRange(inPortRange)
 	if err != nil {
-		return portRange, errors.Trace(err)
+		return portRange, errors.Capture(err)
 	}
 	if portRange.FromPort == -1 {
 		protocol = "icmp"
@@ -302,17 +302,17 @@ func parsePortRange(portRange string) (PortRange, error) {
 		} else {
 			port, err := strconv.Atoi(parts[0])
 			if err != nil {
-				return result, errors.Annotatef(err, "invalid port %q", portRange)
+				return result, errors.Errorf("invalid port %q: %w", portRange, err)
 			}
 			start, end = port, port
 		}
 	} else {
 		var err error
 		if start, err = strconv.Atoi(parts[0]); err != nil {
-			return result, errors.Annotatef(err, "invalid port %q", parts[0])
+			return result, errors.Errorf("invalid port %q: %w", parts[0], err)
 		}
 		if end, err = strconv.Atoi(parts[1]); err != nil {
-			return result, errors.Annotatef(err, "invalid port %q", parts[1])
+			return result, errors.Errorf("invalid port %q: %w", parts[1], err)
 		}
 	}
 

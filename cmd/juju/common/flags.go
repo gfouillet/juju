@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/utils/v4"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // BootstrapConstraintsFlag records constraints set in bootstrap command
@@ -34,7 +34,7 @@ func (c *BootstrapConstraintsFlag) Set(value string) error {
 }
 
 // ConstraintsFlag records constraints set in add-machine, bootstrap, deploy
-// and enable-ha commands via constraints flag.
+// commands via constraints flag.
 type ConstraintsFlag []string
 
 // String implements gnuflag.Value.String.

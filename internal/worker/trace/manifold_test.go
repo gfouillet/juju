@@ -5,14 +5,15 @@ package trace
 
 import (
 	"context"
+	"testing"
+	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/dependency"
 	dependencytesting "github.com/juju/worker/v4/dependency/testing"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/logger"
 	coretrace "github.com/juju/juju/core/trace"
@@ -22,31 +23,33 @@ type manifoldSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
 
 	cfg.AgentName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg.Clock = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.Logger = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.NewTracerWorker = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.Kind = coretrace.Kind("")
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
 func (s *manifoldSuite) getConfig() ManifoldConfig {
@@ -54,7 +57,7 @@ func (s *manifoldSuite) getConfig() ManifoldConfig {
 		AgentName: "agent",
 		Clock:     s.clock,
 		Logger:    s.logger,
-		NewTracerWorker: func(context.Context, coretrace.TaggedTracerNamespace, string, bool, bool, float64, logger.Logger, NewClientFunc) (TrackedTracer, error) {
+		NewTracerWorker: func(context.Context, coretrace.TaggedTracerNamespace, string, bool, bool, float64, time.Duration, logger.Logger, NewClientFunc) (TrackedTracer, error) {
 			return nil, nil
 		},
 		Kind: coretrace.KindController,
@@ -70,11 +73,11 @@ func (s *manifoldSuite) newGetter() dependency.Getter {
 
 var expectedInputs = []string{"agent"}
 
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(Manifold(s.getConfig()).Inputs, jc.SameContents, expectedInputs)
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig()).Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *manifoldSuite) TestStart(c *gc.C) {
+func (s *manifoldSuite) TestStart(c *tc.C) {
 	test := func(enabled bool) {
 		defer s.setupMocks(c).Finish()
 
@@ -84,8 +87,8 @@ func (s *manifoldSuite) TestStart(c *gc.C) {
 			s.expectOpenTelemetry()
 		}
 
-		w, err := Manifold(s.getConfig()).Start(context.Background(), s.newGetter())
-		c.Assert(err, jc.ErrorIsNil)
+		w, err := Manifold(s.getConfig()).Start(c.Context(), s.newGetter())
+		c.Assert(err, tc.ErrorIsNil)
 		workertest.CleanKill(c, w)
 	}
 
@@ -102,4 +105,5 @@ func (s *manifoldSuite) expectOpenTelemetry() {
 	s.config.EXPECT().OpenTelemetryInsecure().Return(false)
 	s.config.EXPECT().OpenTelemetryStackTraces().Return(true)
 	s.config.EXPECT().OpenTelemetrySampleRatio().Return(0.5)
+	s.config.EXPECT().OpenTelemetryTailSamplingThreshold().Return(time.Second)
 }

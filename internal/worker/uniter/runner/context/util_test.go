@@ -9,12 +9,10 @@ import (
 	"time"
 
 	"github.com/juju/clock/testclock"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	apiuniter "github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/life"
@@ -22,22 +20,22 @@ import (
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/uuid"
 	uniterapi "github.com/juju/juju/internal/worker/uniter/api"
 	runnercontext "github.com/juju/juju/internal/worker/uniter/runner/context"
-	"github.com/juju/juju/internal/worker/uniter/runner/context/mocks"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	runnertesting "github.com/juju/juju/internal/worker/uniter/runner/testing"
 	"github.com/juju/juju/juju/sockets"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 var noProxies = proxy.Settings{}
 var apiAddrs = []string{"a1:123", "a2:123"}
 
 type hookCommitMatcher struct {
-	c        *gc.C
+	c        *tc.C
 	expected params.CommitHookChangesArgs
 }
 
@@ -51,31 +49,31 @@ func (m hookCommitMatcher) Matches(x interface{}) bool {
 		return false
 	}
 	match := func(got, wanted params.CommitHookChangesArg) bool {
-		if !m.c.Check(got.RelationUnitSettings, jc.SameContents, wanted.RelationUnitSettings) {
+		if !m.c.Check(got.RelationUnitSettings, tc.SameContents, wanted.RelationUnitSettings) {
 			return false
 		}
-		if !m.c.Check(got.AddStorage, jc.SameContents, wanted.AddStorage) {
+		if !m.c.Check(got.AddStorage, tc.SameContents, wanted.AddStorage) {
 			return false
 		}
-		if !m.c.Check(got.OpenPorts, jc.SameContents, wanted.OpenPorts) {
+		if !m.c.Check(got.OpenPorts, tc.SameContents, wanted.OpenPorts) {
 			return false
 		}
-		if !m.c.Check(got.ClosePorts, jc.SameContents, wanted.ClosePorts) {
+		if !m.c.Check(got.ClosePorts, tc.SameContents, wanted.ClosePorts) {
 			return false
 		}
-		if !m.c.Check(got.SecretCreates, jc.SameContents, wanted.SecretCreates) {
+		if !m.c.Check(got.SecretCreates, tc.SameContents, wanted.SecretCreates) {
 			return false
 		}
-		if !m.c.Check(got.SecretUpdates, jc.SameContents, wanted.SecretUpdates) {
+		if !m.c.Check(got.SecretUpdates, tc.SameContents, wanted.SecretUpdates) {
 			return false
 		}
-		if !m.c.Check(got.SecretDeletes, jc.SameContents, wanted.SecretDeletes) {
+		if !m.c.Check(got.SecretDeletes, tc.SameContents, wanted.SecretDeletes) {
 			return false
 		}
-		if !m.c.Check(got.SecretGrants, jc.SameContents, wanted.SecretGrants) {
+		if !m.c.Check(got.SecretGrants, tc.SameContents, wanted.SecretGrants) {
 			return false
 		}
-		if !m.c.Check(got.SecretRevokes, jc.SameContents, wanted.SecretRevokes) {
+		if !m.c.Check(got.SecretRevokes, tc.SameContents, wanted.SecretRevokes) {
 			return false
 		}
 		if got.UpdateNetworkInfo != wanted.UpdateNetworkInfo {
@@ -102,13 +100,12 @@ func (m hookCommitMatcher) String() string {
 // BaseHookContextSuite contains shared setup for various other test suites. Test
 // methods should not be added to this type, because they'll get run repeatedly.
 type BaseHookContextSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	secretMetadata map[string]jujuc.SecretMetadata
 	secrets        *runnertesting.SecretsContextAccessor
 	clock          *testclock.Clock
 
 	uniter   *uniterapi.MockUniterClient
-	payloads *mocks.MockPayloadAPIClient
 	unit     *uniterapi.MockUnit
 	relunits map[int]*uniterapi.MockRelationUnit
 
@@ -116,7 +113,7 @@ type BaseHookContextSuite struct {
 	machinePortRanges map[names.UnitTag]network.GroupedPortRanges
 }
 
-func (s *BaseHookContextSuite) SetUpTest(c *gc.C) {
+func (s *BaseHookContextSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	s.relunits = map[int]*uniterapi.MockRelationUnit{}
@@ -125,13 +122,13 @@ func (s *BaseHookContextSuite) SetUpTest(c *gc.C) {
 	s.clock = testclock.NewClock(time.Time{})
 }
 
-func (s *BaseHookContextSuite) GetContext(c *gc.C, ctrl *gomock.Controller, relId int, remoteName string, storageTag names.StorageTag) jujuc.Context {
+func (s *BaseHookContextSuite) GetContext(c *tc.C, ctrl *gomock.Controller, relId int, remoteName string, storageTag names.StorageTag) jujuc.Context {
 	uuid, err := uuid.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return s.getHookContext(c, ctrl, uuid.String(), relId, remoteName, storageTag)
 }
 
-func (s *BaseHookContextSuite) AddContextRelation(c *gc.C, ctrl *gomock.Controller, name string) {
+func (s *BaseHookContextSuite) AddContextRelation(c *tc.C, ctrl *gomock.Controller, name string) {
 	num := len(s.relunits)
 	rel := uniterapi.NewMockRelation(ctrl)
 	rel.EXPECT().Id().Return(num).AnyTimes()
@@ -142,7 +139,7 @@ func (s *BaseHookContextSuite) AddContextRelation(c *gc.C, ctrl *gomock.Controll
 	relUnit := uniterapi.NewMockRelationUnit(ctrl)
 	relUnit.EXPECT().Relation().Return(rel).AnyTimes()
 	relUnit.EXPECT().Endpoint().Return(apiuniter.Endpoint{Relation: charm.Relation{Name: "db"}}).AnyTimes()
-	relUnit.EXPECT().Settings().Return(
+	relUnit.EXPECT().Settings(gomock.Any()).Return(
 		apiuniter.NewSettings(rel.Tag().String(), names.NewUnitTag("u/0").String(), params.Settings{}), nil,
 	).AnyTimes()
 
@@ -154,12 +151,12 @@ func (s *BaseHookContextSuite) setupUnit(ctrl *gomock.Controller) names.MachineT
 	s.unit = uniterapi.NewMockUnit(ctrl)
 	s.unit.EXPECT().Tag().Return(unitTag).AnyTimes()
 	s.unit.EXPECT().Name().Return(unitTag.Id()).AnyTimes()
-	s.unit.EXPECT().PublicAddress().Return("u-0.testing.invalid", nil).AnyTimes()
-	s.unit.EXPECT().PrivateAddress().Return("u-0.testing.invalid", nil).AnyTimes()
-	s.unit.EXPECT().AvailabilityZone().Return("a-zone", nil).AnyTimes()
+	s.unit.EXPECT().PublicAddress(gomock.Any()).Return("u-0.testing.invalid", nil).AnyTimes()
+	s.unit.EXPECT().PrivateAddress(gomock.Any()).Return("u-0.testing.invalid", nil).AnyTimes()
+	s.unit.EXPECT().AvailabilityZone(gomock.Any()).Return("a-zone", nil).AnyTimes()
 
 	machineTag := names.NewMachineTag("0")
-	s.unit.EXPECT().AssignedMachine().Return(machineTag, nil).AnyTimes()
+	s.unit.EXPECT().AssignedMachine(gomock.Any()).Return(machineTag, nil).AnyTimes()
 	return machineTag
 }
 
@@ -173,10 +170,10 @@ func (s *BaseHookContextSuite) setupUniter(ctrl *gomock.Controller) names.Machin
 	return machineTag
 }
 
-func (s *BaseHookContextSuite) getHookContext(c *gc.C, ctrl *gomock.Controller, uuid string, relid int, remote string, storageTag names.StorageTag) *runnercontext.HookContext {
+func (s *BaseHookContextSuite) getHookContext(c *tc.C, ctrl *gomock.Controller, uuid string, relid int, remote string, storageTag names.StorageTag) *runnercontext.HookContext {
 	if relid != -1 {
 		_, found := s.relunits[relid]
-		c.Assert(found, jc.IsTrue)
+		c.Assert(found, tc.IsTrue)
 	}
 	machineTag := s.setupUniter(ctrl)
 
@@ -207,123 +204,113 @@ func (s *BaseHookContextSuite) getHookContext(c *gc.C, ctrl *gomock.Controller, 
 		Clock:               s.clock,
 	})
 
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return context
 }
 
-func (s *BaseHookContextSuite) AssertCoreContext(c *gc.C, ctx *runnercontext.HookContext) {
-	c.Assert(ctx.UnitName(), gc.Equals, "u/0")
-	c.Assert(runnercontext.ContextMachineTag(ctx), jc.DeepEquals, names.NewMachineTag("0"))
+func (s *BaseHookContextSuite) AssertCoreContext(c *tc.C, ctx *runnercontext.HookContext) {
+	c.Assert(ctx.UnitName(), tc.Equals, "u/0")
+	c.Assert(runnercontext.ContextMachineTag(ctx), tc.DeepEquals, names.NewMachineTag("0"))
 
 	actual, err := ctx.PrivateAddress()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actual, gc.Equals, "u-0.testing.invalid")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(actual, tc.Equals, "u-0.testing.invalid")
 
-	actual, err = ctx.PublicAddress()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actual, gc.Equals, "u-0.testing.invalid")
+	actual, err = ctx.PublicAddress(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(actual, tc.Equals, "u-0.testing.invalid")
 
 	name, uuid := runnercontext.ContextEnvInfo(ctx)
-	c.Assert(name, gc.Equals, "test-model")
-	c.Assert(uuid, gc.Equals, coretesting.ModelTag.Id())
+	c.Assert(name, tc.Equals, "test-model")
+	c.Assert(uuid, tc.Equals, coretesting.ModelTag.Id())
 
 	ids, err := ctx.RelationIds()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ids, gc.HasLen, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(ids, tc.HasLen, 2)
 
 	r, err := ctx.Relation(0)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(r.Name(), gc.Equals, "db")
-	c.Assert(r.FakeId(), gc.Equals, "db:0")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(r.Name(), tc.Equals, "db")
+	c.Assert(r.FakeId(), tc.Equals, "db:0")
 
 	r, err = ctx.Relation(1)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(r.Name(), gc.Equals, "db")
-	c.Assert(r.FakeId(), gc.Equals, "db:1")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(r.Name(), tc.Equals, "db")
+	c.Assert(r.FakeId(), tc.Equals, "db:1")
 
 	az, err := ctx.AvailabilityZone()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(az, gc.Equals, "a-zone")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(az, tc.Equals, "a-zone")
 
-	info, err := ctx.SecretMetadata()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(info, gc.HasLen, 1)
+	info, err := ctx.SecretMetadata(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(info, tc.HasLen, 1)
 	for id, v := range info {
-		c.Assert(id, gc.Equals, "9m4e2mr0ui3e8a215n4g")
-		c.Assert(v.Label, gc.Equals, "label")
-		c.Assert(v.Owner, jc.DeepEquals, secrets.Owner{Kind: secrets.ApplicationOwner, ID: "mariadb"})
-		c.Assert(v.Description, gc.Equals, "description")
-		c.Assert(v.RotatePolicy, gc.Equals, secrets.RotateHourly)
-		c.Assert(v.LatestRevision, gc.Equals, 666)
+		c.Assert(id, tc.Equals, "9m4e2mr0ui3e8a215n4g")
+		c.Assert(v.Label, tc.Equals, "label")
+		c.Assert(v.Owner, tc.DeepEquals, secrets.Owner{Kind: secrets.ApplicationOwner, ID: "mariadb"})
+		c.Assert(v.Description, tc.Equals, "description")
+		c.Assert(v.RotatePolicy, tc.Equals, secrets.RotateHourly)
+		c.Assert(v.LatestRevision, tc.Equals, 666)
+		c.Assert(v.LatestChecksum, tc.Equals, "deadbeef")
 	}
 }
 
-func (s *BaseHookContextSuite) AssertNotActionContext(c *gc.C, ctx *runnercontext.HookContext) {
+func (s *BaseHookContextSuite) AssertNotActionContext(c *tc.C, ctx *runnercontext.HookContext) {
 	actionData, err := ctx.ActionData()
-	c.Assert(actionData, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "not running an action")
+	c.Assert(actionData, tc.IsNil)
+	c.Assert(err, tc.ErrorMatches, "not running an action")
 }
 
-func (s *BaseHookContextSuite) AssertActionContext(c *gc.C, ctx *runnercontext.HookContext) {
+func (s *BaseHookContextSuite) AssertActionContext(c *tc.C, ctx *runnercontext.HookContext) {
 	actionData, err := ctx.ActionData()
-	c.Assert(actionData, gc.NotNil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(actionData, tc.NotNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BaseHookContextSuite) AssertNotStorageContext(c *gc.C, ctx *runnercontext.HookContext) {
-	storageAttachment, err := ctx.HookStorage()
-	c.Assert(storageAttachment, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, ".*")
+func (s *BaseHookContextSuite) AssertNotStorageContext(c *tc.C, ctx *runnercontext.HookContext) {
+	storageAttachment, err := ctx.HookStorage(c.Context())
+	c.Assert(storageAttachment, tc.IsNil)
+	c.Assert(err, tc.ErrorMatches, ".*")
 }
 
-func (s *BaseHookContextSuite) AssertStorageContext(c *gc.C, ctx *runnercontext.HookContext, id string, attachment storage.StorageAttachmentInfo) {
-	fromCache, err := ctx.HookStorage()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fromCache, gc.NotNil)
-	c.Assert(fromCache.Tag().Id(), gc.Equals, id)
-	c.Assert(fromCache.Kind(), gc.Equals, attachment.Kind)
-	c.Assert(fromCache.Location(), gc.Equals, attachment.Location)
+func (s *BaseHookContextSuite) AssertStorageContext(c *tc.C, ctx *runnercontext.HookContext, id string, attachment storage.StorageAttachmentInfo) {
+	fromCache, err := ctx.HookStorage(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fromCache, tc.NotNil)
+	c.Assert(fromCache.Tag().Id(), tc.Equals, id)
+	c.Assert(fromCache.Kind(), tc.Equals, attachment.Kind)
+	c.Assert(fromCache.Location(), tc.Equals, attachment.Location)
 }
 
-func (s *BaseHookContextSuite) AssertRelationContext(c *gc.C, ctx *runnercontext.HookContext, relId int, remoteUnit string, remoteApp string) *runnercontext.ContextRelation {
+func (s *BaseHookContextSuite) AssertRelationContext(c *tc.C, ctx *runnercontext.HookContext, relId int, remoteUnit string, remoteApp string) *runnercontext.ContextRelation {
 	actualRemoteUnit, _ := ctx.RemoteUnitName()
-	c.Assert(actualRemoteUnit, gc.Equals, remoteUnit)
+	c.Assert(actualRemoteUnit, tc.Equals, remoteUnit)
 	actualRemoteApp, _ := ctx.RemoteApplicationName()
-	c.Assert(actualRemoteApp, gc.Equals, remoteApp)
+	c.Assert(actualRemoteApp, tc.Equals, remoteApp)
 	rel, err := ctx.HookRelation()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rel.Id(), gc.Equals, relId)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(rel.Id(), tc.Equals, relId)
 	return rel.(*runnercontext.ContextRelation)
 }
 
-func (s *BaseHookContextSuite) AssertNotRelationContext(c *gc.C, ctx *runnercontext.HookContext) {
+func (s *BaseHookContextSuite) AssertNotRelationContext(c *tc.C, ctx *runnercontext.HookContext) {
 	rel, err := ctx.HookRelation()
-	c.Assert(rel, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, ".*")
+	c.Assert(rel, tc.IsNil)
+	c.Assert(err, tc.ErrorMatches, ".*")
 }
 
-func (s *BaseHookContextSuite) AssertWorkloadContext(c *gc.C, ctx *runnercontext.HookContext, workloadName string) {
-	actualWorkloadName, _ := ctx.WorkloadName()
-	c.Assert(actualWorkloadName, gc.Equals, workloadName)
-}
-
-func (s *BaseHookContextSuite) AssertNotWorkloadContext(c *gc.C, ctx *runnercontext.HookContext) {
-	workloadName, err := ctx.WorkloadName()
-	c.Assert(err, gc.NotNil)
-	c.Assert(workloadName, gc.Equals, "")
-}
-
-func (s *BaseHookContextSuite) AssertSecretContext(c *gc.C, ctx *runnercontext.HookContext, secretURI, label string, revision int) {
+func (s *BaseHookContextSuite) AssertSecretContext(c *tc.C, ctx *runnercontext.HookContext, secretURI, label string, revision int) {
 	uri, _ := ctx.SecretURI()
-	c.Assert(uri, gc.Equals, secretURI)
-	c.Assert(ctx.SecretLabel(), gc.Equals, label)
-	c.Assert(ctx.SecretRevision(), gc.Equals, revision)
+	c.Assert(uri, tc.Equals, secretURI)
+	c.Assert(ctx.SecretLabel(), tc.Equals, label)
+	c.Assert(ctx.SecretRevision(), tc.Equals, revision)
 }
 
-func (s *BaseHookContextSuite) AssertNotSecretContext(c *gc.C, ctx *runnercontext.HookContext) {
+func (s *BaseHookContextSuite) AssertNotSecretContext(c *tc.C, ctx *runnercontext.HookContext) {
 	workloadName, err := ctx.SecretURI()
-	c.Assert(err, gc.NotNil)
-	c.Assert(workloadName, gc.Equals, "")
+	c.Assert(err, tc.NotNil)
+	c.Assert(workloadName, tc.Equals, "")
 }
 
 // MockEnvPaths implements Paths for tests that don't need to actually touch
@@ -346,38 +333,14 @@ func (MockEnvPaths) GetBaseDir() string {
 	return "path-to-base"
 }
 
-func (MockEnvPaths) GetJujucClientSocket(remote bool) sockets.Socket {
-	if remote {
-		return sockets.Socket{Network: "tcp", Address: "127.0.0.1:32000"}
-	}
+func (MockEnvPaths) GetJujucClientSocket() sockets.Socket {
 	return sockets.Socket{Network: "unix", Address: "path-to-jujuc.socket"}
 }
 
-func (MockEnvPaths) GetJujucServerSocket(remote bool) sockets.Socket {
-	if remote {
-		return sockets.Socket{Network: "tcp", Address: "127.0.0.1:32000"}
-	}
+func (MockEnvPaths) GetJujucServerSocket() sockets.Socket {
 	return sockets.Socket{Network: "unix", Address: "path-to-jujuc.socket"}
 }
 
 func (MockEnvPaths) GetMetricsSpoolDir() string {
 	return "path-to-metrics-spool-dir"
-}
-
-type stubLeadershipSettingsAccessor struct {
-	results map[string]string
-}
-
-func (s *stubLeadershipSettingsAccessor) Read(_ string) (result map[string]string, _ error) {
-	return result, nil
-}
-
-func (s *stubLeadershipSettingsAccessor) Merge(_, _ string, settings map[string]string) error {
-	if s.results == nil {
-		s.results = make(map[string]string)
-	}
-	for k, v := range settings {
-		s.results[k] = v
-	}
-	return nil
 }

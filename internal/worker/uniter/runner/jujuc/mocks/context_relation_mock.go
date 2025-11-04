@@ -17,7 +17,7 @@ import (
 	relation "github.com/juju/juju/core/relation"
 	jujuc "github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	params "github.com/juju/juju/rpc/params"
-	names "github.com/juju/names/v5"
+	names "github.com/juju/names/v6"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -45,18 +45,18 @@ func (m *MockContextRelation) EXPECT() *MockContextRelationMockRecorder {
 }
 
 // ApplicationSettings mocks base method.
-func (m *MockContextRelation) ApplicationSettings() (jujuc.Settings, error) {
+func (m *MockContextRelation) ApplicationSettings(arg0 context.Context) (jujuc.Settings, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ApplicationSettings")
+	ret := m.ctrl.Call(m, "ApplicationSettings", arg0)
 	ret0, _ := ret[0].(jujuc.Settings)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ApplicationSettings indicates an expected call of ApplicationSettings.
-func (mr *MockContextRelationMockRecorder) ApplicationSettings() *MockContextRelationApplicationSettingsCall {
+func (mr *MockContextRelationMockRecorder) ApplicationSettings(arg0 any) *MockContextRelationApplicationSettingsCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplicationSettings", reflect.TypeOf((*MockContextRelation)(nil).ApplicationSettings))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplicationSettings", reflect.TypeOf((*MockContextRelation)(nil).ApplicationSettings), arg0)
 	return &MockContextRelationApplicationSettingsCall{Call: call}
 }
 
@@ -72,13 +72,13 @@ func (c *MockContextRelationApplicationSettingsCall) Return(arg0 jujuc.Settings,
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockContextRelationApplicationSettingsCall) Do(f func() (jujuc.Settings, error)) *MockContextRelationApplicationSettingsCall {
+func (c *MockContextRelationApplicationSettingsCall) Do(f func(context.Context) (jujuc.Settings, error)) *MockContextRelationApplicationSettingsCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockContextRelationApplicationSettingsCall) DoAndReturn(f func() (jujuc.Settings, error)) *MockContextRelationApplicationSettingsCall {
+func (c *MockContextRelationApplicationSettingsCall) DoAndReturn(f func(context.Context) (jujuc.Settings, error)) *MockContextRelationApplicationSettingsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -236,18 +236,18 @@ func (c *MockContextRelationNameCall) DoAndReturn(f func() string) *MockContextR
 }
 
 // ReadApplicationSettings mocks base method.
-func (m *MockContextRelation) ReadApplicationSettings(arg0 string) (params.Settings, error) {
+func (m *MockContextRelation) ReadApplicationSettings(arg0 context.Context, arg1 string) (params.Settings, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReadApplicationSettings", arg0)
+	ret := m.ctrl.Call(m, "ReadApplicationSettings", arg0, arg1)
 	ret0, _ := ret[0].(params.Settings)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ReadApplicationSettings indicates an expected call of ReadApplicationSettings.
-func (mr *MockContextRelationMockRecorder) ReadApplicationSettings(arg0 any) *MockContextRelationReadApplicationSettingsCall {
+func (mr *MockContextRelationMockRecorder) ReadApplicationSettings(arg0, arg1 any) *MockContextRelationReadApplicationSettingsCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadApplicationSettings", reflect.TypeOf((*MockContextRelation)(nil).ReadApplicationSettings), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadApplicationSettings", reflect.TypeOf((*MockContextRelation)(nil).ReadApplicationSettings), arg0, arg1)
 	return &MockContextRelationReadApplicationSettingsCall{Call: call}
 }
 
@@ -263,30 +263,30 @@ func (c *MockContextRelationReadApplicationSettingsCall) Return(arg0 params.Sett
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockContextRelationReadApplicationSettingsCall) Do(f func(string) (params.Settings, error)) *MockContextRelationReadApplicationSettingsCall {
+func (c *MockContextRelationReadApplicationSettingsCall) Do(f func(context.Context, string) (params.Settings, error)) *MockContextRelationReadApplicationSettingsCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockContextRelationReadApplicationSettingsCall) DoAndReturn(f func(string) (params.Settings, error)) *MockContextRelationReadApplicationSettingsCall {
+func (c *MockContextRelationReadApplicationSettingsCall) DoAndReturn(f func(context.Context, string) (params.Settings, error)) *MockContextRelationReadApplicationSettingsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // ReadSettings mocks base method.
-func (m *MockContextRelation) ReadSettings(arg0 string) (params.Settings, error) {
+func (m *MockContextRelation) ReadSettings(arg0 context.Context, arg1 string) (params.Settings, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReadSettings", arg0)
+	ret := m.ctrl.Call(m, "ReadSettings", arg0, arg1)
 	ret0, _ := ret[0].(params.Settings)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ReadSettings indicates an expected call of ReadSettings.
-func (mr *MockContextRelationMockRecorder) ReadSettings(arg0 any) *MockContextRelationReadSettingsCall {
+func (mr *MockContextRelationMockRecorder) ReadSettings(arg0, arg1 any) *MockContextRelationReadSettingsCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadSettings", reflect.TypeOf((*MockContextRelation)(nil).ReadSettings), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadSettings", reflect.TypeOf((*MockContextRelation)(nil).ReadSettings), arg0, arg1)
 	return &MockContextRelationReadSettingsCall{Call: call}
 }
 
@@ -302,13 +302,13 @@ func (c *MockContextRelationReadSettingsCall) Return(arg0 params.Settings, arg1 
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockContextRelationReadSettingsCall) Do(f func(string) (params.Settings, error)) *MockContextRelationReadSettingsCall {
+func (c *MockContextRelationReadSettingsCall) Do(f func(context.Context, string) (params.Settings, error)) *MockContextRelationReadSettingsCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockContextRelationReadSettingsCall) DoAndReturn(f func(string) (params.Settings, error)) *MockContextRelationReadSettingsCall {
+func (c *MockContextRelationReadSettingsCall) DoAndReturn(f func(context.Context, string) (params.Settings, error)) *MockContextRelationReadSettingsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -389,6 +389,44 @@ func (c *MockContextRelationRemoteApplicationNameCall) DoAndReturn(f func() stri
 	return c
 }
 
+// RemoteModelUUID mocks base method.
+func (m *MockContextRelation) RemoteModelUUID() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RemoteModelUUID")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// RemoteModelUUID indicates an expected call of RemoteModelUUID.
+func (mr *MockContextRelationMockRecorder) RemoteModelUUID() *MockContextRelationRemoteModelUUIDCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoteModelUUID", reflect.TypeOf((*MockContextRelation)(nil).RemoteModelUUID))
+	return &MockContextRelationRemoteModelUUIDCall{Call: call}
+}
+
+// MockContextRelationRemoteModelUUIDCall wrap *gomock.Call
+type MockContextRelationRemoteModelUUIDCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockContextRelationRemoteModelUUIDCall) Return(arg0 string) *MockContextRelationRemoteModelUUIDCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockContextRelationRemoteModelUUIDCall) Do(f func() string) *MockContextRelationRemoteModelUUIDCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockContextRelationRemoteModelUUIDCall) DoAndReturn(f func() string) *MockContextRelationRemoteModelUUIDCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // SetStatus mocks base method.
 func (m *MockContextRelation) SetStatus(arg0 context.Context, arg1 relation.Status) error {
 	m.ctrl.T.Helper()
@@ -428,18 +466,18 @@ func (c *MockContextRelationSetStatusCall) DoAndReturn(f func(context.Context, r
 }
 
 // Settings mocks base method.
-func (m *MockContextRelation) Settings() (jujuc.Settings, error) {
+func (m *MockContextRelation) Settings(arg0 context.Context) (jujuc.Settings, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Settings")
+	ret := m.ctrl.Call(m, "Settings", arg0)
 	ret0, _ := ret[0].(jujuc.Settings)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Settings indicates an expected call of Settings.
-func (mr *MockContextRelationMockRecorder) Settings() *MockContextRelationSettingsCall {
+func (mr *MockContextRelationMockRecorder) Settings(arg0 any) *MockContextRelationSettingsCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Settings", reflect.TypeOf((*MockContextRelation)(nil).Settings))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Settings", reflect.TypeOf((*MockContextRelation)(nil).Settings), arg0)
 	return &MockContextRelationSettingsCall{Call: call}
 }
 
@@ -455,13 +493,13 @@ func (c *MockContextRelationSettingsCall) Return(arg0 jujuc.Settings, arg1 error
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockContextRelationSettingsCall) Do(f func() (jujuc.Settings, error)) *MockContextRelationSettingsCall {
+func (c *MockContextRelationSettingsCall) Do(f func(context.Context) (jujuc.Settings, error)) *MockContextRelationSettingsCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockContextRelationSettingsCall) DoAndReturn(f func() (jujuc.Settings, error)) *MockContextRelationSettingsCall {
+func (c *MockContextRelationSettingsCall) DoAndReturn(f func(context.Context) (jujuc.Settings, error)) *MockContextRelationSettingsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

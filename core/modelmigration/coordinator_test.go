@@ -4,19 +4,18 @@
 package modelmigration
 
 import (
-	"context"
-	"errors"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	"github.com/juju/juju/internal/errors"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type migrationSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	op        *MockOperation
 	txnRunner *MockTxnRunner
@@ -25,23 +24,25 @@ type migrationSuite struct {
 	scope Scope
 }
 
-var _ = gc.Suite(&migrationSuite{})
-
-func (s *migrationSuite) TestAdd(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	m := NewCoordinator(loggertesting.WrapCheckLog(c))
-	c.Assert(m.Len(), gc.Equals, 0)
-
-	m.Add(s.op)
-	c.Assert(m.Len(), gc.Equals, 1)
+func TestMigrationSuite(t *testing.T) {
+	tc.Run(t, &migrationSuite{})
 }
 
-func (s *migrationSuite) TestPerform(c *gc.C) {
+func (s *migrationSuite) TestAdd(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	m := NewCoordinator(loggertesting.WrapCheckLog(c))
-	c.Assert(m.Len(), gc.Equals, 0)
+	c.Assert(m.Len(), tc.Equals, 0)
+
+	m.Add(s.op)
+	c.Assert(m.Len(), tc.Equals, 1)
+}
+
+func (s *migrationSuite) TestPerform(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	m := NewCoordinator(loggertesting.WrapCheckLog(c))
+	c.Assert(m.Len(), tc.Equals, 0)
 
 	m.Add(s.op)
 
@@ -52,14 +53,14 @@ func (s *migrationSuite) TestPerform(c *gc.C) {
 		s.op.EXPECT().Execute(gomock.Any(), s.model).Return(nil),
 	)
 
-	err := m.Perform(context.Background(), s.scope, s.model)
-	c.Assert(err, jc.ErrorIsNil)
+	err := m.Perform(c.Context(), s.scope, s.model)
+	c.Assert(err, tc.ErrorIsNil)
 }
-func (s *migrationSuite) TestPerformWithRollbackAtSetup(c *gc.C) {
+func (s *migrationSuite) TestPerformWithRollbackAtSetup(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	m := NewCoordinator(loggertesting.WrapCheckLog(c))
-	c.Assert(m.Len(), gc.Equals, 0)
+	c.Assert(m.Len(), tc.Equals, 0)
 
 	m.Add(s.op)
 
@@ -71,15 +72,15 @@ func (s *migrationSuite) TestPerformWithRollbackAtSetup(c *gc.C) {
 		s.op.EXPECT().Rollback(gomock.Any(), s.model).Return(nil),
 	)
 
-	err := m.Perform(context.Background(), s.scope, s.model)
-	c.Assert(err, gc.ErrorMatches, `setup operation op: boom`)
+	err := m.Perform(c.Context(), s.scope, s.model)
+	c.Assert(err, tc.ErrorMatches, `setup operation op: boom`)
 }
 
-func (s *migrationSuite) TestPerformWithRollbackAtExecution(c *gc.C) {
+func (s *migrationSuite) TestPerformWithRollbackAtExecution(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	m := NewCoordinator(loggertesting.WrapCheckLog(c))
-	c.Assert(m.Len(), gc.Equals, 0)
+	c.Assert(m.Len(), tc.Equals, 0)
 
 	m.Add(s.op)
 
@@ -92,15 +93,15 @@ func (s *migrationSuite) TestPerformWithRollbackAtExecution(c *gc.C) {
 		s.op.EXPECT().Rollback(gomock.Any(), s.model).Return(nil),
 	)
 
-	err := m.Perform(context.Background(), s.scope, s.model)
-	c.Assert(err, gc.ErrorMatches, `execute operation op: boom`)
+	err := m.Perform(c.Context(), s.scope, s.model)
+	c.Assert(err, tc.ErrorMatches, `execute operation op: boom`)
 }
 
-func (s *migrationSuite) TestPerformWithRollbackError(c *gc.C) {
+func (s *migrationSuite) TestPerformWithRollbackError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	m := NewCoordinator(loggertesting.WrapCheckLog(c))
-	c.Assert(m.Len(), gc.Equals, 0)
+	c.Assert(m.Len(), tc.Equals, 0)
 
 	m.Add(s.op)
 
@@ -113,11 +114,11 @@ func (s *migrationSuite) TestPerformWithRollbackError(c *gc.C) {
 		s.op.EXPECT().Rollback(gomock.Any(), s.model).Return(errors.New("sad")),
 	)
 
-	err := m.Perform(context.Background(), s.scope, s.model)
-	c.Assert(err, gc.ErrorMatches, `rollback operation at 0 with sad: execute operation op: boom`)
+	err := m.Perform(c.Context(), s.scope, s.model)
+	c.Assert(err, tc.ErrorMatches, `rollback operation at 0 with sad: execute operation op: boom`)
 }
 
-func (s *migrationSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *migrationSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.op = NewMockOperation(ctrl)

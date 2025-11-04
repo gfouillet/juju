@@ -10,6 +10,9 @@ import (
 	"strings"
 
 	"github.com/juju/collections/set"
+
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/stringcompare"
 )
 
 // Validator defines operations on constraints attributes which are
@@ -60,17 +63,19 @@ type ConflictResolver func(attrValues map[string]interface{}) error
 // NewValidator returns a new constraints Validator instance.
 func NewValidator() Validator {
 	return &validator{
-		conflicts:         make(map[string]set.Strings),
-		conflictResolvers: make(map[string]ConflictResolver),
-		vocab:             make(map[string][]interface{}),
+		conflicts:             make(map[string]set.Strings),
+		conflictResolvers:     make(map[string]ConflictResolver),
+		vocab:                 make(map[string][]interface{}),
+		validValuesCountLimit: 10,
 	}
 }
 
 type validator struct {
-	unsupported       set.Strings
-	conflicts         map[string]set.Strings
-	conflictResolvers map[string]ConflictResolver
-	vocab             map[string][]interface{}
+	unsupported           set.Strings
+	conflicts             map[string]set.Strings
+	conflictResolvers     map[string]ConflictResolver
+	vocab                 map[string][]interface{}
+	validValuesCountLimit int
 }
 
 // RegisterConflicts is defined on Validator.
@@ -107,7 +112,7 @@ func (v *validator) RegisterVocabulary(attributeName string, allowedValues inter
 var checkIsCollection = func(coll interface{}) {
 	k := reflect.TypeOf(coll).Kind()
 	if k != reflect.Slice && k != reflect.Array {
-		panic(fmt.Errorf("invalid vocab: %v of type %T is not a slice", coll, coll))
+		panic(errors.Errorf("invalid vocab: %v of type %T is not a slice", coll, coll))
 	}
 }
 
@@ -177,11 +182,11 @@ func (v *validator) checkConflicts(cons Value) error {
 			if resolver, ok := v.conflictResolvers[id]; ok {
 				err := resolver(attrValues)
 				if err != nil {
-					return fmt.Errorf("ambiguous constraints: %q overlaps with %q: %w", attrTag, conflict, err)
+					return errors.Errorf("ambiguous constraints: %q overlaps with %q: %w", attrTag, conflict, err)
 				}
 				continue
 			}
-			return fmt.Errorf("ambiguous constraints: %q overlaps with %q", attrTag, conflict)
+			return errors.Errorf("ambiguous constraints: %q overlaps with %q", attrTag, conflict)
 		}
 	}
 	return nil
@@ -215,6 +220,31 @@ func (v *validator) checkValidValues(cons Value) error {
 	return nil
 }
 
+// InvalidVocabValueError represents an error that occurs
+// when a validation constraint is violated.
+// It provides details for the
+// invalid inputs, closest valid values and all possible valid values.
+type InvalidVocabValueError struct {
+	closestValidValues  []string
+	allValidValues      []string
+	inputAttributeName  string
+	inputAttributeValue any
+}
+
+func (ve *InvalidVocabValueError) Error() string {
+	closestValuesStr := strings.Join(ve.closestValidValues, " ")
+	errStr := fmt.Sprintf("invalid constraint value: %v=%v\nvalid values are: %v",
+		ve.inputAttributeName, ve.inputAttributeValue, closestValuesStr)
+
+	// Add additional items if there are more than the validValuesCountLimit
+	additionalItemsCount := len(ve.allValidValues) - len(ve.closestValidValues)
+	if additionalItemsCount > 0 {
+		return fmt.Sprintf("%s ...(plus %d more)", errStr, additionalItemsCount)
+	}
+
+	return errStr
+}
+
 // checkInVocab returns an error if the attribute value is not allowed by the
 // vocab which may have been registered for it.
 func (v *validator) checkInVocab(attributeName string, attributeValue interface{}) error {
@@ -222,13 +252,47 @@ func (v *validator) checkInVocab(attributeName string, attributeValue interface{
 	if !ok {
 		return nil
 	}
+
+	validValuesStrLst := make([]string, 0, len(validValues))
+	coercedAttributeValue := coerce(attributeValue)
 	for _, validValue := range validValues {
-		if coerce(validValue) == coerce(attributeValue) {
+		if coerce(validValue) == coercedAttributeValue {
 			return nil
 		}
+		valueStr := fmt.Sprint(validValue)
+		validValuesStrLst = append(validValuesStrLst, valueStr)
 	}
-	return fmt.Errorf(
-		"invalid constraint value: %v=%v\nvalid values are: %v", attributeName, attributeValue, validValues)
+
+	// Collect unique constraint values
+	validValuesUniqueStrLst := set.NewStrings(validValuesStrLst...).Values()
+
+	// Sort constraint values according to LevenshteinDistance between attributeValue and itself
+	if attributeValueStr, ok := attributeValue.(string); ok {
+		sort.Slice(validValuesUniqueStrLst, func(i, j int) bool {
+			d1 := stringcompare.LevenshteinDistance(validValuesUniqueStrLst[i], attributeValueStr)
+			d2 := stringcompare.LevenshteinDistance(validValuesUniqueStrLst[j], attributeValueStr)
+			if d1 == d2 {
+				return validValuesUniqueStrLst[i] < validValuesUniqueStrLst[j]
+			}
+			return d1 < d2
+		})
+	}
+
+	// Find min of len(validValuesUniqueStrLst) and validValuesCountLimit
+	min := min(len(validValuesUniqueStrLst), v.validValuesCountLimit)
+	closestValidValues := validValuesUniqueStrLst
+
+	// Ensure min is non-negative
+	if min > 0 {
+		closestValidValues = validValuesUniqueStrLst[:min]
+	}
+
+	return &InvalidVocabValueError{
+		closestValidValues:  closestValidValues,
+		allValidValues:      validValuesUniqueStrLst,
+		inputAttributeName:  attributeName,
+		inputAttributeValue: attributeValue,
+	}
 }
 
 // coerce returns v in a format that allows constraint values to be easily
@@ -282,6 +346,9 @@ func withFallbacks(v Value, vFallback Value) Value {
 }
 
 // Validate is defined on Validator.
+//
+// The following error types can be expected to be returned:
+// - [constraints.InvalidVocabValueError]: When the provided constraint value does not exist in vocabs
 func (v *validator) Validate(cons Value) ([]string, error) {
 	unsupported := v.checkUnsupported(cons)
 	if err := v.checkValidValues(cons); err != nil {

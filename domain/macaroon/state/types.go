@@ -5,9 +5,11 @@ package state
 
 import (
 	"database/sql/driver"
+	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/errors"
+
+	"github.com/juju/juju/internal/errors"
 )
 
 // FullConfig holds the full macaroon bakery config data
@@ -66,4 +68,17 @@ func (kv *keyScanner) Scan(v any) error {
 // Value implements the driver.Valuer interface
 func (kv *keyScanner) Value() (driver.Value, error) {
 	return kv.key[:], nil
+}
+
+// rootKey holds the state representation of dbrootkeystore.RootKey
+// complete with `db` tags for sqlair
+type rootKey struct {
+	ID      []byte    `db:"id"`
+	Created time.Time `db:"created_at"`
+	Expires time.Time `db:"expires_at"`
+	RootKey []byte    `db:"root_key"`
+}
+
+type rootKeyID struct {
+	ID []byte `db:"id"`
 }

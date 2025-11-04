@@ -4,10 +4,9 @@
 package imagemetadata_test
 
 import (
-	"context"
+	stdtesting "testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/environs/filestorage"
@@ -16,7 +15,7 @@ import (
 	"github.com/juju/juju/environs/simplestreams"
 	sstesting "github.com/juju/juju/environs/simplestreams/testing"
 	"github.com/juju/juju/environs/storage"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 var (
@@ -24,29 +23,31 @@ var (
 	testVersion = "22.04"
 )
 
-var _ = gc.Suite(&generateSuite{})
+func TestGenerateSuite(t *stdtesting.T) {
+	tc.Run(t, &generateSuite{})
+}
 
 type generateSuite struct {
 	coretesting.BaseSuite
 }
 
-func assertFetch(c *gc.C, ss *simplestreams.Simplestreams, stor storage.Storage, version, arch, region, endpoint string, ids ...string) {
+func assertFetch(c *tc.C, ss *simplestreams.Simplestreams, stor storage.Storage, version, arch, region, endpoint string, ids ...string) {
 	cons, err := imagemetadata.NewImageConstraint(simplestreams.LookupParams{
 		CloudSpec: simplestreams.CloudSpec{region, endpoint},
 		Releases:  []string{version},
 		Arches:    []string{arch},
-	})
-	c.Assert(err, jc.ErrorIsNil)
+	}, nil)
+	c.Assert(err, tc.ErrorIsNil)
 	dataSource := storage.NewStorageSimpleStreamsDataSource("test datasource", stor, "images", simplestreams.DEFAULT_CLOUD_DATA, false)
-	metadata, _, err := imagemetadata.Fetch(context.Background(), ss, []simplestreams.DataSource{dataSource}, cons)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(metadata, gc.HasLen, len(ids))
+	metadata, _, err := imagemetadata.Fetch(c.Context(), ss, []simplestreams.DataSource{dataSource}, cons)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(metadata, tc.HasLen, len(ids))
 	for i, id := range ids {
-		c.Assert(metadata[i].Id, gc.Equals, id)
+		c.Assert(metadata[i].Id, tc.Equals, id)
 	}
 }
 
-func (s *generateSuite) TestWriteMetadata(c *gc.C) {
+func (s *generateSuite) TestWriteMetadata(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	im := []*imagemetadata.ImageMetadata{
 		{
@@ -61,18 +62,18 @@ func (s *generateSuite) TestWriteMetadata(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, im, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, im, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	metadata := testing.ParseMetadataFromDir(c, dir)
-	c.Assert(metadata, gc.HasLen, 1)
+	c.Assert(metadata, tc.HasLen, 1)
 	im[0].RegionName = cloudSpec.Region
 	im[0].Endpoint = cloudSpec.Endpoint
-	c.Assert(im[0], gc.DeepEquals, metadata[0])
+	c.Assert(im[0], tc.DeepEquals, metadata[0])
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region", "endpoint", "1234")
 }
 
-func (s *generateSuite) TestWriteMetadataMergeOverwriteSameArch(c *gc.C) {
+func (s *generateSuite) TestWriteMetadataMergeOverwriteSameArch(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -87,9 +88,9 @@ func (s *generateSuite) TestWriteMetadataMergeOverwriteSameArch(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	newImageMetadata := []*imagemetadata.ImageMetadata{
 		{
 			Id:      "abcd",
@@ -102,20 +103,20 @@ func (s *generateSuite) TestWriteMetadataMergeOverwriteSameArch(c *gc.C) {
 			Version: testVersion,
 		},
 	}
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	metadata := testing.ParseMetadataFromDir(c, dir)
-	c.Assert(metadata, gc.HasLen, 2)
+	c.Assert(metadata, tc.HasLen, 2)
 	for _, im := range newImageMetadata {
 		im.RegionName = cloudSpec.Region
 		im.Endpoint = cloudSpec.Endpoint
 	}
-	c.Assert(metadata, gc.DeepEquals, newImageMetadata)
+	c.Assert(metadata, tc.DeepEquals, newImageMetadata)
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region", "endpoint", "abcd")
 	assertFetch(c, ss, targetStorage, testVersion, "arm", "region", "endpoint", "xyz")
 }
 
-func (s *generateSuite) TestWriteMetadataMergeDifferentSeries(c *gc.C) {
+func (s *generateSuite) TestWriteMetadataMergeDifferentSeries(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -130,9 +131,9 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentSeries(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	newImageMetadata := []*imagemetadata.ImageMetadata{
 		{
 			Id:      "abcd",
@@ -146,22 +147,22 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentSeries(c *gc.C) {
 		},
 	}
 	base := corebase.MustParseBaseFromString("ubuntu@12.04")
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, base, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, base, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	metadata := testing.ParseMetadataFromDir(c, dir)
-	c.Assert(metadata, gc.HasLen, 3)
+	c.Assert(metadata, tc.HasLen, 3)
 	newImageMetadata = append(newImageMetadata, existingImageMetadata[0])
 	for _, im := range newImageMetadata {
 		im.RegionName = cloudSpec.Region
 		im.Endpoint = cloudSpec.Endpoint
 	}
 	imagemetadata.Sort(newImageMetadata)
-	c.Assert(metadata, gc.DeepEquals, newImageMetadata)
+	c.Assert(metadata, tc.DeepEquals, newImageMetadata)
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region", "endpoint", "1234")
 	assertFetch(c, ss, targetStorage, "12.04", "amd64", "region", "endpoint", "abcd")
 }
 
-func (s *generateSuite) TestWriteMetadataMergeDifferentRegion(c *gc.C) {
+func (s *generateSuite) TestWriteMetadataMergeDifferentRegion(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -176,9 +177,9 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentRegion(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	newImageMetadata := []*imagemetadata.ImageMetadata{
 		{
 			Id:      "abcd",
@@ -195,10 +196,10 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentRegion(c *gc.C) {
 		Region:   "region2",
 		Endpoint: "endpoint2",
 	}
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	metadata := testing.ParseMetadataFromDir(c, dir)
-	c.Assert(metadata, gc.HasLen, 3)
+	c.Assert(metadata, tc.HasLen, 3)
 	for _, im := range newImageMetadata {
 		im.RegionName = "region2"
 		im.Endpoint = "endpoint2"
@@ -207,13 +208,13 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentRegion(c *gc.C) {
 	existingImageMetadata[0].Endpoint = "endpoint"
 	newImageMetadata = append(newImageMetadata, existingImageMetadata[0])
 	imagemetadata.Sort(newImageMetadata)
-	c.Assert(metadata, gc.DeepEquals, newImageMetadata)
+	c.Assert(metadata, tc.DeepEquals, newImageMetadata)
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region", "endpoint", "1234")
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region2", "endpoint2", "abcd")
 }
 
 // lp#1600054
-func (s *generateSuite) TestWriteMetadataMergeDifferentVirtType(c *gc.C) {
+func (s *generateSuite) TestWriteMetadataMergeDifferentVirtType(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -229,9 +230,9 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentVirtType(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	newImageMetadata := []*imagemetadata.ImageMetadata{
 		{
 			Id:       "abcd",
@@ -240,23 +241,23 @@ func (s *generateSuite) TestWriteMetadataMergeDifferentVirtType(c *gc.C) {
 			VirtType: "lxd",
 		},
 	}
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 
 	foundMetadata := testing.ParseMetadataFromDir(c, dir)
 
 	expectedMetadata := append(newImageMetadata, existingImageMetadata...)
-	c.Assert(len(foundMetadata), gc.Equals, len(expectedMetadata))
+	c.Assert(len(foundMetadata), tc.Equals, len(expectedMetadata))
 	for _, im := range expectedMetadata {
 		im.RegionName = cloudSpec.Region
 		im.Endpoint = cloudSpec.Endpoint
 	}
 	imagemetadata.Sort(expectedMetadata)
-	c.Assert(foundMetadata, gc.DeepEquals, expectedMetadata)
+	c.Assert(foundMetadata, tc.DeepEquals, expectedMetadata)
 	assertFetch(c, ss, targetStorage, testVersion, "amd64", "region", "endpoint", "1234", "abcd")
 }
 
-func (s *generateSuite) TestWriteIndexRegionOnce(c *gc.C) {
+func (s *generateSuite) TestWriteIndexRegionOnce(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -272,9 +273,9 @@ func (s *generateSuite) TestWriteIndexRegionOnce(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 	newImageMetadata := []*imagemetadata.ImageMetadata{
 		{
 			Id:       "abcd",
@@ -283,15 +284,15 @@ func (s *generateSuite) TestWriteIndexRegionOnce(c *gc.C) {
 			VirtType: "lxd",
 		},
 	}
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 
 	foundIndex, _ := testing.ParseIndexMetadataFromStorage(c, targetStorage)
 	expectedCloudSpecs := []simplestreams.CloudSpec{*cloudSpec}
-	c.Assert(foundIndex.Clouds, jc.SameContents, expectedCloudSpecs)
+	c.Assert(foundIndex.Clouds, tc.SameContents, expectedCloudSpecs)
 }
 
-func (s *generateSuite) TestWriteDistinctIndexRegions(c *gc.C) {
+func (s *generateSuite) TestWriteDistinctIndexRegions(c *tc.C) {
 	ss := simplestreams.NewSimpleStreams(sstesting.TestDataSourceFactory())
 	existingImageMetadata := []*imagemetadata.ImageMetadata{
 		{
@@ -307,9 +308,9 @@ func (s *generateSuite) TestWriteDistinctIndexRegions(c *gc.C) {
 	}
 	dir := c.MkDir()
 	targetStorage, err := filestorage.NewFileStorageWriter(dir)
-	c.Assert(err, jc.ErrorIsNil)
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, existingImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 
 	expectedCloudSpecs := []simplestreams.CloudSpec{*cloudSpec}
 
@@ -325,10 +326,10 @@ func (s *generateSuite) TestWriteDistinctIndexRegions(c *gc.C) {
 		Region:   "region2",
 		Endpoint: "endpoint2",
 	}
-	err = imagemetadata.MergeAndWriteMetadata(context.Background(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
-	c.Assert(err, jc.ErrorIsNil)
+	err = imagemetadata.MergeAndWriteMetadata(c.Context(), ss, testBase, newImageMetadata, cloudSpec, targetStorage)
+	c.Assert(err, tc.ErrorIsNil)
 
 	foundIndex, _ := testing.ParseIndexMetadataFromStorage(c, targetStorage)
 	expectedCloudSpecs = append(expectedCloudSpecs, *cloudSpec)
-	c.Assert(foundIndex.Clouds, jc.SameContents, expectedCloudSpecs)
+	c.Assert(foundIndex.Clouds, tc.SameContents, expectedCloudSpecs)
 }

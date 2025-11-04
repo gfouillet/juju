@@ -4,14 +4,17 @@
 package crossmodel
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const showCommandDoc = `
@@ -22,20 +25,20 @@ charm being offered.
 `
 
 const showCommandExamples = `
-To show the extended information for the application 'prod' offered
-from the model 'default' on the same Juju controller:
+To show the extended information for the application ` + "`prod`" + ` offered
+from the model ` + "`default`" + ` on the same Juju controller:
 
      juju show-offer default.prod
 
-The supplied URL can also include a username where offers require them. 
+The supplied URL can also include a model qualifier where offers require them.
 This will be given as part of the URL retrieved from the
-'juju find-offers' command. To show information for the application
-'prod' from the model 'default' from the user 'admin':
+` + "`juju find-offers`" + ` command. To show information for the application
+'prod' from the model 'staging/default':
 
-    juju show-offer admin/default.prod
+    juju show-offer staging/default.prod
 
-To show the information regarding the application 'prod' offered from
-the model 'default' on an accessible controller named 'controller':
+To show the information regarding the application ` + "`prod`" + ` offered from
+the model ` + "`default`" + ` on an accessible controller named ` + "`controller`" + `:
 
     juju show-offer controller:default.prod
 
@@ -46,15 +49,15 @@ type showCommand struct {
 
 	url        string
 	out        cmd.Output
-	newAPIFunc func(string) (ShowAPI, error)
+	newAPIFunc func(context.Context, string) (ShowAPI, error)
 }
 
 // NewShowOfferedEndpointCommand constructs command that
 // allows to show details of offered application's endpoint.
 func NewShowOfferedEndpointCommand() cmd.Command {
 	showCmd := &showCommand{}
-	showCmd.newAPIFunc = func(controllerName string) (ShowAPI, error) {
-		return showCmd.NewRemoteEndpointsAPI(controllerName)
+	showCmd.newAPIFunc = func(ctx context.Context, controllerName string) (ShowAPI, error) {
+		return showCmd.NewRemoteEndpointsAPI(ctx, controllerName)
 	}
 	return modelcmd.Wrap(showCmd)
 }
@@ -100,17 +103,12 @@ func (c *showCommand) Run(ctx *cmd.Context) (err error) {
 	}
 	url, err := crossmodel.ParseOfferURL(c.url)
 	if err != nil {
-		currentModel, err := c.ModelIdentifier()
-		if err != nil {
+		if !names.IsValidApplication(c.url) {
 			return errors.Trace(err)
 		}
-		url, err = makeURLFromCurrentModel(c.url, controllerName, currentModel)
-		if err != nil {
-			return errors.Trace(err)
+		url = crossmodel.OfferURL{
+			Name: c.url,
 		}
-	}
-	if url.Source != "" {
-		controllerName = url.Source
 	}
 	accountDetails, err := c.CurrentAccountDetails()
 	if err != nil {
@@ -118,14 +116,31 @@ func (c *showCommand) Run(ctx *cmd.Context) (err error) {
 	}
 	loggedInUser := accountDetails.User
 
-	api, err := c.newAPIFunc(controllerName)
+	if url.ModelName == "" {
+		modelName, qualifier, err := c.ModelNameWithQualifier()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		url.ModelQualifier = qualifier
+		url.ModelName = modelName
+	}
+
+	if url.ModelQualifier == "" {
+		qualifier := model.QualifierFromUserTag(names.NewUserTag(accountDetails.User))
+		url.ModelQualifier = qualifier.String()
+	}
+	if url.Source != "" {
+		controllerName = url.Source
+	}
+
+	api, err := c.newAPIFunc(ctx, controllerName)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	url.Source = ""
-	found, err := api.ApplicationOffer(url.String())
+	found, err := api.ApplicationOffer(ctx, url.String())
 	if err != nil {
 		return err
 	}
@@ -140,7 +155,7 @@ func (c *showCommand) Run(ctx *cmd.Context) (err error) {
 // ShowAPI defines the API methods that cross model show command uses.
 type ShowAPI interface {
 	Close() error
-	ApplicationOffer(url string) (*crossmodel.ApplicationOfferDetails, error)
+	ApplicationOffer(ctx context.Context, url string) (*crossmodel.ApplicationOfferDetails, error)
 }
 
 type OfferUser struct {

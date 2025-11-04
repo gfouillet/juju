@@ -8,6 +8,7 @@ package diskmanager
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,7 +36,7 @@ func init() {
 	DefaultListBlockDevices = listBlockDevices
 }
 
-func listBlockDevices() ([]blockdevice.BlockDevice, error) {
+func listBlockDevices(ctx context.Context) ([]blockdevice.BlockDevice, error) {
 	columns := []string{
 		"KNAME",      // kernel name
 		"SIZE",       // size
@@ -47,7 +48,7 @@ func listBlockDevices() ([]blockdevice.BlockDevice, error) {
 		"MAJ:MIN",    // major/minor device numbers
 	}
 
-	logger.Tracef("executing lsblk")
+	logger.Tracef(ctx, "executing lsblk")
 	output, err := exec.Command(
 		"lsblk",
 		"-b", // output size in bytes
@@ -74,16 +75,16 @@ func listBlockDevices() ([]blockdevice.BlockDevice, error) {
 			case "SIZE":
 				size, err := strconv.ParseUint(pair[2], 10, 64)
 				if err != nil {
-					logger.Errorf(
+					logger.Errorf(ctx,
 						"invalid size %q from lsblk: %v", pair[2], err,
 					)
 				} else {
 					dev.SizeMiB = size / bytesInMiB
 				}
 			case "LABEL":
-				dev.Label = pair[2]
+				dev.FilesystemLabel = pair[2]
 			case "UUID":
-				dev.UUID = pair[2]
+				dev.FilesystemUUID = pair[2]
 			case "FSTYPE":
 				dev.FilesystemType = pair[2]
 			case "TYPE":
@@ -93,9 +94,12 @@ func listBlockDevices() ([]blockdevice.BlockDevice, error) {
 			case "MAJ:MIN":
 				majorMinor = pair[2]
 			default:
-				logger.Debugf("unexpected field from lsblk: %q", pair[1])
+				logger.Debugf(ctx, "unexpected field from lsblk: %q", pair[1])
 			}
 		}
+
+		// TODO(storage): store the type of the block device and the parent
+		// device if once exists to allow for reliable matching.
 
 		// We may later want to expand this, e.g. to handle lvm,
 		// dmraid, crypt, etc., but this is enough to cover bases
@@ -107,11 +111,11 @@ func listBlockDevices() ([]blockdevice.BlockDevice, error) {
 			// Floppy disks, which have major device number 2,
 			// should be ignored.
 			if strings.HasPrefix(majorMinor, "2:") {
-				logger.Tracef("ignoring flopping disk device: %+v", dev)
+				logger.Tracef(ctx, "ignoring flopping disk device: %+v", dev)
 				continue
 			}
 		default:
-			logger.Tracef("ignoring %q type device: %+v", deviceType, dev)
+			logger.Tracef(ctx, "ignoring %q type device: %+v", deviceType, dev)
 			continue
 		}
 
@@ -124,15 +128,15 @@ func listBlockDevices() ([]blockdevice.BlockDevice, error) {
 			// host, but the devices will typically not be present.
 			continue
 		} else if err != nil {
-			logger.Debugf("could not check if %q is in use: %v", dev.DeviceName, err)
+			logger.Debugf(ctx, "could not check if %q is in use: %v", dev.DeviceName, err)
 			// We cannot detect, so err on the side of caution and default to
 			// "in use" so the device cannot be used.
 			dev.InUse = true
 		}
 
 		// Add additional information from sysfs.
-		if err := addHardwareInfo(&dev); err != nil {
-			logger.Errorf(
+		if err := addHardwareInfo(ctx, &dev); err != nil {
+			logger.Errorf(ctx,
 				"error getting hardware info for %q from sysfs: %v",
 				dev.DeviceName, err,
 			)
@@ -173,8 +177,8 @@ var blockDeviceInUse = func(dev blockdevice.BlockDevice) (bool, error) {
 
 // addHardwareInfo adds additional information about the hardware, and how it is
 // attached to the machine, to the given BlockDevice.
-func addHardwareInfo(dev *blockdevice.BlockDevice) error {
-	logger.Tracef(`executing "udevadm info" for %s`, dev.DeviceName)
+func addHardwareInfo(ctx context.Context, dev *blockdevice.BlockDevice) error {
+	logger.Tracef(ctx, `executing "udevadm info" for %s`, dev.DeviceName)
 	output, err := exec.Command(
 		"udevadm", "info",
 		"-q", "property",
@@ -195,7 +199,7 @@ func addHardwareInfo(dev *blockdevice.BlockDevice) error {
 		line := s.Text()
 		sep := strings.IndexRune(line, '=')
 		if sep == -1 {
-			logger.Debugf("unexpected udevadm output line: %q", line)
+			logger.Debugf(ctx, "unexpected udevadm output line: %q", line)
 			continue
 		}
 		key, value := line[:sep], line[sep+1:]
@@ -213,7 +217,7 @@ func addHardwareInfo(dev *blockdevice.BlockDevice) error {
 		case "ID_WWN_WITH_EXTENSION":
 			wwnWithExtension = value
 		default:
-			logger.Tracef("ignoring line: %q", line)
+			logger.Tracef(ctx, "ignoring line: %q", line)
 		}
 	}
 	if err := s.Err(); err != nil {
@@ -229,6 +233,8 @@ func addHardwareInfo(dev *blockdevice.BlockDevice) error {
 		dev.WWN = wwnWithExtension
 	}
 	if idBus != "" && idSerial != "" {
+		// TODO(storage): remove this as it is completely useless.
+
 		// ID_BUS will be something like "scsi" or "ata";
 		// ID_SERIAL will be something like ${MODEL}_${SERIALNO};
 		// and together they make up the symlink in /dev/disk/by-id.
@@ -259,7 +265,7 @@ func addHardwareInfo(dev *blockdevice.BlockDevice) error {
 				submatch[1], submatch[2], submatch[3], submatch[4],
 			)
 		} else {
-			logger.Debugf(
+			logger.Debugf(ctx,
 				"non matching DEVPATH for %q: %q",
 				dev.DeviceName, devpath,
 			)

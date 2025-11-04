@@ -7,23 +7,24 @@ import (
 	"strings"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
+	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewRunCommand() cmd.Command {
 	return modelcmd.Wrap(&runCommand{
 		runCommandBase: runCommandBase{
 			logMessageHandler: func(ctx *cmd.Context, msg string) {
-				ctx.Infof(msg)
+				ctx.Infof("%s", msg)
 			},
 			clock: clock.WallClock,
 		},
@@ -43,41 +44,43 @@ type runCommand struct {
 
 const runDoc = `
 Run a charm action for execution on the given unit(s), with a given set of params.
-An ID is returned for use with 'juju show-operation <ID>'.
+An ID is returned for use with ` + "`juju show-operation <ID>`" + `.
 
-A action executed on a given unit becomes a task with an ID that can be
-used with 'juju show-task <ID>'.
+All units must be of the same application.
+
+An action executed on a given unit becomes a task with an ID that can be
+used with ` + "`juju show-task <ID>`" + `.
 
 Running an action returns the overall operation ID as well as the individual
 task ID(s) for each unit.
 
-To queue a action to be run in the background without waiting for it to finish,
-use the --background option.
+To queue an action to be run in the background without waiting for it to finish,
+use the ` + "`--background`" + ` option.
 
-To set the maximum time to wait for a action to complete, use the --wait option.
+To set the maximum time to wait for an action to complete, use the ` + "`--wait`" + ` option.
 
 By default, a single action will output its failure message if the action fails,
 followed by any results set by the action. For multiple actions, each action's
 results will be printed with the action id and action status. To see more detailed
-information about run timings etc, use --format yaml.
+information about run timings etc, use ` + "`--format`" + ` yaml.
 
-Valid unit identifiers are: 
-  a standard unit ID, such as mysql/0 or;
-  leader syntax of the form <application>/leader, such as mysql/leader.
+Valid unit identifiers are:
+  - a standard unit ID, such as mysql/0 or;
+  - leader syntax of the form ` + "`<application>/leader`" + `, such as ` + "`mysql/leader`" + `.
 
 If the leader syntax is used, the leader unit for the application will be
 resolved before the action is enqueued.
 
 Params are validated according to the charm for the unit's application.  The
-valid params can be seen using "juju actions <application> --schema".
-Params may be in a yaml file which is passed with the --params option, or they
-may be specified by a key.key.key...=value format (see examples below.)
+valid params can be seen using ` + "`juju actions <application> --schema`" + `.
+Params may be in a ` + "`YAML`" + ` file which is passed with the ` + "`--params`" + ` option, or they
+may be specified by a ` + "`key.key.key...=value`" + ` format (see examples below.)
 
-Params given in the CLI invocation will be parsed as YAML unless the
---string-args option is set.  This can be helpful for values such as 'y', which
+Params given in the CLI invocation will be parsed as ` + "`YAML`" + ` unless the
+` + "`--string-args`" + ` option is set.  This can be helpful for values such as ` + "`y`" + `, which
 is a boolean true in YAML.
 
-If --params is passed, along with key.key...=value explicit arguments, the
+If ` + "`--params`" + ` is passed, along with ` + "`key.key...=value`" + ` explicit arguments, the
 explicit arguments will override the parameter file.
 `
 
@@ -124,8 +127,10 @@ func (c *runCommand) Init(args []string) (err error) {
 	if err := c.runCommandBase.Init(args); err != nil {
 		return errors.Trace(err)
 	}
+	applicationNames := set.NewStrings()
 	for _, arg := range args {
-		if names.IsValidUnit(arg) || validLeader.MatchString(arg) {
+		if s := validUnitOrLeader.FindStringSubmatch(arg); s != nil {
+			applicationNames.Add(s[1])
 			c.unitReceivers = append(c.unitReceivers, arg)
 		} else if nameRule.MatchString(arg) {
 			c.actionName = arg
@@ -139,6 +144,9 @@ func (c *runCommand) Init(args []string) (err error) {
 	}
 	if c.actionName == "" {
 		return errors.New("no action specified")
+	}
+	if len(applicationNames) > 1 {
+		return errors.New("all units must be of the same application")
 	}
 
 	// Parse CLI key-value args if they exist.
@@ -162,7 +170,7 @@ func (c *runCommand) Init(args []string) (err error) {
 }
 
 func (c *runCommand) Run(ctx *cmd.Context) error {
-	if err := c.ensureAPI(); err != nil {
+	if err := c.ensureAPI(ctx); err != nil {
 		return errors.Trace(err)
 	}
 	defer c.api.Close()
@@ -233,7 +241,7 @@ func (c *runCommand) enqueueActions(ctx *cmd.Context) (*actionapi.EnqueuedAction
 		actions[i].Name = c.actionName
 		actions[i].Parameters = actionParams
 	}
-	results, err := c.api.EnqueueOperation(actions)
+	results, err := c.api.EnqueueOperation(ctx, actions)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type ctrData struct {
@@ -30,10 +30,10 @@ type ctrData struct {
 }
 
 type modelData struct {
-	UUID  string
-	Owner string
-	Name  string
-	Life  life.Value
+	UUID      string
+	Qualifier string
+	Name      string
+	Life      life.Value
 
 	HostedMachineCount        int
 	ApplicationCount          int
@@ -71,7 +71,7 @@ func newTimedStatusUpdater(ctx *cmd.Context, api destroyControllerAPI, controlle
 }
 
 func newData(ctx context.Context, api destroyControllerAPI, controllerModelUUID string) (environmentStatus, error) {
-	models, err := api.AllModels()
+	models, err := api.AllModels(ctx)
 	if err != nil {
 		return environmentStatus{
 			Controller:   ctrData{},
@@ -139,16 +139,16 @@ func newData(ctx context.Context, api destroyControllerAPI, controllerModelUUID 
 			}
 		}
 		modelData := modelData{
-			model.UUID,
-			model.Owner,
-			modelName[model.UUID],
-			model.Life,
-			model.HostedMachineCount,
-			model.ApplicationCount,
-			len(model.Volumes),
-			len(model.Filesystems),
-			persistentVolumeCount,
-			persistentFilesystemCount,
+			UUID:                      model.UUID,
+			Qualifier:                 model.Qualifier.String(),
+			Name:                      modelName[model.UUID],
+			Life:                      model.Life,
+			HostedMachineCount:        model.HostedMachineCount,
+			ApplicationCount:          model.ApplicationCount,
+			VolumeCount:               len(model.Volumes),
+			FilesystemCount:           len(model.Filesystems),
+			PersistentVolumeCount:     persistentVolumeCount,
+			PersistentFilesystemCount: persistentFilesystemCount,
 		}
 		if model.UUID == controllerModelUUID {
 			ctrModelData = modelData
@@ -168,13 +168,13 @@ func newData(ctx context.Context, api destroyControllerAPI, controllerModelUUID 
 	}
 
 	ctrFinalStatus := ctrData{
-		controllerModelUUID,
-		aliveModelCount,
-		hostedMachinesCount,
-		applicationsCount,
-		volumeCount,
-		filesystemCount,
-		ctrModelData,
+		UUID:                 controllerModelUUID,
+		HostedModelCount:     aliveModelCount,
+		HostedMachineCount:   hostedMachinesCount,
+		ApplicationCount:     applicationsCount,
+		TotalVolumeCount:     volumeCount,
+		TotalFilesystemCount: filesystemCount,
+		Model:                ctrModelData,
 	}
 
 	return environmentStatus{
@@ -238,7 +238,7 @@ func fmtCtrStatus(data ctrData) string {
 }
 
 func fmtModelStatus(data modelData) string {
-	out := fmt.Sprintf("\t%s/%s (%s)", data.Owner, data.Name, data.Life)
+	out := fmt.Sprintf("\t%s/%s (%s)", data.Qualifier, data.Name, data.Life)
 
 	if machineNo := data.HostedMachineCount; machineNo > 0 {
 		out += fmt.Sprintf(", %d machine%s", machineNo, s(machineNo))

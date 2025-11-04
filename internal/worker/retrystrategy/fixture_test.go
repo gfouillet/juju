@@ -5,34 +5,34 @@
 package retrystrategy_test
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/watcher"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/retrystrategy"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type fixture struct {
-	testing.Stub
+	testhelpers.Stub
 }
 
-func newFixture(c *gc.C, errs ...error) *fixture {
+func newFixture(c *tc.C, errs ...error) *fixture {
 	fix := &fixture{}
-	c.Assert(nil, jc.ErrorIsNil)
+	c.Assert(nil, tc.ErrorIsNil)
 	fix.SetErrors(errs...)
 	return fix
 }
 
-func (fix *fixture) Run(c *gc.C, test func(worker.Worker)) {
+func (fix *fixture) Run(c *tc.C, test func(worker.Worker)) {
 	stubRetryStrategy := params.RetryStrategy{
 		ShouldRetry: true,
 	}
@@ -46,7 +46,7 @@ func (fix *fixture) Run(c *gc.C, test func(worker.Worker)) {
 	}
 
 	w, err := retrystrategy.NewRetryStrategyWorker(stubConfig)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -62,15 +62,15 @@ func (fix *fixture) Run(c *gc.C, test func(worker.Worker)) {
 }
 
 type stubFacade struct {
-	c               *gc.C
-	stub            *testing.Stub
+	c               *tc.C
+	stub            *testhelpers.Stub
 	watcher         *stubWatcher
 	count           int
 	initialStrategy params.RetryStrategy
 	stubTag         names.Tag
 }
 
-func newStubFacade(c *gc.C, stub *testing.Stub, initialStrategy params.RetryStrategy, stubTag names.Tag) *stubFacade {
+func newStubFacade(c *tc.C, stub *testhelpers.Stub, initialStrategy params.RetryStrategy, stubTag names.Tag) *stubFacade {
 	return &stubFacade{
 		c:               c,
 		stub:            stub,
@@ -82,8 +82,8 @@ func newStubFacade(c *gc.C, stub *testing.Stub, initialStrategy params.RetryStra
 }
 
 // WatchRetryStrategy is part of the retrystrategy Facade
-func (f *stubFacade) WatchRetryStrategy(agentTag names.Tag) (watcher.NotifyWatcher, error) {
-	f.c.Assert(agentTag, gc.Equals, f.stubTag)
+func (f *stubFacade) WatchRetryStrategy(ctx context.Context, agentTag names.Tag) (watcher.NotifyWatcher, error) {
+	f.c.Assert(agentTag, tc.Equals, f.stubTag)
 	f.stub.AddCall("WatchRetryStrategy", agentTag)
 	err := f.stub.NextErr()
 	if err != nil {
@@ -93,8 +93,8 @@ func (f *stubFacade) WatchRetryStrategy(agentTag names.Tag) (watcher.NotifyWatch
 }
 
 // RetryStrategy is part of the retrystrategy Facade
-func (f *stubFacade) RetryStrategy(agentTag names.Tag) (params.RetryStrategy, error) {
-	f.c.Assert(agentTag, gc.Equals, f.stubTag)
+func (f *stubFacade) RetryStrategy(ctx context.Context, agentTag names.Tag) (params.RetryStrategy, error) {
+	f.c.Assert(agentTag, tc.Equals, f.stubTag)
 	f.stub.AddCall("RetryStrategy", agentTag)
 	f.count = f.count + 1
 	// Change the strategy after 2 handles

@@ -4,12 +4,13 @@
 package pinger
 
 import (
-	"errors"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/worker/v4"
 	"gopkg.in/tomb.v2"
+
+	"github.com/juju/juju/internal/errors"
 )
 
 // Pinger listens for pings and will call the
@@ -56,6 +57,11 @@ func (pt *Pinger) Kill() {
 // Wait implements the worker.Worker interface.
 func (pt *Pinger) Wait() error {
 	return pt.tomb.Wait()
+}
+
+// Dying returns a channel that is closed when the Pinger is killed.
+func (pt *Pinger) Dying() <-chan struct{} {
+	return pt.tomb.Dying()
 }
 
 // loop waits for a reset signal, otherwise it performs

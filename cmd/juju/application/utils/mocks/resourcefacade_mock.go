@@ -10,9 +10,10 @@
 package mocks
 
 import (
+	context "context"
 	reflect "reflect"
 
-	resources "github.com/juju/juju/core/resources"
+	resource "github.com/juju/juju/core/resource"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -40,18 +41,18 @@ func (m *MockResourceLister) EXPECT() *MockResourceListerMockRecorder {
 }
 
 // ListResources mocks base method.
-func (m *MockResourceLister) ListResources(arg0 []string) ([]resources.ApplicationResources, error) {
+func (m *MockResourceLister) ListResources(arg0 context.Context, arg1 []string) ([]resource.ApplicationResources, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListResources", arg0)
-	ret0, _ := ret[0].([]resources.ApplicationResources)
+	ret := m.ctrl.Call(m, "ListResources", arg0, arg1)
+	ret0, _ := ret[0].([]resource.ApplicationResources)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ListResources indicates an expected call of ListResources.
-func (mr *MockResourceListerMockRecorder) ListResources(arg0 any) *MockResourceListerListResourcesCall {
+func (mr *MockResourceListerMockRecorder) ListResources(arg0, arg1 any) *MockResourceListerListResourcesCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListResources", reflect.TypeOf((*MockResourceLister)(nil).ListResources), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListResources", reflect.TypeOf((*MockResourceLister)(nil).ListResources), arg0, arg1)
 	return &MockResourceListerListResourcesCall{Call: call}
 }
 
@@ -61,19 +62,19 @@ type MockResourceListerListResourcesCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockResourceListerListResourcesCall) Return(arg0 []resources.ApplicationResources, arg1 error) *MockResourceListerListResourcesCall {
+func (c *MockResourceListerListResourcesCall) Return(arg0 []resource.ApplicationResources, arg1 error) *MockResourceListerListResourcesCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockResourceListerListResourcesCall) Do(f func([]string) ([]resources.ApplicationResources, error)) *MockResourceListerListResourcesCall {
+func (c *MockResourceListerListResourcesCall) Do(f func(context.Context, []string) ([]resource.ApplicationResources, error)) *MockResourceListerListResourcesCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockResourceListerListResourcesCall) DoAndReturn(f func([]string) ([]resources.ApplicationResources, error)) *MockResourceListerListResourcesCall {
+func (c *MockResourceListerListResourcesCall) DoAndReturn(f func(context.Context, []string) ([]resource.ApplicationResources, error)) *MockResourceListerListResourcesCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

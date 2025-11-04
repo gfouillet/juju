@@ -8,19 +8,19 @@ run_relation_data_exchange() {
 	ensure "${model_name}" "${file}"
 
 	echo "Deploy 2 dummy-sink instances and one dummy-source instance"
-	juju deploy ./testcharms/charms/dummy-sink -n 2
-	juju deploy ./testcharms/charms/dummy-source
+
+	juju deploy juju-qa-dummy-sink -n 2
+	juju deploy juju-qa-dummy-source --config token=becomegreen
 
 	echo "Establish relation"
 	juju relate dummy-sink dummy-source
-	juju config dummy-source token=becomegreen
 
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0 0)"
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0 1)"
-	wait_for "dummy-source" "$(idle_condition "dummy-source" 1 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 1)"
+	wait_for "dummy-source" "$(idle_condition "dummy-source" 0)"
 
 	echo "Get the leader unit name"
-	non_leader_dummy_sink_unit=$(juju status dummy-sink --format json | jq -r '.applications."dummy-sink".units | to_entries[] | select(.value.leader!=true) | .key')
+	non_leader_dummy_sink_unit=$(juju status --format json | jq -r '.applications."dummy-sink".units | to_entries[] | select(.value.leader!=true) | .key')
 	dummy_sink_relation_id=$(juju exec --unit "dummy-sink/leader" 'relation-ids source')
 	dummy_source_relation_id=$(juju exec --unit "dummy-source/leader" 'relation-ids sink')
 	# stop there

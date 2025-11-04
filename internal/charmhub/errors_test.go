@@ -4,8 +4,9 @@
 package charmhub
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/internal/charmhub/transport"
 )
@@ -14,22 +15,24 @@ type ErrorsSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&ErrorsSuite{})
+func TestErrorsSuite(t *testing.T) {
+	tc.Run(t, &ErrorsSuite{})
+}
 
-func (s *ErrorsSuite) TestHandleBasicAPIErrors(c *gc.C) {
+func (s *ErrorsSuite) TestHandleBasicAPIErrors(c *tc.C) {
 	var list transport.APIErrors
-	err := handleBasicAPIErrors(list, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := handleBasicAPIErrors(c.Context(), list, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *ErrorsSuite) TestHandleBasicAPIErrorsNotFound(c *gc.C) {
+func (s *ErrorsSuite) TestHandleBasicAPIErrorsNotFound(c *tc.C) {
 	list := transport.APIErrors{{Code: transport.ErrorCodeNotFound, Message: "foo"}}
-	err := handleBasicAPIErrors(list, s.logger)
-	c.Assert(err, gc.ErrorMatches, `charm or bundle not found`)
+	err := handleBasicAPIErrors(c.Context(), list, s.logger)
+	c.Assert(err, tc.ErrorMatches, `charm or bundle not found`)
 }
 
-func (s *ErrorsSuite) TestHandleBasicAPIErrorsOther(c *gc.C) {
+func (s *ErrorsSuite) TestHandleBasicAPIErrorsOther(c *tc.C) {
 	list := transport.APIErrors{{Code: "other", Message: "foo"}}
-	err := handleBasicAPIErrors(list, s.logger)
-	c.Assert(err, gc.ErrorMatches, `foo`)
+	err := handleBasicAPIErrors(c.Context(), list, s.logger)
+	c.Assert(err, tc.ErrorMatches, `foo`)
 }

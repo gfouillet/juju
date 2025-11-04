@@ -4,25 +4,26 @@
 package application
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
 // NewRemoveSaasCommand returns a command which removes a consumed application.
 func NewRemoveSaasCommand() cmd.Command {
 	cmd := &removeSaasCommand{}
-	cmd.newAPIFunc = func() (RemoveSaasAPI, error) {
-		root, err := cmd.NewAPIRoot()
+	cmd.newAPIFunc = func(ctx context.Context) (RemoveSaasAPI, error) {
+		root, err := cmd.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -36,7 +37,7 @@ type removeSaasCommand struct {
 	modelcmd.ModelCommandBase
 	SaasNames []string
 
-	newAPIFunc func() (RemoveSaasAPI, error)
+	newAPIFunc func(ctx context.Context) (RemoveSaasAPI, error)
 
 	Force  bool
 	NoWait bool
@@ -96,11 +97,11 @@ func (c *removeSaasCommand) SetFlags(f *gnuflag.FlagSet) {
 // RemoveSaasAPI defines the API methods that the remove-saas command uses.
 type RemoveSaasAPI interface {
 	Close() error
-	DestroyConsumedApplication(application.DestroyConsumedApplicationParams) ([]params.ErrorResult, error)
+	DestroyConsumedApplication(context.Context, application.DestroyConsumedApplicationParams) ([]params.ErrorResult, error)
 }
 
 func (c *removeSaasCommand) Run(ctx *cmd.Context) error {
-	client, err := c.newAPIFunc()
+	client, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func (c *removeSaasCommand) removeSaass(
 		MaxWait:   maxWait,
 		SaasNames: c.SaasNames,
 	}
-	results, err := client.DestroyConsumedApplication(params)
+	results, err := client.DestroyConsumedApplication(ctx, params)
 	if err := block.ProcessBlockedError(err, block.BlockRemove); err != nil {
 		return errors.Trace(err)
 	}

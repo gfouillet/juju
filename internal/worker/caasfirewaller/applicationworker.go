@@ -12,9 +12,11 @@ import (
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/watcher"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
 )
 
 type applicationWorker struct {
@@ -22,17 +24,17 @@ type applicationWorker struct {
 	controllerUUID string
 	modelUUID      string
 	appName        string
+	appUUID        application.UUID
 
-	firewallerAPI CAASFirewallerAPI
+	portService        PortService
+	applicationService ApplicationService
 
 	broker         CAASBroker
 	portMutator    PortMutator
 	serviceUpdater ServiceUpdater
 
 	appWatcher   watcher.NotifyWatcher
-	portsWatcher watcher.StringsWatcher
-
-	lifeGetter LifeGetter
+	portsWatcher watcher.NotifyWatcher
 
 	initial           bool
 	previouslyExposed bool
@@ -45,23 +47,24 @@ type applicationWorker struct {
 func newApplicationWorker(
 	controllerUUID string,
 	modelUUID string,
-	appName string,
-	firewallerAPI CAASFirewallerAPI,
+	appUUID application.UUID,
+	portService PortService,
+	applicationSewrvice ApplicationService,
 	broker CAASBroker,
-	lifeGetter LifeGetter,
 	logger logger.Logger,
 ) (worker.Worker, error) {
 	w := &applicationWorker{
-		controllerUUID: controllerUUID,
-		modelUUID:      modelUUID,
-		appName:        appName,
-		firewallerAPI:  firewallerAPI,
-		broker:         broker,
-		lifeGetter:     lifeGetter,
-		initial:        true,
-		logger:         logger,
+		controllerUUID:     controllerUUID,
+		modelUUID:          modelUUID,
+		appUUID:            appUUID,
+		portService:        portService,
+		applicationService: applicationSewrvice,
+		broker:             broker,
+		initial:            true,
+		logger:             logger,
 	}
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-firewaller-application",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -81,7 +84,11 @@ func (w *applicationWorker) Wait() error {
 }
 
 func (w *applicationWorker) setUp(ctx context.Context) (err error) {
-	w.appWatcher, err = w.firewallerAPI.WatchApplication(ctx, w.appName)
+	w.appName, err = w.applicationService.GetApplicationName(ctx, w.appUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	w.appWatcher, err = w.applicationService.WatchApplicationExposed(ctx, w.appName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -89,7 +96,7 @@ func (w *applicationWorker) setUp(ctx context.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	w.portsWatcher, err = w.firewallerAPI.WatchOpenedPorts()
+	w.portsWatcher, err = w.portService.WatchOpenedPortsForApplication(ctx, w.appUUID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -102,7 +109,7 @@ func (w *applicationWorker) setUp(ctx context.Context) (err error) {
 	w.portMutator = app
 	w.serviceUpdater = app
 
-	if w.currentPorts, err = w.firewallerAPI.GetOpenedPorts(w.appName); err != nil {
+	if w.currentPorts, err = w.portService.GetApplicationOpenedPortsByEndpoint(ctx, w.appUUID); err != nil {
 		return errors.Annotatef(err, "failed to get initial openned ports for application")
 	}
 
@@ -110,16 +117,16 @@ func (w *applicationWorker) setUp(ctx context.Context) (err error) {
 }
 
 func (w *applicationWorker) loop() (err error) {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	defer func() {
 		// If the application has been deleted, we can return nil.
 		if errors.Is(err, errors.NotFound) {
-			w.logger.Debugf("sidecar caas firewaller application %v has been removed", w.appName)
+			w.logger.Debugf(ctx, "sidecar caas firewaller application %v has been removed", w.appName)
 			err = nil
 		}
 	}()
-
-	ctx, cancel := w.scopedContext()
-	defer cancel()
 
 	if err = w.setUp(ctx); err != nil {
 		return errors.Trace(err)
@@ -135,7 +142,7 @@ func (w *applicationWorker) loop() (err error) {
 			}
 			// We know this is a v2 charm at this point, because this child
 			// worker is only ever started for v2 charms.
-			if err := w.onApplicationChanged(); err != nil {
+			if err := w.onApplicationChanged(ctx); err != nil {
 				if strings.Contains(err.Error(), "unexpected EOF") {
 					return nil
 				}
@@ -145,11 +152,7 @@ func (w *applicationWorker) loop() (err error) {
 			if !ok {
 				return errors.New("application watcher closed")
 			}
-			// TODO(sidecar): implement portWatcher to return application names having port changes,
-			/*
-				if !sets.NewString(changes...).Contains(w.appName){continue}
-			*/
-			if err := w.onPortChanged(); err != nil {
+			if err := w.onPortChanged(ctx); err != nil {
 				return errors.Trace(err)
 			}
 		}
@@ -172,15 +175,15 @@ func toServicePorts(in network.GroupedPortRanges) []caas.ServicePort {
 	return out
 }
 
-func (w *applicationWorker) onPortChanged() error {
-	changedPortRanges, err := w.firewallerAPI.GetOpenedPorts(w.appName)
+func (w *applicationWorker) onPortChanged(ctx context.Context) error {
+	changedPortRanges, err := w.portService.GetApplicationOpenedPortsByEndpoint(ctx, w.appUUID)
 	if err != nil {
 		return err
 	}
-	w.logger.Tracef("current port for app %q, %v", w.appName, w.currentPorts)
-	w.logger.Tracef("port changed for app %q, %v", w.appName, changedPortRanges)
+	w.logger.Tracef(ctx, "current port for app %q, %v", w.appName, w.currentPorts)
+	w.logger.Tracef(ctx, "port changed for app %q, %v", w.appName, changedPortRanges)
 	if w.currentPorts.EqualTo(changedPortRanges) {
-		w.logger.Debugf("no port changes for app %q", w.appName)
+		w.logger.Debugf(ctx, "no port changes for app %q", w.appName)
 		return nil
 	}
 
@@ -196,23 +199,23 @@ func (w *applicationWorker) onPortChanged() error {
 	return nil
 }
 
-func (w *applicationWorker) onApplicationChanged() (err error) {
+func (w *applicationWorker) onApplicationChanged(ctx context.Context) (err error) {
 	defer func() {
 		// Not found could be because the app got removed or there's
 		// no container service created yet as the app is still being set up.
-		if errors.Is(err, errors.NotFound) {
+		if errors.Is(err, applicationerrors.ApplicationNotFound) {
 			// Perhaps the app got removed while we were processing.
-			if _, err2 := w.lifeGetter.Life(w.appName); err2 != nil {
+			if _, err2 := w.applicationService.GetApplicationLife(ctx, w.appUUID); err2 != nil {
 				err = err2
 				return
 			}
 			// Ignore not found error because the ip could be not ready yet at this stage.
-			w.logger.Warningf("processing change for application %q, %v", w.appName, err)
+			w.logger.Warningf(ctx, "processing change for application %q, %v", w.appName, err)
 			err = nil
 		}
 	}()
 
-	exposed, err := w.firewallerAPI.IsExposed(w.appName)
+	exposed, err := w.applicationService.IsApplicationExposed(ctx, w.appName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -232,13 +235,13 @@ func (w *applicationWorker) scopedContext() (context.Context, context.CancelFunc
 	return context.WithCancel(w.catacomb.Context(context.Background()))
 }
 
-func exposeService(app ServiceUpdater) error {
+func exposeService(_ ServiceUpdater) error {
 	// TODO(sidecar): implement expose once it's modelled.
 	// app.UpdateService()
 	return nil
 }
 
-func unExposeService(app ServiceUpdater) error {
+func unExposeService(_ ServiceUpdater) error {
 	// TODO(sidecar): implement un-expose once it's modelled.
 	// app.UpdateService()
 	return nil

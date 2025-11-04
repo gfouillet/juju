@@ -5,7 +5,6 @@ package objectstore
 
 import (
 	"context"
-	"io"
 	"time"
 
 	"github.com/juju/clock"
@@ -15,9 +14,12 @@ import (
 
 	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/logger"
-	coreobjectstore "github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
 	coretrace "github.com/juju/juju/core/trace"
 	internalobjectstore "github.com/juju/juju/internal/objectstore"
+	internalworker "github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/worker/apiremotecaller"
 	"github.com/juju/juju/internal/worker/trace"
 )
 
@@ -30,7 +32,9 @@ const (
 // lifecycle of the objectStore is managed.
 type TrackedObjectStore interface {
 	worker.Worker
-	coreobjectstore.ObjectStore
+	objectstore.ObjectStore
+	objectstore.ObjectStoreRemover
+	Report() map[string]any
 }
 
 // WorkerConfig encapsulates the configuration options for the
@@ -41,11 +45,13 @@ type WorkerConfig struct {
 	RootBucket                 string
 	Clock                      clock.Clock
 	Logger                     logger.Logger
-	S3Client                   coreobjectstore.Client
+	S3Client                   objectstore.Client
+	APIRemoteCaller            apiremotecaller.APIRemoteCallers
 	NewObjectStoreWorker       internalobjectstore.ObjectStoreWorkerFunc
-	ObjectStoreType            coreobjectstore.BackendType
 	ControllerMetadataService  MetadataService
+	ControllerConfigService    ControllerConfigService
 	ModelMetadataServiceGetter MetadataServiceGetter
+	ModelServiceGetter         ModelServiceGetter
 	ModelClaimGetter           ModelClaimGetter
 	AllowDraining              bool
 }
@@ -70,11 +76,17 @@ func (c *WorkerConfig) Validate() error {
 	if c.S3Client == nil {
 		return errors.NotValidf("nil S3Client")
 	}
+	if c.APIRemoteCaller == nil {
+		return errors.NotValidf("nil APIRemoteCaller")
+	}
 	if c.NewObjectStoreWorker == nil {
 		return errors.NotValidf("nil NewObjectStoreWorker")
 	}
 	if c.ControllerMetadataService == nil {
 		return errors.NotValidf("nil ControllerMetadataService")
+	}
+	if c.ControllerConfigService == nil {
+		return errors.NotValidf("nil ControllerConfigService")
 	}
 	if c.ModelMetadataServiceGetter == nil {
 		return errors.NotValidf("nil ModelMetadataServiceGetter")
@@ -100,6 +112,7 @@ type objectStoreWorker struct {
 	runner *worker.Runner
 
 	objectStoreRequests chan objectStoreRequest
+	flushWorkers        chan struct{}
 }
 
 // NewWorker creates a new object store worker.
@@ -112,24 +125,30 @@ func newWorker(cfg WorkerConfig, internalStates chan string) (*objectStoreWorker
 		return nil, errors.Trace(err)
 	}
 
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:  "object-store",
+		Clock: cfg.Clock,
+		IsFatal: func(err error) bool {
+			return false
+		},
+		ShouldRestart: internalworker.ShouldRunnerRestart,
+		RestartDelay:  time.Second * 10,
+		Logger:        internalworker.WrapLogger(cfg.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w := &objectStoreWorker{
-		internalStates: internalStates,
-		cfg:            cfg,
-		runner: worker.NewRunner(worker.RunnerParams{
-			Clock: cfg.Clock,
-			IsFatal: func(err error) bool {
-				return false
-			},
-			ShouldRestart: func(err error) bool {
-				return !errors.Is(err, database.ErrDBDead)
-			},
-			RestartDelay: time.Second * 10,
-			Logger:       cfg.Logger,
-		}),
+		internalStates:      internalStates,
+		cfg:                 cfg,
+		runner:              runner,
 		objectStoreRequests: make(chan objectStoreRequest),
+		flushWorkers:        make(chan struct{}),
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "object-store",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
@@ -146,28 +165,29 @@ func (w *objectStoreWorker) loop() (err error) {
 	// Report the initial started state.
 	w.reportInternalState(stateStarted)
 
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	for {
 		select {
+		case <-w.catacomb.Dying():
+			return w.catacomb.ErrDying()
+
 		// The following ensures that all objectStoreRequests are serialised and
 		// processed in order.
 		case req := <-w.objectStoreRequests:
-			if err := w.initObjectStore(req.namespace); err != nil {
-				select {
-				case req.done <- errors.Trace(err):
-				case <-w.catacomb.Dying():
-					return w.catacomb.ErrDying()
-				}
-				continue
-			}
+			err := w.initObjectStore(ctx, req.namespace)
 
 			select {
-			case req.done <- nil:
+			case req.done <- err:
 			case <-w.catacomb.Dying():
 				return w.catacomb.ErrDying()
 			}
 
-		case <-w.catacomb.Dying():
-			return w.catacomb.ErrDying()
+		case <-w.flushWorkers:
+			if err := w.stopAndRemoveAllWorkers(ctx); err != nil {
+				return errors.Trace(err)
+			}
 		}
 	}
 }
@@ -182,14 +202,37 @@ func (w *objectStoreWorker) Wait() error {
 	return w.catacomb.Wait()
 }
 
+// FlushWorkers flushes the object store workers.
+func (w *objectStoreWorker) FlushWorkers(ctx context.Context) error {
+	// We have to synchronise the flush workers to ensure that we don't
+	// have multiple flushes happening at the same time and that we aren't
+	// creating new workers whilst flushing.
+	select {
+	case <-w.catacomb.Dying():
+		return w.catacomb.ErrDying()
+	case w.flushWorkers <- struct{}{}:
+	}
+	return nil
+}
+
+func (w *objectStoreWorker) stopAndRemoveAllWorkers(ctx context.Context) error {
+	for _, namespace := range w.runner.WorkerNames() {
+		err := w.runner.StopAndRemoveWorker(namespace, ctx.Done())
+		if err != nil && !errors.Is(err, errors.NotFound) {
+			return errors.Trace(err)
+		}
+	}
+	return nil
+}
+
 // GetObjectStore returns a objectStore for the given namespace.
-func (w *objectStoreWorker) GetObjectStore(ctx context.Context, namespace string) (coreobjectstore.ObjectStore, error) {
+func (w *objectStoreWorker) GetObjectStore(ctx context.Context, namespace string) (objectstore.ObjectStore, error) {
 	// First check if we've already got the objectStore worker already running.
 	// If we have, then return out quickly. The objectStoreRunner is the cache,
-	// so there is no need to have a in-memory cache here.
+	// so there is no need to have an in-memory cache here.
 	if objectStore, err := w.workerFromCache(namespace); err != nil {
 		if errors.Is(err, w.catacomb.ErrDying()) {
-			return nil, coreobjectstore.ErrObjectStoreDying
+			return nil, objectstore.ErrObjectStoreDying
 		}
 
 		return nil, errors.Trace(err)
@@ -201,12 +244,12 @@ func (w *objectStoreWorker) GetObjectStore(ctx context.Context, namespace string
 	// or it's not running and we need to start it.
 	req := objectStoreRequest{
 		namespace: namespace,
-		done:      make(chan error),
+		done:      make(chan error, 1),
 	}
 	select {
 	case w.objectStoreRequests <- req:
 	case <-w.catacomb.Dying():
-		return nil, coreobjectstore.ErrObjectStoreDying
+		return nil, objectstore.ErrObjectStoreDying
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
 	}
@@ -220,7 +263,7 @@ func (w *objectStoreWorker) GetObjectStore(ctx context.Context, namespace string
 			return nil, errors.Trace(err)
 		}
 	case <-w.catacomb.Dying():
-		return nil, coreobjectstore.ErrObjectStoreDying
+		return nil, objectstore.ErrObjectStoreDying
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
 	}
@@ -228,19 +271,19 @@ func (w *objectStoreWorker) GetObjectStore(ctx context.Context, namespace string
 	// This will return a not found error if the request was not honoured.
 	// The error will be logged - we don't crash this worker for bad calls.
 	tracked, err := w.runner.Worker(namespace, w.catacomb.Dying())
-	if err != nil {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
 	if tracked == nil {
-		return nil, errors.NotFoundf("objectstore")
+		return nil, objectstore.ErrObjectStoreNotFound
 	}
-	return tracked.(coreobjectstore.ObjectStore), nil
+	return tracked.(objectstore.ObjectStore), nil
 }
 
-func (w *objectStoreWorker) workerFromCache(namespace string) (coreobjectstore.ObjectStore, error) {
+func (w *objectStoreWorker) workerFromCache(namespace string) (objectstore.ObjectStore, error) {
 	// If the worker already exists, return the existing worker early.
 	if objectStore, err := w.runner.Worker(namespace, w.catacomb.Dying()); err == nil {
-		return objectStore.(coreobjectstore.ObjectStore), nil
+		return objectStore.(objectstore.ObjectStore), nil
 	} else if errors.Is(errors.Cause(err), worker.ErrDead) {
 		// Handle the case where the runner is dead due to this worker dying.
 		select {
@@ -259,54 +302,78 @@ func (w *objectStoreWorker) workerFromCache(namespace string) (coreobjectstore.O
 	return nil, nil
 }
 
-func (w *objectStoreWorker) initObjectStore(namespace string) error {
-	err := w.runner.StartWorker(namespace, func() (worker.Worker, error) {
-		ctx, cancel := w.scopedContext()
-		defer cancel()
-
+func (w *objectStoreWorker) initObjectStore(ctx context.Context, namespace string) error {
+	err := w.runner.StartWorker(ctx, namespace, func(ctx context.Context) (worker.Worker, error) {
 		tracer, err := w.cfg.TracerGetter.GetTracer(ctx, coretrace.Namespace("objectstore", namespace))
+		if err != nil {
+			return nil, errors.Annotatef(err, "getting tracer for namespace %q", namespace)
+		}
+
+		modelUUID := model.UUID(namespace)
+
+		controllerConfig, err := w.cfg.ControllerConfigService.ControllerConfig(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
 		// Grab the claimer for the model.
-		claimer, err := w.cfg.ModelClaimGetter.ForModelUUID(namespace)
+		claimer, err := w.cfg.ModelClaimGetter.ForModelUUID(modelUUID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Annotatef(err, "getting model claimer for model %q", modelUUID)
 		}
 
 		var metadataService MetadataService
 		if namespace == database.ControllerNS {
 			metadataService = w.cfg.ControllerMetadataService
 		} else {
-			metadataService = w.cfg.ModelMetadataServiceGetter.ForModelUUID(namespace)
+			metadataService = w.cfg.ModelMetadataServiceGetter.ForModelUUID(modelUUID)
 		}
 
 		objectStore, err := w.cfg.NewObjectStoreWorker(
 			ctx,
-			internalobjectstore.BackendTypeOrDefault(w.cfg.ObjectStoreType),
+			internalobjectstore.BackendTypeOrDefault(controllerConfig.ObjectStoreType()),
 			namespace,
 			internalobjectstore.WithRootDir(w.cfg.RootDir),
 			internalobjectstore.WithRootBucket(w.cfg.RootBucket),
 			internalobjectstore.WithS3Client(w.cfg.S3Client),
+			internalobjectstore.WithAPIRemoveCallers(w.cfg.APIRemoteCaller),
 			internalobjectstore.WithMetadataService(metadataService),
 			internalobjectstore.WithClaimer(claimer),
-			internalobjectstore.WithLogger(w.cfg.Logger),
+			internalobjectstore.WithLogger(w.cfg.Logger.Child(database.ShortNamespace(namespace))),
 			internalobjectstore.WithAllowDraining(w.cfg.AllowDraining),
 		)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Annotatef(err, "creating object store for namespace %q", namespace)
 		}
 
-		return &tracedWorker{
-			TrackedObjectStore: objectStore,
-			tracer:             tracer,
-		}, nil
+		if namespace == database.ControllerNS {
+			// If we're in the controller namespace, then agents should only
+			// be using this. We don't need to track the model service.
+			return newControllerWorker(
+				objectStore,
+				tracer,
+			)
+		}
+
+		modelServices := w.cfg.ModelServiceGetter.ForModelUUID(modelUUID)
+		modelService := modelServices.ModelService()
+		return newTrackerWorker(
+			modelUUID,
+			modelService,
+			objectStore,
+			tracer,
+			w.cfg.Logger,
+		)
 	})
 	if errors.Is(err, errors.AlreadyExists) {
 		return nil
 	}
 	return errors.Trace(err)
+}
+
+// Report returns a map of internal state for the worker.
+func (w *objectStoreWorker) Report() map[string]any {
+	return w.runner.Report()
 }
 
 // scopedContext returns a context that is in the scope of the worker lifetime.
@@ -323,41 +390,4 @@ func (w *objectStoreWorker) reportInternalState(state string) {
 	case w.internalStates <- state:
 	default:
 	}
-}
-
-// tracedWorker is a wrapper around a ObjectStore that adds tracing, without
-// exposing the underlying ObjectStore.
-type tracedWorker struct {
-	TrackedObjectStore
-	tracer coretrace.Tracer
-}
-
-// Get returns an io.ReadCloser for data at path, namespaced to the
-// model.
-func (t *tracedWorker) Get(ctx context.Context, path string) (_ io.ReadCloser, _ int64, err error) {
-	ctx, span := coretrace.Start(coretrace.WithTracer(ctx, t.tracer), coretrace.NameFromFunc(),
-		coretrace.WithAttributes(coretrace.StringAttr("objectstore.path", path)),
-	)
-	defer func() {
-		span.RecordError(err)
-		span.End()
-	}()
-
-	return t.TrackedObjectStore.Get(ctx, path)
-}
-
-// Put stores data from reader at path, namespaced to the model.
-func (t *tracedWorker) Put(ctx context.Context, path string, r io.Reader, length int64) (err error) {
-	ctx, span := coretrace.Start(coretrace.WithTracer(ctx, t.tracer), coretrace.NameFromFunc(),
-		coretrace.WithAttributes(
-			coretrace.StringAttr("objectstore.path", path),
-			coretrace.Int64Attr("objectstore.size", length),
-		),
-	)
-	defer func() {
-		span.RecordError(err)
-		span.End()
-	}()
-
-	return t.TrackedObjectStore.Put(ctx, path, r, length)
 }

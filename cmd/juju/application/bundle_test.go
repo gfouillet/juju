@@ -8,11 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/client/application"
 	apiclient "github.com/juju/juju/api/client/client"
@@ -25,10 +24,12 @@ import (
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/internal/charm"
+	charmtesting "github.com/juju/juju/internal/charm/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	coretesting "github.com/juju/juju/internal/testing"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/testcharms"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type BundleDeploySuite struct {
@@ -37,9 +38,11 @@ type BundleDeploySuite struct {
 	fakeAPI *fakeDeployAPI
 }
 
-var _ = gc.Suite(&BundleDeploySuite{})
+func TestBundleDeploySuite(t *testing.T) {
+	tc.Run(t, &BundleDeploySuite{})
+}
 
-func (s *BundleDeploySuite) SetUpTest(c *gc.C) {
+func (s *BundleDeploySuite) SetUpTest(c *tc.C) {
 	cfg := map[string]interface{}{
 		"name":           "name",
 		"uuid":           "deadbeef-0bad-400d-8000-4b1d0d06f00d",
@@ -54,29 +57,29 @@ func (s *BundleDeploySuite) SetUpTest(c *gc.C) {
 // DeployBundleYAML uses the given bundle content to create a bundle in the
 // local repository and then deploy it. It returns the bundle deployment output
 // and error.
-func (s *BundleDeploySuite) DeployBundleYAML(c *gc.C, content string, extraArgs ...string) error {
+func (s *BundleDeploySuite) DeployBundleYAML(c *tc.C, content string, extraArgs ...string) error {
 	bundlePath := s.makeBundleDir(c, content)
 	args := append([]string{bundlePath}, extraArgs...)
 	err := s.runDeploy(c, args...)
 	return err
 }
 
-func (s *BundleDeploySuite) makeBundleDir(c *gc.C, content string) string {
+func (s *BundleDeploySuite) makeBundleDir(c *tc.C, content string) string {
 	bundlePath := filepath.Join(c.MkDir(), "example")
-	c.Assert(os.Mkdir(bundlePath, 0777), jc.ErrorIsNil)
+	c.Assert(os.Mkdir(bundlePath, 0777), tc.ErrorIsNil)
 	err := os.WriteFile(filepath.Join(bundlePath, "bundle.yaml"), []byte(content), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = os.WriteFile(filepath.Join(bundlePath, "README.md"), []byte("README"), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return bundlePath
 }
 
-func (s *BundleDeploySuite) setupCharm(c *gc.C, url, name string, b base.Base) charm.Charm {
+func (s *BundleDeploySuite) setupCharm(c *tc.C, url, name string, b base.Base) charm.Charm {
 	return s.setupCharmMaybeForce(c, url, name, b, arch.DefaultArchitecture, false)
 }
 
-func (s *BundleDeploySuite) setupCharmMaybeForce(c *gc.C, url, name string, abase base.Base, arc string, force bool) charm.Charm {
+func (s *BundleDeploySuite) setupCharmMaybeForce(c *tc.C, url, name string, abase base.Base, arc string, force bool) charm.Charm {
 	baseURL := charm.MustParseURL(url)
 	resolveURL := charm.MustParseURL(url)
 	if resolveURL.Revision < 0 {
@@ -106,7 +109,7 @@ func (s *BundleDeploySuite) setupCharmMaybeForce(c *gc.C, url, name string, abas
 					Channel:      b.Channel.Track,
 				}
 				origin, err := apputils.MakeOrigin(charm.Schema(url.Schema), url.Revision, charm.Channel{}, platform)
-				c.Assert(err, jc.ErrorIsNil)
+				c.Assert(err, tc.ErrorIsNil)
 
 				s.fakeAPI.Call("ResolveCharm", url, origin, false).Returns(
 					resolveURL,
@@ -129,7 +132,7 @@ func (s *BundleDeploySuite) setupCharmMaybeForce(c *gc.C, url, name string, abas
 	}
 
 	var chDir charm.Charm
-	chDir, err := charm.ReadCharmDir(testcharms.RepoWithSeries("bionic").CharmDirPath(name))
+	chDir, err := charmtesting.ReadCharmDir(testcharms.RepoWithSeries("bionic").CharmDirPath(name))
 	if err != nil {
 		if !os.IsNotExist(errors.Cause(err)) {
 			c.Fatal(err)
@@ -140,59 +143,58 @@ func (s *BundleDeploySuite) setupCharmMaybeForce(c *gc.C, url, name string, abas
 	return chDir
 }
 
-func (s *BundleDeploySuite) setupBundle(c *gc.C, url, name string, allBase ...base.Base) {
+func (s *BundleDeploySuite) setupFakeBundle(c *tc.C, url string, allBase ...base.Base) {
 	bundleResolveURL := charm.MustParseURL(url)
 	baseURL := *bundleResolveURL
 	baseURL.Revision = -1
 	withCharmRepoResolvable(s.fakeAPI, &baseURL, base.Base{})
-	bundleDir := testcharms.RepoWithSeries("bionic").BundleArchive(c.MkDir(), name)
 
 	// Resolve a bundle with no revision and return a url with a version.  Ensure
 	// GetBundle expects the url with revision.
 	for _, b := range allBase {
 		origin, err := apputils.MakeOrigin(charm.Schema(bundleResolveURL.Schema), bundleResolveURL.Revision, charm.Channel{}, corecharm.Platform{
 			OS: b.OS, Channel: b.Channel.Track})
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		origin.Revision = nil
 		s.fakeAPI.Call("ResolveBundleURL", &baseURL, origin).Returns(
 			bundleResolveURL,
 			origin,
 			error(nil),
 		)
-		s.fakeAPI.Call("GetBundle", bundleResolveURL).Returns(bundleDir, error(nil))
+		s.fakeAPI.Call("GetBundle", bundleResolveURL).Returns(nil, error(nil))
 	}
 }
 
-func (s *BundleDeploySuite) runDeploy(c *gc.C, args ...string) error {
+func (s *BundleDeploySuite) runDeploy(c *tc.C, args ...string) error {
 	deployCmd := newDeployCommandForTest(s.fakeAPI)
 	_, err := cmdtesting.RunCommand(c, deployCmd, args...)
 	return err
 }
 
-func (s *BundleDeploySuite) TestDeployBundleInvalidFlags(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleInvalidFlags(c *tc.C) {
 	s.setupCharm(c, "ch:mysql-42", "mysql", base.MustParseBaseFromString("ubuntu@18.04"))
 	s.setupCharm(c, "ch:wordpress-47", "wordpress", base.MustParseBaseFromString("ubuntu@18.04"))
-	s.setupBundle(c, "ch:wordpress-simple-1", "wordpress-simple", base.Base{}, base.MustParseBaseFromString("ubuntu@18.04"), base.MustParseBaseFromString("ubuntu@16.04"))
+	s.setupFakeBundle(c, "ch:wordpress-simple-1", base.Base{}, base.MustParseBaseFromString("ubuntu@18.04"), base.MustParseBaseFromString("ubuntu@16.04"))
 
 	err := s.runDeploy(c, "ch:wordpress-simple", "--config", "config.yaml")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: --config")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: --config")
 	err = s.runDeploy(c, "ch:wordpress-simple", "-n", "2")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: -n")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: -n")
 	err = s.runDeploy(c, "ch:wordpress-simple", "--base", "ubuntu@18.04")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: --base")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: --base")
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithForce(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithForce(c *tc.C) {
 	s.assertDeployBundleLocalPathInvalidBaseWithForce(c, true)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithoutForce(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithoutForce(c *tc.C) {
 	s.assertDeployBundleLocalPathInvalidBaseWithForce(c, false)
 }
 
-func (s *BundleDeploySuite) assertDeployBundleLocalPathInvalidBaseWithForce(c *gc.C, force bool) {
+func (s *BundleDeploySuite) assertDeployBundleLocalPathInvalidBaseWithForce(c *tc.C, force bool) {
 	dir := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(dir, "dummy")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(dir, "dummy")
 
 	dummyURL := charm.MustParseURL("local:dummy-1")
 	withLocalCharmDeployable(s.fakeAPI, dummyURL, charmDir, force)
@@ -205,26 +207,26 @@ func (s *BundleDeploySuite) assertDeployBundleLocalPathInvalidBaseWithForce(c *g
 	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
 
 	path := filepath.Join(dir, "mybundle")
-	data := `
+	data := fmt.Sprintf(`
         default-base: ubuntu@12.10
         applications:
             dummy:
-                charm: ./dummy
+                charm: %s
                 num_units: 1
-    `
+    `, charmDir.Path)
 	err := os.WriteFile(path, []byte(data), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	deployArgs := []string{path}
 	if force {
 		deployArgs = append(deployArgs, "--force")
 	}
 	err = s.runDeploy(c, deployArgs...)
-	c.Assert(err, gc.ErrorMatches, "cannot deploy bundle: base: ubuntu@12.10/stable not supported")
+	c.Assert(err, tc.ErrorMatches, "cannot deploy bundle: base: ubuntu@12.10/stable not supported")
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidJujuBase(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidJujuBase(c *tc.C) {
 	dir := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(dir, "jammyonly")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(dir, "jammyonly")
 
 	curl := charm.MustParseURL("local:jammyonly-1")
 	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
@@ -237,18 +239,18 @@ func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidJujuBase(c *gc.C) {
 	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
 
 	path := filepath.Join(dir, "mybundle")
-	data := `
+	data := fmt.Sprintf(`
         default-base: ubuntu@20.04
         applications:
             jammyonly:
-                charm: ./jammyonly
+                charm: %s
                 num_units: 1
-    `
+    `, charmDir.Path)
 	err := os.WriteFile(path, []byte(data), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.runDeploy(c, path)
-	c.Assert(err, gc.ErrorMatches, `cannot deploy bundle: base "ubuntu@20.04/stable" is not supported, supported bases are: .*`)
+	c.Assert(err, tc.ErrorMatches, `cannot deploy bundle: base "ubuntu@20.04/stable" is not supported, supported bases are: .*`)
 }
 
 var deployBundleErrorsTests = []struct {
@@ -323,7 +325,7 @@ negative number of units specified on application "mysql"`,
 	err: `cannot deploy local charm at ".*wordpress": file does not exist`,
 }}
 
-func (s *BundleDeploySuite) TestDeployBundleErrors(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleErrors(c *tc.C) {
 	for i, test := range deployBundleErrorsTests {
 		c.Logf("test %d: %s", i, test.about)
 
@@ -331,17 +333,17 @@ func (s *BundleDeploySuite) TestDeployBundleErrors(c *gc.C) {
 		s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
 
 		err := s.DeployBundleYAML(c, test.content)
-		pass := c.Check(err, gc.ErrorMatches, "cannot deploy bundle: "+test.err)
+		pass := c.Check(err, tc.ErrorMatches, "cannot deploy bundle: "+test.err)
 		if !pass {
 			c.Logf("error: \n%s\n", errors.ErrorStack(err))
 		}
 	}
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadConfig(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadConfig(c *tc.C) {
 	charmsPath := c.MkDir()
-	mysqlPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "mysql")
-	wordpressPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "wordpress")
+	mysqlPath := testcharms.RepoWithSeries("bionic").CharmArchivePath(charmsPath, "mysql")
+	wordpressPath := testcharms.RepoWithSeries("bionic").CharmArchivePath(charmsPath, "wordpress")
 	err := s.DeployBundleYAML(c, fmt.Sprintf(`
        default-base: ubuntu@16.04
        applications:
@@ -355,12 +357,12 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadConfig(c *gc.C) {
            - ["wordpress:db", "mysql:server"]
    `, wordpressPath, mysqlPath),
 		"--overlay", "missing-file")
-	c.Assert(err, gc.ErrorMatches, `cannot deploy bundle: unable to process overlays: "missing-file" not found`)
+	c.Assert(err, tc.ErrorMatches, `cannot deploy bundle: unable to process overlays: "missing-file" not found`)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentLXDProfile(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentLXDProfile(c *tc.C) {
 	charmsPath := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "lxd-profile")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile")
 
 	curl := charm.MustParseURL("local:lxd-profile-0")
 	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
@@ -379,12 +381,12 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentLXDProfile(c *gc.C) {
                charm: %s
                num_units: 1
    `, charmDir.Path))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfile(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfile(c *tc.C) {
 	charmsPath := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "lxd-profile-fail")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile-fail")
 
 	curl := charm.MustParseURL("local:lxd-profile-fail-0")
 	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
@@ -404,12 +406,12 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfile(c *gc.C
                charm: %s
                num_units: 1
    `, charmDir.Path))
-	c.Assert(err, gc.ErrorMatches, "cannot deploy bundle: cannot deploy local charm at .*: invalid lxd-profile.yaml: contains device type \"unix-disk\"")
+	c.Assert(err, tc.ErrorMatches, "cannot deploy bundle: cannot deploy local charm at .*: invalid lxd-profile.yaml: contains device type \"unix-disk\"")
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfileWithForce(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfileWithForce(c *tc.C) {
 	charmsPath := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "lxd-profile-fail")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile-fail")
 
 	curl := charm.MustParseURL("local:lxd-profile-fail-0")
 	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, true)
@@ -428,10 +430,10 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfileWithForc
                charm: %s
                num_units: 1
    `, charmDir.Path), "--force")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *tc.C) {
 	configDir := c.MkDir()
 	configFile := filepath.Join(configDir, "config.yaml")
 	c.Assert(
@@ -442,15 +444,15 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *
                        options:
                            blog-title: include-file://title
            `), 0644),
-		jc.ErrorIsNil)
+		tc.ErrorIsNil)
 	c.Assert(
 		os.WriteFile(
 			filepath.Join(configDir, "title"), []byte("magic bundle config"), 0644),
-		jc.ErrorIsNil)
+		tc.ErrorIsNil)
 
 	charmsPath := c.MkDir()
-	mysqlDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "mysql")
-	wordpressDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "wordpress")
+	mysqlDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "mysql")
+	wordpressDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "wordpress")
 
 	mysqlURL := charm.MustParseURL("local:mysql-1")
 	wordpressURL := charm.MustParseURL("local:wordpress-3")
@@ -499,23 +501,23 @@ func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *
 `, wordpressDir.Path, mysqlDir.Path),
 		"--overlay", configFile)
 
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployLocalBundleWithRelativeCharmPaths(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployLocalBundleWithRelativeCharmPaths(c *tc.C) {
 	bundleDir := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(bundleDir, "dummy")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(bundleDir, "dummy")
 
 	bundleFile := filepath.Join(bundleDir, "bundle.yaml")
-	bundleContent := `
+	bundleContent := fmt.Sprintf(`
 default-base: ubuntu@20.04
 applications:
  dummy:
-   charm: ./dummy
-`
+   charm: %s
+`, charmDir.Path)
 	c.Assert(
 		os.WriteFile(bundleFile, []byte(bundleContent), 0644),
-		jc.ErrorIsNil)
+		tc.ErrorIsNil)
 
 	var args *apiclient.StatusArgs
 	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
@@ -528,13 +530,13 @@ applications:
 	)
 
 	err := s.runDeploy(c, bundleFile)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleLocalAndCharmhubCharms(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalAndCharmhubCharms(c *tc.C) {
 	charmsPath := c.MkDir()
 	wordpressDir := s.setupCharm(c, "ch:wordpress-1", "wordpress", base.MustParseBaseFromString("ubuntu@20.04"))
-	mysqlDir := testcharms.RepoWithSeries("bionic").ClonedDir(charmsPath, "mysql")
+	mysqlDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "mysql")
 	mysqlURL := charm.MustParseURL("local:mysql-1")
 	wordpressURL := charm.MustParseURL("ch:wordpress-1")
 	withLocalCharmDeployable(s.fakeAPI, mysqlURL, mysqlDir, false)
@@ -554,9 +556,9 @@ func (s *BundleDeploySuite) TestDeployBundleLocalAndCharmhubCharms(c *gc.C) {
 	deployArgs := application.DeployArgs{
 		CharmID: application.CharmID{
 			URL:    wordpressURL.String(),
-			Origin: commoncharm.Origin{Source: "charm-hub", Base: base, Architecture: "amd64", Risk: "stable"},
+			Origin: commoncharm.Origin{Source: "charm-hub", Base: base, Risk: "stable"},
 		},
-		CharmOrigin:     commoncharm.Origin{Source: "charm-hub", Base: base, Architecture: "amd64", Risk: "stable"},
+		CharmOrigin:     commoncharm.Origin{Source: "charm-hub", Base: base, Risk: "stable"},
 		ApplicationName: "wordpress",
 		NumUnits:        0,
 	}
@@ -588,10 +590,10 @@ func (s *BundleDeploySuite) TestDeployBundleLocalAndCharmhubCharms(c *gc.C) {
       relations:
           - ["wordpress:db", "mysql:server"]
   `, mysqlDir.Path))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestErrorDeployingBundlesRequiringTrust(c *gc.C) {
+func (s *BundleDeploySuite) TestErrorDeployingBundlesRequiringTrust(c *tc.C) {
 	specs := []struct {
 		descr      string
 		bundle     string
@@ -623,12 +625,12 @@ Please repeat the deploy command with the --trust argument if you consent to tru
 
 		bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), spec.bundle)
 		err := s.runDeploy(c, bundlePath)
-		c.Assert(err, gc.Not(gc.IsNil))
-		c.Assert(err.Error(), gc.Equals, expErr)
+		c.Assert(err, tc.Not(tc.IsNil))
+		c.Assert(err.Error(), tc.Equals, expErr)
 	}
 }
 
-func (s *BundleDeploySuite) TestDeployBundleWithChannel(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleWithChannel(c *tc.C) {
 	// The second charm from the bundle does not require trust so no
 	// additional configuration should be injected
 	ubURL := charm.MustParseURL("ch:ubuntu")
@@ -652,10 +654,10 @@ func (s *BundleDeploySuite) TestDeployBundleWithChannel(c *gc.C) {
 
 	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "basic")
 	err := s.runDeploy(c, bundlePath, "--channel", "edge")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployBundlesRequiringTrust(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundlesRequiringTrust(c *tc.C) {
 	inURL := charm.MustParseURL("ch:aws-integrator")
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
@@ -674,9 +676,8 @@ func (s *BundleDeploySuite) TestDeployBundlesRequiringTrust(c *gc.C) {
 	)
 
 	origin := commoncharm.Origin{
-		Source:       commoncharm.OriginCharmHub,
-		Architecture: arch.DefaultArchitecture,
-		Base:         base.MakeDefaultBase("ubuntu", "22.04"),
+		Source: commoncharm.OriginCharmHub,
+		Base:   base.MakeDefaultBase("ubuntu", "22.04"),
 	}
 
 	deployURL := *inURL
@@ -720,10 +721,10 @@ func (s *BundleDeploySuite) TestDeployBundlesRequiringTrust(c *gc.C) {
 
 	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "aws-integrator-trust-single")
 	err := s.runDeploy(c, bundlePath, "--trust")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleWithOffers(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleWithOffers(c *tc.C) {
 	inURL := charm.MustParseURL("ch:apache2")
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
@@ -775,7 +776,7 @@ func (s *BundleDeploySuite) TestDeployBundleWithOffers(c *gc.C) {
 
 	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "apache2-with-offers-legacy")
 	err := s.runDeploy(c, bundlePath)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	var offerCallCount int
 	var grantOfferCallCount int
@@ -787,11 +788,11 @@ func (s *BundleDeploySuite) TestDeployBundleWithOffers(c *gc.C) {
 			grantOfferCallCount++
 		}
 	}
-	c.Assert(offerCallCount, gc.Equals, 2)
-	c.Assert(grantOfferCallCount, gc.Equals, 2)
+	c.Assert(offerCallCount, tc.Equals, 2)
+	c.Assert(grantOfferCallCount, tc.Equals, 2)
 }
 
-func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *tc.C) {
 	inURL := charm.MustParseURL("ch:wordpress")
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
 	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
@@ -803,7 +804,7 @@ func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *gc.C) {
 	)
 
 	mac, err := jujutesting.NewMacaroon("id")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
 		ApplicationName: "wordpress",
@@ -835,10 +836,10 @@ func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *gc.C) {
 			ApplicationAlias: "mysql",
 			Macaroon:         mac,
 			ControllerInfo: &crossmodel.ControllerInfo{
-				ControllerTag: coretesting.ControllerTag,
-				Alias:         "controller-alias",
-				Addrs:         []string{"192.168.1.0"},
-				CACert:        coretesting.CACert,
+				ControllerUUID: coretesting.ControllerTag.Id(),
+				Alias:          "controller-alias",
+				Addrs:          []string{"192.168.1.0"},
+				CACert:         coretesting.CACert,
 			},
 		},
 	).Returns("mysql", nil)
@@ -857,5 +858,5 @@ func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *gc.C) {
 
 	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "wordpress-with-saas")
 	err = s.runDeploy(c, bundlePath)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

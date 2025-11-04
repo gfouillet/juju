@@ -3,14 +3,5 @@
 
 package upgrader_test
 
-import (
-	stdtesting "testing"
-
-	coretesting "github.com/juju/juju/testing"
-)
-
-//go:generate go run go.uber.org/mock/mockgen -typed -package upgrader_test -destination domain_mock_test.go github.com/juju/juju/apiserver/facades/agent/upgrader ControllerConfigGetter
-
-func TestAll(t *stdtesting.T) {
-	coretesting.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package upgrader_test -destination domain_mock_test.go github.com/juju/juju/apiserver/facades/agent/upgrader ControllerConfigGetter,ModelAgentService,ControllerNodeService,MachineService
+//go:generate go run go.uber.org/mock/mockgen -typed -package upgrader -destination watch_mock.go github.com/juju/juju/apiserver/facades/agent/upgrader ModelAgentService

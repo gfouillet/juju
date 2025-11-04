@@ -4,37 +4,35 @@
 package oci_test
 
 import (
-	"context"
-	stdcontext "context"
 	"fmt"
 	"time"
 
 	"github.com/juju/clock/testclock"
-	jtesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/tc"
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 	ociIdentity "github.com/oracle/oci-go-sdk/v65/identity"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/arch"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/oci"
 	ocitesting "github.com/juju/juju/internal/provider/oci/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	jujutesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/tools"
-	jujutesting "github.com/juju/juju/testing"
 )
 
 var clk = testclock.NewClock(time.Time{})
+
 var advancingClock = testclock.AutoAdvancingClock{clk, clk.Advance}
 
 func makeToolsList(series string) tools.List {
-	var toolsVersion version.Binary
-	toolsVersion.Number = version.MustParse("2.4.0")
+	var toolsVersion semversion.Binary
+	toolsVersion.Number = semversion.MustParse("2.4.0")
 	toolsVersion.Arch = arch.AMD64
 	toolsVersion.Release = series
 	return tools.List{{
@@ -268,7 +266,7 @@ func listShapesResponse() []ociCore.Shape {
 }
 
 type commonSuite struct {
-	jtesting.IsolationSuite
+	testhelpers.IsolationSuite
 
 	testInstanceID  string
 	testCompartment string
@@ -289,7 +287,7 @@ type commonSuite struct {
 	ctrlTags    map[string]string
 }
 
-func (s *commonSuite) SetUpTest(c *gc.C) {
+func (s *commonSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	oci.SetImageCache(&oci.ImageCache{})
 
@@ -301,12 +299,13 @@ func (s *commonSuite) SetUpTest(c *gc.C) {
 	s.spec = fakeCloudSpec()
 
 	config := newConfig(c, jujutesting.Attrs{"compartment-id": s.testCompartment})
-	env, err := environs.Open(stdcontext.Background(), s.provider, environs.OpenParams{
-		Cloud:  s.spec,
-		Config: config,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(env, gc.NotNil)
+	env, err := environs.Open(c.Context(), s.provider, environs.OpenParams{
+		Cloud:          s.spec,
+		Config:         config,
+		ControllerUUID: s.controllerUUID,
+	}, environs.NoopCredentialInvalidator())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(env, tc.NotNil)
 
 	s.config = config
 	s.env = env.(*oci.Environ)
@@ -325,7 +324,7 @@ func (s *commonSuite) SetUpTest(c *gc.C) {
 	s.ociInstance.FreeformTags = s.tags
 }
 
-func (e *commonSuite) setupListInstancesExpectations(instanceId string, state ociCore.InstanceLifecycleStateEnum, times int) {
+func (e *commonSuite) setupListInstancesExpectations(c *tc.C, instanceId string, state ociCore.InstanceLifecycleStateEnum, times int) {
 	listInstancesRequest, listInstancesResponse := makeListInstancesRequestResponse(
 		[]ociCore.Instance{
 			{
@@ -340,8 +339,8 @@ func (e *commonSuite) setupListInstancesExpectations(instanceId string, state oc
 			},
 		},
 	)
-	expect := e.compute.EXPECT().ListInstances(
-		context.Background(), listInstancesRequest.CompartmentId).Return(
+	expect := e.compute.EXPECT().ListInstances(gomock.Any(),
+		listInstancesRequest.CompartmentId).Return(
 		listInstancesResponse.Items, nil)
 	if times == 0 {
 		expect.AnyTimes()
@@ -350,7 +349,7 @@ func (e *commonSuite) setupListInstancesExpectations(instanceId string, state oc
 	}
 }
 
-func (s *commonSuite) patchEnv(c *gc.C) *gomock.Controller {
+func (s *commonSuite) patchEnv(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.compute = ocitesting.NewMockComputeClient(ctrl)
 	s.ident = ocitesting.NewMockIdentityClient(ctrl)
@@ -365,4 +364,182 @@ func (s *commonSuite) patchEnv(c *gc.C) *gomock.Controller {
 	s.env.Identity = s.ident
 
 	return ctrl
+}
+
+func (s *commonSuite) setupEnsureNetworksExpectations(c *tc.C, vcnId string, machineTags map[string]string) {
+	s.setupAvailabilityDomainsExpectations(c, 0)
+	s.setupVcnExpectations(c, vcnId, machineTags, 1)
+	s.setupSecurityListExpectations(c, vcnId, machineTags, 1)
+	s.setupInternetGatewaysExpectations(c, vcnId, machineTags, 1)
+	s.setupListRouteTableExpectations(c, vcnId, machineTags, 1)
+	s.setupListSubnetsExpectations(c, vcnId, "fakeRouteTableId", machineTags, 1)
+}
+
+func (s *commonSuite) setupInternetGatewaysExpectations(c *tc.C, vcnId string, t map[string]string, times int) {
+	name := fmt.Sprintf("%s-%s", oci.InternetGatewayPrefix, t[tags.JujuController])
+	enabled := true
+	request, response := makeListInternetGatewaysRequestResponse([]ociCore.InternetGateway{
+		{
+			CompartmentId: &s.testCompartment,
+			Id:            makeStringPointer("fakeGwId"),
+			VcnId:         &vcnId,
+			DisplayName:   &name,
+			IsEnabled:     &enabled,
+		},
+	})
+	expect := s.netw.EXPECT().ListInternetGateways(gomock.Any(), request.CompartmentId, request.VcnId).Return(response.Items, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
+}
+
+func (s *commonSuite) setupListRouteTableExpectations(c *tc.C, vcnId string, t map[string]string, times int) {
+	name := fmt.Sprintf("%s-%s", oci.RouteTablePrefix, t[tags.JujuController])
+	request, response := makeListRouteTableRequestResponse([]ociCore.RouteTable{
+		{
+			CompartmentId:  &s.testCompartment,
+			Id:             makeStringPointer("fakeRouteTableId"),
+			VcnId:          &vcnId,
+			DisplayName:    &name,
+			FreeformTags:   t,
+			LifecycleState: ociCore.RouteTableLifecycleStateAvailable,
+		},
+	})
+	expect := s.netw.EXPECT().ListRouteTables(gomock.Any(), request.CompartmentId, request.VcnId).Return(response.Items, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
+}
+
+func (s *commonSuite) setupListSubnetsExpectations(c *tc.C, vcnId, route string, t map[string]string, times int) {
+	zone1 := "fakeZone1"
+	zone2 := "fakeZone2"
+	zone3 := "fakeZone3"
+	displayNameZone1 := fmt.Sprintf("juju-%s-%s-%s", zone1, t[tags.JujuController], t[tags.JujuModel])
+	displayNameZone2 := fmt.Sprintf("juju-%s-%s-%s", zone2, t[tags.JujuController], t[tags.JujuModel])
+	displayNameZone3 := fmt.Sprintf("juju-%s-%s-%s", zone3, t[tags.JujuController], t[tags.JujuModel])
+	response := []ociCore.Subnet{
+		{
+			AvailabilityDomain: &zone1,
+			CidrBlock:          makeStringPointer(oci.DefaultAddressSpace),
+			CompartmentId:      &s.testCompartment,
+			Id:                 makeStringPointer("fakeSubnetId1"),
+			VcnId:              &vcnId,
+			DisplayName:        &displayNameZone1,
+			RouteTableId:       &route,
+			LifecycleState:     ociCore.SubnetLifecycleStateAvailable,
+			FreeformTags:       t,
+		},
+		{
+			AvailabilityDomain: &zone2,
+			CidrBlock:          makeStringPointer(oci.DefaultAddressSpace),
+			CompartmentId:      &s.testCompartment,
+			Id:                 makeStringPointer("fakeSubnetId2"),
+			VcnId:              &vcnId,
+			DisplayName:        &displayNameZone2,
+			RouteTableId:       &route,
+			LifecycleState:     ociCore.SubnetLifecycleStateAvailable,
+			FreeformTags:       t,
+		},
+		{
+			AvailabilityDomain: &zone3,
+			CidrBlock:          makeStringPointer(oci.DefaultAddressSpace),
+			CompartmentId:      &s.testCompartment,
+			Id:                 makeStringPointer("fakeSubnetId3"),
+			VcnId:              &vcnId,
+			DisplayName:        &displayNameZone3,
+			RouteTableId:       &route,
+			LifecycleState:     ociCore.SubnetLifecycleStateAvailable,
+			FreeformTags:       t,
+		},
+	}
+
+	expect := s.netw.EXPECT().ListSubnets(gomock.Any(), &s.testCompartment, &vcnId).Return(response, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
+}
+
+func (s *commonSuite) setupAvailabilityDomainsExpectations(c *tc.C, times int) {
+	request, response := makeListAvailabilityDomainsRequestResponse([]ociIdentity.AvailabilityDomain{
+		{
+			Name:          makeStringPointer("fakeZone1"),
+			CompartmentId: &s.testCompartment,
+		},
+		{
+			Name:          makeStringPointer("fakeZone2"),
+			CompartmentId: &s.testCompartment,
+		},
+		{
+			Name:          makeStringPointer("fakeZone3"),
+			CompartmentId: &s.testCompartment,
+		},
+	})
+
+	expect := s.ident.EXPECT().ListAvailabilityDomains(gomock.Any(), request).Return(response, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
+}
+
+func (s *commonSuite) setupVcnExpectations(c *tc.C, vcnId string, t map[string]string, times int) {
+	vcnName := makeVcnName(t[tags.JujuController], t[tags.JujuModel])
+	vcnResponse := []ociCore.Vcn{
+		{
+			CompartmentId:         &s.testCompartment,
+			CidrBlock:             makeStringPointer(oci.DefaultAddressSpace),
+			Id:                    &vcnId,
+			LifecycleState:        ociCore.VcnLifecycleStateAvailable,
+			DefaultRouteTableId:   makeStringPointer("fakeRouteTable"),
+			DefaultSecurityListId: makeStringPointer("fakeSeclist"),
+			DisplayName:           &vcnName,
+			FreeformTags:          s.tags,
+		},
+	}
+
+	expect := s.netw.EXPECT().ListVcns(gomock.Any(), &s.testCompartment).Return(vcnResponse, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
+}
+
+func (s *commonSuite) setupSecurityListExpectations(c *tc.C, vcnId string, t map[string]string, times int) {
+	name := fmt.Sprintf("juju-seclist-%s-%s", t[tags.JujuController], t[tags.JujuModel])
+	request, response := makeListSecurityListsRequestResponse([]ociCore.SecurityList{
+		{
+			CompartmentId: &s.testCompartment,
+			VcnId:         &vcnId,
+			Id:            makeStringPointer("fakeSecList"),
+			DisplayName:   &name,
+			FreeformTags:  t,
+			EgressSecurityRules: []ociCore.EgressSecurityRule{
+				{
+					Destination: makeStringPointer(oci.AllowAllPrefix),
+					Protocol:    makeStringPointer(oci.AllProtocols),
+				},
+			},
+			IngressSecurityRules: []ociCore.IngressSecurityRule{
+				{
+					Source:   makeStringPointer(oci.AllowAllPrefix),
+					Protocol: makeStringPointer(oci.AllProtocols),
+				},
+			},
+		},
+	})
+	expect := s.fw.EXPECT().ListSecurityLists(gomock.Any(), request.CompartmentId, &vcnId).Return(response.Items, nil)
+	if times == 0 {
+		expect.AnyTimes()
+	} else {
+		expect.Times(times)
+	}
 }

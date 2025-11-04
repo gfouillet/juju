@@ -13,13 +13,13 @@ import (
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/core/database"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/logger"
 	coremodel "github.com/juju/juju/core/model"
-)
-
-const (
-	// ErrProviderWorkerDying is returned when the provider worker is dying.
-	ErrProviderWorkerDying = errors.ConstError("provider worker is dying")
+	"github.com/juju/juju/core/providertracker"
+	modelerrors "github.com/juju/juju/domain/model/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internalworker "github.com/juju/juju/internal/worker"
 )
 
 // Config describes the dependencies of a Worker.
@@ -28,18 +28,20 @@ const (
 // use of model config in this package.
 type Config struct {
 	TrackerType          TrackerType
-	ServiceFactoryGetter ServiceFactoryGetter
+	DomainServicesGetter DomainServicesGetter
 	GetIAASProvider      GetProviderFunc
 	GetCAASProvider      GetProviderFunc
 	NewTrackerWorker     NewTrackerWorkerFunc
+	NewEphemeralProvider NewEphemeralProviderFunc
 	Logger               logger.Logger
+	LogSinkGetter        logger.ModelLogSinkGetter
 	Clock                clock.Clock
 }
 
 // Validate returns an error if the config cannot be used to start a Worker.
 func (config Config) Validate() error {
-	if config.ServiceFactoryGetter == nil {
-		return errors.NotValidf("nil ServiceFactoryGetter")
+	if config.DomainServicesGetter == nil {
+		return errors.NotValidf("nil DomainServicesGetter")
 	}
 	if config.GetIAASProvider == nil {
 		return errors.NotValidf("nil GetIAASProvider")
@@ -50,8 +52,17 @@ func (config Config) Validate() error {
 	if config.NewTrackerWorker == nil {
 		return errors.NotValidf("nil NewTrackerWorker")
 	}
+	if config.NewEphemeralProvider == nil {
+		return errors.NotValidf("nil NewEphemeralProvider")
+	}
+	if config.Clock == nil {
+		return errors.NotValidf("nil Clock")
+	}
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")
+	}
+	if config.LogSinkGetter == nil {
+		return errors.NotValidf("nil LogSinkGetter")
 	}
 	return nil
 }
@@ -67,7 +78,7 @@ type trackerRequest struct {
 type providerWorker struct {
 	internalStates chan string
 	catacomb       catacomb.Catacomb
-	runner         *worker.Runner
+	trackedRunner  *worker.Runner
 
 	config Config
 
@@ -85,28 +96,41 @@ func newWorker(config Config, internalStates chan string) (*providerWorker, erro
 		return nil, errors.Trace(err)
 	}
 
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name: "provider-tracker",
+		IsFatal: func(err error) bool {
+			return false
+		},
+		ShouldRestart: func(err error) bool {
+			return !internalerrors.IsOneOf(
+				err,
+				modelerrors.NotFound,
+				coreerrors.NotFound,
+				database.ErrDBDead,
+				database.ErrDBNotFound,
+			)
+		},
+		RestartDelay: time.Second * 10,
+		Clock:        config.Clock,
+		Logger:       internalworker.WrapLogger(config.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w := &providerWorker{
-		config: config,
-		runner: worker.NewRunner(worker.RunnerParams{
-			IsFatal: func(err error) bool {
-				return false
-			},
-			ShouldRestart: func(err error) bool {
-				return !errors.Is(err, database.ErrDBDead)
-			},
-			RestartDelay: time.Second * 10,
-			Clock:        config.Clock,
-			Logger:       config.Logger,
-		}),
+		config:         config,
+		trackedRunner:  runner,
 		requests:       make(chan trackerRequest),
 		internalStates: internalStates,
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "provider-tracker",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
-			w.runner,
+			w.trackedRunner,
 		},
 	}); err != nil {
 		return nil, errors.Trace(err)
@@ -128,7 +152,7 @@ func (w *providerWorker) Provider() (Provider, error) {
 	tracker, err := w.workerFromCache(namespace)
 	if err != nil {
 		if errors.Is(err, w.catacomb.ErrDying()) {
-			return nil, ErrProviderWorkerDying
+			return nil, providertracker.ErrProviderWorkerDying
 		}
 
 		return nil, errors.Trace(err)
@@ -140,7 +164,7 @@ func (w *providerWorker) Provider() (Provider, error) {
 	// Otherwise return an error.
 	select {
 	case <-w.catacomb.Dying():
-		return nil, ErrProviderWorkerDying
+		return nil, providertracker.ErrProviderWorkerDying
 	default:
 		return nil, errors.NotFoundf("provider")
 	}
@@ -164,7 +188,7 @@ func (w *providerWorker) ProviderForModel(ctx context.Context, namespace string)
 	tracker, err := w.workerFromCache(namespace)
 	if err != nil {
 		if errors.Is(err, w.catacomb.ErrDying()) {
-			return nil, ErrProviderWorkerDying
+			return nil, providertracker.ErrProviderWorkerDying
 		}
 
 		return nil, errors.Trace(err)
@@ -176,12 +200,12 @@ func (w *providerWorker) ProviderForModel(ctx context.Context, namespace string)
 	// or it's not running and we need to start it.
 	req := trackerRequest{
 		namespace: namespace,
-		done:      make(chan error),
+		done:      make(chan error, 1),
 	}
 	select {
 	case w.requests <- req:
 	case <-w.catacomb.Dying():
-		return nil, ErrProviderWorkerDying
+		return nil, providertracker.ErrProviderWorkerDying
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
 	}
@@ -195,21 +219,38 @@ func (w *providerWorker) ProviderForModel(ctx context.Context, namespace string)
 			return nil, errors.Trace(err)
 		}
 	case <-w.catacomb.Dying():
-		return nil, ErrProviderWorkerDying
+		return nil, providertracker.ErrProviderWorkerDying
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
 	}
 
 	// This will return a not found error if the request was not honoured.
 	// The error will be logged - we don't crash this worker for bad calls.
-	tracked, err := w.runner.Worker(namespace, w.catacomb.Dying())
-	if err != nil {
+	tracked, err := w.trackedRunner.Worker(namespace, w.catacomb.Dying())
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
 	if tracked == nil {
-		return nil, errors.NotFoundf("provider")
+		return nil, providertracker.ErrProviderNotFound
 	}
 	return tracked.(*trackerWorker).Provider(), nil
+}
+
+// EphemeralProviderFromConfig returns an ephemeral provider for a given
+// configuration. The provider is not tracked, instead is created and then
+// discarded. Credential invalidation is not enforced during the call to the
+// provider. If the credentials change, the provider will have to be recreated.
+func (w *providerWorker) EphemeralProviderFromConfig(ctx context.Context, config providertracker.EphemeralProviderConfig) (Provider, error) {
+	return w.config.NewEphemeralProvider(ctx, EphemeralConfig{
+		ModelType:      config.ModelType,
+		ModelConfig:    config.ModelConfig,
+		CloudSpec:      config.CloudSpec,
+		ControllerUUID: config.ControllerUUID,
+		GetProviderForType: getProviderForType(
+			w.config.GetIAASProvider,
+			w.config.GetCAASProvider,
+		),
+	})
 }
 
 // Kill is part of the worker.Worker interface.
@@ -222,10 +263,17 @@ func (w *providerWorker) Wait() error {
 	return w.catacomb.Wait()
 }
 
+func (w *providerWorker) Report() map[string]any {
+	return w.trackedRunner.Report()
+}
+
 func (w *providerWorker) loop() (err error) {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	// If we're a singular namespace, we need to start the worker early.
 	if namespace, ok := w.config.TrackerType.SingularNamespace(); ok {
-		if err := w.initTrackerWorker(namespace); err != nil {
+		if err := w.initTrackerWorker(ctx, namespace); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -238,7 +286,7 @@ func (w *providerWorker) loop() (err error) {
 		// The following ensures that all requests are serialised and
 		// processed in order.
 		case req := <-w.requests:
-			if err := w.initTrackerWorker(req.namespace); err != nil {
+			if err := w.initTrackerWorker(ctx, req.namespace); err != nil {
 				select {
 				case req.done <- errors.Trace(err):
 				case <-w.catacomb.Dying():
@@ -261,7 +309,7 @@ func (w *providerWorker) loop() (err error) {
 
 func (w *providerWorker) workerFromCache(namespace string) (*trackerWorker, error) {
 	// If the worker already exists, return the existing worker early.
-	if tracker, err := w.runner.Worker(namespace, w.catacomb.Dying()); err == nil {
+	if tracker, err := w.trackedRunner.Worker(namespace, w.catacomb.Dying()); err == nil {
 		return tracker.(*trackerWorker), nil
 	} else if errors.Is(errors.Cause(err), worker.ErrDead) {
 		// Handle the case where the runner is dead due to this worker dying.
@@ -281,24 +329,35 @@ func (w *providerWorker) workerFromCache(namespace string) (*trackerWorker, erro
 	return nil, nil
 }
 
-func (w *providerWorker) initTrackerWorker(namespace string) error {
-	err := w.runner.StartWorker(namespace, func() (worker.Worker, error) {
-		ctx, cancel := w.scopedContext()
-		defer cancel()
-
+func (w *providerWorker) initTrackerWorker(ctx context.Context, namespace string) error {
+	err := w.trackedRunner.StartWorker(ctx, namespace, func(ctx context.Context) (worker.Worker, error) {
 		// Create the tracker worker based on the namespace.
-		serviceFactory := w.config.ServiceFactoryGetter.FactoryForModel(namespace)
+		domainServices := w.config.DomainServicesGetter.ServicesForModel(namespace)
+
+		// LoggerContext for the provider worker, this is then used for all
+		// logging.
+		var logger logger.Logger
+		modelUUID := coremodel.UUID(namespace)
+		if err := modelUUID.Validate(); err == nil {
+			loggerContext, err := w.config.LogSinkGetter.GetLoggerContext(ctx, modelUUID)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			logger = loggerContext.GetLogger("juju.worker.providertracker")
+		} else {
+			logger = w.config.Logger.Child(database.ShortNamespace(namespace))
+		}
 
 		tracker, err := w.config.NewTrackerWorker(ctx, TrackerConfig{
-			ModelService:      serviceFactory.Model(),
-			CloudService:      serviceFactory.Cloud(),
-			ConfigService:     serviceFactory.Config(),
-			CredentialService: serviceFactory.Credential(),
+			ModelService:      domainServices.Model(),
+			CloudService:      domainServices.Cloud(),
+			ConfigService:     domainServices.Config(),
+			CredentialService: domainServices.Credential(),
 			GetProviderForType: getProviderForType(
 				w.config.GetIAASProvider,
 				w.config.GetCAASProvider,
 			),
-			Logger: w.config.Logger,
+			Logger: logger,
 		})
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -328,7 +387,11 @@ func getProviderForType(getIAASProvider, getCAASProvider GetProviderFunc) func(c
 // It returns a cancellable context that is cancelled when the action has
 // completed.
 func (w *providerWorker) scopedContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
+	return w.scopedContextFrom(context.Background())
+}
+
+func (w *providerWorker) scopedContextFrom(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
 	return w.catacomb.Context(ctx), cancel
 }
 

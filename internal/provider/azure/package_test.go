@@ -1,39 +1,20 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package azure_test
+package azure
 
 import (
-	"testing"
+	"context"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/juju/environs"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
+var (
+	GetArchFromResourceSKU = getArchFromResourceSKU
+)
 
-func toValue[T any](v *T) T {
-	if v == nil {
-		return *new(T)
-	}
-	return *v
-}
+type CredentialInvalidator func(ctx context.Context, reason environs.CredentialInvalidReason) error
 
-func toMapPtr(in map[string]string) map[string]*string {
-	result := make(map[string]*string)
-	for k, v := range in {
-		result[k] = to.Ptr(v)
-	}
-	return result
-}
-
-type keyBundle struct {
-	Key *jsonWebKey `json:"key"`
-}
-
-type jsonWebKey struct {
-	Kid *string `json:"kid"`
-	Kty string  `json:"kty"`
+func (c CredentialInvalidator) InvalidateCredentials(ctx context.Context, reason environs.CredentialInvalidReason) error {
+	return c(ctx, reason)
 }

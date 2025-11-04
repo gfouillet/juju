@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/life"
@@ -126,7 +126,7 @@ type mockCharm struct {
 	required bool
 }
 
-func (c *mockCharm) LXDProfileRequired() (bool, error) {
+func (c *mockCharm) LXDProfileRequired(_ context.Context) (bool, error) {
 	return c.required, nil
 }
 
@@ -139,6 +139,7 @@ func (m *mockUniterClient) Relation(_ context.Context, tag names.RelationTag) (a
 }
 
 func (m *mockUniterClient) StorageAttachment(
+	_ context.Context,
 	storageTag names.StorageTag, unitTag names.UnitTag,
 ) (params.StorageAttachment, error) {
 	if unitTag != m.unit.tag {
@@ -158,6 +159,7 @@ func (m *mockUniterClient) StorageAttachment(
 }
 
 func (m *mockUniterClient) StorageAttachmentLife(
+	_ context.Context,
 	ids []params.StorageAttachmentId,
 ) ([]params.LifeResult, error) {
 	results := make([]params.LifeResult, len(ids))
@@ -195,6 +197,7 @@ func (m *mockUniterClient) WatchRelationUnits(
 }
 
 func (m *mockUniterClient) WatchStorageAttachment(
+	_ context.Context,
 	storageTag names.StorageTag, unitTag names.UnitTag,
 ) (watcher.NotifyWatcher, error) {
 	if unitTag != m.unit.tag {
@@ -223,10 +226,10 @@ type mockUnit struct {
 	resolved                         params.ResolvedMode
 	application                      mockApplication
 	unitWatcher                      *mockNotifyWatcher
+	unitResolveWatcher               *mockNotifyWatcher
 	addressesWatcher                 *mockStringsWatcher
 	configSettingsWatcher            *mockStringsWatcher
 	applicationConfigSettingsWatcher *mockStringsWatcher
-	upgradeSeriesWatcher             *mockNotifyWatcher
 	storageWatcher                   *mockStringsWatcher
 	actionWatcher                    *mockStringsWatcher
 	relationsWatcher                 *mockStringsWatcher
@@ -238,7 +241,7 @@ func (u *mockUnit) Life() life.Value {
 	return u.life
 }
 
-func (u *mockUnit) LXDProfileName() (string, error) {
+func (u *mockUnit) LXDProfileName(_ context.Context) (string, error) {
 	return u.lxdProfileName, nil
 }
 
@@ -250,8 +253,8 @@ func (u *mockUnit) ProviderID() string {
 	return u.providerID
 }
 
-func (u *mockUnit) Resolved() params.ResolvedMode {
-	return u.resolved
+func (u *mockUnit) Resolved(context.Context) (params.ResolvedMode, error) {
+	return u.resolved, nil
 }
 
 func (u *mockUnit) Application(context.Context) (api.Application, error) {
@@ -266,62 +269,53 @@ func (u *mockUnit) Watch(context.Context) (watcher.NotifyWatcher, error) {
 	return u.unitWatcher, nil
 }
 
-func (u *mockUnit) WatchAddressesHash() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchResolveMode(context.Context) (watcher.NotifyWatcher, error) {
+	return u.unitResolveWatcher, nil
+}
+
+func (u *mockUnit) WatchAddressesHash(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.addressesWatcher, nil
 }
 
-func (u *mockUnit) WatchConfigSettingsHash() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchConfigSettingsHash(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.configSettingsWatcher, nil
 }
 
-func (u *mockUnit) WatchTrustConfigSettingsHash() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchTrustConfigSettingsHash(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.applicationConfigSettingsWatcher, nil
 }
 
-func (u *mockUnit) WatchStorage() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchStorage(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.storageWatcher, nil
 }
 
-func (u *mockUnit) WatchActionNotifications() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchActionNotifications(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.actionWatcher, nil
 }
 
-func (u *mockUnit) WatchRelations() (watcher.StringsWatcher, error) {
+func (u *mockUnit) WatchRelations(_ context.Context) (watcher.StringsWatcher, error) {
 	return u.relationsWatcher, nil
 }
 
-func (u *mockUnit) WatchUpgradeSeriesNotifications(context.Context) (watcher.NotifyWatcher, error) {
-	return u.upgradeSeriesWatcher, nil
-}
-
-func (u *mockUnit) WatchInstanceData() (watcher.NotifyWatcher, error) {
+func (u *mockUnit) WatchInstanceData(_ context.Context) (watcher.NotifyWatcher, error) {
 	return u.instanceDataWatcher, nil
-}
-
-func (u *mockUnit) UpgradeSeriesStatus(context.Context) (model.UpgradeSeriesStatus, string, error) {
-	return model.UpgradeSeriesPrepareStarted, "ubuntu@20.04", nil
-}
-
-func (u *mockUnit) SetUpgradeSeriesStatus(ctx context.Context, status model.UpgradeSeriesStatus, reason string) error {
-	return nil
 }
 
 type mockApplication struct {
 	api.Application
-	tag                   names.ApplicationTag
-	life                  life.Value
-	curl                  string
-	charmModifiedVersion  int
-	forceUpgrade          bool
-	applicationWatcher    *mockNotifyWatcher
-	leaderSettingsWatcher *mockNotifyWatcher
+	tag                  names.ApplicationTag
+	life                 life.Value
+	curl                 string
+	charmModifiedVersion int
+	forceUpgrade         bool
+	applicationWatcher   *mockNotifyWatcher
 }
 
-func (s *mockApplication) CharmModifiedVersion() (int, error) {
+func (s *mockApplication) CharmModifiedVersion(_ context.Context) (int, error) {
 	return s.charmModifiedVersion, nil
 }
 
-func (s *mockApplication) CharmURL() (string, bool, error) {
+func (s *mockApplication) CharmURL(_ context.Context) (string, bool, error) {
 	return s.curl, s.forceUpgrade, nil
 }
 
@@ -339,10 +333,6 @@ func (s *mockApplication) Tag() names.ApplicationTag {
 
 func (s *mockApplication) Watch(context.Context) (watcher.NotifyWatcher, error) {
 	return s.applicationWatcher, nil
-}
-
-func (s *mockApplication) WatchLeadershipSettings() (watcher.NotifyWatcher, error) {
-	return s.leaderSettingsWatcher, nil
 }
 
 type mockRelation struct {
@@ -423,18 +413,19 @@ func (*mockSecretTriggerWatcher) Wait() error {
 }
 
 type mockSecretsClient struct {
-	secretsWatcher          *mockStringsWatcher
-	secretsRevisionsWatcher *mockStringsWatcher
-	unitName                string
-	owners                  []names.Tag
+	secretsWatcher           *mockStringsWatcher
+	obsoleteRevisionsWatcher *mockStringsWatcher
+	deletedRevisionsWatcher  *mockStringsWatcher
+	unitName                 string
+	owners                   []names.Tag
 }
 
-func (m *mockSecretsClient) WatchConsumedSecretsChanges(unitName string) (watcher.StringsWatcher, error) {
+func (m *mockSecretsClient) WatchConsumedSecretsChanges(_ context.Context, unitName string) (watcher.StringsWatcher, error) {
 	m.unitName = unitName
 	return m.secretsWatcher, nil
 }
 
-func (m *mockSecretsClient) GetConsumerSecretsRevisionInfo(unitName string, uris []string) (map[string]secrets.SecretRevisionInfo, error) {
+func (m *mockSecretsClient) GetConsumerSecretsRevisionInfo(_ context.Context, unitName string, uris []string) (map[string]secrets.SecretRevisionInfo, error) {
 	if unitName != m.unitName {
 		return nil, errors.NotFoundf("unit %q", unitName)
 	}
@@ -451,7 +442,12 @@ func (m *mockSecretsClient) GetConsumerSecretsRevisionInfo(unitName string, uris
 	return result, nil
 }
 
-func (m *mockSecretsClient) WatchObsolete(owners ...names.Tag) (watcher.StringsWatcher, error) {
+func (m *mockSecretsClient) WatchObsolete(_ context.Context, owners ...names.Tag) (watcher.StringsWatcher, error) {
 	m.owners = owners
-	return m.secretsRevisionsWatcher, nil
+	return m.obsoleteRevisionsWatcher, nil
+}
+
+func (m *mockSecretsClient) WatchDeleted(_ context.Context, owners ...names.Tag) (watcher.StringsWatcher, error) {
+	m.owners = owners
+	return m.deletedRevisionsWatcher, nil
 }

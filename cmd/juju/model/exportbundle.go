@@ -4,30 +4,31 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/bundle"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewExportBundleCommand returns a fully constructed export bundle command.
 func NewExportBundleCommand() cmd.Command {
 	command := &exportBundleCommand{}
-	command.newAPIFunc = func() (ExportBundleAPI, error) {
-		return command.getAPIs()
+	command.newAPIFunc = func(ctx context.Context) (ExportBundleAPI, error) {
+		return command.getAPIs(ctx)
 	}
 	return modelcmd.Wrap(command)
 }
 
 type exportBundleCommand struct {
 	modelcmd.ModelCommandBase
-	newAPIFunc           func() (ExportBundleAPI, error)
+	newAPIFunc           func(ctx context.Context) (ExportBundleAPI, error)
 	Filename             string
 	includeCharmDefaults bool
 }
@@ -35,8 +36,8 @@ type exportBundleCommand struct {
 const exportBundleHelpDoc = `
 Exports the current model configuration as a reusable bundle.
 
-If --filename is not used, the configuration is printed to stdout.
- --filename specifies an output file.
+If ` + "`--filename`" + ` is not used, the configuration is printed to ` + "`stdout`" + `.
+` + "` --filename`" + ` specifies an output file.
 `
 
 const exportBundleHelpExamples = `
@@ -70,11 +71,11 @@ func (c *exportBundleCommand) Init(args []string) error {
 // ExportBundleAPI specifies the used function calls of the BundleFacade.
 type ExportBundleAPI interface {
 	Close() error
-	ExportBundle(includeCharmDefaults bool) (string, error)
+	ExportBundle(ctx context.Context, includeCharmDefaults bool) (string, error)
 }
 
-func (c *exportBundleCommand) getAPIs() (ExportBundleAPI, error) {
-	api, err := c.NewAPIRoot()
+func (c *exportBundleCommand) getAPIs(ctx context.Context) (ExportBundleAPI, error) {
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -84,13 +85,13 @@ func (c *exportBundleCommand) getAPIs() (ExportBundleAPI, error) {
 
 // Run implements Command.
 func (c *exportBundleCommand) Run(ctx *cmd.Context) error {
-	bundleClient, err := c.newAPIFunc()
+	bundleClient, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer bundleClient.Close()
 
-	result, err := bundleClient.ExportBundle(c.includeCharmDefaults)
+	result, err := bundleClient.ExportBundle(ctx, c.includeCharmDefaults)
 	if err != nil {
 		return err
 	}

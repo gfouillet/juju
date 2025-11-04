@@ -6,20 +6,20 @@ package controller
 import (
 	"bytes"
 	"context"
-	stdcontext "context"
 	"fmt"
 	"text/template"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/client/modelconfig"
 	controllerapi "github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
@@ -30,8 +30,7 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -72,26 +71,26 @@ specifying `[1:] + "`--destroy-all-models`." + `
 
 If there is persistent storage in any of the models managed by the
 controller, then you must choose to either destroy or release the
-storage, using ` + "`--destroy-storage` or `--release-storage` respectively." + `
+storage, using ` + "`--destroy-storage`" + ` or ` + "`--release-storage`" + ` respectively.
 
 Sometimes, the destruction of a model may fail as Juju encounters errors
 that need to be dealt with before that model can be destroyed.
 However, at times, there is a need to destroy a controller ignoring
-such model errors. In these rare cases, use --force option but note 
+such model errors. In these rare cases, use --force option but note
 that --force will also remove all units of any hosted applications, their subordinates
 and, potentially, machines without given them the opportunity to shutdown cleanly.
 
 Model destruction is a multi-step process. Under normal circumstances, Juju will not
-proceed to the next step until the current step has finished. 
-However, when using --force, users can also specify --no-wait to progress through steps 
+proceed to the next step until the current step has finished.
+However, when using ` + "`--force`" + `, users can also specify ` + "`--no-wait`" + ` to progress through steps
 without delay waiting for each step to complete.
 
-WARNING: Passing --force with --model-timeout will continue the final destruction without
-consideration or respect for clean shutdown or resource cleanup. If model-timeout 
-elapses with --force, you may have resources left behind that will require
-manual cleanup. If --force --model-timeout 0 is passed, the models are brutally
-removed with haste. It is recommended to use graceful destroy (without --force, --no-wait or
---model-timeout).
+WARNING: Passing ` + "`--force`" + ` with ` + "`--model-timeout`" + ` will continue the final destruction without
+consideration or respect for clean shutdown or resource cleanup. If ` + "`model-timeout`" + `
+elapses with ` + "`--force`" + `, you may have resources left behind that will require
+manual cleanup. If ` + "`--force --model-timeout 0`" + ` is passed, the models are brutally
+removed with haste. It is recommended to use graceful destroy (without ` + "`--force`" + `, ` + "`--no-wait`" + ` or
+` + "`--model-timeout`" + `).
 
 `
 
@@ -144,14 +143,18 @@ var destroySysMsgDetails = `
 // that the destroy command calls.
 type destroyControllerAPI interface {
 	Close() error
-	ModelConfig() (map[string]interface{}, error)
-	HostedModelConfigs() ([]controllerapi.HostedConfig, error)
-	CloudSpec(names.ModelTag) (environscloudspec.CloudSpec, error)
-	DestroyController(controllerapi.DestroyControllerParams) error
-	ListBlockedModels() ([]params.ModelBlockInfo, error)
+	HostedModelConfigs(context.Context) ([]controllerapi.HostedConfig, error)
+	CloudSpec(context.Context, names.ModelTag) (environscloudspec.CloudSpec, error)
+	DestroyController(context.Context, controllerapi.DestroyControllerParams) error
+	ListBlockedModels(context.Context) ([]params.ModelBlockInfo, error)
 	ModelStatus(ctx context.Context, models ...names.ModelTag) ([]base.ModelStatus, error)
-	AllModels() ([]base.UserModel, error)
+	AllModels(context.Context) ([]base.UserModel, error)
 	ControllerConfig(context.Context) (controller.Config, error)
+}
+
+type modelConfigAPI interface {
+	Close() error
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 }
 
 // Info implements Command.Info.
@@ -196,7 +199,7 @@ func (c *destroyCommand) Init(args []string) error {
 // getModelNames gets slice of model names from modelData.
 func getModelNames(data []modelData) []string {
 	return transform.Slice(data, func(f modelData) string {
-		return fmt.Sprintf("%s/%s (%s)", f.Owner, f.Name, f.Life)
+		return fmt.Sprintf("%s/%s (%s)", f.Qualifier, f.Name, f.Life)
 	})
 }
 
@@ -237,14 +240,20 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 
 	// Attempt to connect to the API.  If we can't, fail the destroy.  Users will
 	// need to use the controller kill command if we can't connect.
-	api, err := c.getControllerAPI()
+	api, err := c.getControllerAPI(ctx)
 	if err != nil {
 		return c.ensureUserFriendlyErrorLog(errors.Annotate(err, "cannot connect to API"), ctx, nil)
 	}
 	defer func() { _ = api.Close() }()
 
+	controllerModelConfigAPI, err := c.getControllerModelConfigAPI(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot connect to model config API: %w", err)
+	}
+	defer func() { _ = controllerModelConfigAPI.Close() }()
+
 	// Obtain controller environ so we can clean up afterwards.
-	controllerEnviron, err := c.getControllerEnviron(ctx, store, controllerName, api)
+	controllerEnviron, err := c.getControllerEnviron(ctx, store, controllerName, api, controllerModelConfigAPI)
 	if err != nil {
 		return errors.Annotate(err, "getting controller environ")
 	}
@@ -304,7 +313,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 			modelTimeout = &c.modelTimeout
 		}
 
-		err = api.DestroyController(controllerapi.DestroyControllerParams{
+		err = api.DestroyController(ctx, controllerapi.DestroyControllerParams{
 			DestroyModels:  c.destroyModels,
 			DestroyStorage: destroyStorage,
 			Force:          force,
@@ -356,14 +365,13 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 		ctx.Infof("Waiting for model resources to be reclaimed")
 		// wait for 2 seconds to let empty hosted models changed from alive to dying.
 		for ; hasUnreclaimedResources(modelStatus); modelStatus = updateStatus(2 * time.Second) {
-			ctx.Infof(fmtCtrStatus(modelStatus.Controller))
+			ctx.Infof("%s", fmtCtrStatus(modelStatus.Controller))
 			for _, model := range modelStatus.Models {
-				ctx.Verbosef(fmtModelStatus(model))
+				ctx.Verbosef("%s", fmtModelStatus(model))
 			}
 		}
 		ctx.Infof("All models reclaimed, cleaning up controller machines")
-		callCtx := envcontext.WithoutCredentialInvalidator(ctx)
-		return c.environsDestroy(controllerName, controllerEnviron, callCtx, store)
+		return c.environsDestroy(controllerName, controllerEnviron, ctx, store)
 	}
 }
 
@@ -471,9 +479,9 @@ func (c *destroyCommand) ensureUserFriendlyErrorLog(destroyErr error, ctx *cmd.C
 		return nil
 	}
 	if params.IsCodeOperationBlocked(destroyErr) {
-		logger.Errorf(destroyControllerBlockedMsg)
+		logger.Errorf(context.TODO(), destroyControllerBlockedMsg)
 		if api != nil {
-			models, err := api.ListBlockedModels()
+			models, err := api.ListBlockedModels(ctx)
 			out := &bytes.Buffer{}
 			if err == nil {
 				var info interface{}
@@ -484,10 +492,10 @@ func (c *destroyCommand) ensureUserFriendlyErrorLog(destroyErr error, ctx *cmd.C
 				err = block.FormatTabularBlockedModels(out, info)
 			}
 			if err != nil {
-				logger.Errorf("Unable to list models: %s", err)
+				logger.Errorf(context.TODO(), "Unable to list models: %s", err)
 				return cmd.ErrSilent
 			}
-			ctx.Infof(out.String())
+			ctx.Infof("%s", out.String())
 		}
 		return cmd.ErrSilent
 	}
@@ -495,7 +503,7 @@ func (c *destroyCommand) ensureUserFriendlyErrorLog(destroyErr error, ctx *cmd.C
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logger.Errorf(stdFailureMsg, controllerName)
+	logger.Errorf(context.TODO(), stdFailureMsg, controllerName)
 	return destroyErr
 }
 
@@ -532,10 +540,12 @@ type destroyCommandBase struct {
 	api    destroyControllerAPI
 	apierr error
 
-	environsDestroy func(string, environs.ControllerDestroyer, envcontext.ProviderCallContext, jujuclient.ControllerStore) error
+	controllerModelConfigAPI modelConfigAPI
+
+	environsDestroy func(string, environs.ControllerDestroyer, context.Context, jujuclient.ControllerStore) error
 }
 
-func (c *destroyCommandBase) getControllerAPI() (destroyControllerAPI, error) {
+func (c *destroyCommandBase) getControllerAPI(ctx context.Context) (destroyControllerAPI, error) {
 	// Note that some tests set c.api to a non-nil value
 	// even when c.apierr is non-nil, hence the separate test.
 	if c.apierr != nil {
@@ -544,11 +554,22 @@ func (c *destroyCommandBase) getControllerAPI() (destroyControllerAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return controllerapi.NewClient(root), nil
+}
+
+func (c *destroyCommandBase) getControllerModelConfigAPI(ctx context.Context) (modelConfigAPI, error) {
+	if c.controllerModelConfigAPI != nil {
+		return c.controllerModelConfigAPI, nil
+	}
+	root, err := c.NewAPIRoot(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return modelconfig.NewClient(root), nil
 }
 
 // SetFlags implements Command.SetFlags.
@@ -579,13 +600,14 @@ func (c *destroyCommandBase) getControllerEnviron(
 	store jujuclient.ClientStore,
 	controllerName string,
 	sysAPI destroyControllerAPI,
+	controllerModelConfigAPI modelConfigAPI,
 ) (environs.BootstrapEnviron, error) {
 	// TODO: (hml) 2018-08-01
 	// We should try to destroy via the API first, from store is a
 	// fall back position.
 	env, err := c.getControllerEnvironFromStore(ctx, store, controllerName)
 	if errors.Is(err, errors.NotFound) {
-		return c.getControllerEnvironFromAPI(ctx, sysAPI)
+		return c.getControllerEnvironFromAPI(ctx, sysAPI, controllerModelConfigAPI)
 	} else if err != nil {
 		return nil, errors.Annotate(err, "getting environ using bootstrap config from client store")
 	}
@@ -597,14 +619,14 @@ func (c *destroyCommandBase) getControllerCloudSpecFromStore(
 	store jujuclient.ClientStore,
 	controllerName string,
 ) (environscloudspec.CloudSpec, error) {
-	_, params, err := modelcmd.NewGetBootstrapConfigParamsFunc(
+	_, spec, _, err := modelcmd.NewGetBootstrapConfigParamsFunc(
 		ctx, store, environs.GlobalProviderRegistry(),
 	)(controllerName)
 	if err != nil {
 		return environscloudspec.CloudSpec{}, errors.Trace(err)
 	}
 
-	return params.Cloud, nil
+	return *spec, nil
 }
 
 func (c *destroyCommandBase) getControllerEnvironFromStore(
@@ -612,7 +634,7 @@ func (c *destroyCommandBase) getControllerEnvironFromStore(
 	store jujuclient.ClientStore,
 	controllerName string,
 ) (environs.BootstrapEnviron, error) {
-	bootstrapConfig, params, err := modelcmd.NewGetBootstrapConfigParamsFunc(
+	bootstrapConfig, spec, cfg, err := modelcmd.NewGetBootstrapConfigParamsFunc(
 		ctx, store, environs.GlobalProviderRegistry(),
 	)(controllerName)
 	if err != nil {
@@ -622,7 +644,7 @@ func (c *destroyCommandBase) getControllerEnvironFromStore(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	cfg, err := provider.PrepareConfig(ctx, *params)
+	err = provider.ValidateCloud(ctx, *spec)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -633,25 +655,26 @@ func (c *destroyCommandBase) getControllerEnvironFromStore(
 
 	openParams := environs.OpenParams{
 		ControllerUUID: ctrlUUID,
-		Cloud:          params.Cloud,
+		Cloud:          *spec,
 		Config:         cfg,
 	}
 	if cloud.CloudTypeIsCAAS(bootstrapConfig.CloudType) {
-		return caas.New(ctx, openParams)
+		return caas.New(ctx, openParams, environs.NoopCredentialInvalidator())
 	}
-	return environs.New(ctx, openParams)
+	return environs.New(ctx, openParams, environs.NoopCredentialInvalidator())
 }
 
 func (c *destroyCommandBase) getControllerEnvironFromAPI(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	api destroyControllerAPI,
-) (environs.Environ, error) {
+	controllerModelConfigAPI modelConfigAPI,
+) (environs.BootstrapEnviron, error) {
 	if api == nil {
 		return nil, errors.New(
 			"unable to get bootstrap information from client store or API",
 		)
 	}
-	attrs, err := api.ModelConfig()
+	attrs, err := controllerModelConfigAPI.ModelGet(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "getting model config from API")
 	}
@@ -659,7 +682,7 @@ func (c *destroyCommandBase) getControllerEnvironFromAPI(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	cloudSpec, err := api.CloudSpec(names.NewModelTag(cfg.UUID()))
+	cloudSpec, err := api.CloudSpec(ctx, names.NewModelTag(cfg.UUID()))
 	if err != nil {
 		return nil, errors.Annotate(err, "getting cloud spec from API")
 	}
@@ -667,9 +690,16 @@ func (c *destroyCommandBase) getControllerEnvironFromAPI(
 	if err != nil {
 		return nil, errors.Annotate(err, "getting controller config from API")
 	}
+	if cloud.CloudTypeIsCAAS(cloudSpec.Type) {
+		return caas.New(ctx, environs.OpenParams{
+			ControllerUUID: ctrlCfg.ControllerUUID(),
+			Cloud:          cloudSpec,
+			Config:         cfg,
+		}, environs.NoopCredentialInvalidator())
+	}
 	return environs.New(ctx, environs.OpenParams{
 		ControllerUUID: ctrlCfg.ControllerUUID(),
 		Cloud:          cloudSpec,
 		Config:         cfg,
-	})
+	}, environs.NoopCredentialInvalidator())
 }

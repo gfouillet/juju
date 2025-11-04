@@ -4,6 +4,7 @@
 package lxd
 
 import (
+	"context"
 	"math/rand"
 	"os/exec"
 	"strings"
@@ -13,10 +14,9 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/proxy"
 
-	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/containermanager"
 	coreos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/internal/container"
-	"github.com/juju/juju/internal/packaging"
 	"github.com/juju/juju/internal/packaging/dependency"
 	"github.com/juju/juju/internal/packaging/manager"
 	"github.com/juju/juju/internal/service"
@@ -25,7 +25,7 @@ import (
 var hostBase = coreos.HostBase
 
 type containerInitialiser struct {
-	containerNetworkingMethod string
+	containerNetworkingMethod containermanager.NetworkingMethod
 	getExecCommand            func(string, ...string) *exec.Cmd
 	configureLxdProxies       func(_ proxy.Settings, isRunningLocally func() (bool, error), newLocalServer func() (*Server, error)) error
 	isRunningLocally          func() (bool, error)
@@ -54,7 +54,10 @@ var _ container.Initialiser = (*containerInitialiser)(nil)
 
 // NewContainerInitialiser returns an instance used to perform the steps
 // required to allow a host machine to run a LXC container.
-func NewContainerInitialiser(lxdSnapChannel, containerNetworkingMethod string) container.Initialiser {
+func NewContainerInitialiser(
+	lxdSnapChannel string,
+	containerNetworkingMethod containermanager.NetworkingMethod,
+) container.Initialiser {
 	ci := &containerInitialiser{
 		containerNetworkingMethod: containerNetworkingMethod,
 		getExecCommand:            exec.Command,
@@ -68,12 +71,7 @@ func NewContainerInitialiser(lxdSnapChannel, containerNetworkingMethod string) c
 
 // Initialise is specified on the container.Initialiser interface.
 func (ci *containerInitialiser) Initialise() (err error) {
-	localBase, err := hostBase()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if err := ensureDependencies(ci.lxdSnapChannel, localBase); err != nil {
+	if err := ensureDependencies(ci.lxdSnapChannel); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -87,7 +85,7 @@ func (ci *containerInitialiser) Initialise() (err error) {
 	}()
 
 	var output []byte
-	if ci.containerNetworkingMethod == "local" {
+	if ci.containerNetworkingMethod == containermanager.NetworkingMethodLocal {
 		output, err = ci.getExecCommand(
 			"lxd",
 			"init",
@@ -156,7 +154,7 @@ func internalConfigureLXDProxies(
 	}
 
 	if !running {
-		logger.Debugf("LXD is not running; skipping proxy configuration")
+		logger.Debugf(context.TODO(), "LXD is not running; skipping proxy configuration")
 		return nil
 	}
 
@@ -186,7 +184,7 @@ var df = func(path string) (uint64, error) {
 }
 
 // ensureDependencies install the required dependencies for running LXD.
-func ensureDependencies(lxdSnapChannel string, base corebase.Base) error {
+func ensureDependencies(lxdSnapChannel string) error {
 	// If the snap is already installed, check whether the operator asked
 	// us to use a different channel. If so, switch to it.
 	if lxdViaSnap() {
@@ -198,19 +196,19 @@ func ensureDependencies(lxdSnapChannel string, base corebase.Base) error {
 		// a starts-with check instead of an equality check to avoid
 		// switching channels when we don't actually need to.
 		if strings.HasPrefix(trackedChannel, lxdSnapChannel) {
-			logger.Infof("LXD snap is already installed (channel: %s); skipping package installation", trackedChannel)
+			logger.Infof(context.TODO(), "LXD snap is already installed (channel: %s); skipping package installation", trackedChannel)
 			return nil
 		}
 
 		// We need to switch to a different channel
-		logger.Infof("switching LXD snap channel from %s to %s", trackedChannel, lxdSnapChannel)
+		logger.Infof(context.TODO(), "switching LXD snap channel from %s to %s", trackedChannel, lxdSnapChannel)
 		if err := snapManager.ChangeChannel("lxd", lxdSnapChannel); err != nil {
 			return errors.Trace(err)
 		}
 		return nil
 	}
 
-	if err := packaging.InstallDependency(dependency.LXD(lxdSnapChannel), base); err != nil {
+	if err := dependency.InstallLXD(lxdSnapChannel); err != nil {
 		return errors.Trace(err)
 	}
 

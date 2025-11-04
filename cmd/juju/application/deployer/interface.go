@@ -7,14 +7,14 @@ import (
 	"context"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v4"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/client"
 	commoncharm "github.com/juju/juju/api/common/charm"
 	apicharms "github.com/juju/juju/api/common/charms"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/application/store"
 	"github.com/juju/juju/cmd/modelcmd"
 	corebase "github.com/juju/juju/core/base"
@@ -23,7 +23,7 @@ import (
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/charm"
 	charmresource "github.com/juju/juju/internal/charm/resource"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	apiparams "github.com/juju/juju/rpc/params"
 )
 
@@ -46,28 +46,28 @@ type Deployer interface {
 
 type ModelAPI interface {
 	ModelUUID() (string, bool)
-	ModelGet() (map[string]interface{}, error)
-	Sequences() (map[string]int, error)
-	GetModelConstraints() (constraints.Value, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
+	Sequences(ctx context.Context) (map[string]int, error)
+	GetModelConstraints(ctx context.Context) (constraints.Value, error)
 }
 
 // CharmDeployAPI represents the methods of the API the deploy
 // command needs for charms.
 type CharmDeployAPI interface {
 	ModelConfigGetter
-	CharmInfo(string) (*apicharms.CharmInfo, error)
+	CharmInfo(context.Context, string) (*apicharms.CharmInfo, error)
 }
 
 // OfferAPI represents the methods of the API the deploy command needs
 // for creating offers.
 type OfferAPI interface {
-	Offer(modelUUID, application string, endpoints []string, owner, offerName, descr string) ([]apiparams.ErrorResult, error)
-	GrantOffer(user, access string, offerURLs ...string) error
+	Offer(ctx context.Context, modelUUID, application string, endpoints []string, qualifier, offerName, descr string) ([]apiparams.ErrorResult, error)
+	GrantOffer(ctx context.Context, user, access string, offerURLs ...string) error
 }
 
 // ConsumeDetails represents methods needed to consume an offer.
 type ConsumeDetails interface {
-	GetConsumeDetails(url string) (apiparams.ConsumeOfferDetails, error)
+	GetConsumeDetails(ctx context.Context, url string) (apiparams.ConsumeOfferDetails, error)
 	Close() error
 }
 
@@ -85,48 +85,48 @@ type DeployerAPI interface {
 	ModelAPI
 	OfferAPI
 
-	ListSpaces() ([]apiparams.Space, error)
-	Deploy(application.DeployArgs) error
-	Status(*client.StatusArgs) (*apiparams.FullStatus, error)
-	ListCharmResources(curl string, origin commoncharm.Origin) ([]charmresource.Resource, error)
+	ListSpaces(ctx context.Context) ([]apiparams.Space, error)
+	Deploy(context.Context, application.DeployArgs) error
+	Status(context.Context, *client.StatusArgs) (*apiparams.FullStatus, error)
+	ListCharmResources(ctx context.Context, curl string, origin commoncharm.Origin) ([]charmresource.Resource, error)
 }
 
 type ApplicationAPI interface {
-	AddMachines(machineParams []apiparams.AddMachineParams) ([]apiparams.AddMachinesResult, error)
-	AddRelation(endpoints, viaCIDRs []string) (*apiparams.AddRelationResults, error)
-	AddUnits(application.AddUnitsParams) ([]string, error)
-	Expose(application string, exposedEndpoints map[string]apiparams.ExposedEndpoint) error
+	AddMachines(ctx context.Context, machineParams []apiparams.AddMachineParams) ([]apiparams.AddMachinesResult, error)
+	AddRelation(ctx context.Context, endpoints, viaCIDRs []string) (*apiparams.AddRelationResults, error)
+	AddUnits(context.Context, application.AddUnitsParams) ([]string, error)
+	Expose(ctx context.Context, application string, exposedEndpoints map[string]apiparams.ExposedEndpoint) error
 
-	GetAnnotations(tags []string) ([]apiparams.AnnotationsGetResult, error)
-	SetAnnotation(annotations map[string]map[string]string) ([]apiparams.ErrorResult, error)
+	GetAnnotations(ctx context.Context, tags []string) ([]apiparams.AnnotationsGetResult, error)
+	SetAnnotation(ctx context.Context, annotations map[string]map[string]string) ([]apiparams.ErrorResult, error)
 
-	GetCharmURLOrigin(string, string) (*charm.URL, commoncharm.Origin, error)
-	SetCharm(string, application.SetCharmConfig) error
+	GetCharmURLOrigin(context.Context, string) (*charm.URL, commoncharm.Origin, error)
+	SetCharm(context.Context, application.SetCharmConfig) error
 
-	GetConfig(branchName string, appNames ...string) ([]map[string]interface{}, error)
-	SetConfig(branchName string, application, configYAML string, config map[string]string) error
+	GetConfig(ctx context.Context, appNames ...string) ([]map[string]interface{}, error)
+	SetConfig(ctx context.Context, application, configYAML string, config map[string]string) error
 
-	GetConstraints(appNames ...string) ([]constraints.Value, error)
-	SetConstraints(application string, constraints constraints.Value) error
+	GetConstraints(ctx context.Context, appNames ...string) ([]constraints.Value, error)
+	SetConstraints(ctx context.Context, application string, constraints constraints.Value) error
 
-	ScaleApplication(application.ScaleApplicationParams) (apiparams.ScaleApplicationResult, error)
-	Consume(arg crossmodel.ConsumeApplicationArgs) (string, error)
+	ScaleApplication(context.Context, application.ScaleApplicationParams) (apiparams.ScaleApplicationResult, error)
+	Consume(ctx context.Context, arg crossmodel.ConsumeApplicationArgs) (string, error)
 
-	ApplicationsInfo([]names.ApplicationTag) ([]apiparams.ApplicationInfoResult, error)
+	ApplicationsInfo(context.Context, []names.ApplicationTag) ([]apiparams.ApplicationInfoResult, error)
 
-	DeployFromRepository(arg application.DeployFromRepositoryArg) (application.DeployInfo, []application.PendingResourceUpload, []error)
+	DeployFromRepository(ctx context.Context, arg application.DeployFromRepositoryArg) (application.DeployInfo, []application.PendingResourceUpload, []error)
 }
 
 // Resolver defines what we need to resolve a charm or bundle and
 // read the bundle data.
 type Resolver interface {
 	GetBundle(context.Context, *charm.URL, commoncharm.Origin, string) (charm.Bundle, error)
-	ResolveBundleURL(*charm.URL, commoncharm.Origin) (*charm.URL, commoncharm.Origin, error)
-	ResolveCharm(url *charm.URL, preferredOrigin commoncharm.Origin, switchCharm bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error)
+	ResolveBundleURL(context.Context, *charm.URL, commoncharm.Origin) (*charm.URL, commoncharm.Origin, error)
+	ResolveCharm(ctx context.Context, url *charm.URL, preferredOrigin commoncharm.Origin, switchCharm bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error)
 }
 
 type ModelConfigGetter interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 }
 
 type ModelCommand interface {
@@ -144,10 +144,10 @@ type ModelCommand interface {
 
 	// ModelDetails returns details from the file store for the model indicated by
 	// the currently set controller name and model identifier.
-	ModelDetails() (string, *jujuclient.ModelDetails, error)
+	ModelDetails(ctx context.Context) (string, *jujuclient.ModelDetails, error)
 
 	// ModelType returns the type of the model.
-	ModelType() (model.ModelType, error)
+	ModelType(ctx context.Context) (model.ModelType, error)
 
 	// Filesystem returns an instance that provides access to
 	// the filesystem, either delegating to calling os functions

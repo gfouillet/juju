@@ -4,10 +4,11 @@
 package testing
 
 import (
+	"context"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
@@ -18,10 +19,10 @@ import (
 type FakeAuthorizer struct {
 	Tag           names.Tag
 	Controller    bool
-	ModelUUID     string
 	AdminTag      names.UserTag
 	HasConsumeTag names.UserTag
 	HasWriteTag   names.UserTag
+	HasReadTag    names.UserTag
 }
 
 func (fa FakeAuthorizer) AuthOwner(tag names.Tag) bool {
@@ -71,14 +72,18 @@ func (fa FakeAuthorizer) GetAuthTag() names.Tag {
 
 // HasPermission returns true if the logged in user is admin or has a name equal to
 // the pre-set admin tag.
-func (fa FakeAuthorizer) HasPermission(operation permission.Access, target names.Tag) error {
+func (fa FakeAuthorizer) HasPermission(ctx context.Context, operation permission.Access, target names.Tag) error {
 	if fa.Tag.Kind() == names.UserTagKind {
 		ut := fa.Tag.(names.UserTag)
 		emptyTag := names.UserTag{}
 		if fa.AdminTag != emptyTag && ut == fa.AdminTag {
 			return nil
 		}
-		if ut == fa.HasWriteTag && (operation == permission.WriteAccess || operation == permission.ReadAccess) {
+		if fa.HasWriteTag != emptyTag && ut == fa.HasWriteTag && (operation == permission.WriteAccess || operation == permission.ReadAccess) {
+			return nil
+		}
+
+		if fa.HasReadTag != emptyTag && ut == fa.HasReadTag && operation == permission.ReadAccess {
 			return nil
 		}
 
@@ -135,15 +140,9 @@ func nameBasedHasPermission(name string, operation permission.Access, target nam
 	return operation == perm && targetTag.String() == target.String()
 }
 
-// ConnectedModel returns the UUID of the model the current client is
-// connected to.
-func (fa FakeAuthorizer) ConnectedModel() string {
-	return fa.ModelUUID
-}
-
 // EntityHasPermission returns true if the passed entity is admin or has a name equal to
 // the pre-set admin tag.
-func (fa FakeAuthorizer) EntityHasPermission(entity names.Tag, operation permission.Access, _ names.Tag) error {
+func (fa FakeAuthorizer) EntityHasPermission(ctx context.Context, entity names.Tag, operation permission.Access, _ names.Tag) error {
 	if entity.Kind() == names.UserTagKind && entity.Id() == "admin" {
 		return nil
 	}

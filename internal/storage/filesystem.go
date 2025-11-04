@@ -3,7 +3,7 @@
 
 package storage
 
-import "github.com/juju/names/v5"
+import "github.com/juju/names/v6"
 
 // Filesystem identifies and describes a filesystem, either local or remote
 // (NFS, Ceph etc).
@@ -19,10 +19,10 @@ type Filesystem struct {
 
 // Filesystem describes a filesystem, either local or remote (NFS, Ceph etc).
 type FilesystemInfo struct {
-	// FilesystemId is a unique provider-supplied ID for the filesystem.
-	// FilesystemId is required to be unique for the lifetime of the
+	// ProviderId is a unique provider-supplied ID for the filesystem.
+	// ProviderId is required to be unique for the lifetime of the
 	// filesystem, but may be reused.
-	FilesystemId string
+	ProviderId string
 
 	// Size is the size of the filesystem, in MiB.
 	Size uint64

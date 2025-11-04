@@ -8,13 +8,14 @@ import (
 	"reflect"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
+	coreuser "github.com/juju/juju/core/user"
 )
 
 // Register is called to expose a package of facades onto a given registry.
@@ -34,31 +35,32 @@ func newUserManagerAPI(stdCtx context.Context, ctx facade.ModelContext) (*UserMa
 	// Since we know this is a user tag (because AuthClient is true),
 	// we just do the type assertion to the UserTag.
 	apiUserTag, _ := authorizer.GetAuthTag().(names.UserTag)
-	// Pretty much all of the user manager methods have special casing for admin
+	// Pretty much all the user manager methods have special casing for admin
 	// users, so look once when we start and remember if the user is an admin.
-	st := ctx.State()
-	err := authorizer.HasPermission(permission.SuperuserAccess, st.ControllerTag())
+	controllerTag := names.NewControllerTag(ctx.ControllerUUID())
+	err := authorizer.HasPermission(stdCtx, permission.SuperuserAccess, controllerTag)
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return nil, errors.Trace(err)
 	}
 	isAdmin := err == nil
 
-	accessService := ctx.ServiceFactory().Access()
+	domainServices := ctx.DomainServices()
+	accessService := domainServices.Access()
 
-	apiUser, err := accessService.GetUserByName(stdCtx, apiUserTag.Id())
+	apiUser, err := accessService.GetUserByName(stdCtx, coreuser.NameFromTag(apiUserTag))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	return NewAPI(
-		st,
 		accessService,
-		ctx.StatePool(),
+		domainServices.Model(),
 		authorizer,
-		common.NewBlockChecker(st),
+		common.NewBlockChecker(domainServices.BlockCommand()),
 		apiUserTag,
 		apiUser,
 		isAdmin,
 		ctx.Logger().Child("usermanager"),
+		ctx.ControllerUUID(),
 	)
 }

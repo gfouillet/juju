@@ -7,7 +7,7 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
@@ -29,7 +29,7 @@ func newDiskManagerAPI(ctx facade.ModelContext) (*DiskManagerAPI, error) {
 	}
 
 	authEntityTag := authorizer.GetAuthTag()
-	getAuthFunc := func() (common.AuthFunc, error) {
+	getAuthFunc := func(context.Context) (common.AuthFunc, error) {
 		return func(tag names.Tag) bool {
 			// A machine agent can always access its own machine.
 			return tag == authEntityTag
@@ -37,7 +37,8 @@ func newDiskManagerAPI(ctx facade.ModelContext) (*DiskManagerAPI, error) {
 	}
 
 	return &DiskManagerAPI{
-		blockDeviceUpdater: ctx.ServiceFactory().BlockDevice(),
+		machineService:     ctx.DomainServices().Machine(),
+		blockDeviceService: ctx.DomainServices().BlockDevice(),
 		authorizer:         authorizer,
 		getAuthFunc:        getAuthFunc,
 	}, nil

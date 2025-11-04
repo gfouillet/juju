@@ -1,319 +1,186 @@
-// Copyright 2024 Canonical Ltd.
+// Copyright 2025 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 package service
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	corecharm "github.com/juju/juju/core/charm"
+	coremachine "github.com/juju/juju/core/machine"
+	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/domain/application"
-	domainstorage "github.com/juju/juju/domain/storage"
-	storageerrors "github.com/juju/juju/domain/storage/errors"
-	"github.com/juju/juju/internal/charm"
-	loggertesting "github.com/juju/juju/internal/logger/testing"
-	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/internal/storage/provider"
-	dummystorage "github.com/juju/juju/internal/storage/provider/dummy"
+	"github.com/juju/juju/domain/application/architecture"
+	"github.com/juju/juju/domain/deployment"
+	"github.com/juju/juju/domain/status"
+	internalcharm "github.com/juju/juju/internal/charm"
 )
 
 type serviceSuite struct {
-	testing.IsolationSuite
-
-	state   *MockState
-	charm   *MockCharm
-	service *Service
+	baseSuite
 }
 
-var _ = gc.Suite(&serviceSuite{})
-
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-	s.state = NewMockState(ctrl)
-	s.charm = NewMockCharm(ctrl)
-	registry := storage.ChainedProviderRegistry{
-		dummystorage.StorageProviders(),
-		provider.CommonStorageProviders(),
-	}
-	s.service = NewService(s.state, loggertesting.WrapCheckLog(c), registry)
-
-	return ctrl
+func TestServiceSuite(t *testing.T) {
+	tc.Run(t, &serviceSuite{})
 }
 
-func ptr[T any](v T) *T {
-	return &v
-}
-
-func (s *serviceSuite) TestCreateApplication(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666", u).Return(nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{}).AnyTimes()
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-	}, a)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *serviceSuite) TestCreateWithStorageBlock(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666", u).Return(nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name:        "data",
-				Type:        charm.StorageBlock,
-				Shared:      false,
-				CountMin:    1,
-				CountMax:    2,
-				MinimumSize: 10,
-			},
+func (s *serviceSuite) TestEncodeChannelAndPlatform(c *tc.C) {
+	ch, pl, err := encodeChannelAndPlatform(corecharm.Origin{
+		Channel: ptr(internalcharm.MakePermissiveChannel("track", "stable", "branch")),
+		Platform: corecharm.Platform{
+			Architecture: "amd64",
+			OS:           "ubuntu",
+			Channel:      "24.04",
 		},
-	}).AnyTimes()
-	pool := domainstorage.StoragePoolDetails{Name: "loop", Provider: "loop"}
-	s.state.EXPECT().GetStoragePoolByName(gomock.Any(), "loop").Return(pool, nil)
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-	}, a)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *serviceSuite) TestCreateWithStorageBlockDefaultSource(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{DefaultBlockSource: ptr("fast")}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666", u).Return(nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name:        "data",
-				Type:        charm.StorageBlock,
-				Shared:      false,
-				CountMin:    1,
-				CountMax:    2,
-				MinimumSize: 10,
-			},
-		},
-	}).AnyTimes()
-	pool := domainstorage.StoragePoolDetails{Name: "fast", Provider: "modelscoped-block"}
-	s.state.EXPECT().GetStoragePoolByName(gomock.Any(), "fast").Return(pool, nil)
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-		Storage: map[string]storage.Directive{
-			"data": {Count: 2},
-		},
-	}, a)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *serviceSuite) TestCreateWithStorageFilesystem(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666", u).Return(nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name:        "data",
-				Type:        charm.StorageFilesystem,
-				Shared:      false,
-				CountMin:    1,
-				CountMax:    2,
-				MinimumSize: 10,
-			},
-		},
-	}).AnyTimes()
-	pool := domainstorage.StoragePoolDetails{Name: "rootfs", Provider: "rootfs"}
-	s.state.EXPECT().GetStoragePoolByName(gomock.Any(), "rootfs").Return(pool, nil)
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-	}, a)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *serviceSuite) TestCreateWithStorageFilesystemDefaultSource(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{DefaultFilesystemSource: ptr("fast")}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666", u).Return(nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name:        "data",
-				Type:        charm.StorageFilesystem,
-				CountMin:    1,
-				CountMax:    2,
-				MinimumSize: 10,
-			},
-		},
-	}).AnyTimes()
-	pool := domainstorage.StoragePoolDetails{Name: "fast", Provider: "modelscoped"}
-	s.state.EXPECT().GetStoragePoolByName(gomock.Any(), "fast").Return(pool, nil)
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-		Storage: map[string]storage.Directive{
-			"data": {Count: 2},
-		},
-	}, a)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *serviceSuite) TestCreateWithSharedStorageMissingDirectives(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name:   "data",
-				Type:   charm.StorageBlock,
-				Shared: true,
-			},
-		},
-	}).AnyTimes()
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-	}, a)
-	c.Assert(err, jc.ErrorIs, storageerrors.MissingSharedStorageDirectiveError)
-	c.Assert(err, gc.ErrorMatches, `adding default storage directives: no storage directive specified for shared charm storage "data"`)
-}
-
-func (s *serviceSuite) TestCreateWithStorageValidates(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.state.EXPECT().GetStoragePoolByName(gomock.Any(), "loop").
-		Return(domainstorage.StoragePoolDetails{}, storageerrors.PoolNotFoundError).MaxTimes(1)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{
-		Name: "mine",
-		Storage: map[string]charm.Storage{
-			"data": {
-				Name: "data",
-				Type: charm.StorageBlock,
-			},
-		},
-	}).AnyTimes()
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
-		Storage: map[string]storage.Directive{
-			"logs": {Count: 2},
-		},
-	}, a)
-	c.Assert(err, gc.ErrorMatches, `invalid storage directives: charm "mine" has no store called "logs"`)
-}
-
-func (s *serviceSuite) TestCreateApplicationError(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	rErr := errors.New("boom")
-	s.state.EXPECT().StorageDefaults(gomock.Any()).Return(domainstorage.StorageDefaults{}, nil)
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "666").Return(rErr)
-	s.charm.EXPECT().Meta().Return(&charm.Meta{}).AnyTimes()
-
-	err := s.service.CreateApplication(context.Background(), "666", AddApplicationParams{
-		Charm: s.charm,
 	})
-	c.Check(err, jc.ErrorIs, rErr)
-	c.Assert(err, gc.ErrorMatches, `saving application "666": boom`)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(ch, tc.DeepEquals, &deployment.Channel{
+		Track:  "track",
+		Risk:   deployment.RiskStable,
+		Branch: "branch",
+	})
+	c.Check(pl, tc.DeepEquals, deployment.Platform{
+		Architecture: architecture.AMD64,
+		OSType:       deployment.Ubuntu,
+		Channel:      "24.04",
+	})
 }
 
-func (s *serviceSuite) TestDeleteApplicationSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.state.EXPECT().DeleteApplication(gomock.Any(), "666").Return(nil)
-
-	err := s.service.DeleteApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *serviceSuite) TestEncodeChannelAndPlatformInvalidArch(c *tc.C) {
+	ch, pl, err := encodeChannelAndPlatform(corecharm.Origin{
+		Channel: ptr(internalcharm.MakePermissiveChannel("track", "stable", "branch")),
+		Platform: corecharm.Platform{
+			Architecture: "armhf",
+			OS:           "ubuntu",
+			Channel:      "24.04",
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(ch, tc.DeepEquals, &deployment.Channel{
+		Track:  "track",
+		Risk:   deployment.RiskStable,
+		Branch: "branch",
+	})
+	c.Check(pl, tc.DeepEquals, deployment.Platform{
+		Architecture: architecture.Unknown,
+		OSType:       deployment.Ubuntu,
+		Channel:      "24.04",
+	})
 }
 
-func (s *serviceSuite) TestDeleteApplicationError(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	rErr := errors.New("boom")
-	s.state.EXPECT().DeleteApplication(gomock.Any(), "666").Return(rErr)
-
-	err := s.service.DeleteApplication(context.Background(), "666")
-	c.Check(err, jc.ErrorIs, rErr)
-	c.Assert(err, gc.ErrorMatches, `deleting application "666": boom`)
+func (s *serviceSuite) TestEncodeChannelAndPlatformInvalidRisk(c *tc.C) {
+	_, _, err := encodeChannelAndPlatform(corecharm.Origin{
+		Channel: ptr(internalcharm.MakePermissiveChannel("track", "blah", "branch")),
+		Platform: corecharm.Platform{
+			Architecture: "armhf",
+			OS:           "ubuntu",
+			Channel:      "24.04",
+		},
+	})
+	c.Assert(err, tc.ErrorMatches, `unknown risk.*`)
 }
 
-func (s *serviceSuite) TestAddUnits(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().AddUnits(gomock.Any(), "666", u).Return(nil)
-
-	a := AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.AddUnits(context.Background(), "666", a)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *serviceSuite) TestEncodeChannelAndPlatformInvalidOSType(c *tc.C) {
+	_, _, err := encodeChannelAndPlatform(corecharm.Origin{
+		Channel: ptr(internalcharm.MakePermissiveChannel("track", "stable", "branch")),
+		Platform: corecharm.Platform{
+			Architecture: "armhf",
+			OS:           "windows",
+			Channel:      "24.04",
+		},
+	})
+	c.Assert(err, tc.ErrorMatches, `unknown os type.*`)
 }
 
-func (s *serviceSuite) TestAddUpsertCAASUnit(c *gc.C) {
-	defer s.setupMocks(c).Finish()
+func (s *serviceSuite) TestRecordUnitStatusHistory(c *tc.C) {
+	var statusHistory *MockStatusHistory
+	defer s.setupMocksWithStatusHistory(c, func(c *gomock.Controller) StatusHistory {
+		statusHistory = NewMockStatusHistory(c)
+		return statusHistory
+	}).Finish()
 
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	s.state.EXPECT().UpsertApplication(gomock.Any(), "foo", u).Return(nil)
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.UnitAgentNamespace.WithID("foo/0"), corestatus.StatusInfo{
+		Status: corestatus.Allocating,
+	})
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.UnitWorkloadNamespace.WithID("foo/0"), corestatus.StatusInfo{
+		Status:  corestatus.Active,
+		Message: "message",
+	})
 
-	p := UpsertCAASUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.service.UpsertCAASUnit(context.Background(), "foo", p)
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.service.recordUnitStatusHistory(c.Context(), unit.Name("foo/0"), application.UnitStatusArg{
+		AgentStatus: &status.StatusInfo[status.UnitAgentStatusType]{
+			Status: status.UnitAgentStatusAllocating,
+		},
+		WorkloadStatus: &status.StatusInfo[status.WorkloadStatusType]{
+			Status:  status.WorkloadStatusActive,
+			Message: "message",
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *serviceSuite) TestRecordUnitStatusHistoryEmptyAgentStatus(c *tc.C) {
+	var statusHistory *MockStatusHistory
+	defer s.setupMocksWithStatusHistory(c, func(c *gomock.Controller) StatusHistory {
+		statusHistory = NewMockStatusHistory(c)
+		return statusHistory
+	}).Finish()
+
+	err := s.service.recordUnitStatusHistory(c.Context(), unit.Name("foo/0"), application.UnitStatusArg{
+		AgentStatus: &status.StatusInfo[status.UnitAgentStatusType]{
+			Status: status.UnitAgentStatusAllocating,
+		},
+	})
+	c.Assert(err, tc.NotNil)
+}
+
+func (s *serviceSuite) TestRecordUnitStatusHistoryEmptyWorkloadStatus(c *tc.C) {
+	var statusHistory *MockStatusHistory
+	defer s.setupMocksWithStatusHistory(c, func(c *gomock.Controller) StatusHistory {
+		statusHistory = NewMockStatusHistory(c)
+		return statusHistory
+	}).Finish()
+
+	err := s.service.recordUnitStatusHistory(c.Context(), unit.Name("foo/0"), application.UnitStatusArg{
+		WorkloadStatus: &status.StatusInfo[status.WorkloadStatusType]{
+			Status:  status.WorkloadStatusActive,
+			Message: "message",
+		},
+	})
+	c.Assert(err, tc.NotNil)
+}
+
+func (s *serviceSuite) TestRecordMachinesStatusHistory(c *tc.C) {
+	var statusHistory *MockStatusHistory
+	defer s.setupMocksWithStatusHistory(c, func(c *gomock.Controller) StatusHistory {
+		statusHistory = NewMockStatusHistory(c)
+		return statusHistory
+	}).Finish()
+
+	now := s.clock.Now().UTC()
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.MachineNamespace.WithID("0"), corestatus.StatusInfo{
+		Status: corestatus.Pending,
+		Since:  ptr(now),
+	})
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.MachineInstanceNamespace.WithID("0"), corestatus.StatusInfo{
+		Status: corestatus.Pending,
+		Since:  ptr(now),
+	})
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.MachineNamespace.WithID("0/lxd/0"), corestatus.StatusInfo{
+		Status: corestatus.Pending,
+		Since:  ptr(now),
+	})
+	statusHistory.EXPECT().RecordStatus(c.Context(), status.MachineInstanceNamespace.WithID("0/lxd/0"), corestatus.StatusInfo{
+		Status: corestatus.Pending,
+		Since:  ptr(now),
+	})
+
+	s.service.recordInitMachinesStatusHistory(c.Context(), []coremachine.Name{
+		coremachine.Name("0"),
+		coremachine.Name("0/lxd/0"),
+	})
 }

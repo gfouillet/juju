@@ -4,16 +4,16 @@
 package gce
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/internal/provider/gce/google"
 )
 
 // UpgradeOperations is part of the upgrades.OperationSource interface.
-func (env *environ) UpgradeOperations(ctx envcontext.ProviderCallContext, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
+func (env *environ) UpgradeOperations(ctx context.Context, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
 	return []environs.UpgradeOperation{{
 		providerVersion1,
 		[]environs.UpgradeStep{
@@ -35,20 +35,20 @@ func (diskLabelsUpgradeStep) Description() string {
 }
 
 // Run is part of the environs.UpgradeStep interface.
-func (step diskLabelsUpgradeStep) Run(ctx envcontext.ProviderCallContext) error {
+func (step diskLabelsUpgradeStep) Run(ctx context.Context) error {
 	env := step.env
-	disks, err := env.gce.Disks()
+	disks, err := env.gce.Disks(ctx)
 	if err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, err)
 	}
 	for _, disk := range disks {
-		if !isValidVolume(disk.Name) {
+		if !isValidVolume(disk.GetName()) {
 			continue
 		}
 		if disk.Labels[tags.JujuModel] != "" || disk.Labels[tags.JujuController] != "" {
 			continue
 		}
-		if disk.Description != "" && disk.Description != env.uuid {
+		if disk.GetDescription() != "" && disk.GetDescription() != env.uuid {
 			continue
 		}
 		if disk.Labels == nil {
@@ -56,8 +56,8 @@ func (step diskLabelsUpgradeStep) Run(ctx envcontext.ProviderCallContext) error 
 		}
 		disk.Labels[tags.JujuModel] = env.uuid
 		disk.Labels[tags.JujuController] = step.controllerUUID
-		if err := env.gce.SetDiskLabels(disk.Zone, disk.Name, disk.LabelFingerprint, disk.Labels); err != nil {
-			return google.HandleCredentialError(errors.Annotatef(err, "cannot set labels on volume %q", disk.Name), ctx)
+		if err := env.gce.SetDiskLabels(ctx, disk.GetZone(), disk.GetName(), disk.GetLabelFingerprint(), disk.GetLabels()); err != nil {
+			return errors.Annotatef(env.HandleCredentialError(ctx, err), "cannot set labels on volume %q", disk.GetName())
 		}
 	}
 	return nil

@@ -4,26 +4,25 @@
 package domain
 
 import (
-	"sync"
-
-	"github.com/juju/errors"
+	"context"
 
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
+	"github.com/juju/juju/internal/errors"
 )
 
-type WatchableDBFactory = func() (changestream.WatchableDB, error)
+// WatchableDBFactory is a function that returns a WatchableDB or an error.
+type WatchableDBFactory = func(context.Context) (changestream.WatchableDB, error)
 
+// WatcherFactory is a factory for creating watchers.
 type WatcherFactory struct {
-	mu sync.Mutex
-
-	getDB       WatchableDBFactory
-	watchableDB changestream.WatchableDB
-	logger      logger.Logger
+	getDB  WatchableDBFactory
+	logger logger.Logger
 }
 
+// NewWatcherFactory returns a new WatcherFactory.
 func NewWatcherFactory(watchableDBFactory WatchableDBFactory, logger logger.Logger) *WatcherFactory {
 	return &WatcherFactory{
 		getDB:  watchableDBFactory,
@@ -31,111 +30,105 @@ func NewWatcherFactory(watchableDBFactory WatchableDBFactory, logger logger.Logg
 	}
 }
 
-// NewUUIDsWatcher returns a watcher that emits the UUIDs for
-// changes to the input table name that match the input mask.
+// NewUUIDsWatcher returns a watcher that emits the UUIDs for changes to the
+// input table name that match the input mask.
 func (f *WatcherFactory) NewUUIDsWatcher(
-	tableName string, changeMask changestream.ChangeType,
+	ctx context.Context,
+	tableName, summary string, changeMask changestream.ChangeType,
 ) (watcher.StringsWatcher, error) {
-	w, err := f.NewNamespaceWatcher(tableName, changeMask, eventsource.InitialNamespaceChanges("SELECT uuid from "+tableName))
-	return w, errors.Trace(err)
+	w, err := f.NewNamespaceWatcher(
+		ctx,
+		eventsource.InitialNamespaceChanges("SELECT uuid from "+tableName),
+		summary,
+		eventsource.NamespaceFilter(tableName, changeMask),
+	)
+	return w, errors.Capture(err)
 }
 
-// NewNamespaceWatcher returns a new namespace watcher
-// for events based on the input change mask.
+// NewNamespaceWatcher returns a new watcher that filters changes from the input
+// base watcher's db/queue. Change-log events will be emitted only if the filter
+// accepts them, and dispatching the notifications via the Changes channel. A
+// filter option is required, though additional filter options can be provided.
 func (f *WatcherFactory) NewNamespaceWatcher(
-	namespace string, changeMask changestream.ChangeType,
-	initialStateQuery eventsource.NamespaceQuery,
+	ctx context.Context,
+	initialQuery eventsource.NamespaceQuery,
+	summary string,
+	filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
 ) (watcher.StringsWatcher, error) {
-	base, err := f.newBaseWatcher()
+	base, err := f.newBaseWatcher(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
+		return nil, errors.Errorf("creating base watcher: %w", err)
 	}
 
-	return eventsource.NewNamespaceWatcher(base, namespace, changeMask, initialStateQuery), nil
+	return eventsource.NewNamespaceWatcher(base, initialQuery, summary, filterOption, filterOptions...)
 }
 
-// NewNamespaceMapperWatcher returns a new namespace watcher
-// for events based on the input change mask and mapper.
+// NewNamespaceMapperWatcher returns a new watcher that receives changes from
+// the input base watcher's db/queue. Change-log events will be emitted only if
+// the filter accepts them, and dispatching the notifications via the Changes
+// channel, once the mapper has processed them. Filtering of values is done
+// first by the filter, and then by the mapper. Based on the mapper's logic a
+// subset of them (or none) may be emitted. A filter option is required, though
+// additional filter options can be provided.
 func (f *WatcherFactory) NewNamespaceMapperWatcher(
-	namespace string, changeMask changestream.ChangeType,
-	initialStateQuery eventsource.NamespaceQuery,
+	ctx context.Context,
+	initialQuery eventsource.NamespaceQuery,
+	summary string,
 	mapper eventsource.Mapper,
+	filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
 ) (watcher.StringsWatcher, error) {
-	base, err := f.newBaseWatcher()
+	base, err := f.newBaseWatcher(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
+		return nil, errors.Errorf("creating base watcher: %w", err)
 	}
 
 	return eventsource.NewNamespaceMapperWatcher(
-		base, namespace, changeMask,
-		initialStateQuery, mapper,
-	), nil
+		base, initialQuery, summary, mapper, filterOption, filterOptions...,
+	)
 }
 
-// NewNamespaceNotifyWatcher returns a new namespace notify watcher
-// for events based on the input change mask.
-func (f *WatcherFactory) NewNamespaceNotifyWatcher(
-	namespace string, changeMask changestream.ChangeType,
+// NewNotifyWatcher returns a new watcher that filters changes from the input
+// base watcher's db/queue. A single filter option is required, though
+// additional filter options can be provided.
+func (f *WatcherFactory) NewNotifyWatcher(
+	ctx context.Context,
+	summary string,
+	filter eventsource.FilterOption,
+	filterOpts ...eventsource.FilterOption,
 ) (watcher.NotifyWatcher, error) {
-	base, err := f.newBaseWatcher()
+	base, err := f.newBaseWatcher(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
+		return nil, errors.Errorf("creating base watcher: %w", err)
 	}
 
-	return eventsource.NewNamespaceNotifyWatcher(base, namespace, changeMask), nil
+	return eventsource.NewNotifyWatcher(base, summary, filter, filterOpts...)
 }
 
-// NewNamespaceNotifyMapperWatcher returns a new namespace notify watcher
-// for events based on the input change mask and mapper.
-func (f *WatcherFactory) NewNamespaceNotifyMapperWatcher(
-	namespace string, changeMask changestream.ChangeType, mapper eventsource.Mapper,
-) (watcher.NotifyWatcher, error) {
-	base, err := f.newBaseWatcher()
-	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
-	}
-
-	return eventsource.NewNamespaceNotifyMapperWatcher(base, namespace, changeMask, mapper), nil
-}
-
-// NewValueWatcher returns a watcher for a particular change value
-// in a namespace, based on the input change mask.
-func (f *WatcherFactory) NewValueWatcher(
-	namespace, changeValue string, changeMask changestream.ChangeType,
-) (watcher.NotifyWatcher, error) {
-	base, err := f.newBaseWatcher()
-	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
-	}
-
-	return eventsource.NewValueWatcher(base, namespace, changeValue, changeMask), nil
-}
-
-// NewValueMapperWatcher returns a watcher for a particular change value
-// in a namespace, based on the input change mask and mapper.
-func (f *WatcherFactory) NewValueMapperWatcher(
-	namespace, changeValue string,
-	changeMask changestream.ChangeType,
+// NewNotifyMapperWatcher returns a new watcher that receives changes from the
+// input base watcher's db/queue. A single filter option is required, though
+// additional filter options can be provided. Filtering of values is done first
+// by the filter, and then subsequently by the mapper. Based on the mapper's
+// logic a subset of them (or none) may be emitted.
+func (f *WatcherFactory) NewNotifyMapperWatcher(
+	ctx context.Context,
+	summary string,
 	mapper eventsource.Mapper,
+	filter eventsource.FilterOption,
+	filterOpts ...eventsource.FilterOption,
 ) (watcher.NotifyWatcher, error) {
-	base, err := f.newBaseWatcher()
+	base, err := f.newBaseWatcher(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "creating base watcher")
+		return nil, errors.Errorf("creating base watcher: %w", err)
 	}
 
-	return eventsource.NewValueMapperWatcher(base, namespace, changeValue, changeMask, mapper), nil
+	return eventsource.NewNotifyMapperWatcher(base, summary, mapper, filter, filterOpts...)
 }
 
-func (f *WatcherFactory) newBaseWatcher() (*eventsource.BaseWatcher, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.watchableDB == nil {
-		var err error
-		if f.watchableDB, err = f.getDB(); err != nil {
-			return nil, errors.Trace(err)
-		}
+func (f *WatcherFactory) newBaseWatcher(ctx context.Context) (*eventsource.BaseWatcher, error) {
+	watchableDB, err := f.getDB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
 	}
 
-	return eventsource.NewBaseWatcher(f.watchableDB, f.logger), nil
+	return eventsource.NewBaseWatcher(watchableDB, f.logger), nil
 }

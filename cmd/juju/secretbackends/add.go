@@ -4,12 +4,12 @@
 package secretbackends
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/utils/v4/keyvalues"
@@ -19,6 +19,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/secrets/provider"
 	_ "github.com/juju/juju/internal/secrets/provider/all"
 )
@@ -26,7 +27,7 @@ import (
 type addSecretBackendCommand struct {
 	modelcmd.ControllerCommandBase
 
-	AddSecretBackendsAPIFunc func() (AddSecretBackendsAPI, error)
+	AddSecretBackendsAPIFunc func(ctx context.Context) (AddSecretBackendsAPI, error)
 
 	Name        string
 	BackendType string
@@ -47,7 +48,7 @@ Config may be specified as key values ot read from a file.
 Any key values override file content if both are specified.
 
 To rotate the backend access credential/token (if specified), use
-the "token-rotate" config and supply a duration.
+the ` + "`token-rotate` " + `config and supply a duration.
 
 `
 
@@ -59,7 +60,7 @@ const addSecretBackendsExamples = `
 
 // AddSecretBackendsAPI is the secrets client API.
 type AddSecretBackendsAPI interface {
-	AddSecretBackend(backend secretbackends.CreateSecretBackend) error
+	AddSecretBackend(ctx context.Context, backend secretbackends.CreateSecretBackend) error
 	Close() error
 }
 
@@ -71,8 +72,8 @@ func NewAddSecretBackendCommand() cmd.Command {
 	return modelcmd.WrapController(c)
 }
 
-func (c *addSecretBackendCommand) secretBackendsAPI() (AddSecretBackendsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *addSecretBackendCommand) secretBackendsAPI(ctx context.Context) (AddSecretBackendsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -99,8 +100,8 @@ func (c *addSecretBackendCommand) Info() *cmd.Info {
 
 // SetFlags implements cmd.SetFlags.
 func (c *addSecretBackendCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.Var(&c.ConfigFile, "config", "path to yaml-formatted configuration file")
-	f.StringVar(&c.ImportID, "import-id", "", "add the backend with the specified id")
+	f.Var(&c.ConfigFile, "config", "Path to yaml-formatted configuration file")
+	f.StringVar(&c.ImportID, "import-id", "", "Add the backend with the specified ID")
 }
 
 func (c *addSecretBackendCommand) Init(args []string) error {
@@ -212,7 +213,7 @@ func (c *addSecretBackendCommand) Run(ctxt *cmd.Context) error {
 	}
 	configValidator, ok := p.(provider.ProviderConfig)
 	if ok {
-		err = configValidator.ValidateConfig(nil, attrs)
+		err = configValidator.ValidateConfig(nil, attrs, tokenRotateInterval)
 		if err != nil {
 			return errors.Annotate(err, "invalid provider config")
 		}
@@ -225,12 +226,12 @@ func (c *addSecretBackendCommand) Run(ctxt *cmd.Context) error {
 		TokenRotateInterval: tokenRotateInterval,
 		Config:              attrs,
 	}
-	api, err := c.AddSecretBackendsAPIFunc()
+	api, err := c.AddSecretBackendsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	err = api.AddSecretBackend(backend)
+	err = api.AddSecretBackend(ctxt, backend)
 	return errors.Trace(err)
 }

@@ -4,60 +4,61 @@
 package machine_test
 
 import (
-	"context"
 	"sort"
+	stdtesting "testing"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v4"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/dependency"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/worker/v4/workertest"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/agent/agenttest"
 	"github.com/juju/juju/cmd/jujud-controller/agent/machine"
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/upgrades"
 	jworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/apicaller"
 	"github.com/juju/juju/internal/worker/gate"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
 )
 
 type ManifoldsSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&ManifoldsSuite{})
+func TestManifoldsSuite(t *stdtesting.T) {
+	tc.Run(t, &ManifoldsSuite{})
+}
 
-func (s *ManifoldsSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldsSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 }
 
-func (s *ManifoldsSuite) TestStartFuncsIAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestStartFuncsIAAS(c *tc.C) {
 	s.assertStartFuncs(c, machine.IAASManifolds(machine.ManifoldsConfig{
 		Agent:           &mockAgent{},
 		PreUpgradeSteps: preUpgradeSteps,
 	}))
 }
 
-func (s *ManifoldsSuite) TestStartFuncsCAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestStartFuncsCAAS(c *tc.C) {
 	s.assertStartFuncs(c, machine.CAASManifolds(machine.ManifoldsConfig{
 		Agent:           &mockAgent{},
 		PreUpgradeSteps: preUpgradeSteps,
 	}))
 }
 
-func (*ManifoldsSuite) assertStartFuncs(c *gc.C, manifolds dependency.Manifolds) {
+func (*ManifoldsSuite) assertStartFuncs(c *tc.C, manifolds dependency.Manifolds) {
 	for name, manifold := range manifolds {
 		c.Logf("checking %q manifold", name)
-		c.Check(manifold.Start, gc.NotNil)
+		c.Check(manifold.Start, tc.NotNil)
 	}
 }
 
-func (s *ManifoldsSuite) TestManifoldNamesIAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldNamesIAAS(c *tc.C) {
 	s.assertManifoldNames(c,
 		machine.IAASManifolds(machine.ManifoldsConfig{
 			Agent:           &mockAgent{},
@@ -66,41 +67,42 @@ func (s *ManifoldsSuite) TestManifoldNamesIAAS(c *gc.C) {
 		[]string{
 			"agent-config-updater",
 			"agent",
+			"api-address-setter",
 			"api-address-updater",
 			"api-caller",
 			"api-config-watcher",
+			"api-remote-caller",
+			"api-remote-relation-caller",
 			"api-server",
 			"audit-config-updater",
 			"bootstrap",
 			"broker-tracker",
-
-			"central-hub",
 			"certificate-updater",
 			"certificate-watcher",
 			"change-stream-pruner",
 			"change-stream",
-			"charmhub-http-client",
 			"clock",
 			"control-socket",
 			"controller-agent-config",
 			"db-accessor",
 			"deployer",
 			"disk-manager",
+			"domain-services",
 			"external-controller-updater",
 			"file-notify-watcher",
+			"flight-recorder",
 			"host-key-reporter",
+			"http-client",
 			"http-server-args",
 			"http-server",
-			"provider-tracker",
-			"instance-mutater",
 			"is-bootstrap-flag",
 			"is-bootstrap-gate",
 			"is-controller-flag",
 			"is-not-controller-flag",
 			"is-primary-controller-flag",
+			"jwt-parser",
 			"lease-expiry",
 			"lease-manager",
-			"log-sender",
 			"log-sink",
 			"logging-config-updater",
 			"lxd-container-provisioner",
@@ -111,43 +113,46 @@ func (s *ManifoldsSuite) TestManifoldNamesIAAS(c *gc.C) {
 			"migration-inactive-flag",
 			"migration-minion",
 			"model-worker-manager",
+			"object-store-fortress",
+			"object-store-facade",
+			"object-store-drainer",
 			"object-store-s3-caller",
+			"object-store-services",
 			"object-store",
-			"peer-grouper",
-			"presence",
-			"provider-service-factory",
+			"provider-services",
+			"provider-tracker",
 			"proxy-config-updater",
-			"pubsub-forwarder",
 			"query-logger",
 			"reboot-executor",
-			"s3-http-client",
 			"secret-backend-rotate",
-			"service-factory",
 			"ssh-authkeys-updater",
 			"ssh-identity-writer",
+			"ssh-server",
 			"state-config-watcher",
-			"state-converter",
-			"state",
+			"machine-converter",
 			"storage-provisioner",
+			"storage-registry",
 			"termination-signal-handler",
 			"tools-version-checker",
 			"trace",
+			"undertaker",
 			"upgrade-check-flag",
 			"upgrade-check-gate",
 			"upgrade-database-flag",
 			"upgrade-database-gate",
 			"upgrade-database-runner",
-			"upgrade-series",
+			"upgrade-services",
 			"upgrade-steps-flag",
 			"upgrade-steps-gate",
 			"upgrade-steps-runner",
 			"upgrader",
 			"valid-credential-flag",
+			"watcher-registry",
 		},
 	)
 }
 
-func (s *ManifoldsSuite) TestManifoldNamesCAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldNamesCAAS(c *tc.C) {
 	s.assertManifoldNames(c,
 		machine.CAASManifolds(machine.ManifoldsConfig{
 			Agent:           &mockAgent{},
@@ -156,120 +161,129 @@ func (s *ManifoldsSuite) TestManifoldNamesCAAS(c *gc.C) {
 		[]string{
 			"agent-config-updater",
 			"agent",
+			"api-address-setter",
 			"api-caller",
 			"api-config-watcher",
+			"api-remote-caller",
+			"api-remote-relation-caller",
 			"api-server",
 			"audit-config-updater",
 			"bootstrap",
-
-			"caas-units-manager",
-			"central-hub",
 			"certificate-watcher",
 			"change-stream-pruner",
 			"change-stream",
-			"charmhub-http-client",
 			"clock",
 			"control-socket",
 			"controller-agent-config",
 			"db-accessor",
+			"domain-services",
 			"external-controller-updater",
 			"file-notify-watcher",
+			"flight-recorder",
+			"http-client",
 			"http-server-args",
 			"http-server",
-			"provider-tracker",
 			"is-bootstrap-flag",
 			"is-bootstrap-gate",
 			"is-controller-flag",
 			"is-primary-controller-flag",
+			"jwt-parser",
 			"lease-expiry",
 			"lease-manager",
-			"log-sender",
 			"log-sink",
 			"logging-config-updater",
 			"migration-fortress",
 			"migration-inactive-flag",
 			"migration-minion",
 			"model-worker-manager",
+			"object-store-fortress",
+			"object-store-facade",
+			"object-store-drainer",
 			"object-store-s3-caller",
+			"object-store-services",
 			"object-store",
-			"peer-grouper",
-			"presence",
-			"provider-service-factory",
+			"provider-services",
+			"provider-tracker",
 			"proxy-config-updater",
-			"pubsub-forwarder",
 			"query-logger",
-			"s3-http-client",
 			"secret-backend-rotate",
-			"service-factory",
 			"ssh-identity-writer",
+			"ssh-server",
 			"state-config-watcher",
-			"state",
+			"storage-registry",
 			"termination-signal-handler",
 			"trace",
+			"undertaker",
 			"upgrade-check-flag",
 			"upgrade-check-gate",
 			"upgrade-database-flag",
 			"upgrade-database-gate",
 			"upgrade-database-runner",
+			"upgrade-services",
 			"upgrade-steps-flag",
 			"upgrade-steps-gate",
 			"upgrade-steps-runner",
 			"upgrader",
 			"valid-credential-flag",
+			"watcher-registry",
 		},
 	)
 }
 
-func (*ManifoldsSuite) assertManifoldNames(c *gc.C, manifolds dependency.Manifolds, expectedKeys []string) {
+func (*ManifoldsSuite) assertManifoldNames(c *tc.C, manifolds dependency.Manifolds, expectedKeys []string) {
 	keys := make([]string, 0, len(manifolds))
 	for k := range manifolds {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	c.Assert(keys, jc.SameContents, expectedKeys)
+	c.Assert(keys, tc.SameContents, expectedKeys)
 }
 
-func (*ManifoldsSuite) TestUpgradesBlockMigration(c *gc.C) {
+func (*ManifoldsSuite) TestUpgradesBlockMigration(c *tc.C) {
 	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
 		Agent:           &mockAgent{},
 		PreUpgradeSteps: preUpgradeSteps,
 	})
 	manifold, ok := manifolds["migration-fortress"]
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 
 	checkContains(c, manifold.Inputs, "upgrade-check-flag")
 	checkContains(c, manifold.Inputs, "upgrade-steps-flag")
 }
 
-func (s *ManifoldsSuite) TestMigrationGuardsUsed(c *gc.C) {
+func (s *ManifoldsSuite) TestMigrationGuardsUsed(c *tc.C) {
 	exempt := set.NewStrings(
 		"agent",
+		"api-address-setter",
 		"api-caller",
 		"api-config-watcher",
+		"api-remote-caller",
+		"api-remote-relation-caller",
 		"api-server",
 		"audit-config-updater",
 		"bootstrap",
-		"central-hub",
 		"certificate-updater",
 		"certificate-watcher",
 		"change-stream-pruner",
 		"change-stream",
-		"charmhub-http-client",
 		"clock",
 		"control-socket",
 		"controller-agent-config",
 		"db-accessor",
 		"deployer",
+		"domain-services",
 		"file-notify-watcher",
+		"flight-recorder",
 		"global-clock-updater",
+		"http-client",
 		"http-server-args",
 		"http-server",
-		"provider-tracker",
 		"is-bootstrap-flag",
 		"is-bootstrap-gate",
 		"is-controller-flag",
 		"is-not-controller-flag",
 		"is-primary-controller-flag",
+		"jwt-parser",
 		"lease-expiry",
 		"lease-manager",
 		"log-sink",
@@ -277,39 +291,40 @@ func (s *ManifoldsSuite) TestMigrationGuardsUsed(c *gc.C) {
 		"migration-inactive-flag",
 		"migration-minion",
 		"model-worker-manager",
+		"object-store-fortress",
+		"object-store-facade",
+		"object-store-drainer",
 		"object-store-s3-caller",
+		"object-store-services",
 		"object-store",
-		"peer-grouper",
-		"presence",
-		"provider-service-factory",
-		"pubsub-forwarder",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"service-factory",
+		"ssh-server",
 		"state-config-watcher",
-		"state",
+		"storage-registry",
 		"termination-signal-handler",
 		"trace",
+		"undertaker",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 		"upgrade-database-runner",
-		"upgrade-series-enabled",
-		"upgrade-series",
+		"upgrade-services",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
 		"upgrade-steps-runner",
 		"upgrader",
 		"valid-credential-flag",
+		"watcher-registry",
 	)
 	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
 		Agent:           &mockAgent{},
 		PreUpgradeSteps: preUpgradeSteps,
 	})
 	for name, manifold := range manifolds {
-		c.Logf(name)
+		c.Logf("%s", name)
 		if !exempt.Contains(name) {
 			checkContains(c, manifold.Inputs, "migration-fortress")
 			checkContains(c, manifold.Inputs, "migration-inactive-flag")
@@ -317,7 +332,7 @@ func (s *ManifoldsSuite) TestMigrationGuardsUsed(c *gc.C) {
 	}
 }
 
-func (*ManifoldsSuite) TestSingularGuardsUsed(c *gc.C) {
+func (*ManifoldsSuite) TestSingularGuardsUsed(c *tc.C) {
 	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
 		Agent:           &mockAgent{},
 		PreUpgradeSteps: preUpgradeSteps,
@@ -325,20 +340,25 @@ func (*ManifoldsSuite) TestSingularGuardsUsed(c *gc.C) {
 
 	// Explicitly guarded by ifController.
 	controllerWorkers := set.NewStrings(
+		"api-remote-caller",
 		"certificate-watcher",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
 		"is-primary-controller-flag",
+		"jwt-parser",
 		"query-logger",
-		"s3-http-client",
+		"ssh-server",
+		"undertaker",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 		"upgrade-database-runner",
+		"watcher-registry",
 	)
 
 	// Explicitly guarded by ifPrimaryController.
 	primaryControllerWorkers := set.NewStrings(
+		"api-address-setter",
 		"change-stream-pruner",
 		"external-controller-updater",
 		"lease-expiry",
@@ -352,20 +372,17 @@ func (*ManifoldsSuite) TestSingularGuardsUsed(c *gc.C) {
 		"audit-config-updater",
 		"bootstrap",
 		"control-socket",
-		"http-server-args",
-		"log-sink",
 		"object-store",
 		"object-store-s3-caller",
-		"state",
 	)
 
 	// bootstrapWorkers are workers that are run directly run after bootstrap.
 	bootstrapWorkers := set.NewStrings(
-		"api-server",
+		"http-server-args",
 	)
 
 	for name, manifold := range manifolds {
-		c.Logf(name)
+		c.Logf("%s", name)
 		switch {
 		case controllerWorkers.Contains(name):
 			checkContains(c, manifold.Inputs, "is-controller-flag")
@@ -386,7 +403,55 @@ func (*ManifoldsSuite) TestSingularGuardsUsed(c *gc.C) {
 	}
 }
 
-func (*ManifoldsSuite) TestAPICallerNonRecoverableErrorHandling(c *gc.C) {
+func (*ManifoldsSuite) TestObjectStoreDoesNotUseDomainServices(c *tc.C) {
+	// The object-store is a dependency of the domain-services, so we can't have
+	// circular dependencies between the two. Ensuring that the dependencies is
+	// a good way to check that the domain-services isn't a dependency of the
+	// object-store.
+
+	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
+		Agent:           &mockAgent{},
+		PreUpgradeSteps: preUpgradeSteps,
+	})
+
+	// Ensure that the object-store doesn't have a hard dependency on the
+	// domain-services.
+
+	manifold := manifolds["object-store"]
+	checkNotContains(c, manifold.Inputs, "domain-services")
+
+	// Also check that it doesn't have a transitive dependency on the
+	// domain-services.
+
+	dependencies := agenttest.ManifoldDependencies(manifolds, manifold)
+	c.Check(dependencies.Contains("domain-services"), tc.IsFalse)
+}
+
+func (*ManifoldsSuite) TestProviderTrackerDoesNotUseDomainServices(c *tc.C) {
+	// The provider-tracker is a dependency of the domain-services, so we can't
+	// have circular dependencies between the two. Ensuring that the
+	// dependencies is a good way to check that the domain-services isn't a
+	// dependency of the provider-tracker.
+
+	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
+		Agent:           &mockAgent{},
+		PreUpgradeSteps: preUpgradeSteps,
+	})
+
+	// Ensure that the provider-tracker doesn't have a hard dependency on the
+	// domain-services.
+
+	manifold := manifolds["provider-tracker"]
+	checkNotContains(c, manifold.Inputs, "domain-services")
+
+	// Also check that it doesn't have a transitive dependency on the
+	// domain-services.
+
+	dependencies := agenttest.ManifoldDependencies(manifolds, manifold)
+	c.Check(dependencies.Contains("domain-services"), tc.IsFalse)
+}
+
+func (*ManifoldsSuite) TestAPICallerNonRecoverableErrorHandling(c *tc.C) {
 	ag := &mockAgent{
 		conf: mockConfig{
 			dataPath: c.MkDir(),
@@ -397,15 +462,15 @@ func (*ManifoldsSuite) TestAPICallerNonRecoverableErrorHandling(c *gc.C) {
 		PreUpgradeSteps: preUpgradeSteps,
 	})
 
-	c.Assert(manifolds["api-caller"], gc.Not(gc.IsNil))
+	c.Assert(manifolds["api-caller"], tc.Not(tc.IsNil))
 	apiCaller := manifolds["api-caller"]
 
 	// Check that when the api-caller maps non-recoverable errors to ErrTerminateAgent.
 	err := apiCaller.Filter(apicaller.ErrConnectImpossible)
-	c.Assert(err, gc.Equals, jworker.ErrTerminateAgent)
+	c.Assert(err, tc.Equals, jworker.ErrTerminateAgent)
 }
 
-func checkContains(c *gc.C, names []string, seek string) {
+func checkContains(c *tc.C, names []string, seek string) {
 	for _, name := range names {
 		if name == seek {
 			return
@@ -414,7 +479,7 @@ func checkContains(c *gc.C, names []string, seek string) {
 	c.Errorf("%q not found in %v", seek, names)
 }
 
-func checkNotContains(c *gc.C, names []string, seek string) {
+func checkNotContains(c *tc.C, names []string, seek string) {
 	for _, name := range names {
 		if name == seek {
 			c.Errorf("%q found in %v", seek, names)
@@ -423,7 +488,7 @@ func checkNotContains(c *gc.C, names []string, seek string) {
 	}
 }
 
-func (*ManifoldsSuite) TestUpgradeGates(c *gc.C) {
+func (*ManifoldsSuite) TestUpgradeGates(c *tc.C) {
 	upgradeStepsLock := gate.NewLock()
 	upgradeCheckLock := gate.NewLock()
 	manifolds := machine.IAASManifolds(machine.ManifoldsConfig{
@@ -436,14 +501,14 @@ func (*ManifoldsSuite) TestUpgradeGates(c *gc.C) {
 	assertGate(c, manifolds["upgrade-check-gate"], upgradeCheckLock)
 }
 
-func assertGate(c *gc.C, manifold dependency.Manifold, unlocker gate.Unlocker) {
-	w, err := manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
-	defer worker.Stop(w)
+func assertGate(c *tc.C, manifold dependency.Manifold, unlocker gate.Unlocker) {
+	w, err := manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	var waiter gate.Waiter
 	err = manifold.Output(w, &waiter)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case <-waiter.Unlocked():
@@ -460,7 +525,7 @@ func assertGate(c *gc.C, manifold dependency.Manifold, unlocker gate.Unlocker) {
 	}
 }
 
-func (s *ManifoldsSuite) TestManifoldsDependenciesIAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldsDependenciesIAAS(c *tc.C) {
 	agenttest.AssertManifoldsDependencies(c,
 		machine.IAASManifolds(machine.ManifoldsConfig{
 			Agent:           &mockAgent{},
@@ -470,7 +535,7 @@ func (s *ManifoldsSuite) TestManifoldsDependenciesIAAS(c *gc.C) {
 	)
 }
 
-func (s *ManifoldsSuite) TestManifoldsDependenciesCAAS(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldsDependenciesCAAS(c *tc.C) {
 	agenttest.AssertManifoldsDependencies(c,
 		machine.CAASManifolds(machine.ManifoldsConfig{
 			Agent:           &mockAgent{},
@@ -488,15 +553,65 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
-		"central-hub",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
+	},
+
+	"api-address-setter": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"is-primary-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"api-address-updater": {
@@ -515,72 +630,134 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 
 	"api-config-watcher": {"agent"},
 
-	"api-server": {
+	"api-remote-caller": {
 		"agent",
-		"audit-config-updater",
 		"change-stream",
-		"charmhub-http-client",
-		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"http-server-args",
-		"provider-tracker",
-		"is-bootstrap-flag",
-		"is-bootstrap-gate",
+		"is-controller-flag",
+		"object-store-services",
+		"query-logger",
+		"state-config-watcher",
+	},
+
+	"api-remote-relation-caller": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-controller-flag",
 		"lease-manager",
 		"log-sink",
 		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"api-server": {
+		"agent",
+		"api-remote-caller",
+		"audit-config-updater",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"flight-recorder",
+		"http-client",
+		"http-server-args",
+		"is-bootstrap-flag",
+		"is-bootstrap-gate",
+		"is-controller-flag",
+		"jwt-parser",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 		"upgrade-steps-gate",
+		"watcher-registry",
 	},
 
 	"audit-config-updater": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
 
 	"bootstrap": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
-		"charmhub-http-client",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-bootstrap-gate",
 		"is-controller-flag",
 		"lease-manager",
-		"object-store",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
@@ -598,22 +775,31 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"central-hub": {"agent", "state-config-watcher"},
-
 	"certificate-updater": {
 		"agent",
+		"api-remote-caller",
 		"certificate-watcher",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-database-flag",
@@ -640,33 +826,59 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 
 	"change-stream-pruner": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
-
-	"charmhub-http-client": {},
 
 	"clock": {},
 
 	"control-socket": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
@@ -711,11 +923,17 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-steps-flag",
@@ -727,6 +945,8 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"is-controller-flag",
 		"state-config-watcher",
 	},
+
+	"flight-recorder": {},
 
 	"host-key-reporter": {
 		"agent",
@@ -740,53 +960,72 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
+	"http-client": {},
+
 	"http-server": {
 		"agent",
+		"api-remote-caller",
 		"api-server",
 		"audit-config-updater",
-		"central-hub",
 		"certificate-watcher",
 		"change-stream",
-		"charmhub-http-client",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
+		"flight-recorder",
+		"http-client",
 		"http-server-args",
+		"is-bootstrap-flag",
+		"is-bootstrap-gate",
+		"is-controller-flag",
+		"jwt-parser",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+		"upgrade-steps-gate",
+		"watcher-registry",
+	},
+
+	"http-server-args": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-bootstrap-flag",
 		"is-bootstrap-gate",
 		"is-controller-flag",
 		"lease-manager",
 		"log-sink",
-		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
-		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
-		"state-config-watcher",
-		"trace",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-		"upgrade-steps-gate",
-	},
-
-	"http-server-args": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
@@ -798,22 +1037,10 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"db-accessor",
 		"file-notify-watcher",
 		"is-controller-flag",
-		"provider-service-factory",
+		"log-sink",
+		"provider-services",
 		"query-logger",
 		"state-config-watcher",
-	},
-
-	"instance-mutater": {
-		"agent",
-		"api-caller",
-		"api-config-watcher",
-		"broker-tracker",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
 	},
 
 	"is-bootstrap-flag": {
@@ -828,21 +1055,52 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 
 	"is-primary-controller-flag": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
+		"lease-manager",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
+	},
+
+	"jwt-parser": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"lease-expiry": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"query-logger",
 		"state-config-watcher",
 		"trace",
@@ -857,18 +1115,6 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"query-logger",
 		"state-config-watcher",
 		"trace",
-	},
-
-	"log-sender": {
-		"agent",
-		"api-caller",
-		"api-config-watcher",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
 	},
 
 	"logging-config-updater": {
@@ -895,22 +1141,7 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"log-sink": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
-		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
-		"query-logger",
-		"service-factory",
-		"state-config-watcher",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-	},
+	"log-sink": {},
 
 	"machine-action-runner": {
 		"agent",
@@ -974,42 +1205,30 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 
 	"model-worker-manager": {
 		"agent",
+		"api-remote-caller",
+		"api-remote-relation-caller",
 		"certificate-watcher",
 		"change-stream",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
+		"lease-manager",
 		"log-sink",
-		"provider-service-factory",
-		"query-logger",
-		"service-factory",
-		"state",
-		"state-config-watcher",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
-	},
-
-	"peer-grouper": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-database-flag",
@@ -1018,9 +1237,7 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"presence": {"agent", "central-hub", "state-config-watcher"},
-
-	"provider-service-factory": {
+	"provider-services": {
 		"agent",
 		"change-stream",
 		"controller-agent-config",
@@ -1043,31 +1260,81 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"pubsub-forwarder": {
-		"agent",
-		"central-hub",
-		"state-config-watcher",
-	},
+	"object-store-fortress": {},
 
-	"object-store": {
+	"object-store-facade": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
 		"lease-manager",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"object-store",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
 		"state-config-watcher",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
+	},
+
+	"object-store-drainer": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"query-logger",
+		"state-config-watcher",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"object-store": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"object-store-s3-caller",
+		"object-store-services",
+		"query-logger",
+		"state-config-watcher",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"object-store-services": {
+		"agent",
+		"change-stream",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"query-logger",
+		"state-config-watcher",
 	},
 
 	"object-store-s3-caller": {
@@ -1076,12 +1343,10 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"object-store-services",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
 		"state-config-watcher",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
@@ -1105,38 +1370,52 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"s3-http-client": {
-		"agent",
-		"is-controller-flag",
-		"state-config-watcher",
-	},
-
 	"secret-backend-rotate": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
 	},
 
-	"service-factory": {
+	"domain-services": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"ssh-authkeys-updater": {
@@ -1163,25 +1442,37 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"state": {
+	"ssh-server": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
 
 	"state-config-watcher": {"agent"},
 
-	"state-converter": {
+	"machine-converter": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
@@ -1208,6 +1499,20 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"valid-credential-flag",
 	},
 
+	"storage-registry": {
+		"agent",
+		"change-stream",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"log-sink",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+	},
+
 	"termination-signal-handler": {},
 
 	"trace": {
@@ -1218,12 +1523,64 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
+	},
+
+	"undertaker": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"upgrade-check-flag": {"upgrade-check-gate"},
@@ -1249,25 +1606,22 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
 		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
 		"upgrade-database-gate",
+		"upgrade-services",
 	},
 
-	"upgrade-series": {
+	"upgrade-services": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
+		"controller-agent-config",
+		"change-stream",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"query-logger",
+		"state-config-watcher",
 	},
 
 	"upgrade-steps-flag": {"upgrade-steps-gate"},
@@ -1277,17 +1631,31 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 	"upgrade-steps-runner": {
 		"agent",
 		"api-caller",
+		"api-remote-caller",
 		"api-config-watcher",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 		"upgrade-steps-gate",
 	},
 
@@ -1304,6 +1672,12 @@ var expectedMachineManifoldsWithDependenciesIAAS = map[string][]string{
 		"api-caller",
 		"api-config-watcher",
 	},
+
+	"watcher-registry": {
+		"agent",
+		"is-controller-flag",
+		"state-config-watcher",
+	},
 }
 
 var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
@@ -1313,94 +1687,204 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 	"agent-config-updater": {
 		"agent",
 		"api-caller",
+		"api-remote-caller",
 		"api-config-watcher",
-		"central-hub",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
+	},
+
+	"api-address-setter": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"is-primary-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"api-caller": {"agent", "api-config-watcher"},
 
 	"api-config-watcher": {"agent"},
 
-	"api-server": {
+	"api-remote-caller": {
 		"agent",
-		"audit-config-updater",
 		"change-stream",
-		"charmhub-http-client",
-		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"http-server-args",
-		"provider-tracker",
-		"is-bootstrap-flag",
-		"is-bootstrap-gate",
+		"is-controller-flag",
+		"object-store-services",
+		"query-logger",
+		"state-config-watcher",
+	},
+
+	"api-remote-relation-caller": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-controller-flag",
 		"lease-manager",
 		"log-sink",
 		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"api-server": {
+		"agent",
+		"api-remote-caller",
+		"audit-config-updater",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"flight-recorder",
+		"http-client",
+		"http-server-args",
+		"is-bootstrap-flag",
+		"is-bootstrap-gate",
+		"is-controller-flag",
+		"jwt-parser",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 		"upgrade-steps-gate",
+		"watcher-registry",
 	},
 
 	"audit-config-updater": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
 
 	"bootstrap": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
-		"charmhub-http-client",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-bootstrap-gate",
 		"is-controller-flag",
 		"lease-manager",
-		"object-store",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
-
-	"central-hub": {"agent", "state-config-watcher"},
 
 	"certificate-watcher": {
 		"agent",
@@ -1420,33 +1904,59 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 
 	"change-stream-pruner": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
-
-	"charmhub-http-client": {},
 
 	"clock": {},
 
 	"control-socket": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
@@ -1469,11 +1979,17 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-steps-flag",
@@ -1486,57 +2002,78 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"state-config-watcher",
 	},
 
+	"flight-recorder": {},
+
 	"trace": {
 		"agent",
 	},
 
+	"http-client": {},
+
 	"http-server": {
 		"agent",
+		"api-remote-caller",
 		"api-server",
 		"audit-config-updater",
-		"central-hub",
 		"certificate-watcher",
 		"change-stream",
-		"charmhub-http-client",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
+		"flight-recorder",
+		"http-client",
 		"http-server-args",
+		"is-bootstrap-flag",
+		"is-bootstrap-gate",
+		"is-controller-flag",
+		"jwt-parser",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+		"upgrade-steps-gate",
+		"watcher-registry",
+	},
+
+	"http-server-args": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
 		"is-bootstrap-flag",
 		"is-bootstrap-gate",
 		"is-controller-flag",
 		"lease-manager",
 		"log-sink",
-		"object-store",
+		"object-store-facade",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
-		"query-logger",
-		"s3-http-client",
-		"service-factory",
-		"state",
-		"state-config-watcher",
-		"trace",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-		"upgrade-steps-gate",
-	},
-
-	"http-server-args": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
@@ -1548,7 +2085,8 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"db-accessor",
 		"file-notify-watcher",
 		"is-controller-flag",
-		"provider-service-factory",
+		"log-sink",
+		"provider-services",
 		"query-logger",
 		"state-config-watcher",
 	},
@@ -1563,21 +2101,52 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 
 	"is-primary-controller-flag": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
+		"lease-manager",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
+	},
+
+	"jwt-parser": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"lease-expiry": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"query-logger",
 		"state-config-watcher",
 		"trace",
@@ -1594,34 +2163,7 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"trace",
 	},
 
-	"log-sender": {
-		"agent",
-		"api-caller",
-		"api-config-watcher",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
-	},
-
-	"log-sink": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
-		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
-		"query-logger",
-		"service-factory",
-		"state-config-watcher",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-	},
+	"log-sink": {},
 
 	"logging-config-updater": {
 		"agent",
@@ -1661,42 +2203,30 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 
 	"model-worker-manager": {
 		"agent",
+		"api-remote-caller",
+		"api-remote-relation-caller",
 		"certificate-watcher",
 		"change-stream",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
+		"lease-manager",
 		"log-sink",
-		"provider-service-factory",
-		"query-logger",
-		"service-factory",
-		"state",
-		"state-config-watcher",
-		"upgrade-check-flag",
-		"upgrade-check-gate",
-		"upgrade-database-flag",
-		"upgrade-database-gate",
-		"upgrade-steps-flag",
-		"upgrade-steps-gate",
-	},
-
-	"peer-grouper": {
-		"agent",
-		"change-stream",
-		"clock",
-		"controller-agent-config",
-		"db-accessor",
-		"file-notify-watcher",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
 		"provider-tracker",
-		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
-		"state",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-database-flag",
@@ -1705,9 +2235,7 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"presence": {"agent", "central-hub", "state-config-watcher"},
-
-	"provider-service-factory": {
+	"provider-services": {
 		"agent",
 		"change-stream",
 		"controller-agent-config",
@@ -1730,31 +2258,81 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"pubsub-forwarder": {
-		"agent",
-		"central-hub",
-		"state-config-watcher",
-	},
+	"object-store-fortress": {},
 
-	"object-store": {
+	"object-store-facade": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
 		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
 		"lease-manager",
+		"object-store-fortress",
 		"object-store-s3-caller",
-		"provider-service-factory",
+		"object-store-services",
+		"object-store",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
 		"state-config-watcher",
 		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
+	},
+
+	"object-store-drainer": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"query-logger",
+		"state-config-watcher",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"object-store": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"object-store-s3-caller",
+		"object-store-services",
+		"query-logger",
+		"state-config-watcher",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
+
+	"object-store-services": {
+		"agent",
+		"change-stream",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"query-logger",
+		"state-config-watcher",
 	},
 
 	"object-store-s3-caller": {
@@ -1763,12 +2341,10 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"object-store-services",
 		"query-logger",
-		"s3-http-client",
-		"service-factory",
 		"state-config-watcher",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
@@ -1780,38 +2356,52 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"state-config-watcher",
 	},
 
-	"s3-http-client": {
-		"agent",
-		"is-controller-flag",
-		"state-config-watcher",
-	},
-
 	"secret-backend-rotate": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
 		"is-controller-flag",
 		"is-primary-controller-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
+		"query-logger",
 		"state-config-watcher",
+		"trace",
 		"upgrade-check-flag",
 		"upgrade-check-gate",
 		"upgrade-steps-flag",
 		"upgrade-steps-gate",
 	},
 
-	"service-factory": {
+	"domain-services": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 	},
 
 	"ssh-identity-writer": {
@@ -1826,25 +2416,79 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"upgrade-steps-gate",
 	},
 
-	"state": {
+	"ssh-server": {
 		"agent",
+		"api-remote-caller",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
 		"upgrade-database-flag",
 		"upgrade-database-gate",
 	},
 
 	"state-config-watcher": {"agent"},
 
+	"storage-registry": {
+		"agent",
+		"change-stream",
+		"controller-agent-config",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"log-sink",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+	},
+
 	"termination-signal-handler": {},
+
+	"undertaker": {
+		"agent",
+		"api-remote-caller",
+		"change-stream",
+		"clock",
+		"controller-agent-config",
+		"db-accessor",
+		"domain-services",
+		"file-notify-watcher",
+		"http-client",
+		"is-controller-flag",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
+		"query-logger",
+		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
+	},
 
 	"upgrade-check-flag": {"upgrade-check-gate"},
 
@@ -1869,13 +2513,22 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"controller-agent-config",
 		"db-accessor",
 		"file-notify-watcher",
-		"provider-tracker",
 		"is-controller-flag",
-		"provider-service-factory",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
 		"upgrade-database-gate",
+		"upgrade-services",
+	},
+
+	"upgrade-services": {
+		"agent",
+		"controller-agent-config",
+		"change-stream",
+		"db-accessor",
+		"file-notify-watcher",
+		"is-controller-flag",
+		"query-logger",
+		"state-config-watcher",
 	},
 
 	"upgrade-steps-flag": {"upgrade-steps-gate"},
@@ -1885,17 +2538,31 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 	"upgrade-steps-runner": {
 		"agent",
 		"api-caller",
+		"api-remote-caller",
 		"api-config-watcher",
 		"change-stream",
+		"clock",
 		"controller-agent-config",
 		"db-accessor",
+		"domain-services",
 		"file-notify-watcher",
-		"provider-tracker",
+		"http-client",
 		"is-controller-flag",
-		"provider-service-factory",
+		"lease-manager",
+		"log-sink",
+		"object-store-facade",
+		"object-store-fortress",
+		"object-store-s3-caller",
+		"object-store-services",
+		"object-store",
+		"provider-services",
+		"provider-tracker",
 		"query-logger",
-		"service-factory",
 		"state-config-watcher",
+		"storage-registry",
+		"trace",
+		"upgrade-database-flag",
+		"upgrade-database-gate",
 		"upgrade-steps-gate",
 	},
 
@@ -1913,10 +2580,10 @@ var expectedMachineManifoldsWithDependenciesCAAS = map[string][]string{
 		"api-config-watcher",
 	},
 
-	"caas-units-manager": {
+	"watcher-registry": {
 		"agent",
-		"api-caller",
-		"api-config-watcher",
+		"is-controller-flag",
+		"state-config-watcher",
 	},
 }
 
@@ -1937,7 +2604,7 @@ type mockConfig struct {
 	agent.ConfigSetter
 	tag      names.Tag
 	ssiSet   bool
-	ssi      controller.StateServingInfo
+	ssi      controller.ControllerAgentInfo
 	dataPath string
 }
 
@@ -1952,11 +2619,11 @@ func (mc *mockConfig) Controller() names.ControllerTag {
 	return testing.ControllerTag
 }
 
-func (mc *mockConfig) StateServingInfo() (controller.StateServingInfo, bool) {
+func (mc *mockConfig) StateServingInfo() (controller.ControllerAgentInfo, bool) {
 	return mc.ssi, mc.ssiSet
 }
 
-func (mc *mockConfig) SetStateServingInfo(info controller.StateServingInfo) {
+func (mc *mockConfig) SetStateServingInfo(info controller.ControllerAgentInfo) {
 	mc.ssiSet = true
 	mc.ssi = info
 }
@@ -1972,4 +2639,4 @@ func (mc *mockConfig) DataDir() string {
 	return "data-dir"
 }
 
-func preUpgradeSteps(state.ModelType) upgrades.PreUpgradeStepsFunc { return nil }
+func preUpgradeSteps(model.ModelType) upgrades.PreUpgradeStepsFunc { return nil }

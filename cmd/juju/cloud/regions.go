@@ -4,23 +4,24 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 	"io"
 
 	"github.com/juju/ansiterm"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type listRegionsCommand struct {
@@ -28,16 +29,16 @@ type listRegionsCommand struct {
 	out       cmd.Output
 	cloudName string
 
-	cloudAPIFunc func() (CloudRegionsAPI, error)
+	cloudAPIFunc func(ctx context.Context) (CloudRegionsAPI, error)
 	found        *FoundRegions
 }
 
 var listRegionsDoc = `
 List regions for a given cloud.
 
-Use --controller option to list regions from the cloud from a controller.
+Use ` + "`--controller`" + ` option to list regions from the cloud from a controller.
 
-Use --client option to list regions known locally on this client.
+Use ` + "`--client`" + ` option to list regions known locally on this client.
 `
 
 const listRegionsExamples = `
@@ -48,7 +49,7 @@ const listRegionsExamples = `
 `
 
 type CloudRegionsAPI interface {
-	Cloud(tag names.CloudTag) (jujucloud.Cloud, error)
+	Cloud(ctx context.Context, tag names.CloudTag) (jujucloud.Cloud, error)
 	Close() error
 }
 
@@ -65,8 +66,8 @@ func NewListRegionsCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *listRegionsCommand) cloudAPI() (CloudRegionsAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *listRegionsCommand) cloudAPI(ctx context.Context) (CloudRegionsAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -154,12 +155,12 @@ func (c *listRegionsCommand) Run(ctxt *cmd.Context) error {
 }
 
 func (c *listRegionsCommand) findRemoteRegions(ctxt *cmd.Context) error {
-	api, err := c.cloudAPIFunc()
+	api, err := c.cloudAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
-	aCloud, err := api.Cloud(names.NewCloudTag(c.cloudName))
+	aCloud, err := api.Cloud(ctxt, names.NewCloudTag(c.cloudName))
 	if err != nil {
 		return errors.Annotatef(err, "on controller %q", c.ControllerName)
 	}

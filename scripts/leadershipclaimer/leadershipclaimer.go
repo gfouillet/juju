@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/agent/leadership"
@@ -131,41 +132,13 @@ func main() {
 func connect(info *api.Info) (api.Connection, error) {
 	opts := api.DefaultDialOpts()
 	opts.InsecureSkipVerify = true
-	conn, err := api.Open(info, opts)
+	conn, err := api.Open(context.Background(), info, opts)
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
 }
 
-/*
-Deadcode that isn't used, but seems useful
-
-	func leaderSet(facadeCaller base.FacadeCaller, holderTag names.UnitTag, keys map[string]string) error {
-		appId, err := names.UnitApplication(holderTag.Id())
-		if err != nil {
-			return errors.Trace(err)
-		}
-		applicationTag := names.NewApplicationTag(appId)
-		args := params.MergeLeadershipSettingsBulkParams{
-			Params: []params.MergeLeadershipSettingsParam{{
-				ApplicationTag: applicationTag.String(),
-				UnitTag:        holderTag.String(),
-				Settings:       keys,
-			}},
-		}
-		var results params.ErrorResults
-		err = facadeCaller.FacadeCall("Merge", args, &results)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		err = results.OneError()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	}
-*/
 func claimLoop(holderTag names.UnitTag, claimer coreleadership.Claimer, claimDuration, renewDuration time.Duration) {
 	next := time.After(0)
 	leaseName, err := names.UnitApplication(holderTag.Id())
@@ -178,7 +151,7 @@ func claimLoop(holderTag names.UnitTag, claimer coreleadership.Claimer, claimDur
 		select {
 		case <-next:
 			start := time.Now()
-			err := claimer.ClaimLeadership(leaseName, holderTag.Id(), claimDuration)
+			err := claimer.ClaimLeadership(context.Background(), leaseName, holderTag.Id(), claimDuration)
 			now := time.Now()
 			sinceStart := now.Sub(agentStart).Round(time.Millisecond).Seconds()
 			reqDuration := now.Sub(start).Round(time.Millisecond)
@@ -226,7 +199,7 @@ func claimLoop(holderTag names.UnitTag, claimer coreleadership.Claimer, claimDur
 					isLeaderTime = time.Time{}
 					// Note: the 'cancel' channel does nothing
 					start := now
-					err := claimer.BlockUntilLeadershipReleased(leaseName, nil)
+					err := claimer.BlockUntilLeadershipReleased(context.Background(), leaseName)
 					now = time.Now()
 					sinceStart = now.Sub(agentStart).Round(time.Millisecond).Seconds()
 					reqDuration := now.Sub(start).Round(time.Millisecond)

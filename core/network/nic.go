@@ -4,11 +4,13 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
 
-	"github.com/juju/errors"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // VirtualPortType defines the list of known port types for virtual NICs.
@@ -35,7 +37,7 @@ func (r Route) Validate() error {
 	// Make sure the CIDR is actually a CIDR not just an IP or hostname
 	destinationIP, _, err := net.ParseCIDR(r.DestinationCIDR)
 	if err != nil {
-		return errors.Annotate(err, "DestinationCIDR not valid")
+		return errors.Errorf("DestinationCIDR not valid: %w", err)
 	}
 	// Make sure the Gateway is just an IP, not a CIDR, etc.
 	gatewayIP := net.ParseIP(r.GatewayIP)
@@ -83,14 +85,6 @@ type InterfaceInfo struct {
 	// ProviderId is a provider-specific NIC id.
 	ProviderId Id
 
-	// ProviderSubnetId is the provider-specific id for the associated
-	// subnet.
-	ProviderSubnetId Id
-
-	// ProviderNetworkId is the provider-specific id for the
-	// associated network.
-	ProviderNetworkId Id
-
 	// ProviderSpaceId is the provider-specific id for the associated space,
 	// if known and supported.
 	ProviderSpaceId Id
@@ -98,13 +92,6 @@ type InterfaceInfo struct {
 	// ProviderVLANId is the provider-specific id of the VLAN for this
 	// interface.
 	ProviderVLANId Id
-
-	// ProviderAddressId is the provider-specific id of the assigned address.
-	ProviderAddressId Id
-
-	// AvailabilityZones describes the availability zones the associated
-	// subnet is in.
-	AvailabilityZones []string
 
 	// VLANTag needs to be between 1 and 4094 for VLANs and 0 for
 	// normal networks. It's defined by IEEE 802.1Q standard.
@@ -150,7 +137,7 @@ type InterfaceInfo struct {
 
 	// DNSServers contains an optional list of IP addresses and/or
 	// host names to configure as DNS servers for this network interface.
-	DNSServers ProviderAddresses
+	DNSServers []string
 
 	// MTU is the Maximum Transmission Unit controlling the maximum size of the
 	// protocol packets that the interface can pass through. It is only used
@@ -212,22 +199,22 @@ func (i *InterfaceInfo) IsVLAN() bool {
 func (i *InterfaceInfo) Validate() error {
 	if i.MACAddress != "" {
 		if _, err := net.ParseMAC(i.MACAddress); err != nil {
-			return errors.NotValidf("link-layer device hardware address %q", i.MACAddress)
+			return errors.Errorf("link-layer device hardware address %q %w", i.MACAddress, coreerrors.NotValid)
 		}
 	}
 
 	if i.InterfaceName == "" {
-		return errors.NotValidf("link-layer device %q, empty name", i.MACAddress)
+		return errors.Errorf("link-layer device %q, empty name %w", i.MACAddress, coreerrors.NotValid)
 	}
 
 	if !IsValidLinkLayerDeviceName(i.InterfaceName) {
 		// TODO (manadart 2020-07-07): This preserves prior behaviour.
 		// If we are waving invalid names through, I'm not sure of the value.
-		logger.Warningf("link-layer device %q has an invalid name, %q", i.MACAddress, i.InterfaceName)
+		logger.Warningf(context.TODO(), "link-layer device %q has an invalid name, %q", i.MACAddress, i.InterfaceName)
 	}
 
 	if !IsValidLinkLayerDeviceType(string(i.InterfaceType)) {
-		return errors.NotValidf("link-layer device %q, type %q", i.InterfaceName, i.InterfaceType)
+		return errors.Errorf("link-layer device %q, type %q %w", i.InterfaceName, i.InterfaceType, coreerrors.NotValid)
 	}
 
 	return nil
@@ -255,7 +242,7 @@ type InterfaceInfos []InterfaceInfo
 func (s InterfaceInfos) Validate() error {
 	for _, dev := range s {
 		if err := dev.Validate(); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	return nil

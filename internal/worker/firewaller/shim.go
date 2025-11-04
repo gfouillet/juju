@@ -7,21 +7,15 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/crossmodelrelations"
 	"github.com/juju/juju/api/controller/firewaller"
-	"github.com/juju/juju/api/controller/remoterelations"
 	"github.com/juju/juju/internal/worker/apicaller"
 )
-
-// NewRemoteRelationsFacade creates a remote relations API facade.
-func NewRemoteRelationsFacade(apiCaller base.APICaller) *remoterelations.Client {
-	return remoterelations.NewClient(apiCaller)
-}
 
 // NewFirewallerFacade creates a firewaller API facade.
 func NewFirewallerFacade(apiCaller base.APICaller) (FirewallerAPI, error) {
@@ -29,7 +23,7 @@ func NewFirewallerFacade(apiCaller base.APICaller) (FirewallerAPI, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &firewallerShim{facade}, nil
+	return &firewallerShim{Client: facade}, nil
 }
 
 type firewallerShim struct {
@@ -42,7 +36,10 @@ func (s *firewallerShim) Machine(ctx context.Context, tag names.MachineTag) (Mac
 
 func (s *firewallerShim) Unit(ctx context.Context, tag names.UnitTag) (Unit, error) {
 	u, err := s.Client.Unit(ctx, tag)
-	return &unitShim{u}, err
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &unitShim{Unit: u}, nil
 }
 
 type unitShim struct {
@@ -72,7 +69,7 @@ func crossmodelFirewallerFacadeFunc(
 ) newCrossModelFacadeFunc {
 	return func(ctx context.Context, apiInfo *api.Info) (CrossModelFirewallerFacadeCloser, error) {
 		apiInfo.Tag = names.NewUserTag(api.AnonymousUsername)
-		conn, err := connectionFunc(apiInfo)
+		conn, err := connectionFunc(ctx, apiInfo)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

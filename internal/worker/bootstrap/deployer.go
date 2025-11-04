@@ -5,109 +5,65 @@ package bootstrap
 
 import (
 	"context"
-	"io"
 	"os"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
 
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
+	"github.com/juju/juju/caas"
 	"github.com/juju/juju/controller"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/environs"
+	coreos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/internal/bootstrap"
 	"github.com/juju/juju/internal/charm"
-	"github.com/juju/juju/internal/charm/services"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/binarystorage"
+	"github.com/juju/juju/internal/charm/charmdownloader"
+	"github.com/juju/juju/internal/charm/repository"
+	"github.com/juju/juju/internal/charmhub"
+	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 )
 
-// SystemState is the interface that is used to get the legacy state (mongo).
-//
-// Note: It is expected over time for each one of these methods to be replaced
-// with a domain service.
-//
-// Deprecated: Use domain services when available.
-type SystemState interface {
-	// ControllerModelUUID returns the UUID of the model that was
-	// bootstrapped.  This is the only model that can have controller
-	// machines.  The owner of this model is also considered "special", in
-	// that they are the only user that is able to create other users
-	// (until we have more fine grained permissions), and they cannot be
-	// disabled.
-	ControllerModelUUID() string
-	// ToolsStorage returns a new binarystorage.StorageCloser that stores tools
-	// metadata in the "juju" database "toolsmetadata" collection.
-	ToolsStorage(store objectstore.ObjectStore) (binarystorage.StorageCloser, error)
-	// AddApplication adds an application to the model.
-	AddApplication(state.AddApplicationArgs, objectstore.ObjectStore) (bootstrap.Application, error)
-	// Charm returns the charm with the given name.
-	Charm(string) (bootstrap.Charm, error)
-	// Model returns the model.
-	Model() (bootstrap.Model, error)
-	// ModelUUID returns the UUID of the model.
-	ModelUUID() string
-	// Unit returns the unit with the given id.
-	Unit(string) (bootstrap.Unit, error)
-	// Machine returns the machine with the given id.
-	Machine(string) (bootstrap.Machine, error)
-	// PrepareLocalCharmUpload returns the charm URL that should be used to
-	// upload the charm.
-	PrepareLocalCharmUpload(url string) (chosenURL *charm.URL, err error)
-	// UpdateUploadedCharm updates the charm with the given info.
-	UpdateUploadedCharm(info state.CharmInfo) (services.UploadedCharm, error)
-	// PrepareCharmUpload returns the charm URL that should be used to upload
-	// the charm.
-	PrepareCharmUpload(curl string) (services.UploadedCharm, error)
-	// ApplyOperation applies the given operation.
-	ApplyOperation(*state.UpdateUnitOperation) error
-	// CloudService returns the cloud service for the given cloud.
-	CloudService(string) (bootstrap.CloudService, error)
-	// SetAPIHostPorts sets the addresses, if changed, of two collections:
-	//   - The list of *all* addresses at which the API is accessible.
-	//   - The list of addresses at which the API can be accessed by agents according
-	//     to the controller management space configuration.
-	//
-	// Each server is represented by one element in the top level slice.
-	SetAPIHostPorts(controllerConfig controller.Config, newHostPorts []network.SpaceHostPorts, newHostPortsForAgents []network.SpaceHostPorts) error
-	// SaveCloudService creates a cloud service.
-	SaveCloudService(args state.SaveCloudServiceArgs) (*state.CloudService, error)
+// ServiceManager provides the API to manipulate services.
+type ServiceManager interface {
+	// GetService returns the service for the specified application.
+	GetService(ctx context.Context, appName string, includeClusterIP bool) (*caas.Service, error)
 }
 
-// BinaryAgentStorageService is the interface that is used to get the storage
-// for the agent binary.
-type BinaryAgentStorageService interface {
-	AgentBinaryStorage(objectstore.ObjectStore) (BinaryAgentStorage, error)
-}
-
-// BinaryAgentStorage is the interface that is used to store the agent binary.
-type BinaryAgentStorage interface {
-	// Add adds the agent binary to the storage.
-	Add(context.Context, io.Reader, binarystorage.Metadata) error
-	// Close closes the storage.
-	Close() error
-}
+// ServiceManagerGetterFunc is the function that is used to get a service manager.
+type ServiceManagerGetterFunc func(context.Context) (ServiceManager, error)
 
 // AgentBinaryBootstrapFunc is the function that is used to populate the tools.
-type AgentBinaryBootstrapFunc func(context.Context, string, BinaryAgentStorageService, objectstore.ObjectStore, logger.Logger) (func(), error)
+type AgentBinaryBootstrapFunc func(
+	context.Context,
+	string,
+	AgentBinaryStore,
+	objectstore.ObjectStore,
+	logger.Logger,
+) (func(), error)
 
 // ControllerCharmDeployerConfig holds the configuration for the
 // ControllerCharmDeployer.
 type ControllerCharmDeployerConfig struct {
-	StateBackend                SystemState
+	AgentPasswordService        AgentPasswordService
 	ApplicationService          ApplicationService
+	Model                       coremodel.Model
+	ModelConfigService          ModelConfigService
 	ObjectStore                 objectstore.ObjectStore
 	ControllerConfig            controller.Config
 	DataDir                     string
+	BootstrapAddresses          network.ProviderAddresses
 	BootstrapMachineConstraints constraints.Value
 	ControllerCharmName         string
 	ControllerCharmChannel      charm.Channel
 	CharmhubHTTPClient          HTTPClient
 	UnitPassword                string
+	ServiceManagerGetter        ServiceManagerGetterFunc
 	Logger                      logger.Logger
+	Clock                       clock.Clock
 }
 
 // CAASControllerUnitPassword is the function that is used to get the unit
@@ -126,143 +82,69 @@ func IAASControllerUnitPassword(context.Context) (string, error) {
 
 // CAASAgentBinaryUploader is the function that is used to populate the tools
 // for CAAS.
-func CAASAgentBinaryUploader(context.Context, string, BinaryAgentStorageService, objectstore.ObjectStore, logger.Logger) (func(), error) {
+func CAASAgentBinaryUploader(context.Context, string, AgentBinaryStore, objectstore.ObjectStore, logger.Logger) (func(), error) {
 	// CAAS doesn't need to populate the tools.
 	return func() {}, nil
 }
 
 // IAASAgentBinaryUploader is the function that is used to populate the tools
 // for IAAS.
-func IAASAgentBinaryUploader(ctx context.Context, dataDir string, storageService BinaryAgentStorageService, objectStore objectstore.ObjectStore, logger logger.Logger) (func(), error) {
-	storage, err := storageService.AgentBinaryStorage(objectStore)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer storage.Close()
-
-	return bootstrap.PopulateAgentBinary(ctx, dataDir, storage, logger)
+func IAASAgentBinaryUploader(
+	ctx context.Context,
+	dataDir string,
+	agentBinaryStore AgentBinaryStore,
+	objectStore objectstore.ObjectStore,
+	logger logger.Logger,
+) (func(), error) {
+	return bootstrap.PopulateAgentBinary(ctx, dataDir, agentBinaryStore, logger)
 }
 
 // CAASControllerCharmUploader is the function that is used to upload the
 // controller charm for CAAS.
-func CAASControllerCharmUploader(cfg ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
+func CAASControllerCharmUploader(ctx context.Context, cfg ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
+	serviceManager, err := cfg.ServiceManagerGetter(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	return bootstrap.NewCAASDeployer(bootstrap.CAASDeployerConfig{
 		BaseDeployerConfig: makeBaseDeployerConfig(cfg),
-		CloudServiceGetter: cfg.StateBackend,
-		OperationApplier:   cfg.StateBackend,
+		ApplicationService: cfg.ApplicationService,
 		UnitPassword:       cfg.UnitPassword,
+		ServiceManager:     serviceManager,
 	})
 }
 
 // IAASControllerCharmUploader is the function that is used to upload the
 // controller charm for CAAS.
-func IAASControllerCharmUploader(cfg ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
+func IAASControllerCharmUploader(ctx context.Context, cfg ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
 	return bootstrap.NewIAASDeployer(bootstrap.IAASDeployerConfig{
 		BaseDeployerConfig: makeBaseDeployerConfig(cfg),
-		MachineGetter:      cfg.StateBackend,
+		ApplicationService: cfg.ApplicationService,
+		HostBaseFn:         coreos.HostBase,
 	})
 }
 
 func makeBaseDeployerConfig(cfg ControllerCharmDeployerConfig) bootstrap.BaseDeployerConfig {
 	return bootstrap.BaseDeployerConfig{
-		DataDir:             cfg.DataDir,
-		ObjectStore:         cfg.ObjectStore,
-		StateBackend:        cfg.StateBackend,
-		ApplicationService:  cfg.ApplicationService,
-		CharmUploader:       cfg.StateBackend,
-		Constraints:         cfg.BootstrapMachineConstraints,
-		ControllerConfig:    cfg.ControllerConfig,
-		Channel:             cfg.ControllerCharmChannel,
-		CharmhubHTTPClient:  cfg.CharmhubHTTPClient,
-		ControllerCharmName: cfg.ControllerCharmName,
-		NewCharmRepo: func(cfg services.CharmRepoFactoryConfig) (corecharm.Repository, error) {
-			charmRepoFactory := services.NewCharmRepoFactory(cfg)
-			return charmRepoFactory.GetCharmRepository(context.TODO(), corecharm.CharmHub)
+		DataDir:              cfg.DataDir,
+		ObjectStore:          cfg.ObjectStore,
+		ApplicationService:   cfg.ApplicationService,
+		AgentPasswordService: cfg.AgentPasswordService,
+		ModelConfigService:   cfg.ModelConfigService,
+		Constraints:          cfg.BootstrapMachineConstraints,
+		BootstrapAddresses:   cfg.BootstrapAddresses,
+		ControllerConfig:     cfg.ControllerConfig,
+		Channel:              cfg.ControllerCharmChannel,
+		CharmhubHTTPClient:   cfg.CharmhubHTTPClient,
+		ControllerCharmName:  cfg.ControllerCharmName,
+		NewCharmHubRepo: func(cfg repository.CharmHubRepositoryConfig) (corecharm.Repository, error) {
+			return repository.NewCharmHubRepository(cfg)
 		},
-		NewCharmDownloader: func(cfg services.CharmDownloaderConfig) (bootstrap.Downloader, error) {
-			return services.NewCharmDownloader(cfg)
+		NewCharmDownloader: func(client bootstrap.HTTPClient, logger logger.Logger) bootstrap.Downloader {
+			charmhubClient := charmhub.NewDownloadClient(client, charmhub.DefaultFileSystem(), logger)
+			return charmdownloader.NewCharmDownloader(charmhubClient, logger)
 		},
 		Logger: cfg.Logger,
+		Clock:  cfg.Clock,
 	}
-}
-
-type stateShim struct {
-	*state.State
-	prechecker environs.InstancePrechecker
-}
-
-func (s *stateShim) PrepareCharmUpload(curl string) (services.UploadedCharm, error) {
-	return s.State.PrepareCharmUpload(curl)
-}
-
-func (s *stateShim) UpdateUploadedCharm(info state.CharmInfo) (services.UploadedCharm, error) {
-	return s.State.UpdateUploadedCharm(info)
-}
-
-func (s *stateShim) AddApplication(args state.AddApplicationArgs, objectStore objectstore.ObjectStore) (bootstrap.Application, error) {
-	a, err := s.State.AddApplication(s.prechecker, args, objectStore)
-	if err != nil {
-		return nil, err
-	}
-	return &applicationShim{Application: a}, nil
-}
-
-func (s *stateShim) Charm(name string) (bootstrap.Charm, error) {
-	c, err := s.State.Charm(name)
-	if err != nil {
-		return nil, err
-	}
-	return &charmShim{Charm: c}, nil
-}
-
-func (s *stateShim) Model() (bootstrap.Model, error) {
-	m, err := s.State.Model()
-	if err != nil {
-		return nil, err
-	}
-	return &modelShim{Model: m}, nil
-}
-
-func (s *stateShim) Unit(tag string) (bootstrap.Unit, error) {
-	u, err := s.State.Unit(tag)
-	if err != nil {
-		return nil, err
-	}
-	return &unitShim{Unit: u}, nil
-}
-
-func (s *stateShim) Machine(name string) (bootstrap.Machine, error) {
-	m, err := s.State.Machine(name)
-	if err != nil {
-		return nil, err
-	}
-	return &machineShim{Machine: m}, nil
-}
-
-func (s *stateShim) ApplyOperation(op *state.UpdateUnitOperation) error {
-	return s.State.ApplyOperation(op)
-}
-
-func (s *stateShim) CloudService(name string) (bootstrap.CloudService, error) {
-	return s.State.CloudService(name)
-}
-
-type applicationShim struct {
-	*state.Application
-}
-
-type charmShim struct {
-	*state.Charm
-}
-
-type modelShim struct {
-	*state.Model
-}
-
-type unitShim struct {
-	*state.Unit
-}
-
-type machineShim struct {
-	*state.Machine
 }

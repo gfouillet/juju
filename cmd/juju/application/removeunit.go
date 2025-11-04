@@ -4,14 +4,14 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/modelconfig"
@@ -19,6 +19,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -50,23 +51,20 @@ const removeUnitDoc = `
 Remove application units from the model.
 
 The usage of this command differs depending on whether it is being used on a
-k8s or cloud model.
+Kubernetes or a machine model.
 
 Removing all units of a application is not equivalent to removing the
 application itself; for that, the ` + "`juju remove-application`" + ` command
 is used.
 
-For k8s models only a single application can be supplied and only the
---num-units argument supported.
-Specific units cannot be targeted for removal as that is handled by k8s,
+For Kubernetes models only a single application can be supplied and only the
+` + "`--num-units`" + ` argument supported.
+Specific units cannot be targeted for removal as that is handled by Kubernetes;
 instead the total number of units to be removed is specified.
-
-Examples:
-    juju remove-unit wordpress --num-units 2
 
 For cloud models specific units can be targeted for removal.
 Units of a application are numbered in sequence upon creation. For example, the
-fourth unit of wordpress will be designated "wordpress/3". These identifiers
+fourth unit of wordpress will be designated ` + "`wordpress/3`" + `. These identifiers
 can be supplied in a space delimited list to remove unwanted units from the
 model.
 
@@ -78,13 +76,13 @@ and failures that need to be dealt with before a unit can be removed.
 For example, Juju will not remove a unit if there are hook failures.
 However, at times, there is a need to remove a unit ignoring
 all operational errors. In these rare cases, use --force option but note
-that --force will remove a unit and, potentially, its machine without
+that ` + "`--force`" + ` will remove a unit and, potentially, its machine without
 given them the opportunity to shutdown cleanly.
 
 Unit removal is a multi-step process. Under normal circumstances, Juju will not
 proceed to the next step until the current step has finished.
-However, when using --force, users can also specify --no-wait to progress through steps
-without delay waiting for each step to complete.
+However, when using ` + "`--force`" + `, users can also specify ` + "`--no-wait`" + `
+to progress through steps without delay waiting for each step to complete.
 `
 
 const removeUnitExamples = `
@@ -95,6 +93,8 @@ const removeUnitExamples = `
     juju remove-unit wordpress/2 --force
 
     juju remove-unit wordpress/2 --force --no-wait
+
+	juju remove-unit wordpress --num-units 2
 `
 
 var removeUnitMsgNoDryRun = `
@@ -130,7 +130,7 @@ func (c *removeUnitCommand) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *removeUnitCommand) Init(args []string) error {
 	c.EntityNames = args
-	if err := c.validateArgsByModelType(); err != nil {
+	if err := c.validateArgsByModelType(context.Background()); err != nil {
 		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
@@ -143,8 +143,8 @@ func (c *removeUnitCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *removeUnitCommand) validateArgsByModelType() error {
-	modelType, err := c.ModelType()
+func (c *removeUnitCommand) validateArgsByModelType(ctx context.Context) error {
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -175,7 +175,7 @@ func (c *removeUnitCommand) validateCAASRemoval() error {
 k8s models do not support removing named units.
 Instead specify an application with --num-units.
 `[1:]
-		return errors.Errorf(msg)
+		return errors.New(msg)
 	}
 	if !names.IsValidApplication(c.EntityNames[0]) {
 		return errors.NotValidf("application name %q", c.EntityNames[0])
@@ -202,11 +202,11 @@ func (c *removeUnitCommand) validateIAASRemoval() error {
 	return nil
 }
 
-func (c *removeUnitCommand) getAPI() (RemoveApplicationAPI, error) {
+func (c *removeUnitCommand) getAPI(ctx context.Context) (RemoveApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -214,11 +214,11 @@ func (c *removeUnitCommand) getAPI() (RemoveApplicationAPI, error) {
 	return api, nil
 }
 
-func (c *removeUnitCommand) getModelConfigAPI() (ModelConfigClient, error) {
+func (c *removeUnitCommand) getModelConfigAPI(ctx context.Context) (ModelConfigClient, error) {
 	if c.modelConfigApi != nil {
 		return c.modelConfigApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -229,17 +229,17 @@ func (c *removeUnitCommand) getModelConfigAPI() (ModelConfigClient, error) {
 // Run connects to the environment specified on the command line and destroys
 // units therein.
 func (c *removeUnitCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	if err := c.validateArgsByModelType(); err != nil {
+	if err := c.validateArgsByModelType(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	modelType, err := c.ModelType()
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -259,13 +259,13 @@ func (c *removeUnitCommand) removeUnits(ctx *cmd.Context, client RemoveApplicati
 	if c.DryRun {
 		return c.performDryRun(ctx, client)
 	}
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer modelConfigClient.Close()
 
-	needsConfirmation := c.NeedsConfirmation(modelConfigClient)
+	needsConfirmation := c.NeedsConfirmation(ctx, modelConfigClient)
 	if needsConfirmation {
 		err := c.performDryRun(ctx, client)
 		if err == errDryRunNotSupportedByController {
@@ -278,7 +278,7 @@ func (c *removeUnitCommand) removeUnits(ctx *cmd.Context, client RemoveApplicati
 		}
 	}
 
-	results, err := client.DestroyUnits(application.DestroyUnitsParams{
+	results, err := client.DestroyUnits(ctx, application.DestroyUnitsParams{
 		Units:          c.EntityNames,
 		DestroyStorage: c.DestroyStorage,
 		Force:          c.Force,
@@ -301,7 +301,7 @@ func (c *removeUnitCommand) performDryRun(ctx *cmd.Context, client RemoveApplica
 	if client.BestAPIVersion() < 16 {
 		return errDryRunNotSupportedByController
 	}
-	results, err := client.DestroyUnits(application.DestroyUnitsParams{
+	results, err := client.DestroyUnits(ctx, application.DestroyUnitsParams{
 		Units:          c.EntityNames,
 		DestroyStorage: c.DestroyStorage,
 		DryRun:         true,
@@ -381,7 +381,7 @@ func (c *removeUnitCommand) logRemovedUnit(ctx *cmd.Context, name string, info *
 }
 
 func (c *removeUnitCommand) removeCaasUnits(ctx *cmd.Context, client RemoveApplicationAPI) error {
-	result, err := client.ScaleApplication(application.ScaleApplicationParams{
+	result, err := client.ScaleApplication(ctx, application.ScaleApplicationParams{
 		ApplicationName: c.EntityNames[0],
 		ScaleChange:     -c.NumUnits,
 		Force:           c.Force,

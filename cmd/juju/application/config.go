@@ -5,13 +5,13 @@ package application
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -21,78 +21,107 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/config"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/output"
-	"github.com/juju/juju/internal/featureflag"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
 const (
-	configSummary = `Gets, sets, or resets configuration for a deployed application.`
+	configSummary = `Get, set, or reset configuration for a deployed application.`
 	configDetails = `
-To view all configuration values for an application, run
+To view all configuration values for an application:
+
     juju config <app>
-By default, the config will be printed in yaml format. You can instead print it
-in json format using the --format flag:
+
+By default, the config will be printed in a ` + "`yaml`" + ` format. You can instead print it
+in a ` + "`json`" + ` format using the ` + "`--format`" + ` flag:
+
     juju config <app> --format json
 
 To view the value of a single config key, run
+
     juju config <app> key
+
 To set config values, run
+
     juju config <app> key1=val1 key2=val2 ...
-This sets "key1" to "val1", etc. Using the @ directive, you can set a config
+
+This sets "key1" to "val1", etc. Using the ` + "`@`" + ` directive, you can set a config
 key's value to the contents of a file:
+
     juju config <app> key=@/tmp/configvalue
+
 You can also reset config keys to their default values:
+
     juju config <app> --reset key1
     juju config <app> --reset key1,key2,key3
+
 You may simultaneously set some keys and reset others:
+
     juju config <app> key1=val1 key2=val2 --reset key3,key4
 
 Config values can be imported from a yaml file using the --file flag:
+
     juju config <app> --file=path/to/cfg.yaml
-The yaml file should be in the following format:
+
+The ` + "`yaml`" + ` file should be in the following format:
+
     apache2:                        # application name
       servername: "example.com"     # key1: val1
       lb_balancer_timeout: 60       # key2: val2
       ...
-This allows you to e.g. save an app's config to a file:
+
+This allows you to, e.g., save an app's config to a file:
+
     juju config app1 > cfg.yaml
-and then import the config later. You can also read from stdin using "-",
+
+and then import the config later. You can also read from stdin using ` + "`-`" + `,
 which allows you to pipe config values from one app to another:
+
     juju config app1 | juju config app2 --file -
+
 You can simultaneously read config from a yaml file and set/reset config keys
 as above. The command-line args will override any values specified in the file.
 
-By default, any configuration changes will be applied to the currently active
-branch. A specific branch can be targeted using the --branch option. Changes
-can be immediately be applied to the model by specifying --branch=master. For
-example:
-
-juju config apache2 --branch=master servername=example.com
-juju config apache2 --branch test-branch servername=staging.example.com
-
-Rather than specifying each setting name/value inline, the --file flag option
+Rather than specifying each setting name/value inline, the ` + "`--file`" + ` flag option
 may be used to provide a list of settings to be updated as a yaml file. The
 yaml file contents must include a single top-level key with the application's
 name followed by a dictionary of key/value pairs that correspond to the names
 and values of the settings to be set. For instance, to configure apache2,
 the following yaml file can be used:
 
-apache2:
-  servername: "example.com"
-  lb_balancer_timeout: 60
+    apache2:
+      servername: "example.com"
+      lb_balancer_timeout: 60
 
-If the above yaml document is stored in a file called config.yaml, the
+If the above ` + "`yaml`" + ` document is stored in a file called ` + "`config.yaml`" + `, the
 following command can be used to apply the config changes:
 
-juju config apache2 --file config.yaml
+    juju config apache2 --file config.yaml
 
-Finally, the --reset flag can be used to revert one or more configuration
+Finally, the ` + "`--reset`" + ` flag can be used to revert one or more configuration
 settings back to their default value as defined in the charm metadata:
 
-juju config apache2 --reset servername
-juju config apache2 --reset servername,lb_balancer_timeout
+    juju config apache2 --reset servername
+    juju config apache2 --reset servername,lb_balancer_timeout
+`
+
+	examples = `
+To view all configuration values for an application, run
+
+    juju config mysql --format json
+
+To set a configuration value for an application, run
+
+    juju config mysql foo=bar
+
+To set some keys and reset others:
+
+    juju config mysql key1=val1 key2=val2 --reset key3,key4
+
+To set a configuration value for an application from a file:
+
+    juju config mysql --file=path/to/cfg.yaml
 `
 )
 
@@ -115,24 +144,24 @@ type configCommand struct {
 
 	// Extra `juju config` specific fields
 	applicationName string
-	branchName      string
 }
 
 // ApplicationAPI is an interface to allow passing in a fake implementation under test.
 type ApplicationAPI interface {
 	Close() error
-	Get(branchName string, application string) (*params.ApplicationGetResults, error)
-	SetConfig(branchName string, application, configYAML string, config map[string]string) error
-	UnsetApplicationConfig(branchName string, application string, options []string) error
+	Get(ctx context.Context, application string) (*params.ApplicationGetResults, error)
+	SetConfig(ctx context.Context, application, configYAML string, config map[string]string) error
+	UnsetApplicationConfig(ctx context.Context, application string, options []string) error
 }
 
 // Info is part of the cmd.Command interface.
 func (c *configCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "config",
-		Args:    "<application name> [--branch <branch-name>] [--reset <key[,key]>] [<attribute-key>][=<value>] ...]",
-		Purpose: configSummary,
-		Doc:     configDetails,
+		Name:     "config",
+		Args:     "<application name> [--reset <key[,key]>] [<attribute-key>][=<value>] ...]",
+		Purpose:  configSummary,
+		Doc:      configDetails,
+		Examples: examples,
 		SeeAlso: []string{
 			"deploy",
 			"status",
@@ -154,19 +183,15 @@ func (c *configCommand) SetFlags(f *gnuflag.FlagSet) {
 		"yaml": c.FormatYaml,
 		"json": c.FormatJson,
 	})
-
-	if featureflag.Enabled(featureflag.Branches) || featureflag.Enabled(featureflag.Generations) {
-		f.StringVar(&c.branchName, "branch", "", "Specifically target config for the supplied branch")
-	}
 }
 
 // getAPI either uses the fake API set at test time or that is nil, gets a real
 // API and sets that as the API.
-func (c *configCommand) getAPI() (ApplicationAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (ApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -180,38 +205,13 @@ func (c *configCommand) Init(args []string) error {
 		return errors.New("no application name specified")
 	}
 
-	if err := c.validateGeneration(); err != nil {
-		return errors.Trace(err)
-	}
-
 	c.applicationName = args[0]
 	return c.configBase.Init(args[1:])
 }
 
-func (c *configCommand) validateGeneration() error {
-	if c.branchName == "" {
-		branchName, err := c.ActiveBranch()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		c.branchName = branchName
-	}
-
-	// TODO (manadart 2019-02-04): If the generation feature is inactive,
-	// we set a default in lieu of empty values. This is an expediency
-	// during development. When we remove the flag, there will be tests
-	// (particularly feature tests) that will need to accommodate a value
-	// for branch in the local store.
-	if !featureflag.Enabled(featureflag.Branches) && !featureflag.Enabled(featureflag.Generations) && c.branchName == "" {
-		c.branchName = model.GenerationMaster
-	}
-
-	return nil
-}
-
 // Run implements the cmd.Command interface.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -227,7 +227,7 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		case config.SetFile:
 			err = c.setConfigFile(client, ctx)
 		case config.Reset:
-			err = c.resetConfig(client)
+			err = c.resetConfig(ctx, client)
 		default:
 			err = c.getAllConfig(client, ctx)
 		}
@@ -239,8 +239,8 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 }
 
 // resetConfig is the run action when we are resetting attributes.
-func (c *configCommand) resetConfig(client ApplicationAPI) error {
-	err := client.UnsetApplicationConfig(c.branchName, c.applicationName, c.configBase.KeysToReset)
+func (c *configCommand) resetConfig(ctx context.Context, client ApplicationAPI) error {
+	err := client.UnsetApplicationConfig(ctx, c.applicationName, c.configBase.KeysToReset)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }
 
@@ -252,7 +252,7 @@ func (c *configCommand) setConfig(client ApplicationAPI, ctx *cmd.Context) error
 		return errors.Trace(err)
 	}
 
-	err = client.SetConfig(c.branchName, c.applicationName, "", settings)
+	err = client.SetConfig(ctx, c.applicationName, "", settings)
 	return errors.Trace(block.ProcessBlockedError(err, block.BlockChange))
 }
 
@@ -276,18 +276,18 @@ func (c *configCommand) setConfigFile(client ApplicationAPI, ctx *cmd.Context) e
 		}
 	}
 
-	err = client.SetConfig(c.branchName, c.applicationName, string(b), map[string]string{})
+	err = client.SetConfig(ctx, c.applicationName, string(b), map[string]string{})
 	return errors.Trace(block.ProcessBlockedError(err, block.BlockChange))
 }
 
 // getConfig is the run action to return a single configuration value.
 func (c *configCommand) getConfig(client ApplicationAPI, ctx *cmd.Context) error {
-	results, err := client.Get(c.branchName, c.applicationName)
+	results, err := client.Get(ctx, c.applicationName)
 	if err != nil {
 		return err
 	}
 
-	logger.Infof("format %v is ignored", c.out.Name())
+	logger.Infof(context.TODO(), "format %v is ignored", c.out.Name())
 	if len(c.configBase.KeysToGet) == 0 {
 		return errors.New("c.configBase.KeysToGet is empty")
 	}
@@ -309,7 +309,7 @@ func (c *configCommand) getConfig(client ApplicationAPI, ctx *cmd.Context) error
 
 // getAllConfig is the run action to return all configuration values.
 func (c *configCommand) getAllConfig(client ApplicationAPI, ctx *cmd.Context) error {
-	results, err := client.Get(c.branchName, c.applicationName)
+	results, err := client.Get(ctx, c.applicationName)
 	if err != nil {
 		return err
 	}
@@ -324,14 +324,6 @@ func (c *configCommand) getAllConfig(client ApplicationAPI, ctx *cmd.Context) er
 	}
 
 	err = c.out.Write(ctx, resultsMap)
-
-	if (featureflag.Enabled(featureflag.Branches) || featureflag.Enabled(featureflag.Generations)) && err == nil {
-		var gen string
-		gen, err = c.ActiveBranch()
-		if err == nil {
-			_, err = ctx.Stdout.Write([]byte(fmt.Sprintf("\nchanges will be targeted to generation: %s\n", gen)))
-		}
-	}
 	return errors.Trace(err)
 }
 

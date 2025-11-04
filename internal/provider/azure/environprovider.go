@@ -17,10 +17,9 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
+	"github.com/juju/juju/internal/provider/common"
 )
 
 const (
@@ -93,7 +92,6 @@ func (cfg ProviderConfig) Validate() error {
 }
 
 type azureEnvironProvider struct {
-	environProviderCloud
 	environProviderCredentials
 
 	config ProviderConfig
@@ -120,16 +118,17 @@ func (prov *azureEnvironProvider) Version() int {
 }
 
 // Open is part of the EnvironProvider interface.
-func (prov *azureEnvironProvider) Open(ctx context.Context, args environs.OpenParams) (environs.Environ, error) {
-	logger.Debugf("opening model %q", args.Config.Name())
+func (prov *azureEnvironProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+	logger.Debugf(ctx, "opening model %q", args.Config.Name())
 
 	namespace, err := instance.NewNamespace(args.Config.UUID())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	environ := &azureEnviron{
-		provider:  prov,
-		namespace: namespace,
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, errorutils.IsAuthorisationFailure),
+		provider:              prov,
+		namespace:             namespace,
 	}
 
 	// Config is needed before cloud spec.
@@ -150,24 +149,13 @@ func (p azureEnvironProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p azureEnvironProvider) Ping(ctx envcontext.ProviderCallContext, endpoint string) error {
+func (p azureEnvironProvider) Ping(_ context.Context, _ string) error {
 	return errors.NotImplementedf("Ping")
 }
 
-// PrepareConfig is part of the EnvironProvider interface.
-func (prov *azureEnvironProvider) PrepareConfig(ctx context.Context, args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	// Set the default block-storage source.
-	attrs := make(map[string]interface{})
-	if _, ok := args.Config.StorageDefaultBlockSource(); !ok {
-		attrs[config.StorageDefaultBlockSourceKey] = azureStorageProviderType
-	}
-	if len(attrs) == 0 {
-		return args.Config, nil
-	}
-	return args.Config.Apply(attrs)
+// ValidateCloud is specified in the EnvironProvider interface.
+func (azureEnvironProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 func validateCloudSpec(spec environscloudspec.CloudSpec) error {
@@ -177,7 +165,7 @@ func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 	if spec.Credential == nil {
 		return errors.NotValidf("missing credential")
 	}
-	if authType := spec.Credential.AuthType(); authType != clientCredentialsAuthType && authType != cloud.InstanceRoleAuthType {
+	if authType := spec.Credential.AuthType(); authType != clientCredentialsAuthType && authType != cloud.ManagedIdentityAuthType {
 		return errors.NotSupportedf("%q auth-type", authType)
 	}
 	return nil
@@ -187,11 +175,11 @@ func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 // verify the configured credentials. If verification fails, a user-friendly
 // error will be returned, and the original error will be logged at debug
 // level.
-var verifyCredentials = func(e *azureEnviron, ctx envcontext.ProviderCallContext) error {
+var verifyCredentials = func(ctx context.Context, e *azureEnviron) error {
 	// This is used at bootstrap - the ctx invalid credential callback will log
 	// a suitable message.
 	_, err := e.credential.GetToken(ctx, policy.TokenRequestOptions{
 		Scopes: []string{e.clientOptions.Cloud.Services[azurecloud.ResourceManager].Audience + "/.default"},
 	})
-	return errorutils.HandleCredentialError(err, ctx)
+	return e.HandleCredentialError(ctx, err)
 }

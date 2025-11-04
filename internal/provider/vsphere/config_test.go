@@ -4,23 +4,21 @@
 package vsphere_test
 
 import (
-	"context"
-	stdcontext "context"
+	stdtesting "testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/provider/vsphere"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
-func fakeConfig(c *gc.C, attrs ...testing.Attrs) *config.Config {
+func fakeConfig(c *tc.C, attrs ...testing.Attrs) *config.Config {
 	cfg, err := testing.ModelConfig(c).Apply(fakeConfigAttrs(attrs...))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return cfg
 }
 
@@ -63,9 +61,11 @@ type ConfigSuite struct {
 	provider environs.EnvironProvider
 }
 
-var _ = gc.Suite(&ConfigSuite{})
+func TestConfigSuite(t *stdtesting.T) {
+	tc.Run(t, &ConfigSuite{})
+}
 
-func (s *ConfigSuite) SetUpTest(c *gc.C) {
+func (s *ConfigSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 	s.config = fakeConfig(c)
 	s.provider = vsphere.NewEnvironProvider(vsphere.EnvironProviderConfig{})
@@ -85,8 +85,8 @@ type configTestSpec struct {
 	err string
 }
 
-func (ts configTestSpec) checkSuccess(c *gc.C, value interface{}, err error) {
-	if !c.Check(err, jc.ErrorIsNil) {
+func (ts configTestSpec) checkSuccess(c *tc.C, value interface{}, err error) {
+	if !c.Check(err, tc.ErrorIsNil) {
 		return
 	}
 
@@ -100,17 +100,17 @@ func (ts configTestSpec) checkSuccess(c *gc.C, value interface{}, err error) {
 
 	attrs := cfg.AllAttrs()
 	for field, value := range ts.expect {
-		c.Check(attrs[field], gc.Equals, value)
+		c.Check(attrs[field], tc.Equals, value)
 	}
 }
 
-func (ts configTestSpec) checkFailure(c *gc.C, err error, msg string) {
-	c.Check(err, gc.ErrorMatches, msg+": "+ts.err)
+func (ts configTestSpec) checkFailure(c *tc.C, err error, msg string) {
+	c.Check(err, tc.ErrorMatches, msg+": "+ts.err)
 }
 
-func (ts configTestSpec) checkAttrs(c *gc.C, attrs map[string]interface{}, cfg *config.Config) {
+func (ts configTestSpec) checkAttrs(c *tc.C, attrs map[string]interface{}, cfg *config.Config) {
 	for field, value := range cfg.UnknownAttrs() {
-		c.Check(attrs[field], gc.Equals, value)
+		c.Check(attrs[field], tc.Equals, value)
 	}
 }
 
@@ -118,10 +118,10 @@ func (ts configTestSpec) attrs() testing.Attrs {
 	return fakeConfigAttrs().Merge(ts.insert).Delete(ts.remove...)
 }
 
-func (ts configTestSpec) newConfig(c *gc.C) *config.Config {
+func (ts configTestSpec) newConfig(c *tc.C) *config.Config {
 	attrs := ts.attrs()
 	cfg, err := testing.ModelConfig(c).Apply(attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return cfg
 }
 
@@ -143,15 +143,15 @@ var newConfigTests = []configTestSpec{
 	},
 }
 
-func (*ConfigSuite) TestNewModelConfig(c *gc.C) {
+func (*ConfigSuite) TestNewModelConfig(c *tc.C) {
 	for i, test := range newConfigTests {
 		c.Logf("test %d: %s", i, test.info)
 
 		fakeConfig := test.newConfig(c)
-		environ, err := environs.New(stdcontext.Background(), environs.OpenParams{
+		environ, err := environs.New(c.Context(), environs.OpenParams{
 			Cloud:  fakeCloudSpec(),
 			Config: fakeConfig,
-		})
+		}, environs.NoopCredentialInvalidator())
 
 		// Check the result
 		if test.err != "" {
@@ -162,24 +162,24 @@ func (*ConfigSuite) TestNewModelConfig(c *gc.C) {
 	}
 }
 
-func (s *ConfigSuite) TestValidateNewConfig(c *gc.C) {
+func (s *ConfigSuite) TestValidateNewConfig(c *tc.C) {
 	for i, test := range newConfigTests {
 		c.Logf("test %d: %s", i, test.info)
 
 		fakeConfig := test.newConfig(c)
-		validatedConfig, err := s.provider.Validate(context.Background(), fakeConfig, nil)
+		validatedConfig, err := s.provider.Validate(c.Context(), fakeConfig, nil)
 
 		// Check the result
 		if test.err != "" {
 			test.checkFailure(c, err, "invalid config")
 		} else {
-			c.Check(validatedConfig, gc.NotNil)
+			c.Check(validatedConfig, tc.NotNil)
 			test.checkSuccess(c, validatedConfig, err)
 		}
 	}
 }
 
-func (s *ConfigSuite) TestValidateOldConfig(c *gc.C) {
+func (s *ConfigSuite) TestValidateOldConfig(c *tc.C) {
 	for i, test := range newConfigTests {
 		c.Logf("test %d: %s", i, test.info)
 
@@ -189,7 +189,7 @@ func (s *ConfigSuite) TestValidateOldConfig(c *gc.C) {
 
 		// Validate the new config (relative to the old one) using the
 		// provider.
-		validatedConfig, err := s.provider.Validate(context.Background(), newcfg, oldcfg)
+		validatedConfig, err := s.provider.Validate(c.Context(), newcfg, oldcfg)
 
 		// Check the result.
 		if test.err != "" {
@@ -197,14 +197,14 @@ func (s *ConfigSuite) TestValidateOldConfig(c *gc.C) {
 		} else {
 			if test.remove != nil {
 				// No defaults are set on the old config.
-				c.Check(err, gc.ErrorMatches, "invalid base config: .*")
+				c.Check(err, tc.ErrorMatches, "invalid base config: .*")
 				continue
 			}
 
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 			// We verify that Validate filled in the defaults
 			// appropriately.
-			c.Check(validatedConfig, gc.NotNil)
+			c.Check(validatedConfig, tc.NotNil)
 			test.checkAttrs(c, expected, validatedConfig)
 		}
 	}
@@ -219,12 +219,12 @@ var changeConfigTests = []configTestSpec{{
 	expect: testing.Attrs{"unknown": "ignoti"},
 }}
 
-func (s *ConfigSuite) TestValidateChange(c *gc.C) {
+func (s *ConfigSuite) TestValidateChange(c *tc.C) {
 	for i, test := range changeConfigTests {
 		c.Logf("test %d: %s", i, test.info)
 
 		fakeConfig := test.newConfig(c)
-		validatedConfig, err := s.provider.Validate(context.Background(), fakeConfig, s.config)
+		validatedConfig, err := s.provider.Validate(c.Context(), fakeConfig, s.config)
 
 		// Check the result.
 		if test.err != "" {
@@ -235,18 +235,18 @@ func (s *ConfigSuite) TestValidateChange(c *gc.C) {
 	}
 }
 
-func (s *ConfigSuite) TestSetConfig(c *gc.C) {
+func (s *ConfigSuite) TestSetConfig(c *tc.C) {
 	for i, test := range changeConfigTests {
 		c.Logf("test %d: %s", i, test.info)
 
-		environ, err := environs.New(stdcontext.Background(), environs.OpenParams{
+		environ, err := environs.New(c.Context(), environs.OpenParams{
 			Cloud:  fakeCloudSpec(),
 			Config: s.config,
-		})
-		c.Assert(err, jc.ErrorIsNil)
+		}, environs.NoopCredentialInvalidator())
+		c.Assert(err, tc.ErrorIsNil)
 
 		fakeConfig := test.newConfig(c)
-		err = environ.SetConfig(context.Background(), fakeConfig)
+		err = environ.SetConfig(c.Context(), fakeConfig)
 
 		// Check the result.
 		if test.err != "" {
@@ -258,15 +258,15 @@ func (s *ConfigSuite) TestSetConfig(c *gc.C) {
 	}
 }
 
-func (s *ConfigSuite) TestSchema(c *gc.C) {
+func (s *ConfigSuite) TestSchema(c *tc.C) {
 	ps, ok := s.provider.(environs.ProviderSchema)
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 
 	fields := ps.Schema()
 
 	globalFields, err := config.Schema(nil)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 	for name, field := range globalFields {
-		c.Check(fields[name], jc.DeepEquals, field)
+		c.Check(fields[name], tc.DeepEquals, field)
 	}
 }

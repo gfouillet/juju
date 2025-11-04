@@ -5,7 +5,7 @@ package lxd
 
 import (
 	"context"
-	stdcontext "context"
+	"fmt"
 	"net"
 	"net/url"
 	"runtime"
@@ -19,11 +19,11 @@ import (
 	"github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/container/lxd"
 	"github.com/juju/juju/internal/provider/common"
@@ -31,18 +31,24 @@ import (
 
 var _ environs.HardwareCharacteristicsDetector = (*environ)(nil)
 
-const bootstrapMessage = `To configure your system to better support LXD containers, please see: https://documentation.ubuntu.com/lxd/en/latest/explanation/performance_tuning/`
+const (
+	bootstrapMessage = `To configure your system to better support LXD containers, please see: https://documentation.ubuntu.com/lxd/en/latest/explanation/performance_tuning/`
+	// profileNotFound is needed because LXD doesn't have typed errors.
+	profileNotFound = "Profile not found"
+)
 
 type baseProvider interface {
 	// BootstrapEnv bootstraps a Juju environment.
-	BootstrapEnv(environs.BootstrapContext, envcontext.ProviderCallContext, environs.BootstrapParams) (*environs.BootstrapResult, error)
+	BootstrapEnv(environs.BootstrapContext, environs.BootstrapParams) (*environs.BootstrapResult, error)
 
 	// DestroyEnv destroys the provided Juju environment.
-	DestroyEnv(ctx envcontext.ProviderCallContext) error
+	DestroyEnv(ctx context.Context) error
 }
 
 type environ struct {
 	environs.NoSpaceDiscoveryEnviron
+	environs.NoContainerAddressesEnviron
+	common.CredentialInvalidator
 
 	cloud    environscloudspec.CloudSpec
 	provider *environProvider
@@ -64,10 +70,11 @@ type environ struct {
 }
 
 func newEnviron(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	p *environProvider,
 	spec environscloudspec.CloudSpec,
 	cfg *config.Config,
+	invalidator environs.CredentialInvalidator,
 ) (*environ, error) {
 	ecfg, err := newValidConfig(ctx, cfg)
 	if err != nil {
@@ -80,12 +87,13 @@ func newEnviron(
 	}
 
 	env := &environ{
-		provider:     p,
-		cloud:        spec,
-		name:         ecfg.Name(),
-		uuid:         ecfg.UUID(),
-		namespace:    namespace,
-		ecfgUnlocked: ecfg,
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, IsAuthorisationFailure),
+		provider:              p,
+		cloud:                 spec,
+		name:                  ecfg.Name(),
+		uuid:                  ecfg.UUID(),
+		namespace:             namespace,
+		ecfgUnlocked:          ecfg,
 	}
 	env.base = common.DefaultProvider{Env: env}
 
@@ -97,7 +105,7 @@ func newEnviron(
 	return env, nil
 }
 
-func (env *environ) initProfile() error {
+func (env *environ) initProfile(ctx context.Context) error {
 	pName := env.profileName()
 
 	hasProfile, err := env.serverUnlocked.HasProfile(pName)
@@ -124,18 +132,18 @@ func (env *environ) initProfile() error {
 	}
 	hasProfile, hasErr := env.serverUnlocked.HasProfile(pName)
 	if hasErr != nil {
-		logger.Errorf("%s", err)
+		logger.Errorf(ctx, "%s", err)
 		return errors.Trace(hasErr)
 	}
 	if hasProfile {
-		logger.Debugf("received %q, but no need to fail", err)
+		logger.Debugf(ctx, "received %q, but no need to fail", err)
 		return nil
 	}
 	return err
 }
 
 func (env *environ) profileName() string {
-	return "juju-" + env.Name()
+	return fmt.Sprintf("juju-%s-%s", env.name, model.ShortModelUUID(model.UUID(env.uuid)))
 }
 
 // Name returns the name of the environ.
@@ -161,7 +169,7 @@ func (env *environ) SetConfig(ctx context.Context, cfg *config.Config) error {
 }
 
 // SetCloudSpec is specified in the environs.Environ interface.
-func (env *environ) SetCloudSpec(_ stdcontext.Context, spec environscloudspec.CloudSpec) error {
+func (env *environ) SetCloudSpec(ctx context.Context, spec environscloudspec.CloudSpec) error {
 	env.lock.Lock()
 	defer env.lock.Unlock()
 
@@ -172,7 +180,7 @@ func (env *environ) SetCloudSpec(_ stdcontext.Context, spec environscloudspec.Cl
 	}
 
 	env.serverUnlocked = server
-	return env.initProfile()
+	return env.initProfile(ctx)
 }
 
 func (env *environ) server() Server {
@@ -194,7 +202,7 @@ func (env *environ) Config() *config.Config {
 // ValidateCloudEndpoint returns nil if the current model can talk to the lxd
 // server endpoint.  Used as validation during model upgrades.
 // Implements environs.CloudEndpointChecker
-func (env *environ) ValidateCloudEndpoint(ctx envcontext.ProviderCallContext) error {
+func (env *environ) ValidateCloudEndpoint(ctx context.Context) error {
 	info, err := env.server().GetConnectionInfo()
 	if err != nil {
 		return err
@@ -208,52 +216,47 @@ func (env *environ) PrepareForBootstrap(_ environs.BootstrapContext, _ string) e
 	return nil
 }
 
-// Create implements environs.Environ.
-func (env *environ) Create(envcontext.ProviderCallContext, environs.CreateParams) error {
-	return nil
-}
-
 // Bootstrap implements environs.Environ.
-func (env *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.ProviderCallContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
+func (env *environ) Bootstrap(ctx environs.BootstrapContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
 	ctx.Infof("%s", bootstrapMessage)
-	return env.base.BootstrapEnv(ctx, callCtx, params)
+	return env.base.BootstrapEnv(ctx, params)
 }
 
 // Destroy shuts down all known machines and destroys the rest of the
 // known environment.
-func (env *environ) Destroy(ctx envcontext.ProviderCallContext) error {
+func (env *environ) Destroy(ctx context.Context) error {
 	if err := env.base.DestroyEnv(ctx); err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return errors.Trace(err)
+		return errors.Trace(env.HandleCredentialError(ctx, err))
 	}
 	if env.storageSupported() {
 		if err := destroyModelFilesystems(env); err != nil {
-			common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-			return errors.Annotate(err, "destroying LXD filesystems for model")
+			return errors.Annotate(env.HandleCredentialError(ctx, err), "destroying LXD filesystems for model")
 		}
 	}
+	if err := env.DestroyProfiles(ctx); err != nil {
+		return errors.Annotate(env.HandleCredentialError(ctx, err), "destroying LXD profiles for model")
+	}
+
 	return nil
 }
 
 // DestroyController implements the Environ interface.
-func (env *environ) DestroyController(ctx envcontext.ProviderCallContext, controllerUUID string) error {
+func (env *environ) DestroyController(ctx context.Context, controllerUUID string) error {
 	if err := env.Destroy(ctx); err != nil {
 		return errors.Trace(err)
 	}
-	if err := env.destroyHostedModelResources(controllerUUID); err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return errors.Trace(err)
+	if err := env.destroyHostedModelResources(ctx, controllerUUID); err != nil {
+		return errors.Trace(env.HandleCredentialError(ctx, err))
 	}
 	if env.storageSupported() {
 		if err := destroyControllerFilesystems(env, controllerUUID); err != nil {
-			common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-			return errors.Annotate(err, "destroying LXD filesystems for controller")
+			return errors.Annotate(env.HandleCredentialError(ctx, err), "destroying LXD filesystems for controller")
 		}
 	}
 	return nil
 }
 
-func (env *environ) destroyHostedModelResources(controllerUUID string) error {
+func (env *environ) destroyHostedModelResources(ctx context.Context, controllerUUID string) error {
 	// Destroy all instances with juju-controller-uuid
 	// matching the specified UUID.
 	const prefix = "juju-"
@@ -272,9 +275,39 @@ func (env *environ) destroyHostedModelResources(controllerUUID string) error {
 		}
 		names = append(names, string(inst.Id()))
 	}
-	logger.Debugf("removing instances: %v", names)
+	logger.Debugf(ctx, "removing instances: %v", names)
 
 	return errors.Trace(env.server().RemoveContainers(names))
+}
+
+// DestroyProfiles deletes the LXD profiles associated with this model.
+// It includes the: model profile `juju-<modelname>-<id>`and
+// charm profiles `juju-<modelname>-<id>-<appname>-<rev>`.
+func (env *environ) DestroyProfiles(ctx context.Context) error {
+	server := env.server()
+	profiles, err := server.GetProfileNames()
+	if err != nil {
+		return errors.Annotate(err, "get profiles")
+	}
+
+	for _, profile := range profiles {
+		if !strings.HasPrefix(profile, env.profileName()) {
+			continue
+		}
+
+		err := server.DeleteProfile(profile)
+		if err != nil {
+			if strings.Contains(err.Error(), profileNotFound) {
+				continue
+			}
+
+			logger.Errorf(ctx, "failed to delete profile %q due to %s, it may need to be deleted manually through the provider", profile, err.Error())
+		}
+
+		logger.Infof(ctx, "deleted profile %q", profile)
+	}
+
+	return nil
 }
 
 // lxdAvailabilityZone wraps a LXD cluster member as an availability zone.
@@ -289,12 +322,19 @@ func (z *lxdAvailabilityZone) Name() string {
 
 // Available implements AvailabilityZone.
 func (z *lxdAvailabilityZone) Available() bool {
-	return strings.EqualFold(z.Status, "online")
+	return strings.EqualFold(z.Status, nodeOnlineStatus)
 }
+
+// Sadly LXD API library using string literals for node status.
+// See https://github.com/canonical/lxd/blob/stable-5.21/lxd/db/node.go#L148.
+// We'll at least define a const for it.
+const (
+	nodeOnlineStatus = "Online"
+)
 
 // AvailabilityZones (ZonedEnviron) returns all availability zones in the
 // environment. For LXD, this means the cluster node names.
-func (env *environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (network.AvailabilityZones, error) {
+func (env *environ) AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error) {
 	// If we are not using a clustered server (which includes those not
 	// supporting the clustering API) just represent the single server as the
 	// only availability zone.
@@ -304,7 +344,7 @@ func (env *environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (netwo
 			&lxdAvailabilityZone{
 				ClusterMember: api.ClusterMember{
 					ServerName: server.Name(),
-					Status:     "ONLINE",
+					Status:     nodeOnlineStatus,
 				},
 			},
 		}, nil
@@ -312,12 +352,11 @@ func (env *environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (netwo
 
 	nodes, err := server.GetClusterMembers()
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return nil, errors.Annotate(err, "listing cluster members")
+		return nil, errors.Annotate(env.HandleCredentialError(ctx, err), "listing cluster members")
 	}
 	aZones := make(network.AvailabilityZones, len(nodes))
 	for i, n := range nodes {
-		aZones[i] = &lxdAvailabilityZone{n}
+		aZones[i] = &lxdAvailabilityZone{ClusterMember: n}
 	}
 	return aZones, nil
 }
@@ -326,7 +365,7 @@ func (env *environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (netwo
 // availability zones for the specified instances.
 // For containers, this means the LXD server node names where they reside.
 func (env *environ) InstanceAvailabilityZoneNames(
-	ctx envcontext.ProviderCallContext, ids []instance.Id,
+	ctx context.Context, ids []instance.Id,
 ) (map[instance.Id]string, error) {
 	instances, err := env.Instances(ctx, ids)
 	if err != nil && err != environs.ErrPartialInstances {
@@ -357,16 +396,45 @@ func (env *environ) InstanceAvailabilityZoneNames(
 // DeriveAvailabilityZones (ZonedEnviron) attempts to derive availability zones
 // from the specified StartInstanceParams.
 func (env *environ) DeriveAvailabilityZones(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) ([]string, error) {
+	availabilityZone, err := env.deriveAvailabilityZone(ctx, args)
+	if availabilityZone != "" {
+		return []string{availabilityZone}, errors.Trace(err)
+	}
+	return nil, errors.Trace(err)
+}
+
+func (env *environ) deriveAvailabilityZone(
+	ctx context.Context, args environs.StartInstanceParams,
+) (string, error) {
 	p, err := env.parsePlacement(ctx, args.Placement)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return "", errors.Trace(err)
 	}
-	if p.nodeName == "" {
-		return nil, nil
+
+	if p.nodeName != "" || args.AvailabilityZone == "" {
+		return p.nodeName, nil
 	}
-	return []string{p.nodeName}, nil
+	zones, err := env.AvailabilityZones(ctx)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	for _, z := range zones {
+		if z.Name() != args.AvailabilityZone {
+			continue
+		}
+		lxdAZ := z.(*lxdAvailabilityZone)
+		if !lxdAZ.Available() {
+			return "", errors.Errorf(
+				"availability zone %q is %q",
+				z.Name(),
+				lxdAZ.ClusterMember.Status,
+			)
+		}
+		return args.AvailabilityZone, nil
+	}
+	return "", errors.NotValidf("availability zone %q", args.AvailabilityZone)
 }
 
 // TODO: HML 2-apr-2019
@@ -383,10 +451,10 @@ func (env *environ) MaybeWriteLXDProfile(pName string, put lxdprofile.Profile) e
 		return errors.Trace(err)
 	}
 	if hasProfile {
-		logger.Debugf("lxd profile %q already exists, not written again", pName)
+		logger.Debugf(context.TODO(), "lxd profile %q already exists, not written again", pName)
 		return nil
 	}
-	logger.Debugf("attempting to write lxd profile %q %+v", pName, put)
+	logger.Debugf(context.TODO(), "attempting to write lxd profile %q %+v", pName, put)
 	post := api.ProfilesPost{
 		Name: pName,
 		ProfilePut: api.ProfilePut{
@@ -398,8 +466,8 @@ func (env *environ) MaybeWriteLXDProfile(pName string, put lxdprofile.Profile) e
 	if err = server.CreateProfile(post); err != nil {
 		return errors.Trace(err)
 	}
-	logger.Debugf("wrote lxd profile %q", pName)
-	if err := env.verifyProfile(pName); err != nil {
+	logger.Debugf(context.TODO(), "wrote lxd profile %q", pName)
+	if err := env.verifyProfile(context.TODO(), pName); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -408,7 +476,7 @@ func (env *environ) MaybeWriteLXDProfile(pName string, put lxdprofile.Profile) e
 // verifyProfile gets the actual profile from lxd for the name provided
 // and logs the result. For informational purposes only. Returns an error
 // if the call to GetProfile fails.
-func (env *environ) verifyProfile(pName string) error {
+func (env *environ) verifyProfile(ctx context.Context, pName string) error {
 	// As there are configs where we do not have the option of looking at
 	// the profile on the machine to verify, verify here that what we thought
 	// was written, is what was written.
@@ -416,7 +484,7 @@ func (env *environ) verifyProfile(pName string) error {
 	if err != nil {
 		return err
 	}
-	logger.Debugf("lxd profile %q: received %+v ", pName, profile.ProfilePut)
+	logger.Debugf(ctx, "lxd profile %q: received %+v ", pName, profile)
 	return nil
 }
 
@@ -431,7 +499,7 @@ func (env *environ) AssignLXDProfiles(instID string, profilesNames []string, pro
 		// Always return the current profiles assigned to the instance.
 		currentProfiles, err2 := env.LXDProfileNames(instID)
 		if err != nil && err2 != nil {
-			logger.Errorf("retrieving profile names for %q: %s", instID, err2)
+			logger.Errorf(context.TODO(), "retrieving profile names for %q: %s", instID, err2)
 		}
 		return currentProfiles, err
 	}
@@ -454,10 +522,11 @@ func (env *environ) AssignLXDProfiles(instID string, profilesNames []string, pro
 		return report(errors.Trace(err))
 	}
 
+	logger.Debugf(context.TODO(), "profiles to delete  %+v", deleteProfiles)
 	for _, name := range deleteProfiles {
 		if err := server.DeleteProfile(name); err != nil {
 			// most likely the failure is because the profile is already in use
-			logger.Debugf("failed to delete profile %q: %s", name, err)
+			logger.Debugf(context.TODO(), "failed to delete profile %q: %s", name, err)
 		}
 	}
 	return report(nil)
@@ -484,7 +553,7 @@ func (env *environ) DetectHardware() (*instance.HardwareCharacteristics, error) 
 	// ensuring it contains the correct scheme.
 	endpointURL, err := url.Parse(lxd.EnsureHTTPS(env.cloud.Endpoint))
 	if err != nil {
-		logger.Debugf("error parsing endpoint as url: %s", err.Error())
+		logger.Debugf(context.TODO(), "error parsing endpoint as url: %s", err.Error())
 		return nil, nil
 	}
 	endpointIP := net.ParseIP(endpointURL.Hostname())

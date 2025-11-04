@@ -10,9 +10,9 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/configschema"
 )
 
 // SecretRevisions holds external revision ids for a list of secrets.
@@ -53,14 +53,14 @@ type ConfigAttrs map[string]interface{}
 // ProviderConfig is implemented by providers that support config validation.
 type ProviderConfig interface {
 	// ConfigSchema returns the fields defining the provider config.
-	ConfigSchema() environschema.Fields
+	ConfigSchema() configschema.Fields
 
 	// ConfigDefaults returns default attribute values.
 	ConfigDefaults() schema.Defaults
 
 	// ValidateConfig returns an error if the new
 	//provider config is not valid.
-	ValidateConfig(oldCfg, newCfg ConfigAttrs) error
+	ValidateConfig(oldCfg, newCfg ConfigAttrs, tokenRotateInterval *time.Duration) error
 }
 
 // SecretBackendProvider instances create secret backends.
@@ -74,11 +74,11 @@ type SecretBackendProvider interface {
 
 	// CleanupSecrets removes any ACLs / resources associated
 	// with the removed secrets.
-	CleanupSecrets(ctx context.Context, cfg *ModelBackendConfig, unitName string, removed SecretRevisions) error
+	CleanupSecrets(ctx context.Context, cfg *ModelBackendConfig, accessor secrets.Accessor, removed SecretRevisions) error
 
 	// CleanupModel removes any secrets / ACLs / resources
 	// associated with the model config.
-	CleanupModel(cfg *ModelBackendConfig) error
+	CleanupModel(ctx context.Context, cfg *ModelBackendConfig) error
 
 	// RestrictedConfig returns the config needed to create a
 	// secrets backend client restricted to manage the specified
@@ -92,7 +92,7 @@ type SecretBackendProvider interface {
 
 // SupportAuthRefresh defines the methods to refresh auth tokens.
 type SupportAuthRefresh interface {
-	RefreshAuth(adminCfg BackendConfig, validFor time.Duration) (*BackendConfig, error)
+	RefreshAuth(ctx context.Context, adminCfg BackendConfig, validFor time.Duration) (*BackendConfig, error)
 }
 
 // HasAuthRefresh returns true if the provider supports token refresh.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
@@ -106,11 +106,11 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 				// leader-deposed hook -- but that's not done yet.
 				return nil, errors.Trace(err)
 			}
-			var leadershipTracker leadership.TrackerWorker
+			var leadershipTracker leadership.Tracker
 			if err := getter.Get(config.LeadershipTrackerName, &leadershipTracker); err != nil {
 				return nil, errors.Trace(err)
 			}
-			leadershipTrackerFunc := func(_ names.UnitTag) leadership.TrackerWorker {
+			leadershipTrackerFunc := func(_ names.UnitTag) leadership.Tracker {
 				return leadershipTracker
 			}
 			var charmDirGuard fortress.Guard
@@ -137,7 +137,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 				return nil, errors.Trace(err)
 			}
 
-			tracer, err := tracerGetter.GetTracer(stdcontext.TODO(), coretrace.Namespace("uniter", agentConfig.Model().Id()))
+			tracer, err := tracerGetter.GetTracer(ctx, coretrace.Namespace("uniter", agentConfig.Model().Id()))
 			if err != nil {
 				tracer = coretrace.NoopTracer{}
 			}
@@ -147,7 +147,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 				return nil, errors.Trace(err)
 			}
 
-			s3Downloader := charms.NewS3CharmDownloader(s3client.NewCharmsS3Client(objectStoreCaller), apiConn)
+			s3Downloader := charms.NewS3CharmDownloader(s3client.NewBlobsS3Client(objectStoreCaller), apiConn)
 
 			jujuSecretsAPI := secretsmanager.NewClient(apiConn, uniter.WithTracer(tracer))
 			secretRotateWatcherFunc := func(unitTag names.UnitTag, isLeader bool, rotateSecrets chan []string) (worker.Worker, error) {
@@ -183,7 +183,6 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			if err != nil {
 				return nil, err
 			}
-			payloadClient := uniter.NewPayloadFacadeClient(apiConn)
 
 			secretsBackendGetter := func() (uniterapi.SecretsBackend, error) {
 				return secrets.NewClient(jujuSecretsAPI)
@@ -195,7 +194,6 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 					Client: uniter.NewClient(apiConn, unitTag, uniter.WithTracer(tracer)),
 				},
 				ResourcesClient:              resourcesClient,
-				PayloadClient:                payloadClient,
 				SecretsClient:                jujuSecretsAPI,
 				SecretsBackendGetter:         secretsBackendGetter,
 				UnitTag:                      unitTag,

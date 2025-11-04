@@ -4,18 +4,19 @@
 package addons
 
 import (
+	"context"
+	"path"
 	"runtime"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
-	"github.com/juju/juju/core/presence"
 	"github.com/juju/juju/internal/worker/introspection"
 )
 
@@ -26,30 +27,23 @@ type MetricSink interface {
 	Unregister() bool
 }
 
-// DefaultIntrospectionSocketName returns the socket name to use for the
-// abstract domain socket that the introspection worker serves requests
-// over.
-func DefaultIntrospectionSocketName(entityTag names.Tag) string {
-	return "jujud-" + entityTag.String()
-}
+// IntrospectionSocketName is the name of the socket file inside
+// the agent's directory used for introspection calls.
+const IntrospectionSocketName = "introspection.socket"
 
 // IntrospectionConfig defines the various components that the introspection
 // worker reports on or needs to start up.
 type IntrospectionConfig struct {
-	AgentTag           names.Tag
+	AgentDir           string
 	Engine             *dependency.Engine
-	StatePoolReporter  introspection.Reporter
-	PubSubReporter     introspection.Reporter
 	MachineLock        machinelock.Lock
 	PrometheusGatherer prometheus.Gatherer
-	PresenceRecorder   presence.Recorder
-	Clock              clock.Clock
-	LocalHub           introspection.SimpleHub
-	CentralHub         introspection.StructuredHub
-	Logger             logger.Logger
+	FlightRecorder     flightrecorder.FlightRecorder
 
-	NewSocketName func(names.Tag) string
-	WorkerFunc    func(config introspection.Config) (worker.Worker, error)
+	Clock  clock.Clock
+	Logger logger.Logger
+
+	WorkerFunc func(config introspection.Config) (worker.Worker, error)
 }
 
 // StartIntrospection creates the introspection worker. It cannot and should
@@ -60,22 +54,17 @@ type IntrospectionConfig struct {
 // life to that of the engine that is returned.
 func StartIntrospection(cfg IntrospectionConfig) error {
 	if runtime.GOOS != "linux" {
-		cfg.Logger.Debugf("introspection worker not supported on %q", runtime.GOOS)
+		cfg.Logger.Debugf(context.TODO(), "introspection worker not supported on %q", runtime.GOOS)
 		return nil
 	}
 
-	socketName := cfg.NewSocketName(cfg.AgentTag)
+	socketName := path.Join(cfg.AgentDir, IntrospectionSocketName)
 	w, err := cfg.WorkerFunc(introspection.Config{
 		SocketName:         socketName,
 		DepEngine:          cfg.Engine,
-		StatePool:          cfg.StatePoolReporter,
-		PubSub:             cfg.PubSubReporter,
 		MachineLock:        cfg.MachineLock,
 		PrometheusGatherer: cfg.PrometheusGatherer,
-		Presence:           cfg.PresenceRecorder,
-		Clock:              cfg.Clock,
-		LocalHub:           cfg.LocalHub,
-		CentralHub:         cfg.CentralHub,
+		FlightRecorder:     cfg.FlightRecorder,
 		// TODO(leases) - add lease introspection
 	})
 	if err != nil {
@@ -83,10 +72,10 @@ func StartIntrospection(cfg IntrospectionConfig) error {
 	}
 	go func() {
 		_ = cfg.Engine.Wait()
-		cfg.Logger.Debugf("engine stopped, stopping introspection")
+		cfg.Logger.Debugf(context.TODO(), "engine stopped, stopping introspection")
 		w.Kill()
 		_ = w.Wait()
-		cfg.Logger.Debugf("introspection stopped")
+		cfg.Logger.Debugf(context.TODO(), "introspection stopped")
 	}()
 
 	return nil

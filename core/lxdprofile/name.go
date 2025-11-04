@@ -9,7 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/errors"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // AppName here is used as the application prefix name. We can't use names.Juju
@@ -17,20 +18,20 @@ import (
 const AppName = "juju"
 
 // Prefix is used to prefix all the lxd profile programmable profiles. If a
-// profile doesn't have the prefix, then it will be removed when ensuring the
-// the validity of the names (see LXDProfileNames)
+// profile doesn't have the prefix, then it will be removed when ensuring
+// the validity of the names (see FilterLXDProfileNames)
 var Prefix = fmt.Sprintf("%s-", AppName)
 
 // Name returns a serialisable name that we can use to identify profiles
-// juju-<model>-<application>-<charm-revision>
-func Name(modelName, appName string, revision int) string {
-	return fmt.Sprintf("%s%s-%s-%d", Prefix, modelName, appName, revision)
+// juju-<model>-<shortModelID>-<application>-<charm-revision>
+func Name(modelName, shortModelID string, appName string, revision int) string {
+	return fmt.Sprintf("%s%s-%s-%s-%d", Prefix, modelName, shortModelID, appName, revision)
 }
 
-// LXDProfileNames ensures that the LXD profile names are unique yet preserve
+// FilterLXDProfileNames ensures that the LXD profile names are unique yet preserve
 // the same order as the input. It removes certain profile names from the list,
 // for example "default" profile name will be removed.
-func LXDProfileNames(names []string) []string {
+func FilterLXDProfileNames(names []string) []string {
 	// ensure that the ones we have are unique
 	unique := make(map[string]int)
 	for k, v := range names {
@@ -85,7 +86,7 @@ type nameIndex struct {
 // profile name.
 func ProfileRevision(profile string) (int, error) {
 	if !IsValidName(profile) {
-		return 0, errors.BadRequestf("not a juju profile name: %q", profile)
+		return 0, errors.Errorf("not a juju profile name: %q", profile).Add(coreerrors.BadRequest)
 	}
 	split := strings.Split(profile, "-")
 	rev := split[len(split)-1:]
@@ -96,26 +97,26 @@ func ProfileRevision(profile string) (int, error) {
 // in the profile.
 func ProfileReplaceRevision(profile string, rev int) (string, error) {
 	if !IsValidName(profile) {
-		return "", errors.BadRequestf("not a juju profile name: %q", profile)
+		return "", errors.Errorf("not a juju profile name: %q", profile).Add(coreerrors.BadRequest)
 	}
 	split := strings.Split(profile, "-")
 	notRev := split[:len(split)-1]
 	return strings.Join(append(notRev, strconv.Itoa(rev)), "-"), nil
 }
 
-// MatchProfileNameByApp returns the first profile which matches the provided
+// MatchProfileNameByAppName MatchProfileNameByApp returns the first profile which matches the provided
 // appName.  No match returns an empty string.
 // Assumes there is not more than one profile for the same application.
 func MatchProfileNameByAppName(names []string, appName string) (string, error) {
 	if appName == "" {
-		return "", errors.BadRequestf("no application name specified")
+		return "", errors.Errorf("no application name specified").Add(coreerrors.BadRequest)
 	}
 	var foundProfile string
-	for _, p := range LXDProfileNames(names) {
+	for _, p := range FilterLXDProfileNames(names) {
 		rev, err := ProfileRevision(p)
 		if err != nil {
-			// "Shouldn't" happen since we used LXDProfileNames...
-			if errors.Is(err, errors.BadRequest) {
+			// "Shouldn't" happen since we used FilterLXDProfileNames...
+			if errors.Is(err, coreerrors.BadRequest) {
 				continue
 			}
 			return "", err

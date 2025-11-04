@@ -4,25 +4,26 @@
 package application
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var resumeHelpSummary = `
 Resumes a suspended relation to an application offer.`[1:]
 
 var resumeHelpDetails = `
-A relation between an application in another model and an offer in this model will be resumed. 
-The relation-joined and relation-changed hooks will be run for the relation, and the relation
-status will be set to joined. The relation is specified using its id.
+A relation between an application in another model and an offer in this model will be resumed.
+The ` + "`relation-joined`" + ` and ` + "`relation-changed`" + ` hooks will be run for the relation, and the relation
+status will be set to joined. The relation is specified using its ID.
 `
 
 const resumeHelpExamples = `
@@ -33,8 +34,8 @@ const resumeHelpExamples = `
 // NewResumeRelationCommand returns a command to resume a relation.
 func NewResumeRelationCommand() cmd.Command {
 	cmd := &resumeRelationCommand{}
-	cmd.newAPIFunc = func() (SetRelationSuspendedAPI, error) {
-		root, err := cmd.NewAPIRoot()
+	cmd.newAPIFunc = func(ctx context.Context) (SetRelationSuspendedAPI, error) {
+		root, err := cmd.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -47,7 +48,7 @@ func NewResumeRelationCommand() cmd.Command {
 type resumeRelationCommand struct {
 	modelcmd.ModelCommandBase
 	relationIds []int
-	newAPIFunc  func() (SetRelationSuspendedAPI, error)
+	newAPIFunc  func(ctx context.Context) (SetRelationSuspendedAPI, error)
 }
 
 func (c *resumeRelationCommand) Info() *cmd.Info {
@@ -80,12 +81,12 @@ func (c *resumeRelationCommand) Init(args []string) (err error) {
 	return nil
 }
 
-func (c *resumeRelationCommand) Run(_ *cmd.Context) error {
-	client, err := c.newAPIFunc()
+func (c *resumeRelationCommand) Run(ctx *cmd.Context) error {
+	client, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	err = client.SetRelationSuspended(c.relationIds, false, "")
+	err = client.SetRelationSuspended(ctx, c.relationIds, false, "")
 	return block.ProcessBlockedError(err, block.BlockChange)
 }

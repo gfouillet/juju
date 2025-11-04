@@ -7,109 +7,129 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
 	"github.com/juju/juju/core/facades"
-	coremodel "github.com/juju/juju/core/model"
-	"github.com/juju/juju/domain/credential/service"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/state/stateenvirons"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(requiredMigrationFacadeVersions facades.FacadeVersions) func(registry facade.FacadeRegistry) {
 	return func(registry facade.FacadeRegistry) {
-		registry.MustRegister("MigrationTarget", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-			return newFacadeV1(ctx)
-		}, reflect.TypeOf((*APIV1)(nil)))
-		registry.MustRegister("MigrationTarget", 2, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-			return newFacadeV2(ctx)
-		}, reflect.TypeOf((*APIV2)(nil)))
-		registry.MustRegister("MigrationTarget", 3, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-			return newFacade(ctx, requiredMigrationFacadeVersions)
+		registry.MustRegisterForMultiModel("MigrationTarget", 4, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+			api, err := makeFacadeV4(stdCtx, ctx, requiredMigrationFacadeVersions)
+			if err != nil {
+				return nil, errors.Errorf("making migration target version 4: %w", err)
+			}
+			return api, nil
+		}, reflect.TypeOf((*APIV4)(nil)))
+		// Bumped to version 5 for the addition of the token field in
+		// the Migration.TargetInfo struct.
+		registry.MustRegisterForMultiModel("MigrationTarget", 5, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+			api, err := makeFacadeV5(stdCtx, ctx, requiredMigrationFacadeVersions)
+			if err != nil {
+				return nil, errors.Errorf("making migration target version 5: %w", err)
+			}
+			return api, nil
+		}, reflect.TypeOf((*APIV5)(nil)))
+		// Bumped to version 6 for the addition of the skipUserChecks field in
+		// the Migration.TargetInfo struct.
+		registry.MustRegisterForMultiModel("MigrationTarget", 6, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+			api, err := makeFacadeV6(stdCtx, ctx, requiredMigrationFacadeVersions)
+			if err != nil {
+				return nil, errors.Errorf("making migration target version 6: %w", err)
+			}
+			return api, nil
+		}, reflect.TypeOf((*APIV6)(nil)))
+		// v7 handles requests with a model qualifier instead of a model owner.
+		registry.MustRegisterForMultiModel("MigrationTarget", 7, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+			api, err := makeFacade(stdCtx, ctx, requiredMigrationFacadeVersions)
+			if err != nil {
+				return nil, errors.Errorf("making migration target version 7: %w", err)
+			}
+			return api, nil
 		}, reflect.TypeOf((*API)(nil)))
 	}
 }
 
-// newFacadeV1 is used for APIV1 registration.
-func newFacadeV1(ctx facade.ModelContext) (*APIV1, error) {
-	api, err := newFacade(ctx, facades.FacadeVersions{})
+func makeFacadeV4(
+	stdCtx context.Context,
+	ctx facade.MultiModelContext,
+	facadeVersions facades.FacadeVersions,
+) (*APIV4, error) {
+	api, err := makeFacadeV5(stdCtx, ctx, facadeVersions)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-	return &APIV1{API: api}, nil
+	return &APIV4{APIV5: api}, err
 }
 
-// newFacadeV2 is used for APIV2 registration.
-func newFacadeV2(ctx facade.ModelContext) (*APIV2, error) {
-	api, err := newFacade(ctx, facades.FacadeVersions{})
+func makeFacadeV5(
+	stdCtx context.Context,
+	ctx facade.MultiModelContext,
+	facadeVersions facades.FacadeVersions,
+) (*APIV5, error) {
+	api, err := makeFacadeV6(stdCtx, ctx, facadeVersions)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-	return &APIV2{APIV1: &APIV1{API: api}}, nil
+	return &APIV5{APIV6: api}, err
 }
 
-// newFacade is used for API registration.
-func newFacade(ctx facade.ModelContext, facadeVersions facades.FacadeVersions) (*API, error) {
+func makeFacadeV6(
+	stdCtx context.Context,
+	ctx facade.MultiModelContext,
+	facadeVersions facades.FacadeVersions,
+) (*APIV6, error) {
+	api, err := makeFacade(stdCtx, ctx, facadeVersions)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return &APIV6{API: api}, err
+}
+
+// makeFacade is responsible for constructing a new migration target facade and
+// its dependencies.
+func makeFacade(
+	stdCtx context.Context,
+	ctx facade.MultiModelContext,
+	facadeVersions facades.FacadeVersions,
+) (*API, error) {
+	domainServices := ctx.DomainServices()
+
 	auth := ctx.Auth()
-	st := ctx.State()
-	if err := checkAuth(auth, st); err != nil {
-		return nil, errors.Trace(err)
+	if err := checkAuth(stdCtx, auth, names.NewControllerTag(ctx.ControllerUUID())); err != nil {
+		return nil, err
 	}
 
-	credentialCallContextGetter := func(stdctx context.Context, modelUUID coremodel.UUID) (service.CredentialValidationContext, error) {
-		modelState, err := ctx.StatePool().Get(string(modelUUID))
+	modelMigrationServiceGetter := func(c context.Context, modelId model.UUID) (ModelMigrationService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelId)
 		if err != nil {
-			return service.CredentialValidationContext{}, err
+			return nil, errors.Errorf("retrieving domain services for model %q: %w", modelId, err)
 		}
-		defer modelState.Release()
-
-		m, err := modelState.Model()
+		return svc.ModelMigration(), nil
+	}
+	modelAgentServiceGetter := func(c context.Context, modelId model.UUID) (ModelAgentService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelId)
 		if err != nil {
-			return service.CredentialValidationContext{}, err
+			return nil, errors.Errorf("retrieving domain services for model %q: %w", modelId, err)
 		}
-		cfg, err := m.Config()
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-
-		cld, err := ctx.ServiceFactory().Cloud().Cloud(stdctx, m.CloudName())
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-
-		return service.CredentialValidationContext{
-			ControllerUUID: ctx.ControllerUUID(),
-			Config:         cfg,
-			MachineService: credentialcommon.NewMachineService(modelState.State),
-			ModelType:      coremodel.ModelType(m.Type()),
-			Cloud:          *cld,
-			Region:         m.CloudRegion(),
-		}, nil
+		return svc.Agent(), nil
 	}
 
-	serviceFactory := ctx.ServiceFactory()
-	credentialService := serviceFactory.Credential()
-	// TODO(wallyworld) - service factory in tests returns a nil service.
-	if credentialService != nil {
-		credentialService = credentialService.WithValidationContextGetter(credentialCallContextGetter)
-	}
 	return NewAPI(
 		ctx,
 		auth,
-		serviceFactory.ControllerConfig(),
-		serviceFactory.ExternalController(),
-		serviceFactory.Upgrade(),
-		serviceFactory.Cloud(),
-		credentialService,
-		service.NewCredentialValidator(),
-		credentialCallContextGetter,
-		credentialcommon.CredentialInvalidatorGetter(ctx),
-		stateenvirons.GetNewEnvironFunc(environs.New),
-		stateenvirons.GetNewCAASBrokerFunc(caas.New),
+		domainServices.ControllerConfig(),
+		domainServices.ExternalController(),
+		domainServices.Model(),
+		domainServices.Upgrade(),
+		domainServices.Status(),
+		domainServices.Machine(),
+		modelAgentServiceGetter,
+		modelMigrationServiceGetter,
 		facadeVersions,
 		ctx.LogDir(),
 	)

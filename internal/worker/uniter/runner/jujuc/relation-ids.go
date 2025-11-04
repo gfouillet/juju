@@ -4,15 +4,16 @@
 package jujuc
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // RelationIdsCommand implements the relation-ids command.
@@ -42,14 +43,25 @@ func (c *RelationIdsCommand) Info() *cmd.Info {
 		args = "[<name>]"
 		doc = fmt.Sprintf("Current default endpoint name is %q.", r.Name())
 	} else if !errors.Is(err, errors.NotFound) {
-		logger.Errorf("Could not retrieve hook relation: %v", err)
+		logger.Errorf(context.Background(), "Could not retrieve hook relation: %v", err)
 	}
-	doc += "\nOnly relation ids for relations which are not broken are included."
+	doc += `
+relation-ids outputs a list of the related applications with a relation name.
+Accepts a single argument (relation-name) which, in a relation hook, defaults
+to the name of the current relation. The output is useful as input to the
+relation-list, relation-get, relation-set, and relation-model-get commands
+to read or write other relation values.
+
+Only relation ids for relations which are not broken are included.
+`
 	return jujucmd.Info(&cmd.Info{
 		Name:    "relation-ids",
 		Args:    args,
-		Purpose: "list all relation ids for the given endpoint",
+		Purpose: "List all relation IDs for the given endpoint.",
 		Doc:     doc,
+		Examples: `
+    relation-ids database
+`,
 	})
 }
 

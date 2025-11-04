@@ -4,33 +4,36 @@
 package secretsdrain_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/common/secretsdrain"
 	"github.com/juju/juju/api/common/secretsdrain/mocks"
 	coresecrets "github.com/juju/juju/core/secrets"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&secretsDrainSuite{})
+func TestSecretsDrainSuite(t *testing.T) {
+	tc.Run(t, &secretsDrainSuite{})
+}
 
 type secretsDrainSuite struct {
 	coretesting.BaseSuite
 }
 
-func (s *secretsDrainSuite) TestNewClient(c *gc.C) {
+func (s *secretsDrainSuite) TestNewClient(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	apiCaller := mocks.NewMockFacadeCaller(ctrl)
 	client := secretsdrain.NewClient(apiCaller)
-	c.Assert(client, gc.NotNil)
+	c.Assert(client, tc.NotNil)
 }
 
-func (s *secretsDrainSuite) TestGetSecretsToDrain(c *gc.C) {
+func (s *secretsDrainSuite) TestGetSecretsToDrain(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -55,12 +58,12 @@ func (s *secretsDrainSuite) TestGetSecretsToDrain(c *gc.C) {
 	).Return(nil)
 
 	client := secretsdrain.NewClient(apiCaller)
-	result, err := client.GetSecretsToDrain()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.HasLen, 1)
+	result, err := client.GetSecretsToDrain(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.HasLen, 1)
 	for _, info := range result {
-		c.Assert(info.URI.String(), gc.Equals, uri.String())
-		c.Assert(info.Revisions, jc.DeepEquals, []coresecrets.SecretExternalRevision{
+		c.Assert(info.URI.String(), tc.Equals, uri.String())
+		c.Assert(info.Revisions, tc.DeepEquals, []coresecrets.SecretExternalRevision{
 			{
 				Revision: 666,
 				ValueRef: &coresecrets.ValueRef{
@@ -75,7 +78,7 @@ func (s *secretsDrainSuite) TestGetSecretsToDrain(c *gc.C) {
 	}
 }
 
-func (s *secretsDrainSuite) TestChangeSecretBackend(c *gc.C) {
+func (s *secretsDrainSuite) TestChangeSecretBackend(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -102,7 +105,7 @@ func (s *secretsDrainSuite) TestChangeSecretBackend(c *gc.C) {
 		gomock.Any(),
 	).SetArg(
 		3, params.ErrorResults{
-			[]params.ErrorResult{
+			Results: []params.ErrorResult{
 				{Error: nil},
 			},
 		},
@@ -110,6 +113,7 @@ func (s *secretsDrainSuite) TestChangeSecretBackend(c *gc.C) {
 
 	client := secretsdrain.NewClient(apiCaller)
 	result, err := client.ChangeSecretBackend(
+		c.Context(),
 		[]secretsdrain.ChangeSecretBackendArg{
 			{
 				URI:      uri,
@@ -121,12 +125,12 @@ func (s *secretsDrainSuite) TestChangeSecretBackend(c *gc.C) {
 			},
 		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
-	c.Assert(result.Results[0], jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0], tc.ErrorIsNil)
 }
 
-func (s *secretsDrainSuite) TestWatchSecretBackendChanged(c *gc.C) {
+func (s *secretsDrainSuite) TestWatchSecretBackendChanged(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -139,6 +143,6 @@ func (s *secretsDrainSuite) TestWatchSecretBackendChanged(c *gc.C) {
 	).Return(nil)
 
 	client := secretsdrain.NewClient(apiCaller)
-	_, err := client.WatchSecretBackendChanged()
-	c.Assert(err, gc.ErrorMatches, "FAIL")
+	_, err := client.WatchSecretBackendChanged(c.Context())
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }

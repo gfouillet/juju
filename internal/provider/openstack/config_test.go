@@ -5,22 +5,21 @@ package openstack
 
 import (
 	"context"
+	stdtesting "testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type ConfigSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&ConfigSuite{})
+func TestConfigSuite(t *stdtesting.T) {
+	tc.Run(t, &ConfigSuite{})
+}
 
 // configTest specifies a config parsing test, checking that env when
 // parsed as the openstack section of a config file matches
@@ -43,68 +42,68 @@ type configTest struct {
 
 var requiredConfig = testing.Attrs{}
 
-func (t configTest) check(c *gc.C) {
+func (t configTest) check(c *tc.C) {
 	attrs := testing.FakeConfig().Merge(testing.Attrs{
 		"type": "openstack",
 	}).Merge(t.config)
 
 	cfg, err := config.New(config.NoDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	e := &Environ{}
-	err = e.SetConfig(context.Background(), cfg)
+	err = e.SetConfig(c.Context(), cfg)
 
 	if t.change != nil {
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		// Testing a change in configuration.
 		var old, changed, valid *config.Config
 		osenv := e
 		old = osenv.ecfg().Config
 		changed, err = old.Apply(t.change)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		// Keep err for validation below.
-		valid, err = providerInstance.Validate(context.Background(), changed, old)
+		valid, err = providerInstance.Validate(c.Context(), changed, old)
 		if err == nil {
-			err = osenv.SetConfig(context.Background(), valid)
+			err = osenv.SetConfig(c.Context(), valid)
 		}
 	}
 	if t.err != "" {
-		c.Check(err, gc.ErrorMatches, t.err)
+		c.Check(err, tc.ErrorMatches, t.err)
 		return
 	}
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	ecfg := e.ecfg()
-	c.Check(ecfg.Name(), gc.Equals, "testmodel")
+	c.Check(ecfg.Name(), tc.Equals, "testmodel")
 	if t.firewallMode != "" {
-		c.Check(ecfg.FirewallMode(), gc.Equals, t.firewallMode)
+		c.Check(ecfg.FirewallMode(), tc.Equals, t.firewallMode)
 	}
-	c.Check(ecfg.useDefaultSecurityGroup(), gc.Equals, t.useDefaultSecurityGroup)
-	c.Check(ecfg.networks(), gc.DeepEquals, []string{t.network})
-	c.Check(ecfg.externalNetwork(), gc.Equals, t.externalNetwork)
+	c.Check(ecfg.useDefaultSecurityGroup(), tc.Equals, t.useDefaultSecurityGroup)
+	c.Check(ecfg.networks(), tc.DeepEquals, []string{t.network})
+	c.Check(ecfg.externalNetwork(), tc.Equals, t.externalNetwork)
 	// Default should be true
 	expectedHostnameVerification := true
 	if t.sslHostnameSet {
 		expectedHostnameVerification = t.sslHostnameVerification
 	}
-	c.Check(ecfg.SSLHostnameVerification(), gc.Equals, expectedHostnameVerification)
+	c.Check(ecfg.SSLHostnameVerification(), tc.Equals, expectedHostnameVerification)
 	for name, expect := range t.expect {
 		actual, found := ecfg.UnknownAttrs()[name]
-		c.Check(found, jc.IsTrue)
-		c.Check(actual, gc.Equals, expect)
+		c.Check(found, tc.IsTrue)
+		c.Check(actual, tc.Equals, expect)
 	}
 	if t.blockStorageSource != "" {
 		storage, ok := ecfg.StorageDefaultBlockSource()
-		c.Assert(ok, jc.IsTrue)
-		c.Check(storage, gc.Equals, t.blockStorageSource)
+		c.Assert(ok, tc.IsTrue)
+		c.Check(storage, tc.Equals, t.blockStorageSource)
 	}
 }
 
-func (s *ConfigSuite) SetUpTest(c *gc.C) {
+func (s *ConfigSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
-	s.PatchValue(&authenticateClient, func(authenticator) error { return nil })
+	s.PatchValue(&authenticateClient, func(context.Context, authenticator) error { return nil })
 }
 
 var configTests = []configTest{
@@ -233,17 +232,45 @@ var configTests = []configTest{
 			"policy-target-group": "groundcontroltomajortom",
 		}),
 		err: "policy-target-group has invalid UUID: .*",
+	}, {
+		summary: "use gbp set through a string, ptg set",
+		config: requiredConfig.Merge(testing.Attrs{
+			"use-openstack-gbp":   "true",
+			"policy-target-group": "fb19cd79-a25c-4357-9271-b071c5cb726c",
+		}),
+	}, {
+		summary: "use gbp set through a string, ptg set, network is set",
+		config: requiredConfig.Merge(testing.Attrs{
+			"use-openstack-gbp":   "true",
+			NetworkKey:            "a-network-label",
+			"policy-target-group": "fb19cd79-a25c-4357-9271-b071c5cb726c",
+		}),
+		err: "cannot use 'network' config setting when use-openstack-gbp is set",
+	}, {
+		summary: "use gbp set through a string, ptg not set",
+		config: requiredConfig.Merge(testing.Attrs{
+			"use-openstack-gbp": "false",
+			NetworkKey:          "a-network-label",
+		}),
+		network: "a-network-label",
+	}, {
+		summary: "use gbp set through a string, ptg not set, network is set",
+		config: requiredConfig.Merge(testing.Attrs{
+			"use-openstack-gbp": "false",
+			NetworkKey:          "a-network-label",
+		}),
+		network: "a-network-label",
 	},
 }
 
-func (s *ConfigSuite) TestConfig(c *gc.C) {
+func (s *ConfigSuite) TestConfig(c *tc.C) {
 	for i, t := range configTests {
 		c.Logf("test %d: %s (%v)", i, t.summary, t.config)
 		t.check(c)
 	}
 }
 
-func (s *ConfigSuite) TestDeprecatedAttributesRemoved(c *gc.C) {
+func (s *ConfigSuite) TestDeprecatedAttributesRemoved(c *tc.C) {
 	attrs := testing.FakeConfig().Merge(testing.Attrs{
 		"type":                  "openstack",
 		"default-image-id":      "id-1234",
@@ -251,59 +278,25 @@ func (s *ConfigSuite) TestDeprecatedAttributesRemoved(c *gc.C) {
 	})
 
 	cfg, err := config.New(config.NoDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	// Keep err for validation below.
-	valid, err := providerInstance.Validate(context.Background(), cfg, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	valid, err := providerInstance.Validate(c.Context(), cfg, nil)
+	c.Assert(err, tc.ErrorIsNil)
 	// Check deprecated attributes removed.
 	allAttrs := valid.AllAttrs()
 	for _, attr := range []string{"default-image-id", "default-instance-type"} {
 		_, ok := allAttrs[attr]
-		c.Assert(ok, jc.IsFalse)
+		c.Assert(ok, tc.IsFalse)
 	}
 }
 
-func (s *ConfigSuite) TestPrepareConfigSetsDefaultBlockSource(c *gc.C) {
-	attrs := testing.FakeConfig().Merge(testing.Attrs{
-		"type": "openstack",
-	})
-	cfg, err := config.New(config.NoDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
-	_, ok := cfg.StorageDefaultBlockSource()
-	c.Assert(ok, jc.IsFalse)
-
-	cfg, err = providerInstance.PrepareConfig(context.Background(), prepareConfigParams(cfg))
-	c.Assert(err, jc.ErrorIsNil)
-	source, ok := cfg.StorageDefaultBlockSource()
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(source, gc.Equals, "cinder")
-}
-
-func prepareConfigParams(cfg *config.Config) environs.PrepareConfigParams {
-	credential := cloud.NewCredential(cloud.UserPassAuthType, map[string]string{
-		"username":    "user",
-		"password":    "secret",
-		"tenant-name": "sometenant",
-	})
-	return environs.PrepareConfigParams{
-		Config: cfg,
-		Cloud: environscloudspec.CloudSpec{
-			Type:       "openstack",
-			Name:       "canonistack",
-			Region:     "region",
-			Endpoint:   "http://auth",
-			Credential: &credential,
-		},
-	}
-}
-
-func (*ConfigSuite) TestSchema(c *gc.C) {
+func (*ConfigSuite) TestSchema(c *tc.C) {
 	fields := providerInstance.Schema()
 	// Check that all the fields defined in environs/config
 	// are in the returned schema.
 	globalFields, err := config.Schema(nil)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 	for name, field := range globalFields {
-		c.Check(fields[name], jc.DeepEquals, field)
+		c.Check(fields[name], tc.DeepEquals, field)
 	}
 }

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/errors"
-
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Source represents the source of the charm.
@@ -30,6 +30,12 @@ const (
 	// CharmHub represents a charm from the new charmHub.
 	CharmHub Source = "charm-hub"
 )
+
+// MinSHA256PrefixLength is the minimum length of a SHA256 prefix. This value
+// is the minimum length of a SHA256 hash prefix that can be used to identify
+// a charm. Ideally, this value should be increased to reduce the risk of
+// collisions.
+const MinSHA256PrefixLength = 7
 
 // Origin holds the original source of a charm. Information about where the
 // charm was installed from (charm-hub, local) and any additional
@@ -55,11 +61,25 @@ type Origin struct {
 	InstanceKey string
 }
 
+// Validate returns an error if the origin is invalid.
+func (o Origin) Validate() error {
+	if CharmHub.Matches(o.Source.String()) && o.Platform.Architecture == "" {
+		return errors.Errorf("empty architecture %w", coreerrors.NotValid)
+	}
+	return nil
+}
+
+func (o Origin) String() string {
+	return fmt.Sprintf("(source: %q, id: %s, hash: %s, revision: %v, channel: %v, platform: %s)",
+		o.Source, o.ID, o.Hash, o.Revision, o.Channel, o.Platform)
+}
+
 // Platform describes the platform used to install the charm with.
 type Platform struct {
 	Architecture string
-	OS           string
-	Channel      string
+	// TODO: This should be of type ostype.OSType
+	OS      string
+	Channel string
 }
 
 // MustParsePlatform parses a given string or returns a panic.
@@ -86,7 +106,7 @@ func MustParsePlatform(s string) Platform {
 //  3. `<arch>`
 func ParsePlatform(s string) (Platform, error) {
 	if s == "" {
-		return Platform{}, errors.BadRequestf("platform cannot be empty")
+		return Platform{}, errors.Errorf("platform cannot be empty").Add(coreerrors.BadRequest)
 	}
 
 	p := strings.Split(s, "/")
@@ -106,16 +126,16 @@ func ParsePlatform(s string) (Platform, error) {
 	platform := Platform{}
 	if arch != nil {
 		if *arch == "" {
-			return Platform{}, errors.NotValidf("architecture in platform %q", s)
+			return Platform{}, errors.Errorf("architecture in platform %q %w", s, coreerrors.NotValid)
 		}
 		platform.Architecture = *arch
 	}
 	if os != nil {
 		if *os == "" {
-			return Platform{}, errors.NotValidf("os in platform %q", s)
+			return Platform{}, errors.Errorf("os in platform %q %w", s, coreerrors.NotValid)
 		}
 		if channel == nil || *channel == "" {
-			return Platform{}, errors.NotValidf("channel in platform %q", s)
+			return Platform{}, errors.Errorf("channel in platform %q %w", s, coreerrors.NotValid)
 		}
 		platform.OS = *os
 		platform.Channel = *channel
@@ -133,7 +153,7 @@ func strptr(s string) *string {
 func ParsePlatformNormalize(s string) (Platform, error) {
 	platform, err := ParsePlatform(s)
 	if err != nil {
-		return Platform{}, errors.Trace(err)
+		return Platform{}, errors.Capture(err)
 	}
 	return platform.Normalize(), nil
 }

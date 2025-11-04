@@ -1,17 +1,15 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package storage_test
+package storage
 
 import (
-	"context"
 	"fmt"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/apiserver/facades/client/storage"
 	storageerrors "github.com/juju/juju/domain/storage/errors"
 	internalstorage "github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
@@ -21,13 +19,13 @@ type poolUpdateSuite struct {
 	baseStorageSuite
 }
 
-var _ = gc.Suite(&poolUpdateSuite{})
+func TestPoolUpdateSuite(t *testing.T) {
+	tc.Run(t, &poolUpdateSuite{})
+}
 
-func (s *poolUpdateSuite) TestUpdatePool(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolUpdateSuite) TestUpdatePool(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
 	poolName := fmt.Sprintf("%v%v", tstName, 0)
 	newAttrs := map[string]interface{}{
 		"foo1": "bar1",
@@ -41,17 +39,15 @@ func (s *poolUpdateSuite) TestUpdatePool(c *gc.C) {
 			Attrs: newAttrs,
 		}},
 	}
-	results, err := s.api.UpdatePool(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
+	results, err := s.api.UpdatePool(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.IsNil)
 }
 
-func (s *poolUpdateSuite) TestUpdatePoolError(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolUpdateSuite) TestUpdatePoolError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
 	poolName := fmt.Sprintf("%v%v", tstName, 0)
 	args := params.StoragePoolArgs{
 		Pools: []params.StoragePool{{
@@ -60,8 +56,8 @@ func (s *poolUpdateSuite) TestUpdatePoolError(c *gc.C) {
 	}
 	s.storageService.EXPECT().ReplaceStoragePool(gomock.Any(), poolName, internalstorage.ProviderType(""), nil).Return(storageerrors.PoolNotFoundError)
 
-	results, err := s.api.UpdatePool(context.Background(), args)
-	c.Assert(err, gc.IsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, "storage pool is not found")
+	results, err := s.api.UpdatePool(c.Context(), args)
+	c.Assert(err, tc.IsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.ErrorMatches, "storage pool is not found")
 }

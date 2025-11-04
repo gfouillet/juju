@@ -18,10 +18,10 @@ import (
 	controller "github.com/juju/juju/controller"
 	model "github.com/juju/juju/core/model"
 	objectstore "github.com/juju/juju/core/objectstore"
+	semversion "github.com/juju/juju/core/semversion"
 	mongo "github.com/juju/juju/internal/mongo"
-	names "github.com/juju/names/v5"
+	names "github.com/juju/names/v6"
 	shell "github.com/juju/utils/v4/shell"
-	version "github.com/juju/version/v2"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -377,6 +377,45 @@ func (c *MockConfigControllerCall) DoAndReturn(f func() names.ControllerTag) *Mo
 	return c
 }
 
+// ControllerAgentInfo mocks base method.
+func (m *MockConfig) ControllerAgentInfo() (controller.ControllerAgentInfo, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ControllerAgentInfo")
+	ret0, _ := ret[0].(controller.ControllerAgentInfo)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
+}
+
+// ControllerAgentInfo indicates an expected call of ControllerAgentInfo.
+func (mr *MockConfigMockRecorder) ControllerAgentInfo() *MockConfigControllerAgentInfoCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ControllerAgentInfo", reflect.TypeOf((*MockConfig)(nil).ControllerAgentInfo))
+	return &MockConfigControllerAgentInfoCall{Call: call}
+}
+
+// MockConfigControllerAgentInfoCall wrap *gomock.Call
+type MockConfigControllerAgentInfoCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockConfigControllerAgentInfoCall) Return(arg0 controller.ControllerAgentInfo, arg1 bool) *MockConfigControllerAgentInfoCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockConfigControllerAgentInfoCall) Do(f func() (controller.ControllerAgentInfo, bool)) *MockConfigControllerAgentInfoCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockConfigControllerAgentInfoCall) DoAndReturn(f func() (controller.ControllerAgentInfo, bool)) *MockConfigControllerAgentInfoCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // DataDir mocks base method.
 func (m *MockConfig) DataDir() string {
 	m.ctrl.T.Helper()
@@ -526,44 +565,6 @@ func (c *MockConfigJobsCall) Do(f func() []model.MachineJob) *MockConfigJobsCall
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockConfigJobsCall) DoAndReturn(f func() []model.MachineJob) *MockConfigJobsCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// JujuDBSnapChannel mocks base method.
-func (m *MockConfig) JujuDBSnapChannel() string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "JujuDBSnapChannel")
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-// JujuDBSnapChannel indicates an expected call of JujuDBSnapChannel.
-func (mr *MockConfigMockRecorder) JujuDBSnapChannel() *MockConfigJujuDBSnapChannelCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "JujuDBSnapChannel", reflect.TypeOf((*MockConfig)(nil).JujuDBSnapChannel))
-	return &MockConfigJujuDBSnapChannelCall{Call: call}
-}
-
-// MockConfigJujuDBSnapChannelCall wrap *gomock.Call
-type MockConfigJujuDBSnapChannelCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockConfigJujuDBSnapChannelCall) Return(arg0 string) *MockConfigJujuDBSnapChannelCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockConfigJujuDBSnapChannelCall) Do(f func() string) *MockConfigJujuDBSnapChannelCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockConfigJujuDBSnapChannelCall) DoAndReturn(f func() string) *MockConfigJujuDBSnapChannelCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -755,44 +756,6 @@ func (c *MockConfigMongoInfoCall) Do(f func() (*mongo.MongoInfo, bool)) *MockCon
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockConfigMongoInfoCall) DoAndReturn(f func() (*mongo.MongoInfo, bool)) *MockConfigMongoInfoCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// MongoMemoryProfile mocks base method.
-func (m *MockConfig) MongoMemoryProfile() mongo.MemoryProfile {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "MongoMemoryProfile")
-	ret0, _ := ret[0].(mongo.MemoryProfile)
-	return ret0
-}
-
-// MongoMemoryProfile indicates an expected call of MongoMemoryProfile.
-func (mr *MockConfigMockRecorder) MongoMemoryProfile() *MockConfigMongoMemoryProfileCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MongoMemoryProfile", reflect.TypeOf((*MockConfig)(nil).MongoMemoryProfile))
-	return &MockConfigMongoMemoryProfileCall{Call: call}
-}
-
-// MockConfigMongoMemoryProfileCall wrap *gomock.Call
-type MockConfigMongoMemoryProfileCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockConfigMongoMemoryProfileCall) Return(arg0 mongo.MemoryProfile) *MockConfigMongoMemoryProfileCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockConfigMongoMemoryProfileCall) Do(f func() mongo.MemoryProfile) *MockConfigMongoMemoryProfileCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockConfigMongoMemoryProfileCall) DoAndReturn(f func() mongo.MemoryProfile) *MockConfigMongoMemoryProfileCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1101,6 +1064,44 @@ func (c *MockConfigOpenTelemetryStackTracesCall) DoAndReturn(f func() bool) *Moc
 	return c
 }
 
+// OpenTelemetryTailSamplingThreshold mocks base method.
+func (m *MockConfig) OpenTelemetryTailSamplingThreshold() time.Duration {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "OpenTelemetryTailSamplingThreshold")
+	ret0, _ := ret[0].(time.Duration)
+	return ret0
+}
+
+// OpenTelemetryTailSamplingThreshold indicates an expected call of OpenTelemetryTailSamplingThreshold.
+func (mr *MockConfigMockRecorder) OpenTelemetryTailSamplingThreshold() *MockConfigOpenTelemetryTailSamplingThresholdCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OpenTelemetryTailSamplingThreshold", reflect.TypeOf((*MockConfig)(nil).OpenTelemetryTailSamplingThreshold))
+	return &MockConfigOpenTelemetryTailSamplingThresholdCall{Call: call}
+}
+
+// MockConfigOpenTelemetryTailSamplingThresholdCall wrap *gomock.Call
+type MockConfigOpenTelemetryTailSamplingThresholdCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockConfigOpenTelemetryTailSamplingThresholdCall) Return(arg0 time.Duration) *MockConfigOpenTelemetryTailSamplingThresholdCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockConfigOpenTelemetryTailSamplingThresholdCall) Do(f func() time.Duration) *MockConfigOpenTelemetryTailSamplingThresholdCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockConfigOpenTelemetryTailSamplingThresholdCall) DoAndReturn(f func() time.Duration) *MockConfigOpenTelemetryTailSamplingThresholdCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // QueryTracingEnabled mocks base method.
 func (m *MockConfig) QueryTracingEnabled() bool {
 	m.ctrl.T.Helper()
@@ -1173,45 +1174,6 @@ func (c *MockConfigQueryTracingThresholdCall) Do(f func() time.Duration) *MockCo
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockConfigQueryTracingThresholdCall) DoAndReturn(f func() time.Duration) *MockConfigQueryTracingThresholdCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// StateServingInfo mocks base method.
-func (m *MockConfig) StateServingInfo() (controller.StateServingInfo, bool) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "StateServingInfo")
-	ret0, _ := ret[0].(controller.StateServingInfo)
-	ret1, _ := ret[1].(bool)
-	return ret0, ret1
-}
-
-// StateServingInfo indicates an expected call of StateServingInfo.
-func (mr *MockConfigMockRecorder) StateServingInfo() *MockConfigStateServingInfoCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StateServingInfo", reflect.TypeOf((*MockConfig)(nil).StateServingInfo))
-	return &MockConfigStateServingInfoCall{Call: call}
-}
-
-// MockConfigStateServingInfoCall wrap *gomock.Call
-type MockConfigStateServingInfoCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockConfigStateServingInfoCall) Return(arg0 controller.StateServingInfo, arg1 bool) *MockConfigStateServingInfoCall {
-	c.Call = c.Call.Return(arg0, arg1)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockConfigStateServingInfoCall) Do(f func() (controller.StateServingInfo, bool)) *MockConfigStateServingInfoCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockConfigStateServingInfoCall) DoAndReturn(f func() (controller.StateServingInfo, bool)) *MockConfigStateServingInfoCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1331,10 +1293,10 @@ func (c *MockConfigTransientDataDirCall) DoAndReturn(f func() string) *MockConfi
 }
 
 // UpgradedToVersion mocks base method.
-func (m *MockConfig) UpgradedToVersion() version.Number {
+func (m *MockConfig) UpgradedToVersion() semversion.Number {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpgradedToVersion")
-	ret0, _ := ret[0].(version.Number)
+	ret0, _ := ret[0].(semversion.Number)
 	return ret0
 }
 
@@ -1351,19 +1313,19 @@ type MockConfigUpgradedToVersionCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockConfigUpgradedToVersionCall) Return(arg0 version.Number) *MockConfigUpgradedToVersionCall {
+func (c *MockConfigUpgradedToVersionCall) Return(arg0 semversion.Number) *MockConfigUpgradedToVersionCall {
 	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockConfigUpgradedToVersionCall) Do(f func() version.Number) *MockConfigUpgradedToVersionCall {
+func (c *MockConfigUpgradedToVersionCall) Do(f func() semversion.Number) *MockConfigUpgradedToVersionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockConfigUpgradedToVersionCall) DoAndReturn(f func() version.Number) *MockConfigUpgradedToVersionCall {
+func (c *MockConfigUpgradedToVersionCall) DoAndReturn(f func() semversion.Number) *MockConfigUpgradedToVersionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

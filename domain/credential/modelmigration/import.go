@@ -7,15 +7,17 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
+	"github.com/juju/juju/core/user"
 	"github.com/juju/juju/domain/credential/service"
 	"github.com/juju/juju/domain/credential/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Coordinator is the interface that is used to add operations to a migration.
@@ -66,26 +68,30 @@ func (i *importOperation) Execute(ctx context.Context, model description.Model) 
 		return nil
 	}
 
+	name, err := user.NewName(cred.Owner())
+	if err != nil {
+		return errors.Capture(err)
+	}
 	// Need to add credential or make sure an existing credential
 	// matches.
 	key := credential.Key{
 		Cloud: cred.Cloud(),
-		Owner: cred.Owner(),
+		Owner: name,
 		Name:  cred.Name(),
 	}
 	if err := key.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	existing, err := i.service.CloudCredential(ctx, key)
 
-	if errors.Is(err, errors.NotFound) {
+	if errors.Is(err, coreerrors.NotFound) {
 		credential := cloud.NewCredential(
 			cloud.AuthType(cred.AuthType()),
 			cred.Attributes())
-		return errors.Trace(i.service.UpdateCloudCredential(ctx, key, credential))
+		return errors.Capture(i.service.UpdateCloudCredential(ctx, key, credential))
 	} else if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	// ensure existing cred matches.
 	if existing.AuthType() != cloud.AuthType(cred.AuthType()) {

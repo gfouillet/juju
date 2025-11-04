@@ -8,23 +8,23 @@ import (
 	"fmt"
 
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	"vpc-id": {
 		Description: "Use a specific AWS VPC ID (optional). When not specified, Juju requires a default VPC or EC2-Classic features to be available for the account/region.",
 		Example:     "vpc-a1b2c3d4",
-		Type:        environschema.Tstring,
-		Group:       environschema.AccountGroup,
+		Type:        configschema.Tstring,
+		Group:       configschema.AccountGroup,
 		Immutable:   true,
 	},
 	"vpc-id-force": {
 		Description: "Force Juju to use the AWS VPC ID specified with vpc-id, when it fails the minimum validation criteria. Not accepted without vpc-id",
-		Type:        environschema.Tbool,
-		Group:       environschema.AccountGroup,
+		Type:        configschema.Tbool,
+		Group:       configschema.AccountGroup,
 		Immutable:   true,
 	},
 }
@@ -60,11 +60,17 @@ func (p environProvider) newConfig(ctx context.Context, cfg *config.Config) (*en
 	if err != nil {
 		return nil, err
 	}
-	return &environConfig{valid, valid.UnknownAttrs()}, nil
+	return &environConfig{Config: valid, attrs: valid.UnknownAttrs()}, nil
+}
+
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p environProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
 }
 
 // Schema returns the configuration schema for an environment.
-func (environProvider) Schema() environschema.Fields {
+func (environProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -93,7 +99,7 @@ func validateConfig(ctx context.Context, cfg, old *config.Config) (*environConfi
 	if err != nil {
 		return nil, err
 	}
-	ecfg := &environConfig{cfg, validated}
+	ecfg := &environConfig{Config: cfg, attrs: validated}
 
 	if vpcID := ecfg.vpcID(); isVPCIDSetButInvalid(vpcID) {
 		return nil, fmt.Errorf("vpc-id: %q is not a valid AWS VPC ID", vpcID)

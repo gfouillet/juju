@@ -4,16 +4,15 @@
 package deployer
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/application"
-	applicationapi "github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/resources"
 	commoncharm "github.com/juju/juju/api/common/charm"
 	apicharms "github.com/juju/juju/api/common/charms"
@@ -25,7 +24,9 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/storage/provider"
 )
 
 type deployCharm struct {
@@ -51,8 +52,8 @@ type deployCharm struct {
 	trust            bool
 }
 
-func checkCharmFormat(m ModelCommand, charmInfo *apicharms.CharmInfo) error {
-	modelType, err := m.ModelType()
+func checkCharmFormat(ctx context.Context, m ModelCommand, charmInfo *apicharms.CharmInfo) error {
+	modelType, err := m.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -71,19 +72,25 @@ func (d *deployCharm) deploy(
 	deployAPI DeployerAPI,
 ) (rErr error) {
 	id := d.id
-	charmInfo, err := deployAPI.CharmInfo(id.URL)
+	charmInfo, err := deployAPI.CharmInfo(ctx, id.URL)
 	if err != nil {
 		return err
 	}
-	if err := checkCharmFormat(d.model, charmInfo); err != nil {
+	if err := checkCharmFormat(ctx, d.model, charmInfo); err != nil {
 		return err
 	}
 
-	// storage cannot be added to a container.
-	if len(d.storage) > 0 || len(d.attachStorage) > 0 {
-		for _, placement := range d.placement {
-			if t, err := instance.ParseContainerType(placement.Scope); err == nil {
-				return errors.NotSupportedf("adding storage to %s container", string(t))
+	// Check storage on containers is supported.
+	// This is a rather simplistic client side check based on pool name.
+	// When we support passthrough/bindmount etc we'll need to shift this server side.
+	for _, placement := range d.placement {
+		t, err := instance.ParseContainerType(placement.Scope)
+		if err != nil {
+			continue
+		}
+		for _, s := range d.storage {
+			if !provider.AllowedContainerProvider(storage.ProviderType(s.Pool)) {
+				return errors.NotSupportedf("adding storage of type %q to %s container", s.Pool, string(t))
 			}
 		}
 	}
@@ -140,8 +147,8 @@ func (d *deployCharm) deploy(
 		appConfig = nil
 	}
 
-	ctx.Infof(d.formatDeployingText(applicationName, charmName))
-	args := applicationapi.DeployArgs{
+	ctx.Infof("%s", d.formatDeployingText(applicationName, charmName))
+	args := application.DeployArgs{
 		CharmID:          id,
 		CharmOrigin:      id.Origin,
 		Cons:             d.constraints,
@@ -158,18 +165,18 @@ func (d *deployCharm) deploy(
 		Force:            d.force,
 	}
 
-	err = deployAPI.Deploy(args)
+	err = deployAPI.Deploy(ctx, args)
 	if err == nil {
 		return nil
 	}
 
 	if errors.Is(err, errors.AlreadyExists) {
 		// Would be nice to be able to access the app name here
-		return errors.Wrapf(err, errors.Errorf(`
+		return errors.Wrapf(err, errors.New(`
 deploy application using an alias name:
     juju deploy <application> <alias>
 or use remove-application to remove the existing one and try again.`,
-		), err.Error())
+		), "%s", err.Error())
 	}
 	return errors.Trace(err)
 }
@@ -211,7 +218,7 @@ type predeployedLocalCharm struct {
 
 // String returns a string description of the deployer.
 func (d *predeployedLocalCharm) String() string {
-	str := fmt.Sprintf("deploy predeployed local charm: %s", d.userCharmURL.String())
+	str := fmt.Sprintf("deploy pre-deployed local charm: %s", d.userCharmURL.String())
 	origin := d.id.Origin
 	if isEmptyOrigin(origin, commoncharm.OriginLocal) {
 		return str
@@ -236,7 +243,7 @@ func (d *predeployedLocalCharm) PrepareAndDeploy(ctx *cmd.Context, deployAPI Dep
 		return errors.Trace(err)
 	}
 
-	ctx.Infof(formatLocatedText(d.userCharmURL, commoncharm.Origin{}))
+	ctx.Infof("%s", formatLocatedText(d.userCharmURL, commoncharm.Origin{}))
 	platform := utils.MakePlatform(d.constraints, d.base, d.modelConstraints)
 	origin, err := utils.MakeOrigin(charm.Local, userCharmURL.Revision, charm.Channel{}, platform)
 	if err != nil {
@@ -273,7 +280,7 @@ func (l *localCharm) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, _
 		return errors.Trace(err)
 	}
 
-	curl, err := deployAPI.AddLocalCharm(l.curl, l.ch, l.force)
+	curl, err := deployAPI.AddLocalCharm(ctx, l.curl, l.ch, l.force)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -285,7 +292,7 @@ func (l *localCharm) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerAPI, _
 		return errors.Trace(err)
 	}
 
-	ctx.Infof(formatLocatedText(curl, origin))
+	ctx.Infof("%s", formatLocatedText(curl, origin))
 	l.id = application.CharmID{
 		URL:    curl.String(),
 		Origin: origin,
@@ -351,7 +358,7 @@ func (c *repositoryCharm) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerA
 	}
 
 	charmName := c.userRequestedURL.Name
-	info, localPendingResources, errs := deployAPI.DeployFromRepository(application.DeployFromRepositoryArg{
+	info, localPendingResources, errs := deployAPI.DeployFromRepository(ctx, application.DeployFromRepositoryArg{
 		CharmName:        charmName,
 		ApplicationName:  c.applicationName,
 		AttachStorage:    c.attachStorage,
@@ -386,7 +393,7 @@ func (c *repositoryCharm) PrepareAndDeploy(ctx *cmd.Context, deployAPI DeployerA
 			info.Name, uploadErr)
 	}
 
-	ctx.Infof(formatDeployedText(c.dryRun, charmName, info))
+	ctx.Infof("%s", formatDeployedText(c.dryRun, charmName, info))
 	return nil
 }
 

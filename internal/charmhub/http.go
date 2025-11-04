@@ -20,9 +20,9 @@ import (
 	"gopkg.in/httprequest.v1"
 
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/charmhub/path"
 	jujuhttp "github.com/juju/juju/internal/http"
-	"github.com/juju/juju/version"
 )
 
 const (
@@ -62,7 +62,7 @@ type HTTPClient interface {
 }
 
 // DefaultHTTPClient creates a new HTTPClient with the default configuration.
-func DefaultHTTPClient(logger corelogger.Logger) HTTPClient {
+func DefaultHTTPClient(logger corelogger.Logger) *jujuhttp.Client {
 	recorder := loggingRequestRecorder{
 		logger: logger.Child("transport.request-recorder", corelogger.METRICS),
 	}
@@ -86,21 +86,21 @@ type loggingRequestRecorder struct {
 // Record an outgoing request which produced an http.Response.
 func (r loggingRequestRecorder) Record(method string, url *url.URL, res *http.Response, rtt time.Duration) {
 	if r.logger.IsLevelEnabled(corelogger.TRACE) {
-		r.logger.Tracef("request (method: %q, host: %q, path: %q, status: %q, duration: %s)", method, url.Host, url.Path, res.Status, rtt)
+		r.logger.Tracef(context.TODO(), "request (method: %q, host: %q, path: %q, status: %q, duration: %s)", method, url.Host, url.Path, res.Status, rtt)
 	}
 }
 
 // RecordError records an outgoing request which returned an error.
 func (r loggingRequestRecorder) RecordError(method string, url *url.URL, err error) {
 	if r.logger.IsLevelEnabled(corelogger.TRACE) {
-		r.logger.Tracef("request error (method: %q, host: %q, path: %q, err: %s)", method, url.Host, url.Path, err)
+		r.logger.Tracef(context.TODO(), "request error (method: %q, host: %q, path: %q, err: %s)", method, url.Host, url.Path, err)
 	}
 }
 
 // requestHTTPClient returns a function that creates a new HTTPClient that
 // records the requests.
-func requestHTTPClient(recorder jujuhttp.RequestRecorder, policy jujuhttp.RetryPolicy) func(corelogger.Logger) HTTPClient {
-	return func(logger corelogger.Logger) HTTPClient {
+func requestHTTPClient(recorder jujuhttp.RequestRecorder, policy jujuhttp.RetryPolicy) func(corelogger.Logger) *jujuhttp.Client {
+	return func(logger corelogger.Logger) *jujuhttp.Client {
 		return jujuhttp.NewClient(
 			jujuhttp.WithRequestRecorder(recorder),
 			jujuhttp.WithRequestRetrier(policy),
@@ -155,14 +155,14 @@ func (t *apiRequester) Do(req *http.Request) (*http.Response, error) {
 				req.Body = io.NopCloser(bytes.NewReader(body))
 			}
 			var err error
-			resp, err = t.doOnce(req)
+			resp, err = t.doOnce(req) //nolint:bodyclose // resp.Body is closed by the caller.
 			return err
 		},
 		IsFatalError: func(err error) bool {
 			return !errors.Is(err, io.EOF)
 		},
 		NotifyFunc: func(lastError error, attempt int) {
-			t.logger.Errorf("Charmhub API error (attempt %d): %v", attempt, lastError)
+			t.logger.Errorf(req.Context(), "Charmhub API error (attempt %d): %v", attempt, lastError)
 		},
 		Attempts: 2,
 		Delay:    t.retryDelay,
@@ -232,9 +232,9 @@ func newAPIRequesterLogger(httpClient HTTPClient, logger corelogger.Logger) *api
 func (t *apiRequestLogger) Do(req *http.Request) (*http.Response, error) {
 	if t.logger.IsLevelEnabled(corelogger.TRACE) {
 		if data, err := httputil.DumpRequest(req, true); err == nil {
-			t.logger.Tracef("%s request %s", req.Method, data)
+			t.logger.Tracef(req.Context(), "%s request %s", req.Method, data)
 		} else {
-			t.logger.Tracef("%s request DumpRequest error %s", req.Method, err.Error())
+			t.logger.Tracef(req.Context(), "%s request DumpRequest error %s", req.Method, err.Error())
 		}
 	}
 
@@ -245,9 +245,9 @@ func (t *apiRequestLogger) Do(req *http.Request) (*http.Response, error) {
 
 	if t.logger.IsLevelEnabled(corelogger.TRACE) {
 		if data, err := httputil.DumpResponse(resp, true); err == nil {
-			t.logger.Tracef("%s response %s", req.Method, data)
+			t.logger.Tracef(req.Context(), "%s response %s", req.Method, data)
 		} else {
-			t.logger.Tracef("%s response DumpResponse error %s", req.Method, err.Error())
+			t.logger.Tracef(req.Context(), "%s response DumpResponse error %s", req.Method, err.Error())
 		}
 	}
 

@@ -7,27 +7,53 @@ import (
 	"context"
 	"reflect"
 
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Client", 6, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newFacadeV6(ctx)
-	}, reflect.TypeOf((*ClientV6)(nil)))
-	registry.MustRegister("Client", 7, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newFacadeV7(ctx)
+	registry.MustRegister("Client", 8, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV8(ctx)
 	}, reflect.TypeOf((*Client)(nil)))
 }
 
-func newFacadeV6(ctx facade.ModelContext) (*ClientV6, error) {
-	client, err := newFacadeV7(ctx)
-	if err != nil {
-		return nil, err
+// newFacadeV8 returns a new Client facade (v8).
+func newFacadeV8(ctx facade.ModelContext) (*Client, error) {
+	authorizer := ctx.Auth()
+	if !authorizer.AuthClient() {
+		return nil, apiservererrors.ErrPerm
 	}
-	return &ClientV6{Client: client}, nil
-}
 
-func newFacadeV7(ctx facade.ModelContext) (*Client, error) {
-	return NewFacade(ctx)
+	leadershipReader, err := ctx.LeadershipReader()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	domainServices := ctx.DomainServices()
+	client := &Client{
+		logDir: ctx.LogDir(),
+		clock:  ctx.Clock(),
+
+		controllerTag:    names.NewControllerTag(ctx.ControllerUUID()),
+		modelTag:         names.NewModelTag(ctx.ModelUUID().String()),
+		auth:             authorizer,
+		leadershipReader: leadershipReader,
+
+		applicationService:        domainServices.Application(),
+		crossModelRelationService: domainServices.CrossModelRelation(),
+		blockDeviceService:        domainServices.BlockDevice(),
+		machineService:            domainServices.Machine(),
+		modelInfoService:          domainServices.ModelInfo(),
+		networkService:            domainServices.Network(),
+		portService:               domainServices.Port(),
+		relationService:           domainServices.Relation(),
+		statusService:             domainServices.Status(),
+
+		isControllerModel: ctx.IsControllerModelScoped(),
+	}
+	return client, nil
 }

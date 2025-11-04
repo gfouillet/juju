@@ -4,10 +4,10 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -16,19 +16,21 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // getConstraintsDoc is multi-line since we need to use ` to denote
 // commands for ease in markdown.
-const getConstraintsDoc = "" +
-	"Shows constraints that have been set on the model with\n" +
-	"`juju set-model-constraints.`\n" +
-	"By default, the model is the current model.\n" +
-	"Model constraints are combined with constraints set on an application\n" +
-	"with `juju set-constraints` for commands (such as 'deploy') that provision\n" +
-	"machines/containers for applications. Where model and application constraints overlap, the\n" +
-	"application constraints take precedence.\n" +
-	"Constraints for a specific application can be viewed with `juju constraints`.\n"
+const getConstraintsDoc = `
+Shows constraints that have been set on the model with ` + "`juju set-model-constraints`" + `.
+By default, the model is the current model.
+Model constraints are combined with constraints set on an application.
+with ` + "`juju set-constraints`" + ` for commands (such as ` + "`deploy`" + `) that provision
+machines/containers for applications. Where model and application constraints overlap, the
+application constraints take precedence. Constraints for a specific application
+can be viewed with ` + "`juju constraints`" + `.
+
+`
 
 const getConstraintsDocExamples = `
     juju model-constraints
@@ -37,14 +39,15 @@ const getConstraintsDocExamples = `
 
 // setConstraintsDoc is multi-line since we need to use ` to denote
 // commands for ease in markdown.
-const setConstraintsDoc = "" +
-	"Sets constraints on the model that can be viewed with\n" +
-	"`juju model-constraints`.  By default, the model is the current model.\n" +
-	"Model constraints are combined with constraints set for an application with\n" +
-	"`juju set-constraints` for commands (such as 'deploy') that provision\n" +
-	"machines/containers for applications. Where model and application constraints overlap, the\n" +
-	"application constraints take precedence.\n" +
-	"Constraints for a specific application can be viewed with `juju constraints`.\n"
+const setConstraintsDoc = `
+Sets constraints on the model that can be viewed with ` + "`juju model-constraints`" + `.
+By default, the model is the current model.
+Model constraints are combined with constraints set for an application with
+` + "`juju set-constraints`" + ` for commands (such as ` + "`deploy`" + `) that provision
+machines/containers for applications. Where model and application constraints overlap, the
+application constraints take precedence.
+Constraints for a specific application can be viewed with ` + "`juju constraints`" + `.
+`
 
 const setConstraintsDocExamples = `
     juju set-model-constraints cores=8 mem=16G
@@ -55,8 +58,8 @@ const setConstraintsDocExamples = `
 // the constraints and set-constraints commands call
 type ConstraintsAPI interface {
 	Close() error
-	GetModelConstraints() (constraints.Value, error)
-	SetModelConstraints(constraints.Value) error
+	GetModelConstraints(context.Context) (constraints.Value, error)
+	SetModelConstraints(context.Context, constraints.Value) error
 }
 
 // NewModelGetConstraintsCommand returns a command to get model constraints.
@@ -90,11 +93,11 @@ func (c *modelGetConstraintsCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args)
 }
 
-func (c *modelGetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
+func (c *modelGetConstraintsCommand) getAPI(ctx context.Context) (ConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -117,13 +120,13 @@ func (c *modelGetConstraintsCommand) SetFlags(f *gnuflag.FlagSet) {
 }
 
 func (c *modelGetConstraintsCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	cons, err := client.GetModelConstraints()
+	cons, err := client.GetModelConstraints(ctx)
 	if err != nil {
 		return err
 	}
@@ -163,11 +166,11 @@ func (c *modelSetConstraintsCommand) Init(args []string) (err error) {
 	return err
 }
 
-func (c *modelSetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
+func (c *modelSetConstraintsCommand) getAPI(ctx context.Context) (ConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -175,13 +178,13 @@ func (c *modelSetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
 	return client, nil
 }
 
-func (c *modelSetConstraintsCommand) Run(_ *cmd.Context) (err error) {
-	client, err := c.getAPI()
+func (c *modelSetConstraintsCommand) Run(ctx *cmd.Context) (err error) {
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	err = client.SetModelConstraints(c.Constraints)
+	err = client.SetModelConstraints(ctx, c.Constraints)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }

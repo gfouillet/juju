@@ -5,54 +5,46 @@ package common_test
 
 import (
 	"context"
+	stdtesting "testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/common/mocks"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/controller"
+	unittesting "github.com/juju/juju/core/unit/testing"
+	"github.com/juju/juju/domain/unitstate"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
 )
 
 type unitStateSuite struct {
 	testing.BaseSuite
 
 	unitTag1 names.UnitTag
-
-	api         *common.UnitStateAPI
-	mockBackend *mocks.MockUnitStateBackend
-	mockUnit    *mocks.MockUnitStateUnit
-	mockOp      *mocks.MockModelOperation
+	api      *common.UnitStateAPI
 
 	controllerConfigGetter *mocks.MockControllerConfigService
+	unitStateService       *mocks.MockUnitStateService
 }
 
-var _ = gc.Suite(&unitStateSuite{})
+func TestUnitStateSuite(t *stdtesting.T) {
+	tc.Run(t, &unitStateSuite{})
+}
 
-func (s *unitStateSuite) SetUpTest(c *gc.C) {
+func (s *unitStateSuite) SetUpTest(c *tc.C) {
 	s.unitTag1 = names.NewUnitTag("wordpress/0")
 }
 
-func (s *unitStateSuite) assertBackendApi(c *gc.C) *gomock.Controller {
-	resources := common.NewResources()
-	authorizer := apiservertesting.FakeAuthorizer{
-		Tag: s.unitTag1,
-	}
-
+func (s *unitStateSuite) assertBackendApi(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
-	s.mockBackend = mocks.NewMockUnitStateBackend(ctrl)
-	s.mockUnit = mocks.NewMockUnitStateUnit(ctrl)
-	s.mockOp = mocks.NewMockModelOperation(ctrl)
 	s.controllerConfigGetter = mocks.NewMockControllerConfigService(ctrl)
+	s.unitStateService = mocks.NewMockUnitStateService(ctrl)
 
-	unitAuthFunc := func() (common.AuthFunc, error) {
+	unitAuthFunc := func(ctx context.Context) (common.AuthFunc, error) {
 		return func(tag names.Tag) bool {
 			if tag.Id() == s.unitTag1.Id() {
 				return true
@@ -62,11 +54,15 @@ func (s *unitStateSuite) assertBackendApi(c *gc.C) *gomock.Controller {
 	}
 
 	s.api = common.NewUnitStateAPI(
-		s.controllerConfigGetter, s.mockBackend, resources, authorizer, unitAuthFunc, loggertesting.WrapCheckLog(c))
+		s.controllerConfigGetter,
+		s.unitStateService,
+		unitAuthFunc,
+		loggertesting.WrapCheckLog(c),
+	)
 	return ctrl
 }
 
-func (s *unitStateSuite) expectState() (map[string]string, string, map[int]string, string, string) {
+func (s *unitStateSuite) expectGetState(c *tc.C, name string) (map[string]string, string, map[int]string, string, string) {
 	expCharmState := map[string]string{
 		"foo.bar":  "baz",
 		"payload$": "enc0d3d",
@@ -79,56 +75,22 @@ func (s *unitStateSuite) expectState() (map[string]string, string, map[int]strin
 	expStorageState := "storage testing"
 	expSecretState := "secret testing"
 
-	unitState := state.NewUnitState()
-	unitState.SetCharmState(expCharmState)
-	unitState.SetUniterState(expUniterState)
-	unitState.SetRelationState(expRelationState)
-	unitState.SetStorageState(expStorageState)
-	unitState.SetSecretState(expSecretState)
+	unitName := unittesting.GenNewName(c, name)
 
-	exp := s.mockUnit.EXPECT()
-	exp.State().Return(unitState, nil)
+	s.unitStateService.EXPECT().GetState(gomock.Any(), unitName).Return(unitstate.RetrievedUnitState{
+		CharmState:    expCharmState,
+		UniterState:   expUniterState,
+		RelationState: expRelationState,
+		StorageState:  expStorageState,
+		SecretState:   expSecretState,
+	}, nil)
 
 	return expCharmState, expUniterState, expRelationState, expStorageState, expSecretState
 }
 
-func (s *unitStateSuite) expectUnit() {
-	exp := s.mockBackend.EXPECT()
-	exp.Unit(s.unitTag1.Id()).Return(s.mockUnit, nil)
-}
-
-func (s *unitStateSuite) expectSetStateOperation() string {
-	unitState := state.NewUnitState()
-	expUniterState := "testing"
-	unitState.SetUniterState(expUniterState)
-
-	// Mock controller config which provides the limits passed to SetStateOperation.
-	s.controllerConfigGetter.EXPECT().ControllerConfig(gomock.Any()).Return(
-		controller.Config{
-			"max-charm-state-size": 123,
-			"max-agent-state-size": 456,
-		}, nil)
-
-	exp := s.mockUnit.EXPECT()
-	exp.SetStateOperation(
-		unitState,
-		state.UnitStateSizeLimits{
-			MaxCharmStateSize: 123,
-			MaxAgentStateSize: 456,
-		},
-	).Return(s.mockOp)
-	return expUniterState
-}
-
-func (s *unitStateSuite) expectApplyOperation() {
-	exp := s.mockBackend.EXPECT()
-	exp.ApplyOperation(s.mockOp).Return(nil)
-}
-
-func (s *unitStateSuite) TestState(c *gc.C) {
+func (s *unitStateSuite) TestState(c *tc.C) {
 	defer s.assertBackendApi(c).Finish()
-	s.expectUnit()
-	expCharmState, expUniterState, expRelationState, expStorageState, expSecretState := s.expectState()
+	expCharmState, expUniterState, expRelationState, expStorageState, expSecretState := s.expectGetState(c, "wordpress/0")
 
 	args := params.Entities{
 		Entities: []params.Entity{
@@ -138,9 +100,9 @@ func (s *unitStateSuite) TestState(c *gc.C) {
 			{Tag: "unit-notfound-0"},
 		},
 	}
-	result, err := s.api.State(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.UnitStateResults{
+	result, err := s.api.State(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.UnitStateResults{
 		Results: []params.UnitStateResult{
 			{Error: &params.Error{Message: `"not-a-unit-tag" is not a valid tag`}},
 			{
@@ -157,11 +119,9 @@ func (s *unitStateSuite) TestState(c *gc.C) {
 	})
 }
 
-func (s *unitStateSuite) TestSetStateUniterState(c *gc.C) {
+func (s *unitStateSuite) TestSetStateUniterState(c *tc.C) {
 	defer s.assertBackendApi(c).Finish()
-	s.expectUnit()
-	expUniterState := s.expectSetStateOperation()
-	s.expectApplyOperation()
+	expUniterState := "testing"
 
 	args := params.SetUnitStateArgs{
 		Args: []params.SetUnitStateArg{
@@ -172,9 +132,15 @@ func (s *unitStateSuite) TestSetStateUniterState(c *gc.C) {
 		},
 	}
 
-	result, err := s.api.SetState(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+	expectedState := unitstate.UnitState{
+		Name:        "wordpress/0",
+		UniterState: &expUniterState,
+	}
+	s.unitStateService.EXPECT().SetState(gomock.Any(), expectedState).Return(nil)
+
+	result, err := s.api.SetState(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
 			{Error: &params.Error{Message: `"not-a-unit-tag" is not a valid tag`}},
 			{Error: nil},

@@ -6,219 +6,157 @@ package state
 import (
 	"context"
 	"database/sql"
+	"testing"
 
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/canonical/sqlair"
+	"github.com/juju/clock"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/domain/application"
 	applicationerrors "github.com/juju/juju/domain/application/errors"
-	schematesting "github.com/juju/juju/domain/schema/testing"
-	domainstorage "github.com/juju/juju/domain/storage"
+	"github.com/juju/juju/domain/life"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
 type stateSuite struct {
-	schematesting.ModelSuite
-
-	state *State
+	baseSuite
 }
 
-var _ = gc.Suite(&stateSuite{})
-
-func (s *stateSuite) SetUpTest(c *gc.C) {
-	s.ModelSuite.SetUpTest(c)
-
-	s.state = NewState(s.TxnRunnerFactory(), loggertesting.WrapCheckLog(c))
+func TestStateSuite(t *testing.T) {
+	tc.Run(t, &stateSuite{})
 }
 
-func ptr[T any](v T) *T {
-	return &v
-}
+func (s *stateSuite) TestCheckApplicationNameAvailable(c *tc.C) {
+	s.createIAASApplication(c, "foo", life.Alive)
 
-func (s *stateSuite) TestCreateApplicationNoUnits(c *gc.C) {
-	err := s.state.UpsertApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
 
-	var name string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM application").Scan(&name)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNameAvailable(ctx, tx, "foo")
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(name, gc.Equals, "666")
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationAlreadyExists)
 }
 
-func (s *stateSuite) TestCreateApplication(c *gc.C) {
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.state.UpsertApplication(context.Background(), "666", u)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestCheckApplicationNameAvailableSyntheticCMRApplication(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Alive)
 
-	var name string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM application").Scan(&name)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	// Switch the source_id of a charm to a synthetic CMR charm.
+	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+UPDATE charm SET source_id = 2, architecture_id = NULL WHERE uuid = (
+SELECT charm_uuid FROM application WHERE uuid = ?
+)`, id)
+		return err
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(name, gc.Equals, "666")
+	c.Assert(err, tc.ErrorIsNil)
 
-	var unitID string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM unit").Scan(&unitID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
+
+	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNameAvailable(ctx, tx, "foo")
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitID, gc.Equals, "foo/666")
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationAlreadyExists)
 }
 
-func (s *stateSuite) TestUpdateApplication(c *gc.C) {
-	err := s.state.UpsertApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestCheckApplicationNameAvailableNoApplication(c *tc.C) {
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
 
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err = s.state.UpsertApplication(context.Background(), "666", u)
-	c.Assert(err, jc.ErrorIsNil)
-
-	var name string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM application").Scan(&name)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNameAvailable(ctx, tx, "foo")
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(name, gc.Equals, "666")
-
-	var unitID string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM unit").Scan(&unitID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitID, gc.Equals, "foo/666")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *stateSuite) TestDeleteApplication(c *gc.C) {
-	err := s.state.UpsertApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestCheckApplication(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Alive)
 
-	//s.insertBlockDevice(c, bd, bdUUID, "666")
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
 
-	err = s.state.DeleteApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
-
-	var appCount int
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT count(*) FROM application WHERE name=?", "666").Scan(&appCount)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNotDead(ctx, tx, id)
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(appCount, gc.Equals, 0)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *stateSuite) TestDeleteApplicationWithUnits(c *gc.C) {
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.state.UpsertApplication(context.Background(), "666", u)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestCheckApplicationSyntheticCMRApplication(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Alive)
 
-	err = s.state.DeleteApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIs, applicationerrors.ApplicationHasUnits)
-	c.Assert(err, gc.ErrorMatches, `.*cannot delete application "666" as it still has 1 unit\(s\)`)
-
-	var appCount int
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT count(*) FROM application WHERE name=?", "666").Scan(&appCount)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	// Switch the source_id of a charm to a synthetic CMR charm.
+	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+UPDATE charm SET source_id = 2, architecture_id = NULL WHERE uuid = (
+SELECT charm_uuid FROM application WHERE uuid = ?
+)`, id)
+		return err
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(appCount, gc.Equals, 1)
+	c.Assert(err, tc.ErrorIsNil)
+
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
+
+	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNotDead(ctx, tx, id)
+	})
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationNotFound)
 }
 
-func (s *stateSuite) TestAddUnits(c *gc.C) {
-	err := s.state.UpsertApplication(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestCheckApplicationExistsNotFound(c *tc.C) {
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
 
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err = s.state.AddUnits(context.Background(), "666", u)
-	c.Assert(err, jc.ErrorIsNil)
-
-	var name string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM application").Scan(&name)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNotDead(ctx, tx, "foo")
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(name, gc.Equals, "666")
-
-	var unitID string
-	err = s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, "SELECT name FROM unit").Scan(&unitID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitID, gc.Equals, "foo/666")
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationNotFound)
 }
 
-func (s *stateSuite) TestAddUnitsMissingApplication(c *gc.C) {
-	u := application.AddUnitParams{
-		UnitName: ptr("foo/666"),
-	}
-	err := s.state.AddUnits(context.Background(), "666", u)
-	c.Assert(err, jc.ErrorIs, applicationerrors.ApplicationNotFound)
-}
+func (s *stateSuite) TestCheckApplicationDying(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Dying)
 
-func (s *stateSuite) TestStorageDefaultsNone(c *gc.C) {
-	defaults, err := s.state.StorageDefaults(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(defaults, jc.DeepEquals, domainstorage.StorageDefaults{})
-}
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
 
-func (s *stateSuite) TestStorageDefaults(c *gc.C) {
-	db := s.DB()
-	_, err := db.ExecContext(context.Background(), "INSERT INTO model_config (key, value) VALUES (?, ?)",
-		"storage-default-block-source", "ebs-fast")
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = db.ExecContext(context.Background(), "INSERT INTO model_config (key, value) VALUES (?, ?)",
-		"storage-default-filesystem-source", "elastic-fs")
-	c.Assert(err, jc.ErrorIsNil)
-
-	defaults, err := s.state.StorageDefaults(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(defaults, jc.DeepEquals, domainstorage.StorageDefaults{
-		DefaultBlockSource:      ptr("ebs-fast"),
-		DefaultFilesystemSource: ptr("elastic-fs"),
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNotDead(ctx, tx, id)
 	})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *stateSuite) TestCheckApplicationExistsDead(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Dead)
+
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
+
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationNotDead(ctx, tx, id)
+	})
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationIsDead)
+}
+
+func (s *stateSuite) TestCheckApplicationExistsAlive(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Dying)
+
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
+
+	err := s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationAlive(ctx, tx, id)
+	})
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationNotAlive)
+}
+
+func (s *stateSuite) TestCheckApplicationExistsAliveSyntheticCMRApplication(c *tc.C) {
+	id := s.createIAASApplication(c, "foo", life.Dying)
+
+	// Switch the source_id of a charm to a synthetic CMR charm.
+	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+UPDATE charm SET source_id = 2, architecture_id = NULL WHERE uuid = (
+SELECT charm_uuid FROM application WHERE uuid = ?
+)`, id)
+		return err
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+	st := NewState(s.TxnRunnerFactory(), clock.WallClock, loggertesting.WrapCheckLog(c))
+
+	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
+		return st.checkApplicationAlive(ctx, tx, id)
+	})
+	c.Assert(err, tc.ErrorIs, applicationerrors.ApplicationNotFound)
 }

@@ -4,29 +4,28 @@
 package cloud
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4"
 	"github.com/juju/utils/v4/cert"
 	"gopkg.in/yaml.v2"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/interact"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -46,36 +45,32 @@ var usageAddCloudSummary = `
 Add a cloud definition to Juju.`[1:]
 
 var usageAddCloudDetails = `
-Juju needs to know how to connect to clouds. A cloud definition 
+Juju needs to know how to connect to clouds. A cloud definition
 describes a cloud's endpoints and authentication requirements. Each
-definition is stored and accessed later as <cloud name>.
+definition is stored and accessed later as ` + "`<cloud name>`" + `.
 
-If you are accessing a public cloud, running add-cloud is unlikely to be 
-necessary.  Juju already contains definitions for the public cloud 
+If you are accessing a public cloud, running ` + "`add-cloud`" + `is unlikely to be
+necessary.  Juju already contains definitions for the public cloud
 providers it supports.
 
-add-cloud operates in two modes:
+` + "`add-cloud` " + `operates in two modes:
 
     juju add-cloud
     juju add-cloud <cloud name> <cloud definition file>
 
-When invoked without arguments, add-cloud begins an interactive session
-designed for working with private clouds.  The session will enable you 
+When invoked without arguments, ` + "`add-cloud` " + `begins an interactive session
+designed for working with private clouds.  The session will enable you
 to instruct Juju how to connect to your private cloud.
 
-A cloud definition can be provided in a file either as an option -f or as a 
+A cloud definition can be provided in a file either as an option ` + "`-f`" + `or as a
 positional argument:
 
     juju add-cloud mycloud ~/mycloud.yaml
     juju add-cloud mycloud -f ~/mycloud.yaml
 
-When <cloud definition file> is provided with <cloud name>,
-Juju will validate the content of the file and add this cloud 
+When ` + "`<cloud definition file>` " + `is provided with ` + "`<cloud name>`" + `,
+Juju will validate the content of the file and add this cloud
 to this client as well as upload it to a controller.
-
-Use --controller option to upload a cloud to a controller. 
-
-Use --client option to add cloud to the current client.
 
 A cloud definition file has the following YAML format:
 
@@ -87,33 +82,33 @@ A cloud definition file has the following YAML format:
           london:
             endpoint: https://london.mycloud.com:35574/v3.0/
 
-Cloud types for private clouds: 
- - lxd
- - maas
- - manual
- - openstack
- - vsphere
+Cloud types for private clouds:
+ - ` + "`lxd`" + `
+ - ` + "`maas`" + `
+ - ` + "`openstack`" + `
+ - ` + "`unmanaged`" + `
+ - ` + "`vsphere`" + `
 
 Cloud types for public clouds:
- - azure
- - ec2
- - gce
- - oci
+ - ` + "`azure`" + `
+ - ` + "`ec2`" + `
+ - ` + "`gce`" + `
+ - ` + "`oci`" + `
 
 When a running controller is updated, the credential for the cloud
 is also uploaded. As with the cloud, the credential needs
-to have been added to the current client, use add-credential to
+to have been added to the current client; use ` + "`add-credential` " + `to
 do that. If there's only one credential for the cloud it will be
-uploaded to the controller automatically by add-cloud command. 
+uploaded to the controller automatically by add-cloud command.
 However, if the cloud has multiple credentials on this client
-you can specify which to upload with the --credential option.
+you can specify which to upload with the ` + "`--credential`" + `option.
 
 When adding clouds to a controller, some clouds are whitelisted and can be easily added:
 %v
 
 Other cloud combinations can only be force added as the user must consider
-network routability, etc - concerns that are outside of scope of Juju.
-When forced addition is desired, use --force.
+network routability, etc -- concerns that are outside of scope of Juju.
+When forced addition is desired, use ` + "`--force`" + `.
 
 `
 
@@ -121,15 +116,15 @@ const usageAddCloudExamples = `
     juju add-cloud
     juju add-cloud --force
     juju add-cloud mycloud ~/mycloud.yaml
-    juju add-cloud --controller mycontroller mycloud 
+    juju add-cloud --controller mycontroller mycloud
     juju add-cloud --controller mycontroller mycloud --credential mycred
     juju add-cloud --client mycloud ~/mycloud.yaml
 `
 
 // AddCloudAPI - Implemented by cloudapi.Client.
 type AddCloudAPI interface {
-	AddCloud(jujucloud.Cloud, bool) error
-	AddCredential(tag string, credential jujucloud.Credential) error
+	AddCloud(context.Context, jujucloud.Cloud, bool) error
+	AddCredential(ctx context.Context, tag string, credential jujucloud.Credential) error
 	Close() error
 }
 
@@ -153,13 +148,17 @@ type AddCloudCommand struct {
 
 	// These attributes are used when adding a cloud to a controller.
 	credentialName  string
-	addCloudAPIFunc func() (AddCloudAPI, error)
+	addCloudAPIFunc func(ctx context.Context) (AddCloudAPI, error)
 
 	// Force holds whether user wants to force addition of the cloud.
 	Force bool
 
 	// existsLocally whether this cloud already exists locally.
 	existsLocally bool
+
+	// targetController holds a controller name when adding a cloud
+	// to a controller managed by JAAS.
+	targetController string
 }
 
 // NewAddCloudCommand returns a command to add cloud information.
@@ -173,16 +172,15 @@ func NewAddCloudCommand(cloudMetadataStore CloudMetadataStore) cmd.Command {
 		// Ping is provider.Ping except in tests where we don't actually want to
 		// require a valid cloud.
 		Ping: func(p environs.EnvironProvider, endpoint string) error {
-			callCtx := envcontext.WithoutCredentialInvalidator(stdcontext.Background())
-			return p.Ping(callCtx, endpoint)
+			return p.Ping(context.Background(), endpoint)
 		},
 	}
 	c.addCloudAPIFunc = c.cloudAPI
 	return modelcmd.WrapBase(c)
 }
 
-func (c *AddCloudCommand) cloudAPI() (AddCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *AddCloudCommand) cloudAPI(ctx context.Context) (AddCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -213,10 +211,15 @@ func (c *AddCloudCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.CloudFile, "f", "", "The path to a cloud definition file")
 	f.StringVar(&c.CloudFile, "file", "", "The path to a cloud definition file")
 	f.StringVar(&c.credentialName, "credential", "", "Credential to use for new cloud")
+	f.StringVar(&c.targetController, "target-controller", "", "The name of a JAAS managed controller to add a cloud to")
 }
 
 // Init populates the command with the args from the command line.
 func (c *AddCloudCommand) Init(args []string) (err error) {
+	if c.targetController != "" {
+		return cmd.ErrCommandMissing
+	}
+
 	if err := c.OptionalControllerCommand.Init(args); err != nil {
 		return err
 	}
@@ -281,7 +284,7 @@ func (c *AddCloudCommand) addCredentialToController(ctx *cmd.Context, cloud juju
 	}
 	cloudCredTag := names.NewCloudCredentialTag(id)
 
-	if err := apiClient.AddCredential(cloudCredTag.String(), *cred); err != nil {
+	if err := apiClient.AddCredential(ctx, cloudCredTag.String(), *cred); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -341,12 +344,12 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
 func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.Cloud) error {
 	// A controller has been specified so upload the cloud details
 	// plus a corresponding credential to the controller.
-	api, err := c.addCloudAPIFunc()
+	api, err := c.addCloudAPIFunc(ctxt)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
-	err = api.AddCloud(*newCloud, c.Force)
+	err = api.AddCloud(ctxt, *newCloud, c.Force)
 	if err != nil {
 		if params.ErrCode(err) == params.CodeAlreadyExists {
 			ctxt.Infof("Cloud %q already exists on the controller %q.", c.Cloud, c.ControllerName)
@@ -356,7 +359,7 @@ func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.
 			return nil
 		}
 		if params.ErrCode(err) == params.CodeIncompatibleClouds {
-			logger.Infof("%v", err)
+			logger.Infof(context.TODO(), "%v", err)
 			ctxt.Infof("Adding a cloud of type %q might not function correctly on this controller.\n"+
 				"If you really want to do this, use --force.", newCloud.Type)
 			return nil
@@ -367,7 +370,7 @@ func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.
 	// Add a credential for the newly added cloud.
 	err = c.addCredentialToController(ctxt, *newCloud, api)
 	if err != nil {
-		logger.Warningf("%v", err)
+		logger.Warningf(context.TODO(), "%v", err)
 		ctxt.Infof("To upload a credential to the controller for cloud %q, use \n"+
 			"* 'add-model' with --credential option or\n"+
 			"* 'add-credential -c %v'.", newCloud.Name, newCloud.Name)

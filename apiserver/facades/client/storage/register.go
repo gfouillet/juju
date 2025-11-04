@@ -7,47 +7,35 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/state/stateenvirons"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
 	registry.MustRegister("Storage", 6, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newStorageAPI(ctx) // modify Remove to support force and maxWait; add DetachStorage to support force and maxWait.
+		return newStorageAPIV6(ctx) // modify Remove to support force and maxWait;
+	}, reflect.TypeOf((*StorageAPIv6)(nil)))
+
+	registry.MustRegister("Storage", 7, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newStorageAPI(ctx) // support force option on import-fileystem.
 	}, reflect.TypeOf((*StorageAPI)(nil)))
+}
+
+func newStorageAPIV6(ctx facade.ModelContext) (*StorageAPIv6, error) {
+	storageAPI, err := newStorageAPI(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return &StorageAPIv6{
+		storageAPI,
+	}, nil
 }
 
 // newStorageAPI returns a new storage API facade.
 func newStorageAPI(ctx facade.ModelContext) (*StorageAPI, error) {
-	st := ctx.State()
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	storageMetadata := func() (StorageService, storage.ProviderRegistry, error) {
-		registry, err := stateenvirons.NewStorageProviderRegistryForModel(
-			model,
-			ctx.ServiceFactory().Cloud(),
-			ctx.ServiceFactory().Credential(),
-			stateenvirons.GetNewEnvironFunc(environs.New),
-			stateenvirons.GetNewCAASBrokerFunc(caas.New))
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		return ctx.ServiceFactory().Storage(registry), registry, nil
-	}
-	storageAccessor, err := getStorageAccessor(st)
-	if err != nil {
-		return nil, errors.Annotate(err, "getting backend")
-	}
+	domainServices := ctx.DomainServices()
 
 	authorizer := ctx.Auth()
 	if !authorizer.AuthClient() {
@@ -55,7 +43,13 @@ func newStorageAPI(ctx facade.ModelContext) (*StorageAPI, error) {
 	}
 
 	return NewStorageAPI(
-		stateShim{st}, model.Type(),
-		storageAccessor, ctx.ServiceFactory().BlockDevice(), storageMetadata, authorizer,
-		credentialcommon.CredentialInvalidatorGetter(ctx)), nil
+		ctx.ControllerUUID(),
+		ctx.ModelUUID(),
+		authorizer,
+		ctx.Logger().Child("storage"),
+		domainServices.Application(),
+		domainServices.BlockDevice(),
+		domainServices.Removal(),
+		domainServices.Storage(),
+	), nil
 }

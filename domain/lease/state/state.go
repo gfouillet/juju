@@ -8,14 +8,14 @@ import (
 
 	"github.com/canonical/sqlair"
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 
 	coredatabase "github.com/juju/juju/core/database"
+	coreerrors "github.com/juju/juju/core/errors"
 	corelease "github.com/juju/juju/core/lease"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/domain"
 	"github.com/juju/juju/internal/database"
-	"github.com/juju/juju/internal/database/txn"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/uuid"
 )
 
@@ -42,12 +42,12 @@ func (s *State) Leases(ctx context.Context, keys ...corelease.Key) (map[coreleas
 	// As it is, there are no upstream usages for more than one key,
 	// so we just lock in that behaviour.
 	if len(keys) > 1 {
-		return nil, errors.NotSupportedf("filtering with more than one lease key")
+		return nil, errors.Errorf("filtering with more than one lease key %w", coreerrors.NotSupported)
 	}
 
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	q := `
@@ -70,14 +70,14 @@ WHERE  t.type = $Lease.type
 AND    l.model_uuid = $Lease.model_uuid
 AND    l.name = $Lease.name`, lease)
 		if err != nil {
-			return nil, errors.Annotate(err, "preparing select lease with keys statement")
+			return nil, errors.Errorf("preparing select lease with keys statement: %w", err)
 		}
 
 		args = []any{lease}
 	} else {
 		stmt, err = s.Prepare(q, Lease{})
 		if err != nil {
-			return nil, errors.Annotate(err, "preparing select lease statement")
+			return nil, errors.Errorf("preparing select lease statement: %w", err)
 		}
 	}
 
@@ -88,7 +88,7 @@ AND    l.name = $Lease.name`, lease)
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return nil
 		} else if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		result = map[corelease.Key]corelease.Info{}
@@ -104,16 +104,16 @@ AND    l.name = $Lease.name`, lease)
 		}
 		return nil
 	})
-	return result, errors.Trace(domain.CoerceError(err))
+	return result, errors.Capture(err)
 }
 
 // ClaimLease (lease.Store) claims the lease indicated by the input key,
 // for the holder and duration indicated by the input request.
 // The lease must not already be held, otherwise an error is returned.
 func (s *State) ClaimLease(ctx context.Context, uuid uuid.UUID, key corelease.Key, req corelease.Request) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	lease := Lease{
@@ -131,25 +131,29 @@ SELECT $Lease.uuid, id, $Lease.model_uuid, $Lease.name, $Lease.holder, datetime(
 FROM   lease_type
 WHERE  type = $Lease.type;`, lease)
 	if err != nil {
-		return errors.Annotate(err, "preparing insert lease statement")
+		return errors.Errorf("preparing insert lease statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		return tx.Query(ctx, stmt, lease).Run()
+		err := tx.Query(ctx, stmt, lease).Run()
+		if database.IsErrConstraintUnique(err) {
+			return corelease.ErrHeld
+		} else if err != nil {
+			return errors.Capture(err)
+		}
+		return nil
 	})
-	if database.IsErrConstraintUnique(err) {
-		return corelease.ErrHeld
-	}
-	return errors.Trace(domain.CoerceError(err))
+
+	return errors.Capture(err)
 }
 
 // ExtendLease (lease.Store) ensures the input lease will be held for at least
 // the requested duration starting from now.
 // If the input holder does not currently hold the lease, an error is returned.
 func (s *State) ExtendLease(ctx context.Context, key corelease.Key, req corelease.Request) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	lease := Lease{
@@ -172,7 +176,7 @@ WHERE  uuid = (
     AND    l.holder = $Lease.holder
 )`, lease)
 	if err != nil {
-		return errors.Annotate(err, "preparing update lease statement")
+		return errors.Errorf("preparing update lease statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -188,18 +192,18 @@ WHERE  uuid = (
 				err = corelease.ErrInvalid
 			}
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 // RevokeLease (lease.Store) deletes the lease from the store,
 // provided it exists and is held by the input holder.
 // If either of these conditions is false, an error is returned.
 func (s *State) RevokeLease(ctx context.Context, key corelease.Key, holder string) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	lease := Lease{
@@ -220,7 +224,7 @@ WHERE  uuid = (
     AND    l.holder = $Lease.holder
 )`, lease)
 	if err != nil {
-		return errors.Annotate(err, "preparing delete lease statement")
+		return errors.Errorf("preparing delete lease statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -233,17 +237,17 @@ WHERE  uuid = (
 				err = corelease.ErrInvalid
 			}
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 // LeaseGroup (lease.Store) returns all leases
 // for the input namespace and model.
 func (s *State) LeaseGroup(ctx context.Context, namespace, modelUUID string) (map[corelease.Key]corelease.Info, error) {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	lease := Lease{
@@ -257,7 +261,7 @@ FROM   lease l JOIN lease_type t ON l.lease_type_id = t.id
 WHERE  t.type = $Lease.type
 AND    l.model_uuid = $Lease.model_uuid;`, lease)
 	if err != nil {
-		return nil, errors.Annotate(err, "preparing delete lease statement")
+		return nil, errors.Errorf("preparing delete lease statement: %w", err)
 	}
 
 	var result map[corelease.Key]corelease.Info
@@ -267,7 +271,7 @@ AND    l.model_uuid = $Lease.model_uuid;`, lease)
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return nil
 		} else if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		result = map[corelease.Key]corelease.Info{}
@@ -283,21 +287,21 @@ AND    l.model_uuid = $Lease.model_uuid;`, lease)
 		}
 		return nil
 	})
-	return result, errors.Trace(domain.CoerceError(err))
+	return result, errors.Capture(err)
 }
 
 // PinLease (lease.Store) adds the input entity into the lease_pin table
 // to indicate that the lease indicated by the input key must not expire,
 // and that this entity requires such behaviour.
 func (s *State) PinLease(ctx context.Context, key corelease.Key, entity string) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	leasePin := LeasePin{
@@ -318,16 +322,20 @@ WHERE  t.type = $Lease.type
 AND    l.model_uuid = $Lease.model_uuid
 AND    l.name = $Lease.name;`, leasePin, lease)
 	if err != nil {
-		return errors.Annotate(err, "preparing insert lease pin statement")
+		return errors.Errorf("preparing insert lease pin statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		return errors.Trace(tx.Query(ctx, stmt, leasePin, lease).Run())
-	})
-	if database.IsErrConstraintUnique(err) {
+		err := tx.Query(ctx, stmt, leasePin, lease).Run()
+		if database.IsErrConstraintUnique(err) {
+			return nil
+		} else if err != nil {
+			return errors.Capture(err)
+		}
 		return nil
-	}
-	return errors.Trace(domain.CoerceError(err))
+	})
+
+	return errors.Capture(err)
 }
 
 // UnpinLease (lease.Store) removes the record indicated by the input
@@ -336,9 +344,9 @@ AND    l.name = $Lease.name;`, leasePin, lease)
 // When there are no entities associated with a particular lease,
 // it is determined not to be pinned, and can expire normally.
 func (s *State) UnpinLease(ctx context.Context, key corelease.Key, entity string) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	leasePin := LeasePin{
@@ -362,21 +370,21 @@ WHERE  uuid = (
     AND    l.name = $Lease.name
     AND    p.entity_id = $LeasePin.entity_id)`, lease, leasePin)
 	if err != nil {
-		return errors.Annotate(err, "preparing delete lease pin statement")
+		return errors.Errorf("preparing delete lease pin statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		return errors.Trace(tx.Query(ctx, stmt, lease, leasePin).Run())
+		return errors.Capture(tx.Query(ctx, stmt, lease, leasePin).Run())
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 // Pinned (lease.Store) returns all leases that are currently pinned,
 // and the entities requiring such behaviour for them.
 func (s *State) Pinned(ctx context.Context) (map[corelease.Key][]string, error) {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	stmt, err := s.Prepare(`
@@ -387,7 +395,7 @@ FROM     lease l
 		 JOIN lease_pin p on l.uuid = p.lease_uuid
 ORDER BY l.uuid;`, Lease{}, LeasePin{})
 	if err != nil {
-		return nil, errors.Annotate(err, "preparing select pinned lease statement")
+		return nil, errors.Errorf("preparing select pinned lease statement: %w", err)
 	}
 
 	var result map[corelease.Key][]string
@@ -398,7 +406,7 @@ ORDER BY l.uuid;`, Lease{}, LeasePin{})
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return nil
 		} else if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		seen := set.NewStrings()
@@ -421,15 +429,15 @@ ORDER BY l.uuid;`, Lease{}, LeasePin{})
 		}
 		return nil
 	})
-	return result, errors.Trace(domain.CoerceError(err))
+	return result, errors.Capture(err)
 }
 
 // ExpireLeases (lease.Store) deletes all leases that have expired, from the
 // store. This method is intended to be called periodically by a worker.
 func (s *State) ExpireLeases(ctx context.Context) error {
-	db, err := s.DB()
+	db, err := s.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	// This is split into two queries to avoid a write transaction preventing
@@ -440,7 +448,7 @@ func (s *State) ExpireLeases(ctx context.Context) error {
 SELECT COUNT(*) AS &Count.num FROM lease WHERE expiry < datetime('now');
 `, count)
 	if err != nil {
-		return errors.Annotate(err, "preparing select expired count statement")
+		return errors.Errorf("preparing select expired count statement: %w", err)
 	}
 
 	deleteStmt, err := s.Prepare(`
@@ -451,15 +459,15 @@ DELETE FROM lease WHERE uuid in (
 	AND    l.expiry < datetime('now')
 );`)
 	if err != nil {
-		return errors.Annotate(err, "preparing delete lease statement")
+		return errors.Errorf("preparing delete lease statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, countStmt).Get(&count)
-		if txn.IsErrRetryable(err) {
+		if database.IsErrRetryable(err) {
 			return nil
 		} else if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		// Nothing to do here, so return early.
@@ -475,23 +483,23 @@ DELETE FROM lease WHERE uuid in (
 			// locking or other contention. We know we will retry very soon,
 			// so just log and indicate success for these cases.
 			// Rethink this if the worker cardinality changes to be singular.
-			if txn.IsErrRetryable(err) {
-				s.logger.Debugf("ignoring error during lease expiry: %s", err.Error())
+			if database.IsErrRetryable(err) {
+				s.logger.Debugf(ctx, "ignoring error during lease expiry: %s", err.Error())
 				return nil
 			}
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		expired, err := outcome.Result().RowsAffected()
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		if expired > 0 {
-			s.logger.Infof("expired %d leases", expired)
+			s.logger.Infof(ctx, "expired %d leases", expired)
 		}
 
 		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }

@@ -16,7 +16,7 @@ import (
 
 // SecretsFacade instances provide a set of API for the worker to deal with secret prune.
 type SecretsFacade interface {
-	WatchRevisionsToPrune() (watcher.NotifyWatcher, error)
+	WatchRevisionsToPrune(context.Context) (watcher.NotifyWatcher, error)
 	DeleteObsoleteUserSecretRevisions(context.Context) error
 }
 
@@ -45,6 +45,7 @@ func NewWorker(config Config) (worker.Worker, error) {
 
 	w := &Worker{config: config}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "secrets-pruner",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -67,14 +68,17 @@ func (w *Worker) Wait() error {
 	return w.catacomb.Wait()
 }
 
-func (w *Worker) processChanges() error {
-	ctx, cancel := context.WithCancel(context.Background())
+func (w *Worker) processChanges(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	return w.config.SecretsFacade.DeleteObsoleteUserSecretRevisions(ctx)
 }
 
 func (w *Worker) loop() (err error) {
-	watcher, err := w.config.SecretsFacade.WatchRevisionsToPrune()
+	ctx, cancel := w.scopeContext()
+	defer cancel()
+
+	watcher, err := w.config.SecretsFacade.WatchRevisionsToPrune(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -92,10 +96,14 @@ func (w *Worker) loop() (err error) {
 			if !ok {
 				return errors.New("secret prune changed watch closed")
 			}
-			w.config.Logger.Debugf("maybe have user secret revisions to prune")
-			if err := w.processChanges(); err != nil {
+			w.config.Logger.Debugf(ctx, "maybe have user secret revisions to prune")
+			if err := w.processChanges(ctx); err != nil {
 				return errors.Trace(err)
 			}
 		}
 	}
+}
+
+func (w *Worker) scopeContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }

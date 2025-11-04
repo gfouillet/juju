@@ -4,29 +4,29 @@
 package uniter
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facade"
-	coreapplication "github.com/juju/juju/core/application"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/unit"
 )
 
-func applicationAccessor(authorizer facade.Authorizer, st *state.State) common.GetAuthFunc {
-	return func() (common.AuthFunc, error) {
+func applicationAccessor(authorizer facade.Authorizer) common.GetAuthFunc {
+	return func(ctx context.Context) (common.AuthFunc, error) {
 		switch tag := authorizer.GetAuthTag().(type) {
 		case names.ApplicationTag:
 			return func(applicationTag names.Tag) bool {
 				return tag == applicationTag
 			}, nil
 		case names.UnitTag:
-			entity, err := st.Unit(tag.Id())
+			unitName, err := unit.NewName(tag.Id())
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			applicationName := entity.ApplicationName()
-			applicationTag := names.NewApplicationTag(applicationName)
+			applicationTag := names.NewApplicationTag(unitName.Application())
 			return func(tag names.Tag) bool {
 				return tag == applicationTag
 			}, nil
@@ -36,8 +36,8 @@ func applicationAccessor(authorizer facade.Authorizer, st *state.State) common.G
 	}
 }
 
-func machineAccessor(authorizer facade.Authorizer, st *state.State) common.GetAuthFunc {
-	return func() (common.AuthFunc, error) {
+func machineAccessor(authorizer facade.Authorizer, applicationService ApplicationService) common.GetAuthFunc {
+	return func(ctx context.Context) (common.AuthFunc, error) {
 		switch tag := authorizer.GetAuthTag().(type) {
 		// Application agents can't access machines.
 		case names.ApplicationTag:
@@ -45,15 +45,15 @@ func machineAccessor(authorizer facade.Authorizer, st *state.State) common.GetAu
 				return false
 			}, nil
 		case names.UnitTag:
-			entity, err := st.Unit(tag.Id())
+			unitName, err := unit.NewName(tag.Id())
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			machineId, err := entity.AssignedMachineId()
+			machineID, err := applicationService.GetUnitMachineName(ctx, unitName)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			machineTag := names.NewMachineTag(machineId)
+			machineTag := names.NewMachineTag(machineID.String())
 			return func(tag names.Tag) bool {
 				return tag == machineTag
 			}, nil
@@ -63,34 +63,27 @@ func machineAccessor(authorizer facade.Authorizer, st *state.State) common.GetAu
 	}
 }
 
-func cloudSpecAccessor(authorizer facade.Authorizer, st *state.State) func() (func() bool, error) {
-	return func() (func() bool, error) {
+func cloudSpecAccessor(authorizer facade.Authorizer, appService ApplicationService) func(ctx context.Context) (func() bool, error) {
+	return func(ctx context.Context) (func() bool, error) {
 		var appName string
-		var err error
-
 		switch tag := authorizer.GetAuthTag().(type) {
-		case names.ApplicationTag:
-			appName = tag.Id()
 		case names.UnitTag:
-			entity, err := st.Unit(tag.Id())
+			unitName, err := unit.NewName(tag.Id())
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			appName = entity.ApplicationName()
+			appName = unitName.Application()
 		default:
-			return nil, errors.Errorf("expected names.UnitTag or names.ApplicationTag, got %T", tag)
+			return nil, errors.Errorf("expected names.UnitTag, got %T", tag)
 		}
 
-		app, err := st.Application(appName)
+		trust, err := appService.GetApplicationTrustSetting(ctx, appName)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		config, err := app.ApplicationConfig()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
+
 		return func() bool {
-			return config.GetBool(coreapplication.TrustConfigOptionName, false)
+			return trust
 		}, nil
 	}
 }

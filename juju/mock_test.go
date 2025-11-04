@@ -4,12 +4,15 @@
 package juju_test
 
 import (
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"context"
+	"net/url"
+
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/testing"
 )
 
 type mockAPIConnection struct {
@@ -18,12 +21,13 @@ type mockAPIConnection struct {
 	// If non-nil, close is called when the Close method is called.
 	close func(api.Connection) error
 
-	addr          string
+	addr          *url.URL
 	ipAddr        string
 	apiHostPorts  []network.MachineHostPorts
 	modelTag      string
 	controllerTag string
 	publicDNSName string
+	authTag       names.Tag
 }
 
 type mockedStateFlags int
@@ -41,7 +45,6 @@ const (
 func mockedAPIState(flags mockedStateFlags) *mockAPIConnection {
 	hasHostPort := flags&mockedHostPort == mockedHostPort
 	hasModelTag := flags&mockedModelTag == mockedModelTag
-	addr := ""
 
 	apiHostPorts := []network.MachineHostPorts{}
 	if hasHostPort {
@@ -58,7 +61,8 @@ func mockedAPIState(flags mockedStateFlags) *mockAPIConnection {
 		apiHostPorts:  apiHostPorts,
 		modelTag:      modelTag,
 		controllerTag: testing.ControllerTag.Id(),
-		addr:          addr,
+		addr:          nil,
+		authTag:       names.NewUserTag("admin"),
 	}
 }
 
@@ -69,16 +73,24 @@ func (s *mockAPIConnection) Close() error {
 	return nil
 }
 
-func (s *mockAPIConnection) ServerVersion() (version.Number, bool) {
-	return version.MustParse("1.2.3"), true
+func (s *mockAPIConnection) ServerVersion() (semversion.Number, bool) {
+	return semversion.MustParse("1.2.3"), true
 }
 
 func (s *mockAPIConnection) IPAddr() string {
 	return s.ipAddr
 }
 
-func (s *mockAPIConnection) Addr() string {
-	return s.addr
+func (s *mockAPIConnection) Addr() *url.URL {
+	if s.addr == nil {
+		return nil
+	}
+	copy := *s.addr
+	return &copy
+}
+
+func (s *mockAPIConnection) IsProxied() bool {
+	return false
 }
 
 func (s *mockAPIConnection) PublicDNSName() string {
@@ -109,13 +121,13 @@ func (s *mockAPIConnection) ControllerTag() names.ControllerTag {
 }
 
 func (s *mockAPIConnection) AuthTag() names.Tag {
-	return names.NewUserTag("admin")
+	return s.authTag
 }
 
 func (s *mockAPIConnection) ControllerAccess() string {
 	return "superuser"
 }
 
-func panicAPIOpen(apiInfo *api.Info, opts api.DialOpts) (api.Connection, error) {
+func panicAPIOpen(ctx context.Context, apiInfo *api.Info, opts api.DialOpts) (api.Connection, error) {
 	panic("api.Open called unexpectedly")
 }

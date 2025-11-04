@@ -13,20 +13,78 @@ run_api_imports() {
 	done
 }
 
+run_domain_imports() {
+	dirs=$(find ./domain -mindepth 1 -maxdepth 4 -type d | grep -E "/service$|/state$" | awk '{split($0,a,"/"); print "./"a[2]"/"a[3]}' | sort -u)
+	for dir in $dirs; do
+		echo "Checking $dir"
+
+		if [[ -d "$dir/service" ]]; then
+			# Service domain packages should not import state domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/service" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/state"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain service imports it's state pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state imports it's service pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state/controller" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state/controller" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state/controller imports it's service pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state/model" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state/model" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state/model imports it's service pkg $dir" && exit 1)
+		fi
+	done
+}
+
+run_juju_errors_imports() {
+	pkgs=("domain")
+
+	for pkg in "${pkgs[@]}"; do
+		dirs=$(find ${pkg} -mindepth 1 -maxdepth 10 -type d | sort -u)
+		for dir in $dirs; do
+			echo "Checking $dir"
+			imports=$(go list -json -e -test "./${dir}" 2>/dev/null | jq -r ".Imports // [] | .[]")
+			disallowed="github.com/juju/errors"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${imports}" || (echo "Error: pkg $dir contains juju/errors imports" && exit 1)
+		done
+	done
+}
+
+run_context_background() {
+	pkgs=("domain")
+
+	for pkg in "${pkgs[@]}"; do
+		dirs=$(find ${pkg} -mindepth 1 -maxdepth 10 -type d | sort -u)
+		files=$(find ${dirs} -type f -name "*_test.go")
+		for file in $files; do
+			grep "context.Background()" "$file" && (echo "Error: pkg $file contains context.Background()" && exit 1)
+		done
+	done
+
+	echo "done"
+}
+
 run_go() {
 	VER=$(golangci-lint --version | tr -s ' ' | cut -d ' ' -f 4 | cut -d '.' -f 1,2)
-	if [[ ${VER} != "1.55" ]] && [[ ${VER} != "v1.55" ]]; then
-		(echo >&2 -e '\nError: golangci-lint version does not match 1.55. Please upgrade/downgrade to the right version.')
+	if [[ ${VER} != "2.5" ]] && [[ ${VER} != "v2.5.0" ]]; then
+		(echo >&2 -e '\nError: golangci-lint version does not match 2.5.0. Please upgrade/downgrade to the right version.')
 		exit 1
 	fi
-	OUT=$(golangci-lint run -c .github/golangci-lint.config.yaml 2>&1)
+	OUT=$(golangci-lint run -c .golangci.yml 2>&1 | sed '/0 issues./d')
 	if [[ -n ${OUT} ]]; then
 		(echo >&2 "\\nError: linter has issues:\\n\\n${OUT}")
-		exit 1
-	fi
-	OUT=$(golangci-lint run -c .github/golangci-lint.config.experimental.yaml 2>&1)
-	if [[ -n ${OUT} ]]; then
-		(echo >&2 "\\nError: experimental linter has issues:\\n\\n${OUT}")
 		exit 1
 	fi
 }
@@ -63,6 +121,35 @@ run_go_fanout() {
 	done
 }
 
+run_go_txncheck() {
+	go run ./scripts/txncheck/main.go "$PWD" 2>&1
+}
+
+join() {
+	local IFS="$1"
+	shift
+	echo "$*"
+}
+
+run_govulncheck() {
+	ignore=(
+		# The vulnerability below is for a method not used since Juju 1.x.
+		# https://pkg.go.dev/vuln/GO-2025-3798
+		"GO-2025-3798"
+	)
+	ignoreMatcher=$(join "|" "${ignore[@]}")
+
+	echo "Ignoring vulnerabilities: ${ignoreMatcher}"
+
+	allVulns=$(govulncheck -format openvex "github.com/juju/juju/...")
+	filteredVulns=$(echo ${allVulns} | jq -r '.statements[] | select(.status == "affected") | .vulnerability.name' | grep -vE "${ignoreMatcher}")
+
+	if [[ -n ${filteredVulns} ]]; then
+		(echo >&2 -e "\\nError: govulncheck has issues:\\n\\n${filteredVulns}")
+		exit 1
+	fi
+}
+
 test_static_analysis_go() {
 	if [ "$(skip 'test_static_analysis_go')" ]; then
 		echo "==> TEST SKIPPED: static go analysis"
@@ -74,9 +161,21 @@ test_static_analysis_go() {
 
 		cd .. || exit
 
+		run "run_juju_errors_imports"
 		run "run_api_imports"
+		run "run_domain_imports"
+		run "run_context_background"
+
 		run_linter "run_go"
 		run_linter "run_go_tidy"
 		run_linter "run_go_fanout"
+		run_linter "run_go_txncheck"
+
+		# govulncheck static analysis
+		if which govulncheck >/dev/null 2>&1; then
+			run_linter "run_govulncheck"
+		else
+			echo "govulncheck not found, govulncheck static analysis disabled"
+		fi
 	)
 }

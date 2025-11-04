@@ -4,14 +4,13 @@
 package modelmigration
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/environs/config"
 )
 
@@ -20,9 +19,11 @@ type exportSuite struct {
 	service     *MockExportService
 }
 
-var _ = gc.Suite(&exportSuite{})
+func TestExportSuite(t *testing.T) {
+	tc.Run(t, &exportSuite{})
+}
 
-func (s *exportSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *exportSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.coordinator = NewMockCoordinator(ctrl)
@@ -37,7 +38,7 @@ func (s *exportSuite) newExportOperation() *exportOperation {
 	}
 }
 
-func (s *exportSuite) TestRegisterExport(c *gc.C) {
+func (s *exportSuite) TestRegisterExport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.coordinator.EXPECT().Add(gomock.Any())
@@ -45,7 +46,7 @@ func (s *exportSuite) TestRegisterExport(c *gc.C) {
 	RegisterExport(s.coordinator)
 }
 
-func (s *exportSuite) TestNilModelConfig(c *gc.C) {
+func (s *exportSuite) TestNilModelConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.service.EXPECT().ModelConfig(gomock.Any()).Return(nil, nil)
@@ -53,11 +54,11 @@ func (s *exportSuite) TestNilModelConfig(c *gc.C) {
 	model := description.NewModel(description.ModelArgs{})
 
 	op := s.newExportOperation()
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid)
 }
 
-func (s *exportSuite) TestEmptyModelConfig(c *gc.C) {
+func (s *exportSuite) TestEmptyModelConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := &config.Config{}
@@ -67,11 +68,11 @@ func (s *exportSuite) TestEmptyModelConfig(c *gc.C) {
 	model := description.NewModel(description.ModelArgs{})
 
 	op := s.newExportOperation()
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid)
 }
 
-func (s *exportSuite) TestModelConfig(c *gc.C) {
+func (s *exportSuite) TestModelConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config, err := config.New(config.NoDefaults, map[string]any{
@@ -79,7 +80,7 @@ func (s *exportSuite) TestModelConfig(c *gc.C) {
 		"uuid": "a677bdfd-3c96-46b2-912f-38e25faceaf7",
 		"type": "sometype",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.service.EXPECT().ModelConfig(gomock.Any()).Return(config, nil)
 
@@ -88,8 +89,8 @@ func (s *exportSuite) TestModelConfig(c *gc.C) {
 	})
 
 	op := s.newExportOperation()
-	err = op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIsNil)
+	err = op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(model.Config(), jc.DeepEquals, config.AllAttrs())
+	c.Assert(model.Config(), tc.DeepEquals, config.AllAttrs())
 }

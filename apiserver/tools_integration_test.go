@@ -4,29 +4,30 @@
 package apiserver_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"testing"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	apiauthentication "github.com/juju/juju/api/authentication"
 	apitesting "github.com/juju/juju/apiserver/testing"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/user"
+	usertesting "github.com/juju/juju/core/user/testing"
+	"github.com/juju/juju/domain/access"
 	"github.com/juju/juju/domain/access/service"
 	"github.com/juju/juju/internal/auth"
 	jujuhttp "github.com/juju/juju/internal/http"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing/factory"
 )
 
 type toolsCommonSuite struct {
@@ -51,11 +52,11 @@ func (s *toolsCommonSuite) modelToolsURL(model, query string) *url.URL {
 	return u
 }
 
-func (s *toolsCommonSuite) assertJSONErrorResponse(c *gc.C, resp *http.Response, expCode int, expError string) {
+func (s *toolsCommonSuite) assertJSONErrorResponse(c *tc.C, resp *http.Response, expCode int, expError string) {
 	toolsResponse := assertResponse(c, resp, expCode)
-	c.Check(toolsResponse.ToolsList, gc.IsNil)
-	c.Check(toolsResponse.Error, gc.NotNil)
-	c.Check(toolsResponse.Error.Message, gc.Matches, expError)
+	c.Check(toolsResponse.ToolsList, tc.IsNil)
+	c.Check(toolsResponse.Error, tc.NotNil)
+	c.Check(toolsResponse.Error.Message, tc.Matches, expError)
 }
 
 // URL returns a URL for this server with the given path and
@@ -67,88 +68,102 @@ func (s *toolsCommonSuite) URL(path string, queryParams url.Values) *url.URL {
 	return &url
 }
 
-func assertResponse(c *gc.C, resp *http.Response, expStatus int) params.ToolsResult {
+func assertResponse(c *tc.C, resp *http.Response, expStatus int) params.ToolsResult {
 	body := apitesting.AssertResponse(c, resp, expStatus, params.ContentTypeJSON)
 	var toolsResponse params.ToolsResult
 	err := json.Unmarshal(body, &toolsResponse)
-	c.Assert(err, jc.ErrorIsNil, gc.Commentf("body: %s", body))
+	c.Assert(err, tc.ErrorIsNil, tc.Commentf("body: %s", body))
 	return toolsResponse
 }
 
 type toolsWithMacaroonsIntegrationSuite struct {
 	toolsCommonSuite
 	jujutesting.MacaroonSuite
-	userTag names.Tag
+	userName user.Name
 }
 
-var _ = gc.Suite(&toolsWithMacaroonsIntegrationSuite{})
-
-func (s *toolsWithMacaroonsIntegrationSuite) SetUpTest(c *gc.C) {
+func TestToolsWithMacaroonsIntegrationSuite(t *testing.T) {
+	tc.Run(t, &toolsWithMacaroonsIntegrationSuite{})
+}
+func (s *toolsWithMacaroonsIntegrationSuite) SetUpTest(c *tc.C) {
 	s.MacaroonSuite.SetUpTest(c)
 
-	s.userTag = names.NewUserTag("bob@authhttpsuite")
-	s.AddModelUser(c, s.userTag.Id())
-	s.AddControllerUser(c, s.userTag.Id(), permission.LoginAccess)
+	s.userName = usertesting.GenNewName(c, "bob@authhttpsuite")
+	s.AddModelUserWithPermission(c, s.userName, permission.AdminAccess)
+	s.AddControllerUser(c, s.userName, permission.LoginAccess)
 
 	apiInfo := s.APIInfo(c)
 	baseURL, err := url.Parse(fmt.Sprintf("https://%s/", apiInfo.Addrs[0]))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.baseURL = baseURL
 	s.modelUUID = s.ControllerModelUUID()
 }
 
-func (s *toolsWithMacaroonsIntegrationSuite) TestWithNoBasicAuthReturnsDischargeRequiredError(c *gc.C) {
+func (s *toolsWithMacaroonsIntegrationSuite) TestWithNoBasicAuthReturnsDischargeRequiredError(c *tc.C) {
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{
 		Method: "POST",
 		URL:    s.toolsURI(""),
 	})
 
 	charmResponse := assertResponse(c, resp, http.StatusUnauthorized)
-	c.Assert(charmResponse.Error, gc.NotNil)
-	c.Assert(charmResponse.Error.Message, gc.Equals, "macaroon discharge required: authentication required")
-	c.Assert(charmResponse.Error.Code, gc.Equals, params.CodeDischargeRequired)
-	c.Assert(charmResponse.Error.Info, gc.NotNil)
-	c.Assert(charmResponse.Error.Info["bakery-macaroon"], gc.NotNil)
+	defer resp.Body.Close()
+	c.Assert(charmResponse.Error, tc.NotNil)
+	c.Assert(charmResponse.Error.Message, tc.Equals, "macaroon discharge required: authentication required")
+	c.Assert(charmResponse.Error.Code, tc.Equals, params.CodeDischargeRequired)
+	c.Assert(charmResponse.Error.Info, tc.NotNil)
+	c.Assert(charmResponse.Error.Info["bakery-macaroon"], tc.NotNil)
 }
 
-func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithDischargedMacaroon(c *gc.C) {
+func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithDischargedMacaroon(c *tc.C) {
+	s.MacaroonSuite.AddControllerUser(c, s.userName, permission.SuperuserAccess)
 	checkCount := 0
 	s.DischargerLogin = func() string {
 		checkCount++
-		return s.userTag.Id()
+		return s.userName.Name()
 	}
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{
-		Do:     s.doer(),
+		Do:     s.doer(), //nolint:bodyclose // Closed below.
 		Method: "POST",
 		URL:    s.toolsURI(""),
 	})
 	s.assertJSONErrorResponse(c, resp, http.StatusBadRequest, "expected binaryVersion argument")
-	c.Assert(checkCount, gc.Equals, 1)
+	defer resp.Body.Close()
+	c.Assert(checkCount, tc.Equals, 1)
 }
 
-func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithLocalLogin(c *gc.C) {
+func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithLocalLogin(c *tc.C) {
 	// Create a new local user that we can log in as
 	// using macaroon authentication.
 	password := "hunter2"
-	accessService := s.ControllerServiceFactory(c).Access()
-	userTag := names.NewUserTag("bobbrown")
-	_, _, err := accessService.AddUser(context.Background(), service.AddUserArg{
-		Name:        userTag.Name(),
+	accessService := s.ControllerDomainServices(c).Access()
+	userName := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := accessService.AddUser(c.Context(), service.AddUserArg{
+		Name:        userName,
 		DisplayName: "Bob Brown",
 		CreatorUUID: s.AdminUserUUID,
 		Password:    ptr(auth.NewPassword(password)),
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.SuperuserAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	// TODO (stickupkid): Permissions: This is only required to insert admin
-	// permissions into the state, remove when permissions are written to state.
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	f.MakeUser(c, &factory.UserParams{
-		Name: userTag.Name(),
+	c.Assert(err, tc.ErrorIsNil)
+	err = accessService.UpdatePermission(c.Context(), access.UpdatePermissionArgs{
+		AccessSpec: permission.AccessSpec{
+			Target: permission.ID{
+				ObjectType: permission.Model,
+				Key:        s.modelUUID,
+			},
+			Access: permission.AdminAccess,
+		},
+		Change:  permission.Grant,
+		Subject: userName,
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Install a "web-page" visitor that deals with the interaction
 	// method that Juju controllers support for authenticating local
@@ -164,9 +179,9 @@ func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithLocalLogin(c *gc.C) 
 	)
 	bakeryClient.Client = client.Client()
 	bakeryClient.AddInteractor(apiauthentication.NewInteractor(
-		userTag.Id(),
+		userName.Name(),
 		func(username string) (string, error) {
-			c.Assert(username, gc.Equals, userTag.Id())
+			c.Assert(username, tc.Equals, userName.Name())
 			prompted = true
 			return password, nil
 		},
@@ -179,18 +194,19 @@ func (s *toolsWithMacaroonsIntegrationSuite) TestCanPostWithLocalLogin(c *gc.C) 
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{
 		Method:   "POST",
 		URL:      s.toolsURI(""),
-		Tag:      userTag.String(),
+		Tag:      names.NewUserTag(userName.Name()).String(),
 		Password: "", // no password forces macaroon usage
 		Do:       bakeryDo,
 	})
 	s.assertJSONErrorResponse(c, resp, http.StatusBadRequest, "expected binaryVersion argument")
-	c.Assert(prompted, jc.IsTrue)
+	defer resp.Body.Close()
+	c.Assert(prompted, tc.IsTrue)
 }
 
 // doer returns a Do function that can make a bakery request
 // appropriate for a charms endpoint.
 func (s *toolsWithMacaroonsIntegrationSuite) doer() func(*http.Request) (*http.Response, error) {
-	return bakeryDo(nil, bakeryGetError)
+	return bakeryDo(nil, bakeryGetError) //nolint:bodyclose // Closed by caller.
 }
 
 // bakeryDo provides a function suitable for using in HTTPRequestParams.Do
@@ -205,7 +221,7 @@ func bakeryDo(client *http.Client, getBakeryError func(*http.Response) error) fu
 		// Configure the default client to skip verification.
 		tlsConfig := jujuhttp.SecureTLSConfig()
 		tlsConfig.InsecureSkipVerify = true
-		bclient.Client.Transport = jujuhttp.NewHTTPTLSTransport(jujuhttp.TransportConfig{
+		bclient.Transport = jujuhttp.NewHTTPTLSTransport(jujuhttp.TransportConfig{
 			TLSConfig: tlsConfig,
 		})
 	}

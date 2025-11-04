@@ -4,19 +4,20 @@
 package lxd
 
 import (
+	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/container/lxd"
 	"github.com/juju/juju/internal/provider/common"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	lxdStorageProviderType = "lxd"
+	lxdStorageProviderType storage.ProviderType = "lxd"
 
 	// attrLXDStorageDriver is the attribute name for the
 	// storage pool's LXD storage driver. This and "lxd-pool"
@@ -45,9 +46,27 @@ func (env *environ) storageSupported() bool {
 	return env.server().StorageSupported()
 }
 
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned. The
+// LXD provider recommends that for filesystem storage it's default storage pool
+// is used. For all other types of storage it defers to the common IAAS pool.
+//
+// Implements [storage.PoolAdvisor] interface.
+func (env *environ) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	if kind == storage.StorageKindFilesystem {
+		defaultPool, _ := storage.NewConfig(
+			lxdStorageProviderType.String(), lxdStorageProviderType, storage.Attrs{},
+		)
+		return defaultPool
+	}
+	return common.GetCommonRecommendedIAASPoolForKind(kind)
+}
+
 // StorageProviderTypes implements storage.ProviderRegistry.
 func (env *environ) StorageProviderTypes() ([]storage.ProviderType, error) {
-	var types []storage.ProviderType
+	types := common.CommonIAASStorageProviderTypes()
 	if env.storageSupported() {
 		types = append(types, lxdStorageProviderType)
 	}
@@ -56,10 +75,12 @@ func (env *environ) StorageProviderTypes() ([]storage.ProviderType, error) {
 
 // StorageProvider implements storage.ProviderRegistry.
 func (env *environ) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	if env.storageSupported() && t == lxdStorageProviderType {
+	switch t {
+	case lxdStorageProviderType:
 		return &lxdStorageProvider{env}, nil
+	default:
+		return common.GetCommonIAASStorageProvider(t)
 	}
-	return nil, errors.NotFoundf("storage provider %q", t)
 }
 
 // lxdStorageProvider is a storage provider for LXD volumes, exposed to Juju as
@@ -163,19 +184,26 @@ func (*lxdStorageProvider) Releasable() bool {
 	return true
 }
 
-// DefaultPools is part of the Provider interface.
+// DefaultPools returns the default pools available through the lxd storage
+// provider. By default a pool by the same name as the provider is offered in
+// addition to a fast ssd backed storage pool.
+//
+// Implements [storage.Provider] interface.
 func (e *lxdStorageProvider) DefaultPools() []*storage.Config {
-	zfsPool, _ := storage.NewConfig("lxd-zfs", lxdStorageProviderType, map[string]interface{}{
+	defaultPool, _ := storage.NewConfig(
+		lxdStorageProviderType.String(), lxdStorageProviderType, storage.Attrs{},
+	)
+	zfsPool, _ := storage.NewConfig("lxd-zfs", lxdStorageProviderType, storage.Attrs{
 		attrLXDStorageDriver: "zfs",
 		attrLXDStoragePool:   "juju-zfs",
 		"zfs.pool_name":      "juju-lxd",
 	})
-	btrfsPool, _ := storage.NewConfig("lxd-btrfs", lxdStorageProviderType, map[string]interface{}{
+	btrfsPool, _ := storage.NewConfig("lxd-btrfs", lxdStorageProviderType, storage.Attrs{
 		attrLXDStorageDriver: "btrfs",
 		attrLXDStoragePool:   "juju-btrfs",
 	})
 
-	var pools []*storage.Config
+	pools := []*storage.Config{defaultPool}
 	if e.ValidateConfig(zfsPool) == nil {
 		pools = append(pools, zfsPool)
 	}
@@ -236,7 +264,7 @@ type lxdFilesystemSource struct {
 }
 
 // CreateFilesystems is specified on the storage.FilesystemSource interface.
-func (s *lxdFilesystemSource) CreateFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemParams) (_ []storage.CreateFilesystemsResult, err error) {
+func (s *lxdFilesystemSource) CreateFilesystems(ctx context.Context, args []storage.FilesystemParams) (_ []storage.CreateFilesystemsResult, err error) {
 	results := make([]storage.CreateFilesystemsResult, len(args))
 	for i, arg := range args {
 		if err := s.ValidateFilesystemParams(arg); err != nil {
@@ -245,8 +273,7 @@ func (s *lxdFilesystemSource) CreateFilesystems(ctx envcontext.ProviderCallConte
 		}
 		filesystem, err := s.createFilesystem(arg)
 		if err != nil {
-			results[i].Error = err
-			common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
+			results[i].Error = s.env.HandleCredentialError(ctx, err)
 			continue
 		}
 		results[i].Filesystem = filesystem
@@ -292,8 +319,8 @@ func (s *lxdFilesystemSource) createFilesystem(
 	filesystem := storage.Filesystem{
 		Tag: arg.Tag,
 		FilesystemInfo: storage.FilesystemInfo{
-			FilesystemId: filesystemId,
-			Size:         arg.Size,
+			ProviderId: filesystemId,
+			Size:       arg.Size,
 		},
 	}
 	return &filesystem, nil
@@ -355,11 +382,14 @@ func destroyFilesystems(env *environ, match func(api.StorageVolume) bool) error 
 }
 
 // DestroyFilesystems is specified on the storage.FilesystemSource interface.
-func (s *lxdFilesystemSource) DestroyFilesystems(ctx envcontext.ProviderCallContext, filesystemIds []string) ([]error, error) {
+func (s *lxdFilesystemSource) DestroyFilesystems(ctx context.Context, filesystemIds []string) ([]error, error) {
 	results := make([]error, len(filesystemIds))
 	for i, filesystemId := range filesystemIds {
-		results[i] = s.destroyFilesystem(filesystemId)
-		common.HandleCredentialError(IsAuthorisationFailure, results[i], ctx)
+		err := s.destroyFilesystem(filesystemId)
+		if err == nil {
+			continue
+		}
+		results[i] = s.env.HandleCredentialError(ctx, err)
 	}
 	return results, nil
 }
@@ -377,11 +407,14 @@ func (s *lxdFilesystemSource) destroyFilesystem(filesystemId string) error {
 }
 
 // ReleaseFilesystems is specified on the storage.FilesystemSource interface.
-func (s *lxdFilesystemSource) ReleaseFilesystems(ctx envcontext.ProviderCallContext, filesystemIds []string) ([]error, error) {
+func (s *lxdFilesystemSource) ReleaseFilesystems(ctx context.Context, filesystemIds []string) ([]error, error) {
 	results := make([]error, len(filesystemIds))
 	for i, filesystemId := range filesystemIds {
-		results[i] = s.releaseFilesystem(filesystemId)
-		common.HandleCredentialError(IsAuthorisationFailure, results[i], ctx)
+		err := s.releaseFilesystem(filesystemId)
+		if err == nil {
+			continue
+		}
+		results[i] = s.env.HandleCredentialError(ctx, err)
 	}
 	return results, nil
 }
@@ -416,11 +449,49 @@ func (s *lxdFilesystemSource) ValidateFilesystemParams(params storage.Filesystem
 	return nil
 }
 
+type filesystemOperation func(arg storage.FilesystemAttachmentParams, inst *environInstance) error
+
 // AttachFilesystems is specified on the storage.FilesystemSource interface.
-func (s *lxdFilesystemSource) AttachFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemAttachmentParams) ([]storage.AttachFilesystemsResult, error) {
+func (s *lxdFilesystemSource) AttachFilesystems(ctx context.Context, args []storage.FilesystemAttachmentParams) ([]storage.AttachFilesystemsResult, error) {
+	attachErrors, err := s.performFilesystemOperation(ctx, args, s.attachFilesystem)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	results := make([]storage.AttachFilesystemsResult, len(attachErrors))
+	for i, attachError := range attachErrors {
+		arg := args[i]
+		if attachError != nil {
+			results[i].Error = errors.Annotatef(
+				attachError, "attaching %s to %s",
+				names.ReadableString(arg.Filesystem),
+				names.ReadableString(arg.Machine),
+			)
+			continue
+		}
+		results[i] = storage.AttachFilesystemsResult{
+			FilesystemAttachment: &storage.FilesystemAttachment{
+				Filesystem: arg.Filesystem,
+				Machine:    arg.Machine,
+				FilesystemAttachmentInfo: storage.FilesystemAttachmentInfo{
+					Path:     arg.Path,
+					ReadOnly: arg.ReadOnly,
+				},
+			},
+		}
+	}
+	return results, nil
+}
+
+func (s *lxdFilesystemSource) performFilesystemOperation(ctx context.Context, args []storage.FilesystemAttachmentParams, op filesystemOperation) ([]error, error) {
 	var instanceIds []instance.Id
 	instanceIdsSeen := make(set.Strings)
-	for _, arg := range args {
+	// We maintain a set of arg indices of the not found instance ids
+	// so we can return a not found error for those ones.
+	notFoundIndices := make(set.Ints)
+	for i, arg := range args {
+		// Initially add al the indices to the not found list
+		// and we will remove the found ones below.
+		notFoundIndices.Add(i)
 		if instanceIdsSeen.Contains(string(arg.InstanceId)) {
 			continue
 		}
@@ -431,33 +502,48 @@ func (s *lxdFilesystemSource) AttachFilesystems(ctx envcontext.ProviderCallConte
 	switch err {
 	case nil, environs.ErrPartialInstances, environs.ErrNoInstances:
 	default:
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return nil, errors.Trace(err)
+		return nil, errors.Trace(s.env.HandleCredentialError(ctx, err))
 	}
 
-	results := make([]storage.AttachFilesystemsResult, len(args))
-	for i, arg := range args {
-		var inst *environInstance
-		for i, instanceId := range instanceIds {
-			if instanceId != arg.InstanceId {
+	// Build up a slice of args with the details needed to make an attachment.
+	type instanceAttachmentParams struct {
+		attachmentParams storage.FilesystemAttachmentParams
+		inst             *environInstance
+		index            int
+	}
+	var toAttach []instanceAttachmentParams
+	for _, inst := range instances {
+		for i, arg := range args {
+			if inst == nil || arg.InstanceId != inst.Id() {
 				continue
 			}
-			if instances[i] != nil {
-				inst = instances[i].(*environInstance)
-			}
-			break
+			toAttach = append(toAttach, instanceAttachmentParams{
+				attachmentParams: arg,
+				index:            i,
+				inst:             inst.(*environInstance),
+			})
+			// This index has a valid instance so remove it
+			// from the not found set.
+			notFoundIndices.Remove(i)
 		}
-		attachment, err := s.attachFilesystem(arg, inst)
-		if err != nil {
-			results[i].Error = errors.Annotatef(
-				err, "attaching %s to %s",
-				names.ReadableString(arg.Filesystem),
-				names.ReadableString(arg.Machine),
-			)
-			common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
+	}
+
+	// LXD currently wants to have the storage sorted by path.
+	// https://github.com/canonical/lxd/issues/16003
+	slices.SortFunc(toAttach, func(a, b instanceAttachmentParams) int {
+		return strings.Compare(a.attachmentParams.Path, b.attachmentParams.Path)
+	})
+	results := make([]error, len(args))
+	for _, arg := range toAttach {
+		err := op(arg.attachmentParams, arg.inst)
+		if err == nil {
 			continue
 		}
-		results[i].FilesystemAttachment = attachment
+		err = s.env.HandleCredentialError(ctx, err)
+		results[arg.index] = err
+	}
+	for idx := range notFoundIndices {
+		results[idx] = errors.NotFoundf("instance %q", args[idx].InstanceId)
 	}
 	return results, nil
 }
@@ -465,77 +551,33 @@ func (s *lxdFilesystemSource) AttachFilesystems(ctx envcontext.ProviderCallConte
 func (s *lxdFilesystemSource) attachFilesystem(
 	arg storage.FilesystemAttachmentParams,
 	inst *environInstance,
-) (*storage.FilesystemAttachment, error) {
-	if inst == nil {
-		return nil, errors.NotFoundf("instance %q", arg.InstanceId)
-	}
-
-	poolName, volumeName, err := parseFilesystemId(arg.FilesystemId)
+) error {
+	poolName, volumeName, err := parseFilesystemId(arg.ProviderId)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return errors.Trace(err)
 	}
 
 	deviceName := arg.Filesystem.String()
 	if err = inst.container.AddDisk(deviceName, arg.Path, volumeName, poolName, arg.ReadOnly); err != nil {
-		return nil, errors.Trace(err)
+		return errors.Trace(err)
 	}
 
-	if err := s.env.server().WriteContainer(inst.container); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	filesystemAttachment := storage.FilesystemAttachment{
-		Filesystem: arg.Filesystem,
-		Machine:    arg.Machine,
-		FilesystemAttachmentInfo: storage.FilesystemAttachmentInfo{
-			Path:     arg.Path,
-			ReadOnly: arg.ReadOnly,
-		},
-	}
-	return &filesystemAttachment, nil
+	return errors.Trace(s.env.server().WriteContainer(inst.container))
 }
 
 // DetachFilesystems is specified on the storage.FilesystemSource interface.
-func (s *lxdFilesystemSource) DetachFilesystems(ctx envcontext.ProviderCallContext, args []storage.FilesystemAttachmentParams) ([]error, error) {
-	var instanceIds []instance.Id
-	instanceIdsSeen := make(set.Strings)
-	for _, arg := range args {
-		if instanceIdsSeen.Contains(string(arg.InstanceId)) {
-			continue
-		}
-		instanceIdsSeen.Add(string(arg.InstanceId))
-		instanceIds = append(instanceIds, arg.InstanceId)
-	}
-	instances, err := s.env.Instances(ctx, instanceIds)
-	switch err {
-	case nil, environs.ErrPartialInstances, environs.ErrNoInstances:
-	default:
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
+func (s *lxdFilesystemSource) DetachFilesystems(ctx context.Context, args []storage.FilesystemAttachmentParams) ([]error, error) {
+	detachErrors, err := s.performFilesystemOperation(ctx, args, s.detachFilesystem)
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	results := make([]error, len(args))
-	for i, arg := range args {
-		var inst *environInstance
-		for i, instanceId := range instanceIds {
-			if instanceId != arg.InstanceId {
-				continue
-			}
-			if instances[i] != nil {
-				inst = instances[i].(*environInstance)
-			}
-			break
-		}
-		if inst != nil {
-			err := s.detachFilesystem(arg, inst)
-			common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-			results[i] = errors.Annotatef(
-				err, "detaching %s",
-				names.ReadableString(arg.Filesystem),
-			)
-		}
+	for i := range detachErrors {
+		detachErrors[i] = errors.Annotatef(
+			detachErrors[i], "detaching %s",
+			names.ReadableString(args[i].Filesystem),
+		)
 	}
-	return results, nil
+	return detachErrors, nil
 }
 
 func (s *lxdFilesystemSource) detachFilesystem(
@@ -549,7 +591,7 @@ func (s *lxdFilesystemSource) detachFilesystem(
 
 // ImportFilesystem is part of the storage.FilesystemImporter interface.
 func (s *lxdFilesystemSource) ImportFilesystem(
-	callCtx envcontext.ProviderCallContext,
+	ctx context.Context,
 	filesystemId string,
 	tags map[string]string,
 ) (storage.FilesystemInfo, error) {
@@ -559,8 +601,7 @@ func (s *lxdFilesystemSource) ImportFilesystem(
 	}
 	volume, eTag, err := s.env.server().GetStoragePoolVolume(lxdPool, storagePoolVolumeType, volumeName)
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, callCtx)
-		return storage.FilesystemInfo{}, errors.Trace(err)
+		return storage.FilesystemInfo{}, errors.Trace(s.env.HandleCredentialError(ctx, err))
 	}
 	if len(volume.UsedBy) > 0 {
 		return storage.FilesystemInfo{}, errors.Errorf(
@@ -594,14 +635,14 @@ func (s *lxdFilesystemSource) ImportFilesystem(
 			volume.Config["user."+k] = v
 		}
 		if err := s.env.server().UpdateStoragePoolVolume(
-			lxdPool, storagePoolVolumeType, volumeName, volume.Writable(), eTag); err != nil {
-			common.HandleCredentialError(IsAuthorisationFailure, err, callCtx)
-			return storage.FilesystemInfo{}, errors.Annotate(err, "tagging volume")
+			lxdPool, storagePoolVolumeType, volumeName, volume.Writable(), eTag,
+		); err != nil {
+			return storage.FilesystemInfo{}, errors.Annotate(s.env.HandleCredentialError(ctx, err), "tagging volume")
 		}
 	}
 
 	return storage.FilesystemInfo{
-		FilesystemId: filesystemId,
-		Size:         size,
+		ProviderId: filesystemId,
+		Size:       size,
 	}, nil
 }

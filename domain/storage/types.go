@@ -4,10 +4,10 @@
 package storage
 
 import (
-	"github.com/juju/errors"
+	"github.com/juju/collections/set"
 
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/internal/storage/provider"
 )
 
 // Pool configuration attribute names.
@@ -19,9 +19,10 @@ const (
 // Attrs defines storage attributes.
 type Attrs map[string]string
 
-// StoragePoolDetails defines the details of a storage pool to save.
-// This type is also used when returning query results from state.
-type StoragePoolDetails struct {
+// StoragePool represents a storage pool in Juju.
+// It contains the name of the pool, the provider type, and any attributes
+type StoragePool struct {
+	UUID     string
 	Name     string
 	Provider string
 	Attrs    Attrs
@@ -33,26 +34,31 @@ type (
 	Providers []string
 )
 
-// These consts are used to specify nil filter terms.
-var (
-	NilNames     = Names(nil)
-	NilProviders = Providers(nil)
-)
-
-// BuiltInStoragePools returns the built in providers common to all.
-func BuiltInStoragePools() ([]StoragePoolDetails, error) {
-	providerTypes, err := provider.CommonStorageProviders().StorageProviderTypes()
-	if err != nil {
-		return nil, errors.Annotate(err, "getting built in storage provider types")
+func deduplicateNamesOrProviders[T ~[]string](namesOrProviders T) T {
+	if len(namesOrProviders) == 0 {
+		return nil
 	}
-	result := make([]StoragePoolDetails, len(providerTypes))
-	for i, pType := range providerTypes {
-		result[i] = StoragePoolDetails{
-			Name:     string(pType),
-			Provider: string(pType),
+	// Ensure uniqueness and no empty values.
+	result := set.NewStrings()
+	for _, v := range namesOrProviders {
+		if v != "" {
+			result.Add(v)
 		}
 	}
-	return result, nil
+	if result.IsEmpty() {
+		return nil
+	}
+	return T(result.Values())
+}
+
+// Values returns the unique values of the Names.
+func (n Names) Values() []string {
+	return deduplicateNamesOrProviders(n)
+}
+
+// Values returns the unique values of the Providers.
+func (p Providers) Values() []string {
+	return deduplicateNamesOrProviders(p)
 }
 
 // DefaultStoragePools returns the default storage pools to add to a new model
@@ -61,16 +67,21 @@ func DefaultStoragePools(registry storage.ProviderRegistry) ([]*storage.Config, 
 	var result []*storage.Config
 	providerTypes, err := registry.StorageProviderTypes()
 	if err != nil {
-		return nil, errors.Annotate(err, "getting storage provider types")
+		return nil, errors.Errorf("getting storage provider types: %w", err)
 	}
 	for _, providerType := range providerTypes {
 		p, err := registry.StorageProvider(providerType)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
-		for _, pool := range p.DefaultPools() {
-			result = append(result, pool)
-		}
+		result = append(result, p.DefaultPools()...)
 	}
 	return result, nil
+}
+
+// FilesystemInfo describes information about a filesystem.
+type FilesystemInfo struct {
+	storage.FilesystemInfo
+	Pool          string
+	BackingVolume *storage.VolumeInfo
 }

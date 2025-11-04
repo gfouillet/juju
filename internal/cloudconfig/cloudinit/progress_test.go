@@ -4,21 +4,25 @@
 package cloudinit_test
 
 import (
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/internal/cloudconfig/cloudinit"
 )
 
 type progressSuite struct{}
 
-var _ = gc.Suite(&progressSuite{})
+func TestProgressSuite(t *testing.T) {
+	tc.Run(t, &progressSuite{})
+}
 
-func (*progressSuite) TestProgressCmds(c *gc.C) {
+func (*progressSuite) TestProgressCmds(c *tc.C) {
 	initCmd := cloudinit.InitProgressCmd()
-	c.Assert(initCmd, gc.Equals,
+	c.Assert(initCmd, tc.Equals,
 		`test -n "$JUJU_PROGRESS_FD" || `+
 			`(exec {JUJU_PROGRESS_FD}>&2) 2>/dev/null && exec {JUJU_PROGRESS_FD}>&2 || `+
 			`JUJU_PROGRESS_FD=2`)
 	logCmd := cloudinit.LogProgressCmd("he'llo\"!")
-	c.Assert(logCmd, gc.Equals, `echo 'he'"'"'llo"!' >&$JUJU_PROGRESS_FD`)
+	c.Assert(logCmd, tc.Equals, `echo 'he'"'"'llo"!' >&$JUJU_PROGRESS_FD`)
 }

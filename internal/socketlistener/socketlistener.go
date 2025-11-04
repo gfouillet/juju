@@ -1,10 +1,6 @@
 // Copyright 2024 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package socketlistener provides a worker that will listen on a specified unix
-// socket identified by a file descriptor. Handlers are provided to the worker
-// that specify endpoints and define the action to be taken when they are
-// reached.
 package socketlistener
 
 import (
@@ -71,7 +67,7 @@ func NewSocketListener(config Config) (*SocketListener, error) {
 	if err != nil {
 		return nil, errors.Annotate(err, "unable to listen on unix socket")
 	}
-	config.Logger.Debugf("socketlistener listening on socket %q", config.SocketName)
+	config.Logger.Debugf(context.TODO(), "socketlistener listening on socket %q", config.SocketName)
 
 	sl := &SocketListener{
 		config:   config,
@@ -93,6 +89,9 @@ func (sl *SocketListener) Wait() error {
 
 // run listens on the control socket and handles requests.
 func (sl *SocketListener) run() error {
+	ctx, cancel := sl.scopedContext()
+	defer cancel()
+
 	router := mux.NewRouter()
 	sl.config.RegisterHandlers(router)
 
@@ -100,7 +99,7 @@ func (sl *SocketListener) run() error {
 	defer func() {
 		err := srv.Close()
 		if err != nil {
-			sl.config.Logger.Warningf("error closing HTTP server: %v", err)
+			sl.config.Logger.Warningf(ctx, "error closing HTTP server: %v", err)
 		}
 	}()
 
@@ -112,10 +111,14 @@ func (sl *SocketListener) run() error {
 		return srv.Shutdown(ctx)
 	})
 
-	sl.config.Logger.Debugf("socketlistener now serving on socket %q", sl.config.SocketName)
-	defer sl.config.Logger.Debugf("socketlistener finished serving on socket %q", sl.config.SocketName)
+	sl.config.Logger.Debugf(ctx, "socketlistener now serving on socket %q", sl.config.SocketName)
+	defer sl.config.Logger.Debugf(ctx, "socketlistener finished serving on socket %q", sl.config.SocketName)
 	if err := srv.Serve(sl.listener); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+func (sl *SocketListener) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(sl.tomb.Context(context.Background()))
 }

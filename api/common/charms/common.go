@@ -8,10 +8,10 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charm/resource"
 	"github.com/juju/juju/rpc/params"
@@ -28,10 +28,10 @@ func NewCharmInfoClient(facade base.FacadeCaller) *CharmInfoClient {
 }
 
 // CharmInfo returns information about the requested charm.
-func (c *CharmInfoClient) CharmInfo(charmURL string) (*CharmInfo, error) {
+func (c *CharmInfoClient) CharmInfo(ctx context.Context, charmURL string) (*CharmInfo, error) {
 	args := params.CharmURL{URL: charmURL}
 	var info params.Charm
-	if err := c.facade.FacadeCall(context.TODO(), "CharmInfo", args, &info); err != nil {
+	if err := c.facade.FacadeCall(ctx, "CharmInfo", args, &info); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return convertCharm(&info)
@@ -49,11 +49,11 @@ func NewApplicationCharmInfoClient(facade base.FacadeCaller) *ApplicationCharmIn
 }
 
 // ApplicationCharmInfo returns information about an application's charm.
-func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(appName string) (*CharmInfo, error) {
+func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(ctx context.Context, appName string) (*CharmInfo, error) {
 	args := params.Entity{Tag: names.NewApplicationTag(appName).String()}
 	var info params.Charm
-	if err := c.facade.FacadeCall(context.TODO(), "ApplicationCharmInfo", args, &info); err != nil {
-		return nil, errors.Trace(err)
+	if err := c.facade.FacadeCall(ctx, "ApplicationCharmInfo", args, &info); err != nil {
+		return nil, params.TranslateWellKnownError(err)
 	}
 	return convertCharm(&info)
 }
@@ -62,11 +62,12 @@ func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(appName string) (*Char
 type CharmInfo struct {
 	Revision   int
 	URL        string
-	Config     *charm.Config
+	Config     *charm.ConfigSpec
 	Meta       *charm.Meta
 	Actions    *charm.Actions
 	Manifest   *charm.Manifest
 	LXDProfile *charm.LXDProfile
+	Version    string
 }
 
 func (info *CharmInfo) Charm() charm.Charm {
@@ -90,6 +91,7 @@ func convertCharm(info *params.Charm) (*CharmInfo, error) {
 		Actions:    convertCharmActions(info.Actions),
 		Manifest:   manifest,
 		LXDProfile: convertCharmLXDProfile(info.LXDProfile),
+		Version:    info.Version,
 	}
 	return result, nil
 }
@@ -98,7 +100,7 @@ func convertCharmMeta(meta *params.CharmMeta) (*charm.Meta, error) {
 	if meta == nil {
 		return nil, nil
 	}
-	minVersion, err := version.Parse(meta.MinJujuVersion)
+	minVersion, err := semversion.Parse(meta.MinJujuVersion)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -123,7 +125,6 @@ func convertCharmMeta(meta *params.CharmMeta) (*charm.Meta, error) {
 		Tags:           meta.Tags,
 		Storage:        convertCharmStorageMap(meta.Storage),
 		Devices:        convertCharmDevices(meta.Devices),
-		PayloadClasses: convertCharmPayloadClassMap(meta.PayloadClasses),
 		Resources:      resources,
 		Terms:          meta.Terms,
 		MinJujuVersion: minVersion,
@@ -179,24 +180,6 @@ func convertCharmStorage(storage params.CharmStorage) charm.Storage {
 		MinimumSize: storage.MinimumSize,
 		Location:    storage.Location,
 		Properties:  storage.Properties,
-	}
-}
-
-func convertCharmPayloadClassMap(payload map[string]params.CharmPayloadClass) map[string]charm.PayloadClass {
-	if len(payload) == 0 {
-		return nil
-	}
-	result := make(map[string]charm.PayloadClass)
-	for key, value := range payload {
-		result[key] = convertCharmPayloadClass(value)
-	}
-	return result
-}
-
-func convertCharmPayloadClass(payload params.CharmPayloadClass) charm.PayloadClass {
-	return charm.PayloadClass{
-		Name: payload.Name,
-		Type: payload.Type,
 	}
 }
 
@@ -261,7 +244,7 @@ func convertCharmExtraBindingMap(bindings map[string]string) map[string]charm.Ex
 	}
 	result := make(map[string]charm.ExtraBinding)
 	for key, value := range bindings {
-		result[key] = charm.ExtraBinding{value}
+		result[key] = charm.ExtraBinding{Name: value}
 	}
 	return result
 }
@@ -322,7 +305,7 @@ func (c *charmImpl) Meta() *charm.Meta {
 	return c.info.Meta
 }
 
-func (c *charmImpl) Config() *charm.Config {
+func (c *charmImpl) Config() *charm.ConfigSpec {
 	return c.info.Config
 }
 
@@ -336,6 +319,10 @@ func (c *charmImpl) Actions() *charm.Actions {
 
 func (c *charmImpl) Revision() int {
 	return c.info.Revision
+}
+
+func (c *charmImpl) Version() string {
+	return c.info.Version
 }
 
 func convertCharmManifest(input *params.CharmManifest) (*charm.Manifest, error) {

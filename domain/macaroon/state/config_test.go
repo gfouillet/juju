@@ -4,14 +4,13 @@
 package state
 
 import (
-	"context"
+	"testing"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/internal/changestream/testing"
+	macaroonerrors "github.com/juju/juju/domain/macaroon/errors"
+	schematesting "github.com/juju/juju/domain/schema/testing"
 )
 
 var (
@@ -21,60 +20,62 @@ var (
 	testKey4 = bakery.MustGenerateKey()
 )
 
-type stateSuite struct {
-	testing.ControllerSuite
+type configStateSuite struct {
+	schematesting.ControllerSuite
 }
 
-var _ = gc.Suite(&stateSuite{})
-
-func (s *stateSuite) TestInitialise(c *gc.C) {
-	st := NewState(s.TxnRunnerFactory())
-	err := st.InitialiseBakeryConfig(context.Background(), testKey1, testKey2, testKey3, testKey4)
-	c.Assert(err, jc.ErrorIsNil)
+func TestConfigStateSuite(t *testing.T) {
+	tc.Run(t, &configStateSuite{})
 }
 
-func (s *stateSuite) TestInitialiseMultipleTimesFails(c *gc.C) {
+func (s *configStateSuite) TestInitialise(c *tc.C) {
 	st := NewState(s.TxnRunnerFactory())
-	err := st.InitialiseBakeryConfig(context.Background(), testKey1, testKey2, testKey3, testKey4)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = st.InitialiseBakeryConfig(context.Background(), testKey1, testKey2, testKey3, testKey4)
-	c.Assert(err, jc.ErrorIs, BakeryConfigAlreadyInitialised)
+	err := st.InitialiseBakeryConfig(c.Context(), testKey1, testKey2, testKey3, testKey4)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *stateSuite) TestGetKeys(c *gc.C) {
+func (s *configStateSuite) TestInitialiseMultipleTimesFails(c *tc.C) {
 	st := NewState(s.TxnRunnerFactory())
-	err := st.InitialiseBakeryConfig(context.Background(), testKey1, testKey2, testKey3, testKey4)
-	c.Assert(err, jc.ErrorIsNil)
+	err := st.InitialiseBakeryConfig(c.Context(), testKey1, testKey2, testKey3, testKey4)
+	c.Assert(err, tc.ErrorIsNil)
 
-	keypair, err := st.GetLocalUsersKey(context.Background())
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(keypair, gc.DeepEquals, testKey1)
-
-	keypair, err = st.GetLocalUsersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(keypair, gc.DeepEquals, testKey2)
-
-	keypair, err = st.GetExternalUsersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(keypair, gc.DeepEquals, testKey3)
-
-	keypair, err = st.GetOffersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(keypair, gc.DeepEquals, testKey4)
+	err = st.InitialiseBakeryConfig(c.Context(), testKey1, testKey2, testKey3, testKey4)
+	c.Assert(err, tc.ErrorIs, macaroonerrors.BakeryConfigAlreadyInitialised)
 }
 
-func (s *stateSuite) TestGetKeysUninitialised(c *gc.C) {
+func (s *configStateSuite) TestGetKeys(c *tc.C) {
 	st := NewState(s.TxnRunnerFactory())
-	_, err := st.GetLocalUsersKey(context.Background())
-	c.Check(err, jc.ErrorIs, errors.NotYetAvailable)
+	err := st.InitialiseBakeryConfig(c.Context(), testKey1, testKey2, testKey3, testKey4)
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = st.GetLocalUsersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIs, errors.NotYetAvailable)
+	keypair, err := st.GetLocalUsersKey(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(keypair, tc.DeepEquals, testKey1)
 
-	_, err = st.GetExternalUsersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIs, errors.NotYetAvailable)
+	keypair, err = st.GetLocalUsersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(keypair, tc.DeepEquals, testKey2)
 
-	_, err = st.GetOffersThirdPartyKey(context.Background())
-	c.Check(err, jc.ErrorIs, errors.NotYetAvailable)
+	keypair, err = st.GetExternalUsersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(keypair, tc.DeepEquals, testKey3)
+
+	keypair, err = st.GetOffersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(keypair, tc.DeepEquals, testKey4)
+}
+
+func (s *configStateSuite) TestGetKeysUninitialised(c *tc.C) {
+	st := NewState(s.TxnRunnerFactory())
+	_, err := st.GetLocalUsersKey(c.Context())
+	c.Check(err, tc.ErrorIs, macaroonerrors.NotInitialised)
+
+	_, err = st.GetLocalUsersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIs, macaroonerrors.NotInitialised)
+
+	_, err = st.GetExternalUsersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIs, macaroonerrors.NotInitialised)
+
+	_, err = st.GetOffersThirdPartyKey(c.Context())
+	c.Check(err, tc.ErrorIs, macaroonerrors.NotInitialised)
 }

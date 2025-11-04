@@ -59,6 +59,8 @@ type SecretContentParams struct {
 	// ValueRef is the content reference for when a secret
 	// backend like vault is used.
 	ValueRef *SecretValueRef `json:"value-ref,omitempty"`
+	// Checksum is the hash of the secret context.
+	Checksum string `json:"checksum,omitempty"`
 }
 
 // UpsertSecretArg holds the args for creating or updating a secret.
@@ -135,7 +137,7 @@ type UpdateUserSecretArg struct {
 
 // Validate validates the UpdateUserSecretArg.
 func (arg UpdateUserSecretArg) Validate() error {
-	if arg.AutoPrune == nil && arg.Description == nil && arg.Label == nil && len(arg.Content.Data) == 0 {
+	if !arg.HasUpdate() {
 		return errors.New("at least one attribute to update must be specified")
 	}
 	if arg.URI == "" && arg.ExistingLabel == "" {
@@ -145,6 +147,13 @@ func (arg UpdateUserSecretArg) Validate() error {
 		return errors.New("must specify either URI or label but not both")
 	}
 	return nil
+}
+
+// HasUpdate returns true if arg contains at least one attribute to update.
+func (arg UpdateUserSecretArg) HasUpdate() bool {
+	return arg.AutoPrune != nil || arg.Description != nil || arg.Label != nil ||
+		arg.RotatePolicy != nil || arg.ExpireTime != nil ||
+		len(arg.Content.Data) != 0 || arg.Content.ValueRef != nil
 }
 
 // DeleteSecretArgs holds args for deleting secrets.
@@ -268,22 +277,46 @@ type SecretRevision struct {
 	ExpireTime  *time.Time      `json:"expire-time,omitempty"`
 }
 
-// ListSecretResult is the result of getting secret metadata.
+// ListSecretResult is the result of getting secret and revision metadata.
 type ListSecretResult struct {
-	URI              string             `json:"uri"`
-	Version          int                `json:"version"`
-	OwnerTag         string             `json:"owner-tag"`
-	RotatePolicy     string             `json:"rotate-policy,omitempty"`
-	NextRotateTime   *time.Time         `json:"next-rotate-time,omitempty"`
-	Description      string             `json:"description,omitempty"`
-	Label            string             `json:"label,omitempty"`
-	LatestRevision   int                `json:"latest-revision"`
-	LatestExpireTime *time.Time         `json:"latest-expire-time,omitempty"`
-	CreateTime       time.Time          `json:"create-time"`
-	UpdateTime       time.Time          `json:"update-time"`
-	Revisions        []SecretRevision   `json:"revisions"`
-	Value            *SecretValueResult `json:"value,omitempty"`
-	Access           []AccessInfo       `json:"access,omitempty"`
+	URI                    string             `json:"uri"`
+	Version                int                `json:"version"`
+	OwnerTag               string             `json:"owner-tag"`
+	RotatePolicy           string             `json:"rotate-policy,omitempty"`
+	NextRotateTime         *time.Time         `json:"next-rotate-time,omitempty"`
+	Description            string             `json:"description,omitempty"`
+	Label                  string             `json:"label,omitempty"`
+	LatestRevision         int                `json:"latest-revision"`
+	LatestRevisionChecksum string             `json:"latest-revision-checksum"`
+	LatestExpireTime       *time.Time         `json:"latest-expire-time,omitempty"`
+	CreateTime             time.Time          `json:"create-time"`
+	UpdateTime             time.Time          `json:"update-time"`
+	Revisions              []SecretRevision   `json:"revisions"`
+	Value                  *SecretValueResult `json:"value,omitempty"`
+	Access                 []AccessInfo       `json:"access,omitempty"`
+}
+
+// ListSecretMetadataResults holds secret metadata results.
+type ListSecretMetadataResults struct {
+	Results []ListSecretMetadataResult `json:"results"`
+}
+
+// ListSecretMetadataResult is the result of getting secret metadata.
+type ListSecretMetadataResult struct {
+	URI                    string             `json:"uri"`
+	Version                int                `json:"version"`
+	OwnerTag               string             `json:"owner-tag"`
+	RotatePolicy           string             `json:"rotate-policy,omitempty"`
+	NextRotateTime         *time.Time         `json:"next-rotate-time,omitempty"`
+	Description            string             `json:"description,omitempty"`
+	Label                  string             `json:"label,omitempty"`
+	LatestRevision         int                `json:"latest-revision"`
+	LatestRevisionChecksum string             `json:"latest-revision-checksum"`
+	LatestExpireTime       *time.Time         `json:"latest-expire-time,omitempty"`
+	CreateTime             time.Time          `json:"create-time"`
+	UpdateTime             time.Time          `json:"update-time"`
+	Value                  *SecretValueResult `json:"value,omitempty"`
+	Access                 []AccessInfo       `json:"access,omitempty"`
 }
 
 // SecretRevisionsToDrainResults holds secret revisions to drain results.
@@ -429,6 +462,12 @@ type UpdateSecretBackendArg struct {
 type ListSecretBackendsArgs struct {
 	Names  []string `json:"names"`
 	Reveal bool     `json:"reveal"`
+}
+
+// SetModelSecretBackendArg holds the arg for setting the model secret backend.
+type SetModelSecretBackendArg struct {
+	// SecretBackendName is the name of the secret backend.
+	SecretBackendName string `json:"secret-backend-name"`
 }
 
 // SecretBackend holds secret backend details.
@@ -577,4 +616,22 @@ type SecretRevisionWatchResult struct {
 // returning a list of SecretRevisionWatchers.
 type SecretRevisionWatchResults struct {
 	Results []SecretRevisionWatchResult `json:"results"`
+}
+
+// SecretRevisionIDsResults holds secret revision IDs for many secrets.
+type SecretRevisionIDsResults struct {
+	Results []SecretRevisionIDsResult `json:"results"`
+}
+
+// SecretRevisionIDsResult holds secret revision IDs for a secret.
+type SecretRevisionIDsResult struct {
+	URI       string `json:"uri"`
+	Revisions []int  `json:"revisions"`
+	Error     *Error `json:"error,omitempty"`
+}
+
+// SecretRevisionArgs holds the secret URI strings to request revision IDs for.
+type SecretRevisionArgs struct {
+	Unit       Entity   `json:"entity"`
+	SecretURIs []string `json:"secret-uris"`
 }

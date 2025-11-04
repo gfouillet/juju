@@ -4,7 +4,8 @@
 package openstack
 
 import (
-	"regexp"
+	"context"
+	"fmt"
 
 	"github.com/go-goose/goose/v5/neutron"
 	"github.com/go-goose/goose/v5/nova"
@@ -14,13 +15,14 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	envstorage "github.com/juju/juju/environs/storage"
+	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 var (
@@ -42,18 +44,19 @@ var (
 	NewOpenstackStorage       = &newOpenstackStorage
 )
 
-func NewCinderVolumeSource(s OpenstackStorage, env common.ZonedEnviron) storage.VolumeSource {
-	return NewCinderVolumeSourceForModel(s, testing.ModelTag.Id(), env)
+func NewCinderVolumeSource(s OpenstackStorage, env common.ZonedEnviron, invalidator common.CredentialInvalidator) storage.VolumeSource {
+	return NewCinderVolumeSourceForModel(s, testing.ModelTag.Id(), env, invalidator)
 }
 
-func NewCinderVolumeSourceForModel(s OpenstackStorage, modelUUID string, env common.ZonedEnviron) storage.VolumeSource {
+func NewCinderVolumeSourceForModel(s OpenstackStorage, modelUUID string, env common.ZonedEnviron, invalidator common.CredentialInvalidator) storage.VolumeSource {
 	const envName = "testmodel"
 	return &cinderVolumeSource{
-		storageAdaptor: s,
-		envName:        envName,
-		modelUUID:      modelUUID,
-		namespace:      fakeNamespace{},
-		zonedEnv:       env,
+		storageAdaptor:        s,
+		envName:               envName,
+		modelUUID:             modelUUID,
+		namespace:             fakeNamespace{},
+		zonedEnv:              env,
+		credentialInvalidator: invalidator,
 	}
 }
 
@@ -65,14 +68,9 @@ func (fakeNamespace) Value(s string) string {
 	return "juju-" + s
 }
 
-func EnsureGroup(e environs.Environ, ctx envcontext.ProviderCallContext, name string, isModelGroup bool) (neutron.SecurityGroupV2, error) {
+func EnsureGroup(e environs.Environ, ctx context.Context, name string, isModelGroup bool) (neutron.SecurityGroupV2, error) {
 	switching := &neutronFirewaller{firewallerBase: firewallerBase{environ: e.(*Environ)}}
-	return switching.ensureGroup(name, isModelGroup)
-}
-
-func MachineGroupRegexp(e environs.Environ, machineId string) string {
-	switching := &neutronFirewaller{firewallerBase: firewallerBase{environ: e.(*Environ)}}
-	return switching.machineGroupRegexp(machineId)
+	return switching.ensureGroup(name, isModelGroup, nil)
 }
 
 func MachineGroupName(e environs.Environ, controllerUUID, machineId string) string {
@@ -80,9 +78,25 @@ func MachineGroupName(e environs.Environ, controllerUUID, machineId string) stri
 	return switching.machineGroupName(controllerUUID, machineId)
 }
 
-func MatchingGroup(e environs.Environ, ctx envcontext.ProviderCallContext, nameRegExp string) (neutron.SecurityGroupV2, error) {
+func GetSecurityGroupByName(e environs.Environ, ctx context.Context, name string) (neutron.SecurityGroupV2, error) {
 	switching := &neutronFirewaller{firewallerBase: firewallerBase{environ: e.(*Environ)}}
-	return switching.matchingGroup(ctx, nameRegExp)
+	return switching.getSecurityGroupByName(ctx, name)
+}
+
+func OpenModelPorts(
+	e environs.Environ,
+	ctx context.Context,
+	enableSecurityGroup bool,
+	controllerUUID string,
+	rules firewall.IngressRules,
+) error {
+	environ := e.(*Environ)
+	environ.usingSecurityGroups = enableSecurityGroup
+	environ.controllerUUID = controllerUUID
+	switching := &neutronFirewaller{
+		firewallerBase: firewallerBase{environ: environ},
+	}
+	return switching.OpenModelPorts(ctx, rules)
 }
 
 // ImageMetadataStorage returns a Storage object pointing where the goose
@@ -115,7 +129,7 @@ func BlankContainerStorage() envstorage.Storage {
 }
 
 // GetNeutronClient returns the neutron client for the current environs.
-func GetNeutronClient(e environs.Environ) *neutron.Client {
+func GetNeutronClient(e environs.Environ) NetworkingNeutron {
 	return e.(*Environ).neutron()
 }
 
@@ -145,20 +159,16 @@ var GetVolumeEndpointURL = getVolumeEndpointURL
 
 func GetModelGroupNames(e environs.Environ) ([]string, error) {
 	env := e.(*Environ)
-	neutronFw := env.firewaller.(*neutronFirewaller)
-	groups, err := env.neutron().ListSecurityGroupsV2()
-	if err != nil {
-		return nil, err
+	query := neutron.ListSecurityGroupsV2Query{
+		Tags: []string{fmt.Sprintf("%s=%s", tags.JujuModel, env.modelUUID)},
 	}
-	modelPattern, err := regexp.Compile(neutronFw.jujuGroupPrefixRegexp())
+	groups, err := env.neutron().ListSecurityGroupsV2(query)
 	if err != nil {
 		return nil, err
 	}
 	var results []string
 	for _, group := range groups {
-		if modelPattern.MatchString(group.Name) {
-			results = append(results, group.Name)
-		}
+		results = append(results, group.Name)
 	}
 	return results, nil
 }

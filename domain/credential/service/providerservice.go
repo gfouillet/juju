@@ -6,24 +6,41 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
-
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/core/changestream"
 	corecredential "github.com/juju/juju/core/credential"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/domain/credential"
+	"github.com/juju/juju/internal/errors"
 )
 
 // ProviderState describes retrieval and persistence methods for storage.
 type ProviderState interface {
-	// CloudCredential returns the cloud credential for the given name, cloud, owner.
+	// CloudCredential returns the cloud credential for the given key.
 	CloudCredential(ctx context.Context, key corecredential.Key) (credential.CloudCredentialResult, error)
+
+	// CredentialUUIDForKey finds and returns the uuid for the cloud credential
+	// identified by key. If no credential is found then an error of
+	// [github.com/juju/juju/domain/credential/errors.NotFound] is returned.
+	CredentialUUIDForKey(context.Context, corecredential.Key) (corecredential.UUID, error)
+
+	// InvalidateCloudCredential marks a cloud credential for the provided uuid as
+	// invalid.
+	// The following errors can be expected:
+	// - [github.com/juju/juju/domain/credential/errors.NotFound] when no
+	// credential is found for the given uuid.
+	InvalidateCloudCredential(ctx context.Context, uuid corecredential.UUID, reason string) error
 
 	// WatchCredential returns a new NotifyWatcher watching for changes to the specified credential.
 	WatchCredential(
 		ctx context.Context,
-		getWatcher func(string, string, changestream.ChangeType) (watcher.NotifyWatcher, error),
+		getWatcher func(
+			ctx context.Context,
+			summary string,
+			filter eventsource.FilterOption,
+			filterOpts ...eventsource.FilterOption,
+		) (watcher.NotifyWatcher, error),
 		key corecredential.Key,
 	) (watcher.NotifyWatcher, error)
 }
@@ -37,26 +54,40 @@ type ProviderService struct {
 	st ProviderState
 }
 
-// NewProviderService returns a new service reference wrapping the input state.
-func NewProviderService(st ProviderState) *ProviderService {
-	return &ProviderService{
-		st: st,
-	}
-}
-
 // CloudCredential returns the cloud credential for the given tag.
 func (s *ProviderService) CloudCredential(ctx context.Context, key corecredential.Key) (cloud.Credential, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := key.Validate(); err != nil {
-		return cloud.Credential{}, errors.Annotate(err, "invalid id getting cloud credential")
+		return cloud.Credential{}, errors.Errorf("invalid id getting cloud credential: %w", err)
 	}
 	credInfo, err := s.st.CloudCredential(ctx, key)
 	if err != nil {
-		return cloud.Credential{}, errors.Trace(err)
+		return cloud.Credential{}, errors.Capture(err)
 	}
 	cred := cloud.NewNamedCredential(credInfo.Label, cloud.AuthType(credInfo.AuthType), credInfo.Attributes, credInfo.Revoked)
 	cred.Invalid = credInfo.Invalid
 	cred.InvalidReason = credInfo.InvalidReason
 	return cred, nil
+}
+
+// InvalidateCredential marks the cloud credential for the given key as invalid.
+// The following errors can be expected:
+// - [github.com/juju/juju/domain/credential/errors.NotFound] when the
+// credential specified by key does not exist.
+func (s *ProviderService) InvalidateCredential(ctx context.Context, key corecredential.Key, reason string) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if err := key.Validate(); err != nil {
+		return errors.Errorf("invalidating cloud credential with invalid key: %w", err)
+	}
+	uuid, err := s.st.CredentialUUIDForKey(ctx, key)
+	if err != nil {
+		return errors.Errorf("getting credential uuid for key %q: %w", key, err)
+	}
+	return s.st.InvalidateCloudCredential(ctx, uuid, reason)
 }
 
 // WatchableProviderService provides the API for working with credentials and
@@ -80,8 +111,11 @@ func NewWatchableProviderService(st ProviderState, watcherFactory WatcherFactory
 // WatchCredential returns a watcher that observes changes to the specified
 // credential.
 func (s *WatchableProviderService) WatchCredential(ctx context.Context, key corecredential.Key) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := key.Validate(); err != nil {
-		return nil, errors.Annotatef(err, "invalid id watching cloud credential")
+		return nil, errors.Errorf("watching cloud credential with invalid key: %w", err)
 	}
-	return s.st.WatchCredential(ctx, s.watcherFactory.NewValueWatcher, key)
+	return s.st.WatchCredential(ctx, s.watcherFactory.NewNotifyWatcher, key)
 }

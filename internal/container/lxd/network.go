@@ -4,6 +4,7 @@
 package lxd
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -176,7 +177,7 @@ func (s *Server) ensureDefaultNetworking(profile *api.Profile, eTag string) erro
 	if err := s.UpdateProfile(profile.Name, profile.Writable(), eTag); err != nil {
 		return errors.Trace(err)
 	}
-	logger.Debugf("created new nic device %q in profile %q", nicName, profile.Name)
+	logger.Debugf(context.TODO(), "created new nic device %q in profile %q", nicName, profile.Name)
 	return nil
 }
 
@@ -211,17 +212,17 @@ func (s *Server) verifyNICsWithAPI(nics map[string]device) error {
 			continue
 		}
 
-		logger.Tracef("found usable network device %q with parent %q", name, netName)
+		logger.Tracef(context.TODO(), "found usable network device %q with parent %q", name, netName)
 		s.localBridgeName = netName
 		return nil
 	}
 
 	// No nics with a nictype of nicTypeBridged, nicTypeMACVLAN was found.
-	return errors.Errorf(fmt.Sprintf(
+	return errors.Errorf(
 		"no network device found with nictype %q or %q"+
 			"\n\tthe following devices were checked: %s"+
 			"\nReconfigure lxd to use a network of type %q or %q.",
-		nicTypeBridged, nicTypeMACVLAN, strings.Join(checked, ", "), nicTypeBridged, nicTypeMACVLAN))
+		nicTypeBridged, nicTypeMACVLAN, strings.Join(checked, ", "), nicTypeBridged, nicTypeMACVLAN)
 }
 
 // generateNICDeviceName attempts to generate a new NIC device name that is not

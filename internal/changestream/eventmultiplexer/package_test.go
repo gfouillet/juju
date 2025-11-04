@@ -5,28 +5,18 @@ package eventmultiplexer
 
 import (
 	"sync/atomic"
-	"testing"
-	time "time"
 
-	"go.uber.org/goleak"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/changestream"
 	domaintesting "github.com/juju/juju/domain/schema/testing"
-	jujutesting "github.com/juju/juju/testing"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventmultiplexer -destination change_mock_test.go github.com/juju/juju/core/changestream Term
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventmultiplexer -destination stream_mock_test.go github.com/juju/juju/internal/changestream/eventmultiplexer Stream
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventmultiplexer -destination metrics_mock_test.go github.com/juju/juju/internal/changestream/eventmultiplexer MetricsCollector
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventmultiplexer -destination clock_mock_test.go github.com/juju/clock Clock,Timer
-
-func TestPackage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
 
 type baseSuite struct {
 	domaintesting.ControllerSuite
@@ -37,7 +27,7 @@ type baseSuite struct {
 	term    *MockTerm
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.clock = NewMockClock(ctrl)
@@ -56,15 +46,15 @@ func (s *baseSuite) expectAfter() {
 	s.clock.EXPECT().After(gomock.Any()).AnyTimes()
 }
 
-func (s *baseSuite) expectTerm(c *gc.C, evts ...changestream.ChangeEvent) {
+func (s *baseSuite) expectTerm(c *tc.C, evts ...changestream.ChangeEvent) {
 	s.expectTermInOrder(c, false, evts...)
 }
 
-func (s *baseSuite) expectEmptyTerm(c *gc.C, evts ...changestream.ChangeEvent) {
+func (s *baseSuite) expectEmptyTerm(c *tc.C, evts ...changestream.ChangeEvent) {
 	s.expectTermInOrder(c, true, evts...)
 }
 
-func (s *baseSuite) expectTermInOrder(c *gc.C, empty bool, evts ...changestream.ChangeEvent) {
+func (s *baseSuite) expectTermInOrder(c *tc.C, empty bool, evts ...changestream.ChangeEvent) {
 	// The order is important here. We always expect done to be called once
 	// all the changes have been read.
 	gomock.InOrder(
@@ -73,16 +63,11 @@ func (s *baseSuite) expectTermInOrder(c *gc.C, empty bool, evts ...changestream.
 	)
 }
 
-func (s *baseSuite) dispatchTerm(c *gc.C, terms chan<- changestream.Term) <-chan struct{} {
+func (s *baseSuite) dispatchTerm(c *tc.C, terms chan<- changestream.Term) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-
-		select {
-		case terms <- s.term:
-		case <-time.After(jujutesting.ShortWait):
-			c.Fatal("timed out waiting to enqueue event")
-		}
+		terms <- s.term
 	}()
 	return done
 }

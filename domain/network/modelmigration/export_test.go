@@ -4,41 +4,44 @@
 package modelmigration
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/description/v6"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/domain/unit/errors"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
 type exportSuite struct {
-	coordinator   *MockCoordinator
 	exportService *MockExportService
 }
 
-var _ = gc.Suite(&exportSuite{})
+func TestExportSuite(t *testing.T) {
+	tc.Run(t, &exportSuite{})
+}
 
-func (s *exportSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *exportSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.coordinator = NewMockCoordinator(ctrl)
 	s.exportService = NewMockExportService(ctrl)
+
+	c.Cleanup(func() {
+		s.exportService = nil
+	})
 
 	return ctrl
 }
 
-func (s *exportSuite) newExportOperation(c *gc.C) *exportOperation {
+func (s *exportSuite) newExportOperation(c *tc.C) *exportOperation {
 	return &exportOperation{
 		exportService: s.exportService,
 		logger:        loggertesting.WrapCheckLog(c),
 	}
 }
-func (s *exportSuite) TestExport(c *gc.C) {
+func (s *exportSuite) TestExport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
@@ -69,40 +72,40 @@ func (s *exportSuite) TestExport(c *gc.C) {
 		Return(subnets, nil)
 
 	op := s.newExportOperation(c)
-	err := op.Execute(context.Background(), dst)
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorIsNil)
 
 	actualSpaces := dst.Spaces()
-	c.Assert(len(actualSpaces), gc.Equals, 1)
-	c.Assert(actualSpaces[0].Name(), gc.Equals, string(spaces[0].Name))
-	c.Assert(actualSpaces[0].ProviderID(), gc.Equals, string(spaces[0].ProviderId))
+	c.Assert(len(actualSpaces), tc.Equals, 1)
+	c.Assert(actualSpaces[0].Name(), tc.Equals, spaces[0].Name.String())
+	c.Assert(actualSpaces[0].ProviderID(), tc.Equals, string(spaces[0].ProviderId))
 
 	actualSubnets := dst.Subnets()
-	c.Assert(len(actualSubnets), gc.Equals, 1)
-	c.Assert(actualSubnets[0].CIDR(), gc.Equals, subnets[0].CIDR)
-	c.Assert(actualSubnets[0].VLANTag(), gc.Equals, subnets[0].VLANTag)
-	c.Assert(actualSubnets[0].AvailabilityZones(), jc.SameContents, subnets[0].AvailabilityZones)
-	c.Assert(actualSubnets[0].SpaceID(), gc.Equals, subnets[0].SpaceID)
-	c.Assert(actualSubnets[0].SpaceName(), gc.Equals, subnets[0].SpaceName)
-	c.Assert(actualSubnets[0].ProviderId(), gc.Equals, string(subnets[0].ProviderId))
-	c.Assert(actualSubnets[0].ProviderSpaceId(), gc.Equals, string(subnets[0].ProviderSpaceId))
-	c.Assert(actualSubnets[0].ProviderNetworkId(), gc.Equals, string(subnets[0].ProviderNetworkId))
+	c.Assert(len(actualSubnets), tc.Equals, 1)
+	c.Assert(actualSubnets[0].CIDR(), tc.Equals, subnets[0].CIDR)
+	c.Assert(actualSubnets[0].VLANTag(), tc.Equals, subnets[0].VLANTag)
+	c.Assert(actualSubnets[0].AvailabilityZones(), tc.SameContents, subnets[0].AvailabilityZones)
+	c.Assert(actualSubnets[0].SpaceID(), tc.Equals, subnets[0].SpaceID.String())
+	c.Assert(actualSubnets[0].SpaceName(), tc.Equals, subnets[0].SpaceName.String())
+	c.Assert(actualSubnets[0].ProviderId(), tc.Equals, string(subnets[0].ProviderId))
+	c.Assert(actualSubnets[0].ProviderSpaceId(), tc.Equals, string(subnets[0].ProviderSpaceId))
+	c.Assert(actualSubnets[0].ProviderNetworkId(), tc.Equals, string(subnets[0].ProviderNetworkId))
 }
 
-func (s *exportSuite) TestExportSpacesNotFound(c *gc.C) {
+func (s *exportSuite) TestExportSpacesNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
 
 	s.exportService.EXPECT().GetAllSpaces(gomock.Any()).
-		Return(nil, errors.NotFound)
+		Return(nil, coreerrors.NotFound)
 
 	op := s.newExportOperation(c)
-	err := op.Execute(context.Background(), dst)
-	c.Assert(err, gc.ErrorMatches, ".*not found")
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorMatches, ".*not found")
 }
 
-func (s *exportSuite) TestExportSubnetsNotFound(c *gc.C) {
+func (s *exportSuite) TestExportSubnetsNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
@@ -110,9 +113,9 @@ func (s *exportSuite) TestExportSubnetsNotFound(c *gc.C) {
 	s.exportService.EXPECT().GetAllSpaces(gomock.Any()).
 		Return(nil, nil)
 	s.exportService.EXPECT().GetAllSubnets(gomock.Any()).
-		Return(nil, errors.NotFound)
+		Return(nil, coreerrors.NotFound)
 
 	op := s.newExportOperation(c)
-	err := op.Execute(context.Background(), dst)
-	c.Assert(err, gc.ErrorMatches, ".*not found")
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorMatches, ".*not found")
 }

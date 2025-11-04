@@ -4,28 +4,33 @@
 package credential
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/user"
+	usertesting "github.com/juju/juju/core/user/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type typeSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&typeSuite{})
-
-func (s *typeSuite) TestCredentialKeyIsZero(c *gc.C) {
-	c.Assert(Key{}.IsZero(), jc.IsTrue)
+func TestTypeSuite(t *testing.T) {
+	tc.Run(t, &typeSuite{})
 }
 
-func (s *typeSuite) TestCredentialKeyIsNotZero(c *gc.C) {
+func (s *typeSuite) TestCredentialKeyIsZero(c *tc.C) {
+	c.Assert(Key{}.IsZero(), tc.IsTrue)
+}
+
+func (s *typeSuite) TestCredentialKeyIsNotZero(c *tc.C) {
 	tests := []Key{
 		{
-			Owner: "wallyworld",
+			Owner: usertesting.GenNewName(c, "wallyworld"),
 		},
 		{
 			Cloud: "somecloud",
@@ -35,17 +40,41 @@ func (s *typeSuite) TestCredentialKeyIsNotZero(c *gc.C) {
 		},
 		{
 			Cloud: "somecloud",
-			Owner: "wallyworld",
+			Owner: usertesting.GenNewName(c, "wallyworld"),
 			Name:  "somecred",
 		},
 	}
 
 	for _, test := range tests {
-		c.Assert(test.IsZero(), jc.IsFalse)
+		c.Assert(test.IsZero(), tc.IsFalse)
 	}
 }
 
-func (s *typeSuite) TestCredentialKeyValidate(c *gc.C) {
+// TestCredentialKeyEscape is a regression test for asserting the escaping of
+// credential data before parsing to a tag. Specifically credential values that
+// contain a '_' rune need to be escaped in accordance with url patterns.
+func (s *typeSuite) TestCredentialKeyEscape(c *tc.C) {
+	k := Key{
+		Cloud: "maas_cloud",
+		Name:  "maas_cloud_credentials",
+		Owner: user.AdminUserName,
+	}
+
+	// Test to tag
+	tag, err := k.Tag()
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(
+		tag.String(),
+		tc.Equals,
+		"cloudcred-maas%5fcloud_admin_maas%5fcloud%5fcredentials",
+	)
+
+	// Test from tag
+	gotKey := KeyFromTag(tag)
+	c.Check(gotKey, tc.Equals, k)
+}
+
+func (s *typeSuite) TestCredentialKeyValidate(c *tc.C) {
 	tests := []struct {
 		Key Key
 		Err error
@@ -54,31 +83,31 @@ func (s *typeSuite) TestCredentialKeyValidate(c *gc.C) {
 			Key: Key{
 				Cloud: "",
 				Name:  "wallyworld",
-				Owner: "wallyworld",
+				Owner: usertesting.GenNewName(c, "wallyworld"),
 			},
-			Err: errors.NotValid,
+			Err: coreerrors.NotValid,
 		},
 		{
 			Key: Key{
 				Cloud: "my-cloud",
 				Name:  "",
-				Owner: "wallyworld",
+				Owner: usertesting.GenNewName(c, "wallyworld"),
 			},
-			Err: errors.NotValid,
+			Err: coreerrors.NotValid,
 		},
 		{
 			Key: Key{
 				Cloud: "my-cloud",
 				Name:  "wallyworld",
-				Owner: "",
+				Owner: user.Name{},
 			},
-			Err: errors.NotValid,
+			Err: coreerrors.NotValid,
 		},
 		{
 			Key: Key{
 				Cloud: "my-cloud",
 				Name:  "wallyworld",
-				Owner: "wallyworld",
+				Owner: usertesting.GenNewName(c, "wallyworld"),
 			},
 			Err: nil,
 		},
@@ -87,25 +116,25 @@ func (s *typeSuite) TestCredentialKeyValidate(c *gc.C) {
 	for _, test := range tests {
 		err := test.Key.Validate()
 		if test.Err == nil {
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		} else {
-			c.Assert(err, jc.ErrorIs, test.Err)
+			c.Assert(err, tc.ErrorIs, test.Err)
 		}
 	}
 }
 
-func (*typeSuite) TestIDValidate(c *gc.C) {
+func (*typeSuite) TestUUIDValidate(c *tc.C) {
 	tests := []struct {
 		id  string
 		err error
 	}{
 		{
 			id:  "",
-			err: errors.NotValid,
+			err: coreerrors.NotValid,
 		},
 		{
 			id:  "invalid",
-			err: errors.NotValid,
+			err: coreerrors.NotValid,
 		},
 		{
 			id: uuid.MustNewUUID().String(),
@@ -114,13 +143,13 @@ func (*typeSuite) TestIDValidate(c *gc.C) {
 
 	for i, test := range tests {
 		c.Logf("test %d: %q", i, test.id)
-		err := ID(test.id).Validate()
+		err := UUID(test.id).Validate()
 
 		if test.err == nil {
-			c.Check(err, gc.IsNil)
+			c.Check(err, tc.IsNil)
 			continue
 		}
 
-		c.Check(err, jc.ErrorIs, test.err)
+		c.Check(err, tc.ErrorIs, test.err)
 	}
 }

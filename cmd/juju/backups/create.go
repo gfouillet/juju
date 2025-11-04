@@ -4,17 +4,18 @@
 package backups
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/backups"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -29,19 +30,19 @@ You may provide a note to associate with the backup.
 
 By default, the backup archive and associated metadata are downloaded.
 
-Use --no-download to avoid getting a local copy of the backup downloaded 
+Use ` + "`--no-download`" + ` to avoid getting a local copy of the backup downloaded
 at the end of the backup process. In this case it is recommended that the
-model config attribute "backup-dir" be set to point to a path where the
+model config attribute ` + "`backup-dir`" + ` be set to point to a path where the
 backup archives should be stored long term. This could be a remotely mounted
 filesystem; the same path must exist on each controller if using HA.
 
-Use --verbose to see extra information about backup.
+Use ` + "`--verbose`" + ` to see extra information about backup.
 
-To access remote backups stored on the controller, see 'juju download-backup'.
+To access remote backups stored on the controller, see ` + "`juju download-backup`" + `.
 `
 
 const createExamples = `
-    juju create-backup 
+    juju create-backup
     juju create-backup --no-download
 `
 
@@ -106,10 +107,10 @@ func (c *createCommand) Init(args []string) error {
 
 // Run implements Command.Run.
 func (c *createCommand) Run(ctx *cmd.Context) error {
-	if err := c.validateIaasController(c.Info().Name); err != nil {
+	if err := c.validateIaasController(ctx, c.Info().Name); err != nil {
 		return errors.Trace(err)
 	}
-	client, err := c.NewGetAPI()
+	client, err := c.NewGetAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -119,7 +120,7 @@ func (c *createCommand) Run(ctx *cmd.Context) error {
 		ctx.Warningf(downloadWarning)
 	}
 
-	metadataResult, copyFrom, err := c.create(client)
+	metadataResult, copyFrom, err := c.create(ctx, client)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -131,7 +132,7 @@ func (c *createCommand) Run(ctx *cmd.Context) error {
 	if c.NoDownload {
 		ctx.Infof("Remote backup stored on the controller as %v", metadataResult.Filename)
 	} else {
-		filename := c.decideFilename(ctx, c.Filename, metadataResult.Started)
+		filename := c.decideFilename(c.Filename, metadataResult.Started)
 		if err := c.download(ctx, client, copyFrom, filename); err != nil {
 			return errors.Trace(err)
 		}
@@ -140,7 +141,7 @@ func (c *createCommand) Run(ctx *cmd.Context) error {
 	return nil
 }
 
-func (c *createCommand) decideFilename(ctx *cmd.Context, filename string, timestamp time.Time) string {
+func (c *createCommand) decideFilename(filename string, timestamp time.Time) string {
 	if filename != notset {
 		return filename
 	}
@@ -169,8 +170,8 @@ func (c *createCommand) download(ctx *cmd.Context, client APIClient, copyFrom st
 	return nil
 }
 
-func (c *createCommand) create(client APIClient) (*params.BackupsMetadataResult, string, error) {
-	result, err := client.Create(c.Notes, c.NoDownload)
+func (c *createCommand) create(ctx context.Context, client APIClient) (*params.BackupsMetadataResult, string, error) {
+	result, err := client.Create(ctx, c.Notes, c.NoDownload)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}

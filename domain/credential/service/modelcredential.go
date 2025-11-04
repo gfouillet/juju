@@ -4,50 +4,37 @@
 package service
 
 import (
-	stdcontext "context"
-	"fmt"
-
-	"github.com/juju/collections/set"
-	"github.com/juju/errors"
+	"context"
 
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/cloud"
 	corecredential "github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/machine"
 	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
+	"github.com/juju/juju/internal/errors"
 )
 
-// MachineService provides access to all machines.
+// MachineService defines the methods that the credential service assumes from
+// the Machine service.
 type MachineService interface {
-	// AllMachines returns all machines in the model.
-	AllMachines() ([]Machine, error)
-}
-
-// Machine defines machine methods needed for the check.
-type Machine interface {
-	// IsManual returns true if the machine was manually provisioned.
-	IsManual() (bool, error)
-
-	// IsContainer returns true if the machine is a container.
-	IsContainer() bool
-
-	// InstanceId returns the provider specific instance id for this
-	// machine, or a NotProvisionedError, if not set.
-	InstanceId() (instance.Id, error)
-
-	// Id returns the machine id.
-	Id() string
+	// GetAllProvisionedMachineInstanceID returns all provisioned machine
+	// instance IDs in the model.
+	GetAllProvisionedMachineInstanceID(ctx context.Context) (map[machine.Name]instance.Id, error)
+	// InstanceID returns the cloud specific instance id for this machine.
+	InstanceID(ctx context.Context, mUUID machine.UUID) (string, error)
 }
 
 // CloudProvider defines methods needed from the cloud provider to perform the check.
 type CloudProvider interface {
 	// AllInstances returns all instances currently known to the cloud provider.
-	AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error)
+	AllInstances(ctx context.Context) ([]instances.Instance, error)
 }
 
 // CredentialValidationContext provides access to artefacts needed to
@@ -67,7 +54,7 @@ type CredentialValidationContext struct {
 // valid for any models which want to use it.
 type CredentialValidator interface {
 	Validate(
-		ctx stdcontext.Context,
+		ctx context.Context,
 		validationContext CredentialValidationContext,
 		credentialKey corecredential.Key,
 		credential *cloud.Credential,
@@ -85,19 +72,22 @@ func NewCredentialValidator() CredentialValidator {
 // Validate checks if a new cloud credential could be valid for a model whose
 // details are defined in the context.
 func (v defaultCredentialValidator) Validate(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	validationContext CredentialValidationContext,
 	key corecredential.Key,
 	cred *cloud.Credential,
 	checkCloudInstances bool,
 ) (machineErrors []error, err error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := key.Validate(); err != nil {
-		return nil, fmt.Errorf("credential %w", err)
+		return nil, errors.Errorf("credential %w", err)
 	}
 
 	openParams, err := v.buildOpenParams(validationContext, key, cred)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	switch validationContext.ModelType {
 	case coremodel.CAAS:
@@ -105,26 +95,32 @@ func (v defaultCredentialValidator) Validate(
 	case coremodel.IAAS:
 		return checkIAASModelCredential(ctx, validationContext.MachineService, openParams, checkCloudInstances)
 	default:
-		return nil, errors.NotSupportedf("model type %q", validationContext.ModelType)
+		return nil, errors.Errorf("model type %q %w", validationContext.ModelType, coreerrors.NotSupported)
 	}
 }
 
-func checkCAASModelCredential(ctx stdcontext.Context, brokerParams environs.OpenParams) ([]error, error) {
-	broker, err := newCAASBroker(ctx, brokerParams)
+// TODO (stickupkid): This should be removed with haste.
+// Instead the provider factory should allow you to get a provider without a
+// credential validator.
+func checkCAASModelCredential(ctx context.Context, brokerParams environs.OpenParams) ([]error, error) {
+	broker, err := newCAASBroker(ctx, brokerParams, environs.NoopCredentialInvalidator())
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	if err = broker.CheckCloudCredentials(ctx); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return nil, nil
 }
 
-func checkIAASModelCredential(ctx stdcontext.Context, machineService MachineService, openParams environs.OpenParams, checkCloudInstances bool) ([]error, error) {
-	env, err := newEnv(ctx, openParams)
+// TODO (stickupkid): This should be removed with haste.
+// Instead the provider factory should allow you to get a provider without a
+// credential validator.
+func checkIAASModelCredential(ctx context.Context, machineService MachineService, openParams environs.OpenParams, checkCloudInstances bool) ([]error, error) {
+	env, err := newEnv(ctx, openParams, environs.NoopCredentialInvalidator())
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	// We only check persisted machines vs known cloud instances.
 	// In the future, this check may be extended to other cloud resources,
@@ -136,45 +132,24 @@ func checkIAASModelCredential(ctx stdcontext.Context, machineService MachineServ
 // checkMachineInstances compares model machines from state with
 // the ones reported by the provider using supplied credential.
 // This only makes sense for non-k8s providers.
-func checkMachineInstances(ctx stdcontext.Context, machineService MachineService, provider CloudProvider, checkCloudInstances bool) ([]error, error) {
+func checkMachineInstances(ctx context.Context, machineService MachineService, provider CloudProvider, checkCloudInstances bool) ([]error, error) {
 	// Get machines from state
-	machines, err := machineService.AllMachines()
+	machineInstanceIDs, err := machineService.GetAllProvisionedMachineInstanceID(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	var results []error
-
-	machinesByInstance := make(map[string]string)
-	for _, machine := range machines {
-		if machine.IsContainer() {
-			// Containers don't correspond to instances at the
-			// provider level.
-			continue
-		}
-		if manual, err := machine.IsManual(); err != nil {
-			return nil, errors.Trace(err)
-		} else if manual {
-			continue
-		}
-		instanceId, err := machine.InstanceId()
-		if errors.Is(err, errors.NotProvisioned) {
-			// Skip over this machine; we wouldn't expect the cloud
-			// to know about it.
-			continue
-		} else if err != nil {
-			results = append(results, errors.Annotatef(err, "getting instance id for machine %s", machine.Id()))
-			continue
-		}
-		machinesByInstance[string(instanceId)] = machine.Id()
+	machinesByInstance := make(map[instance.Id]machine.Name)
+	for m, id := range machineInstanceIDs {
+		machinesByInstance[id] = m
 	}
 
-	// Check that we can see all machines' instances regardless of their state as perceived by the cloud, i.e.
-	// this call will return all non-terminated instances.
-	callCtx := envcontext.WithoutCredentialInvalidator(ctx)
-	instances, err := provider.AllInstances(callCtx)
+	// Check that we can see all machines' instances regardless of their state
+	// as perceived by the cloud, i.e. this call will return all non-terminated
+	// instances.
+	instances, err := provider.AllInstances(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	// From here, there 2 ways of checking whether the credential is valid:
@@ -184,11 +159,13 @@ func checkMachineInstances(ctx stdcontext.Context, machineService MachineService
 	// Second check (2) is more useful for model migration, for example, since we want to know if
 	// we have moved the known universe correctly. However, it is a but redundant if we just care about
 	// credential validity since the first check (1) addresses all our concerns.
+	var results []error
 
-	instanceIds := set.NewStrings()
+	instanceIds := make(map[instance.Id]struct{})
 	for _, instance := range instances {
-		id := string(instance.Id())
-		instanceIds.Add(id)
+		id := instance.Id()
+		instanceIds[id] = struct{}{}
+
 		if checkCloudInstances {
 			if _, found := machinesByInstance[id]; !found {
 				results = append(results, errors.Errorf("no machine with instance %q", id))
@@ -197,8 +174,8 @@ func checkMachineInstances(ctx stdcontext.Context, machineService MachineService
 	}
 
 	for instanceId, name := range machinesByInstance {
-		if !instanceIds.Contains(instanceId) {
-			results = append(results, errors.Errorf("couldn't find instance %q for machine %s", instanceId, name))
+		if _, found := instanceIds[instanceId]; !found {
+			results = append(results, errors.Errorf("couldn't find instance %q for machine %q", instanceId, name))
 		}
 	}
 
@@ -219,12 +196,12 @@ func (v defaultCredentialValidator) buildOpenParams(
 
 	err := v.validateCloudCredential(ctx.Cloud, credentialKey)
 	if err != nil {
-		return fail(errors.Trace(err))
+		return fail(errors.Capture(err))
 	}
 
 	tempCloudSpec, err := environscloudspec.MakeCloudSpec(ctx.Cloud, ctx.Region, credential)
 	if err != nil {
-		return fail(errors.Trace(err))
+		return fail(errors.Capture(err))
 	}
 
 	return environs.OpenParams{
@@ -242,7 +219,7 @@ func (v defaultCredentialValidator) validateCloudCredential(
 ) error {
 	if !credentialKey.IsZero() {
 		if credentialKey.Cloud != cld.Name {
-			return errors.NotValidf("credential %q", credentialKey)
+			return errors.Errorf("credential %q %w", credentialKey, coreerrors.NotValid)
 		}
 		return nil
 	}
@@ -255,7 +232,7 @@ func (v defaultCredentialValidator) validateCloudCredential(
 		break
 	}
 	if !hasEmptyAuth {
-		return errors.NotValidf("missing CloudCredential")
+		return errors.Errorf("missing CloudCredential %w", coreerrors.NotValid)
 	}
 	return nil
 }

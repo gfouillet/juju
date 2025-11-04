@@ -4,10 +4,10 @@
 package state
 
 import (
-	"github.com/juju/errors"
+	"database/sql"
 
-	dbcloud "github.com/juju/juju/domain/cloud/state"
 	"github.com/juju/juju/domain/credential"
+	"github.com/juju/juju/internal/errors"
 )
 
 // These structs represent the persistent cloud credential entity schema in the database.
@@ -50,7 +50,7 @@ type Credential struct {
 }
 
 // credentialWithAttribute represents a single returned from the
-// v_cloud_credential_attributes table.
+// v_cloud_credential_attribute table.
 type credentialWithAttribute struct {
 	ID string `db:"uuid"`
 
@@ -105,17 +105,42 @@ type CredentialAttribute struct {
 	Value string `db:"value"`
 }
 
+type credentialInvalidReason struct {
+	Reason string `db:"invalid_reason"`
+}
+
+type credentialUUID struct {
+	UUID string `db:"uuid"`
+}
+
+type modelCredentialUUID struct {
+	UUID sql.NullString `db:"cloud_credential_uuid"`
+}
+
+// dbCloudName represents the name of a cloud.
+type dbCloudName struct {
+	Name string `db:"name"`
+}
+
+type authTypes []authType
+
+// authType represents a single row from the auth_type table.
+type authType struct {
+	ID   int    `db:"id"`
+	Type string `db:"type"`
+}
+
 type Credentials []Credential
 
 // ToCloudCredentials converts the given credentials to a slice of cloud credentials.
-func (rows Credentials) ToCloudCredentials(authTypes []dbcloud.AuthType, clouds []dbcloud.Cloud, keyValues []CredentialAttribute) ([]credential.CloudCredentialResult, error) {
-	if n := len(rows); n != len(authTypes) || n != len(keyValues) || n != len(clouds) {
+func (rows Credentials) ToCloudCredentials(cloudName string, authTypes []authType, keyValues []CredentialAttribute) ([]credential.CloudCredentialResult, error) {
+	if n := len(rows); n != len(authTypes) || n != len(keyValues) {
 		// Should never happen.
 		return nil, errors.New("row length mismatch")
 	}
 
 	var result []credential.CloudCredentialResult
-	recordResult := func(row *Credential, authType, cloudName string, attrs credentialAttrs) {
+	recordResult := func(row *Credential, authType string, attrs credentialAttrs) {
 		result = append(result, credential.CloudCredentialResult{
 			CloudCredentialInfo: credential.CloudCredentialInfo{
 				AuthType:      authType,
@@ -130,17 +155,16 @@ func (rows Credentials) ToCloudCredentials(authTypes []dbcloud.AuthType, clouds 
 	}
 
 	var (
-		current             *Credential
-		authType, cloudName string
-		attrs               = make(credentialAttrs)
+		current  *Credential
+		authType string
+		attrs    = make(credentialAttrs)
 	)
 	for i, row := range rows {
 		if current != nil && row.ID != current.ID {
-			recordResult(current, authType, cloudName, attrs)
+			recordResult(current, authType, attrs)
 			attrs = make(credentialAttrs)
 		}
 		authType = authTypes[i].Type
-		cloudName = clouds[i].Name
 		if keyValues[i].Key != "" {
 			attrs[keyValues[i].Key] = keyValues[i].Value
 		}
@@ -148,7 +172,46 @@ func (rows Credentials) ToCloudCredentials(authTypes []dbcloud.AuthType, clouds 
 		current = &rowCopy
 	}
 	if current != nil {
-		recordResult(current, authType, cloudName, attrs)
+		recordResult(current, authType, attrs)
 	}
 	return result, nil
+}
+
+// credentialAttrs is a key value map of credential attributes.
+type credentialAttrs map[string]string
+
+type credentialKey struct {
+	CredentialName string `db:"name"`
+	CloudName      string `db:"cloud_name"`
+	OwnerName      string `db:"owner_name"`
+}
+
+// modelCredentialStatus represents the cloud credential key and validity status
+// of the credential that is being used by a model. The members of this type
+// are considered optional with sql null types. If the values are null it
+// indicates that the model has no cloud credential set and that the cloud
+// supports empty auth type.
+type modelCredentialStatus struct {
+	CredentialName sql.NullString `db:"cloud_credential_name"`
+	CloudName      sql.NullString `db:"cloud_credential_cloud_name"`
+	OwnerName      sql.NullString `db:"cloud_credential_owner_name"`
+	Invalid        sql.NullBool   `db:"cloud_credential_invalid"`
+}
+
+type modelNameAndUUID struct {
+	Name string `db:"name"`
+	UUID string `db:"uuid"`
+}
+
+type ownerName struct {
+	Name string `db:"name"`
+}
+
+type ownerAndCloudName struct {
+	OwnerName string `db:"owner_name"`
+	CloudName string `db:"cloud_name"`
+}
+
+type modelUUID struct {
+	UUID string `db:"uuid"`
 }

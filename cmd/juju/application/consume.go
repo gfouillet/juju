@@ -4,9 +4,10 @@
 package application
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/applicationoffers"
@@ -14,6 +15,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -21,21 +23,21 @@ var usageConsumeSummary = `
 Add a remote offer to the model.`[1:]
 
 var usageConsumeDetails = `
-Adds a remote offer to the model. Relations can be created later using "juju relate".
+Adds a remote offer to the model. Relations can be created later using ` + "`juju integrate`" + `.
 
 The path to the remote offer is formatted as follows:
 
-    [<controller name>:][<model owner>/]<model name>.<application name>
-        
+    [<controller name>:][<model qualifier>/]<model name>.<application name>
+
 If the controller name is omitted, Juju will use the currently active
-controller. Similarly, if the model owner is omitted, Juju will use the user
+controller. Similarly, if the model qualifier is omitted, Juju will use the user
 that is currently logged in to the controller providing the offer.
 `[1:]
 
 const usageConsumeExamples = `
     juju consume othermodel.mysql
-    juju consume owner/othermodel.mysql
-    juju consume anothercontroller:owner/othermodel.mysql
+    juju consume prod/othermodel.mysql
+    juju consume anothercontroller:prod/othermodel.mysql
 `
 
 // NewConsumeCommand returns a command to add remote offers to
@@ -86,18 +88,18 @@ func (c *consumeCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *consumeCommand) getTargetAPI() (applicationConsumeAPI, error) {
+func (c *consumeCommand) getTargetAPI(ctx context.Context) (applicationConsumeAPI, error) {
 	if c.targetAPI != nil {
 		return c.targetAPI, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return application.NewClient(root), nil
 }
 
-func (c *consumeCommand) getSourceAPI(url *crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
+func (c *consumeCommand) getSourceAPI(ctx context.Context, url crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
 	if c.sourceAPI != nil {
 		return c.sourceAPI, nil
 	}
@@ -110,7 +112,7 @@ func (c *consumeCommand) getSourceAPI(url *crossmodel.OfferURL) (applicationCons
 		}
 		url.Source = controllerName
 	}
-	root, err := c.CommandBase.NewAPIRoot(c.ClientStore(), url.Source, "")
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), url.Source, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -131,17 +133,17 @@ func (c *consumeCommand) Run(ctx *cmd.Context) error {
 	if url.HasEndpoint() {
 		return errors.Errorf("saas offer %q shouldn't include endpoint", c.remoteApplication)
 	}
-	if url.User == "" {
-		url.User = accountDetails.User
+	if url.ModelQualifier == "" {
+		url.ModelQualifier = accountDetails.User
 		c.remoteApplication = url.Path()
 	}
-	sourceClient, err := c.getSourceAPI(url)
+	sourceClient, err := c.getSourceAPI(ctx, url)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer sourceClient.Close()
 
-	consumeDetails, err := sourceClient.GetConsumeDetails(url.AsLocal().String())
+	consumeDetails, err := sourceClient.GetConsumeDetails(ctx, url.AsLocal().String())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -154,7 +156,7 @@ func (c *consumeCommand) Run(ctx *cmd.Context) error {
 	offerURL.Source = url.Source
 	consumeDetails.Offer.OfferURL = offerURL.String()
 
-	targetClient, err := c.getTargetAPI()
+	targetClient, err := c.getTargetAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -171,13 +173,13 @@ func (c *consumeCommand) Run(ctx *cmd.Context) error {
 			return errors.Trace(err)
 		}
 		arg.ControllerInfo = &crossmodel.ControllerInfo{
-			ControllerTag: controllerTag,
-			Alias:         consumeDetails.ControllerInfo.Alias,
-			Addrs:         consumeDetails.ControllerInfo.Addrs,
-			CACert:        consumeDetails.ControllerInfo.CACert,
+			ControllerUUID: controllerTag.Id(),
+			Alias:          consumeDetails.ControllerInfo.Alias,
+			Addrs:          consumeDetails.ControllerInfo.Addrs,
+			CACert:         consumeDetails.ControllerInfo.CACert,
 		}
 	}
-	localName, err := targetClient.Consume(arg)
+	localName, err := targetClient.Consume(ctx, arg)
 	if err != nil {
 		return block.ProcessBlockedError(errors.Annotatef(err, "could not consume %v", url.AsLocal().String()), block.BlockChange)
 	}
@@ -187,10 +189,10 @@ func (c *consumeCommand) Run(ctx *cmd.Context) error {
 
 type applicationConsumeAPI interface {
 	Close() error
-	Consume(crossmodel.ConsumeApplicationArgs) (string, error)
+	Consume(context.Context, crossmodel.ConsumeApplicationArgs) (string, error)
 }
 
 type applicationConsumeDetailsAPI interface {
 	Close() error
-	GetConsumeDetails(string) (params.ConsumeOfferDetails, error)
+	GetConsumeDetails(context.Context, string) (params.ConsumeOfferDetails, error)
 }

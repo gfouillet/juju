@@ -4,9 +4,10 @@
 package backups
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	backupstesting "github.com/juju/juju/core/backups/testing"
 	"github.com/juju/juju/rpc/params"
@@ -16,9 +17,11 @@ type createSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&createSuite{})
+func TestCreateSuite(t *testing.T) {
+	tc.Run(t, &createSuite{})
+}
 
-func (s *createSuite) TestCreate(c *gc.C) {
+func (s *createSuite) TestCreate(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	arg := params.BackupsCreateArgs{
@@ -32,8 +35,8 @@ func (s *createSuite) TestCreate(c *gc.C) {
 	s.facade.EXPECT().FacadeCall(gomock.Any(), "Create", arg, gomock.Any()).SetArg(3, result)
 
 	client := s.newClient()
-	got, err := client.Create("important", true)
-	c.Assert(err, jc.ErrorIsNil)
+	got, err := client.Create(c.Context(), "important", true)
+	c.Assert(err, tc.ErrorIsNil)
 	c.Log(got)
 	resultMeta := backupstesting.UpdateNotes(meta, "important")
 	s.checkMetadataResult(c, got, resultMeta)

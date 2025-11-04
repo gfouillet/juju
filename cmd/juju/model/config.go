@@ -5,16 +5,15 @@ package model
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/api/client/modelconfig"
 	jujucmd "github.com/juju/juju/cmd"
@@ -24,49 +23,70 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
 	envconfig "github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/configschema"
 )
 
 const (
 	modelConfigSummary        = "Displays or sets configuration values on a model."
 	modelConfigHelpDocPartOne = `
-To view all configuration values for the current model, run
+To view all configuration values for the current model:
+
     juju model-config
-You can target a specific model using the -m flag:
+
+You can target a specific model using the ` + "`-m`" + ` flag:
+
     juju model-config -m <model>
     juju model-config -m <controller>:<model>
-By default, the config will be printed in a tabular format. You can instead
-print it in json or yaml format using the --format flag:
+
+	By default, the config will be printed in a tabular format. You can instead
+print it in the ` + "`json`" + ` or ` + "`yaml`" + ` format using the ` + "`--format`" + ` flag:
+
     juju model-config --format json
     juju model-config --format yaml
 
-To view the value of a single config key, run
+To view the value of a single config key:
+
     juju model-config key
-To set config values, run
+
+To set config values:
+
     juju model-config key1=val1 key2=val2 ...
+
 You can also reset config keys to their default values:
+
     juju model-config --reset key1
     juju model-config --reset key1,key2,key3
+
 You may simultaneously set some keys and reset others:
+
     juju model-config key1=val1 key2=val2 --reset key3,key4
 
-Config values can be imported from a yaml file using the --file flag:
+Config values can be imported from a yaml file using the ` + "`--file`" + ` flag:
+
     juju model-config --file=path/to/cfg.yaml
-This allows you to e.g. save a model's config to a file:
+
+This allows you to, e.g., save a model's config to a file:
+
     juju model-config --format=yaml > cfg.yaml
-and then import the config later. Note that the output of model-config
+
+and then import the config later. Note that the output of ` + "`model-config`" + `
 may include read-only values, which will cause an error when importing later.
-To prevent the error, use the --ignore-read-only-fields flag:
+To prevent the error, use the ` + "`--ignore-read-only-fields`" + ` flag:
+
     juju model-config --file=cfg.yaml --ignore-read-only-fields
 
-You can also read from stdin using "-", which allows you to pipe config values
+You can also read from ` + "`stdin`" + ` using ` + "`-`" + `, which allows you to pipe config values
 from one model to another:
+
     juju model-config -c c1 --format=yaml \
       | juju model-config -c c2 --file=- --ignore-read-only-fields
+
 You can simultaneously read config from a yaml file and set config keys
 as above. The command-line args will override any values specified in the file.
 
-The default-series key is deprecated in favour of default-base
-e.g. default-base=ubuntu@22.04.
+The ` + "`default-series`" + ` key is deprecated in favour of ` + "`default-base`" + `. For example:
+` + "`default-base=ubuntu@22.04`" + `.
 `
 	modelConfigHelpDocKeys = `
 The following keys are available:
@@ -78,11 +98,11 @@ Print the value of default-base:
 
     juju model-config default-base
 
-Print the model config of model mycontroller:mymodel:
+Print the model config of model ` + "`mycontroller:mymodel`" + `:
 
     juju model-config -m mycontroller:mymodel
 
-Set the value of ftp-proxy to 10.0.0.1:8000:
+Set the value of ftp-proxy to ` + "`10.0.0.1:8000`" + `:
 
     juju model-config ftp-proxy=10.0.0.1:8000
 
@@ -201,10 +221,11 @@ type configCommand struct {
 // configCommandAPI defines an API interface to be used during testing.
 type configCommandAPI interface {
 	Close() error
-	ModelGet() (map[string]interface{}, error)
-	ModelGetWithMetadata() (envconfig.ConfigValues, error)
-	ModelSet(config map[string]interface{}) error
-	ModelUnset(keys ...string) error
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
+	ModelGetWithMetadata(ctx context.Context) (envconfig.ConfigValues, error)
+	ModelSet(ctx context.Context, config map[string]interface{}) error
+	ModelUnset(ctx context.Context, keys ...string) error
+	BestAPIVersion() int
 }
 
 // Info implements part of the cmd.Command interface.
@@ -257,11 +278,11 @@ func (c *configCommand) Init(args []string) error {
 
 // getAPI returns the API. This allows passing in a test configCommandAPI
 // implementation.
-func (c *configCommand) getAPI() (configCommandAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (configCommandAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	api, err := c.NewAPIRoot()
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
@@ -271,7 +292,7 @@ func (c *configCommand) getAPI() (configCommandAPI, error) {
 
 // Run implements the meaty part of the cmd.Command interface.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -281,20 +302,20 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		var err error
 		switch action {
 		case config.GetOne:
-			err = c.getConfig(client, ctx)
+			err = c.getConfig(ctx, client)
 		case config.SetArgs:
-			err = c.setConfig(client, c.configBase.ValsToSet)
+			err = c.setConfig(ctx, client, c.configBase.ValsToSet)
 		case config.SetFile:
 			var attrs config.Attrs
 			attrs, err = c.configBase.ReadFile(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			err = c.setConfig(client, attrs)
+			err = c.setConfig(ctx, client, attrs)
 		case config.Reset:
-			err = c.resetConfig(client)
+			err = c.resetConfig(ctx, client)
 		default:
-			err = c.getAllConfig(client, ctx)
+			err = c.getAllConfig(ctx, client)
 		}
 		if err != nil {
 			return errors.Trace(err)
@@ -304,17 +325,17 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 }
 
 // resetConfig unsets the keys provided to the command.
-func (c *configCommand) resetConfig(client configCommandAPI) error {
+func (c *configCommand) resetConfig(ctx context.Context, client configCommandAPI) error {
 	// ctx unused in this method
-	if err := c.verifyKnownKeys(client, c.configBase.KeysToReset); err != nil {
+	if err := c.verifyKnownKeys(ctx, client, c.configBase.KeysToReset); err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(client.ModelUnset(c.configBase.KeysToReset...), block.BlockChange)
+	return block.ProcessBlockedError(client.ModelUnset(ctx, c.configBase.KeysToReset...), block.BlockChange)
 }
 
 // setConfig sets the provided key/value pairs on the model.
-func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) error {
+func (c *configCommand) setConfig(ctx context.Context, client configCommandAPI, attrs config.Attrs) error {
 	var keys []string // collect and validate
 
 	// Sort through to catch read-only keys
@@ -332,6 +353,8 @@ func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) e
 			}
 			return errors.Errorf(`%q must be set via "add-model"`,
 				envconfig.CharmHubURLKey)
+		} else if k == "secret-backend" && client.BestAPIVersion() > 3 {
+			return secretBackendNotSupportedError
 		}
 
 		values[k] = v
@@ -343,16 +366,20 @@ func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) e
 		return errors.Trace(err)
 	}
 
-	if err := c.verifyKnownKeys(client, keys); err != nil {
+	if err := c.verifyKnownKeys(ctx, client, keys); err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(client.ModelSet(coerced), block.BlockChange)
+	return block.ProcessBlockedError(client.ModelSet(ctx, coerced), block.BlockChange)
 }
 
+const secretBackendNotSupportedError = errors.ConstError(
+	`"secret-backend" has been removed from model config, use the new command "model-secret-backend" instead`,
+)
+
 // getConfig writes the value of a single model config key to the cmd.Context.
-func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) error {
-	attrs, err := c.getFilteredModel(client)
+func (c *configCommand) getConfig(ctx *cmd.Context, client configCommandAPI) error {
+	attrs, err := c.getFilteredModel(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -362,6 +389,9 @@ func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) err
 	}
 
 	key := c.configBase.KeysToGet[0]
+	if key == "secret-backend" && client.BestAPIVersion() > 3 {
+		return secretBackendNotSupportedError
+	}
 	if value, found := attrs[key]; found {
 		if c.out.Name() == "tabular" {
 			// The user has not specified that they want
@@ -382,8 +412,8 @@ func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) err
 }
 
 // getAllConfig writes the full model config to the cmd.Context.
-func (c *configCommand) getAllConfig(client configCommandAPI, ctx *cmd.Context) error {
-	attrs, err := c.getFilteredModel(client)
+func (c *configCommand) getAllConfig(ctx *cmd.Context, client configCommandAPI) error {
+	attrs, err := c.getFilteredModel(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -403,8 +433,8 @@ func (c *configCommand) getAllConfig(client configCommandAPI, ctx *cmd.Context) 
 }
 
 // getFilteredModel returns the model config with model attributes filtered out.
-func (c *configCommand) getFilteredModel(client configCommandAPI) (envconfig.ConfigValues, error) {
-	attrs, err := client.ModelGetWithMetadata()
+func (c *configCommand) getFilteredModel(ctx context.Context, client configCommandAPI) (envconfig.ConfigValues, error) {
+	attrs, err := client.ModelGetWithMetadata(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -419,8 +449,8 @@ func (c *configCommand) getFilteredModel(client configCommandAPI) (envconfig.Con
 
 // verifyKnownKeys is a helper to validate the keys we are operating with
 // against the set of known attributes from the model.
-func (c *configCommand) verifyKnownKeys(client configCommandAPI, keys []string) error {
-	known, err := client.ModelGet()
+func (c *configCommand) verifyKnownKeys(ctx context.Context, client configCommandAPI, keys []string) error {
+	known, err := client.ModelGet(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -434,7 +464,7 @@ func (c *configCommand) verifyKnownKeys(client configCommandAPI, keys []string) 
 		// Check if the key exists in the known config
 		// and warn the user if the key is not defined.
 		if _, exists := known[key]; !exists {
-			logger.Warningf(
+			logger.Warningf(context.TODO(),
 				"key %q is not defined in the current model configuration: possible misspelling", key)
 		}
 	}
@@ -487,17 +517,18 @@ func formatConfigTabular(writer io.Writer, value interface{}) error {
 	return nil
 }
 
-// ConfigDetails gets ModelDetails when a model is not available
-// to use.
-func ConfigDetails() (map[string]interface{}, error) {
+// ConfigDetails returns the set of available configuration keys that can be set
+// for a model along with printing information for the key containing a user
+// readable description and the expected type for the key.
+func ConfigDetails() (map[string]common.PrintConfigSchema, error) {
 	defaultSchema, err := envconfig.Schema(nil)
 	if err != nil {
 		return nil, err
 	}
-	specifics := make(map[string]interface{})
+	specifics := make(map[string]common.PrintConfigSchema, len(defaultSchema))
 	for key, attr := range defaultSchema {
 		if attr.Secret || isModelAttribute(key) ||
-			attr.Group != environschema.EnvironGroup {
+			attr.Group != configschema.EnvironGroup {
 			continue
 		}
 		specifics[key] = common.PrintConfigSchema{

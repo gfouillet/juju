@@ -17,7 +17,7 @@ import (
 	"github.com/juju/collections/set"
 
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 // bidirectional mapping between key and constant name
@@ -31,8 +31,11 @@ var (
 // Generate Markdown documentation based on the contents of the
 // github.com/juju/juju/controller package.
 func main() {
-	outputDir := mustEnv("DOCS_DIR")        // directory to write output to
-	jujuSrcRoot := mustEnv("JUJU_SRC_ROOT") // root of Juju source tree
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "Error: missing argument: root of Juju source tree")
+		os.Exit(1)
+	}
+	jujuSrcRoot := os.Args[1]
 
 	data := map[string]*keyInfo{}
 
@@ -42,8 +45,8 @@ func main() {
 	fillFromAllowedUpdateConfigAttributes(data)
 	fillFromNewConfig(data)
 
-	_ = os.MkdirAll(outputDir, 0755)
-	render(filepath.Join(outputDir, "controller-config-keys.md"), data)
+	// Print generated docs.
+	fmt.Print(render(data))
 }
 
 // keyInfo contains information about a config key.
@@ -60,17 +63,14 @@ type keyInfo struct {
 	Default2 string `yaml:"default2,omitempty"` // from reflection on Config type
 }
 
-// render turns the input data into a Markdown document
-func render(filepath string, data map[string]*keyInfo) {
-	// Generate table of contents and main doc separately
-	var tableOfContents, mainDoc string
+// render turns the input data into a Markdown string.
+func render(data map[string]*keyInfo) string {
+	var mainDoc string
 
-	anchorForKey := func(key string) string {
-		return "heading--" + key
-	}
 	headingForKey := func(key string) string {
-		return fmt.Sprintf(`<a href="#%[1]s"><h2 id="%[1]s"><code>%[2]s</code></h2></a>`,
-			anchorForKey(key), key)
+		anchor := "(controller-config-" + key + ")="
+		heading := "## `" + key + "`"
+		return anchor + "\n" + heading
 	}
 
 	// Sort keys
@@ -83,7 +83,6 @@ func render(filepath string, data map[string]*keyInfo) {
 	for _, key := range keys {
 		info := data[key]
 
-		tableOfContents += fmt.Sprintf("- [`%s`](#%s)\n", key, anchorForKey(key))
 		mainDoc += headingForKey(key) + "\n"
 		if info.Deprecated {
 			mainDoc += "> This key is deprecated.\n"
@@ -109,17 +108,7 @@ func render(filepath string, data map[string]*keyInfo) {
 		}
 		mainDoc += "\n\n\n"
 	}
-
-	err := os.WriteFile(filepath, []byte(fmt.Sprintf(`
-> <small> [Configuration](/t/6659) > List of controller configuration keys</small>
->
-> See also: [Controller](/t/5455),  [How to manage configuration values for a controller](/t/1111#heading--manage-configuration-values-for-a-controller)
-
-%s
-
-%s
-`[1:], tableOfContents, mainDoc)), 0644)
-	check(err)
+	return mainDoc
 }
 
 // Gather information from the AST parsed from the Go files:
@@ -223,11 +212,12 @@ func fillFromConfigCheckerAST(data map[string]*keyInfo, configChecker *ast.GenDe
 // get type from configChecker expressions
 func typeForExpr(expr ast.Expr) string {
 	niceNames := map[string]string{
-		"Bool":         "boolean",
-		"ForceInt":     "integer",
-		"List":         "list",
-		"String":       "string",
-		"TimeDuration": "duration",
+		"Bool":           "boolean",
+		"ForceInt":       "integer",
+		"List":           "list",
+		"String":         "string",
+		"TimeDuration":   "duration",
+		"NonEmptyString": "non-empty string",
 	}
 	niceNameFor := func(rawType string) string {
 		if nn, ok := niceNames[rawType]; ok {
@@ -240,7 +230,8 @@ func typeForExpr(expr ast.Expr) string {
 	rawType := callExpr.Fun.(*ast.SelectorExpr).Sel.Name
 	dataType := niceNameFor(rawType)
 
-	if len(callExpr.Args) > 0 {
+	// Don't recurse for schema.NonEmptyString
+	if rawType != "NonEmptyString" && len(callExpr.Args) > 0 {
 		// add parameter types
 		dataType += "["
 		for i, arg := range callExpr.Args {
@@ -291,7 +282,6 @@ func fillFromConfigType(data map[string]*keyInfo) {
 	skipMethods := set.NewStrings(
 		"CAASImageRepo",
 		"CAASOperatorImagePath",
-		"ControllerAPIPort",
 		"Features",
 		"IdentityPublicKey",
 		"Validate", // not a config key
@@ -345,16 +335,6 @@ func fillFromConfigType(data map[string]*keyInfo) {
 }
 
 // UTILITY FUNCTIONS
-
-// Returns the value of the given environment variable, panicking if the var
-// is not set.
-func mustEnv(key string) string {
-	val, ok := os.LookupEnv(key)
-	if !ok {
-		panic(fmt.Sprintf("env var %q not set", key))
-	}
-	return val
-}
 
 // Return the first value that is defined / not-zero, and "true"
 // if such a value is found.

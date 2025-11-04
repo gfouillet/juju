@@ -4,18 +4,19 @@
 package gce
 
 import (
+	"context"
 	"strings"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/internal/provider/gce/google"
+	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 // instStatus is the list of statuses to accept when filtering
@@ -31,18 +32,18 @@ var instStatuses = []string{
 // instances, the result at the corresponding index will be nil. In that
 // case the error will be environs.ErrPartialInstances (or
 // ErrNoInstances if none of the IDs match an instance).
-func (env *environ) Instances(ctx envcontext.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error) {
+func (env *environ) Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error) {
 	if len(ids) == 0 {
 		return nil, environs.ErrNoInstances
 	}
 
-	all, err := getInstances(env, ctx)
+	all, err := env.instances(ctx)
 	if err != nil {
 		// We don't return the error since we need to pack one instance
 		// for each ID into the result. If there is a problem then we
 		// will return either ErrPartialInstances or ErrNoInstances.
 		// TODO(ericsnow) Skip returning here only for certain errors?
-		logger.Errorf("failed to get instances from GCE: %v", err)
+		logger.Errorf(ctx, "failed to get instances from GCE: %v", err)
 		err = errors.Trace(err)
 	}
 
@@ -67,17 +68,16 @@ func (env *environ) Instances(ctx envcontext.ProviderCallContext, ids []instance
 	return results, err
 }
 
-var getInstances = func(env *environ, ctx envcontext.ProviderCallContext, statusFilters ...string) ([]instances.Instance, error) {
-	return env.instances(ctx, statusFilters...)
-}
-
-func (env *environ) gceInstances(ctx envcontext.ProviderCallContext, statusFilters ...string) ([]google.Instance, error) {
+func (env *environ) gceInstances(ctx context.Context, statusFilters ...string) ([]*computepb.Instance, error) {
 	prefix := env.namespace.Prefix()
 	if len(statusFilters) == 0 {
 		statusFilters = instStatuses
 	}
-	instances, err := env.gce.Instances(prefix, statusFilters...)
-	return instances, google.HandleCredentialError(errors.Trace(err), ctx)
+	instances, err := env.gce.Instances(ctx, prefix, statusFilters...)
+	if err != nil {
+		return instances, env.HandleCredentialError(ctx, err)
+	}
+	return instances, nil
 }
 
 // instances returns a list of all "alive" instances in the environment.
@@ -85,7 +85,7 @@ func (env *environ) gceInstances(ctx envcontext.ProviderCallContext, statusFilte
 // "juju-<env name>-machine-*". This is important because otherwise juju
 // will see they are not tracked in state, assume they're stale/rogue,
 // and shut them down.
-func (env *environ) instances(ctx envcontext.ProviderCallContext, statusFilters ...string) ([]instances.Instance, error) {
+func (env *environ) instances(ctx context.Context, statusFilters ...string) ([]instances.Instance, error) {
 	gceInstances, err := env.gceInstances(ctx, statusFilters...)
 	err = errors.Trace(err)
 
@@ -93,19 +93,37 @@ func (env *environ) instances(ctx envcontext.ProviderCallContext, statusFilters 
 	// whether or not we got an error.
 	var results []instances.Instance
 	for _, base := range gceInstances {
-		// If we don't make a copy then the same pointer is used for the
-		// base of all resulting instances.
-		copied := base
-		inst := newInstance(&copied, env)
+		inst := newInstance(base, env)
 		results = append(results, inst)
 	}
 
 	return results, err
 }
 
+// unpackMetadata decomposes the provided data from the format used
+// in the GCE API.
+func unpackMetadata(data *computepb.Metadata) map[string]string {
+	if data == nil {
+		return nil
+	}
+
+	result := make(map[string]string)
+	for _, item := range data.Items {
+		if item == nil {
+			continue
+		}
+		value := ""
+		if item.Value != nil {
+			value = *item.Value
+		}
+		result[item.GetKey()] = value
+	}
+	return result
+}
+
 // ControllerInstances returns the IDs of the instances corresponding
 // to juju controllers.
-func (env *environ) ControllerInstances(ctx envcontext.ProviderCallContext, controllerUUID string) ([]instance.Id, error) {
+func (env *environ) ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error) {
 	instances, err := env.gceInstances(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -113,13 +131,13 @@ func (env *environ) ControllerInstances(ctx envcontext.ProviderCallContext, cont
 
 	var results []instance.Id
 	for _, inst := range instances {
-		metadata := inst.Metadata()
+		metadata := unpackMetadata(inst.GetMetadata())
 		if uuid, ok := metadata[tags.JujuController]; !ok || uuid != controllerUUID {
 			continue
 		}
 		isController, ok := metadata[tags.JujuIsController]
 		if ok && isController == "true" {
-			results = append(results, instance.Id(inst.ID))
+			results = append(results, instance.Id(inst.GetName()))
 		}
 	}
 	if len(results) == 0 {
@@ -129,55 +147,53 @@ func (env *environ) ControllerInstances(ctx envcontext.ProviderCallContext, cont
 }
 
 // AdoptResources is part of the Environ interface.
-func (env *environ) AdoptResources(ctx envcontext.ProviderCallContext, controllerUUID string, fromVersion version.Number) error {
-	instances, err := env.AllInstances(ctx)
+func (env *environ) AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error {
+	insts, err := env.AllInstances(ctx)
 	if err != nil {
 		return errors.Annotate(err, "all instances")
 	}
 
 	var stringIds []string
-	for _, id := range instances {
+	for _, id := range insts {
 		stringIds = append(stringIds, string(id.Id()))
 	}
-	err = env.gce.UpdateMetadata(tags.JujuController, controllerUUID, stringIds...)
+	err = env.gce.UpdateMetadata(ctx, tags.JujuController, controllerUUID, stringIds...)
 	if err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
-// TODO(ericsnow) Turn into an interface.
-type instPlacement struct {
-	Zone *google.AvailabilityZone
+type gcePlacement struct {
+	zone       string
+	subnetSpec string
 }
 
 // parsePlacement extracts the availability zone from the placement
 // string and returns it. If no zone is found there then an error is
 // returned.
-func (env *environ) parsePlacement(ctx envcontext.ProviderCallContext, placement string) (*instPlacement, error) {
+func (env *environ) parsePlacement(placement string) (gcePlacement, error) {
 	if placement == "" {
-		return nil, nil
+		return gcePlacement{}, nil
 	}
 
 	pos := strings.IndexRune(placement, '=')
 	if pos == -1 {
-		return nil, errors.Errorf("unknown placement directive: %v", placement)
+		return gcePlacement{}, errors.Errorf("unknown placement directive: %v", placement)
 	}
 
 	switch key, value := placement[:pos], placement[pos+1:]; key {
+	case "subnet":
+		return gcePlacement{subnetSpec: value}, nil
 	case "zone":
-		zone, err := env.availZoneUp(ctx, value)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return &instPlacement{Zone: zone}, nil
+		return gcePlacement{zone: value}, nil
 	}
-	return nil, errors.Errorf("unknown placement directive: %v", placement)
+	return gcePlacement{}, errors.Errorf("unknown placement directive: %v", placement)
 }
 
 // checkInstanceType is used to ensure the provided constraints
 // specify a recognized instance type.
-func (env *environ) checkInstanceType(ctx envcontext.ProviderCallContext, cons constraints.Value) bool {
+func (env *environ) checkInstanceType(ctx context.Context, cons constraints.Value) bool {
 	if cons.InstanceType == nil || *cons.InstanceType == "" {
 		return false
 	}
@@ -187,7 +203,7 @@ func (env *environ) checkInstanceType(ctx envcontext.ProviderCallContext, cons c
 	// fetch all instance types and check manually.
 	instTypesAndCosts, err := env.InstanceTypes(ctx, constraints.Value{})
 	if err != nil {
-		logger.Errorf("unable to fetch GCE instance types: %v", err)
+		logger.Errorf(ctx, "unable to fetch GCE instance types: %v", err)
 		return false
 	}
 

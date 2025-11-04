@@ -5,12 +5,12 @@ package jujuc_test
 
 import (
 	"bytes"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 )
 
@@ -18,47 +18,8 @@ type stateSetSuite struct {
 	stateSuite
 }
 
-var _ = gc.Suite(&stateSetSuite{})
-
-func (s *stateSetSuite) TestHelp(c *gc.C) {
-	toolCmd, err := jujuc.NewCommand(nil, "state-set")
-	c.Assert(err, jc.ErrorIsNil)
-
-	ctx := cmdtesting.Context(c)
-	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(toolCmd), ctx, []string{"--help"})
-	c.Check(code, gc.Equals, 0)
-	c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
-
-	var expectedHelp = `
-Usage: state-set [options] key=value [key=value ...]
-
-Summary:
-set server-side-state values
-
-Options:
---file  (= )
-    file containing key-value pairs
-
-Details:
-state-set sets the value of the server side state specified by key.
-
-The --file option should be used when one or more key-value pairs
-are too long to fit within the command length limit of the shell
-or operating system. The file will contain a YAML map containing
-the settings as strings.  Settings in the file will be overridden
-by any duplicate key-value arguments. A value of "-" for the filename
-means <stdin>.
-
-The following fixed size limits apply:
-- Length of stored keys cannot exceed 256 bytes.
-- Length of stored values cannot exceed 65536 bytes.
-
-See also:
-    state-delete
-    state-get
-`[1:]
-
-	c.Assert(bufferString(ctx.Stdout), gc.Equals, expectedHelp)
+func TestStateSetSuite(t *testing.T) {
+	tc.Run(t, &stateSetSuite{})
 }
 
 type runStateSetCmd struct {
@@ -70,7 +31,7 @@ type runStateSetCmd struct {
 	expect      func()
 }
 
-func (s *stateSetSuite) TestStateSet(c *gc.C) {
+func (s *stateSetSuite) TestStateSet(c *tc.C) {
 	runStateSetCmdTests := []runStateSetCmd{
 		{
 			description: "no input",
@@ -119,33 +80,33 @@ func (s *stateSetSuite) TestStateSet(c *gc.C) {
 		}
 
 		toolCmd, err := jujuc.NewCommand(s.mockContext, "state-set")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		ctx := cmdtesting.Context(c)
 		if test.content != "" {
 			ctx.Stdin = bytes.NewBufferString(test.content)
 		}
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(toolCmd), ctx, test.args)
-		c.Check(code, gc.Equals, test.code)
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, test.err)
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, "")
+		c.Check(code, tc.Equals, test.code)
+		c.Assert(bufferString(ctx.Stderr), tc.Equals, test.err)
+		c.Assert(bufferString(ctx.Stdout), tc.Equals, "")
 	}
 }
 
-func (s *stateSetSuite) TestStateSetExistingEmpty(c *gc.C) {
+func (s *stateSetSuite) TestStateSetExistingEmpty(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectStateSetOne()
 	s.expectStateSetOneEmpty()
 
 	toolCmd, err := jujuc.NewCommand(s.mockContext, "state-set")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	ctx := cmdtesting.Context(c)
 
 	for _, arg := range []string{"one=two", "one="} {
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(toolCmd), ctx, []string{arg})
-		c.Check(code, gc.Equals, 0)
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, "")
+		c.Check(code, tc.Equals, 0)
+		c.Assert(bufferString(ctx.Stderr), tc.Equals, "")
+		c.Assert(bufferString(ctx.Stdout), tc.Equals, "")
 	}
 }

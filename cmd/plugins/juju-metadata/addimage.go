@@ -4,14 +4,17 @@
 package main
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/environs/simplestreams"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -28,6 +31,9 @@ are optional for this command but they may still be needed by your provider.
 Adding an image for a specific base can be done via --base. --base can be 
 specified using the OS name and the version of the OS, separated by @. For 
 example, --base ubuntu@22.04.
+
+Valid values for --stream are released, testing, proposed and devel. The image
+stream used by Juju can be configured with 'juju model-config'.
 `
 
 // addImageMetadataCommand stores image metadata in Juju environment.
@@ -63,6 +69,11 @@ func (c *addImageMetadataCommand) Info() *cmd.Info {
 		Name:    "add-image",
 		Purpose: "adds image metadata to model",
 		Doc:     addImageCommandDoc,
+		SeeAlso: []string{
+			"delete-image",
+			"list-images",
+			"model-config",
+		},
 	})
 }
 
@@ -72,7 +83,7 @@ func (c *addImageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 
 	f.StringVar(&c.Region, "region", "", "image cloud region")
 	f.StringVar(&c.Base, "base", "", "image base")
-	f.StringVar(&c.Arch, "arch", "amd64", "image architecture")
+	f.StringVar(&c.Arch, "arch", arch.AMD64, "image architecture")
 	f.StringVar(&c.VirtType, "virt-type", "", "image metadata virtualisation type")
 	f.StringVar(&c.RootStorageType, "storage-type", "", "image metadata root storage type")
 	f.Uint64Var(&c.RootStorageSize, "storage-size", 0, "image metadata root storage size")
@@ -91,14 +102,14 @@ func (c *addImageMetadataCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	api, err := getImageMetadataAddAPI(c)
+	api, err := getImageMetadataAddAPI(c, ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	m := c.constructMetadataParam(base)
-	if err := api.Save([]params.CloudImageMetadata{m}); err != nil {
+	if err := api.Save(ctx, []params.CloudImageMetadata{m}); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -107,13 +118,13 @@ func (c *addImageMetadataCommand) Run(ctx *cmd.Context) error {
 // MetadataAddAPI defines the API methods that add image metadata command uses.
 type MetadataAddAPI interface {
 	Close() error
-	Save(metadata []params.CloudImageMetadata) error
+	Save(ctx context.Context, metadata []params.CloudImageMetadata) error
 }
 
 var getImageMetadataAddAPI = (*addImageMetadataCommand).getImageMetadataAddAPI
 
-func (c *addImageMetadataCommand) getImageMetadataAddAPI() (MetadataAddAPI, error) {
-	return c.NewImageMetadataAPI()
+func (c *addImageMetadataCommand) getImageMetadataAddAPI(ctx context.Context) (MetadataAddAPI, error) {
+	return c.NewImageMetadataAPI(ctx)
 }
 
 // constructMetadataParam returns cloud image metadata as a param.

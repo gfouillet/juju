@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 )
 
 var (
@@ -27,7 +26,7 @@ type RequirementsNotSatisfiedError struct {
 // IsRequirementsNotSatisfiedError returns true if err is a
 // RequirementsNotSatisfiedError.
 func IsRequirementsNotSatisfiedError(err error) bool {
-	_, is := errors.Cause(err).(*RequirementsNotSatisfiedError)
+	_, is := err.(*RequirementsNotSatisfiedError)
 	return is
 }
 
@@ -61,15 +60,6 @@ func requirementsNotSatisfied(message string, errList []error) *RequirementsNotS
 			featNames.Add(featName)
 		}
 	}
-
-	if len(featNames) != 0 {
-		buf.WriteString("\nFeature descriptions:\n")
-		for _, featName := range featNames.SortedValues() {
-			buf.WriteString(fmt.Sprintf("  - %q: %s\n", featName, notSatFeatureDescrs[featName]))
-		}
-	}
-
-	buf.WriteString("\nFor additional information please see: " + featureDocsURL)
 
 	return &RequirementsNotSatisfiedError{
 		message: buf.String(),

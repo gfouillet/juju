@@ -4,12 +4,12 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/mattn/go-isatty"
@@ -21,8 +21,9 @@ import (
 	coreapplication "github.com/juju/juju/core/application"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
 	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -30,8 +31,8 @@ var logger = internallogger.GetLogger("juju.cmd.juju.application.utils")
 
 // GetMetaResources retrieves metadata resources for the given
 // charmURL.
-func GetMetaResources(charmURL string, client CharmClient) (map[string]charmresource.Meta, error) {
-	charmInfo, err := client.CharmInfo(charmURL)
+func GetMetaResources(ctx context.Context, charmURL string, client CharmClient) (map[string]charmresource.Meta, error) {
+	charmInfo, err := client.CharmInfo(ctx, charmURL)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -79,6 +80,7 @@ func flagWithMinus(name string) string {
 // GetUpgradeResources returns a map of resources which require
 // refresh.
 func GetUpgradeResources(
+	ctx context.Context,
 	newCharmID application.CharmID,
 	repositoryResourceLister CharmClient,
 	resourceLister ResourceLister,
@@ -89,11 +91,11 @@ func GetUpgradeResources(
 	if len(meta) == 0 {
 		return nil, nil
 	}
-	available, err := getAvailableRepositoryResources(newCharmID, repositoryResourceLister)
+	available, err := getAvailableRepositoryResources(ctx, newCharmID, repositoryResourceLister)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	current, err := getCurrentResources(applicationID, resourceLister)
+	current, err := getCurrentResources(ctx, applicationID, resourceLister)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -103,24 +105,25 @@ func GetUpgradeResources(
 // getCurrentResources gets the current resources for this charm in
 // state.
 func getCurrentResources(
+	ctx context.Context,
 	applicationID string,
 	resourceLister ResourceLister,
-) (map[string]resources.Resource, error) {
-	svcs, err := resourceLister.ListResources([]string{applicationID})
+) (map[string]resource.Resource, error) {
+	svcs, err := resourceLister.ListResources(ctx, []string{applicationID})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return resources.AsMap(svcs[0].Resources), nil
+	return resource.AsMap(svcs[0].Resources), nil
 }
 
 // getAvailableRepositoryResources gets the current resources for this
 // charm available in the repository.
-func getAvailableRepositoryResources(newCharmID application.CharmID, repositoryResourceLister CharmClient) (map[string]charmresource.Resource, error) {
+func getAvailableRepositoryResources(ctx context.Context, newCharmID application.CharmID, repositoryResourceLister CharmClient) (map[string]charmresource.Resource, error) {
 	if repositoryResourceLister == nil || !corecharm.CharmHub.Matches(newCharmID.Origin.Source.String()) {
 		// not required for local charms
 		return nil, nil
 	}
-	available, err := repositoryResourceLister.ListCharmResources(newCharmID.URL, newCharmID.Origin)
+	available, err := repositoryResourceLister.ListCharmResources(ctx, newCharmID.URL, newCharmID.Origin)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -137,7 +140,7 @@ func getAvailableRepositoryResources(newCharmID application.CharmID, repositoryR
 func filterResourcesForUpgrade(
 	source apicharm.OriginSource,
 	meta map[string]charmresource.Meta,
-	current map[string]resources.Resource,
+	current map[string]resource.Resource,
 	available map[string]charmresource.Resource,
 	providedResources map[string]string,
 ) (map[string]charmresource.Meta, error) {
@@ -174,7 +177,7 @@ func filterResourcesForUpgrade(
 func shouldUpgradeResource(
 	resName string,
 	providedResources map[string]string,
-	current map[string]resources.Resource,
+	current map[string]resource.Resource,
 	available map[string]charmresource.Resource,
 ) (bool, error) {
 
@@ -186,16 +189,16 @@ func shouldUpgradeResource(
 		if err == nil && curFound && cur.Revision == providedResourceRev && cur.Origin == charmresource.OriginStore {
 			// A revision refers to resources in a repository. If the specified revision
 			// is already uploaded, nothing to do.
-			logger.Tracef("provided revision of %s resource already loaded", resName)
+			logger.Tracef(context.TODO(), "provided revision of %s resource already loaded", resName)
 			return false, nil
 		}
-		logger.Tracef("%q provided to upgrade existing resource", resName)
+		logger.Tracef(context.TODO(), "%q provided to upgrade existing resource", resName)
 		return true, nil
 	}
 
 	if !curFound {
 		// If there's no information on the server, there might be a new resource added to the charm.
-		logger.Tracef("resource %q does not exist in controller, so it will be uploaded", resName)
+		logger.Tracef(context.TODO(), "resource %q does not exist in controller, so it will be uploaded", resName)
 		return true, nil
 	}
 
@@ -203,7 +206,7 @@ func shouldUpgradeResource(
 	if availFound &&
 		avail.Revision == cur.Revision &&
 		cur.Origin != charmresource.OriginUpload {
-		logger.Tracef("available resource and current store resource have same revision, no upgrade")
+		logger.Tracef(context.TODO(), "available resource and current store resource have same revision, no upgrade")
 		return false, nil
 	}
 	// Never override existing resources a user has already uploaded.
@@ -218,7 +221,7 @@ func shouldUpgradeResource(
 func shouldUpgradeResourceLocalCharm(
 	name string,
 	providedResources map[string]string,
-	current map[string]resources.Resource,
+	current map[string]resource.Resource,
 ) (bool, error) {
 	_, curFound := current[name]
 	providedResource, providedResourceFound := providedResources[name]
@@ -230,7 +233,7 @@ func shouldUpgradeResourceLocalCharm(
 		_, err := strconv.Atoi(providedResource)
 		if err != nil {
 			// This is a filename to be uploaded.
-			logger.Tracef("%q provided to upgrade existing resource", name)
+			logger.Tracef(context.TODO(), "%q provided to upgrade existing resource", name)
 			return true, nil
 		} else {
 			return false, errors.NewNotFound(nil, fmt.Sprintf("resource %q revision not found, provide via --resource", name))

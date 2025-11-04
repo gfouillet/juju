@@ -5,17 +5,15 @@ package stateauthenticator
 
 import (
 	"context"
-	"encoding/base64"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/dbrootkeystore"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
@@ -24,10 +22,20 @@ import (
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/httpcontext"
 	"github.com/juju/juju/controller"
-	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/user"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
+
+// AgentPasswordServiceGetter defines the methods required to get an
+// AgentPasswordService for a model.
+type AgentPasswordServiceGetter interface {
+	// GetAgentPasswordServiceForModel returns a PasswordService for the given model.
+	GetAgentPasswordServiceForModel(ctx context.Context, modelUUID model.UUID) (authentication.AgentPasswordService, error)
+}
 
 // AgentTags are those used by any Juju agent.
 var AgentTags = []string{
@@ -44,15 +52,39 @@ var AgentTags = []string{
 // This Authenticator only works with requests that have been handled
 // by one of the httpcontext.*ModelHandler handlers.
 type Authenticator struct {
-	statePool               *state.StatePool
-	controllerConfigService ControllerConfigService
-	authContext             *authContext
+	authContext *authContext
+
+	controllerConfigService             ControllerConfigService
+	agentPasswordServiceGetter          AgentPasswordServiceGetter
+	controllerModelAgentPasswordService authentication.AgentPasswordService
+
+	controllerModelUUID model.UUID
 }
 
 // ControllerConfigService is an interface that can be implemented by
 // types that can return a controller config.
 type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
+}
+
+// MacaroonService defines the method required to manage macaroons.
+type MacaroonService interface {
+	dbrootkeystore.ContextBacking
+	BakeryConfigService
+}
+
+// MachineServiceGetter defines the methods required to get a MachineService
+// for a model.
+type MachineServiceGetter interface {
+	// GetMachineServiceForModel returns a MachineService for the given model.
+	GetMachineServiceForModel(ctx context.Context, modelUUID model.UUID) (MachineService, error)
+}
+
+// MachineService defines the methods required to determine if a machine is a
+// controller machine.
+type MachineService interface {
+	// IsMachineController returns true if the machine is a controller machine.
+	IsMachineController(ctx context.Context, name machine.Name) (bool, error)
 }
 
 type BakeryConfigService interface {
@@ -64,30 +96,48 @@ type BakeryConfigService interface {
 // NewAuthenticator returns a new Authenticator using the given StatePool.
 func NewAuthenticator(
 	ctx context.Context,
-	statePool *state.StatePool,
-	systemState *state.State,
+	controllerModelUUID model.UUID,
 	controllerConfigService ControllerConfigService,
-	userService UserService,
-	bakeryConfigService BakeryConfigService,
-	agentAuthFactory AgentAuthenticatorFactory,
+	agentPasswordServiceGetter AgentPasswordServiceGetter,
+	accessService AccessService,
+	macaroonService MacaroonService,
+	agentAuthGetter AgentAuthenticatorGetter,
 	clock clock.Clock,
 ) (*Authenticator, error) {
-	authContext, err := newAuthContext(ctx, systemState, controllerConfigService, userService, bakeryConfigService, agentAuthFactory, clock)
+	authContext, err := newAuthContext(
+		ctx,
+		controllerModelUUID,
+		controllerConfigService,
+		accessService,
+		macaroonService,
+		agentAuthGetter,
+		clock,
+	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+
+	controllerModelAgentPasswordService, err := agentPasswordServiceGetter.GetAgentPasswordServiceForModel(ctx, controllerModelUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	return &Authenticator{
-		statePool:               statePool,
-		controllerConfigService: controllerConfigService,
-		authContext:             authContext,
+		authContext: authContext,
+
+		agentPasswordServiceGetter:          agentPasswordServiceGetter,
+		controllerConfigService:             controllerConfigService,
+		controllerModelAgentPasswordService: controllerModelAgentPasswordService,
+
+		controllerModelUUID: controllerModelUUID,
 	}, nil
 }
 
 // Maintain periodically expires local login interactions.
-func (a *Authenticator) Maintain(done <-chan struct{}) {
+func (a *Authenticator) Maintain(ctx context.Context) {
 	for {
 		select {
-		case <-done:
+		case <-ctx.Done():
 			return
 		case <-a.authContext.clock.After(authentication.LocalLoginInteractionTimeout):
 			now := a.authContext.clock.Now()
@@ -119,8 +169,8 @@ func (a *Authenticator) AddHandlers(mux *apiserverhttp.Mux) error {
 
 // Authenticate is part of the httpcontext.Authenticator interface.
 func (a *Authenticator) Authenticate(req *http.Request) (authentication.AuthInfo, error) {
-	modelUUID := httpcontext.RequestModelUUID(req)
-	if modelUUID == "" {
+	modelUUID, valid := httpcontext.RequestModelUUID(req.Context())
+	if !valid {
 		return authentication.AuthInfo{}, errors.New("model UUID not found")
 	}
 
@@ -142,7 +192,7 @@ func (a *Authenticator) Authenticate(req *http.Request) (authentication.AuthInfo
 		}
 	}
 
-	info, err := a.AuthenticateLoginRequest(req.Context(), req.Host, modelUUID, authParams)
+	info, err := a.AuthenticateLoginRequest(req.Context(), req.Host, model.UUID(modelUUID), authParams)
 	return info, errors.Trace(err)
 }
 
@@ -150,23 +200,25 @@ func (a *Authenticator) Authenticate(req *http.Request) (authentication.AuthInfo
 func (a *Authenticator) AuthenticateLoginRequest(
 	ctx context.Context,
 	serverHost string,
-	modelUUID string,
+	modelUUID model.UUID,
 	authParams authentication.AuthParams,
-) (_ authentication.AuthInfo, err error) {
+) (authInfo authentication.AuthInfo, err error) {
 	defer func() {
 		if errors.Is(err, apiservererrors.ErrNoCreds) {
 			err = errors.NewNotSupported(err, "")
 		}
+		if err == nil {
+			authInfo.ModelTag = names.NewModelTag(modelUUID.String())
+		}
 	}()
 
-	st, err := a.statePool.Get(modelUUID)
+	agentPasswordService, err := a.agentPasswordServiceGetter.GetAgentPasswordServiceForModel(ctx, modelUUID)
 	if err != nil {
 		return authentication.AuthInfo{}, errors.Trace(err)
 	}
-	defer st.Release()
 
-	authenticator := a.authContext.authenticatorForState(serverHost, st.State)
-	authInfo, err := a.checkCreds(ctx, authParams, authenticator)
+	authenticator := a.authContext.authenticatorForModel(serverHost, agentPasswordService)
+	authInfo, err = a.checkCreds(ctx, modelUUID, authParams, authenticator, agentPasswordService)
 	if err == nil {
 		return authInfo, nil
 	}
@@ -178,11 +230,15 @@ func (a *Authenticator) AuthenticateLoginRequest(
 
 	_, isMachineTag := authParams.AuthTag.(names.MachineTag)
 	_, isControllerAgentTag := authParams.AuthTag.(names.ControllerAgentTag)
-	if (isMachineTag || isControllerAgentTag) && !st.IsController() {
+
+	// If you're a model worker api-caller using the model controller agent tag
+	// to ask questions about the non-controller model that you're running in.
+	if (isMachineTag || isControllerAgentTag) && a.controllerModelUUID != modelUUID {
 		// Controller agents are allowed to log into any model.
-		authenticator := a.authContext.authenticator(serverHost)
+		authenticator := a.authContext.authenticatorForModel(serverHost, a.controllerModelAgentPasswordService)
+
 		var err2 error
-		authInfo, err2 = a.checkCreds(ctx, authParams, authenticator)
+		authInfo, err2 = a.checkCreds(ctx, modelUUID, authParams, authenticator, a.controllerModelAgentPasswordService)
 		if err2 == nil && authInfo.Controller {
 			err = nil
 		}
@@ -191,62 +247,55 @@ func (a *Authenticator) AuthenticateLoginRequest(
 		return authentication.AuthInfo{}, errors.NewUnauthorized(err, "")
 	}
 
-	authInfo.Delegator = &PermissionDelegator{a.authContext.userService}
+	authInfo.Delegator = &PermissionDelegator{
+		AccessService: a.authContext.accessService,
+	}
 	return authInfo, nil
 }
 
 func (a *Authenticator) checkCreds(
 	ctx context.Context,
+	modelUUID model.UUID,
 	authParams authentication.AuthParams,
 	authenticator authentication.EntityAuthenticator,
+	agentPasswordService authentication.AgentPasswordService,
 ) (authentication.AuthInfo, error) {
-	entity, err := authenticator.Authenticate(ctx, authParams)
+	authenticatedTag, err := authenticator.Authenticate(ctx, authParams)
 	if err != nil {
 		return authentication.AuthInfo{}, errors.Trace(err)
 	}
 
 	authInfo := authentication.AuthInfo{
-		Delegator: &PermissionDelegator{a.authContext.userService},
-		Entity:    entity,
+		Delegator: &PermissionDelegator{AccessService: a.authContext.accessService},
+		Tag:       authenticatedTag,
 	}
 
-	switch entity.Tag().Kind() {
+	switch authenticatedTag.Kind() {
 	case names.UserTagKind:
 		// TODO (stickupkid): This is incorrect. We should only be updating the
 		// last login time if they've been authorized (not just authenticated).
 		// For now we'll leave it as is, but we should fix this.
-		userTag := entity.Tag().(names.UserTag)
+		userTag := authenticatedTag.(names.UserTag)
 
-		st := a.authContext.st
-		model, err := st.Model()
+		err = a.authContext.accessService.UpdateLastModelLogin(ctx, user.NameFromTag(userTag), modelUUID)
 		if err != nil {
+			logger.Warningf(ctx, "updating last login time for %v, %v", userTag, err)
+		}
+
+	case names.MachineTagKind:
+		ctrl, err := agentPasswordService.IsMachineController(ctx, machine.Name(authenticatedTag.Id()))
+		if err != nil && !errors.Is(err, machineerrors.MachineNotFound) {
 			return authentication.AuthInfo{}, errors.Trace(err)
 		}
+		authInfo.Controller = ctrl
 
-		err = a.authContext.userService.UpdateLastModelLogin(ctx, userTag.Name(), coremodel.UUID(model.UUID()))
-		if err != nil {
-			logger.Warningf("updating last login time for %v, %v", userTag, err)
-		}
-
-	case names.MachineTagKind, names.ControllerAgentTagKind:
-		// Currently only machines and controller agents are managers in the
-		// context of a controller.
-		authInfo.Controller = a.isManager(entity)
+	case names.ControllerAgentTagKind:
+		// If you're a controller agent, then we've already authenticated so
+		// this must be true.
+		authInfo.Controller = true
 	}
 
 	return authInfo, nil
-}
-
-func (a *Authenticator) isManager(entity state.Entity) bool {
-	type withIsManager interface {
-		IsManager() bool
-	}
-
-	m, ok := entity.(withIsManager)
-	if !ok {
-		return false
-	}
-	return m.IsManager()
 }
 
 // LoginRequest extracts basic auth login details from an http.Request.
@@ -259,40 +308,28 @@ func LoginRequest(req *http.Request) (params.LoginRequest, error) {
 	if authHeader == "" {
 		return params.LoginRequest{Macaroons: macaroons}, nil
 	}
-
-	parts := strings.Fields(authHeader)
-	if len(parts) != 2 || parts[0] != "Basic" {
+	username, password, ok := req.BasicAuth()
+	if !ok {
 		// Invalid header format or no header provided.
-		return params.LoginRequest{}, errors.NotValidf("request format")
-	}
-
-	// Challenge is a base64-encoded "tag:pass" string.
-	// See RFC 2617, Section 2.
-	challenge, err := base64.StdEncoding.DecodeString(parts[1])
-	if err != nil {
-		return params.LoginRequest{}, errors.NotValidf("request format")
-	}
-	tagPass := strings.SplitN(string(challenge), ":", 2)
-	if len(tagPass) != 2 {
-		return params.LoginRequest{}, errors.NotValidf("request format")
+		return params.LoginRequest{}, errors.NotFoundf("request format")
 	}
 
 	// Ensure that a sensible tag was passed.
-	if _, err := names.ParseTag(tagPass[0]); err != nil {
+	if _, err := names.ParseTag(username); err != nil {
 		return params.LoginRequest{}, errors.Trace(err)
 	}
 
 	bakeryVersion, _ := strconv.Atoi(req.Header.Get(httpbakery.BakeryProtocolHeader))
 	loginRequest := params.LoginRequest{
-		AuthTag:       tagPass[0],
-		Credentials:   tagPass[1],
+		AuthTag:       username,
+		Credentials:   password,
 		Nonce:         req.Header.Get(params.MachineNonceHeader),
 		Macaroons:     macaroons,
 		BakeryVersion: bakery.Version(bakeryVersion),
 	}
 	// Default client version to 2 since older 2.x clients
 	// don't send this field.
-	requestClientVersion := version.Number{Major: 2}
+	requestClientVersion := semversion.Number{Major: 2}
 	if clientVersion, err := common.JujuClientVersionFromRequest(req); err == nil {
 		requestClientVersion = clientVersion
 	}

@@ -1,14 +1,10 @@
 // Copyright 2023 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package controlleragentconfig provides a worker that listens on the "/reload"
-// endpoint of the config change socket and restarts any workers that have
-// requested to watch the config.
-// It also supplies the *agent* ID to external requesters via the "/agent-id"
-// endpoint.
 package controlleragentconfig
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -23,6 +19,7 @@ import (
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/socketlistener"
+	internalworker "github.com/juju/juju/internal/worker"
 )
 
 const (
@@ -99,20 +96,26 @@ func newWorker(cfg WorkerConfig, internalStates chan string) (*configWorker, err
 		return nil, errors.Trace(err)
 	}
 
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:  "controller-agent-config",
+		Clock: cfg.Clock,
+		IsFatal: func(err error) bool {
+			return false
+		},
+		ShouldRestart: func(err error) bool {
+			return false
+		},
+		Logger: internalworker.WrapLogger(cfg.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w := &configWorker{
 		internalStates:  internalStates,
 		cfg:             cfg,
 		reloadRequested: make(chan struct{}),
-		runner: worker.NewRunner(worker.RunnerParams{
-			Clock: cfg.Clock,
-			IsFatal: func(err error) bool {
-				return false
-			},
-			ShouldRestart: func(err error) bool {
-				return false
-			},
-			Logger: cfg.Logger,
-		}),
+		runner:          runner,
 	}
 
 	sl, err := cfg.NewSocketListener(socketlistener.Config{
@@ -126,6 +129,7 @@ func newWorker(cfg WorkerConfig, internalStates chan string) (*configWorker, err
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "controller-agent-config",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
@@ -166,7 +170,7 @@ func (w *configWorker) idHandler(resp http.ResponseWriter, req *http.Request) {
 
 	_, err := resp.Write([]byte(w.cfg.ControllerID))
 	if err != nil {
-		w.cfg.Logger.Errorf("error writing HTTP response: %v", err)
+		w.cfg.Logger.Errorf(req.Context(), "error writing HTTP response: %v", err)
 	}
 }
 
@@ -183,9 +187,11 @@ func (w *configWorker) Wait() error {
 // Watcher returns a Watcher for watching for changes to the agent
 // controller config.
 func (w *configWorker) Watcher() (ConfigWatcher, error) {
+	ctx := w.catacomb.Context(context.Background())
+
 	unique := atomic.AddInt64(&w.unique, 1)
 	namespace := fmt.Sprintf("watcher-%d", unique)
-	err := w.runner.StartWorker(namespace, func() (worker.Worker, error) {
+	err := w.runner.StartWorker(ctx, namespace, func(ctx context.Context) (worker.Worker, error) {
 		return newSubscription(), nil
 	})
 	if err != nil {
@@ -204,6 +210,9 @@ func (w *configWorker) loop() error {
 	// Report the initial started state.
 	w.reportInternalState(stateStarted)
 
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	for {
 		select {
 		case <-w.catacomb.Dying():
@@ -211,14 +220,14 @@ func (w *configWorker) loop() error {
 		case <-w.reloadRequested:
 			w.reportInternalState(stateReload)
 
-			w.cfg.Logger.Infof("reload config request received, reloading config")
+			w.cfg.Logger.Infof(ctx, "reload config request received, reloading config")
 
 			for _, name := range w.runner.WorkerNames() {
 				runnerWorker, err := w.runner.Worker(name, w.catacomb.Dying())
 				if err != nil {
 					if errors.Is(err, errors.NotFound) {
 
-						w.cfg.Logger.Debugf("worker %q not found, skipping", name)
+						w.cfg.Logger.Debugf(ctx, "worker %q not found, skipping", name)
 						continue
 					}
 					// If the runner is dead, we should stop.
@@ -242,6 +251,10 @@ func (w *configWorker) reportInternalState(state string) {
 	case w.internalStates <- state:
 	default:
 	}
+}
+
+func (w *configWorker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }
 
 type subscription struct {

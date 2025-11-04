@@ -4,9 +4,11 @@
 package utils
 
 import (
+	"context"
+
 	apicharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/api/common/charms"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
 	charmresource "github.com/juju/juju/internal/charm/resource"
 )
 
@@ -16,12 +18,12 @@ import (
 // CharmClient defines a subset of the charms facade, as required
 // by the upgrade-charm command and to GetMetaResources.
 type CharmClient interface {
-	CharmInfo(string) (*charms.CharmInfo, error)
-	ListCharmResources(curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
+	CharmInfo(context.Context, string) (*charms.CharmInfo, error)
+	ListCharmResources(ctx context.Context, curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
 }
 
 // ResourceLister defines a subset of the resources facade, as required
 // by the upgrade-charm command and to deploy bundles.
 type ResourceLister interface {
-	ListResources([]string) ([]resources.ApplicationResources, error)
+	ListResources(context.Context, []string) ([]resource.ApplicationResources, error)
 }

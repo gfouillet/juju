@@ -5,21 +5,23 @@ package cloudinit_test
 
 import (
 	"regexp"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/internal/cloudconfig/cloudinit"
 	"github.com/juju/juju/internal/packaging/source"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type configureSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&configureSuite{})
+func TestConfigureSuite(t *testing.T) {
+	tc.Run(t, &configureSuite{})
+}
 
 type testProvider struct {
 	environs.CloudEnvironProvider
@@ -31,24 +33,30 @@ func init() {
 
 var aptgetRegexp = "(.|\n)*" + regexp.QuoteMeta("apt-get --option=Dpkg::Options::=--force-confold --option=Dpkg::Options::=--force-unsafe-io --assume-yes --quiet ")
 
-func assertScriptMatches(c *gc.C, cfg cloudinit.CloudConfig, pattern string, match bool) {
+func assertScriptMatches(c *tc.C, cfg cloudinit.CloudConfig, pattern string, match bool) {
 	script, err := cfg.RenderScript()
-	c.Assert(err, jc.ErrorIsNil)
-	checker := gc.Matches
+	c.Assert(err, tc.ErrorIsNil)
+	checker := tc.Matches
 	if !match {
-		checker = gc.Not(checker)
+		checker = tc.Not(checker)
 	}
 	c.Assert(script, checker, pattern)
 }
 
-func (s *configureSuite) TestAptUpdate(c *gc.C) {
+func assertScriptContains(c *tc.C, cfg cloudinit.CloudConfig, substring string) {
+	script, err := cfg.RenderScript()
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(script, tc.Contains, substring)
+}
+
+func (s *configureSuite) TestAptUpdate(c *tc.C) {
 	// apt-get update is run only if AptUpdate is set.
 	aptGetUpdatePattern := aptgetRegexp + "update(.|\n)*"
 	cfg, err := cloudinit.New("ubuntu")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cfg.SystemUpdate(), jc.IsFalse)
-	c.Assert(cfg.PackageSources(), gc.HasLen, 0)
+	c.Assert(cfg.SystemUpdate(), tc.IsFalse)
+	c.Assert(cfg.PackageSources(), tc.HasLen, 0)
 	assertScriptMatches(c, cfg, aptGetUpdatePattern, false)
 
 	cfg.SetSystemUpdate(true)
@@ -63,14 +71,14 @@ func (s *configureSuite) TestAptUpdate(c *gc.C) {
 	}
 	cfg.AddPackageSource(source)
 	_, err = cfg.RenderScript()
-	c.Check(err, gc.ErrorMatches, "update sources were specified, but OS updates have been disabled.")
+	c.Check(err, tc.ErrorMatches, "update sources were specified, but OS updates have been disabled.")
 }
 
-func (s *configureSuite) TestAptUpgrade(c *gc.C) {
+func (s *configureSuite) TestAptUpgrade(c *tc.C) {
 	// apt-get upgrade is only run if AptUpgrade is set.
 	aptGetUpgradePattern := aptgetRegexp + "upgrade(.|\n)*"
 	cfg, err := cloudinit.New("ubuntu")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	cfg.SetSystemUpdate(true)
 	source := source.PackageSource{
 		Name: "source",
@@ -83,12 +91,13 @@ func (s *configureSuite) TestAptUpgrade(c *gc.C) {
 	assertScriptMatches(c, cfg, aptGetUpgradePattern, true)
 }
 
-func (s *configureSuite) TestAptMirrorWrapper(c *gc.C) {
-	expectedCommands := regexp.QuoteMeta(`
+func (s *configureSuite) TestAptMirrorWrapper(c *tc.C) {
+	expectedCommands := `
 echo 'Changing apt mirror to "http://woat.com"' >&$JUJU_PROGRESS_FD
-old_archive_mirror=$(awk "/^deb .* $(awk -F= '/DISTRIB_CODENAME=/ {gsub(/"/,""); print $2}' /etc/lsb-release) .*main.*\$/{print \$2;exit}" /etc/apt/sources.list)
-new_archive_mirror=http://woat.com
-sed -i s,$old_archive_mirror,$new_archive_mirror, /etc/apt/sources.list
+old_archive_mirror=$(apt-cache policy | grep http | awk '{ $1="" ; print }' | sed 's/^ //g'  | grep "$(lsb_release -c -s)/main" | awk '{print $1; exit}')
+new_archive_mirror="http://woat.com"
+[ -f "/etc/apt/sources.list" ] && sed -i s,$old_archive_mirror,$new_archive_mirror, "/etc/apt/sources.list"
+[ -f "/etc/apt/sources.list.d/ubuntu.sources" ] && sed -i s,$old_archive_mirror,$new_archive_mirror, "/etc/apt/sources.list.d/ubuntu.sources"
 old_prefix=/var/lib/apt/lists/$(echo $old_archive_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
 new_prefix=/var/lib/apt/lists/$(echo $new_archive_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
 [ "$old_prefix" != "$new_prefix" ] &&
@@ -98,9 +107,10 @@ for old in ${old_prefix}_*; do
       mv $old $new
     fi
 done
-old_security_mirror=$(awk "/^deb .* $(awk -F= '/DISTRIB_CODENAME=/ {gsub(/"/,""); print $2}' /etc/lsb-release)-security .*main.*\$/{print \$2;exit}" /etc/apt/sources.list)
-new_security_mirror=http://woat.com
-sed -i s,$old_security_mirror,$new_security_mirror, /etc/apt/sources.list
+old_security_mirror=$(apt-cache policy | grep http | awk '{ $1="" ; print }' | sed 's/^ //g'  | grep "$(lsb_release -c -s)-security/main" | awk '{print $1; exit}')
+new_security_mirror="http://woat.com"
+[ -f "/etc/apt/sources.list" ] && sed -i s,$old_security_mirror,$new_security_mirror, "/etc/apt/sources.list"
+[ -f "/etc/apt/sources.list.d/ubuntu.sources" ] && sed -i s,$old_security_mirror,$new_security_mirror, "/etc/apt/sources.list.d/ubuntu.sources"
 old_prefix=/var/lib/apt/lists/$(echo $old_security_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
 new_prefix=/var/lib/apt/lists/$(echo $new_security_mirror | sed 's,.*://,,' | sed 's,/$,,' | tr / _)
 [ "$old_prefix" != "$new_prefix" ] &&
@@ -109,10 +119,9 @@ for old in ${old_prefix}_*; do
     if [ -f $old ]; then
       mv $old $new
     fi
-done`)
-	aptMirrorRegexp := "(.|\n)*" + expectedCommands + "(.|\n)*"
+done`
 	cfg, err := cloudinit.New("ubuntu")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	cfg.SetPackageMirror("http://woat.com")
-	assertScriptMatches(c, cfg, aptMirrorRegexp, true)
+	assertScriptContains(c, cfg, expectedCommands)
 }

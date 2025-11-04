@@ -7,52 +7,44 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/authentication"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/user"
+	accesserrors "github.com/juju/juju/domain/access/errors"
 )
 
 // PermissionDelegator implements authentication.PermissionDelegator
 type PermissionDelegator struct {
-	AccessService UserService
+	AccessService AccessService
 }
 
 // SubjectPermissions ensures that the input entity is a user,
 // then returns that user's access to the input subject.
 func (p *PermissionDelegator) SubjectPermissions(
-	entity authentication.Entity, target names.Tag,
+	ctx context.Context, userName string, target permission.ID,
 ) (permission.Access, error) {
-	userTag, ok := entity.Tag().(names.UserTag)
-	if !ok {
-		return permission.NoAccess, errors.Errorf("%s is not a user", names.ReadableString(entity.Tag()))
-	}
-	userID := userTag.Id()
 
-	var permissionID permission.ID
-	// TODO (manadart 2024-05-27): Follow up with this.
-	// checkUserPermissions in admin.go checks for access to a controller tag,
-	// which is constituted by a controller ID, but we appear to be granting
-	// access to an entity called "controller".
-	if _, ok := target.(names.ControllerTag); ok {
-		permissionID = permission.ID{
-			ObjectType: permission.Controller,
-			Key:        "controller",
-		}
-	} else {
-		var err error
-		permissionID, err = permission.ParseTagForID(target)
+	name, err := user.NewName(userName)
+	if err != nil {
+		return permission.NoAccess, errors.Trace(err)
+	}
+
+	if !name.IsLocal() {
+		err := p.AccessService.EnsureExternalUserIfAuthorized(ctx, name, target)
 		if err != nil {
 			return permission.NoAccess, errors.Trace(err)
 		}
 	}
 
-	access, err := p.AccessService.ReadUserAccessForTarget(context.TODO(), userID, permissionID)
-	if err != nil {
+	access, err := p.AccessService.ReadUserAccessLevelForTarget(ctx, name, target)
+	if errors.Is(err, accesserrors.AccessNotFound) {
+		return permission.NoAccess, accesserrors.PermissionNotFound
+	} else if err != nil {
 		return permission.NoAccess, errors.Trace(err)
 	}
-	return access.Access, nil
+	return access, nil
 }
 
 func (p *PermissionDelegator) PermissionError(_ names.Tag, _ permission.Access) error {

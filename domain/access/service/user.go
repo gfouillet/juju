@@ -7,17 +7,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
 	"time"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 	"golang.org/x/crypto/nacl/secretbox"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/user"
 	accesserrors "github.com/juju/juju/domain/access/errors"
 	"github.com/juju/juju/internal/auth"
+	"github.com/juju/juju/internal/errors"
 )
 
 // UserService provides the API for working with users.
@@ -37,9 +37,12 @@ func NewUserService(st UserState) *UserService {
 // (last login, disabled) from the database. If no users exist an empty slice
 // will be returned.
 func (s *UserService) GetAllUsers(ctx context.Context, includeDisabled bool) ([]user.User, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	usrs, err := s.st.GetAllUsers(ctx, includeDisabled)
 	if err != nil {
-		return nil, errors.Annotate(err, "getting all users with auth info")
+		return nil, errors.Errorf("getting all users with auth info: %w", err)
 	}
 	return usrs, nil
 }
@@ -51,13 +54,16 @@ func (s *UserService) GetUser(
 	ctx context.Context,
 	uuid user.UUID,
 ) (user.User, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := uuid.Validate(); err != nil {
-		return user.User{}, errors.Annotatef(accesserrors.UserUUIDNotValid, "validating uuid %q", uuid)
+		return user.User{}, errors.Errorf("validating uuid %q: %w", uuid, accesserrors.UserUUIDNotValid)
 	}
 
 	usr, err := s.st.GetUser(ctx, uuid)
 	if err != nil {
-		return user.User{}, errors.Annotatef(err, "getting user for uuid %q", uuid)
+		return user.User{}, errors.Errorf("getting user for uuid %q: %w", uuid, err)
 	}
 
 	return usr, nil
@@ -71,18 +77,44 @@ func (s *UserService) GetUser(
 // GetUserByName will not return users that have been previously removed.
 func (s *UserService) GetUserByName(
 	ctx context.Context,
-	name string,
+	name user.Name,
 ) (user.User, error) {
-	if !names.IsValidUser(name) {
-		return user.User{}, errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return user.User{}, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	usr, err := s.st.GetUserByName(ctx, name)
 	if err != nil {
-		return user.User{}, errors.Annotatef(err, "getting user %q", name)
+		return user.User{}, errors.Errorf("getting user %q: %w", name, err)
 	}
 
 	return usr, nil
+}
+
+// GetUserUUIDByName will find and return the UUID associated with user name.
+// The following errors can be expected:
+// - [accesserrors.UserNotFound] when no user exists for the supplied user name.
+// - [accesserrors.UserNameNotValid] when the user name is not valid.
+func (s *UserService) GetUserUUIDByName(
+	ctx context.Context,
+	name user.Name,
+) (user.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return "", errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
+	}
+
+	uuid, err := s.st.GetUserUUIDByName(ctx, name)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	return uuid, nil
 }
 
 // GetUserByAuth will find and return the user with UUID. If there is no
@@ -92,14 +124,18 @@ func (s *UserService) GetUserByName(
 // It will not return users that have been previously removed.
 func (s *UserService) GetUserByAuth(
 	ctx context.Context,
-	name string,
+	name user.Name,
 	password auth.Password,
 ) (user.User, error) {
-	if !names.IsValidUser(name) {
-		return user.User{}, errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return user.User{}, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
+
 	if err := password.Validate(); err != nil {
-		return user.User{}, errors.Trace(err)
+		return user.User{}, errors.Capture(err)
 	}
 
 	usr, err := s.st.GetUserByAuth(ctx, name, password)
@@ -108,7 +144,7 @@ func (s *UserService) GetUserByAuth(
 		// The happy path hashes the password in state,
 		// and in so doing destroys it.
 		password.Destroy()
-		return user.User{}, errors.Annotatef(err, "getting user %q", name)
+		return user.User{}, errors.Errorf("getting user %q: %w", name, err)
 	}
 
 	return usr, nil
@@ -119,30 +155,35 @@ func (s *UserService) GetUserByAuth(
 // the user will be added with an activation key.
 // The following error types are possible from this function:
 //   - accesserrors.UserNameNotValid: When the username supplied is not valid.
-//   - accesserrors.AlreadyExists: If a user with the supplied name already exists.
+//   - accesserrors.UserAlreadyExists: If a user with the supplied name already exists.
 //   - accesserrors.CreatorUUIDNotFound: If a creator has been supplied for the user
 //     and the creator does not exist.
 //   - auth.ErrPasswordNotValid: If the password supplied is not valid.
 func (s *UserService) AddUser(ctx context.Context, arg AddUserArg) (user.UUID, []byte, error) {
-	if !names.IsValidUser(arg.Name) {
-		return "", nil, errors.Annotatef(accesserrors.UserNameNotValid, "%q", arg.Name)
-	}
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 
+	if arg.Name.IsZero() {
+		return "", nil, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
+	}
+	if !arg.Name.IsLocal() {
+		return "", nil, errors.Errorf("cannot add external user %q: %w", arg.Name, accesserrors.UserNameNotValid)
+	}
 	if err := arg.CreatorUUID.Validate(); err != nil {
-		return "", nil, errors.Annotatef(err, "validating creator UUID %q", arg.CreatorUUID)
+		return "", nil, errors.Errorf("validating creator UUID %q: %w", arg.CreatorUUID, err)
 	}
 
 	if err := arg.Permission.Validate(); err != nil {
-		return "", nil, fmt.Errorf("validating permission %q: %w: %w", arg.Permission, err, accesserrors.PermissionNotValid)
+		return "", nil, errors.Errorf("validating permission %q: %w: %w", arg.Permission, err, accesserrors.PermissionNotValid)
 	}
 
 	if arg.UUID.String() == "" {
 		var err error
 		if arg.UUID, err = user.NewUUID(); err != nil {
-			return "", nil, errors.Annotatef(err, "generating UUID for user %q", arg.Name)
+			return "", nil, errors.Errorf("generating UUID for user %q: %w", arg.Name, err)
 		}
 	} else if err := arg.UUID.Validate(); err != nil {
-		return "", nil, errors.Annotatef(err, "validating user UUID %q", arg.UUID)
+		return "", nil, errors.Errorf("validating user UUID %q: %w", arg.UUID, err)
 	}
 
 	var key []byte
@@ -153,7 +194,7 @@ func (s *UserService) AddUser(ctx context.Context, arg AddUserArg) (user.UUID, [
 		key, err = s.addUserWithActivationKey(ctx, arg)
 	}
 	if err != nil {
-		return "", nil, errors.Trace(err)
+		return "", nil, errors.Capture(err)
 	}
 
 	return arg.UUID, key, nil
@@ -161,33 +202,55 @@ func (s *UserService) AddUser(ctx context.Context, arg AddUserArg) (user.UUID, [
 
 func (s *UserService) addUserWithPassword(ctx context.Context, arg AddUserArg) error {
 	if err := arg.Password.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	salt, err := auth.NewSalt()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	hash, err := auth.HashPassword(*arg.Password, salt)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = s.st.AddUserWithPasswordHash(ctx, arg.UUID, arg.Name, arg.DisplayName, arg.CreatorUUID, arg.Permission, hash, salt)
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 func (s *UserService) addUserWithActivationKey(ctx context.Context, arg AddUserArg) ([]byte, error) {
 	key, err := generateActivationKey()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	if err = s.st.AddUserWithActivationKey(ctx, arg.UUID, arg.Name, arg.DisplayName, arg.CreatorUUID, arg.Permission, key); err != nil {
-		return nil, errors.Trace(err)
+	if err := s.st.AddUserWithActivationKey(ctx, arg.UUID, arg.Name, arg.DisplayName, arg.CreatorUUID, arg.Permission, key); err != nil {
+		return nil, errors.Capture(err)
 	}
 	return key, nil
+}
+
+// AddExternalUser adds a new external user to the database and does not set a
+// password or activation key.
+// The following error types are possible from this function:
+//   - accesserrors.UserNameNotValid: When the username supplied is not valid.
+//   - accesserrors.UserAlreadyExists: If a user with the supplied name already exists.
+//   - accesserrors.CreatorUUIDNotFound: If the creator supplied for the user
+//     does not exist.
+func (s *UserService) AddExternalUser(ctx context.Context, name user.Name, displayName string, creatorUUID user.UUID) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsLocal() {
+		return errors.Errorf("cannot use add external user method to add local user: %w", accesserrors.UserNameNotValid)
+	}
+
+	uuid, err := user.NewUUID()
+	if err != nil {
+		return errors.Errorf("generating user UUID: %w", err)
+	}
+	return s.st.AddUser(ctx, uuid, name, displayName, true, creatorUUID)
 }
 
 // RemoveUser marks the user as removed and removes any credentials or
@@ -196,13 +259,15 @@ func (s *UserService) addUserWithActivationKey(ctx context.Context, arg AddUserA
 // The following error types are possible from this function:
 // - accesserrors.UserNameNotValid: When the username supplied is not valid.
 // - accesserrors.NotFound: If no user by the given UUID exists.
-func (s *UserService) RemoveUser(ctx context.Context, name string) error {
-	if !names.IsValidUser(name) {
-		return errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
-	}
+func (s *UserService) RemoveUser(ctx context.Context, name user.Name) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
+	}
 	if err := s.st.RemoveUser(ctx, name); err != nil {
-		return errors.Annotatef(err, "removing user for %q", name)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -213,17 +278,17 @@ func (s *UserService) RemoveUser(ctx context.Context, name string) error {
 //   - accesserrors.UserNameNotValid: When the username supplied is not valid.
 //   - accesserrors.NotFound: If no user by the given name exists.
 //   - internal/auth.ErrPasswordNotValid: If the password supplied is not valid.
-func (s *UserService) SetPassword(ctx context.Context, name string, pass auth.Password) error {
-	if !names.IsValidUser(name) {
-		return errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+func (s *UserService) SetPassword(ctx context.Context, name user.Name, pass auth.Password) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	if err := pass.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-
-	err := s.setPassword(ctx, name, pass)
-	return errors.Trace(err)
+	return errors.Capture(s.setPassword(ctx, name, pass))
 }
 
 // ResetPassword will remove any active passwords for a user and generate a new
@@ -231,18 +296,20 @@ func (s *UserService) SetPassword(ctx context.Context, name string, pass auth.Pa
 // The following error types are possible from this function:
 // - accesserrors.UserNameNotValid: When the username supplied is not valid.
 // - accesserrors.NotFound: If no user by the given UUID exists.
-func (s *UserService) ResetPassword(ctx context.Context, name string) ([]byte, error) {
-	if !names.IsValidUser(name) {
-		return nil, errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+func (s *UserService) ResetPassword(ctx context.Context, name user.Name) ([]byte, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	if name.IsZero() {
+		return nil, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	activationKey, err := generateActivationKey()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	if err = s.st.SetActivationKey(ctx, name, activationKey); err != nil {
-		return nil, errors.Annotatef(err, "setting activation key for user %q", name)
+		return nil, errors.Errorf("setting activation key for user %q: %w", name, err)
 	}
 	return activationKey, nil
 }
@@ -251,13 +318,16 @@ func (s *UserService) ResetPassword(ctx context.Context, name string) ([]byte, e
 // The following error types are possible from this function:
 // - accesserrors.UserNameNotValid: When the username supplied is not valid.
 // - accesserrors.NotFound: If no user by the given UUID exists.
-func (s *UserService) EnableUserAuthentication(ctx context.Context, name string) error {
-	if !names.IsValidUser(name) {
-		return errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+func (s *UserService) EnableUserAuthentication(ctx context.Context, name user.Name) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	if err := s.st.EnableUserAuthentication(ctx, name); err != nil {
-		return errors.Annotatef(err, "enabling user with uuid %q", name)
+		return errors.Errorf("enabling user with uuid %q: %w", name, err)
 	}
 	return nil
 }
@@ -266,52 +336,80 @@ func (s *UserService) EnableUserAuthentication(ctx context.Context, name string)
 // The following error types are possible from this function:
 // - accesserrors.UserNameNotValid: When the username supplied is not valid.
 // - accesserrors.NotFound: If no user by the given UUID exists.
-func (s *UserService) DisableUserAuthentication(ctx context.Context, name string) error {
-	if !names.IsValidUser(name) {
-		return errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+func (s *UserService) DisableUserAuthentication(ctx context.Context, name user.Name) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	if err := s.st.DisableUserAuthentication(ctx, name); err != nil {
-		return errors.Annotatef(err, "disabling user %q", name)
+		return errors.Capture(err)
 	}
 	return nil
 }
 
 // UpdateLastModelLogin will update the last login time for the user.
 // The following error types are possible from this function:
-// - accesserrors.UserNameNotValid: When the username supplied is not valid.
-// - accesserrors.UserNotFound: When the user cannot be found.
-// - modelerrors.NotFound: If no model by the given modelUUID exists.
-func (s *UserService) UpdateLastModelLogin(ctx context.Context, name string, modelUUID coremodel.UUID) error {
-	if !names.IsValidUser(name) {
-		return errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+// - [accesserrors.UserNameNotValid] when the username supplied is not valid.
+// - [accesserrors.UserNotFound] when the user cannot be found.
+// - [modelerrors.NotFound] if no model by the given modelUUID exists.
+func (s *UserService) UpdateLastModelLogin(ctx context.Context, name user.Name, modelUUID coremodel.UUID) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
-	if err := s.st.UpdateLastModelLogin(ctx, name, modelUUID); err != nil {
-		return errors.Annotatef(err, "updating last login for user %q", name)
+	if err := s.st.UpdateLastModelLogin(ctx, name, modelUUID, time.Now()); err != nil {
+		return errors.Errorf("updating last login for user %q: %w", name, err)
+	}
+	return nil
+}
+
+// SetLastModelLogin will set the last login time for the user to the given
+// value. The following error types are possible from this function:
+// [accesserrors.UserNameNotValid] when the username supplied is not valid.
+// [accesserrors.UserNotFound] when the user cannot be found.
+// [modelerrors.NotFound] if no model by the given modelUUID exists.
+func (s *UserService) SetLastModelLogin(ctx context.Context, name user.Name, modelUUID coremodel.UUID, lastLogin time.Time) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
+	}
+
+	if err := s.st.UpdateLastModelLogin(ctx, name, modelUUID, lastLogin); err != nil {
+		return errors.Errorf("setting last login for user %q: %w", name, err)
 	}
 	return nil
 }
 
 // LastModelLogin will return the last login time of the specified user.
 // The following error types are possible from this function:
-// - accesserrors.UserNameNotValid: When the username is not valid.
-// - accesserrors.UserNotFound: When the user cannot be found.
-// - modelerrors.NotFound: If no model by the given modelUUID exists.
-// - accesserrors.UserNeverAccessedModel: If there is no record of the user
+// - [accesserrors.UserNameNotValid] when the username is not valid.
+// - [accesserrors.UserNotFound] when the user cannot be found.
+// - [modelerrors.NotFound] if no model by the given modelUUID exists.
+// - [accesserrors.UserNeverAccessedModel] if there is no record of the user
 // accessing the model.
-func (s *UserService) LastModelLogin(ctx context.Context, name string, modelUUID coremodel.UUID) (time.Time, error) {
-	if !names.IsValidUser(name) {
-		return time.Time{}, errors.Annotatef(accesserrors.UserNameNotValid, "%q", name)
+func (s *UserService) LastModelLogin(ctx context.Context, name user.Name, modelUUID coremodel.UUID) (time.Time, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return time.Time{}, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
 	}
 
 	if err := modelUUID.Validate(); err != nil {
-		return time.Time{}, errors.Annotatef(err, "getting last model connection for %q: bad uuid", name)
+		return time.Time{}, errors.Errorf("getting last model connection for %q: bad uuid: %w", name, err)
 	}
 
 	lastConnection, err := s.st.LastModelLogin(ctx, name, modelUUID)
 	if err != nil {
-		return time.Time{}, errors.Trace(err)
+		return time.Time{}, errors.Capture(err)
 	}
 	return lastConnection, nil
 }
@@ -324,7 +422,7 @@ const activationKeyLength = 32
 func generateActivationKey() ([]byte, error) {
 	var activationKey [activationKeyLength]byte
 	if _, err := rand.Read(activationKey[:]); err != nil {
-		return nil, errors.Annotate(err, "generating activation key")
+		return nil, errors.Errorf("generating activation key: %w", err)
 	}
 	return activationKey[:], nil
 }
@@ -350,15 +448,22 @@ type Sealer interface {
 // unmarshalled an error will be returned.
 // To prevent the leaking of the key and nonce (which can unbox the secret),
 // a Sealer will be returned that can be used to seal the response payload.
-func (s *UserService) SetPasswordWithActivationKey(ctx context.Context, name string, nonce, box []byte) (Sealer, error) {
+func (s *UserService) SetPasswordWithActivationKey(ctx context.Context, name user.Name, nonce, box []byte) (Sealer, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return nil, errors.Errorf("empty username: %w", accesserrors.UserNameNotValid)
+	}
+
 	if len(nonce) != activationBoxNonceLength {
-		return nil, errors.NotValidf("nonce")
+		return nil, errors.Errorf("nonce %w", coreerrors.NotValid)
 	}
 
 	// Get the activation key for the user.
 	key, err := s.st.GetActivationKey(ctx, name)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	// Copy the nonce and the key to arrays which can be used for the secretbox.
@@ -380,11 +485,11 @@ func (s *UserService) SetPasswordWithActivationKey(ctx context.Context, name str
 		Password string `json:"password"`
 	}
 	if err := json.Unmarshal(boxPayloadBytes, &payload); err != nil {
-		return nil, errors.Annotate(err, "cannot unmarshal payload")
+		return nil, errors.Errorf("cannot unmarshal payload: %w", err)
 	}
 
 	if err := s.setPassword(ctx, name, auth.NewPassword(payload.Password)); err != nil {
-		return nil, errors.Annotate(err, "setting new password")
+		return nil, errors.Errorf("setting new password: %w", err)
 	}
 
 	return boxSealer{
@@ -392,19 +497,19 @@ func (s *UserService) SetPasswordWithActivationKey(ctx context.Context, name str
 	}, nil
 }
 
-func (s *UserService) setPassword(ctx context.Context, name string, pass auth.Password) error {
+func (s *UserService) setPassword(ctx context.Context, name user.Name, pass auth.Password) error {
 	salt, err := auth.NewSalt()
 	if err != nil {
-		return errors.Annotatef(err, "generating password salt for user %q", name)
+		return errors.Errorf("generating password salt for user %q: %w", name, err)
 	}
 
 	pwHash, err := auth.HashPassword(pass, salt)
 	if err != nil {
-		return errors.Annotatef(err, "hashing password for user %q", name)
+		return errors.Errorf("hashing password for user %q: %w", name, err)
 	}
 
 	if err = s.st.SetPasswordHash(ctx, name, pwHash, salt); err != nil {
-		return errors.Annotatef(err, "setting password for user %q", name)
+		return errors.Errorf("setting password for user %q: %w", name, err)
 	}
 
 	return nil
@@ -417,7 +522,7 @@ type boxSealer struct {
 
 func (s boxSealer) Seal(nonce, payload []byte) ([]byte, error) {
 	if len(nonce) != activationBoxNonceLength {
-		return nil, errors.NotValidf("nonce")
+		return nil, errors.Errorf("nonce %w", coreerrors.NotValid)
 	}
 
 	var sbNonce [activationBoxNonceLength]byte

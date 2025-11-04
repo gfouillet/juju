@@ -1,17 +1,42 @@
+# Copyright 2024 Canonical Ltd.
+# Licensed under the AGPLv3, see LICENCE file for details.
+
 run_secrets_vault() {
 	echo
 
 	prepare_vault
 
-	model_name='model-secrets-vault'
-	juju add-secret-backend myvault vault endpoint="$VAULT_ADDR" token="$VAULT_TOKEN"
+	juju add-secret-backend myvault vault endpoint="$VAULT_ADDR" token="$VAULT_TOKEN" ca-cert="$(cat $VAULT_CAPATH)"
+
+	model_name='model-secrets-vault-charm-owned'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	juju --show-log model-secret-backend myvault -m "$model_name"
 
 	check_secrets
-	run_user_secrets "$model_name"
+	destroy_model "$model_name"
 
-	destroy_model "model-secrets-vault"
+	model_name='model-secrets-vault-model-owned'
+	add_model "$model_name"
+	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	run_user_secrets "$model_name"
+	destroy_model "$model_name"
+
+	# test remove-secret-backend with force.
+	model_name='model-remove-secret-backend-with-force'
+	add_model "$model_name"
+	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	# add a secret to the vault backend to make sure the backend is in-use.
+	# (make it a large secret which encodes to approx 1MB in size).
+	echo "data: $(cat /dev/zero | tr '\0' A | head -c 749500)" >"${TEST_DIR}/secret.txt"
+	secret_uri=$(juju add-secret big --file "${TEST_DIR}/secret.txt")
+	secret_short_uri=${secret_uri##*:}
+	check_contains "$(juju show-secret big --reveal | yq ".${secret_short_uri}.content.data" | grep -o A | wc -l)" 749500
+	check_contains "$(juju show-secret-backend myvault | yq -r .myvault.secrets)" 1
+	check_contains "$(juju list-secret-backends --format yaml | yq -r .myvault.secrets)" 1
+	check_contains "$(juju remove-secret-backend myvault 2>&1)" 'backend "myvault" still contains secret content'
+	juju remove-secret-backend myvault --force
+	destroy_model "$model_name"
+
 	destroy_model "model-vault-provider"
 }
 
@@ -26,17 +51,17 @@ run_secret_drain() {
 	vault_backend_name='myvault'
 	juju add-secret-backend "$vault_backend_name" vault endpoint="$VAULT_ADDR" token="$VAULT_TOKEN"
 
-	juju --show-log deploy easyrsa
-	wait_for "active" '.applications["easyrsa"] | ."application-status".current'
-	wait_for "easyrsa" "$(idle_condition "easyrsa" 0 0)"
+	juju --show-log deploy jameinel-ubuntu-lite
+	wait_for "active" '.applications["ubuntu-lite"] | ."application-status".current'
+	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite" 0)"
 
-	secret_owned_by_unit=$(juju exec --unit easyrsa/0 -- secret-add --owner unit owned-by=easyrsa/0)
-	secret_owned_by_app=$(juju exec --unit easyrsa/0 -- secret-add owned-by=easyrsa-app)
+	secret_owned_by_unit=$(juju exec --unit ubuntu-lite/0 -- secret-add --owner unit owned-by=ubuntu-lite/0)
+	secret_owned_by_app=$(juju exec --unit ubuntu-lite/0 -- secret-add owned-by=ubuntu-lite-app)
 
 	juju show-secret --reveal "$secret_owned_by_unit"
 	juju show-secret --reveal "$secret_owned_by_app"
 
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	model_uuid=$(juju show-model $model_name --format json | jq -r ".[\"${model_name}\"][\"model-uuid\"]")
 
@@ -50,7 +75,7 @@ run_secret_drain() {
 		attempt=$((attempt + 1))
 	done
 
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	attempt=0
 	until [[ $(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length) -eq 0 ]]; do
@@ -79,12 +104,12 @@ run_user_secret_drain() {
 
 	model_name='model-user-secrets-drain'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend="$vault_backend_name" -m "$model_name"
+	juju --show-log model-secret-backend "$vault_backend_name" -m "$model_name"
 	model_uuid=$(juju show-model $model_name --format json | jq -r ".[\"${model_name}\"][\"model-uuid\"]")
 
-	juju --show-log deploy easyrsa
-	wait_for "active" '.applications["easyrsa"] | ."application-status".current'
-	wait_for "easyrsa" "$(idle_condition "easyrsa" 0 0)"
+	juju --show-log deploy ubuntu-lite
+	wait_for "active" '.applications["ubuntu-lite"] | ."application-status".current'
+	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite" 0)"
 
 	secret_uri=$(juju --show-log add-secret mysecret owned-by="$model_name-1" --info "this is a user secret")
 	secret_short_uri=${secret_uri##*:}
@@ -92,11 +117,11 @@ run_user_secret_drain() {
 	juju show-secret --reveal "$secret_uri"
 	check_contains "$(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length)" 1
 
-	juju --show-log grant-secret "$secret_uri" easyrsa
-	check_contains "$(juju exec --unit easyrsa/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
+	juju --show-log grant-secret "$secret_uri" ubuntu-lite
+	check_contains "$(juju exec --unit ubuntu-lite/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
 
 	# change the secret backend to internal.
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	another_secret_uri=$(juju --show-log add-secret anothersecret owned-by="$model_name-2" --info "this is another user secret")
 	juju show-secret --reveal "$another_secret_uri"
@@ -113,7 +138,7 @@ run_user_secret_drain() {
 	done
 
 	# change the secret backend to vault.
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	# ensure the user secrets are in the vault backend.
 	attempt=0
@@ -127,7 +152,7 @@ run_user_secret_drain() {
 	done
 
 	# ensure the application can still read the user secret.
-	check_contains "$(juju exec --unit easyrsa/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
+	check_contains "$(juju exec --unit ubuntu-lite/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
 
 	juju show-secret --reveal mysecret
 	juju show-secret --reveal anothersecret
@@ -145,12 +170,16 @@ prepare_vault() {
 
 	# If no databases are related, vault will be auto configured to
 	# use its embedded raft storage backend for storage and HA.
-	juju --show-log deploy vault
+	juju --show-log deploy vault --channel 1.18
 	juju --show-log expose vault
 
 	wait_for "blocked" "$(workload_status vault 0).current"
 	vault_public_addr=$(juju status --format json | jq -r '.applications.vault.units."vault/0"."public-address"')
-	export VAULT_ADDR="http://${vault_public_addr}:8200"
+	export VAULT_ADDR="https://${vault_public_addr}:8200"
+	TMP=$(mktemp -d ~/snap/vault/common/cacert-XXXXX)
+	cert_juju_secret_id=$(juju secrets --format=yaml | yq 'to_entries | .[] | select(.value.label == "self-signed-vault-ca-certificate") | .key')
+	juju show-secret "${cert_juju_secret_id}" --reveal --format=yaml | yq '.[].content.certificate' > "$TMP/vault.pem"
+	export VAULT_CAPATH="$TMP/vault.pem"
 	vault status || true
 	vault_init_output=$(vault operator init -key-shares=5 -key-threshold=3 -format json)
 	vault_token=$(echo "$vault_init_output" | jq -r .root_token)
@@ -198,8 +227,7 @@ test_secret_drain() {
 
 		cd .. || exit
 
-		# TODO: drain is not implemented in DQlite yet.
-		# run "run_secret_drain"
+		run "run_secret_drain"
 	)
 }
 
@@ -214,8 +242,7 @@ test_user_secret_drain() {
 
 		cd .. || exit
 
-		# TODO: drain is not implemented in DQlite yet.
-		# run "run_user_secret_drain"
+		run "run_user_secret_drain"
 	)
 }
 

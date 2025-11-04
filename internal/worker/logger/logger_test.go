@@ -4,25 +4,26 @@
 package logger_test
 
 import (
+	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
-	gc "gopkg.in/check.v1"
 
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/watcher"
 	internallogger "github.com/juju/juju/internal/logger"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/logger"
 )
 
 type LoggerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	context   corelogger.LoggerContext
 	agent     names.Tag
@@ -32,9 +33,11 @@ type LoggerSuite struct {
 	value string
 }
 
-var _ = gc.Suite(&LoggerSuite{})
+func TestLoggerSuite(t *testing.T) {
+	tc.Run(t, &LoggerSuite{})
+}
 
-func (s *LoggerSuite) SetUpTest(c *gc.C) {
+func (s *LoggerSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.context = internallogger.WrapLoggoContext(loggo.NewContext(loggo.DEBUG))
 	s.agent = names.NewMachineTag("42")
@@ -55,32 +58,32 @@ func (s *LoggerSuite) SetUpTest(c *gc.C) {
 	s.value = ""
 }
 
-func (s *LoggerSuite) TestMissingContext(c *gc.C) {
+func (s *LoggerSuite) TestMissingContext(c *tc.C) {
 	s.config.Context = nil
 	w, err := logger.NewLogger(s.config)
-	c.Assert(w, gc.IsNil)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
-	c.Assert(err.Error(), gc.Equals, "missing logging context not valid")
+	c.Assert(w, tc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+	c.Assert(err.Error(), tc.Equals, "missing logging context not valid")
 }
 
-func (s *LoggerSuite) TestMissingAPI(c *gc.C) {
+func (s *LoggerSuite) TestMissingAPI(c *tc.C) {
 	s.config.API = nil
 	w, err := logger.NewLogger(s.config)
-	c.Assert(w, gc.IsNil)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
-	c.Assert(err.Error(), gc.Equals, "missing api not valid")
+	c.Assert(w, tc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+	c.Assert(err.Error(), tc.Equals, "missing api not valid")
 }
 
-func (s *LoggerSuite) TestMissingLogger(c *gc.C) {
+func (s *LoggerSuite) TestMissingLogger(c *tc.C) {
 	s.config.Logger = nil
 	w, err := logger.NewLogger(s.config)
-	c.Assert(w, gc.IsNil)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
-	c.Assert(err.Error(), gc.Equals, "missing logger not valid")
+	c.Assert(w, tc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+	c.Assert(err.Error(), tc.Equals, "missing logger not valid")
 }
 
-func (s *LoggerSuite) waitLoggingInfo(c *gc.C, expected string) {
-	timeout := time.After(testing.LongWait)
+func (s *LoggerSuite) waitLoggingInfo(c *tc.C, expected string) {
+	timeout := time.After(testhelpers.LongWait)
 	for {
 		select {
 		case <-timeout:
@@ -96,43 +99,43 @@ func (s *LoggerSuite) waitLoggingInfo(c *gc.C, expected string) {
 	}
 }
 
-func (s *LoggerSuite) makeLogger(c *gc.C) worker.Worker {
+func (s *LoggerSuite) makeLogger(c *tc.C) worker.Worker {
 	w, err := logger.NewLogger(s.config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return w
 }
 
-func (s *LoggerSuite) TestRunStop(c *gc.C) {
+func (s *LoggerSuite) TestRunStop(c *tc.C) {
 	loggingWorker := s.makeLogger(c)
-	c.Assert(worker.Stop(loggingWorker), gc.IsNil)
+	c.Assert(worker.Stop(loggingWorker), tc.IsNil)
 }
 
-func (s *LoggerSuite) TestInitialState(c *gc.C) {
+func (s *LoggerSuite) TestInitialState(c *tc.C) {
 	expected := s.context.Config().String()
 
 	initial := "<root>=DEBUG;wibble=ERROR"
-	c.Assert(expected, gc.Not(gc.Equals), initial)
+	c.Assert(expected, tc.Not(tc.Equals), initial)
 
 	s.context.ResetLoggerLevels()
 	err := s.context.ConfigureLoggers(initial)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	loggingWorker := s.makeLogger(c)
 	s.waitLoggingInfo(c, expected)
 	err = worker.Stop(loggingWorker)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(s.value, gc.Equals, expected)
-	c.Check(s.loggerAPI.loggingTag, gc.Equals, s.agent)
-	c.Check(s.loggerAPI.watchingTag, gc.Equals, s.agent)
+	c.Check(s.value, tc.Equals, expected)
+	c.Check(s.loggerAPI.loggingTag, tc.Equals, s.agent)
+	c.Check(s.loggerAPI.watchingTag, tc.Equals, s.agent)
 }
 
-func (s *LoggerSuite) TestConfigOverride(c *gc.C) {
+func (s *LoggerSuite) TestConfigOverride(c *tc.C) {
 	s.config.Override = "test=TRACE"
 
 	s.context.ResetLoggerLevels()
 	err := s.context.ConfigureLoggers("<root>=DEBUG;wibble=ERROR")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	loggingWorker := s.makeLogger(c)
 	defer worker.Stop(loggingWorker)
@@ -166,12 +169,12 @@ type mockAPI struct {
 	watchingTag names.Tag
 }
 
-func (m *mockAPI) LoggingConfig(agentTag names.Tag) (string, error) {
+func (m *mockAPI) LoggingConfig(_ context.Context, agentTag names.Tag) (string, error) {
 	m.loggingTag = agentTag
 	return m.config, nil
 }
 
-func (m *mockAPI) WatchLoggingConfig(agentTag names.Tag) (watcher.NotifyWatcher, error) {
+func (m *mockAPI) WatchLoggingConfig(_ context.Context, agentTag names.Tag) (watcher.NotifyWatcher, error) {
 	m.watchingTag = agentTag
 	return m.watcher, nil
 }

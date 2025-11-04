@@ -56,7 +56,7 @@ func (ra *runAction) Prepare(ctx context.Context, state State) (*State, error) {
 	actionID := ra.action.ID()
 	rnr, err := ra.runnerFactory.NewActionRunner(ctx, ra.action, ra.cancel)
 	if cause := errors.Cause(err); charmrunner.IsBadActionError(cause) {
-		if err := ra.callbacks.FailAction(ctx, actionID, err.Error()); err != nil {
+		if err := ra.callbacks.ErrorAction(ctx, actionID, err.Error()); err != nil {
 			return nil, err
 		}
 		return nil, ErrSkipExecute
@@ -88,7 +88,7 @@ func (ra *runAction) Prepare(ctx context.Context, state State) (*State, error) {
 // Execute is part of the Operation interface.
 func (ra *runAction) Execute(ctx context.Context, state State) (*State, error) {
 	message := fmt.Sprintf("running action %s", ra.name)
-	if err := ra.callbacks.SetExecutingStatus(message); err != nil {
+	if err := ra.callbacks.SetExecutingStatus(ctx, message); err != nil {
 		return nil, err
 	}
 
@@ -105,11 +105,11 @@ func (ra *runAction) Execute(ctx context.Context, state State) (*State, error) {
 			}
 			status, err := ra.callbacks.ActionStatus(ctx, actionID)
 			if err != nil {
-				ra.logger.Warningf("unable to get action status for %q: %v", actionID, err)
+				ra.logger.Warningf(ctx, "unable to get action status for %q: %v", actionID, err)
 				continue
 			}
 			if status == params.ActionAborting {
-				ra.logger.Infof("action %s aborting", actionID)
+				ra.logger.Infof(ctx, "action %s aborting", actionID)
 				close(ra.cancel)
 				return
 			}
@@ -149,13 +149,13 @@ func (ra *runAction) RemoteStateChanged(snapshot remotestate.Snapshot) {
 	actionID := ra.action.ID()
 	change, ok := snapshot.ActionChanged[actionID]
 	if !ok {
-		ra.logger.Errorf("action %s missing action changed entry", actionID)
+		ra.logger.Errorf(context.Background(), "action %s missing action changed entry", actionID)
 		// Shouldn't happen.
 		return
 	}
 	if ra.change < change {
 		ra.change = change
-		ra.logger.Errorf("running action %s changed", actionID)
+		ra.logger.Errorf(context.Background(), "running action %s changed", actionID)
 		select {
 		case ra.changed <- struct{}{}:
 		default:

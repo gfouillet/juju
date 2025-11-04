@@ -5,18 +5,16 @@ package gce
 
 import (
 	"context"
-	stdcontext "context"
 
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
+	"github.com/juju/juju/internal/configschema"
 )
 
 const (
@@ -39,11 +37,11 @@ func (environProvider) Version() int {
 }
 
 // Open implements environs.EnvironProvider.
-func (environProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
+func (environProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
 	if err := validateCloudSpec(args.Cloud); err != nil {
 		return nil, errors.Annotate(err, "validating cloud spec")
 	}
-	env, err := newEnviron(ctx, args.Cloud, args.Config)
+	env, err := newEnviron(ctx, args.Cloud, args.Config, invalidator)
 	return env, errors.Trace(err)
 }
 
@@ -54,16 +52,19 @@ func (p environProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p environProvider) Ping(ctx envcontext.ProviderCallContext, endpoint string) error {
+func (p environProvider) Ping(_ context.Context, _ string) error {
 	return errors.NotImplementedf("Ping")
 }
 
-// PrepareConfig implements environs.EnvironProvider.
-func (p environProvider) PrepareConfig(ctx context.Context, args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	return configWithDefaults(args.Config)
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p environProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+// ValidateCloud is specified in the EnvironProvider interface.
+func (environProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 func validateCloudSpec(spec environscloudspec.CloudSpec) error {
@@ -75,6 +76,10 @@ func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 	}
 	switch authType := spec.Credential.AuthType(); authType {
 	case cloud.OAuth2AuthType, cloud.JSONFileAuthType:
+	case cloud.ServiceAccountAuthType:
+		if spec.Credential.Attributes()[credServiceAccount] == "" {
+			return errors.NotValidf("missing service account name")
+		}
 	default:
 		return errors.NotSupportedf("%q auth-type", authType)
 	}
@@ -82,7 +87,7 @@ func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 }
 
 // Schema returns the configuration schema for an environment.
-func (environProvider) Schema() environschema.Fields {
+func (environProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -100,18 +105,6 @@ func (p environProvider) ConfigSchema() schema.Fields {
 // provider specific config attributes.
 func (p environProvider) ConfigDefaults() schema.Defaults {
 	return configDefaults
-}
-
-func configWithDefaults(cfg *config.Config) (*config.Config, error) {
-	defaults := make(map[string]interface{})
-	if _, ok := cfg.StorageDefaultBlockSource(); !ok {
-		// Set the default block source.
-		defaults[config.StorageDefaultBlockSourceKey] = storageProviderType
-	}
-	if len(defaults) == 0 {
-		return cfg, nil
-	}
-	return cfg.Apply(defaults)
 }
 
 // Validate implements environs.EnvironProvider.Validate.

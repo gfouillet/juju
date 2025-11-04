@@ -5,11 +5,11 @@ package runcommands_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/utils/v4/exec"
-	gc "gopkg.in/check.v1"
 
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/worker/uniter/operation"
@@ -28,19 +28,21 @@ type runcommandsSuite struct {
 	opFactory        operation.Factory
 	resolver         resolver.Resolver
 	commands         runcommands.Commands
-	runCommands      func(string, runner.RunLocation) (*exec.ExecResponse, error)
+	runCommands      func(string) (*exec.ExecResponse, error)
 	commandCompleted func(string)
 }
 
-var _ = gc.Suite(&runcommandsSuite{})
+func TestRuncommandsSuite(t *testing.T) {
+	tc.Run(t, &runcommandsSuite{})
+}
 
-func (s *runcommandsSuite) SetUpTest(c *gc.C) {
+func (s *runcommandsSuite) SetUpTest(c *tc.C) {
 	s.charmURL = "ch:precise/mysql-2"
 	s.remoteState = remotestate.Snapshot{
 		CharmURL: s.charmURL,
 	}
-	s.mockRunner = mockRunner{runCommands: func(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-		return s.runCommands(commands, runLocation)
+	s.mockRunner = mockRunner{runCommands: func(commands string) (*exec.ExecResponse, error) {
+		return s.runCommands(commands)
 	}}
 	s.callbacks = &mockCallbacks{}
 	s.opFactory = operation.NewFactory(operation.FactoryParams{
@@ -64,7 +66,7 @@ func (s *runcommandsSuite) SetUpTest(c *gc.C) {
 	)
 }
 
-func (s *runcommandsSuite) TestRunCommands(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommands(c *tc.C) {
 	localState := resolver.LocalState{
 		CharmURL: s.charmURL,
 		State: operation.State{
@@ -72,24 +74,22 @@ func (s *runcommandsSuite) TestRunCommands(c *gc.C) {
 		},
 	}
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(*exec.ExecResponse, error) bool { return false })
 	s.remoteState.Commands = []string{id}
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 }
 
-func (s *runcommandsSuite) TestRunCommandsCallbacks(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommandsCallbacks(c *tc.C) {
 	var completed []string
 	s.commandCompleted = func(id string) {
 		completed = append(completed, id)
 	}
 
 	var run []string
-	s.runCommands = func(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-		c.Assert(runLocation, gc.Equals, runner.Operator)
+	s.runCommands = func(commands string) (*exec.ExecResponse, error) {
 		run = append(run, commands)
 		return &exec.ExecResponse{}, nil
 	}
@@ -101,31 +101,30 @@ func (s *runcommandsSuite) TestRunCommandsCallbacks(c *gc.C) {
 	}
 
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(*exec.ExecResponse, error) bool { return false })
 	s.remoteState.Commands = []string{id}
 
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 
-	_, err = op.Prepare(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(run, gc.HasLen, 0)
-	c.Assert(completed, gc.HasLen, 0)
+	_, err = op.Prepare(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(run, tc.HasLen, 0)
+	c.Assert(completed, tc.HasLen, 0)
 
-	_, err = op.Execute(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(run, jc.DeepEquals, []string{"echo foxtrot"})
-	c.Assert(completed, gc.HasLen, 0)
+	_, err = op.Execute(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(run, tc.DeepEquals, []string{"echo foxtrot"})
+	c.Assert(completed, tc.HasLen, 0)
 
-	_, err = op.Commit(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(completed, jc.DeepEquals, []string{id})
+	_, err = op.Commit(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(completed, tc.DeepEquals, []string{id})
 }
 
-func (s *runcommandsSuite) TestRunCommandsCommitErrorNoCompletedCallback(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommandsCommitErrorNoCompletedCallback(c *tc.C) {
 	// Override opFactory with one that creates run command
 	// operations with failing Commit methods.
 	s.opFactory = commitErrorOpFactory{s.opFactory}
@@ -136,8 +135,7 @@ func (s *runcommandsSuite) TestRunCommandsCommitErrorNoCompletedCallback(c *gc.C
 	}
 
 	var run []string
-	s.runCommands = func(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-		c.Assert(runLocation, gc.Equals, runner.Operator)
+	s.runCommands = func(commands string) (*exec.ExecResponse, error) {
 		run = append(run, commands)
 		return &exec.ExecResponse{}, nil
 	}
@@ -149,98 +147,93 @@ func (s *runcommandsSuite) TestRunCommandsCommitErrorNoCompletedCallback(c *gc.C
 	}
 
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(*exec.ExecResponse, error) bool { return false })
 	s.remoteState.Commands = []string{id}
 
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 
-	_, err = op.Prepare(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = op.Prepare(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = op.Execute(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(run, jc.DeepEquals, []string{"echo foxtrot"})
-	c.Assert(completed, gc.HasLen, 0)
+	_, err = op.Execute(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(run, tc.DeepEquals, []string{"echo foxtrot"})
+	c.Assert(completed, tc.HasLen, 0)
 
-	_, err = op.Commit(context.Background(), operation.State{})
-	c.Assert(err, gc.ErrorMatches, "Commit failed")
+	_, err = op.Commit(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorMatches, "Commit failed")
 	// commandCompleted is not called if Commit fails
-	c.Assert(completed, gc.HasLen, 0)
+	c.Assert(completed, tc.HasLen, 0)
 }
 
-func (s *runcommandsSuite) TestRunCommandsError(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommandsError(c *tc.C) {
 	localState := resolver.LocalState{
 		CharmURL: s.charmURL,
 		State: operation.State{
 			Kind: operation.Continue,
 		},
 	}
-	s.runCommands = func(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-		c.Assert(runLocation, gc.Equals, runner.Operator)
+	s.runCommands = func(commands string) (*exec.ExecResponse, error) {
 		return nil, errors.Errorf("executing commands: %s", commands)
 	}
 
 	var execErr error
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(_ *exec.ExecResponse, err error) bool {
 		execErr = err
 		return false
 	})
 	s.remoteState.Commands = []string{id}
 
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 
-	_, err = op.Prepare(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = op.Prepare(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = op.Execute(context.Background(), operation.State{})
-	c.Assert(err, gc.NotNil)
-	c.Assert(execErr, gc.ErrorMatches, "executing commands: echo foxtrot")
+	_, err = op.Execute(c.Context(), operation.State{})
+	c.Assert(err, tc.NotNil)
+	c.Assert(execErr, tc.ErrorMatches, "executing commands: echo foxtrot")
 }
 
-func (s *runcommandsSuite) TestRunCommandsErrorConsumed(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommandsErrorConsumed(c *tc.C) {
 	localState := resolver.LocalState{
 		CharmURL: s.charmURL,
 		State: operation.State{
 			Kind: operation.Continue,
 		},
 	}
-	s.runCommands = func(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-		c.Assert(runLocation, gc.Equals, runner.Operator)
+	s.runCommands = func(commands string) (*exec.ExecResponse, error) {
 		return nil, errors.Errorf("executing commands: %s", commands)
 	}
 
 	var execErr error
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(_ *exec.ExecResponse, err error) bool {
 		execErr = err
 		return true
 	})
 	s.remoteState.Commands = []string{id}
 
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 
-	_, err = op.Prepare(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = op.Prepare(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = op.Execute(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(execErr, gc.ErrorMatches, "executing commands: echo foxtrot")
+	_, err = op.Execute(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(execErr, tc.ErrorMatches, "executing commands: echo foxtrot")
 }
 
-func (s *runcommandsSuite) TestRunCommandsStatus(c *gc.C) {
+func (s *runcommandsSuite) TestRunCommandsStatus(c *tc.C) {
 	localState := resolver.LocalState{
 		CharmURL: s.charmURL,
 		State: operation.State{
@@ -249,23 +242,22 @@ func (s *runcommandsSuite) TestRunCommandsStatus(c *gc.C) {
 	}
 
 	id := s.commands.AddCommand(operation.CommandArgs{
-		Commands:    "echo foxtrot",
-		RunLocation: runner.Operator,
+		Commands: "echo foxtrot",
 	}, func(*exec.ExecResponse, error) bool { return false })
 	s.remoteState.Commands = []string{id}
 
-	op, err := s.resolver.NextOp(context.Background(), localState, s.remoteState, s.opFactory)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op.String(), gc.Equals, "run commands (0)")
+	op, err := s.resolver.NextOp(c.Context(), localState, s.remoteState, s.opFactory)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op.String(), tc.Equals, "run commands (0)")
 	s.callbacks.CheckCalls(c, nil /* no calls */)
 
-	_, err = op.Prepare(context.Background(), operation.State{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = op.Prepare(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorIsNil)
 	s.callbacks.CheckCalls(c, nil /* no calls */)
 
 	s.callbacks.SetErrors(errors.New("cannot set status"))
-	_, err = op.Execute(context.Background(), operation.State{})
-	c.Assert(err, gc.ErrorMatches, "cannot set status")
+	_, err = op.Execute(c.Context(), operation.State{})
+	c.Assert(err, tc.ErrorMatches, "cannot set status")
 	s.callbacks.CheckCallNames(c, "SetExecutingStatus")
 	s.callbacks.CheckCall(c, 0, "SetExecutingStatus", "running commands")
 }

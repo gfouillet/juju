@@ -4,149 +4,225 @@
 package machine_test
 
 import (
-	"context"
+	"testing"
 	"time"
 
-	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/clock"
+	"github.com/juju/clock/testclock"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facades/agent/machine"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/life"
+	coremachine "github.com/juju/juju/core/machine"
+	machinetesting "github.com/juju/juju/core/machine/testing"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/juju/testing"
+	"github.com/juju/juju/core/watcher/watchertest"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
 )
 
 type machinerSuite struct {
 	commonSuite
 
-	resources      *common.Resources
-	machiner       *machine.MachinerAPI
-	networkService *MockNetworkService
+	clock clock.Clock
+
+	machiner           *machine.MachinerAPI
+	networkService     *MockNetworkService
+	machineService     *MockMachineService
+	applicationService *MockApplicationService
+	statusService      *MockStatusService
+	removalService     *MockRemovalService
+	watcherRegistry    *MockWatcherRegistry
 }
 
-var _ = gc.Suite(&machinerSuite{})
+func TestMachinerSuite(t *testing.T) {
+	tc.Run(t, &machinerSuite{})
+}
 
-func (s *machinerSuite) setUpMocks(c *gc.C) *gomock.Controller {
+func (s *machinerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
+	s.clock = testclock.NewClock(time.Now())
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
 	s.networkService = NewMockNetworkService(ctrl)
+	s.machineService = NewMockMachineService(ctrl)
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.statusService = NewMockStatusService(ctrl)
+	s.removalService = NewMockRemovalService(ctrl)
+
+	c.Cleanup(func() {
+		s.clock = nil
+		s.watcherRegistry = nil
+		s.networkService = nil
+		s.machineService = nil
+		s.applicationService = nil
+		s.statusService = nil
+		s.removalService = nil
+	})
+
 	return ctrl
 }
 
-func (s *machinerSuite) SetUpTest(c *gc.C) {
-	s.commonSuite.SetUpTest(c)
-
-	// Create the resource registry separately to track invocations to
-	// Register.
-	s.resources = common.NewResources()
-
-	st := s.ControllerModel(c).State()
+func (s *machinerSuite) makeAPI(c *tc.C) {
 	// Create a machiner API for machine 1.
 	machiner, err := machine.NewMachinerAPIForState(
-		context.Background(),
-		st,
-		st,
-		s.ControllerServiceFactory(c).ControllerConfig(),
-		apiservertesting.ConstCloudGetter(&testing.DefaultCloud),
+		s.clock,
+		s.ControllerDomainServices(c).ControllerConfig(),
+		s.ControllerDomainServices(c).ControllerNode(),
 		s.networkService,
-		s.resources,
+		s.applicationService,
+		s.machineService,
+		s.statusService,
+		s.removalService,
+		s.watcherRegistry,
 		s.authorizer,
+		loggertesting.WrapCheckLog(c),
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.machiner = machiner
 }
 
-func (s *machinerSuite) TestMachinerFailsWithNonMachineAgentUser(c *gc.C) {
-	defer s.setUpMocks(c).Finish()
+func (s *machinerSuite) TestMachinerFailsWithNonMachineAgentUser(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
 	anAuthorizer := s.authorizer
 	anAuthorizer.Tag = names.NewUnitTag("ubuntu/1")
-	st := s.ControllerModel(c).State()
 	aMachiner, err := machine.NewMachinerAPIForState(
-		context.Background(),
-		st,
-		st,
-		s.ControllerServiceFactory(c).ControllerConfig(),
+		clock.WallClock,
+		s.ControllerDomainServices(c).ControllerConfig(),
 		nil,
 		s.networkService,
-		s.resources,
+		s.applicationService,
+		s.machineService,
+		s.statusService,
+		s.removalService,
+		s.watcherRegistry,
 		anAuthorizer,
+		loggertesting.WrapCheckLog(c),
 	)
-	c.Assert(err, gc.NotNil)
-	c.Assert(aMachiner, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	c.Assert(err, tc.NotNil)
+	c.Assert(aMachiner, tc.IsNil)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *machinerSuite) TestSetStatus(c *gc.C) {
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Started,
-		Message: "blah",
+func (s *machinerSuite) TestEnsureDead(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
+
+	machineName := coremachine.Name("1")
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), machineName).Return(machineUUID, nil)
+	s.removalService.EXPECT().MarkMachineAsDead(gomock.Any(), machineUUID).Return(nil)
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "machine-1"},
+	}}
+	result, err := s.machiner.EnsureDead(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: nil},
+		},
+	})
+}
+
+func (s *machinerSuite) TestEnsureDeadMachineNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
+
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("1")).Return("", machineerrors.MachineNotFound)
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "machine-1"},
+	}}
+	result, err := s.machiner.EnsureDead(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *machinerSuite) TestSetStatus(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
+
+	now := s.clock.Now()
+	s.statusService.EXPECT().SetMachineStatus(gomock.Any(), coremachine.Name("1"), status.StatusInfo{
+		Status:  status.Error,
+		Message: "not really",
 		Since:   &now,
-	}
-	err := s.machine0.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	sInfo = status.StatusInfo{
-		Status:  status.Stopped,
-		Message: "foo",
-		Since:   &now,
-	}
-	err = s.machine1.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
+	})
 
 	args := params.SetStatus{
 		Entities: []params.EntityStatusArgs{
 			{Tag: "machine-1", Status: status.Error.String(), Info: "not really"},
-			{Tag: "machine-0", Status: status.Stopped.String(), Info: "foobar"},
-			{Tag: "machine-42", Status: status.Started.String(), Info: "blah"},
 		}}
-	result, err := s.machiner.SetStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify machine 0 - no change.
-	statusInfo, err := s.machine0.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Started)
-	c.Assert(statusInfo.Message, gc.Equals, "blah")
-	// ...machine 1 is fine though.
-	statusInfo, err = s.machine1.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Error)
-	c.Assert(statusInfo.Message, gc.Equals, "not really")
+	result, err := s.machiner.SetStatus(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.IsNil)
 }
 
-func (s *machinerSuite) TestLife(c *gc.C) {
-	err := s.machine1.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.Life(), gc.Equals, state.Dead)
+func (s *machinerSuite) TestSetStatusMachineNotFound(c *tc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+	s.makeAPI(c)
+
+	now := s.clock.Now()
+	s.statusService.EXPECT().SetMachineStatus(gomock.Any(), coremachine.Name("1"), status.StatusInfo{
+		Status:  status.Error,
+		Message: "not really",
+		Since:   &now,
+	}).Return(machineerrors.MachineNotFound)
+
+	args := params.SetStatus{
+		Entities: []params.EntityStatusArgs{
+			{Tag: "machine-1", Status: status.Error.String(), Info: "not really"},
+		}}
+	result, err := s.machiner.SetStatus(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *machinerSuite) TestSetStatusInvalidTags(c *tc.C) {
+	result, err := s.machiner.SetStatus(c.Context(), params.SetStatus{Entities: []params.EntityStatusArgs{
+		{Tag: "application-unknown"},
+		{Tag: "invalid-tag"},
+		{Tag: "unit-missing-1"},
+		{Tag: ""},
+		{Tag: "42"},
+	}})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{
+		{Error: apiservertesting.ErrUnauthorized},
+		{Error: apiservertesting.ErrUnauthorized},
+		{Error: apiservertesting.ErrUnauthorized},
+		{Error: apiservertesting.ErrUnauthorized},
+		{Error: apiservertesting.ErrUnauthorized},
+	}})
+}
+
+func (s *machinerSuite) TestLife(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
+
+	exp := s.machineService.EXPECT()
+	exp.GetMachineLife(gomock.Any(), coremachine.Name("1")).Return(life.Dead, nil)
 
 	args := params.Entities{Entities: []params.Entity{
 		{Tag: "machine-1"},
 		{Tag: "machine-0"},
 		{Tag: "machine-42"},
 	}}
-	result, err := s.machiner.Life(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.LifeResults{
+	result, err := s.machiner.Life(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.LifeResults{
 		Results: []params.LifeResult{
 			{Life: "dead"},
 			{Error: apiservertesting.ErrUnauthorized},
@@ -155,185 +231,63 @@ func (s *machinerSuite) TestLife(c *gc.C) {
 	})
 }
 
-func (s *machinerSuite) TestEnsureDead(c *gc.C) {
-	c.Assert(s.machine0.Life(), gc.Equals, state.Alive)
-	c.Assert(s.machine1.Life(), gc.Equals, state.Alive)
+func (s *machinerSuite) TestWatch(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "machine-1"},
-		{Tag: "machine-0"},
-		{Tag: "machine-42"},
-	}}
-	result, err := s.machiner.EnsureDead(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+	ch := make(chan struct{}, 1)
+	ch <- struct{}{}
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.CleanKill(c, watcher)
+
+	s.machineService.EXPECT().WatchMachineLifeAndDependants(gomock.Any(), coremachine.Name("1")).Return(watcher, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("1", nil)
+
+	args := params.Entities{
+		Entities: []params.Entity{
+			{Tag: "machine-1"},
+			{Tag: "machine-0"},
+			{Tag: "machine-42"},
 		},
-	})
-
-	err = s.machine0.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine0.Life(), gc.Equals, state.Alive)
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.Life(), gc.Equals, state.Dead)
-
-	// Try it again on a Dead machine; should work.
-	args = params.Entities{
-		Entities: []params.Entity{{Tag: "machine-1"}},
 	}
-	result, err = s.machiner.EnsureDead(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
+	result, err := s.machiner.Watch(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 
-	// Verify Life is unchanged.
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.Life(), gc.Equals, state.Dead)
-}
-
-func (s *machinerSuite) TestSetMachineAddresses(c *gc.C) {
-	c.Assert(s.machine0.Addresses(), gc.HasLen, 0)
-	c.Assert(s.machine1.Addresses(), gc.HasLen, 0)
-
-	addresses := []network.MachineAddress{
-		network.NewMachineAddress("127.0.0.1"),
-		network.NewMachineAddress("8.8.8.8"),
-	}
-	args := params.SetMachinesAddresses{MachineAddresses: []params.MachineAddresses{
-		{Tag: "machine-1", Addresses: params.FromMachineAddresses(addresses...)},
-		{Tag: "machine-0", Addresses: params.FromMachineAddresses(addresses...)},
-		{Tag: "machine-42", Addresses: params.FromMachineAddresses(addresses...)},
-	}}
-
-	result, err := s.machiner.SetMachineAddresses(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-
-	expectedAddresses := network.NewSpaceAddresses("8.8.8.8", "127.0.0.1")
-	c.Assert(s.machine1.MachineAddresses(), gc.DeepEquals, expectedAddresses)
-	err = s.machine0.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine0.MachineAddresses(), gc.HasLen, 0)
-}
-
-func (s *machinerSuite) TestSetEmptyMachineAddresses(c *gc.C) {
-	// Set some addresses so we can ensure they are removed.
-	addresses := []network.MachineAddress{
-		network.NewMachineAddress("127.0.0.1"),
-		network.NewMachineAddress("8.8.8.8"),
-	}
-	args := params.SetMachinesAddresses{MachineAddresses: []params.MachineAddresses{
-		{Tag: "machine-1", Addresses: params.FromMachineAddresses(addresses...)},
-	}}
-	result, err := s.machiner.SetMachineAddresses(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.MachineAddresses(), gc.HasLen, 2)
-
-	args.MachineAddresses[0].Addresses = nil
-	result, err = s.machiner.SetMachineAddresses(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.MachineAddresses(), gc.HasLen, 0)
-}
-
-func (s *machinerSuite) TestJobs(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "machine-1"},
-		{Tag: "machine-0"},
-		{Tag: "machine-42"},
-	}}
-
-	result, err := s.machiner.Jobs(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.JobsResults{
-		Results: []params.JobsResult{
-			{Jobs: []model.MachineJob{model.JobHostUnits}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *machinerSuite) TestWatch(c *gc.C) {
-	loggo.GetLogger("juju.state.pool.txnwatcher").SetLogLevel(loggo.TRACE)
-	loggo.GetLogger("juju.state.watcher").SetLogLevel(loggo.TRACE)
-
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "machine-1"},
-		{Tag: "machine-0"},
-		{Tag: "machine-42"},
-	}}
-	result, err := s.machiner.Watch(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.NotifyWatchResults{
+	c.Assert(result, tc.DeepEquals, params.NotifyWatchResults{
 		Results: []params.NotifyWatchResult{
 			{NotifyWatcherId: "1"},
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	c.Assert(result.Results[0].NotifyWatcherId, gc.Equals, "1")
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewNotifyWatcherC(c, resource.(state.NotifyWatcher))
-	wc.AssertNoChange()
 }
 
-func (s *machinerSuite) TestRecordAgentStartInformation(c *gc.C) {
+func (s *machinerSuite) TestRecordAgentStartInformation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.makeAPI(c)
+
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("1")).Return("uuid-1", nil)
+	s.machineService.EXPECT().SetMachineHostname(gomock.Any(), coremachine.UUID("uuid-1"), "thundering-herds").Return(nil)
+
 	args := params.RecordAgentStartInformationArgs{Args: []params.RecordAgentStartInformationArg{
 		{Tag: "machine-1", Hostname: "thundering-herds"},
 		{Tag: "machine-0", Hostname: "eldritch-octopii"},
 		{Tag: "machine-42", Hostname: "missing-gem"},
 	}}
 
-	result, err := s.machiner.RecordAgentStartInformation(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+	result, err := s.machiner.RecordAgentStartInformation(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
 			{Error: nil},
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
+}
 
-	err = s.machine1.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine1.Hostname(), gc.Equals, "thundering-herds", gc.Commentf("expected the machine hostname to be updated"))
+func (s *machinerSuite) TestSetObservedNetworkConfig(c *tc.C) {
+	c.Skip(`This suite is missing tests for SetObservedNetworkConfig.
+Those tests will be added once the call to the common network API is gone.
+`)
 }

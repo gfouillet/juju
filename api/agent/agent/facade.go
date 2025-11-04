@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/rpc/params"
@@ -30,8 +30,6 @@ const (
 // apiserver level somewhere? -- but:
 //  1. this feels like a convenient/transitional method grouping, not a
 //     fundamental *role*; and
-//  2. at least it's a narrowed interface, and eschews the object-style
-//     sins of *State/*Entity.
 //
 // Progress not perfection.
 type ConnFacade interface {

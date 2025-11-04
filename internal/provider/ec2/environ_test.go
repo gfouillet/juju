@@ -4,13 +4,11 @@
 package ec2
 
 import (
-	"context"
+	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
@@ -18,7 +16,6 @@ import (
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/internal/storage"
@@ -33,7 +30,9 @@ var (
 
 type Suite struct{}
 
-var _ = gc.Suite(&Suite{})
+func TestSuite(t *testing.T) {
+	tc.Run(t, &Suite{})
+}
 
 type RootDiskTest struct {
 	series         string
@@ -57,7 +56,7 @@ var commonInstanceStoreDisks = []types.BlockDeviceMapping{{
 	VirtualName: aws.String("ephemeral3"),
 }}
 
-func (*Suite) TestRootDiskBlockDeviceMapping(c *gc.C) {
+func (*Suite) TestRootDiskBlockDeviceMapping(c *tc.C) {
 	var rootDiskTests = []RootDiskTest{{
 		"jammy",
 		"nil constraint ubuntu",
@@ -141,9 +140,9 @@ func (*Suite) TestRootDiskBlockDeviceMapping(c *gc.C) {
 		c.Logf("Test %s", t.name)
 		cons := constraints.Value{RootDisk: t.constraint}
 		mappings, err := getBlockDeviceMappings(cons, t.series, false, t.rootDiskParams)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		expected := append([]types.BlockDeviceMapping{t.device}, commonInstanceStoreDisks...)
-		c.Assert(mappings, gc.DeepEquals, expected)
+		c.Assert(mappings, tc.DeepEquals, expected)
 	}
 }
 
@@ -151,7 +150,7 @@ func pInt(i uint64) *uint64 {
 	return &i
 }
 
-func (*Suite) TestPortsToIPPerms(c *gc.C) {
+func (*Suite) TestPortsToIPPerms(c *tc.C) {
 	testCases := []struct {
 		about    string
 		rules    firewall.IngressRules
@@ -231,143 +230,48 @@ func (*Suite) TestPortsToIPPerms(c *gc.C) {
 	for i, t := range testCases {
 		c.Logf("test %d: %s", i, t.about)
 		ipperms := rulesToIPPerms(t.rules)
-		c.Assert(ipperms, gc.DeepEquals, t.expected)
+		c.Assert(ipperms, tc.DeepEquals, t.expected)
 	}
 }
 
 // These Support checks are currently valid with a 'nil' environ pointer. If
 // that changes, the tests will need to be updated. (we know statically what is
 // supported.)
-func (*Suite) TestSupportsNetworking(c *gc.C) {
+func (*Suite) TestSupportsNetworking(c *tc.C) {
 	var env *environ
 	_, supported := environs.SupportsNetworking(env)
-	c.Assert(supported, jc.IsTrue)
+	c.Assert(supported, tc.IsTrue)
 }
 
-func (*Suite) TestSupportsSpaces(c *gc.C) {
-	callCtx := envcontext.WithoutCredentialInvalidator(context.Background())
+func (*Suite) TestSupportsSpaces(c *tc.C) {
 	var env *environ
-	supported, err := env.SupportsSpaces(callCtx)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(supported, jc.IsTrue)
-	c.Check(environs.SupportsSpaces(callCtx, env), jc.IsTrue)
+	supported, err := env.SupportsSpaces()
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(supported, tc.IsTrue)
+	c.Check(environs.SupportsSpaces(env), tc.IsTrue)
 }
 
-func (*Suite) TestSupportsSpaceDiscovery(c *gc.C) {
-	supported, err := (&environ{}).SupportsSpaceDiscovery(envcontext.WithoutCredentialInvalidator(context.Background()))
+func (*Suite) TestSupportsSpaceDiscovery(c *tc.C) {
+	supported, err := (&environ{}).SupportsSpaceDiscovery()
 	// TODO(jam): 2016-02-01 the comment on the interface says the error should
 	// conform to IsNotSupported, but all of the implementations just return
 	// nil for error and 'false' for supported.
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(supported, jc.IsFalse)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(supported, tc.IsFalse)
 }
 
-func (*Suite) TestSupportsContainerAddresses(c *gc.C) {
-	callCtx := envcontext.WithoutCredentialInvalidator(context.Background())
-	var env *environ
-	supported, err := env.SupportsContainerAddresses(callCtx)
-	c.Assert(err, jc.ErrorIs, errors.NotSupported)
-	c.Assert(supported, jc.IsFalse)
-	c.Check(environs.SupportsContainerAddresses(callCtx, env), jc.IsFalse)
-}
-
-func (*Suite) TestGetValidSubnetZoneMapOneSpaceConstraint(c *gc.C) {
-	allSubnetZones := []map[network.Id][]string{
-		{network.Id("sub-1"): {"az-1"}},
-	}
-
-	args := environs.StartInstanceParams{
-		Constraints:    constraints.MustParse("spaces=admin"),
-		SubnetsToZones: allSubnetZones,
-	}
-
-	subnetZones, err := getValidSubnetZoneMap(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subnetZones, gc.DeepEquals, allSubnetZones[0])
-}
-
-func (*Suite) TestGetValidSubnetZoneMapOneBindingFanFiltered(c *gc.C) {
-	allSubnetZones := []map[network.Id][]string{{
-		network.Id("sub-1"):       {"az-1"},
-		network.Id("sub-INFAN-2"): {"az-2"},
-	}}
-
-	args := environs.StartInstanceParams{
-		SubnetsToZones: allSubnetZones,
-		EndpointBindings: map[string]network.Id{
-			"":    "space-1",
-			"ep1": "space-1",
-			"ep2": "space-1",
-		},
-	}
-
-	subnetZones, err := getValidSubnetZoneMap(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subnetZones, gc.DeepEquals, map[network.Id][]string{
-		"sub-1": {"az-1"},
-	})
-}
-
-func (*Suite) TestGetValidSubnetZoneMapNoIntersectionError(c *gc.C) {
-	allSubnetZones := []map[network.Id][]string{
-		{network.Id("sub-1"): {"az-1"}},
-		{network.Id("sub-2"): {"az-2"}},
-	}
-
-	args := environs.StartInstanceParams{
-		SubnetsToZones: allSubnetZones,
-		Constraints:    constraints.MustParse("spaces=admin"),
-		EndpointBindings: map[string]network.Id{
-			"":    "space-1",
-			"ep1": "space-1",
-			"ep2": "space-1",
-		},
-	}
-
-	_, err := getValidSubnetZoneMap(args)
-	c.Assert(err, gc.ErrorMatches,
-		`unable to satisfy supplied space requirements; spaces: \[admin\], bindings: \[space-1\]`)
-}
-
-func (*Suite) TestGetValidSubnetZoneMapIntersectionSelectsCorrectIndex(c *gc.C) {
-	allSubnetZones := []map[network.Id][]string{
-		{network.Id("sub-1"): {"az-1"}},
-		{network.Id("sub-2"): {"az-2"}},
-		{network.Id("sub-3"): {"az-2"}},
-	}
-
-	args := environs.StartInstanceParams{
-		SubnetsToZones: allSubnetZones,
-		Constraints:    constraints.MustParse("spaces=space-2,space-3"),
-		EndpointBindings: map[string]network.Id{
-			"":    "space-1",
-			"ep1": "space-2",
-			"ep2": "space-2",
-		},
-	}
-
-	// space-2 is common to the bindings and constraints and is at index 1
-	// of the sorted union.
-	// This should result in the selection of the same index from the
-	// subnets-to-zones map.
-
-	subnetZones, err := getValidSubnetZoneMap(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subnetZones, gc.DeepEquals, allSubnetZones[1])
-}
-
-func (*Suite) TestGatherNilAZ(c *gc.C) {
+func (*Suite) TestGatherNilAZ(c *tc.C) {
 	az := gatherAvailabilityZones(nil)
-	c.Assert(az, gc.HasLen, 0)
+	c.Assert(az, tc.HasLen, 0)
 }
 
-func (*Suite) TestGatherEmptyAZ(c *gc.C) {
+func (*Suite) TestGatherEmptyAZ(c *tc.C) {
 	instances := []instances.Instance{}
 	az := gatherAvailabilityZones(instances)
-	c.Assert(az, gc.HasLen, 0)
+	c.Assert(az, tc.HasLen, 0)
 }
 
-func (*Suite) TestGatherAZ(c *gc.C) {
+func (*Suite) TestGatherAZ(c *tc.C) {
 	instances := []instances.Instance{
 		&sdkInstance{
 			i: types.Instance{
@@ -392,7 +296,7 @@ func (*Suite) TestGatherAZ(c *gc.C) {
 		},
 	}
 	az := gatherAvailabilityZones(instances)
-	c.Assert(az, gc.DeepEquals, map[instance.Id]string{
+	c.Assert(az, tc.DeepEquals, map[instance.Id]string{
 		"id1": "aaa",
 		"id2": "bbb",
 	})

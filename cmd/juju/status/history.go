@@ -4,6 +4,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,17 +12,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/juju/osenv"
 )
 
@@ -35,7 +36,7 @@ func NewStatusHistoryCommand() cmd.Command {
 
 // HistoryAPI is the API surface for the show-status-log command.
 type HistoryAPI interface {
-	StatusHistory(kind status.HistoryKind, tag names.Tag, filter status.StatusHistoryFilter) (status.History, error)
+	StatusHistory(ctx context.Context, kind status.HistoryKind, tag names.Tag, filter status.StatusHistoryFilter) (status.History, error)
 	Close() error
 }
 
@@ -55,19 +56,55 @@ type statusHistoryCommand struct {
 var statusHistoryDoc = fmt.Sprintf(`
 This command will report the history of status changes for
 a given entity.
+
 The statuses are available for the following types.
 -type supports:
 %v
  and sorted by time of occurrence.
+
  The default is unit.
 `, supportedHistoryKindDescs())
 
+const statusHistoryExamples = `
+Show the status history for the specified unit:
+
+    juju show-status-log mysql/0
+
+Show the status history for the specified unit with the last 30 logs:
+
+    juju show-status-log mysql/0 -n 30
+
+Show the status history for the specified unit with the logs for the past 2 days:
+
+    juju show-status-log mysql/0 -days 2
+
+Show the status history for the specified unit with the logs for any date after 2020-01-01:
+
+    juju show-status-log mysql/0 --from-date 2020-01-01
+
+Show the status history for the specified application:
+
+    juju show-status-log -type application wordpress
+
+Show the status history for the specified machine:
+
+    juju show-status-log 0
+
+Show the status history for the model:
+
+    juju show-status-log -type model
+`
+
 func (c *statusHistoryCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "show-status-log",
-		Args:    "<entity name>",
-		Purpose: "Output past statuses for the specified entity.",
-		Doc:     statusHistoryDoc,
+		Name:     "show-status-log",
+		Args:     "<entity name>",
+		Purpose:  "Output past statuses for the specified entity.",
+		Doc:      statusHistoryDoc,
+		Examples: statusHistoryExamples,
+		SeeAlso: []string{
+			"status",
+		},
 	})
 }
 
@@ -165,15 +202,15 @@ type DetailedStatus struct {
 // History holds the status results.
 type History []DetailedStatus
 
-func (c *statusHistoryCommand) getAPI() (HistoryAPI, error) {
+func (c *statusHistoryCommand) getAPI(ctx context.Context) (HistoryAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.NewAPIClient()
+	return c.NewAPIClient(ctx)
 }
 
 func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.getAPI()
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -196,7 +233,7 @@ func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
 	var tag names.Tag
 	switch kind {
 	case status.KindModel:
-		_, details, err := c.ModelDetails()
+		_, details, err := c.ModelDetails(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -217,7 +254,7 @@ func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
 		}
 		tag = names.NewMachineTag(c.entityName)
 	}
-	statuses, err := apiclient.StatusHistory(kind, tag, filterArgs)
+	statuses, err := apiclient.StatusHistory(ctx, kind, tag, filterArgs)
 	historyLen := len(statuses)
 	if err != nil {
 		if historyLen == 0 {
@@ -255,7 +292,7 @@ func (c *statusHistoryCommand) formatTabular(writer io.Writer, value interface{}
 
 func (c *statusHistoryCommand) writeTabular(writer io.Writer, statuses History) {
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 
 	w.Println("Time", "Type", "Status", "Message")
 	for _, v := range statuses {

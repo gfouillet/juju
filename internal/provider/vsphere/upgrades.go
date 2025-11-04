@@ -4,18 +4,18 @@
 package vsphere
 
 import (
+	"context"
 	"path"
 
 	"github.com/juju/errors"
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
 )
 
 // UpgradeOperations is part of the upgrades.OperationSource interface.
-func (env *environ) UpgradeOperations(ctx envcontext.ProviderCallContext, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
+func (env *environ) UpgradeOperations(ctx context.Context, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
 	return []environs.UpgradeOperation{{
 		TargetVersion: providerVersion1,
 		Steps: []environs.UpgradeStep{
@@ -38,16 +38,15 @@ func (extraConfigUpgradeStep) Description() string {
 }
 
 // Run is part of the environs.UpgradeStep interface.
-func (step extraConfigUpgradeStep) Run(ctx envcontext.ProviderCallContext) error {
+func (step extraConfigUpgradeStep) Run(ctx context.Context) error {
 	const (
 		legacyControllerTag   = "juju_controller_uuid_key"
 		legacyIsControllerTag = "juju_is_controller_key"
 	)
-	return step.env.withSession(ctx, func(env *sessionEnviron) error {
-		vms, err := env.client.VirtualMachines(env.ctx, env.namespace.Prefix()+"*")
+	return step.env.withSession(ctx, func(senv *sessionEnviron) error {
+		vms, err := senv.client.VirtualMachines(senv.ctx, senv.namespace.Prefix()+"*")
 		if err != nil || len(vms) == 0 {
-			HandleCredentialError(err, env, ctx)
-			return err
+			return senv.handleCredentialError(ctx, err)
 		}
 		for _, vm := range vms {
 			update := false
@@ -66,16 +65,15 @@ func (step extraConfigUpgradeStep) Run(ctx envcontext.ProviderCallContext) error
 			}
 			metadata := map[string]string{
 				tags.JujuController: step.controllerUUID,
-				tags.JujuModel:      env.Config().UUID(),
+				tags.JujuModel:      senv.Config().UUID(),
 			}
 			if isController {
 				metadata[tags.JujuIsController] = "true"
 			}
-			if err := env.client.UpdateVirtualMachineExtraConfig(
-				env.ctx, vm, metadata,
+			if err := senv.client.UpdateVirtualMachineExtraConfig(
+				senv.ctx, vm, metadata,
 			); err != nil {
-				HandleCredentialError(err, env, ctx)
-				return errors.Annotatef(err, "updating VM %s", vm.Name)
+				return errors.Annotatef(senv.handleCredentialError(ctx, err), "updating VM %s", vm.Name)
 			}
 		}
 		return nil
@@ -95,37 +93,34 @@ func (modelFoldersUpgradeStep) Description() string {
 }
 
 // Run is part of the environs.UpgradeStep interface.
-func (step modelFoldersUpgradeStep) Run(ctx envcontext.ProviderCallContext) error {
-	return step.env.withSession(ctx, func(env *sessionEnviron) error {
+func (step modelFoldersUpgradeStep) Run(ctx context.Context) error {
+	return step.env.withSession(ctx, func(senv *sessionEnviron) error {
 		// We must create the folder even if there are no VMs in the model.
-		modelFolderPath := path.Join(env.getVMFolder(), controllerFolderName(step.controllerUUID), env.modelFolderName())
+		modelFolderPath := path.Join(senv.getVMFolder(), controllerFolderName(step.controllerUUID), senv.modelFolderName())
 
 		// EnsureVMFolder needs credential attributes to be defined separately
 		// from the folders it is supposed to create
-		if _, err := env.client.EnsureVMFolder(
-			env.ctx,
-			env.getVMFolder(),
-			path.Join(controllerFolderName(step.controllerUUID), env.modelFolderName()),
+		if _, err := senv.client.EnsureVMFolder(
+			senv.ctx,
+			senv.getVMFolder(),
+			path.Join(controllerFolderName(step.controllerUUID), senv.modelFolderName()),
 		); err != nil {
-			HandleCredentialError(err, env, ctx)
-			return errors.Annotate(err, "creating model folder")
+			return errors.Annotate(senv.handleCredentialError(ctx, err), "creating model folder")
 		}
 
 		// List all instances at the top level with the model UUID,
 		// and move them into the folder.
-		vms, err := env.client.VirtualMachines(env.ctx, env.namespace.Prefix()+"*")
+		vms, err := senv.client.VirtualMachines(senv.ctx, senv.namespace.Prefix()+"*")
 		if err != nil || len(vms) == 0 {
-			HandleCredentialError(err, env, ctx)
-			return err
+			return senv.handleCredentialError(ctx, err)
 		}
 		refs := make([]types.ManagedObjectReference, len(vms))
 		for i, vm := range vms {
-			logger.Debugf("moving VM %q into %q", vm.Name, modelFolderPath)
+			logger.Debugf(ctx, "moving VM %q into %q", vm.Name, modelFolderPath)
 			refs[i] = vm.Reference()
 		}
-		if err := env.client.MoveVMsInto(env.ctx, modelFolderPath, refs...); err != nil {
-			HandleCredentialError(err, env, ctx)
-			return errors.Annotate(err, "moving VMs into model folder")
+		if err := senv.client.MoveVMsInto(senv.ctx, modelFolderPath, refs...); err != nil {
+			return errors.Annotate(senv.handleCredentialError(ctx, err), "moving VMs into model folder")
 		}
 		return nil
 	})

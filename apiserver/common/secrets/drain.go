@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -181,18 +181,13 @@ func (s *SecretsDrainAPI) changeSecretBackendForOne(ctx context.Context, arg par
 	if err != nil {
 		return
 	}
-	token, err := LeadershipToken(s.authTag, s.leadershipChecker)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return s.secretService.ChangeSecretBackend(ctx, uri, arg.Revision, toChangeSecretBackendParams(accessor, token, arg))
+	return s.secretService.ChangeSecretBackend(ctx, uri, arg.Revision, toChangeSecretBackendParams(accessor, arg))
 }
 
-func toChangeSecretBackendParams(accessor secretservice.SecretAccessor, token leadership.Token, arg params.ChangeSecretBackendArg) secretservice.ChangeSecretBackendParams {
+func toChangeSecretBackendParams(accessor secretservice.SecretAccessor, arg params.ChangeSecretBackendArg) secretservice.ChangeSecretBackendParams {
 	params := secretservice.ChangeSecretBackendParams{
-		LeaderToken: token,
-		Accessor:    accessor,
-		Data:        arg.Content.Data,
+		Accessor: accessor,
+		Data:     arg.Content.Data,
 	}
 	if arg.Content.ValueRef != nil {
 		params.ValueRef = &coresecrets.ValueRef{
@@ -205,18 +200,13 @@ func toChangeSecretBackendParams(accessor secretservice.SecretAccessor, token le
 
 // WatchSecretBackendChanged sets up a watcher to notify of changes to the secret backend.
 func (s *SecretsDrainAPI) WatchSecretBackendChanged(ctx context.Context) (params.NotifyWatchResult, error) {
-	backendWatcher, err := s.secretService.WatchSecretBackendChanged(ctx)
+	w, err := s.secretBackendService.WatchModelSecretBackendChanged(ctx, s.modelUUID)
 	if err != nil {
 		return params.NotifyWatchResult{
 			Error: apiservererrors.ServerError(err),
 		}, nil
 	}
-	w, err := newSecretBackendModelConfigWatcher(ctx, s.secretService, backendWatcher, s.logger)
-	if err != nil {
-		return params.NotifyWatchResult{
-			Error: apiservererrors.ServerError(err),
-		}, nil
-	}
+
 	id, _, err := internal.EnsureRegisterWatcher[struct{}](ctx, s.watcherRegistry, w)
 	if err != nil {
 		return params.NotifyWatchResult{

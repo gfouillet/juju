@@ -4,22 +4,23 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type showCloudCommand struct {
@@ -30,22 +31,22 @@ type showCloudCommand struct {
 
 	includeConfig bool
 
-	showCloudAPIFunc func() (showCloudAPI, error)
+	showCloudAPIFunc func(ctx context.Context) (showCloudAPI, error)
 
 	configDisplayed bool
 }
 
 var showCloudDoc = `
-Provided information includes 'defined' (public, built-in), 'type',
-'auth-type', 'regions', 'endpoints', and cloud specific configuration
+Provided information includes ` + "`defined`" + ` (public, built-in), ` + "`type`" + `,
+` + "`auth-type`" + `, ` + "`regions`" + `, ` + "`endpoints`" + `, and cloud specific configuration
 options.
 
-If ‘--include-config’ is used, additional configuration (key, type, and
+If ` + "`--include-config`" + ` is used, additional configuration (key, type, and
 description) specific to the cloud are displayed if available.
 
-Use --controller option to show a cloud from a controller.
+Use the ` + "`--controller`" + ` option to show a cloud from a controller.
 
-Use --client option to show a cloud known on this client.
+Use the ` + "`--client`" + ` option to show a cloud known on this client.
 `
 
 const showCloudExamples = `
@@ -57,7 +58,7 @@ const showCloudExamples = `
 `
 
 type showCloudAPI interface {
-	CloudInfo(tags []names.CloudTag) ([]cloudapi.CloudInfo, error)
+	CloudInfo(ctx context.Context, tags []names.CloudTag) ([]cloudapi.CloudInfo, error)
 	Close() error
 }
 
@@ -74,8 +75,8 @@ func NewShowCloudCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *showCloudCommand) cloudAPI() (showCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *showCloudCommand) cloudAPI(ctx context.Context) (showCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -136,7 +137,7 @@ func (c *showCloudCommand) Run(ctxt *cmd.Context) error {
 		localCloud, localErr = c.getLocalCloud()
 	}
 	if c.ControllerName != "" {
-		remoteCloud, remoteErr := c.getControllerCloud()
+		remoteCloud, remoteErr := c.getControllerCloud(ctxt)
 		showRemoteConfig := c.includeConfig
 		if localCloud != nil && remoteCloud != nil {
 			// It's possible that a local cloud named A is different to
@@ -250,13 +251,13 @@ func (c *showCloudCommand) displayCloud(aCloud CloudDetails, name, summary strin
 	}
 }
 
-func (c *showCloudCommand) getControllerCloud() (*CloudDetails, error) {
-	api, err := c.showCloudAPIFunc()
+func (c *showCloudCommand) getControllerCloud(ctx context.Context) (*CloudDetails, error) {
+	api, err := c.showCloudAPIFunc(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer api.Close()
-	controllerCloud, err := api.CloudInfo([]names.CloudTag{names.NewCloudTag(c.CloudName)})
+	controllerCloud, err := api.CloudInfo(ctx, []names.CloudTag{names.NewCloudTag(c.CloudName)})
 	if err != nil {
 		return nil, err
 	}

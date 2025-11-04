@@ -6,17 +6,16 @@ package state
 import (
 	"time"
 
-	"github.com/juju/names/v5"
-
 	corepermission "github.com/juju/juju/core/permission"
 	coreuser "github.com/juju/juju/core/user"
+	"github.com/juju/juju/internal/errors"
 )
 
 // user represents a user in the state layer with the associated fields in the
 // database.
 type dbUser struct {
 	// UUID is the unique identifier for the user.
-	UUID coreuser.UUID `db:"uuid"`
+	UUID string `db:"uuid"`
 
 	// Name is the username of the user.
 	Name string `db:"name"`
@@ -24,11 +23,14 @@ type dbUser struct {
 	// DisplayName is a user-friendly name represent the user as.
 	DisplayName string `db:"display_name"`
 
+	// External indicates if the user has a non-local domain.
+	External bool `db:"external"`
+
 	// Removed indicates if the user has been removed.
 	Removed bool `db:"removed"`
 
 	// CreatorUUID is the associated user that created this user.
-	CreatorUUID coreuser.UUID `db:"created_by_uuid"`
+	CreatorUUID string `db:"created_by_uuid"`
 
 	// CreatorName is the name of the user that created this user.
 	CreatorName string `db:"created_by_name"`
@@ -50,17 +52,28 @@ type dbUser struct {
 }
 
 // toCoreUser converts the state user to a core user.
-func (u dbUser) toCoreUser() coreuser.User {
+func (u dbUser) toCoreUser() (coreuser.User, error) {
+	name, err := coreuser.NewName(u.Name)
+	if err != nil {
+		return coreuser.User{}, errors.Errorf("user name from db: %w", err)
+	}
+	var creatorName coreuser.Name
+	if u.CreatorName != "" {
+		creatorName, err = coreuser.NewName(u.CreatorName)
+		if err != nil {
+			return coreuser.User{}, errors.Errorf("creator name from db: %w", err)
+		}
+	}
 	return coreuser.User{
-		UUID:        u.UUID,
-		Name:        u.Name,
+		UUID:        coreuser.UUID(u.UUID),
+		Name:        name,
 		DisplayName: u.DisplayName,
-		CreatorUUID: u.CreatorUUID,
-		CreatorName: u.CreatorName,
+		CreatorUUID: coreuser.UUID(u.CreatorUUID),
+		CreatorName: creatorName,
 		CreatedAt:   u.CreatedAt,
 		LastLogin:   u.LastLogin,
 		Disabled:    u.Disabled,
-	}
+	}, nil
 }
 
 // dbActivationKey represents an activation key in the state layer with the
@@ -81,6 +94,9 @@ type dbPermissionUser struct {
 	// DisplayName is a user-friendly name represent the user as.
 	DisplayName string `db:"display_name"`
 
+	// External indicates if the user is not a local user.
+	External bool `db:"external"`
+
 	// CreatorName is the name of the user that created this user.
 	CreatorName string `db:"created_by_name"`
 
@@ -94,15 +110,26 @@ type dbPermissionUser struct {
 // toCoreUserAccess converts the state user to a core permission UserAccess.
 // Additional detail regarding the permission is required to be added
 // after.
-func (u dbPermissionUser) toCoreUserAccess() corepermission.UserAccess {
+func (u dbPermissionUser) toCoreUserAccess() (corepermission.UserAccess, error) {
+	name, err := coreuser.NewName(u.Name)
+	if err != nil {
+		return corepermission.UserAccess{}, errors.Capture(err)
+	}
+	var creatorName coreuser.Name
+	if u.CreatorName != "" {
+		creatorName, err = coreuser.NewName(u.CreatorName)
+		if err != nil {
+			return corepermission.UserAccess{}, errors.Capture(err)
+		}
+	}
+
 	return corepermission.UserAccess{
 		UserID:      u.UUID,
-		UserTag:     names.NewUserTag(u.Name),
 		DisplayName: u.DisplayName,
-		UserName:    u.Name,
-		CreatedBy:   names.NewUserTag(u.CreatorName),
+		UserName:    name,
+		CreatedBy:   creatorName,
 		DateCreated: u.CreatedAt,
-	}
+	}, nil
 }
 
 // dbPermission represents a permission in the system.
@@ -127,15 +154,19 @@ type dbPermission struct {
 
 // toUserAccess combines a dbPermission with a user to create
 // a core permission UserAccess.
-func (r dbPermission) toUserAccess(u dbPermissionUser) corepermission.UserAccess {
-	userAccess := u.toCoreUserAccess()
+func (r dbPermission) toUserAccess(u dbPermissionUser) (corepermission.UserAccess, error) {
+	userAccess, err := u.toCoreUserAccess()
+	if err != nil {
+		return corepermission.UserAccess{}, errors.Capture(err)
+	}
+
 	userAccess.PermissionID = r.UUID
-	userAccess.Object = objectTag(corepermission.ID{
+	userAccess.Object = corepermission.ID{
 		ObjectType: corepermission.ObjectType(r.ObjectType),
 		Key:        r.GrantOn,
-	})
+	}
 	userAccess.Access = corepermission.Access(r.AccessType)
-	return userAccess
+	return userAccess, nil
 }
 
 // userName is used to pass a user's name as an argument to SQL.
@@ -154,14 +185,15 @@ type userUUID struct {
 type permInOut struct {
 	Name    string `db:"name"`
 	GrantOn string `db:"grant_on"`
-	Access  string `db:"access"`
+	Access  string `db:"access_type"`
 }
 
-// dbModelAccess is a struct used to record a users logging in to a particular
+// dbModelLastLogin is a struct used to record a users logging in to a particular
 // model.
-type dbModelAccess struct {
-	UserUUID  string `db:"user_uuid"`
-	ModelUUID string `db:"model_uuid"`
+type dbModelLastLogin struct {
+	UserUUID  string    `db:"user_uuid"`
+	ModelUUID string    `db:"model_uuid"`
+	Time      time.Time `db:"time"`
 }
 
 // dbModelUUID is a struct used to record a model UUID from the database.
@@ -175,8 +207,12 @@ type dbModelExists struct {
 	Exists bool `db:"exists"`
 }
 
-// loginTime is used to record the last time a user logged in when reading from
-// model_last_login.
-type loginTime struct {
-	Time time.Time `db:"time"`
+// dbEveryoneExternal represents the permissions of the everyone@external user.
+type dbEveryoneExternal dbPermission
+
+// nameAndUUID is an agnostic container for a `name` and `uuid`
+// column combination.
+type nameAndUUID struct {
+	Name string `db:"name"`
+	UUID string `db:"uuid"`
 }

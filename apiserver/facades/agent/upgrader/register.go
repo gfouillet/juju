@@ -7,18 +7,19 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/state"
+	coremodel "github.com/juju/juju/core/model"
+	internalerrors "github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
 	registry.MustRegister("Upgrader", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newUpgraderFacade(ctx)
+		return newUpgraderFacade(stdCtx, ctx)
 	}, reflect.TypeOf((*Upgrader)(nil)).Elem())
 }
 
@@ -29,9 +30,15 @@ func Register(registry facade.FacadeRegistry) {
 // do not depend on who is currently connected.
 
 // newUpgraderFacade provides the signature required for facade registration.
-func newUpgraderFacade(ctx facade.ModelContext) (Upgrader, error) {
+func newUpgraderFacade(stdCtx context.Context, ctx facade.ModelContext) (Upgrader, error) {
 	auth := ctx.Auth()
-	st := ctx.State()
+
+	if !auth.AuthMachineAgent() &&
+		!auth.AuthUnitAgent() &&
+		!auth.AuthModelAgent() {
+		return nil, apiservererrors.ErrPerm
+	}
+
 	// The type of upgrader we return depends on who is asking.
 	// Machines get an UpgraderAPI, units get a UnitUpgraderAPI.
 	// This is tested in the api/upgrader package since there
@@ -41,29 +48,42 @@ func newUpgraderFacade(ctx facade.ModelContext) (Upgrader, error) {
 	if err != nil {
 		return nil, apiservererrors.ErrPerm
 	}
-	model, err := st.Model()
+
+	domainServices := ctx.DomainServices()
+	modelType, err := domainServices.ModelInfo().GetModelType(stdCtx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, internalerrors.Errorf(
+			"getting current model type to construct correct upgrader api: %w", err,
+		)
 	}
 
-	ctrlSt, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
+	if tag.Kind() == names.UnitTagKind && modelType != coremodel.CAAS {
+		return NewUnitUpgraderAPI(
+			auth,
+			domainServices.Agent(),
+			domainServices.Application(),
+			ctx.WatcherRegistry(),
+		), nil
 	}
-	resources := ctx.Resources()
-	controllerConfigGetter := ctx.ServiceFactory().ControllerConfig()
-	cloudService := ctx.ServiceFactory().Cloud()
-	credentialService := ctx.ServiceFactory().Credential()
-	switch tag.(type) {
-	case names.MachineTag, names.ControllerAgentTag, names.ApplicationTag, names.ModelTag:
-		return NewUpgraderAPI(controllerConfigGetter, ctrlSt, st, resources, auth, ctx.Logger().Child("upgrader"), cloudService, credentialService, ctx.ControllerObjectStore())
-	case names.UnitTag:
-		if model.Type() == state.ModelTypeCAAS {
-			// For sidecar applications.
-			return NewUpgraderAPI(controllerConfigGetter, ctrlSt, st, resources, auth, ctx.Logger().Child("upgrader"), cloudService, credentialService, ctx.ControllerObjectStore())
-		}
-		return NewUnitUpgraderAPI(ctx)
+
+	getCanReadWrite := func(ctx context.Context) (common.AuthFunc, error) {
+		return auth.AuthOwner, nil
 	}
-	// Not a machine or unit.
-	return nil, apiservererrors.ErrPerm
+
+	urlGetter := common.NewToolsURLGetter(ctx.ModelUUID().String(), domainServices.ControllerNode())
+	toolsFinder := common.NewToolsFinder(
+		urlGetter, ctx.ControllerObjectStore(),
+		domainServices.AgentBinary(),
+	)
+	toolsGetter := common.NewToolsGetter(domainServices.Agent(), urlGetter, toolsFinder, getCanReadWrite)
+
+	return NewUpgraderAPI(
+		toolsGetter,
+		auth,
+		ctx.Logger().Child("upgrader"),
+		ctx.WatcherRegistry(),
+		domainServices.ControllerNode(),
+		domainServices.Agent(),
+		domainServices.Machine(),
+	), nil
 }

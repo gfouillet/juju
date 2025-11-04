@@ -8,18 +8,18 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4/catacomb"
 
 	coreagent "github.com/juju/juju/core/agent"
 	"github.com/juju/juju/core/arch"
 	coreos "github.com/juju/juju/core/os"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/core/watcher"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/worker/gate"
 	"github.com/juju/juju/internal/worker/upgrader"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var logger = internallogger.GetLogger("juju.worker.caasupgrader")
@@ -37,13 +37,13 @@ type Upgrader struct {
 
 // UpgraderClient provides the facade methods used by the worker.
 type UpgraderClient interface {
-	DesiredVersion(tag string) (version.Number, error)
-	SetVersion(tag string, v version.Binary) error
-	WatchAPIVersion(agentTag string) (watcher.NotifyWatcher, error)
+	DesiredVersion(ctx context.Context, tag string) (semversion.Number, error)
+	SetVersion(ctx context.Context, tag string, v semversion.Binary) error
+	WatchAPIVersion(ctx context.Context, agentTag string) (watcher.NotifyWatcher, error)
 }
 
 type CAASOperatorUpgrader interface {
-	Upgrade(ctx context.Context, agentTag string, v version.Number) error
+	Upgrade(ctx context.Context, agentTag string, v semversion.Number) error
 }
 
 // Config contains the items the worker needs to start.
@@ -51,7 +51,7 @@ type Config struct {
 	UpgraderClient              UpgraderClient
 	CAASOperatorUpgrader        CAASOperatorUpgrader
 	AgentTag                    names.Tag
-	OrigAgentVersion            version.Number
+	OrigAgentVersion            semversion.Number
 	UpgradeStepsWaiter          gate.Waiter
 	InitialUpgradeCheckComplete gate.Unlocker
 }
@@ -68,6 +68,7 @@ func NewUpgrader(config Config) (*Upgrader, error) {
 		config:           config,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-upgrader",
 		Site: &u.catacomb,
 		Work: u.loop,
 	})
@@ -88,10 +89,13 @@ func (u *Upgrader) Wait() error {
 }
 
 func (u *Upgrader) loop() error {
+	ctx, cancel := u.scopedContext()
+	defer cancel()
+
 	// Only controllers and sidecar unit agents set their version here - application agents do it in the main agent worker loop.
 	hostOSType := coreos.HostOSTypeName()
 	if coreagent.IsAllowedControllerTag(u.tag.Kind()) || u.tag.Kind() == names.UnitTagKind {
-		if err := u.upgraderClient.SetVersion(u.tag.String(), toBinaryVersion(jujuversion.Current, hostOSType)); err != nil {
+		if err := u.upgraderClient.SetVersion(ctx, u.tag.String(), toBinaryVersion(jujuversion.Current, hostOSType)); err != nil {
 			return errors.Annotatef(err, "setting agent version for %q", u.tag.String())
 		}
 	}
@@ -107,17 +111,17 @@ func (u *Upgrader) loop() error {
 	// initial event, and we should assume that it'll break its contract
 	// sometime. So we allow the watcher to wait patiently for the event
 	// for a full minute; but after that we proceed regardless.
-	versionWatcher, err := u.upgraderClient.WatchAPIVersion(u.tag.String())
+	versionWatcher, err := u.upgraderClient.WatchAPIVersion(ctx, u.tag.String())
 	if err != nil {
 		return errors.Annotate(err, "getting upgrader facade watch api version client")
 	}
-	logger.Infof("abort check blocked until version event received")
+	logger.Infof(ctx, "abort check blocked until version event received")
 	// TODO(fwereade): 2016-03-17 lp:1558657
 	mustProceed := time.After(time.Minute)
 	var dying <-chan struct{}
 	allowDying := func() {
 		if dying == nil {
-			logger.Infof("unblocking abort check")
+			logger.Infof(ctx, "unblocking abort check")
 			mustProceed = nil
 			dying = u.catacomb.Dying()
 			if err := u.catacomb.Add(versionWatcher); err != nil {
@@ -126,7 +130,7 @@ func (u *Upgrader) loop() error {
 		}
 	}
 
-	logger.Debugf("current agent binary version: %v", jujuversion.Current)
+	logger.Debugf(ctx, "current agent binary version: %v", jujuversion.Current)
 	for {
 		select {
 		// NOTE: dying starts out nil, so it can't be chosen
@@ -136,7 +140,7 @@ func (u *Upgrader) loop() error {
 		// ...*every* other case *must* allowDying(), before doing anything
 		// else, lest an error cause us to leak versionWatcher.
 		case <-mustProceed:
-			logger.Infof("version event not received after one minute")
+			logger.Infof(ctx, "version event not received after one minute")
 			allowDying()
 		case _, ok := <-versionWatcher.Changes():
 			allowDying()
@@ -145,7 +149,7 @@ func (u *Upgrader) loop() error {
 			}
 		}
 
-		wantVersion, err := u.upgraderClient.DesiredVersion(u.tag.String())
+		wantVersion, err := u.upgraderClient.DesiredVersion(ctx, u.tag.String())
 		if err != nil {
 			return err
 		}
@@ -154,7 +158,7 @@ func (u *Upgrader) loop() error {
 			u.config.InitialUpgradeCheckComplete.Unlock()
 			continue
 		} else if !upgrader.AllowedTargetVersion(jujuversion.Current, wantVersion) {
-			logger.Warningf("desired agent binary version: %s is older than current %s, refusing to downgrade",
+			logger.Warningf(ctx, "desired agent binary version: %s is older than current %s, refusing to downgrade",
 				wantVersion, jujuversion.Current)
 			u.config.InitialUpgradeCheckComplete.Unlock()
 			continue
@@ -163,8 +167,8 @@ func (u *Upgrader) loop() error {
 		if wantVersion.Compare(jujuversion.Current) == -1 {
 			direction = "downgrade"
 		}
-		logger.Debugf("%s requested for %v from %v to %v", direction, u.tag, jujuversion.Current, wantVersion)
-		err = u.operatorUpgrader.Upgrade(context.TODO(), u.tag.String(), wantVersion)
+		logger.Debugf(ctx, "%s requested for %v from %v to %v", direction, u.tag, jujuversion.Current, wantVersion)
+		err = u.operatorUpgrader.Upgrade(ctx, u.tag.String(), wantVersion)
 		if err != nil {
 			return errors.Annotatef(
 				err, "requesting upgrade for %v from %v to %v", u.tag.String(), jujuversion.Current, wantVersion)
@@ -172,8 +176,12 @@ func (u *Upgrader) loop() error {
 	}
 }
 
-func toBinaryVersion(vers version.Number, osType string) version.Binary {
-	outVers := version.Binary{
+func (u *Upgrader) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(u.catacomb.Context(context.Background()))
+}
+
+func toBinaryVersion(vers semversion.Number, osType string) semversion.Binary {
+	outVers := semversion.Binary{
 		Number:  vers,
 		Arch:    arch.HostArch(),
 		Release: osType,

@@ -4,29 +4,27 @@
 package azure
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strings"
 
 	azurenetwork "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
 )
 
-var _ environs.NetworkingEnviron = &azureEnviron{}
+var _ environs.NetworkingEnviron = (*azureEnviron)(nil)
 
 // SupportsSpaces implements environs.NetworkingEnviron.
-func (env *azureEnviron) SupportsSpaces(envcontext.ProviderCallContext) (bool, error) {
+func (env *azureEnviron) SupportsSpaces() (bool, error) {
 	return true, nil
 }
 
-func (env *azureEnviron) networkInfo() (vnetRG string, vnetName string) {
+func (env *azureEnviron) networkInfo(ctx context.Context) (vnetRG string, vnetName string) {
 	// The virtual network to use defaults to "juju-internal-network"
 	// but may also be specified by the user.
 	vnetName = internalNetworkName
@@ -39,22 +37,22 @@ func (env *azureEnviron) networkInfo() (vnetRG string, vnetName string) {
 			vnetRG = parts[0]
 			vnetName = parts[1]
 		}
-		logger.Debugf("user specified network name %q in resource group %q", vnetName, vnetRG)
+		logger.Debugf(ctx, "user specified network name %q in resource group %q", vnetName, vnetRG)
 	}
 	return
 }
 
 // Subnets implements environs.NetworkingEnviron.
 func (env *azureEnviron) Subnets(
-	ctx envcontext.ProviderCallContext, instanceID instance.Id, _ []network.Id) ([]network.SubnetInfo, error) {
-	if instanceID != instance.UnknownId {
-		return nil, errors.NotSupportedf("subnets for instance")
-	}
+	ctx context.Context, _ []network.Id) ([]network.SubnetInfo, error) {
 	subnets, err := env.allSubnets(ctx)
-	return subnets, errorutils.HandleCredentialError(err, ctx)
+	if err != nil {
+		return nil, env.HandleCredentialError(ctx, err)
+	}
+	return subnets, nil
 }
 
-func (env *azureEnviron) allProviderSubnets(ctx envcontext.ProviderCallContext) ([]*azurenetwork.Subnet, error) {
+func (env *azureEnviron) allProviderSubnets(ctx context.Context) ([]*azurenetwork.Subnet, error) {
 	// Subnet discovery happens immediately after model creation.
 	// We need to ensure that the asynchronously invoked resource creation has
 	// completed and added our networking assets.
@@ -68,7 +66,7 @@ func (env *azureEnviron) allProviderSubnets(ctx envcontext.ProviderCallContext) 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	vnetRG, vnetName := env.networkInfo()
+	vnetRG, vnetName := env.networkInfo(ctx)
 	var result []*azurenetwork.Subnet
 	pager := subnets.NewListPager(vnetRG, vnetName, nil)
 	for pager.More() {
@@ -81,7 +79,7 @@ func (env *azureEnviron) allProviderSubnets(ctx envcontext.ProviderCallContext) 
 	return result, nil
 }
 
-func (env *azureEnviron) allSubnets(ctx envcontext.ProviderCallContext) ([]network.SubnetInfo, error) {
+func (env *azureEnviron) allSubnets(ctx context.Context) ([]network.SubnetInfo, error) {
 	values, err := env.allProviderSubnets(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -93,10 +91,25 @@ func (env *azureEnviron) allSubnets(ctx envcontext.ProviderCallContext) ([]netwo
 		if sub.Properties == nil {
 			continue
 		}
+		addressPrefix := sub.Properties.AddressPrefix
+		if addressPrefix == nil || *addressPrefix == "" {
+			for _, prefix := range sub.Properties.AddressPrefixes {
+				if prefix == nil {
+					continue
+				}
+				addrType, err := network.CIDRAddressType(*prefix)
+				// We only care about IPv4 addresses.
+				if err == nil && addrType == network.IPv4Address {
+					addressPrefix = prefix
+					break
+				}
+
+			}
+		}
 		// An empty CIDR is no use to us, so guard against it.
-		cidr := toValue(sub.Properties.AddressPrefix)
+		cidr := toValue(addressPrefix)
 		if cidr == "" {
-			logger.Debugf("ignoring subnet %q with empty address prefix", id)
+			logger.Debugf(ctx, "ignoring subnet %q with empty address prefix", id)
 			continue
 		}
 
@@ -108,7 +121,7 @@ func (env *azureEnviron) allSubnets(ctx envcontext.ProviderCallContext) ([]netwo
 	return results, nil
 }
 
-func (env *azureEnviron) allPublicIPs(ctx envcontext.ProviderCallContext) (map[string]network.ProviderAddress, error) {
+func (env *azureEnviron) allPublicIPs(ctx context.Context) (map[string]network.ProviderAddress, error) {
 	idToIPMap := make(map[string]network.ProviderAddress)
 
 	pipClient, err := env.publicAddressesClient()
@@ -141,23 +154,6 @@ func (env *azureEnviron) allPublicIPs(ctx envcontext.ProviderCallContext) (map[s
 	return idToIPMap, nil
 }
 
-// SupportsContainerAddresses implements environs.NetworkingEnviron.
-func (env *azureEnviron) SupportsContainerAddresses(envcontext.ProviderCallContext) (bool, error) {
-	return false, nil
-}
-
-// AllocateContainerAddresses implements environs.NetworkingEnviron.
-func (env *azureEnviron) AllocateContainerAddresses(
-	envcontext.ProviderCallContext, instance.Id, names.MachineTag, network.InterfaceInfos,
-) (network.InterfaceInfos, error) {
-	return nil, errors.NotSupportedf("container addresses")
-}
-
-// ReleaseContainerAddresses implements environs.NetworkingEnviron.
-func (env *azureEnviron) ReleaseContainerAddresses(envcontext.ProviderCallContext, []network.ProviderInterfaceInfo) error {
-	return errors.NotSupportedf("container addresses")
-}
-
 // NetworkInterfaces implements environs.NetworkingEnviron. It returns back
 // a slice where the i_th element contains the list of network interfaces
 // for the i_th provided instance ID.
@@ -166,7 +162,7 @@ func (env *azureEnviron) ReleaseContainerAddresses(envcontext.ProviderCallContex
 // If only a subset of the instance IDs exist, the result will contain a nil
 // value for the missing instances and a ErrPartialInstances error will be
 // returned.
-func (env *azureEnviron) NetworkInterfaces(ctx envcontext.ProviderCallContext, instanceIDs []instance.Id) ([]network.InterfaceInfos, error) {
+func (env *azureEnviron) NetworkInterfaces(ctx context.Context, instanceIDs []instance.Id) ([]network.InterfaceInfos, error) {
 	// Create a subnet (provider) ID to CIDR map so we can identify the
 	// subnet for each NIC address when mapping azure NIC details.
 	allSubnets, err := env.allSubnets(ctx)
@@ -272,23 +268,28 @@ func mapAzureInterfaceList(in []*azurenetwork.Interface, subnetIDToCIDR map[stri
 				cfgMethod = network.ConfigStatic
 			}
 
-			addrOpts := []func(network.AddressMutator){
+			machineAddrOpts := []func(network.AddressMutator){
 				network.WithScope(network.ScopeCloudLocal),
 				network.WithConfigType(cfgMethod),
 			}
 
-			var subnetID string
+			var (
+				subnetID         string
+				providerAddrOpts []func(address network.ProviderAddressMutator)
+			)
 			if ipConf.Properties.Subnet != nil && ipConf.Properties.Subnet.ID != nil {
 				subnetID = toValue(ipConf.Properties.Subnet.ID)
+				providerAddrOpts = append(providerAddrOpts, network.WithProviderSubnetID(network.Id(subnetID)))
+
 				if subnetCIDR := subnetIDToCIDR[subnetID]; subnetCIDR != "" {
-					addrOpts = append(addrOpts, network.WithCIDR(subnetCIDR))
+					machineAddrOpts = append(machineAddrOpts, network.WithCIDR(subnetCIDR))
 				}
 			}
 
 			providerAddr := network.NewMachineAddress(
 				toValue(ipConf.Properties.PrivateIPAddress),
-				addrOpts...,
-			).AsProviderAddress()
+				machineAddrOpts...,
+			).AsProviderAddress(providerAddrOpts...)
 
 			// If this is the primary address ensure that it appears
 			// at the top of the address list.
@@ -296,12 +297,6 @@ func mapAzureInterfaceList(in []*azurenetwork.Interface, subnetIDToCIDR map[stri
 				ni.Addresses = append(network.ProviderAddresses{providerAddr}, ni.Addresses...)
 			} else {
 				ni.Addresses = append(ni.Addresses, providerAddr)
-			}
-
-			// Record the subnetID and config mode to the NIC instance
-			if isPrimary && subnetID != "" {
-				ni.ProviderSubnetId = network.Id(subnetID)
-				ni.ConfigType = cfgMethod
 			}
 		}
 
@@ -318,7 +313,7 @@ func (env *azureEnviron) defaultControllerSubnet() network.Id {
 	// subnets. This enables us to create controller-specific NSG rules
 	// just by targeting the controller subnet.
 
-	vnetRG, vnetName := env.networkInfo()
+	vnetRG, vnetName := env.networkInfo(context.TODO())
 	subnetID := fmt.Sprintf(
 		`[concat(resourceId('Microsoft.Network/virtualNetworks', '%s'), '/subnets/%s')]`,
 		vnetName, controllerSubnetName,
@@ -332,10 +327,10 @@ func (env *azureEnviron) defaultControllerSubnet() network.Id {
 	return network.Id(subnetID)
 }
 
-func (env *azureEnviron) findSubnetID(ctx envcontext.ProviderCallContext, subnetName string) (network.Id, error) {
+func (env *azureEnviron) findSubnetID(ctx context.Context, subnetName string) (network.Id, error) {
 	subnets, err := env.allProviderSubnets(ctx)
 	if err != nil {
-		return "", errorutils.HandleCredentialError(err, ctx)
+		return "", env.HandleCredentialError(ctx, err)
 	}
 	for _, subnet := range subnets {
 		if toValue(subnet.Name) == subnetName {
@@ -348,13 +343,13 @@ func (env *azureEnviron) findSubnetID(ctx envcontext.ProviderCallContext, subnet
 // networkInfoForInstance returns the virtual network and subnet to use
 // when provisioning an instance.
 func (env *azureEnviron) networkInfoForInstance(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	args environs.StartInstanceParams,
 	bootstrapping, controller bool,
 	placementSubnetID network.Id,
 ) (vnetID string, subnetIDs []network.Id, _ error) {
 
-	vnetRG, vnetName := env.networkInfo()
+	vnetRG, vnetName := env.networkInfo(ctx)
 	vnetID = fmt.Sprintf(`[resourceId('Microsoft.Network/virtualNetworks', '%s')]`, vnetName)
 	if vnetRG != "" {
 		vnetID = fmt.Sprintf(`[resourceId('%s', 'Microsoft.Network/virtualNetworks', '%s')]`, vnetRG, vnetName)
@@ -396,7 +391,7 @@ func (env *azureEnviron) networkInfoForInstance(
 		// So get all accessible subnets.
 		allSubnets, err := env.allSubnets(ctx)
 		if err != nil {
-			return "", nil, errorutils.HandleCredentialError(errors.Trace(err), ctx)
+			return "", nil, env.HandleCredentialError(ctx, err)
 		}
 		subnetIds := make([]network.Id, len(allSubnets))
 		for i, subnet := range allSubnets {
@@ -484,7 +479,7 @@ func (env *azureEnviron) parsePlacement(placement string) (string, error) {
 	return "", fmt.Errorf("unknown placement directive: %v", placement)
 }
 
-func (env *azureEnviron) findPlacementSubnet(ctx envcontext.ProviderCallContext, placement string) (network.Id, error) {
+func (env *azureEnviron) findPlacementSubnet(ctx context.Context, placement string) (network.Id, error) {
 	if placement == "" {
 		return "", nil
 	}
@@ -493,6 +488,6 @@ func (env *azureEnviron) findPlacementSubnet(ctx envcontext.ProviderCallContext,
 		return "", errors.Trace(err)
 	}
 
-	logger.Debugf("searching for subnet matching placement directive %q", subnetName)
+	logger.Debugf(ctx, "searching for subnet matching placement directive %q", subnetName)
 	return env.findSubnetID(ctx, subnetName)
 }

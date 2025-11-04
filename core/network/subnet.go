@@ -4,15 +4,17 @@
 package network
 
 import (
+	"context"
 	"math/big"
 	"net"
 	"sort"
 	"strings"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/errors"
 )
 
 // SubnetInfo is a source-agnostic representation of a subnet.
@@ -53,12 +55,12 @@ type SubnetInfo struct {
 	// Default value should be AlphaSpaceId. It can be empty if
 	// the subnet is returned from an networkingEnviron. SpaceID is
 	// preferred over SpaceName in state and non networkingEnviron use.
-	SpaceID string
+	SpaceID SpaceUUID
 
 	// SpaceName is the name of the space the subnet is associated with.
 	// An empty string indicates it is part of the AlphaSpaceName OR
 	// if the SpaceID is set. Should primarily be used in an networkingEnviron.
-	SpaceName string
+	SpaceName SpaceName
 
 	// Life represents the current life-cycle status of the subnets.
 	Life life.Value
@@ -69,7 +71,7 @@ func (s *SubnetInfo) Validate() error {
 	if s.CIDR == "" {
 		return errors.Errorf("missing CIDR")
 	} else if _, err := s.ParsedCIDRNetwork(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	if s.VLANTag < 0 || s.VLANTag > 4094 {
@@ -101,7 +103,7 @@ type SubnetInfos []SubnetInfo
 func (s SubnetInfos) SpaceIDs() set.Strings {
 	spaceIDs := set.NewStrings()
 	for _, sub := range s {
-		spaceIDs.Add(sub.SpaceID)
+		spaceIDs.Add(sub.SpaceID.String())
 	}
 	return spaceIDs
 }
@@ -126,7 +128,7 @@ func (s SubnetInfos) GetByID(id Id) *SubnetInfo {
 // with a CIDR matching the input.
 func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 	if !IsValidCIDR(cidr) {
-		return nil, errors.NotValidf("CIDR %q", cidr)
+		return nil, errors.Errorf("CIDR %q %w", cidr, coreerrors.NotValid)
 	}
 
 	var matching SubnetInfos
@@ -140,19 +142,18 @@ func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 		return matching, nil
 	}
 
-	// Some providers (e.g. equinix) carve subnets into smaller CIDRs and
-	// assign addresses from the carved subnets to the machines. If we were
-	// not able to find a direct CIDR match fallback to a CIDR is sub-CIDR
-	// of check.
+	// Some providers carve subnets into smaller CIDRs and assign addresses from
+	// the carved subnets to the machines. If we were not able to find a direct
+	// CIDR match fallback to a CIDR is sub-CIDR of check.
 	firstIP, lastIP, err := IPRangeForCIDR(cidr)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unable to extract first and last IP addresses from CIDR %q", cidr)
+		return nil, errors.Errorf("unable to extract first and last IP addresses from CIDR %q: %w", cidr, err)
 	}
 
 	for _, sub := range s {
 		subNet, err := sub.ParsedCIDRNetwork()
 		if err != nil { // this should not happen; but let's be paranoid.
-			logger.Warningf("unable to parse CIDR %q for subnet %q", sub.CIDR, sub.ID)
+			logger.Warningf(context.TODO(), "unable to parse CIDR %q for subnet %q", sub.CIDR, sub.ID)
 			continue
 		}
 
@@ -169,14 +170,14 @@ func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 func (s SubnetInfos) GetByAddress(addr string) (SubnetInfos, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {
-		return nil, errors.NotValidf("%q as IP address", addr)
+		return nil, errors.Errorf("%q as IP address %w", addr, coreerrors.NotValid)
 	}
 
 	var subs SubnetInfos
 	for _, sub := range s {
 		ipNet, err := sub.ParsedCIDRNetwork()
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		if ipNet.Contains(ip) {
 			subs = append(subs, sub)
@@ -242,7 +243,7 @@ func FindSubnetIDsForAvailabilityZone(zoneName string, subnetsToZones map[Id][]s
 	}
 
 	if matchingSubnetIDs.IsEmpty() {
-		return nil, errors.NotFoundf("subnets in AZ %q", zoneName)
+		return nil, errors.Errorf("subnets in AZ %q %w", zoneName, coreerrors.NotFound)
 	}
 
 	sorted := make([]Id, matchingSubnetIDs.Size())
@@ -278,7 +279,7 @@ func IsInFanNetwork(network Id) bool {
 func IPRangeForCIDR(cidr string) (net.IP, net.IP, error) {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
-		return net.IP{}, net.IP{}, errors.Trace(err)
+		return net.IP{}, net.IP{}, errors.Capture(err)
 	}
 	ones, numBits := ipNet.Mask.Size()
 

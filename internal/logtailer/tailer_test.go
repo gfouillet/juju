@@ -10,35 +10,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/logtailer"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type TailerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&TailerSuite{})
+func TestTailerSuite(t *testing.T) {
+	tc.Run(t, &TailerSuite{})
+}
 
-func (s *TailerSuite) TestProcessForwardNoTail(c *gc.C) {
+func (s *TailerSuite) TestProcessForwardNoTail(c *tc.C) {
 	testFileName := filepath.Join(c.MkDir(), "test.log")
-	err := os.WriteFile(testFileName, []byte(logContent), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	err := os.WriteFile(testFileName, []byte(createLogFileContent(c)), 0644)
+	c.Assert(err, tc.ErrorIsNil)
 
 	tailer, err := logtailer.NewLogTailer(coretesting.ModelTag.Id(), testFileName, logtailer.LogTailerParams{
 		NoTail: true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	var records []*corelogger.LogRecord
+	var records []corelogger.LogRecord
 	logs := tailer.Logs()
 	for {
 		rec, ok := <-logs
@@ -47,21 +49,21 @@ func (s *TailerSuite) TestProcessForwardNoTail(c *gc.C) {
 		}
 		records = append(records, rec)
 	}
-	c.Assert(records, jc.DeepEquals, logRecords)
+	c.Assert(records, tc.DeepEquals, logRecords)
 }
 
-func (s *TailerSuite) TestWithModelUUID(c *gc.C) {
+func (s *TailerSuite) TestWithModelUUID(c *tc.C) {
 	testFileName := filepath.Join(c.MkDir(), "test.log")
-	err := os.WriteFile(testFileName, []byte(logContentWithModelUUID), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	err := os.WriteFile(testFileName, []byte(createLogFileContent(c)), 0644)
+	c.Assert(err, tc.ErrorIsNil)
 
 	tailer, err := logtailer.NewLogTailer("", testFileName, logtailer.LogTailerParams{
 		NoTail:   true,
 		Firehose: true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	var records []*corelogger.LogRecord
+	var records []corelogger.LogRecord
 	logs := tailer.Logs()
 	for {
 		rec, ok := <-logs
@@ -74,21 +76,21 @@ func (s *TailerSuite) TestWithModelUUID(c *gc.C) {
 	for i, r := range recordsWithModel {
 		r.ModelUUID = fmt.Sprintf("modelUUID%d", i+1)
 	}
-	c.Assert(records, jc.DeepEquals, recordsWithModel)
+	c.Assert(records, tc.DeepEquals, recordsWithModel)
 }
 
-func (s *TailerSuite) TestProcessReverseNoTail(c *gc.C) {
+func (s *TailerSuite) TestProcessReverseNoTail(c *tc.C) {
 	testFileName := filepath.Join(c.MkDir(), "test.log")
-	err := os.WriteFile(testFileName, []byte(logContent), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	err := os.WriteFile(testFileName, []byte(createLogFileContent(c)), 0644)
+	c.Assert(err, tc.ErrorIsNil)
 
 	tailer, err := logtailer.NewLogTailer(coretesting.ModelTag.Id(), testFileName, logtailer.LogTailerParams{
 		NoTail:       true,
 		InitialLines: 2,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	var records []*corelogger.LogRecord
+	var records []corelogger.LogRecord
 	logs := tailer.Logs()
 	for {
 		rec, ok := <-logs
@@ -97,12 +99,12 @@ func (s *TailerSuite) TestProcessReverseNoTail(c *gc.C) {
 		}
 		records = append(records, rec)
 	}
-	c.Assert(records, jc.DeepEquals, logRecords[2:])
+	c.Assert(records, tc.DeepEquals, logRecords[2:])
 }
 
-func (s *TailerSuite) fetchLogs(tailer logtailer.LogTailer, expected int) []*corelogger.LogRecord {
-	var records []*corelogger.LogRecord
-	timeout := time.After(testing.LongWait)
+func (s *TailerSuite) fetchLogs(tailer logtailer.LogTailer, expected int) []corelogger.LogRecord {
+	var records []corelogger.LogRecord
+	timeout := time.After(testhelpers.LongWait)
 	for {
 		select {
 		case rec, ok := <-tailer.Logs():
@@ -119,10 +121,10 @@ func (s *TailerSuite) fetchLogs(tailer logtailer.LogTailer, expected int) []*cor
 	}
 }
 
-func (s *TailerSuite) writeAdditionalLogs(c *gc.C, fileName string, lines []string) {
+func (s *TailerSuite) writeAdditionalLogs(c *tc.C, fileName string, lines []string) {
 	go func() {
 		f, err := os.OpenFile(fileName, os.O_APPEND|os.O_WRONLY, 0644)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		defer func() {
 			_ = f.Close()
 		}()
@@ -137,19 +139,19 @@ func (s *TailerSuite) writeAdditionalLogs(c *gc.C, fileName string, lines []stri
 	}()
 }
 
-func (s *TailerSuite) TestProcessForwardTail(c *gc.C) {
-	logLines := strings.Split(logContent, "\n")
+func (s *TailerSuite) TestProcessForwardTail(c *tc.C) {
+	logLines := strings.Split(createLogFileContent(c), "\n")
 	testFileName := filepath.Join(c.MkDir(), "test.log")
 	f, err := os.OpenFile(testFileName, os.O_CREATE|os.O_WRONLY, 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() {
 		_ = f.Close()
 	}()
 	_, err = io.WriteString(f, strings.Join(logLines[:2], "\n"))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	tailer, err := logtailer.NewLogTailer(coretesting.ModelTag.Id(), testFileName, logtailer.LogTailerParams{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Allow logtailer to start up.
 	time.Sleep(100 * time.Millisecond)
@@ -157,23 +159,23 @@ func (s *TailerSuite) TestProcessForwardTail(c *gc.C) {
 	s.writeAdditionalLogs(c, testFileName, logLines[2:])
 
 	records := s.fetchLogs(tailer, 4)
-	c.Assert(records, jc.DeepEquals, logRecords)
+	c.Assert(records, tc.DeepEquals, logRecords)
 }
 
-func (s *TailerSuite) TestProcessReverseTail(c *gc.C) {
-	logLines := strings.Split(logContent, "\n")
+func (s *TailerSuite) TestProcessReverseTail(c *tc.C) {
+	logLines := strings.Split(createLogFileContent(c), "\n")
 	testFileName := filepath.Join(c.MkDir(), "test.log")
 	f, err := os.OpenFile(testFileName, os.O_CREATE|os.O_WRONLY, 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = io.WriteString(f, strings.Join(logLines[:3], "\n"))
-	c.Assert(f.Close(), jc.ErrorIsNil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(f.Close(), tc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	tailer, err := logtailer.NewLogTailer(coretesting.ModelTag.Id(), testFileName, logtailer.LogTailerParams{
 		InitialLines: 2,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	records := s.fetchLogs(tailer, 2)
 
 	// Allow logtailer to start up.
@@ -183,22 +185,22 @@ func (s *TailerSuite) TestProcessReverseTail(c *gc.C) {
 
 	newRecords := s.fetchLogs(tailer, 1)
 	result := append(records, newRecords...)
-	c.Assert(result, jc.DeepEquals, logRecords[1:])
+	c.Assert(result, tc.DeepEquals, logRecords[1:])
 }
 
-var logContent = `
-{"timestamp":"2024-02-15T06:23:22.00000000Z","entity":"machine-0","level":"DEBUG","module":"juju.worker.dependency","location":"engine.go:598","message":"\"db-accessor\" manifold worker started at 2024-02-15 06:23:23.006402802 +0000 UTC"}
-{"timestamp":"2024-02-15T06:23:23.00000000Z","entity":"machine-0","level":"INFO","module":"juju.worker.dbaccessor","location":"worker.go:518","message":"host is configured to use cloud-local address as a Dqlite node"}
-{"timestamp":"2024-02-15T06:23:24.00000000Z","entity":"machine-1","level":"WARNING","module":"juju.worker.dependency","location":"engine.go:598","message":"\"lease-manager\" manifold worker started at 2024-02-15 06:23:23.016373586 +0000 UTC"}
-{"timestamp":"2024-02-15T06:23:25.00000000Z","entity":"machine-0","level":"CRITICAL","module":"juju.worker.dependency","location":"engine.go:598","message":"\"change-stream\" manifold worker started at 2024-02-15 06:23:23.01677874 +0000 UTC"}`[1:]
+func createLogFileContent(c *tc.C) string {
+	buffer := new(strings.Builder)
 
-var logContentWithModelUUID = `
-modelUUID1: {"timestamp":"2024-02-15T06:23:22.00000000Z","entity":"machine-0","level":"DEBUG","module":"juju.worker.dependency","location":"engine.go:598","message":"\"db-accessor\" manifold worker started at 2024-02-15 06:23:23.006402802 +0000 UTC"}
-modelUUID2: {"timestamp":"2024-02-15T06:23:23.00000000Z","entity":"machine-0","level":"INFO","module":"juju.worker.dbaccessor","location":"worker.go:518","message":"host is configured to use cloud-local address as a Dqlite node"}
-modelUUID3: {"timestamp":"2024-02-15T06:23:24.00000000Z","entity":"machine-1","level":"WARNING","module":"juju.worker.dependency","location":"engine.go:598","message":"\"lease-manager\" manifold worker started at 2024-02-15 06:23:23.016373586 +0000 UTC"}
-modelUUID4: {"timestamp":"2024-02-15T06:23:25.00000000Z","entity":"machine-0","level":"CRITICAL","module":"juju.worker.dependency","location":"engine.go:598","message":"\"change-stream\" manifold worker started at 2024-02-15 06:23:23.01677874 +0000 UTC"}`[1:]
+	jsonEncoder := json.NewEncoder(buffer)
+	for _, record := range logRecords {
+		err := jsonEncoder.Encode(record)
+		c.Assert(err, tc.ErrorIsNil)
+	}
 
-var logRecords = []*corelogger.LogRecord{
+	return buffer.String()
+}
+
+var logRecords = []corelogger.LogRecord{
 	{
 		Time:      mustParseTime("2024-02-15 06:23:22"),
 		ModelUUID: coretesting.ModelTag.Id(),
@@ -246,12 +248,14 @@ func mustParseTime(in string) time.Time {
 }
 
 type LogFilterSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&LogFilterSuite{})
+func TestLogFilterSuite(t *testing.T) {
+	tc.Run(t, &LogFilterSuite{})
+}
 
-func (s *LogFilterSuite) TestLevelFiltering(c *gc.C) {
+func (s *LogFilterSuite) TestLevelFiltering(c *tc.C) {
 	infoLevelRec := &corelogger.LogRecord{Level: corelogger.INFO}
 	errorLevelRec := &corelogger.LogRecord{Level: corelogger.ERROR}
 	logFile := filepath.Join(c.MkDir(), "logs.log")
@@ -270,7 +274,7 @@ func (s *LogFilterSuite) TestLevelFiltering(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestIncludeEntity(c *gc.C) {
+func (s *LogFilterSuite) TestIncludeEntity(c *tc.C) {
 	machine0 := &corelogger.LogRecord{Entity: "machine-0"}
 	foo0 := &corelogger.LogRecord{Entity: "unit-foo-0"}
 	foo1 := &corelogger.LogRecord{Entity: "unit-foo-1"}
@@ -294,7 +298,7 @@ func (s *LogFilterSuite) TestIncludeEntity(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestIncludeEntityWildcard(c *gc.C) {
+func (s *LogFilterSuite) TestIncludeEntityWildcard(c *tc.C) {
 	machine0 := &corelogger.LogRecord{Entity: "machine-0"}
 	foo0 := &corelogger.LogRecord{Entity: "unit-foo-0"}
 	foo1 := &corelogger.LogRecord{Entity: "unit-foo-1"}
@@ -317,7 +321,7 @@ func (s *LogFilterSuite) TestIncludeEntityWildcard(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestExcludeEntity(c *gc.C) {
+func (s *LogFilterSuite) TestExcludeEntity(c *tc.C) {
 	machine0 := &corelogger.LogRecord{Entity: "machine-0"}
 	foo0 := &corelogger.LogRecord{Entity: "unit-foo-0"}
 	foo1 := &corelogger.LogRecord{Entity: "unit-foo-1"}
@@ -341,7 +345,7 @@ func (s *LogFilterSuite) TestExcludeEntity(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestExcludeEntityWildcard(c *gc.C) {
+func (s *LogFilterSuite) TestExcludeEntityWildcard(c *tc.C) {
 	machine0 := &corelogger.LogRecord{Entity: "machine-0"}
 	foo0 := &corelogger.LogRecord{Entity: "unit-foo-0"}
 	foo1 := &corelogger.LogRecord{Entity: "unit-foo-1"}
@@ -365,7 +369,7 @@ func (s *LogFilterSuite) TestExcludeEntityWildcard(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestIncludeModule(c *gc.C) {
+func (s *LogFilterSuite) TestIncludeModule(c *tc.C) {
 	mod0 := &corelogger.LogRecord{Module: "foo.bar"}
 	mod1 := &corelogger.LogRecord{Module: "juju.thing"}
 	subMod1 := &corelogger.LogRecord{Module: "juju.thing.hai"}
@@ -389,7 +393,7 @@ func (s *LogFilterSuite) TestIncludeModule(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestExcludeModule(c *gc.C) {
+func (s *LogFilterSuite) TestExcludeModule(c *tc.C) {
 	mod0 := &corelogger.LogRecord{Module: "foo.bar"}
 	mod1 := &corelogger.LogRecord{Module: "juju.thing"}
 	subMod1 := &corelogger.LogRecord{Module: "juju.thing.hai"}
@@ -413,7 +417,7 @@ func (s *LogFilterSuite) TestExcludeModule(c *gc.C) {
 	s.checkLogTailerFiltering(c, params, writeLogs, assert)
 }
 
-func (s *LogFilterSuite) TestIncludeExcludeModule(c *gc.C) {
+func (s *LogFilterSuite) TestIncludeExcludeModule(c *tc.C) {
 	foo := &corelogger.LogRecord{Module: "foo"}
 	bar := &corelogger.LogRecord{Module: "bar"}
 	barSub := &corelogger.LogRecord{Module: "bar.thing"}
@@ -441,21 +445,21 @@ func (s *LogFilterSuite) TestIncludeExcludeModule(c *gc.C) {
 }
 
 func (s *LogFilterSuite) checkLogTailerFiltering(
-	c *gc.C,
+	c *tc.C,
 	params logtailer.LogTailerParams,
 	writeLogs func() string,
 	assertTailer func(logtailer.LogTailer),
 ) {
 	logFile := writeLogs()
 	tailer, err := logtailer.NewLogTailer(coretesting.ModelTag.Id(), logFile, params)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, tailer)
 	assertTailer(tailer)
 }
 
-func (s *LogFilterSuite) assertTailer(c *gc.C, tailer logtailer.LogTailer, template ...*corelogger.LogRecord) {
-	c.Assert(template, gc.Not(gc.HasLen), 0)
-	timeout := time.After(testing.LongWait)
+func (s *LogFilterSuite) assertTailer(c *tc.C, tailer logtailer.LogTailer, template ...*corelogger.LogRecord) {
+	c.Assert(template, tc.Not(tc.HasLen), 0)
+	timeout := time.After(testhelpers.LongWait)
 	count := 0
 	for {
 		select {
@@ -466,12 +470,12 @@ func (s *LogFilterSuite) assertTailer(c *gc.C, tailer logtailer.LogTailer, templ
 			rec := s.normaliseLogTemplate(template[0])
 			template = template[1:]
 
-			c.Assert(log.Entity, gc.Equals, rec.Entity)
-			c.Assert(log.Module, gc.Equals, rec.Module)
-			c.Assert(log.Location, gc.Equals, rec.Location)
-			c.Assert(log.Level, gc.Equals, rec.Level)
-			c.Assert(log.Message, gc.Equals, rec.Message)
-			c.Assert(log.Labels, gc.DeepEquals, rec.Labels)
+			c.Assert(log.Entity, tc.Equals, rec.Entity)
+			c.Assert(log.Module, tc.Equals, rec.Module)
+			c.Assert(log.Location, tc.Equals, rec.Location)
+			c.Assert(log.Level, tc.Equals, rec.Level)
+			c.Assert(log.Message, tc.Equals, rec.Message)
+			c.Assert(log.Labels, tc.DeepEquals, rec.Labels)
 			count++
 			if len(template) == 0 {
 				return
@@ -499,33 +503,41 @@ func (s *LogFilterSuite) normaliseLogTemplate(template *corelogger.LogRecord) *c
 	if rec.Message == "" {
 		rec.Message = "message"
 	}
+	if rec.ModelUUID == "" {
+		rec.ModelUUID = coretesting.ModelTag.Id()
+	}
 	return &rec
 }
 
 // writeLogs creates count log messages at the current time using
 // the supplied template.
-func (s *LogFilterSuite) writeLogs(c *gc.C, logFie string, count int, template *corelogger.LogRecord) {
+func (s *LogFilterSuite) writeLogs(c *tc.C, logFie string, count int, template *corelogger.LogRecord) {
 	t := coretesting.ZeroTime()
 	s.writeLogsT(c, logFie, t, t, count, template)
 }
 
 // writeLogsT creates count log messages between startTime and
 // endTime using the supplied template
-func (s *LogFilterSuite) writeLogsT(c *gc.C, logFile string, startTime, endTime time.Time, count int, template *corelogger.LogRecord) {
+func (s *LogFilterSuite) writeLogsT(c *tc.C, logFile string, startTime, endTime time.Time, count int, template *corelogger.LogRecord) {
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() {
 		_ = f.Close()
 	}()
 
 	interval := endTime.Sub(startTime) / time.Duration(count)
 	t := startTime
-	for i := 0; i < count; i++ {
+
+	buffer := new(strings.Builder)
+	jsonEncoder := json.NewEncoder(buffer)
+	for range count {
 		rec := s.normaliseLogTemplate(template)
-		line, err := json.Marshal(rec)
-		c.Assert(err, jc.ErrorIsNil)
-		_, err = f.WriteString(fmt.Sprintf("%s\n", line))
-		c.Assert(err, jc.ErrorIsNil)
+		err := jsonEncoder.Encode(rec)
+		c.Assert(err, tc.ErrorIsNil)
+
 		t = t.Add(interval)
 	}
+
+	_, err = io.WriteString(f, buffer.String())
+	c.Assert(err, tc.ErrorIsNil)
 }

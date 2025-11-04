@@ -4,34 +4,34 @@
 package modelmigration
 
 import (
-	"context"
-	"errors"
+	"testing"
 	"time"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/lease"
 	"github.com/juju/juju/core/modelmigration"
+	"github.com/juju/juju/internal/errors"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type importSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	coordinator *MockCoordinator
 	service     *MockImportService
 	txnRunner   *MockTxnRunner
 }
 
-var _ = gc.Suite(&importSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &importSuite{})
+}
 
-func (s *importSuite) TestRegisterImport(c *gc.C) {
+func (s *importSuite) TestRegisterImport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.coordinator.EXPECT().Add(gomock.Any())
@@ -39,7 +39,7 @@ func (s *importSuite) TestRegisterImport(c *gc.C) {
 	RegisterImport(s.coordinator, loggertesting.WrapCheckLog(c))
 }
 
-func (s *importSuite) TestSetup(c *gc.C) {
+func (s *importSuite) TestSetup(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	op := &importOperation{
@@ -49,22 +49,22 @@ func (s *importSuite) TestSetup(c *gc.C) {
 	// We don't currently need the model DB, so for this instance we can just
 	// pass nil.
 	err := op.Setup(modelmigration.NewScope(nil, nil, nil))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *importSuite) TestExecuteWithNoApplications(c *gc.C) {
+func (s *importSuite) TestExecuteWithNoApplications(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	op := s.newImportOperation(c)
 
 	s.expectNoLeases(c)
 
-	err := op.Execute(context.Background(), description.NewModel(description.ModelArgs{}))
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), description.NewModel(description.ModelArgs{}))
+	c.Assert(err, tc.ErrorIsNil)
 
 }
 
-func (s *importSuite) TestExecuteWithApplications(c *gc.C) {
+func (s *importSuite) TestExecuteWithApplications(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	op := s.newImportOperation(c)
@@ -76,7 +76,7 @@ func (s *importSuite) TestExecuteWithApplications(c *gc.C) {
 		},
 	})
 	model.AddApplication(description.ApplicationArgs{
-		Tag:    names.NewApplicationTag("postgresql"),
+		Name:   "postgresql",
 		Leader: "postgresql/0",
 	})
 
@@ -93,11 +93,11 @@ func (s *importSuite) TestExecuteWithApplications(c *gc.C) {
 
 	s.expectLease(c, key, req)
 
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *importSuite) TestExecuteWithMultipleApplications(c *gc.C) {
+func (s *importSuite) TestExecuteWithMultipleApplications(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	op := s.newImportOperation(c)
@@ -109,11 +109,11 @@ func (s *importSuite) TestExecuteWithMultipleApplications(c *gc.C) {
 		},
 	})
 	model.AddApplication(description.ApplicationArgs{
-		Tag:    names.NewApplicationTag("postgresql"),
+		Name:   "postgresql",
 		Leader: "postgresql/0",
 	})
 	model.AddApplication(description.ApplicationArgs{
-		Tag:    names.NewApplicationTag("wordpress"),
+		Name:   "wordpress",
 		Leader: "wordpress/1",
 	})
 
@@ -142,11 +142,11 @@ func (s *importSuite) TestExecuteWithMultipleApplications(c *gc.C) {
 
 	s.expectLease(c, key, req)
 
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *importSuite) TestExecuteWithError(c *gc.C) {
+func (s *importSuite) TestExecuteWithError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	op := s.newImportOperation(c)
@@ -158,17 +158,17 @@ func (s *importSuite) TestExecuteWithError(c *gc.C) {
 		},
 	})
 	model.AddApplication(description.ApplicationArgs{
-		Tag:    names.NewApplicationTag("postgresql"),
+		Name:   "postgresql",
 		Leader: "postgresql/0",
 	})
 
 	s.service.EXPECT().ClaimLease(gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("boom"))
 
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, gc.ErrorMatches, `claiming lease for {"postgresql" "`+uuid+`" "application-leadership"}: boom`)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorMatches, `claiming lease for {"postgresql" "`+uuid+`" "application-leadership"}: boom`)
 }
 
-func (s *importSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *importSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.coordinator = NewMockCoordinator(ctrl)
@@ -178,17 +178,17 @@ func (s *importSuite) setupMocks(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *importSuite) newImportOperation(c *gc.C) *importOperation {
+func (s *importSuite) newImportOperation(c *tc.C) *importOperation {
 	return &importOperation{
 		service: s.service,
 		logger:  loggertesting.WrapCheckLog(c),
 	}
 }
 
-func (s *importSuite) expectNoLeases(c *gc.C) {
+func (s *importSuite) expectNoLeases(c *tc.C) {
 	s.service.EXPECT().ClaimLease(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 }
 
-func (s *importSuite) expectLease(c *gc.C, key lease.Key, req lease.Request) {
+func (s *importSuite) expectLease(c *tc.C, key lease.Key, req lease.Request) {
 	s.service.EXPECT().ClaimLease(gomock.Any(), key, req).Return(nil)
 }

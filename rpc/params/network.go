@@ -4,8 +4,6 @@
 package params
 
 import (
-	"net"
-
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
 )
@@ -45,12 +43,6 @@ type Subnet struct {
 	// Zones contain one or more availability zones this subnet is
 	// associated with.
 	Zones []string `json:"zones"`
-
-	// TODO (jack-w-shaw 2022-02-22): Remove this. It is unused
-	//
-	// Status returns the status of the subnet, whether it is in use, not
-	// in use or terminating.
-	Status string `json:"status,omitempty"`
 }
 
 // SubnetV2 is used by versions of spaces/subnets APIs that must include
@@ -76,7 +68,8 @@ type SubnetV3 struct {
 type NetworkRoute struct {
 	// DestinationCIDR is the Subnet CIDR of traffic that needs a custom route.
 	DestinationCIDR string `json:"destination-cidr"`
-	// GatewayIP is the target IP to use as the next-hop when sending traffic to DestinationCIDR
+	// GatewayIP is the target IP to use as the next-hop when sending traffic to
+	// DestinationCIDR
 	GatewayIP string `json:"gateway-ip"`
 	// Metric is the cost for this particular route.
 	Metric int `json:"metric"`
@@ -100,9 +93,6 @@ type NetworkConfig struct {
 	// (e.g. "aa:bb:cc:dd:ee:ff").
 	MACAddress string `json:"mac-address"`
 
-	// CIDR of the network, in 123.45.67.89/24 format.
-	CIDR string `json:"cidr"`
-
 	// MTU is the Maximum Transmission Unit controlling the maximum size of the
 	// protocol packets that the interface can pass through. It is only used
 	// when > 0.
@@ -113,19 +103,12 @@ type NetworkConfig struct {
 
 	// ProviderNetworkId is a provider-specific id for the network this
 	// interface is part of.
+	// Deprecated: no longer written or read.
 	ProviderNetworkId string `json:"provider-network-id"`
-
-	// ProviderSubnetId is a provider-specific subnet id, to which the
-	// interface is attached to.
-	ProviderSubnetId string `json:"provider-subnet-id"`
 
 	// ProviderSpaceId is a provider-specific space id to which the interface
 	// is attached, if known and supported.
 	ProviderSpaceId string `json:"provider-space-id"`
-
-	// ProviderAddressId is the provider-specific id of the assigned address,
-	// if supported and known.
-	ProviderAddressId string `json:"provider-address-id"`
 
 	// ProviderVLANId is the provider-specific id of the assigned address's
 	// VLAN, if supported and known.
@@ -160,26 +143,11 @@ type NetworkConfig struct {
 	// backwards-compatibility, "dhcp" is assumed.
 	ConfigType string `json:"config-type,omitempty"`
 
-	// Address contains an optional static IP address to configure for
-	// this network interface. The subnet mask to set will be inferred
-	// from the CIDR value.
-	//
-	// NOTE(achilleasa) this field is retained for backwards compatibility
-	// purposes and will be removed in juju 3. New features should use
-	// the Addresses field below which also include scope information.
-	Address string `json:"address,omitempty"`
-
 	// Addresses contains an optional list of static IP address to
 	// configure for this network interface. The subnet mask to set will be
 	// inferred from the CIDR value of the first entry which is always
 	// assumed to be the primary IP address for the interface.
 	Addresses []Address `json:"addresses,omitempty"`
-
-	// ShadowAddresses contains an optional list of additional IP addresses
-	// that the underlying network provider associates with this network
-	// interface instance. These IP addresses are not typically visible
-	// to the machine that the interface is connected to.
-	ShadowAddresses []Address `json:"shadow-addresses,omitempty"`
 
 	// DNSServers contains an optional list of IP addresses and/or
 	// hostnames to configure as DNS servers for this network
@@ -211,9 +179,22 @@ type NetworkConfig struct {
 	// NetworkOrigin represents the authoritative source of the NetworkConfig.
 	// It is expected that either the provider gave us this info or the
 	// machine gave us this info.
-	// Giving us this information allows us to reason about when a InterfaceInfo
-	// is in use.
+	// Giving us this information allows us to reason about when an
+	// InterfaceInfo is in use.
 	NetworkOrigin NetworkOrigin `json:"origin,omitempty"`
+
+	// These deprecated fields had to be retained for backwards compatibility
+	// because their tags did not include the `omitempty` option.
+
+	// ProviderSubnetId is a provider-specific subnet id, to which the
+	// interface is attached to.
+	// Deprecated: no longer written or read.
+	ProviderSubnetId string `json:"provider-subnet-id"`
+
+	// ProviderAddressId is the provider-specific id of the assigned address,
+	// if supported and known.
+	// Deprecated: no longer written or read.
+	ProviderAddressId string `json:"provider-address-id"`
 }
 
 // NetworkConfigFromInterfaceInfo converts a slice of network.InterfaceInfo into
@@ -221,11 +202,6 @@ type NetworkConfig struct {
 func NetworkConfigFromInterfaceInfo(interfaceInfos network.InterfaceInfos) []NetworkConfig {
 	result := make([]NetworkConfig, len(interfaceInfos))
 	for i, v := range interfaceInfos {
-		var dnsServers []string
-		for _, nameserver := range v.DNSServers {
-			dnsServers = append(dnsServers, nameserver.Value)
-		}
-
 		var routes []NetworkRoute
 		if len(v.Routes) != 0 {
 			routes = make([]NetworkRoute, len(v.Routes))
@@ -244,11 +220,8 @@ func NetworkConfigFromInterfaceInfo(interfaceInfos network.InterfaceInfos) []Net
 			ConfigType:          string(v.ConfigType),
 			MTU:                 v.MTU,
 			ProviderId:          string(v.ProviderId),
-			ProviderNetworkId:   string(v.ProviderNetworkId),
-			ProviderSubnetId:    string(v.ProviderSubnetId),
 			ProviderSpaceId:     string(v.ProviderSpaceId),
 			ProviderVLANId:      string(v.ProviderVLANId),
-			ProviderAddressId:   string(v.ProviderAddressId),
 			VLANTag:             v.VLANTag,
 			InterfaceName:       v.InterfaceName,
 			ParentInterfaceName: v.ParentInterfaceName,
@@ -256,19 +229,13 @@ func NetworkConfigFromInterfaceInfo(interfaceInfos network.InterfaceInfos) []Net
 			Disabled:            v.Disabled,
 			NoAutoStart:         v.NoAutoStart,
 			Addresses:           FromProviderAddresses(v.Addresses...),
-			ShadowAddresses:     FromProviderAddresses(v.ShadowAddresses...),
-			DNSServers:          dnsServers,
+			DNSServers:          v.DNSServers,
 			DNSSearchDomains:    v.DNSSearchDomains,
 			GatewayAddress:      v.GatewayAddress.Value,
 			Routes:              routes,
 			IsDefaultGateway:    v.IsDefaultGateway,
 			VirtualPortType:     string(v.VirtualPortType),
 			NetworkOrigin:       NetworkOrigin(v.Origin),
-
-			// TODO (manadart 2021-03-24): Retained for compatibility.
-			// Delete CIDR and Address for Juju 3/4.
-			CIDR:    v.PrimaryAddress().CIDR,
-			Address: v.PrimaryAddress().Value,
 		}
 	}
 	return result
@@ -298,11 +265,8 @@ func InterfaceInfoFromNetworkConfig(configs []NetworkConfig) network.InterfaceIn
 			MACAddress:          network.NormalizeMACAddress(v.MACAddress),
 			MTU:                 v.MTU,
 			ProviderId:          network.Id(v.ProviderId),
-			ProviderNetworkId:   network.Id(v.ProviderNetworkId),
-			ProviderSubnetId:    network.Id(v.ProviderSubnetId),
 			ProviderSpaceId:     network.Id(v.ProviderSpaceId),
 			ProviderVLANId:      network.Id(v.ProviderVLANId),
-			ProviderAddressId:   network.Id(v.ProviderAddressId),
 			VLANTag:             v.VLANTag,
 			InterfaceName:       v.InterfaceName,
 			ParentInterfaceName: v.ParentInterfaceName,
@@ -311,8 +275,7 @@ func InterfaceInfoFromNetworkConfig(configs []NetworkConfig) network.InterfaceIn
 			NoAutoStart:         v.NoAutoStart,
 			ConfigType:          configType,
 			Addresses:           ToProviderAddresses(v.Addresses...),
-			ShadowAddresses:     ToProviderAddresses(v.ShadowAddresses...),
-			DNSServers:          network.NewMachineAddresses(v.DNSServers).AsProviderAddresses(),
+			DNSServers:          v.DNSServers,
 			DNSSearchDomains:    v.DNSSearchDomains,
 			GatewayAddress:      network.NewMachineAddress(v.GatewayAddress).AsProviderAddress(),
 			Routes:              routes,
@@ -321,35 +284,14 @@ func InterfaceInfoFromNetworkConfig(configs []NetworkConfig) network.InterfaceIn
 			Origin:              network.Origin(v.NetworkOrigin),
 		}
 
-		// Compatibility accommodations follow.
-		// TODO (manadart 2021-03-05): Juju 3/4 should require that only the
-		// address collections are used, and the following fields removed from
-		// the top-level interface:
-		// - CIDR
-		// - Address
-
-		// 1) For clients that populate Addresses, but still set
-		//    address-specific fields on the device.
-		//    Note that the assumption must hold (as it does at the time of
-		//    writing) that the collections are only populated with a single
-		//    member, with repeated devices for each address.
+		// For clients that populate Addresses, but still set
+		// address-specific fields on the device.
+		// Note that the assumption must hold (as it does at the time of
+		// writing) that the collections are only populated with a single
+		// member, with repeated devices for each address.
 		if len(result[i].Addresses) > 0 {
-			if result[i].Addresses[0].CIDR == "" {
-				result[i].Addresses[0].CIDR = v.CIDR
-			}
 			if result[i].Addresses[0].ConfigType == "" {
 				result[i].Addresses[0].ConfigType = configType
-			}
-		} else {
-			// 2) For even older clients that do not populate Addresses.
-			if v.Address != "" {
-				result[i].Addresses = network.ProviderAddresses{
-					network.NewMachineAddress(
-						v.Address,
-						network.WithCIDR(v.CIDR),
-						network.WithConfigType(configType),
-					).AsProviderAddress(),
-				}
 			}
 		}
 	}
@@ -453,13 +395,6 @@ type EntityPortRange struct {
 	Endpoint string `json:"endpoint"`
 }
 
-// EntitiesPortRanges holds the parameters for making an OpenPorts or
-// ClosePorts on some entities.
-// TODO(juju3) - remove
-type EntitiesPortRanges struct {
-	Entities []EntityPortRange `json:"entities"`
-}
-
 // Address represents the location of a machine, including metadata
 // about what kind of location the address describes.
 // See also the address types in core/network that this type can be
@@ -540,7 +475,7 @@ func FromProviderAddress(addr network.ProviderAddress) Address {
 		CIDR:            addr.CIDR,
 		Type:            string(addr.Type),
 		Scope:           string(addr.Scope),
-		SpaceName:       string(addr.SpaceName),
+		SpaceName:       addr.SpaceName.String(),
 		ProviderSpaceID: string(addr.ProviderSpaceID),
 		ConfigType:      string(addr.ConfigType),
 		IsSecondary:     addr.IsSecondary,
@@ -825,8 +760,7 @@ type HostNetworkChange struct {
 	// device they should be connected to.
 	NewBridges []DeviceBridgeInfo `json:"new-bridges"`
 
-	// ReconfigureDelay is the duration in seconds to sleep before
-	// raising the bridged interface
+	// Deprecated: no longer written or read.
 	ReconfigureDelay int `json:"reconfigure-delay"`
 }
 
@@ -1291,7 +1225,7 @@ func FromNetworkSpaceInfos(allInfos network.SpaceInfos) SpaceInfos {
 		for j, subnetInfo := range si.Subnets {
 
 			mappedSubnets[j] = SubnetV3{
-				SpaceID: subnetInfo.SpaceID,
+				SpaceID: subnetInfo.SpaceID.String(),
 
 				SubnetV2: SubnetV2{
 					ID: string(subnetInfo.ID),
@@ -1311,7 +1245,7 @@ func FromNetworkSpaceInfos(allInfos network.SpaceInfos) SpaceInfos {
 		}
 
 		res.Infos[i] = SpaceInfo{
-			ID:         si.ID,
+			ID:         si.ID.String(),
 			Name:       string(si.Name),
 			ProviderID: string(si.ProviderId),
 			Subnets:    mappedSubnets,
@@ -1337,13 +1271,13 @@ func ToNetworkSpaceInfos(allInfos SpaceInfos) network.SpaceInfos {
 				ProviderNetworkId: network.Id(subnetInfo.ProviderNetworkId),
 				VLANTag:           subnetInfo.VLANTag,
 				AvailabilityZones: subnetInfo.Zones,
-				SpaceID:           subnetInfo.SpaceID,
-				SpaceName:         si.Name,
+				SpaceID:           network.SpaceUUID(subnetInfo.SpaceID),
+				SpaceName:         network.SpaceName(si.Name),
 			}
 		}
 
 		res[i] = network.SpaceInfo{
-			ID:         si.ID,
+			ID:         network.SpaceUUID(si.ID),
 			Name:       network.SpaceName(si.Name),
 			ProviderId: network.Id(si.ProviderID),
 			Subnets:    mappedSubnets,
@@ -1351,31 +1285,4 @@ func ToNetworkSpaceInfos(allInfos SpaceInfos) network.SpaceInfos {
 	}
 
 	return res
-}
-
-// FanConfigResultToFanConfig converts fan config params into a network.FanConfig instance.
-func FanConfigResultToFanConfig(config FanConfigResult) (network.FanConfig, error) {
-	rv := make(network.FanConfig, len(config.Fans))
-	for i, entry := range config.Fans {
-		_, ipNet, err := net.ParseCIDR(entry.Underlay)
-		if err != nil {
-			return nil, err
-		}
-		rv[i].Underlay = ipNet
-		_, ipNet, err = net.ParseCIDR(entry.Overlay)
-		if err != nil {
-			return nil, err
-		}
-		rv[i].Overlay = ipNet
-	}
-	return rv, nil
-}
-
-// FanConfigToFanConfigResult converts a network.FanConfig instance to a params struct.
-func FanConfigToFanConfigResult(config network.FanConfig) FanConfigResult {
-	result := FanConfigResult{Fans: make([]FanConfigEntry, len(config))}
-	for i, entry := range config {
-		result.Fans[i] = FanConfigEntry{Underlay: entry.Underlay.String(), Overlay: entry.Overlay.String()}
-	}
-	return result
 }

@@ -4,34 +4,23 @@
 package spaces
 
 import (
-	stdcontext "context"
 	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	facademocks "github.com/juju/juju/apiserver/facade/mocks"
-	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	environmocks "github.com/juju/juju/environs/mocks"
+	modeltesting "github.com/juju/juju/core/model/testing"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package spaces -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/spaces Backing,BlockChecker,Machine,Constraints,Address,Unit,Bindings,NetworkService,ControllerConfigService
+//go:generate go run go.uber.org/mock/mockgen -typed -package spaces -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/spaces BlockChecker,Constraints,NetworkService,ControllerConfigService,ApplicationService,MachineService
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
-// APISuite is used to test API calls using mocked model operations.
-type APISuite struct {
-	resource   *facademocks.MockResources
+// APIBaseSuite is used to test API calls using mocked model operations.
+type APIBaseSuite struct {
 	authorizer *facademocks.MockAuthorizer
 
-	Backing      *MockBacking
 	blockChecker *MockBlockChecker
 
 	// TODO (manadart 2020-03-24): Localise this to the suites that need it.
@@ -41,82 +30,47 @@ type APISuite struct {
 
 	ControllerConfigService *MockControllerConfigService
 	NetworkService          *MockNetworkService
+	ApplicationService      *MockApplicationService
+	MachineService          *MockMachineService
 }
 
-var _ = gc.Suite(&APISuite{})
+func TestAPISuite(t *testing.T) {
+	tc.Run(t, &APIBaseSuite{})
+}
 
-func (s *APISuite) TearDownTest(_ *gc.C) {
+func (s *APIBaseSuite) TearDownTest(_ *tc.C) {
 	s.API = nil
 }
 
-func (s *APISuite) SetupMocks(c *gc.C, supportSpaces bool, providerSpaces bool) (*gomock.Controller, func()) {
+func (s *APIBaseSuite) SetupMocks(c *tc.C, supportSpaces bool, providerSpaces bool) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.resource = facademocks.NewMockResources(ctrl)
 	s.Constraints = NewMockConstraints(ctrl)
 
 	s.blockChecker = NewMockBlockChecker(ctrl)
 	s.blockChecker.EXPECT().ChangeAllowed(gomock.Any()).Return(nil).AnyTimes()
 
 	s.authorizer = facademocks.NewMockAuthorizer(ctrl)
-	s.authorizer.EXPECT().HasPermission(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-	s.authorizer.EXPECT().AuthClient().Return(true)
-
-	cloudSpec := environscloudspec.CloudSpec{
-		Type:             "mock-provider",
-		Name:             "cloud-name",
-		Endpoint:         "endpoint",
-		IdentityEndpoint: "identity-endpoint",
-		StorageEndpoint:  "storage-endpoint",
-	}
-
-	s.Backing = NewMockBacking(ctrl)
-	bExp := s.Backing.EXPECT()
-	bExp.ModelTag().Return(names.NewModelTag("123"))
-	bExp.ModelConfig(gomock.Any()).Return(nil, nil).AnyTimes()
-	bExp.CloudSpec(gomock.Any()).Return(cloudSpec, nil).AnyTimes()
-
-	mockNetworkEnviron := environmocks.NewMockNetworkingEnviron(ctrl)
-	mockNetworkEnviron.EXPECT().SupportsSpaces(gomock.Any()).Return(supportSpaces, nil).AnyTimes()
-	mockNetworkEnviron.EXPECT().SupportsSpaceDiscovery(gomock.Any()).Return(providerSpaces, nil).AnyTimes()
-
-	mockProvider := environmocks.NewMockCloudEnvironProvider(ctrl)
-	mockProvider.EXPECT().Open(gomock.Any(), gomock.Any()).Return(mockNetworkEnviron, nil).AnyTimes()
-
-	unReg := environs.RegisterProvider("mock-provider", mockProvider)
+	s.authorizer.EXPECT().HasPermission(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	s.ControllerConfigService = NewMockControllerConfigService(ctrl)
 	s.NetworkService = NewMockNetworkService(ctrl)
+	s.ApplicationService = NewMockApplicationService(ctrl)
+	s.MachineService = NewMockMachineService(ctrl)
 
-	var err error
-	s.API, err = newAPIWithBacking(apiConfig{
-		Backing:                     s.Backing,
-		Check:                       s.blockChecker,
-		CredentialInvalidatorGetter: apiservertesting.NoopModelCredentialInvalidatorGetter,
-		Resources:                   s.resource,
-		Authorizer:                  s.authorizer,
-		ControllerConfigService:     s.ControllerConfigService,
-		NetworkService:              s.NetworkService,
-		logger:                      loggertesting.WrapCheckLog(c),
-	})
-	c.Assert(err, jc.ErrorIsNil)
+	s.NetworkService.EXPECT().SupportsSpaces(gomock.Any()).Return(supportSpaces, nil).AnyTimes()
+	s.NetworkService.EXPECT().SupportsSpaceDiscovery(gomock.Any()).Return(providerSpaces, nil).AnyTimes()
 
-	return ctrl, unReg
-}
-
-// SupportsSpaces is used by the legacy test suite and
-// can be removed when it is grandfathered out.
-func SupportsSpaces(backing Backing) error {
-	api := &API{
-		backing:                     backing,
-		credentialInvalidatorGetter: apiservertesting.NoopModelCredentialInvalidatorGetter,
+	s.API = &API{
+		modelTag:                names.NewModelTag(modeltesting.GenModelUUID(c).String()),
+		check:                   s.blockChecker,
+		auth:                    s.authorizer,
+		controllerConfigService: s.ControllerConfigService,
+		networkService:          s.NetworkService,
+		applicationService:      s.ApplicationService,
+		machineService:          s.MachineService,
+		logger:                  loggertesting.WrapCheckLog(c),
 	}
-	return api.checkSupportsSpaces(stdcontext.Background())
+
+	return ctrl
 }
-
-// NewAPIWithBacking is also a legacy-only artifact,
-// only used by the legacy test suite.
-var NewAPIWithBacking = newAPIWithBacking
-
-// APIConfig is also a legacy-only artifact.
-type APIConfig = apiConfig

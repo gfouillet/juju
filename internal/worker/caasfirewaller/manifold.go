@@ -10,20 +10,20 @@ import (
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
-	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/services"
+	internalworker "github.com/juju/juju/internal/worker"
 )
 
 // ManifoldConfig describes the resources used by the firewaller worker.
 type ManifoldConfig struct {
-	APICallerName string
-	BrokerName    string
+	BrokerName         string
+	DomainServicesName string
 
 	ControllerUUID string
 	ModelUUID      string
 
-	NewClient func(base.APICaller) Client
 	NewWorker func(Config) (worker.Worker, error)
 	Logger    logger.Logger
 }
@@ -32,10 +32,11 @@ type ManifoldConfig struct {
 func Manifold(cfg ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
-			cfg.APICallerName,
 			cfg.BrokerName,
+			cfg.DomainServicesName,
 		},
-		Start: cfg.start,
+		Start:  cfg.start,
+		Filter: internalworker.ShouldWorkerUninstall,
 	}
 }
 
@@ -47,14 +48,11 @@ func (config ManifoldConfig) Validate() error {
 	if config.ModelUUID == "" {
 		return errors.NotValidf("empty ModelUUID")
 	}
-	if config.APICallerName == "" {
-		return errors.NotValidf("empty APICallerName")
-	}
 	if config.BrokerName == "" {
 		return errors.NotValidf("empty BrokerName")
 	}
-	if config.NewClient == nil {
-		return errors.NotValidf("nil NewClient")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.NewWorker == nil {
 		return errors.NotValidf("nil NewWorker")
@@ -71,24 +69,23 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 		return nil, errors.Trace(err)
 	}
 
-	var apiCaller base.APICaller
-	if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	var broker caas.Broker
 	if err := getter.Get(config.BrokerName, &broker); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	client := config.NewClient(apiCaller)
+	var domainServices services.ModelDomainServices
+	if err := getter.Get(config.DomainServicesName, &domainServices); err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w, err := config.NewWorker(Config{
-		ControllerUUID: config.ControllerUUID,
-		ModelUUID:      config.ModelUUID,
-		FirewallerAPI:  client,
-		LifeGetter:     client,
-		Broker:         broker,
-		Logger:         config.Logger,
+		ControllerUUID:     config.ControllerUUID,
+		ModelUUID:          config.ModelUUID,
+		PortService:        domainServices.Port(),
+		ApplicationService: domainServices.Application(),
+		Broker:             broker,
+		Logger:             config.Logger,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)

@@ -4,28 +4,33 @@
 package gce
 
 import (
-	"strings"
+	"context"
+	"fmt"
+	"maps"
+	"path"
+	"slices"
 
+	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/os/ostype"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 	"github.com/juju/juju/internal/cloudconfig/providerinit"
 	"github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/internal/provider/gce/google"
+	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 // StartInstance implements environs.InstanceBroker.
-func (env *environ) StartInstance(ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
+func (env *environ) StartInstance(ctx context.Context, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
 	// Start a new instance.
 
-	spec, err := buildInstanceSpec(env, ctx, args)
+	spec, err := env.buildInstanceSpec(ctx, args)
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
 	}
@@ -34,41 +39,20 @@ func (env *environ) StartInstance(ctx envcontext.ProviderCallContext, args envir
 		return nil, environs.ZoneIndependentError(err)
 	}
 
-	// Validate availability zone.
-	volumeAttachmentsZone, err := volumeAttachmentsZone(args.VolumeAttachments)
-	if err != nil {
-		return nil, environs.ZoneIndependentError(err)
-	}
-	if err := validateAvailabilityZoneConsistency(args.AvailabilityZone, volumeAttachmentsZone); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	raw, err := newRawInstance(env, ctx, args, spec)
+	inst, err := env.startInstance(ctx, args, spec.Image.Id, spec.InstanceType.Name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Infof("started instance %q in zone %q", raw.ID, raw.ZoneName)
-	inst := newInstance(raw, env)
+	envInst := newInstance(inst, env)
 
 	// Build the result.
-	hwc := getHardwareCharacteristics(env, spec, inst)
+	hwc := env.getHardwareCharacteristics(spec, envInst)
+	logger.Infof(ctx, "started instance %q in zone %q", inst.GetName(), *hwc.AvailabilityZone)
 	result := environs.StartInstanceResult{
-		Instance: inst,
+		Instance: envInst,
 		Hardware: hwc,
 	}
 	return &result, nil
-}
-
-var buildInstanceSpec = func(env *environ, ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) (*instances.InstanceSpec, error) {
-	return env.buildInstanceSpec(ctx, args)
-}
-
-var newRawInstance = func(env *environ, ctx envcontext.ProviderCallContext, args environs.StartInstanceParams, spec *instances.InstanceSpec) (*google.Instance, error) {
-	return env.newRawInstance(ctx, args, spec)
-}
-
-var getHardwareCharacteristics = func(env *environ, spec *instances.InstanceSpec, inst *environInstance) *instance.HardwareCharacteristics {
-	return env.getHardwareCharacteristics(spec, inst)
 }
 
 // finishInstanceConfig updates args.InstanceConfig in place. Setting up
@@ -83,7 +67,7 @@ func (env *environ) finishInstanceConfig(args environs.StartInstanceParams, spec
 // buildInstanceSpec builds an instance spec from the provided args
 // and returns it. This includes pulling the simplestreams data for the
 // machine type, region, and other constraints.
-func (env *environ) buildInstanceSpec(ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) (*instances.InstanceSpec, error) {
+func (env *environ) buildInstanceSpec(ctx context.Context, args environs.StartInstanceParams) (*instances.InstanceSpec, error) {
 	instTypesAndCosts, err := env.InstanceTypes(ctx, constraints.Value{})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -93,8 +77,8 @@ func (env *environ) buildInstanceSpec(ctx envcontext.ProviderCallContext, args e
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	spec, err := findInstanceSpec(
-		env, &instances.InstanceConstraint{
+	spec, err := env.findInstanceSpec(
+		&instances.InstanceConstraint{
 			Region:      env.cloud.Region,
 			Base:        args.InstanceConfig.Base,
 			Arch:        arch,
@@ -104,15 +88,6 @@ func (env *environ) buildInstanceSpec(ctx envcontext.ProviderCallContext, args e
 		instTypesAndCosts.InstanceTypes,
 	)
 	return spec, errors.Trace(err)
-}
-
-var findInstanceSpec = func(
-	env *environ,
-	ic *instances.InstanceConstraint,
-	imageMetadata []*imagemetadata.ImageMetadata,
-	allInstanceTypes []instances.InstanceType,
-) (*instances.InstanceSpec, error) {
-	return env.findInstanceSpec(ic, imageMetadata, allInstanceTypes)
 }
 
 // findInstanceSpec initializes a new instance spec for the given
@@ -129,7 +104,9 @@ func (env *environ) findInstanceSpec(
 }
 
 func (env *environ) imageURLBase(os ostype.OSType) (string, error) {
+	env.lock.Lock()
 	base, useCustomPath := env.ecfg.baseImagePath()
+	env.lock.Unlock()
 	if useCustomPath {
 		return base, nil
 	}
@@ -151,12 +128,75 @@ func (env *environ) imageURLBase(os ostype.OSType) (string, error) {
 	return base, nil
 }
 
-// newRawInstance is where the new physical instance is actually
+// packMetadata composes the provided data into the format required
+// by the GCE API.
+func packMetadata(data map[string]string) *computepb.Metadata {
+	// Sort for testing.
+	keys := maps.Keys(data)
+	var items []*computepb.Items
+	for _, key := range slices.Sorted(keys) {
+		localValue := data[key]
+		item := computepb.Items{
+			Key:   &key,
+			Value: &localValue,
+		}
+		items = append(items, &item)
+	}
+	return &computepb.Metadata{Items: items}
+}
+
+func formatMachineType(zone, name string) string {
+	return fmt.Sprintf("zones/%s/machineTypes/%s", zone, name)
+}
+
+func (env *environ) serviceAccount(ctx context.Context, args environs.StartInstanceParams) (string, error) {
+	var serviceAccount string
+
+	// For controllers, the service account can come from the credential.
+	if args.InstanceConfig.IsController() {
+		if args.InstanceConfig.Bootstrap != nil && args.InstanceConfig.Bootstrap.BootstrapMachineConstraints.HasInstanceRole() {
+			serviceAccount = *args.InstanceConfig.Bootstrap.BootstrapMachineConstraints.InstanceRole
+			if serviceAccount != "" {
+				logger.Debugf(ctx, "using bootstrap service account: %s", serviceAccount)
+			}
+		} else if env.cloud.Credential.AuthType() == cloud.ServiceAccountAuthType {
+			serviceAccount = env.cloud.Credential.Attributes()[credServiceAccount]
+			if serviceAccount != "" {
+				logger.Debugf(ctx, "using credential service account: %s", serviceAccount)
+			}
+		}
+	}
+	if serviceAccount != "" {
+		return serviceAccount, nil
+	}
+
+	// Next use the constraint value if supplied.
+	if args.Constraints.HasInstanceRole() {
+		serviceAccount = *args.Constraints.InstanceRole
+		if serviceAccount != "" {
+			logger.Debugf(ctx, "using constraints service account: %s", serviceAccount)
+		}
+	}
+	if serviceAccount != "" {
+		return serviceAccount, nil
+	}
+
+	// Fallback to the project default.
+	var err error
+	serviceAccount, err = env.gce.DefaultServiceAccount(ctx)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	logger.Debugf(ctx, "using project service account: %s", serviceAccount)
+	return serviceAccount, nil
+}
+
+// startInstance is where the new physical instance is actually
 // provisioned, relative to the provided args and spec. Info for that
 // low-level instance is returned.
-func (env *environ) newRawInstance(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams, spec *instances.InstanceSpec,
-) (_ *google.Instance, err error) {
+func (env *environ) startInstance(
+	ctx context.Context, args environs.StartInstanceParams, imageID, instanceTypeName string,
+) (_ *computepb.Instance, err error) {
 	hostname, err := env.namespace.Hostname(args.InstanceConfig.MachineId)
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
@@ -176,13 +216,9 @@ func (env *environ) newRawInstance(
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
 	}
+	imageURL := imageURLBase + imageID
 
-	disks, err := getDisks(
-		spec, args.Constraints,
-		os,
-		env.Config().UUID(),
-		imageURLBase,
-	)
+	disks, err := getDisks(ctx, imageURL, args.Constraints, os)
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
 	}
@@ -192,21 +228,75 @@ func (env *environ) newRawInstance(
 		allocatePublicIP = *args.Constraints.AllocatePublicIP
 	}
 
-	inst, err := env.gce.AddInstance(google.InstanceSpec{
-		ID:                hostname,
-		Type:              spec.InstanceType.Name,
+	var nics []*computepb.NetworkInterface
+	vpcLink, subnets, err := env.subnetsForInstance(ctx, args)
+	if err != nil {
+		return nil, environs.ZoneIndependentError(err)
+	}
+	if len(subnets) == 0 {
+		nics = []*computepb.NetworkInterface{{
+			Network: vpcLink,
+		}}
+	} else {
+		for _, subnet := range subnets {
+			if err := isSubnetReady(subnet); err != nil {
+				return nil, environs.ZoneIndependentError(err)
+			}
+			nics = append(nics, &computepb.NetworkInterface{
+				Network:    vpcLink,
+				Subnetwork: ptr(subnet.GetSelfLink()),
+			})
+		}
+	}
+
+	if allocatePublicIP {
+		nics[0].AccessConfigs = []*computepb.AccessConfig{{
+			Name: ptr(google.ExternalNetworkName),
+			Type: ptr(google.NetworkAccessOneToOneNAT),
+		}}
+	}
+
+	serviceAccount, err := env.serviceAccount(ctx, args)
+	if err != nil {
+		return nil, env.HandleCredentialError(ctx, errors.Trace(err))
+	}
+
+	hasAccelerator, err := env.hasAccelerator(ctx, args.AvailabilityZone, instanceTypeName)
+	if err != nil {
+		return nil, env.HandleCredentialError(ctx, err)
+	}
+	logger.Debugf(ctx, "Accelerator support in zone %s for instance type %s: %t",
+		args.AvailabilityZone, args.Constraints.InstanceType, hasAccelerator)
+
+	instArg := &computepb.Instance{
+		Name:              &hostname,
+		Zone:              &args.AvailabilityZone,
+		MachineType:       ptr(formatMachineType(args.AvailabilityZone, instanceTypeName)),
 		Disks:             disks,
-		NetworkInterfaces: []string{"ExternalNAT"},
-		Metadata:          metadata,
-		Tags:              tags,
-		AvailabilityZone:  args.AvailabilityZone,
-		AllocatePublicIP:  allocatePublicIP,
-	})
+		NetworkInterfaces: nics,
+		Metadata:          packMetadata(metadata),
+		Tags:              &computepb.Tags{Items: tags},
+	}
+	if serviceAccount != "" {
+		instArg.ServiceAccounts = []*computepb.ServiceAccount{{
+			Email:  &serviceAccount,
+			Scopes: google.Scopes,
+		}}
+	}
+
+	// For the instance types which don't support live migration E.g. gpu instance
+	// https://cloud.google.com/compute/docs/instances/live-migration-process#limitations
+	if hasAccelerator {
+		instArg.Scheduling = &computepb.Scheduling{
+			OnHostMaintenance: ptr(google.HostMaintenanceTerminate),
+		}
+	}
+	inst, err := env.gce.AddInstance(ctx, instArg)
 	if err != nil {
 		// We currently treat all AddInstance failures
 		// as being zone-specific, so we'll retry in
 		// another zone.
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
 
 	return inst, nil
@@ -219,7 +309,7 @@ func getMetadata(args environs.StartInstanceParams, os ostype.OSType) (map[strin
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot make user data")
 	}
-	logger.Debugf("GCE user data; %d bytes", len(userData))
+	logger.Debugf(context.TODO(), "GCE user data; %d bytes", len(userData))
 
 	metadata := make(map[string]string)
 	for tag, value := range args.InstanceConfig.Tags {
@@ -247,48 +337,78 @@ func getMetadata(args environs.StartInstanceParams, os ostype.OSType) (map[strin
 // the new instances and returns it. This will always include a root
 // disk with characteristics determined by the provides args and
 // constraints.
-func getDisks(spec *instances.InstanceSpec, cons constraints.Value, os ostype.OSType, eUUID string, imageURLBase string) ([]google.DiskSpec, error) {
+func getDisks(ctx context.Context, imageURL string, cons constraints.Value, os ostype.OSType) ([]*computepb.AttachedDisk, error) {
 	size := common.MinRootDiskSizeGiB(os)
 	if cons.RootDisk != nil && *cons.RootDisk > size {
 		size = common.MiBToGiB(*cons.RootDisk)
+		if size < google.MinDiskSizeGB {
+			msg := "Ignoring root-disk constraint of %dM because it is smaller than the GCE image size of %dG"
+			logger.Infof(ctx, msg, *cons.RootDisk, google.MinDiskSizeGB)
+		}
 	}
-	if imageURLBase == "" {
-		return nil, errors.NotValidf("imageURLBase must be set")
+	if size < google.MinDiskSizeGB {
+		size = google.MinDiskSizeGB
 	}
-	imageURL := imageURLBase + spec.Image.Id
-	logger.Infof("fetching disk image from %v", imageURL)
-	dSpec := google.DiskSpec{
-		OS:         strings.ToLower(os.String()),
-		SizeHintGB: size,
-		ImageURL:   imageURL,
-		Boot:       true,
-		AutoDelete: true,
+	logger.Infof(ctx, "fetching disk image from %v", imageURL)
+
+	disk := &computepb.AttachedDisk{
+		Type:       ptr(google.DiskPersistenceTypePersistent),
+		Boot:       ptr(true),
+		Mode:       ptr(string(google.ModeRW)),
+		AutoDelete: ptr(true),
+		InitializeParams: &computepb.AttachedDiskInitializeParams{
+			// DiskName (defaults to instance name)
+			DiskSizeGb: ptr(int64(size)),
+			// DiskType (defaults to pd-standard, pd-ssd, local-ssd)
+			SourceImage: &imageURL,
+		},
+		// Interface (defaults to SCSI)
+		// DeviceName (GCE sets this, persistent disk only)
 	}
-	if cons.RootDisk != nil && dSpec.TooSmall() {
-		msg := "Ignoring root-disk constraint of %dM because it is smaller than the GCE image size of %dG"
-		logger.Infof(msg, *cons.RootDisk, google.MinDiskSizeGB)
+	return []*computepb.AttachedDisk{disk}, nil
+}
+
+// hasAccelerator checks if the given instance type has any accelerators (e.g., GPUs).
+func (env *environ) hasAccelerator(ctx context.Context, zone string, instanceType string) (bool, error) {
+	if len(instanceType) == 0 {
+		return false, nil
 	}
-	return []google.DiskSpec{dSpec}, nil
+
+	mt, err := env.gce.MachineType(ctx, zone, instanceType)
+	if err != nil {
+		return false, env.HandleCredentialError(ctx, err)
+	}
+
+	for _, accelerator := range mt.GetAccelerators() {
+		if accelerator != nil && accelerator.GuestAcceleratorCount != nil && *accelerator.GuestAcceleratorCount > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // getHardwareCharacteristics compiles hardware-related details about
 // the given instance and relative to the provided spec and returns it.
 func (env *environ) getHardwareCharacteristics(spec *instances.InstanceSpec, inst *environInstance) *instance.HardwareCharacteristics {
-	rootDiskMB := inst.base.RootDiskGB() * 1024
+	rootDiskMB := uint64(0)
+	if len(inst.base.Disks) > 0 {
+		rootDiskMB = uint64(inst.base.Disks[0].GetDiskSizeGb() * 1024)
+	}
+	zone := path.Base(inst.base.GetZone())
 	hwc := instance.HardwareCharacteristics{
 		Arch:             &spec.Image.Arch,
 		Mem:              &spec.InstanceType.Mem,
 		CpuCores:         &spec.InstanceType.CpuCores,
 		CpuPower:         spec.InstanceType.CpuPower,
 		RootDisk:         &rootDiskMB,
-		AvailabilityZone: &inst.base.ZoneName,
+		AvailabilityZone: &zone,
 		// Tags: not supported in GCE.
 	}
 	return &hwc
 }
 
 // AllInstances implements environs.InstanceBroker.
-func (env *environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (env *environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	// We want all statuses here except for "terminated" - these instances are truly dead to us.
 	// According to https://cloud.google.com/compute/docs/instances/instance-life-cycle
 	// there are now only "provisioning", "staging", "running", "stopping" and "terminated" states.
@@ -303,24 +423,24 @@ func (env *environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instance
 		google.StatusUp,
 	}
 	filters := append(instStatuses, nonLiveStatuses...)
-	instances, err := getInstances(env, ctx, filters...)
+	instances, err := env.instances(ctx, filters...)
 	return instances, errors.Trace(err)
 }
 
 // AllRunningInstances implements environs.InstanceBroker.
-func (env *environ) AllRunningInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
-	instances, err := getInstances(env, ctx)
+func (env *environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
+	instances, err := env.instances(ctx)
 	return instances, errors.Trace(err)
 }
 
 // StopInstances implements environs.InstanceBroker.
-func (env *environ) StopInstances(ctx envcontext.ProviderCallContext, instances ...instance.Id) error {
+func (env *environ) StopInstances(ctx context.Context, instances ...instance.Id) error {
 	var ids []string
 	for _, id := range instances {
 		ids = append(ids, string(id))
 	}
 
 	prefix := env.namespace.Prefix()
-	err := env.gce.RemoveInstances(prefix, ids...)
-	return google.HandleCredentialError(errors.Trace(err), ctx)
+	err := env.gce.RemoveInstances(ctx, prefix, ids...)
+	return env.HandleCredentialError(ctx, err)
 }

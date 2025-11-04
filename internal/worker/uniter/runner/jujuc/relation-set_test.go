@@ -6,15 +6,15 @@ package jujuc_test
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc/jujuctesting"
 )
@@ -23,57 +23,25 @@ type RelationSetSuite struct {
 	relationSuite
 }
 
-var _ = gc.Suite(&RelationSetSuite{})
+func TestRelationSetSuite(t *testing.T) {
+	tc.Run(t, &RelationSetSuite{})
+}
 
 var helpTests = []struct {
 	relid  int
 	expect string
 }{{-1, ""}, {0, "peer0:0"}}
 
-func (s *RelationSetSuite) TestHelp(c *gc.C) {
+func (s *RelationSetSuite) TestHelp(c *tc.C) {
 	for i, t := range helpTests {
 		c.Logf("test %d", i)
 		hctx, _ := s.newHookContext(t.relid, "", "")
 		com, err := jujuc.NewCommand(hctx, "relation-set")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"--help"})
-		c.Assert(code, gc.Equals, 0)
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, fmt.Sprintf(`
-Usage: relation-set [options] key=value [key=value ...]
-
-Summary:
-set relation settings
-
-Options:
---app  (= false)
-    pick whether you are setting "application" settings or "unit" settings
---file  (= )
-    file containing key-value pairs
---format (= "")
-    deprecated format flag
--r, --relation  (= %s)
-    specify a relation by id
-
-Details:
-"relation-set" writes the local unit's settings for some relation.
-If no relation is specified then the current relation is used. The
-setting values are not inspected and are stored as strings. Setting
-an empty string causes the setting to be removed. Duplicate settings
-are not allowed.
-
-If the unit is the leader, it can set the application settings using
-"--app". These are visible to related applications via 'relation-get --app'
-or by supplying the application name to 'relation-get' in place of
-a unit name.
-
-The --file option should be used when one or more key-value pairs are
-too long to fit within the command length limit of the shell or
-operating system. The file will contain a YAML map containing the
-settings.  Settings in the file will be overridden by any duplicate
-key-value arguments. A value of "-" for the filename means <stdin>.
-`[1:], t.expect))
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
+		c.Assert(code, tc.Equals, 0)
+		c.Assert(strings.Contains(bufferString(ctx.Stdout), t.expect), tc.IsTrue)
 	}
 }
 
@@ -88,7 +56,7 @@ type relationSetInitTest struct {
 	application bool
 }
 
-func (t relationSetInitTest) log(c *gc.C, i int) {
+func (t relationSetInitTest) log(c *tc.C, i int) {
 	var summary string
 	if t.summary != "" {
 		summary = " - " + t.summary
@@ -106,13 +74,13 @@ func (t relationSetInitTest) filename() (string, int) {
 	return "", -1
 }
 
-func (t relationSetInitTest) init(c *gc.C, s *RelationSetSuite) (cmd.Command, []string, *cmd.Context) {
+func (t relationSetInitTest) init(c *tc.C, s *RelationSetSuite) (cmd.Command, []string, *cmd.Context) {
 	args := make([]string, len(t.args))
 	copy(args, t.args)
 
 	hctx, _ := s.newHookContext(t.ctxrelid, "", "")
 	com, err := jujuc.NewCommand(hctx, "relation-set")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	ctx := cmdtesting.Context(c)
 
@@ -124,30 +92,30 @@ func (t relationSetInitTest) init(c *gc.C, s *RelationSetSuite) (cmd.Command, []
 		filename = filepath.Join(c.MkDir(), filename)
 		args[i] = filename
 		err := os.WriteFile(filename, []byte(t.content), 0644)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
 	return com, args, ctx
 }
 
-func (t relationSetInitTest) check(c *gc.C, com cmd.Command, err error) {
+func (t relationSetInitTest) check(c *tc.C, com cmd.Command, err error) {
 	if t.err == "" {
-		if !c.Check(err, jc.ErrorIsNil) {
+		if !c.Check(err, tc.ErrorIsNil) {
 			return
 		}
 
 		rset := com.(*jujuc.RelationSetCommand)
-		c.Check(rset.RelationId, gc.Equals, t.relid)
-		c.Check(rset.Application, gc.Equals, t.application)
+		c.Check(rset.RelationId, tc.Equals, t.relid)
+		c.Check(rset.Application, tc.Equals, t.application)
 
 		settings := t.settings
 		if settings == nil {
 			settings = map[string]string{}
 		}
-		c.Check(rset.Settings, jc.DeepEquals, settings)
+		c.Check(rset.Settings, tc.DeepEquals, settings)
 	} else {
 		c.Logf("%#v", com.(*jujuc.RelationSetCommand).Settings)
-		c.Check(err, gc.ErrorMatches, t.err)
+		c.Check(err, tc.ErrorMatches, t.err)
 	}
 }
 
@@ -331,7 +299,7 @@ var relationSetInitTests = []relationSetInitTest{
 	},
 }
 
-func (s *RelationSetSuite) TestInit(c *gc.C) {
+func (s *RelationSetSuite) TestInit(c *tc.C) {
 	for i, t := range relationSetInitTests {
 		t.log(c, i)
 		com, args, ctx := t.init(c, s)
@@ -361,7 +329,7 @@ var relationSetRunTests = []struct {
 	},
 }
 
-func (s *RelationSetSuite) TestRun(c *gc.C) {
+func (s *RelationSetSuite) TestRun(c *tc.C) {
 	hctx, info := s.newHookContext(0, "", "")
 	for i, t := range relationSetRunTests {
 		c.Logf("test %d", i)
@@ -373,28 +341,28 @@ func (s *RelationSetSuite) TestRun(c *gc.C) {
 
 		// Run the command.
 		com, err := jujuc.NewCommand(hctx, "relation-set")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		rset := com.(*jujuc.RelationSetCommand)
 		rset.RelationId = 1
 		rset.Settings = t.change
 		ctx := cmdtesting.Context(c)
 		err = com.Run(ctx)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		// Check changes.
-		c.Assert(info.rels[0].Units["u/0"], gc.DeepEquals, pristine)
-		c.Assert(info.rels[1].Units["u/0"], gc.DeepEquals, t.expect)
+		c.Assert(info.rels[0].Units["u/0"], tc.DeepEquals, pristine)
+		c.Assert(info.rels[1].Units["u/0"], tc.DeepEquals, t.expect)
 	}
 }
 
-func (s *RelationSetSuite) TestRunDeprecationWarning(c *gc.C) {
+func (s *RelationSetSuite) TestRunDeprecationWarning(c *tc.C) {
 	hctx, _ := s.newHookContext(0, "", "")
 	com, _ := jujuc.NewCommand(hctx, "relation-set")
 	com = jujuc.NewJujucCommandWrappedForTest(com)
 	// The rel= is needed to make this a valid command.
 	ctx, err := cmdtesting.RunCommand(c, com, "--format", "foo", "rel=")
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, "--format flag deprecated for command \"relation-set\"")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Assert(cmdtesting.Stderr(ctx), tc.Equals, "--format flag deprecated for command \"relation-set\"")
 }

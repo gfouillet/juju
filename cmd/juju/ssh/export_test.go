@@ -5,16 +5,17 @@ package ssh
 
 import (
 	"context"
+	"net/url"
 
 	"github.com/juju/retry"
 
-	k8sexec "github.com/juju/juju/caas/kubernetes/provider/exec"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/environs/cloudspec"
 	jujussh "github.com/juju/juju/internal/network/ssh"
+	k8sexec "github.com/juju/juju/internal/provider/kubernetes/exec"
 	"github.com/juju/juju/internal/uuid"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
 )
 
 type (
@@ -37,8 +38,8 @@ func (c *sshContainer) CleanupRun() {
 	c.cleanupRun()
 }
 
-func (c *sshContainer) ResolveTarget(target string) (*resolvedTarget, error) {
-	return c.resolveTarget(target)
+func (c *sshContainer) ResolveTarget(ctx context.Context, target string) (*resolvedTarget, error) {
+	return c.resolveTarget(ctx, target)
 }
 
 func (c *sshContainer) SSH(ctx Context, enablePty bool, target *resolvedTarget) error {
@@ -50,7 +51,7 @@ func (c *sshContainer) Copy(ctx Context) error {
 }
 
 func (c *sshContainer) GetExecClient() (k8sexec.Executor, error) {
-	return c.getExecClient()
+	return c.getExecClient(context.TODO())
 }
 
 func (c *sshContainer) ModelName() string {
@@ -71,7 +72,7 @@ func (c *sshContainer) Namespace() string {
 
 type SSHContainerInterfaceForTest interface {
 	CleanupRun()
-	ResolveTarget(string) (*resolvedTarget, error)
+	ResolveTarget(context.Context, string) (*resolvedTarget, error)
 	SSH(Context, bool, *resolvedTarget) error
 	Copy(ctx Context) error
 	GetExecClient() (k8sexec.Executor, error)
@@ -136,7 +137,7 @@ func NewSSHCommandForTest(
 	c.sshMachine.sshClient = sshClient
 	c.sshMachine.leaderAPI = applicationAPI
 	c.statusClient = statusClient
-	c.apiAddr = "localhost:6666"
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
 	c.SetClientStore(clientStore())
 	return c
 }
@@ -157,7 +158,7 @@ func NewSCPCommandForTest(
 	c.sshMachine.sshClient = sshClient
 	c.sshMachine.leaderAPI = applicationAPI
 	c.statusClient = statusClient
-	c.apiAddr = "localhost:6666"
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
 	c.SetClientStore(clientStore())
 	return c
 }
@@ -185,7 +186,7 @@ func NewDebugHooksCommandForTest(
 	c.sshMachine.sshClient = sshClient
 	c.sshMachine.leaderAPI = applicationAPI
 	c.statusClient = statusClient
-	c.apiAddr = "localhost:6666"
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
 	c.SetClientStore(clientStore())
 	return c
 }
@@ -215,7 +216,7 @@ func NewDebugCodeCommandForTest(
 	c.sshMachine.sshClient = sshClient
 	c.sshMachine.leaderAPI = applicationAPI
 	c.statusClient = statusClient
-	c.apiAddr = "localhost:6666"
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
 	c.SetClientStore(clientStore())
 	return c
 }

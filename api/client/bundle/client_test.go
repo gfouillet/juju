@@ -4,9 +4,10 @@
 package bundle_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/bundle"
@@ -15,9 +16,11 @@ import (
 
 type bundleMockSuite struct{}
 
-var _ = gc.Suite(&bundleMockSuite{})
+func TestBundleMockSuite(t *testing.T) {
+	tc.Run(t, &bundleMockSuite{})
+}
 
-func (s *bundleMockSuite) TestGetChangesMapArgs(c *gc.C) {
+func (s *bundleMockSuite) TestGetChangesMapArgs(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -67,13 +70,13 @@ func (s *bundleMockSuite) TestGetChangesMapArgs(c *gc.C) {
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "GetChangesMapArgs", args, res).SetArg(3, results).Return(nil)
 	client := bundle.NewClientFromCaller(mockFacadeCaller)
-	result, err := client.GetChangesMapArgs(bundleURL, bundleYAML)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Errors, gc.DeepEquals, []string(nil))
-	c.Assert(result.Changes, gc.DeepEquals, changes)
+	result, err := client.GetChangesMapArgs(c.Context(), bundleURL, bundleYAML)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Errors, tc.DeepEquals, []string(nil))
+	c.Assert(result.Changes, tc.DeepEquals, changes)
 }
 
-func (s *bundleMockSuite) TestGetChangesMapArgsReturnsErrors(c *gc.C) {
+func (s *bundleMockSuite) TestGetChangesMapArgsReturnsErrors(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -102,13 +105,13 @@ func (s *bundleMockSuite) TestGetChangesMapArgsReturnsErrors(c *gc.C) {
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "GetChangesMapArgs", args, res).SetArg(3, results).Return(nil)
 	client := bundle.NewClientFromCaller(mockFacadeCaller)
-	result, err := client.GetChangesMapArgs(bundleURL, bundleYAML)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Errors, gc.DeepEquals, []string{"Error returned from request"})
-	c.Assert(result.Changes, gc.DeepEquals, []*params.BundleChangesMapArgs(nil))
+	result, err := client.GetChangesMapArgs(c.Context(), bundleURL, bundleYAML)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Errors, tc.DeepEquals, []string{"Error returned from request"})
+	c.Assert(result.Changes, tc.DeepEquals, []*params.BundleChangesMapArgs(nil))
 }
 
-func (s *bundleMockSuite) TestExportBundleLatest(c *gc.C) {
+func (s *bundleMockSuite) TestExportBundleLatest(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -135,7 +138,7 @@ func (s *bundleMockSuite) TestExportBundleLatest(c *gc.C) {
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ExportBundle", args, res).SetArg(3, results).Return(nil)
 	client := bundle.NewClientFromCaller(mockFacadeCaller)
-	result, err := client.ExportBundle(true)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, bundleStr)
+	result, err := client.ExportBundle(c.Context(), true)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, bundleStr)
 }

@@ -3,14 +3,4 @@
 
 package state
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
 // tlm: Tests coming in following PR when integrated back into API

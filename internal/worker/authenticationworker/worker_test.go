@@ -5,21 +5,21 @@ package authenticationworker_test
 
 import (
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/utils/v4/ssh"
 	sshtesting "github.com/juju/utils/v4/ssh/testing"
 	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/core/watcher/watchertest"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/authenticationworker"
 	"github.com/juju/juju/internal/worker/authenticationworker/mocks"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type workerSuite struct {
@@ -30,12 +30,14 @@ type workerSuite struct {
 	existingKeys      []string
 }
 
-var _ = gc.Suite(&workerSuite{})
+func TestWorkerSuite(t *testing.T) {
+	tc.Run(t, &workerSuite{})
+}
 
-func (s *workerSuite) SetUpTest(c *gc.C) {
+func (s *workerSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	// Default ssh user is currently "ubuntu".
-	c.Assert(authenticationworker.SSHUser, gc.Equals, "ubuntu")
+	c.Assert(authenticationworker.SSHUser, tc.Equals, "ubuntu")
 	// Set the ssh user to empty (the current user) as required by the test infrastructure.
 	s.PatchValue(&authenticationworker.SSHUser, "")
 
@@ -49,12 +51,12 @@ func (s *workerSuite) SetUpTest(c *gc.C) {
 	// Set up an existing key (which is not in the environment) in the ssh authorised_keys file.
 	s.existingKeys = []string{sshtesting.ValidKeyTwo.Key + " existinguser@host"}
 	err := ssh.AddKeys(authenticationworker.SSHUser, s.existingKeys...)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 type mockConfig struct {
 	agent.Config
-	c   *gc.C
+	c   *tc.C
 	tag names.Tag
 }
 
@@ -62,11 +64,11 @@ func (mock *mockConfig) Tag() names.Tag {
 	return mock.tag
 }
 
-func agentConfig(c *gc.C, tag names.MachineTag) *mockConfig {
+func agentConfig(c *tc.C, tag names.MachineTag) *mockConfig {
 	return &mockConfig{c: c, tag: tag}
 }
 
-func (s *workerSuite) waitSSHKeys(c *gc.C, expected []string) {
+func (s *workerSuite) waitSSHKeys(c *tc.C, expected []string) {
 	timeout := time.After(coretesting.LongWait)
 	for {
 		select {
@@ -74,7 +76,7 @@ func (s *workerSuite) waitSSHKeys(c *gc.C, expected []string) {
 			c.Fatalf("timeout while waiting for authoirsed ssh keys to change")
 		case <-time.After(coretesting.ShortWait):
 			keys, err := ssh.ListKeys(authenticationworker.SSHUser, ssh.FullKeys)
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 			keysStr := strings.Join(keys, "\n")
 			expectedStr := strings.Join(expected, "\n")
 			if expectedStr != keysStr {
@@ -85,7 +87,7 @@ func (s *workerSuite) waitSSHKeys(c *gc.C, expected []string) {
 	}
 }
 
-func (s *workerSuite) TestKeyUpdateRetainsExisting(c *gc.C) {
+func (s *workerSuite) TestKeyUpdateRetainsExisting(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -94,22 +96,22 @@ func (s *workerSuite) TestKeyUpdateRetainsExisting(c *gc.C) {
 
 	tag := names.NewMachineTag("666")
 	client := mocks.NewMockClient(ctrl)
-	client.EXPECT().AuthorisedKeys(tag).Return(s.existingModelKeys, nil)
-	client.EXPECT().WatchAuthorisedKeys(tag).Return(watch, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return(s.existingModelKeys, nil)
+	client.EXPECT().WatchAuthorisedKeys(gomock.Any(), tag).Return(watch, nil)
 
 	authWorker, err := authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, authWorker)
 
 	newKeyWithCommentPrefix := sshtesting.ValidKeyThree.Key + " Juju:user@host"
-	client.EXPECT().AuthorisedKeys(tag).Return([]string{newKeyWithCommentPrefix}, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{newKeyWithCommentPrefix}, nil)
 
 	ch <- struct{}{}
 
 	s.waitSSHKeys(c, append(s.existingKeys, newKeyWithCommentPrefix))
 }
 
-func (s *workerSuite) TestNewKeysInJujuAreSavedOnStartup(c *gc.C) {
+func (s *workerSuite) TestNewKeysInJujuAreSavedOnStartup(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -120,22 +122,22 @@ func (s *workerSuite) TestNewKeysInJujuAreSavedOnStartup(c *gc.C) {
 
 	tag := names.NewMachineTag("666")
 	client := mocks.NewMockClient(ctrl)
-	client.EXPECT().AuthorisedKeys(tag).Return([]string{existingKey}, nil)
-	client.EXPECT().WatchAuthorisedKeys(tag).Return(watch, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{existingKey}, nil)
+	client.EXPECT().WatchAuthorisedKeys(gomock.Any(), tag).Return(watch, nil)
 
 	authWorker, err := authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, authWorker)
 
 	newKeyWithCommentPrefix := sshtesting.ValidKeyThree.Key + " Juju:user@host"
-	client.EXPECT().AuthorisedKeys(tag).Return([]string{newKeyWithCommentPrefix}, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{newKeyWithCommentPrefix}, nil)
 
 	ch <- struct{}{}
 
 	s.waitSSHKeys(c, append(s.existingKeys, newKeyWithCommentPrefix))
 }
 
-func (s *workerSuite) TestDeleteKey(c *gc.C) {
+func (s *workerSuite) TestDeleteKey(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -147,11 +149,11 @@ func (s *workerSuite) TestDeleteKey(c *gc.C) {
 
 	tag := names.NewMachineTag("666")
 	client := mocks.NewMockClient(ctrl)
-	client.EXPECT().AuthorisedKeys(tag).Return(append(s.existingModelKeys, anotherKey), nil).Times(2)
-	client.EXPECT().WatchAuthorisedKeys(tag).Return(watch, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return(append(s.existingModelKeys, anotherKey), nil).Times(2)
+	client.EXPECT().WatchAuthorisedKeys(gomock.Any(), tag).Return(watch, nil)
 
 	authWorker, err := authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, authWorker)
 
 	ch <- struct{}{}
@@ -160,13 +162,13 @@ func (s *workerSuite) TestDeleteKey(c *gc.C) {
 	s.waitSSHKeys(c, append(s.existingKeys, s.existingEnvKey, anotherKeyWithCommentPrefix))
 
 	// Delete the original key and check anotherKey plus the existing keys remain.
-	client.EXPECT().AuthorisedKeys(tag).Return([]string{anotherKey}, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{anotherKey}, nil)
 	ch <- struct{}{}
 
 	s.waitSSHKeys(c, append(s.existingKeys, anotherKeyWithCommentPrefix))
 }
 
-func (s *workerSuite) TestMultipleChanges(c *gc.C) {
+func (s *workerSuite) TestMultipleChanges(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -175,25 +177,25 @@ func (s *workerSuite) TestMultipleChanges(c *gc.C) {
 
 	tag := names.NewMachineTag("666")
 	client := mocks.NewMockClient(ctrl)
-	client.EXPECT().AuthorisedKeys(tag).Return(s.existingModelKeys, nil)
-	client.EXPECT().WatchAuthorisedKeys(tag).Return(watch, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return(s.existingModelKeys, nil)
+	client.EXPECT().WatchAuthorisedKeys(gomock.Any(), tag).Return(watch, nil)
 
 	authWorker, err := authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, authWorker)
 
 	// Perform a set to add a key and delete a key.
 	// added: key 3
 	// deleted: key 1 (existing env key)
 	yetAnotherKeyWithComment := sshtesting.ValidKeyThree.Key + " Juju:yetanother@host"
-	client.EXPECT().AuthorisedKeys(tag).Return([]string{yetAnotherKeyWithComment}, nil)
+	client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{yetAnotherKeyWithComment}, nil)
 
 	ch <- struct{}{}
 
 	s.waitSSHKeys(c, append(s.existingKeys, yetAnotherKeyWithComment))
 }
 
-func (s *workerSuite) TestWorkerRestart(c *gc.C) {
+func (s *workerSuite) TestWorkerRestart(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -203,17 +205,17 @@ func (s *workerSuite) TestWorkerRestart(c *gc.C) {
 	tag := names.NewMachineTag("666")
 	client := mocks.NewMockClient(ctrl)
 
-	client.EXPECT().WatchAuthorisedKeys(tag).Return(watch, nil).MinTimes(1)
+	client.EXPECT().WatchAuthorisedKeys(gomock.Any(), tag).Return(watch, nil).MinTimes(1)
 
 	yetAnotherKeyWithCommentPrefix := sshtesting.ValidKeyThree.Key + " Juju:yetanother@host"
 
 	gomock.InOrder(
-		client.EXPECT().AuthorisedKeys(tag).Return(s.existingModelKeys, nil).Times(2),
-		client.EXPECT().AuthorisedKeys(tag).Return([]string{yetAnotherKeyWithCommentPrefix}, nil),
+		client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return(s.existingModelKeys, nil).Times(2),
+		client.EXPECT().AuthorisedKeys(gomock.Any(), tag).Return([]string{yetAnotherKeyWithCommentPrefix}, nil),
 	)
 
 	authWorker, err := authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer authWorker.Kill()
 
 	// Stop the worker and delete and add keys from the environment while it is down.
@@ -222,7 +224,7 @@ func (s *workerSuite) TestWorkerRestart(c *gc.C) {
 	workertest.CleanKill(c, authWorker)
 
 	authWorker, err = authenticationworker.NewWorker(client, agentConfig(c, names.NewMachineTag("666")))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	ch <- struct{}{}
 

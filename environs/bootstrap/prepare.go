@@ -5,8 +5,9 @@ package bootstrap
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/model"
@@ -14,8 +15,6 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/internal/featureflag"
-	"github.com/juju/juju/jujuclient"
 )
 
 const (
@@ -132,10 +131,10 @@ func PrepareController(
 	}
 	if isCAASController {
 		details.ModelType = model.CAAS
-		env, err = caas.Open(ctx, p, openParams)
+		env, err = caas.Open(ctx, p, openParams, environs.NoopCredentialInvalidator())
 	} else {
 		details.ModelType = model.IAAS
-		env, err = environs.Open(ctx, p, openParams)
+		env, err = environs.Open(ctx, p, openParams, environs.NoopCredentialInvalidator())
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -156,8 +155,8 @@ func decorateAndWriteInfo(
 	details prepareDetails,
 	controllerName, modelName string,
 ) error {
-	qualifiedModelName := jujuclient.JoinOwnerModelName(
-		names.NewUserTag(details.AccountDetails.User),
+	qualifiedModelName := jujuclient.QualifyModelName(
+		model.QualifierFromUserTag(names.NewUserTag(details.AccountDetails.User)).String(),
 		modelName,
 	)
 	if err := store.AddController(controllerName, details.ControllerDetails); err != nil {
@@ -190,7 +189,7 @@ func prepare(
 		return cfg, details, errors.Trace(err)
 	}
 
-	cfg, err = p.PrepareConfig(ctx, environs.PrepareConfigParams{Cloud: args.Cloud, Config: cfg})
+	err = p.ValidateCloud(ctx, args.Cloud)
 	if err != nil {
 		return cfg, details, errors.Trace(err)
 	}
@@ -236,9 +235,6 @@ func prepare(
 	details.Password = args.AdminSecret
 	details.LastKnownAccess = string(permission.SuperuserAccess)
 	details.ModelUUID = cfg.UUID()
-	if featureflag.Enabled(featureflag.Branches) || featureflag.Enabled(featureflag.Generations) {
-		details.ActiveBranch = model.GenerationMaster
-	}
 	details.ControllerDetails.Cloud = args.Cloud.Name
 	details.ControllerDetails.CloudRegion = args.Cloud.Region
 	details.ControllerDetails.CloudType = args.Cloud.Type
@@ -256,7 +252,7 @@ func prepare(
 		if len(args.Cloud.CACertificates) > 0 && args.Cloud.CACertificates[0] != "" {
 			return cfg, details, errors.NotValidf("cloud with both skip-TLS-verify=true and CA certificates")
 		}
-		logger.Warningf("controller %v is configured to skip validity checks on the server's certificate", args.ControllerName)
+		logger.Warningf(ctx, "controller %v is configured to skip validity checks on the server's certificate", args.ControllerName)
 	}
 
 	return cfg, details, nil

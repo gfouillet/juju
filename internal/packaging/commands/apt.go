@@ -4,18 +4,19 @@
 
 package commands
 
-import "github.com/juju/juju/internal/packaging/config"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/juju/proxy"
+
+	"github.com/juju/juju/internal/packaging/config"
+)
 
 const (
 	// AptConfFilePath is the full file path for the proxy settings that are
 	// written by cloud-init and the machine environ worker.
 	AptConfFilePath = "/etc/apt/apt.conf.d/95-juju-proxy-settings"
-
-	// the basic command for all dpkg calls:
-	dpkg = "dpkg"
-
-	// the basic command for all dpkg-query calls:
-	dpkgquery = "dpkg-query"
 
 	// the basic command for all apt-get calls:
 	//		--force-confold is passed to dpkg to never overwrite config files
@@ -30,9 +31,6 @@ const (
 	//		--yes to never prompt for confirmation
 	addaptrepo = "add-apt-repository --yes"
 
-	// the basic command for all apt-config calls:
-	aptconfig = "apt-config dump"
-
 	// the basic format for specifying a proxy option for apt:
 	aptProxySettingFormat = "Acquire::%s::Proxy %q;"
 
@@ -40,43 +38,97 @@ const (
 	aptNoProxySettingFormat = "Acquire::%s::Proxy::%q \"DIRECT\";"
 )
 
-// aptCmder is the packageCommander instantiation for apt-based systems.
-var aptCmder = packageCommander{
-	prereq:                buildCommand(aptget, "install python-software-properties"),
-	update:                buildCommand(aptget, "update"),
-	upgrade:               buildCommand(aptget, "upgrade"),
-	install:               buildCommand(aptget, "install"),
-	remove:                buildCommand(aptget, "remove"),
-	purge:                 buildCommand(aptget, "purge"),
-	search:                buildCommand(aptcache, "search --names-only ^%s$"),
-	isInstalled:           buildCommand(dpkgquery, "-s %s"),
-	listAvailable:         buildCommand(aptcache, "pkgnames"),
-	listInstalled:         buildCommand(dpkg, "--get-selections"),
-	addRepository:         buildCommand(addaptrepo, "%q"),
-	listRepositories:      buildCommand(`sed -r -n "s|^deb(-src)? (.*)|\2|p"`, "/etc/apt/sources.list"),
-	removeRepository:      buildCommand(addaptrepo, "--remove ppa:%s"),
-	cleanup:               buildCommand(aptget, "autoremove"),
-	getProxy:              buildCommand(aptconfig, "Acquire::http::Proxy Acquire::https::Proxy Acquire::ftp::Proxy"),
-	proxySettingsFormat:   aptProxySettingFormat,
-	setProxy:              buildCommand("echo %s >> ", AptConfFilePath),
-	noProxySettingsFormat: aptNoProxySettingFormat,
-	setNoProxy:            buildCommand("echo %s >> ", AptConfFilePath),
-	setMirrorCommands: func(newArchiveMirror, newSecurityMirror string) []string {
-		var cmds []string
-		if newArchiveMirror != "" {
-			cmds = append(cmds, "old_archive_mirror=$("+config.ExtractAptArchiveSource+")")
-			cmds = append(cmds, "new_archive_mirror="+newArchiveMirror)
-			cmds = append(cmds, `sed -i s,$old_archive_mirror,$new_archive_mirror, `+config.AptSourcesFile)
-			cmds = append(cmds, renameAptListFilesCommands("$new_archive_mirror", "$old_archive_mirror")...)
+var (
+	// listRepositoriesCmd is a shell command that will list all the currently
+	// configured apt repositories.
+	listRepositoriesCmd = buildCommand(aptcache, `policy | grep http | awk '{ $1="" ; print }' | sed 's/^ //g'`)
+
+	// extractAptArchiveSource is a shell command that will extract the
+	// currently configured APT archive source location. We assume that
+	// the first source for "main" in the file is the one that
+	// should be replaced throughout the file.
+	extractAptArchiveSource = buildCommand(listRepositoriesCmd, ` | grep "$(lsb_release -c -s)/main" | awk '{print $1; exit}'`)
+
+	// extractAptSecuritySource is a shell command that will extract the
+	// currently configured APT security source location. We assume that
+	// the first source for "main" in the file is the one that
+	// should be replaced throughout the file.
+	extractAptSecuritySource = buildCommand(listRepositoriesCmd, ` | grep "$(lsb_release -c -s)-security/main" | awk '{print $1; exit}'`)
+)
+
+// NewAptPackageCommander returns an AptPackageCommander.
+func NewAptPackageCommander() AptPackageCommander {
+	return AptPackageCommander{}
+}
+
+// AptPackageCommander provides runnable shell commands for various apt-based
+// packaging operations.
+type AptPackageCommander struct{}
+
+// UpdateCmd returns the command to update the local package list.
+func (AptPackageCommander) UpdateCmd() string {
+	return buildCommand(aptget, "update")
+}
+
+// UpgradeCmd returns the command which issues an upgrade on all packages
+// with available newer versions.
+func (AptPackageCommander) UpgradeCmd() string {
+	return buildCommand(aptget, "upgrade")
+}
+
+// InstallCmd returns a *single* command that installs the given package(s).
+func (AptPackageCommander) InstallCmd(packages ...string) string {
+	args := append([]string{aptget, "install"}, packages...)
+	return buildCommand(args...)
+}
+
+// AddRepositoryCmd returns the command that adds a repository to the
+// list of available repositories.
+func (AptPackageCommander) AddRepositoryCmd(repo string) string {
+	return buildCommand(addaptrepo, fmt.Sprintf("%q", repo))
+}
+
+// SetMirrorCommands returns the commands to update the package archive and security mirrors.
+func (AptPackageCommander) SetMirrorCommands(newArchiveMirror, newSecurityMirror string) []string {
+	var cmds []string
+	if newArchiveMirror != "" {
+		cmds = append(cmds, fmt.Sprintf("old_archive_mirror=$(%s)", extractAptArchiveSource))
+		cmds = append(cmds, fmt.Sprintf("new_archive_mirror=%q", newArchiveMirror))
+		cmds = append(cmds, fmt.Sprintf("[ -f %q ] && sed -i s,$old_archive_mirror,$new_archive_mirror, %q", config.LegacyAptSourcesFile, config.LegacyAptSourcesFile))
+		cmds = append(cmds, fmt.Sprintf("[ -f %q ] && sed -i s,$old_archive_mirror,$new_archive_mirror, %q", config.AptSourcesFile, config.AptSourcesFile))
+		cmds = append(cmds, renameAptListFilesCommands("$new_archive_mirror", "$old_archive_mirror")...)
+	}
+	if newSecurityMirror != "" {
+		cmds = append(cmds, fmt.Sprintf("old_security_mirror=$(%s)", extractAptSecuritySource))
+		cmds = append(cmds, fmt.Sprintf("new_security_mirror=%q", newSecurityMirror))
+		cmds = append(cmds, fmt.Sprintf("[ -f %q ] && sed -i s,$old_security_mirror,$new_security_mirror, %q", config.LegacyAptSourcesFile, config.LegacyAptSourcesFile))
+		cmds = append(cmds, fmt.Sprintf("[ -f %q ] && sed -i s,$old_security_mirror,$new_security_mirror, %q", config.AptSourcesFile, config.AptSourcesFile))
+		cmds = append(cmds, renameAptListFilesCommands("$new_security_mirror", "$old_security_mirror")...)
+	}
+	return cmds
+}
+
+// ProxyConfigContents returns the format expected by the package manager
+// for proxy settings which can be written directly to the config file.
+func (AptPackageCommander) ProxyConfigContents(settings proxy.Settings) string {
+	var lines []string
+	if settings.Http != "" {
+		lines = append(lines, fmt.Sprintf(aptProxySettingFormat, "http", settings.Http))
+	}
+	if settings.Https != "" {
+		lines = append(lines, fmt.Sprintf(aptProxySettingFormat, "https", settings.Https))
+	}
+	if settings.Ftp != "" {
+		lines = append(lines, fmt.Sprintf(aptProxySettingFormat, "ftp", settings.Ftp))
+	}
+	for _, host := range strings.Split(settings.NoProxy, ",") {
+		if host != "" {
+			lines = append(lines, fmt.Sprintf(aptNoProxySettingFormat, "http", host))
+			lines = append(lines, fmt.Sprintf(aptNoProxySettingFormat, "https", host))
+			lines = append(lines, fmt.Sprintf(aptNoProxySettingFormat, "ftp", host))
 		}
-		if newSecurityMirror != "" {
-			cmds = append(cmds, "old_security_mirror=$("+config.ExtractAptSecuritySource+")")
-			cmds = append(cmds, "new_security_mirror="+newSecurityMirror)
-			cmds = append(cmds, `sed -i s,$old_security_mirror,$new_security_mirror, `+config.AptSourcesFile)
-			cmds = append(cmds, renameAptListFilesCommands("$new_security_mirror", "$old_security_mirror")...)
-		}
-		return cmds
-	},
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renameAptListFilesCommands takes a new and old mirror string,

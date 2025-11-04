@@ -6,10 +6,10 @@ package jujuc
 import (
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ActionLogCommand implements the action-log command.
@@ -27,7 +27,7 @@ func (c *ActionLogCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:    "action-log",
 		Args:    "<message>",
-		Purpose: "record a progress message for the current action",
+		Purpose: "Record a progress message for the current action.",
 	})
 }
 
@@ -40,5 +40,5 @@ func (c *ActionLogCommand) Init(args []string) error {
 }
 
 func (c *ActionLogCommand) Run(ctx *cmd.Context) error {
-	return c.ctx.LogActionMessage(c.Message)
+	return c.ctx.LogActionMessage(ctx, c.Message)
 }

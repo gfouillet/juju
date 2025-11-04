@@ -5,13 +5,14 @@ package state
 
 import (
 	"context"
+	"testing"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	schematesting "github.com/juju/juju/domain/schema/testing"
+	"github.com/juju/juju/internal/errors"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
@@ -21,68 +22,70 @@ type stateSuite struct {
 	state *State
 }
 
-var _ = gc.Suite(&stateSuite{})
+func TestStateSuite(t *testing.T) {
+	tc.Run(t, &stateSuite{})
+}
 
-func (s *stateSuite) SetUpTest(c *gc.C) {
+func (s *stateSuite) SetUpTest(c *tc.C) {
 	s.ControllerSuite.SetUpTest(c)
 
 	s.state = NewState(s.TxnRunnerFactory(), loggertesting.WrapCheckLog(c))
 }
 
-func (s *stateSuite) TestGetFlagNotFound(c *gc.C) {
-	value, err := s.state.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
-	c.Assert(value, jc.IsFalse)
+func (s *stateSuite) TestGetFlagNotFound(c *tc.C) {
+	value, err := s.state.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIs, coreerrors.NotFound)
+	c.Assert(value, tc.IsFalse)
 }
 
-func (s *stateSuite) TestGetFlagFound(c *gc.C) {
-	err := s.state.SetFlag(context.Background(), "foo", true, "foo set to true")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestGetFlagFound(c *tc.C) {
+	err := s.state.SetFlag(c.Context(), "foo", true, "foo set to true")
+	c.Assert(err, tc.ErrorIsNil)
 
-	value, err := s.state.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(value, jc.IsTrue)
+	value, err := s.state.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(value, tc.IsTrue)
 }
 
-func (s *stateSuite) TestSetFlag(c *gc.C) {
-	err := s.state.SetFlag(context.Background(), "foo", true, "foo set to true")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestSetFlag(c *tc.C) {
+	err := s.state.SetFlag(c.Context(), "foo", true, "foo set to true")
+	c.Assert(err, tc.ErrorIsNil)
 
 	var flag dbFlag
-	err = s.TxnRunner().Txn(context.Background(), func(ctx context.Context, tx *sqlair.TX) error {
+	err = s.TxnRunner().Txn(c.Context(), func(ctx context.Context, tx *sqlair.TX) error {
 		stmt, err := sqlair.Prepare(`
 SELECT (value, description) AS (&dbFlag.*) 
 FROM   flag 
 WHERE  name = 'foo'`, flag)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		err = tx.Query(ctx, stmt).Get(&flag)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		if !flag.Value {
 			return errors.Errorf("unexpected value: %v", flag.Value)
 		}
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(flag.Value, jc.IsTrue)
-	c.Assert(flag.Description, gc.Equals, "foo set to true")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(flag.Value, tc.IsTrue)
+	c.Assert(flag.Description, tc.Equals, "foo set to true")
 }
 
-func (s *stateSuite) TestSetFlagAlreadyFound(c *gc.C) {
-	err := s.state.SetFlag(context.Background(), "foo", true, "foo set to true")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *stateSuite) TestSetFlagAlreadyFound(c *tc.C) {
+	err := s.state.SetFlag(c.Context(), "foo", true, "foo set to true")
+	c.Assert(err, tc.ErrorIsNil)
 
-	value, err := s.state.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(value, jc.IsTrue)
+	value, err := s.state.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(value, tc.IsTrue)
 
-	err = s.state.SetFlag(context.Background(), "foo", false, "foo set to false")
-	c.Assert(err, jc.ErrorIsNil)
+	err = s.state.SetFlag(c.Context(), "foo", false, "foo set to false")
+	c.Assert(err, tc.ErrorIsNil)
 
-	value, err = s.state.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(value, jc.IsFalse)
+	value, err = s.state.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(value, tc.IsFalse)
 }

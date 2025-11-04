@@ -27,12 +27,11 @@ import (
 type ResolverConfig struct {
 	ModelType           model.ModelType
 	ClearResolved       func() error
-	ReportHookError     func(hook.Info) error
+	ReportHookError     func(stdcontext.Context, hook.Info) error
 	ShouldRetryHooks    bool
 	StartRetryHookTimer func()
 	StopRetryHookTimer  func()
 	VerifyCharmProfile  resolver.Resolver
-	UpgradeSeries       resolver.Resolver
 	Reboot              resolver.Resolver
 	Leadership          resolver.Resolver
 	Actions             resolver.Resolver
@@ -67,7 +66,7 @@ func (s *uniterResolver) NextOp(
 	badge := "<unspecified>"
 	defer func() {
 		if err != nil && errors.Cause(err) != resolver.ErrNoOperation && err != resolver.ErrRestart {
-			s.config.Logger.Debugf("next %q operation could not be resolved: %v", badge, err)
+			s.config.Logger.Debugf(stdcontext.Background(), "next %q operation could not be resolved: %v", badge, err)
 		}
 	}()
 
@@ -76,21 +75,9 @@ func (s *uniterResolver) NextOp(
 	}
 	log := s.config.Logger
 
-	// Operations for series-upgrade need to be resolved early,
-	// in particular because no other operations should be run when the unit
-	// has completed preparation and is waiting for upgrade completion.
-	badge = "upgrade series"
-	op, err := s.config.UpgradeSeries.NextOp(ctx, localState, remoteState, opFactory)
-	if errors.Cause(err) != resolver.ErrNoOperation {
-		if errors.Cause(err) == resolver.ErrDoNotProceed {
-			return nil, resolver.ErrNoOperation
-		}
-		return op, err
-	}
-
 	// Check if we need to notify the charms because a reboot was detected.
 	badge = "reboot"
-	op, err = s.config.Reboot.NextOp(ctx, localState, remoteState, opFactory)
+	op, err := s.config.Reboot.NextOp(ctx, localState, remoteState, opFactory)
 	if errors.Cause(err) != resolver.ErrNoOperation {
 		return op, err
 	}
@@ -101,7 +88,7 @@ func (s *uniterResolver) NextOp(
 			return s.nextOpConflicted(ctx, localState, remoteState, opFactory)
 		}
 		// continue upgrading the charm
-		log.Infof("resuming charm upgrade")
+		log.Infof(stdcontext.TODO(), "resuming charm upgrade")
 		return s.newUpgradeOperation(ctx, localState, remoteState, opFactory)
 	}
 
@@ -167,7 +154,7 @@ func (s *uniterResolver) NextOp(
 	// If we are to shut down, we don't want to start running any more queued/pending hooks.
 	if remoteState.Shutdown {
 		badge = "shutdown"
-		log.Debugf("unit agent is shutting down, will not run pending/queued hooks")
+		log.Debugf(stdcontext.TODO(), "unit agent is shutting down, will not run pending/queued hooks")
 		return s.nextOp(ctx, localState, remoteState, opFactory)
 	}
 
@@ -180,12 +167,12 @@ func (s *uniterResolver) NextOp(
 		switch step {
 		case operation.Pending:
 			badge = "resolve hook"
-			log.Infof("awaiting error resolution for %q hook", localState.Hook.Kind)
+			log.Infof(stdcontext.TODO(), "awaiting error resolution for %q hook", localState.Hook.Kind)
 			return s.nextOpHookError(ctx, localState, remoteState, opFactory)
 
 		case operation.Queued:
 			badge = "queued hook"
-			log.Infof("found queued %q hook", localState.Hook.Kind)
+			log.Infof(stdcontext.TODO(), "found queued %q hook", localState.Hook.Kind)
 			if localState.Hook.Kind == hooks.Install {
 				// Special case: handle install in nextOp,
 				// so we do nothing when the unit is dying.
@@ -202,12 +189,12 @@ func (s *uniterResolver) NextOp(
 				// If it's set, the charm url will parse.
 				curl := jujucharm.MustParseURL(localState.CharmURL)
 				if curl != nil && wrench.IsActive("hooks", fmt.Sprintf("%s-%s-error", curl.Name, localState.Hook.Kind)) {
-					s.config.Logger.Errorf("commit hook %q failed due to a wrench in the works", localState.Hook.Kind)
+					s.config.Logger.Errorf(stdcontext.TODO(), "commit hook %q failed due to a wrench in the works", localState.Hook.Kind)
 					return nil, errors.Errorf("commit hook %q failed due to a wrench in the works", localState.Hook.Kind)
 				}
 			}
 
-			log.Infof("committing %q hook", localState.Hook.Kind)
+			log.Infof(stdcontext.TODO(), "committing %q hook", localState.Hook.Kind)
 			return opFactory.NewSkipHook(*localState.Hook)
 
 		default:
@@ -216,7 +203,7 @@ func (s *uniterResolver) NextOp(
 
 	case operation.Continue:
 		badge = "idle"
-		log.Debugf("no operations in progress; waiting for changes")
+		log.Debugf(stdcontext.TODO(), "no operations in progress; waiting for changes")
 		return s.nextOp(ctx, localState, remoteState, opFactory)
 
 	default:
@@ -251,7 +238,7 @@ func (s *uniterResolver) nextOpConflicted(
 		}
 		return opFactory.NewResolvedUpgrade(localState.CharmURL)
 	}
-	if remoteState.ForceCharmUpgrade && s.charmModified(localState, remoteState) {
+	if remoteState.ForceCharmUpgrade && s.charmModified(ctx, localState, remoteState) {
 		return opFactory.NewRevertUpgrade(remoteState.CharmURL)
 	}
 	return nil, resolver.ErrWaiting
@@ -282,11 +269,11 @@ func (s *uniterResolver) nextOpHookError(
 ) (operation.Operation, error) {
 
 	// Report the hook error.
-	if err := s.config.ReportHookError(*localState.Hook); err != nil {
+	if err := s.config.ReportHookError(ctx, *localState.Hook); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	if remoteState.ForceCharmUpgrade && s.charmModified(localState, remoteState) {
+	if remoteState.ForceCharmUpgrade && s.charmModified(ctx, localState, remoteState) {
 		return s.newUpgradeOperation(ctx, localState, remoteState, opFactory)
 	}
 
@@ -332,18 +319,18 @@ func (s *uniterResolver) nextOpHookError(
 	}
 }
 
-func (s *uniterResolver) charmModified(local resolver.LocalState, remote remotestate.Snapshot) bool {
+func (s *uniterResolver) charmModified(ctx stdcontext.Context, local resolver.LocalState, remote remotestate.Snapshot) bool {
 	// CAAS models may not yet have read the charm url from state.
 	if remote.CharmURL == "" {
 		return false
 	}
 	if local.CharmURL != remote.CharmURL {
-		s.config.Logger.Debugf("upgrade from %v to %v", local.CharmURL, remote.CharmURL)
+		s.config.Logger.Debugf(ctx, "upgrade from %v to %v", local.CharmURL, remote.CharmURL)
 		return true
 	}
 
 	if local.CharmModifiedVersion != remote.CharmModifiedVersion {
-		s.config.Logger.Debugf("upgrade from CharmModifiedVersion %v to %v", local.CharmModifiedVersion, remote.CharmModifiedVersion)
+		s.config.Logger.Debugf(ctx, "upgrade from CharmModifiedVersion %v to %v", local.CharmModifiedVersion, remote.CharmModifiedVersion)
 		return true
 	}
 	return false
@@ -398,7 +385,7 @@ func (s *uniterResolver) nextOp(
 		return opFactory.NewRunHook(hook.Info{Kind: hooks.Install})
 	}
 
-	if s.charmModified(localState, remoteState) {
+	if s.charmModified(ctx, localState, remoteState) {
 		return s.newUpgradeOperation(ctx, localState, remoteState, opFactory)
 	}
 

@@ -6,16 +6,16 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/credential"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
+	"github.com/juju/juju/core/user"
 	"github.com/juju/juju/domain/credential/service"
 	"github.com/juju/juju/domain/credential/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 // RegisterExport registers the export operations with the given coordinator.
@@ -64,18 +64,22 @@ func (e *exportOperation) Execute(ctx context.Context, model description.Model) 
 		// Not set.
 		return nil
 	}
+	name, err := user.NewName(credInfo.Owner())
+	if err != nil {
+		return errors.Capture(err)
+	}
 	key := credential.Key{
 		Cloud: credInfo.Cloud(),
-		Owner: credInfo.Owner(),
+		Owner: name,
 		Name:  credInfo.Name(),
 	}
 	cred, err := e.service.CloudCredential(ctx, key)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	model.SetCloudCredential(description.CloudCredentialArgs{
-		Owner:      names.NewUserTag(key.Owner),
-		Cloud:      names.NewCloudTag(key.Cloud),
+		Owner:      key.Owner.Name(),
+		Cloud:      key.Cloud,
 		Name:       key.Name,
 		AuthType:   string(cred.AuthType()),
 		Attributes: cred.Attributes(),

@@ -6,13 +6,14 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
+	corestorage "github.com/juju/juju/core/storage"
 	"github.com/juju/juju/domain/storage/service"
 	"github.com/juju/juju/domain/storage/state"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/storage"
 )
 
@@ -23,10 +24,10 @@ type Coordinator interface {
 }
 
 // RegisterImport registers the import operations with the given coordinator.
-func RegisterImport(coordinator Coordinator, registry storage.ProviderRegistry, logger logger.Logger) {
+func RegisterImport(coordinator Coordinator, storageRegistryGetter corestorage.ModelStorageRegistryGetter, logger logger.Logger) {
 	coordinator.Add(&importOperation{
-		registry: registry,
-		logger:   logger,
+		storageRegistryGetter: storageRegistryGetter,
+		logger:                logger,
 	})
 }
 
@@ -39,9 +40,9 @@ type ImportService interface {
 type importOperation struct {
 	modelmigration.BaseOperation
 
-	registry storage.ProviderRegistry
-	service  ImportService
-	logger   logger.Logger
+	storageRegistryGetter corestorage.ModelStorageRegistryGetter
+	service               ImportService
+	logger                logger.Logger
 }
 
 // Name returns the name of this operation.
@@ -52,7 +53,7 @@ func (i *importOperation) Name() string {
 // Setup implements Operation.
 func (i *importOperation) Setup(scope modelmigration.Scope) error {
 	i.service = service.NewService(
-		state.NewState(scope.ModelDB()), i.logger, i.registry)
+		state.NewState(scope.ModelDB()), i.logger, i.storageRegistryGetter)
 	return nil
 }
 
@@ -61,7 +62,7 @@ func (i *importOperation) Execute(ctx context.Context, model description.Model) 
 	for _, pool := range model.StoragePools() {
 		err := i.service.CreateStoragePool(ctx, pool.Name(), storage.ProviderType(pool.Provider()), pool.Attributes())
 		if err != nil {
-			return errors.Annotatef(err, "creating storage pool %q", pool.Name())
+			return errors.Errorf("creating storage pool %q: %w", pool.Name(), err)
 		}
 	}
 	return nil

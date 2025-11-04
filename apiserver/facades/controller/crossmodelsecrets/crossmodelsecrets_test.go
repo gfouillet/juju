@@ -5,48 +5,51 @@ package crossmodelsecrets_test
 
 import (
 	"context"
-	"time"
+	"testing"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
-	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/crossmodel"
 	"github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets"
-	"github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets/mocks"
+	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/model"
+	modeltesting "github.com/juju/juju/core/model/testing"
+	"github.com/juju/juju/core/offer"
+	"github.com/juju/juju/core/relation"
 	coresecrets "github.com/juju/juju/core/secrets"
-	secretservice "github.com/juju/juju/domain/secret/service"
+	"github.com/juju/juju/core/unit"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
+	"github.com/juju/juju/domain/secret/service"
 	secretbackendservice "github.com/juju/juju/domain/secretbackend/service"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/secrets/provider"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
-
-var _ = gc.Suite(&CrossModelSecretsSuite{})
 
 type CrossModelSecretsSuite struct {
 	coretesting.BaseSuite
 
-	resources            *common.Resources
-	secretService        *mocks.MockSecretService
-	secretBackendService *mocks.MockSecretBackendService
-	crossModelState      *mocks.MockCrossModelState
-	stateBackend         *mocks.MockStateBackend
+	bakery *mockBakery
+
+	modelUUID model.UUID
+
+	authContext   *MockCrossModelAuthContext
+	authenticator *MockMacaroonAuthenticator
+
+	secretBackendService      *MockSecretBackendService
+	secretService             *MockSecretService
+	crossModelRelationService *MockCrossModelRelationService
 
 	facade *crossmodelsecrets.CrossModelSecretsAPI
+}
 
-	authContext *crossmodel.AuthContext
-	bakery      authentication.ExpirableStorageBakery
+func TestCrossModelSecretsSuite(t *testing.T) {
+	tc.Run(t, &CrossModelSecretsSuite{})
 }
 
 type testLocator struct {
@@ -67,63 +70,61 @@ type mockBakery struct {
 	*bakery.Bakery
 }
 
-func (m *mockBakery) ExpireStorageAfter(_ time.Duration) (authentication.ExpirableStorageBakery, error) {
-	return m, nil
-}
-
-func (m *mockBakery) Auth(_ context.Context, mss ...macaroon.Slice) *bakery.AuthChecker {
-	return m.Bakery.Checker.Auth(mss...)
-}
-
 func (m *mockBakery) NewMacaroon(ctx context.Context, version bakery.Version, caveats []checkers.Caveat, ops ...bakery.Op) (*bakery.Macaroon, error) {
 	return m.Bakery.Oven.NewMacaroon(ctx, version, caveats, ops...)
 }
 
-func (s *CrossModelSecretsSuite) SetUpTest(c *gc.C) {
+func (s *CrossModelSecretsSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
-	s.resources = common.NewResources()
-	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
 
 	key, err := bakery.GenerateKey()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	locator := testLocator{key.Public}
-	bakery := bakery.New(bakery.BakeryParams{
-		Locator:       locator,
-		Key:           bakery.MustGenerateKey(),
-		OpsAuthorizer: crossmodel.CrossModelAuthorizer{},
-	})
-	s.bakery = &mockBakery{bakery}
-	s.authContext, err = crossmodel.NewAuthContext(
-		nil, key, crossmodel.NewOfferBakeryForTest(s.bakery, clock.WallClock),
-	)
-	c.Assert(err, jc.ErrorIsNil)
+	s.bakery = &mockBakery{Bakery: bakery.New(bakery.BakeryParams{
+		Locator: locator,
+		Key:     bakery.MustGenerateKey(),
+	})}
 }
 
-func (s *CrossModelSecretsSuite) setup(c *gc.C) *gomock.Controller {
+func (s *CrossModelSecretsSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.secretService = mocks.NewMockSecretService(ctrl)
-	s.secretBackendService = mocks.NewMockSecretBackendService(ctrl)
-	s.crossModelState = mocks.NewMockCrossModelState(ctrl)
-	s.stateBackend = mocks.NewMockStateBackend(ctrl)
+	s.modelUUID = modeltesting.GenModelUUID(c)
 
-	secretsServiceGetter := func(modelUUID string) crossmodelsecrets.SecretService {
-		return s.secretService
+	s.authenticator = NewMockMacaroonAuthenticator(ctrl)
+	s.authContext = NewMockCrossModelAuthContext(ctrl)
+	s.authContext.EXPECT().Authenticator().Return(s.authenticator).AnyTimes()
+
+	s.secretBackendService = NewMockSecretBackendService(ctrl)
+	s.secretService = NewMockSecretService(ctrl)
+	s.crossModelRelationService = NewMockCrossModelRelationService(ctrl)
+
+	secretServiceGetter := func(_ context.Context, modelUUID model.UUID) (crossmodelsecrets.SecretService, error) {
+		return s.secretService, nil
+	}
+	crossModelServiceGetter := func(_ context.Context, modelUUID model.UUID) (crossmodelsecrets.CrossModelRelationService, error) {
+		return s.crossModelRelationService, nil
 	}
 
 	var err error
 	s.facade, err = crossmodelsecrets.NewCrossModelSecretsAPI(
-		s.resources,
-		s.authContext,
 		coretesting.ControllerTag.Id(),
-		coretesting.ModelTag.Id(),
-		secretsServiceGetter,
+		s.modelUUID,
+		s.authContext,
 		s.secretBackendService,
-		s.crossModelState,
-		s.stateBackend,
+		secretServiceGetter,
+		crossModelServiceGetter,
 		loggertesting.WrapCheckLog(c),
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.AddCleanup(func(_ *tc.C) {
+		s.authenticator = nil
+		s.authContext = nil
+		s.secretBackendService = nil
+		s.secretService = nil
+		s.crossModelRelationService = nil
+	})
 
 	return ctrl
 }
@@ -132,99 +133,99 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-func (s *CrossModelSecretsSuite) TestGetSecretContentInfo(c *gc.C) {
-	s.assertGetSecretContentInfo(c, false)
-}
-
-func (s *CrossModelSecretsSuite) TestGetSecretContentInfoNewConsumer(c *gc.C) {
-	s.assertGetSecretContentInfo(c, true)
-}
-
-type backendConfigParamsMatcher struct {
-	c        *gc.C
-	expected any
-}
-
-func (m backendConfigParamsMatcher) Matches(x interface{}) bool {
-	obtained, ok := x.(secretbackendservice.BackendConfigParams)
-	if !ok {
-		return false
-	}
-	m.c.Assert(obtained.GrantedSecretsGetter, gc.NotNil)
-	obtained.GrantedSecretsGetter = nil
-	m.c.Assert(obtained, jc.DeepEquals, m.expected)
-	return true
-}
-
-func (m backendConfigParamsMatcher) String() string {
-	return "Match the contents of BackendConfigParams"
-}
-
-func (s *CrossModelSecretsSuite) assertGetSecretContentInfo(c *gc.C, newConsumer bool) {
+func (s *CrossModelSecretsSuite) TestGetSecretContentInfo(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	uri := coresecrets.NewURI().WithSource(coretesting.ModelTag.Id())
-	app := names.NewApplicationTag("remote-app")
-	relation := names.NewRelationTag("remote-app:foo local-app:foo")
-	s.crossModelState.EXPECT().GetRemoteApplicationTag("token").Return(app, nil)
-	s.stateBackend.EXPECT().HasEndpoint(relation.Id(), "remote-app").Return(true, nil)
 
-	// Remote app 2 has incorrect relation.
-	app2 := names.NewApplicationTag("remote-app2")
-	s.crossModelState.EXPECT().GetRemoteApplicationTag("token2").Return(app2, nil)
-	s.stateBackend.EXPECT().HasEndpoint(relation.Id(), "remote-app2").Return(false, nil)
+	appUUID := tc.Must(c, application.NewUUID)
+	appUUID2 := tc.Must(c, application.NewUUID)
 
-	consumer := secretservice.SecretAccessor{
-		Kind: secretservice.UnitAccessor,
-		ID:   "remote-app/666",
-	}
-	s.secretService.EXPECT().UpdateRemoteConsumedRevision(gomock.Any(), uri, "remote-app/666", true).Return(667, nil)
-	s.secretService.EXPECT().GetSecretValue(gomock.Any(), uri, 667, consumer).Return(
+	s.crossModelRelationService.EXPECT().GetRemoteConsumerApplicationName(gomock.Any(), appUUID).Return("mediawiki", nil)
+	s.crossModelRelationService.EXPECT().ProcessRemoteConsumerGetSecret(gomock.Any(), uri, unit.Name("mediawiki/666"), ptr(667), false, true).Return(
 		nil,
 		&coresecrets.ValueRef{
 			BackendID:  "backend-id",
 			RevisionID: "rev-id",
-		}, nil,
+		}, 668, nil,
 	)
-	s.secretBackendService.EXPECT().BackendConfigInfo(gomock.Any(), backendConfigParamsMatcher{c: c, expected: secretbackendservice.BackendConfigParams{
-		Accessor:       consumer,
-		ModelUUID:      model.UUID(coretesting.ModelTag.Id()),
-		BackendIDs:     []string{"backend-id"},
-		SameController: false,
-	}}).Return(&provider.ModelBackendConfigInfo{
-		ActiveID: "active-id",
-		Configs: map[string]provider.ModelBackendConfig{
-			"backend-id": {
-				ControllerUUID: coretesting.ControllerTag.Id(),
-				ModelUUID:      coretesting.ModelTag.Id(),
-				ModelName:      "fred",
-				BackendConfig: provider.BackendConfig{
-					BackendType: "vault",
-					Config:      map[string]interface{}{"foo": "bar"},
-				},
-			},
-		},
-	}, nil)
+	s.crossModelRelationService.EXPECT().GetRemoteConsumerApplicationName(gomock.Any(), appUUID2).Return("wordpress", nil)
+	s.crossModelRelationService.EXPECT().ProcessRemoteConsumerGetSecret(gomock.Any(), uri, unit.Name("wordpress/666"), nil, false, true).Return(
+		nil, nil, 0, secreterrors.PermissionDenied,
+	)
+
+	offerUUID := tc.Must(c, offer.NewUUID)
 
 	mac, err := s.bakery.NewMacaroon(
-		context.Background(),
+		c.Context(),
 		bakery.LatestVersion,
 		[]checkers.Caveat{
 			checkers.DeclaredCaveat("username", "mary"),
-			checkers.DeclaredCaveat("offer-uuid", "some-offer"),
-			checkers.DeclaredCaveat("source-model-uuid", coretesting.ModelTag.Id()),
-			checkers.DeclaredCaveat("relation-key", relation.Id()),
-		}, bakery.Op{"consume", "mysql-uuid"})
-	c.Assert(err, jc.ErrorIsNil)
+			checkers.DeclaredCaveat("offer-uuid", offerUUID.String()),
+			checkers.DeclaredCaveat("source-model-uuid", uri.SourceUUID),
+			checkers.DeclaredCaveat("relation-key", "mediawkik:server mysql:database"),
+		}, bakery.Op{Entity: "consume", Action: "mysql-uuid"})
+	c.Assert(err, tc.ErrorIsNil)
+	mac2, err := s.bakery.NewMacaroon(
+		c.Context(),
+		bakery.LatestVersion,
+		[]checkers.Caveat{
+			checkers.DeclaredCaveat("username", "mary"),
+			checkers.DeclaredCaveat("offer-uuid", offerUUID.String()),
+			checkers.DeclaredCaveat("source-model-uuid", uri.SourceUUID),
+			checkers.DeclaredCaveat("relation-key", "wordpress:server mysql:database"),
+		}, bakery.Op{Entity: "consume", Action: "mysql-uuid"})
+	c.Assert(err, tc.ErrorIsNil)
+
+	relKey := tc.Must1(c, relation.NewKeyFromString, "mediawkik:server mysql:database")
+	relKey2 := tc.Must1(c, relation.NewKeyFromString, "wordpress:server mysql:database")
+	s.crossModelRelationService.EXPECT().IsCrossModelRelationValidForApplication(gomock.Any(), relKey, "mediawiki").Return(true, nil)
+	s.crossModelRelationService.EXPECT().IsCrossModelRelationValidForApplication(gomock.Any(), relKey2, "wordpress").Return(true, nil)
+	s.authenticator.EXPECT().CheckOfferMacaroons(
+		gomock.Any(), s.modelUUID.String(), offerUUID.String(), macaroon.Slice{mac.M()}, bakery.LatestVersion).
+		Return(nil, nil)
+	s.authenticator.EXPECT().CheckOfferMacaroons(
+		gomock.Any(), s.modelUUID.String(), offerUUID.String(), macaroon.Slice{mac2.M()}, bakery.LatestVersion).
+		Return(nil, nil)
+
+	s.secretBackendService.EXPECT().BackendConfigInfo(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, params secretbackendservice.BackendConfigParams) (*provider.ModelBackendConfigInfo, error) {
+			c.Assert(params.GrantedSecretsGetter, tc.NotNil)
+			params.GrantedSecretsGetter = nil
+			c.Assert(params, tc.DeepEquals, secretbackendservice.BackendConfigParams{
+				Accessor: service.SecretAccessor{
+					Kind: service.UnitAccessor,
+					ID:   "mediawiki/666",
+				},
+				ModelUUID:      model.UUID(uri.SourceUUID),
+				BackendIDs:     []string{"backend-id"},
+				SameController: false,
+			})
+			return &provider.ModelBackendConfigInfo{
+				ActiveID: "active-id",
+				Configs: map[string]provider.ModelBackendConfig{
+					"backend-id": {
+						ControllerUUID: coretesting.ControllerTag.Id(),
+						ModelUUID:      uri.SourceUUID,
+						ModelName:      "fred",
+						BackendConfig: provider.BackendConfig{
+							BackendType: "vault",
+							Config:      map[string]interface{}{"foo": "bar"},
+						},
+					},
+				},
+			}, nil
+		})
 
 	args := params.GetRemoteSecretContentArgs{
 		Args: []params.GetRemoteSecretContentArg{{
 			SourceControllerUUID: "deadbeef-1bad-500d-9000-4b1d0d06f666",
-			ApplicationToken:     "token",
+			ApplicationToken:     appUUID.String(),
 			UnitId:               666,
 			BakeryVersion:        3,
 			Macaroons:            macaroon.Slice{mac.M()},
 			URI:                  uri.String(),
+			Revision:             ptr(667),
 			Refresh:              true,
 		}, {
 			URI: coresecrets.NewURI().String(),
@@ -232,17 +233,17 @@ func (s *CrossModelSecretsSuite) assertGetSecretContentInfo(c *gc.C, newConsumer
 			URI: uri.String(),
 		}, {
 			SourceControllerUUID: "deadbeef-1bad-500d-9000-4b1d0d06f666",
-			ApplicationToken:     "token2",
+			ApplicationToken:     appUUID2.String(),
 			UnitId:               666,
 			BakeryVersion:        3,
-			Macaroons:            macaroon.Slice{mac.M()},
+			Macaroons:            macaroon.Slice{mac2.M()},
 			URI:                  uri.String(),
 			Refresh:              true,
 		}},
 	}
-	results, err := s.facade.GetSecretContentInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.SecretContentResults{
+	results, err := s.facade.GetSecretContentInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.SecretContentResults{
 		Results: []params.SecretContentResult{{
 			Content: params.SecretContentParams{
 				ValueRef: &params.SecretValueRef{
@@ -260,7 +261,7 @@ func (s *CrossModelSecretsSuite) assertGetSecretContentInfo(c *gc.C, newConsumer
 					Params:      map[string]interface{}{"foo": "bar"},
 				},
 			},
-			LatestRevision: ptr(667),
+			LatestRevision: ptr(668),
 		}, {
 			Error: &params.Error{
 				Code:    "not valid",

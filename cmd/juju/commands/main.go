@@ -4,21 +4,20 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	proxyutils "github.com/juju/proxy"
 
+	"github.com/juju/juju/api/jujuclient"
 	cloudfile "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/action"
-	"github.com/juju/juju/cmd/juju/agree/agree"
-	"github.com/juju/juju/cmd/juju/agree/listagreements"
 	"github.com/juju/juju/cmd/juju/application"
 	"github.com/juju/juju/cmd/juju/backups"
 	"github.com/juju/juju/cmd/juju/block"
@@ -31,7 +30,6 @@ import (
 	"github.com/juju/juju/cmd/juju/firewall"
 	"github.com/juju/juju/cmd/juju/machine"
 	"github.com/juju/juju/cmd/juju/model"
-	"github.com/juju/juju/cmd/juju/payload"
 	"github.com/juju/juju/cmd/juju/resource"
 	"github.com/juju/juju/cmd/juju/secretbackends"
 	"github.com/juju/juju/cmd/juju/secrets"
@@ -42,13 +40,13 @@ import (
 	"github.com/juju/juju/cmd/juju/storage"
 	"github.com/juju/juju/cmd/juju/subnet"
 	"github.com/juju/juju/cmd/juju/user"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/featureflag"
 	internallogger "github.com/juju/juju/internal/logger"
 	proxy "github.com/juju/juju/internal/proxy/config"
 	"github.com/juju/juju/juju"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var logger = internallogger.GetLogger("juju.cmd.juju.commands")
@@ -251,7 +249,7 @@ func NewJujuCommandWithStore(
 		FlagKnownAs:         "option",
 		NotifyRun: func(string) {
 			if jujuMsg != "" {
-				ctx.Infof(jujuMsg)
+				ctx.Infof("%s", jujuMsg)
 			}
 		},
 	})
@@ -306,14 +304,14 @@ type jujuCommandRegistry struct {
 func (r jujuCommandRegistry) Register(c cmd.Command) {
 	cmdName := c.Info().Name
 	if r.whitelist.Size() > 0 && !r.whitelist.Contains(cmdName) {
-		logger.Tracef("command %q not allowed", cmdName)
+		logger.Tracef(context.TODO(), "command %q not allowed", cmdName)
 		r.excluded.Add(cmdName)
 		return
 	}
 	if se, ok := c.(supportsEmbedded); ok {
 		se.SetEmbedded(r.embedded)
 	} else {
-		logger.Tracef("command %q is not embeddable", cmdName)
+		logger.Tracef(context.TODO(), "command %q is not embeddable", cmdName)
 	}
 	if csc, ok := c.(hasClientStore); ok {
 		csc.SetClientStore(r.store)
@@ -383,11 +381,11 @@ func registerCommands(r commandRegistry) {
 	r.Register(newUpgradeModelCommand())
 	r.Register(newUpgradeControllerCommand())
 	r.Register(application.NewRefreshCommand())
-	r.Register(application.NewSetApplicationBaseCommand())
 	r.Register(application.NewBindCommand())
 
 	// Charm tool commands.
-	r.Register(newHelpToolCommand())
+	r.Register(newhelpHookCmdsCommand())
+	r.Register(newHelpActionCmdsCommand())
 
 	// Manage backups.
 	r.Register(backups.NewCreateCommand())
@@ -416,7 +414,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(machine.NewRemoveCommand())
 	r.Register(machine.NewListMachinesCommand())
 	r.Register(machine.NewShowMachineCommand())
-	r.Register(machine.NewUpgradeMachineCommand())
 
 	// Manage model
 	r.Register(model.NewConfigCommand())
@@ -427,16 +424,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(model.NewRevokeCommand())
 	r.Register(model.NewShowCommand())
 	r.Register(model.NewModelCredentialCommand())
-	if featureflag.Enabled(featureflag.Branches) || featureflag.Enabled(featureflag.Generations) {
-		r.Register(model.NewAddBranchCommand())
-		r.Register(model.NewCommitCommand())
-		r.Register(model.NewTrackBranchCommand())
-		r.Register(model.NewBranchCommand())
-		r.Register(model.NewDiffCommand())
-		r.Register(model.NewAbortCommand())
-		r.Register(model.NewCommitsCommand())
-		r.Register(model.NewShowCommitCommand())
-	}
 
 	r.Register(newMigrateCommand())
 	r.Register(model.NewExportBundleCommand())
@@ -454,9 +441,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(action.NewListOperationsCommand())
 	r.Register(action.NewShowOperationCommand())
 	r.Register(action.NewShowTaskCommand())
-
-	// Manage controller availability
-	r.Register(newEnableHACommand())
 
 	// Manage and control applications
 	r.Register(application.NewAddUnitCommand())
@@ -568,13 +552,7 @@ func registerCommands(r commandRegistry) {
 	r.Register(secretbackends.NewUpdateSecretBackendCommand())
 	r.Register(secretbackends.NewRemoveSecretBackendCommand())
 	r.Register(secretbackends.NewShowSecretBackendCommand())
-
-	// Payload commands.
-	r.Register(payload.NewListCommand())
-
-	// Agreement commands
-	r.Register(agree.NewAgreeCommand())
-	r.Register(listagreements.NewListAgreementsCommand())
+	r.Register(secretbackends.NewModelSecretBackendCommand())
 }
 
 type cloudToCommandAdaptor struct{}

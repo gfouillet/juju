@@ -4,17 +4,19 @@
 package user
 
 import (
+	"context"
+
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/usermanager"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -22,7 +24,7 @@ var helpSummary = `
 Show information about a user.`[1:]
 
 var helpDetails = `
-By default, the YAML format is used and the user name is the current
+By default, the ` + "`YAML`" + ` format is used and the user name is the current
 user.
 `[1:]
 
@@ -35,7 +37,7 @@ const helpExamples = `
 
 // UserInfoAPI defines the API methods that the info command uses.
 type UserInfoAPI interface {
-	UserInfo([]string, usermanager.IncludeDisabled) ([]params.UserInfo, error)
+	UserInfo(context.Context, []string, usermanager.IncludeDisabled) ([]params.UserInfo, error)
 	Close() error
 }
 
@@ -104,16 +106,16 @@ func (c *infoCommand) Init(args []string) (err error) {
 	return err
 }
 
-func (c *infoCommandBase) getUserInfoAPI() (UserInfoAPI, error) {
+func (c *infoCommandBase) getUserInfoAPI(ctx context.Context) (UserInfoAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.NewUserManagerAPIClient()
+	return c.NewUserManagerAPIClient(ctx)
 }
 
 // Run implements Command.Run.
 func (c *infoCommand) Run(ctx *cmd.Context) (err error) {
-	client, err := c.getUserInfoAPI()
+	client, err := c.getUserInfoAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -126,7 +128,7 @@ func (c *infoCommand) Run(ctx *cmd.Context) (err error) {
 		}
 		username = accountDetails.User
 	}
-	result, err := client.UserInfo([]string{username}, false)
+	result, err := client.UserInfo(ctx, []string{username}, false)
 	if err != nil {
 		return err
 	}

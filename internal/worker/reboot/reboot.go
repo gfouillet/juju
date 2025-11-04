@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api/agent/reboot"
@@ -47,17 +47,17 @@ func NewReboot(client reboot.Client, agentTag names.Tag, machineLock machinelock
 	return w, errors.Trace(err)
 }
 
-func (r *Reboot) SetUp(_ context.Context) (watcher.NotifyWatcher, error) {
-	watcher, err := r.client.WatchForRebootEvent()
+func (r *Reboot) SetUp(ctx context.Context) (watcher.NotifyWatcher, error) {
+	watcher, err := r.client.WatchForRebootEvent(ctx)
 	return watcher, errors.Trace(err)
 }
 
-func (r *Reboot) Handle(_ context.Context) error {
-	rAction, err := r.client.GetRebootAction()
+func (r *Reboot) Handle(ctx context.Context) error {
+	rAction, err := r.client.GetRebootAction(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logger.Debugf("Reboot worker got action: %v", rAction)
+	logger.Debugf(ctx, "Reboot worker got action: %v", rAction)
 
 	// NOTE: Here we explicitly avoid stopping on the abort channel as we are
 	// wanting to make sure that we grab the lock and return an error
@@ -73,14 +73,14 @@ func (r *Reboot) Handle(_ context.Context) error {
 		if _, err := r.machineLock.Acquire(spec); err != nil {
 			return errors.Trace(err)
 		}
-		logger.Debugf("machine lock will not be released manually")
+		logger.Debugf(ctx, "machine lock will not be released manually")
 		err = jworker.ErrRebootMachine
 	case params.ShouldShutdown:
 		spec.Comment = "shutdown"
 		if _, err := r.machineLock.Acquire(spec); err != nil {
 			return errors.Trace(err)
 		}
-		logger.Debugf("machine lock will not be released manually")
+		logger.Debugf(ctx, "machine lock will not be released manually")
 		err = jworker.ErrShutdownMachine
 	}
 
@@ -90,8 +90,8 @@ func (r *Reboot) Handle(_ context.Context) error {
 		// that the machine agent is also a controller, and the apiserver has been
 		// shut down. It is better to clear the flag and not reboot on a weird
 		// error rather than get into a reboot loop because we can't shutdown.
-		if err := r.client.ClearReboot(); err != nil {
-			logger.Infof("unable to clear reboot flag: %v", err)
+		if err := r.client.ClearReboot(ctx); err != nil {
+			logger.Infof(ctx, "unable to clear reboot flag: %v", err)
 		}
 	}
 	return err

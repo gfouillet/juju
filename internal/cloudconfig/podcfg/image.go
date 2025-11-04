@@ -9,15 +9,15 @@ import (
 
 	"github.com/docker/distribution/reference"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/docker"
 )
 
 const (
-	JujudOCINamespace = "docker.io/jujusolutions"
+	JujudOCINamespace = "ghcr.io/juju"
 	JujudOCIName      = "jujud-operator"
 	JujudbOCIName     = "juju-db"
 	CharmBaseName     = "charm-base"
@@ -25,13 +25,13 @@ const (
 
 // GetControllerImagePath returns oci image path of jujud for a controller.
 func (cfg *ControllerPodConfig) GetControllerImagePath() (string, error) {
-	return GetJujuOCIImagePath(cfg.Controller, cfg.JujuVersion)
+	return GetJujuOCIImagePathFromControllerCfg(cfg.Controller, cfg.JujuVersion)
 }
 
-func (cfg *ControllerPodConfig) dbVersion() (version.Number, error) {
-	snapChannel := cfg.Controller.JujuDBSnapChannel()
+func (cfg *ControllerPodConfig) dbVersion() (semversion.Number, error) {
+	snapChannel := "4.4/stable"
 	vers := strings.Split(snapChannel, "/")[0] + ".0"
-	return version.Parse(vers)
+	return semversion.Parse(vers)
 }
 
 // GetJujuDbOCIImagePath returns the juju-db oci image path.
@@ -47,7 +47,7 @@ func (cfg *ControllerPodConfig) GetJujuDbOCIImagePath() (string, error) {
 	path := fmt.Sprintf("%s/%s", imageRepo, JujudbOCIName)
 	mongoVers, err := cfg.dbVersion()
 	if err != nil {
-		return "", errors.Annotatef(err, "cannot parse %q from controller config", controller.JujuDBSnapChannel)
+		return "", errors.Annotatef(err, "cannot parse %q from controller config", "4.4/stable")
 	}
 	tag := fmt.Sprintf("%d.%d", mongoVers.Major, mongoVers.Minor)
 	return tagImagePath(path, tag)
@@ -63,8 +63,8 @@ func IsCharmBaseImage(imagePath string) bool {
 	return strings.Contains(imagePath, CharmBaseName+":")
 }
 
-// GetJujuOCIImagePath returns the jujud oci image path.
-func GetJujuOCIImagePath(controllerCfg controller.Config, ver version.Number) (string, error) {
+// GetJujuOCIImagePathFromControllerCfg constructs the full OCI image path using the given controller config and Juju version.
+func GetJujuOCIImagePathFromControllerCfg(controllerCfg controller.Config, ver semversion.Number) (string, error) {
 	// First check the deprecated "caas-operator-image-path" config.
 	imagePath, err := RebuildOldOperatorImagePath(
 		controllerCfg.CAASOperatorImagePath(), ver,
@@ -77,19 +77,28 @@ func GetJujuOCIImagePath(controllerCfg controller.Config, ver version.Number) (s
 		return "", errors.Annotatef(err, "parsing %s", controller.CAASImageRepo)
 	}
 	tag := ""
-	if ver != version.Zero {
+	if ver != semversion.Zero {
 		tag = ver.String()
 	}
 	return imageRepoToPath(details.Repository, tag)
 }
 
+// GetJujuOCIImagePathFromModelRepo constructs the full OCI image path using the given model image repository and Juju version.
+func GetJujuOCIImagePathFromModelRepo(modelRepo string, ver semversion.Number) (string, error) {
+	tag := ""
+	if ver != semversion.Zero {
+		tag = ver.String()
+	}
+	return imageRepoToPath(modelRepo, tag)
+}
+
 // RebuildOldOperatorImagePath returns a updated image path for the specified juju version.
-func RebuildOldOperatorImagePath(imagePath string, ver version.Number) (string, error) {
+func RebuildOldOperatorImagePath(imagePath string, ver semversion.Number) (string, error) {
 	if imagePath == "" {
 		return "", nil
 	}
 	tag := ""
-	if ver != version.Zero {
+	if ver != semversion.Zero {
 		// ver is always a valid tag.
 		tag = ver.String()
 	}

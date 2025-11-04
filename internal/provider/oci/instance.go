@@ -17,10 +17,8 @@ import (
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/status"
-	envcontext "github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/provider/common"
-	ocicommon "github.com/juju/juju/internal/provider/oci/common"
 )
 
 const (
@@ -92,9 +90,9 @@ func (o *ociInstance) Id() instance.Id {
 }
 
 // Status implements instances.Instance
-func (o *ociInstance) Status(ctx envcontext.ProviderCallContext) instance.Status {
+func (o *ociInstance) Status(ctx context.Context) instance.Status {
 	if err := o.refresh(); err != nil {
-		ocicommon.HandleCredentialError(err, ctx)
+		_ = o.env.HandleCredentialError(ctx, err)
 		return instance.Status{}
 	}
 	state, ok := statusMap[o.raw.LifecycleState]
@@ -160,10 +158,9 @@ func (o *ociInstance) getAddresses() ([]corenetwork.ProviderAddress, error) {
 }
 
 // Addresses implements instances.Instance
-func (o *ociInstance) Addresses(ctx envcontext.ProviderCallContext) (corenetwork.ProviderAddresses, error) {
+func (o *ociInstance) Addresses(ctx context.Context) (corenetwork.ProviderAddresses, error) {
 	addresses, err := o.getAddresses()
-	ocicommon.HandleCredentialError(err, ctx)
-	return addresses, err
+	return addresses, o.env.HandleCredentialError(ctx, err)
 }
 
 func (o *ociInstance) isTerminating() bool {
@@ -175,23 +172,22 @@ func (o *ociInstance) isTerminating() bool {
 	return false
 }
 
-func (o *ociInstance) waitForPublicIP(ctx envcontext.ProviderCallContext) error {
+func (o *ociInstance) waitForPublicIP(ctx context.Context) error {
 	iteration := 0
 	startTime := time.Now()
 	for {
 		addresses, err := o.Addresses(ctx)
 		if err != nil {
-			ocicommon.HandleCredentialError(err, ctx)
-			return errors.Trace(err)
+			return o.env.HandleCredentialError(ctx, err)
 		}
 		if iteration >= maxPollIterations {
-			logger.Debugf("could not find a public IP after %s. breaking loop", time.Since(startTime))
+			logger.Debugf(ctx, "could not find a public IP after %s. breaking loop", time.Since(startTime))
 			break
 		}
 
 		for _, val := range addresses {
 			if val.Scope == corenetwork.ScopePublic {
-				logger.Infof("Found public IP: %s", val)
+				logger.Infof(ctx, "Found public IP: %s", val)
 				return nil
 			}
 		}
@@ -202,14 +198,14 @@ func (o *ociInstance) waitForPublicIP(ctx envcontext.ProviderCallContext) error 
 	return errors.NotFoundf("failed to find public IP for instance: %s", *o.raw.Id)
 }
 
-func (o *ociInstance) deleteInstance(ctx envcontext.ProviderCallContext) error {
+func (o *ociInstance) deleteInstance(ctx context.Context) error {
 	err := o.refresh()
 	if errors.Is(err, errors.NotFound) {
 		return nil
 	}
 
 	if o.isTerminating() {
-		logger.Debugf("instance %q is alrealy in terminating state", *o.raw.Id)
+		logger.Debugf(ctx, "instance %q is alrealy in terminating state", *o.raw.Id)
 		return nil
 	}
 	request := ociCore.TerminateInstanceRequest{
@@ -218,8 +214,7 @@ func (o *ociInstance) deleteInstance(ctx envcontext.ProviderCallContext) error {
 	}
 	response, err := o.env.Compute.TerminateInstance(context.Background(), request)
 	if err != nil && !o.env.isNotFound(response.RawResponse) {
-		ocicommon.HandleCredentialError(err, ctx)
-		return err
+		return o.env.HandleCredentialError(ctx, err)
 	}
 	iteration := 0
 	for {
@@ -227,10 +222,9 @@ func (o *ociInstance) deleteInstance(ctx envcontext.ProviderCallContext) error {
 			if errors.Is(err, errors.NotFound) {
 				break
 			}
-			ocicommon.HandleCredentialError(err, ctx)
-			return err
+			return o.env.HandleCredentialError(ctx, err)
 		}
-		logger.Infof("Waiting for machine to transition to Terminating: %s", o.raw.LifecycleState)
+		logger.Infof(ctx, "Waiting for machine to transition to Terminating: %s", o.raw.LifecycleState)
 		if o.isTerminating() {
 			break
 		}
@@ -269,12 +263,15 @@ func (o *ociInstance) hardwareCharacteristics() *instance.HardwareCharacteristic
 	if o.raw.AvailabilityDomain != nil {
 		az = *o.raw.AvailabilityDomain
 	}
-	return &instance.HardwareCharacteristics{
-		Arch:             &archType,
-		Mem:              mem,
-		CpuCores:         cpus,
-		AvailabilityZone: &az,
+	hc := &instance.HardwareCharacteristics{
+		Arch:     &archType,
+		Mem:      mem,
+		CpuCores: cpus,
 	}
+	if az != "" {
+		hc.AvailabilityZone = &az
+	}
+	return hc
 }
 
 func (o *ociInstance) waitForMachineStatus(state ociCore.InstanceLifecycleStateEnum, timeout time.Duration) error {
@@ -322,7 +319,7 @@ func (o *ociInstance) refresh() error {
 
 // OpenPorts (InstanceFirewaller) ensures that the input ingress rule is
 // permitted for machine with the input ID.
-func (o *ociInstance) OpenPorts(ctx envcontext.ProviderCallContext, _ string, rules firewall.IngressRules) error {
+func (o *ociInstance) OpenPorts(ctx context.Context, _ string, rules firewall.IngressRules) error {
 	client, err := o.getInstanceConfigurator(ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -332,7 +329,7 @@ func (o *ociInstance) OpenPorts(ctx envcontext.ProviderCallContext, _ string, ru
 
 // OpenPorts (InstanceFirewaller) ensures that the input ingress rule is
 // restricted for machine with the input ID.
-func (o *ociInstance) ClosePorts(ctx envcontext.ProviderCallContext, _ string, rules firewall.IngressRules) error {
+func (o *ociInstance) ClosePorts(ctx context.Context, _ string, rules firewall.IngressRules) error {
 	client, err := o.getInstanceConfigurator(ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -342,7 +339,7 @@ func (o *ociInstance) ClosePorts(ctx envcontext.ProviderCallContext, _ string, r
 
 // IngressRules (InstanceFirewaller) returns the ingress rules that have been
 // applied to the input machine ID.
-func (o *ociInstance) IngressRules(ctx envcontext.ProviderCallContext, _ string) (firewall.IngressRules, error) {
+func (o *ociInstance) IngressRules(ctx context.Context, _ string) (firewall.IngressRules, error) {
 	client, err := o.getInstanceConfigurator(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -353,7 +350,7 @@ func (o *ociInstance) IngressRules(ctx envcontext.ProviderCallContext, _ string)
 }
 
 func (o *ociInstance) getInstanceConfigurator(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 ) (common.InstanceConfigurator, error) {
 	addresses, err := o.Addresses(ctx)
 	if err != nil {

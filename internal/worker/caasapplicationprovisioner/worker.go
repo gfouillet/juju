@@ -16,52 +16,91 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 
-	charmscommon "github.com/juju/juju/api/common/charms"
 	api "github.com/juju/juju/api/controller/caasapplicationprovisioner"
 	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/network"
+	coreresource "github.com/juju/juju/core/resource"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/rpc/params"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	"github.com/juju/juju/domain/storageprovisioning"
+	internalcharm "github.com/juju/juju/internal/charm"
+	internalworker "github.com/juju/juju/internal/worker"
 )
-
-type CAASUnitProvisionerFacade interface {
-	ApplicationScale(string) (int, error)
-	WatchApplicationScale(string) (watcher.NotifyWatcher, error)
-	ApplicationTrust(string) (bool, error)
-	WatchApplicationTrustHash(string) (watcher.StringsWatcher, error)
-	UpdateApplicationService(arg params.UpdateApplicationServiceArg) error
-}
 
 // CAASProvisionerFacade exposes CAAS provisioning functionality to a worker.
 type CAASProvisionerFacade interface {
-	ProvisioningInfo(string) (api.ProvisioningInfo, error)
-	WatchApplications() (watcher.StringsWatcher, error)
-	SetPassword(string, string) error
-	Life(string) (life.Value, error)
-	CharmInfo(string) (*charmscommon.CharmInfo, error)
-	ApplicationCharmInfo(string) (*charmscommon.CharmInfo, error)
-	SetOperatorStatus(appName string, status status.Status, message string, data map[string]interface{}) error
-	Units(appName string) ([]params.CAASUnit, error)
-	ApplicationOCIResources(appName string) (map[string]resources.DockerImageDetails, error)
-	UpdateUnits(arg params.UpdateApplicationUnits) (*params.UpdateApplicationUnitsInfo, error)
-	WatchApplication(ctx context.Context, appName string) (watcher.NotifyWatcher, error)
-	ClearApplicationResources(appName string) error
-	WatchUnits(application string) (watcher.StringsWatcher, error)
-	RemoveUnit(unitName string) error
-	WatchProvisioningInfo(string) (watcher.NotifyWatcher, error)
-	DestroyUnits(unitNames []string) error
-	ProvisioningState(string) (*params.CAASApplicationProvisioningState, error)
-	SetProvisioningState(string, params.CAASApplicationProvisioningState) error
-	ProvisionerConfig() (params.CAASApplicationProvisionerConfig, error)
+	ProvisioningInfo(context.Context, string) (api.ProvisioningInfo, error)
+	FilesystemProvisioningInfo(context.Context, string) (api.FilesystemProvisioningInfo, error)
+	RemoveUnit(ctx context.Context, unitName string) error
+	WatchProvisioningInfo(context.Context, string) (watcher.NotifyWatcher, error)
+	DestroyUnits(ctx context.Context, unitNames []string) error
+}
+
+// ApplicationService is used to interact with the application service.
+type ApplicationService interface {
+	// GetApplicationTrustSetting returns the application trust setting.
+	// The following errors may be returned:
+	// - [applicationerrors.ApplicationNotFound] if the application doesn't exist
+	GetApplicationTrustSetting(ctx context.Context, appName string) (bool, error)
+
+	// WatchApplicationSettings watches for changes to the specified application's
+	// settings.
+	// This functions returns the following errors:
+	// - [applicationerrors.ApplicationNotFound] if the application doesn't exist
+	WatchApplicationSettings(ctx context.Context, name string) (watcher.NotifyWatcher, error)
+
+	// WatchApplicationUnitLife returns a watcher that observes changes to the life of any units if an application.
+	WatchApplicationUnitLife(ctx context.Context, appName string) (watcher.StringsWatcher, error)
+
+	// WatchApplicationScale returns a watcher that observes changes to an application's scale.
+	// The following errors may be returned:
+	// - [applicationerrors.ApplicationNotFound] if the application doesn't exist
+	WatchApplicationScale(ctx context.Context, appName string) (watcher.NotifyWatcher, error)
+
+	// GetApplicationScale returns the desired scale of an application,
+	// The following errors may be returned:
+	// - [applicationerrors.ApplicationNotFound] if the application doesn't exist
+	GetApplicationScale(ctx context.Context, appName string) (int, error)
+
+	SetApplicationScalingState(ctx context.Context, name string, scaleTarget int, scaling bool) error
+	GetApplicationScalingState(ctx context.Context, name string) (applicationservice.ScalingState, error)
+	GetApplicationLife(ctx context.Context, id application.UUID) (life.Value, error)
+	GetUnitLife(context.Context, unit.Name) (life.Value, error)
+	GetAllUnitLifeForApplication(context.Context, application.UUID) (map[unit.Name]life.Value, error)
+
+	// GetApplicationName returns the application name for the given application UUID.
+	GetApplicationName(ctx context.Context, id application.UUID) (string, error)
+
+	// WatchApplications returns a watcher that observes changes to applications.
+	WatchApplications(ctx context.Context) (watcher.StringsWatcher, error)
+
+	// UpsertCloudService updates the cloud service for the specified application.
+	UpdateCloudService(ctx context.Context, appName, providerID string, sAddrs network.ProviderAddresses) error
+
+	// IsControllerApplication returns true when the application is the controller.
+	IsControllerApplication(ctx context.Context, id application.UUID) (bool, error)
+
+	// UpdateCAASUnit updates the specified CAAS unit
+	UpdateCAASUnit(context.Context, unit.Name, applicationservice.UpdateCAASUnitParams) error
+
+	// GetAllUnitCloudContainerIDsForApplication returns a map of the unit names
+	// and their cloud container provider IDs for the given application.
+	GetAllUnitCloudContainerIDsForApplication(ctx context.Context, id application.UUID) (map[unit.Name]string, error)
+
+	// GetCharmByApplicationUUID returns the charm for the specified application
+	// UUID.
+	GetCharmByApplicationUUID(context.Context, application.UUID) (internalcharm.Charm, applicationcharm.CharmLocator, error)
 }
 
 // CAASBroker exposes CAAS broker functionality to a worker.
@@ -74,60 +113,115 @@ type CAASBroker interface {
 // Runner exposes functionalities of a worker.Runner.
 type Runner interface {
 	Worker(id string, abort <-chan struct{}) (worker.Worker, error)
-	StartWorker(id string, startFunc func() (worker.Worker, error)) error
+	StartWorker(ctx context.Context, id string, startFunc func(context.Context) (worker.Worker, error)) error
 	StopAndRemoveWorker(id string, abort <-chan struct{}) error
+	Report() map[string]any
 	worker.Worker
+}
+
+type StatusService interface {
+	// GetUnitAgentStatusesForApplication returns the agent statuses of all
+	// units in the specified application, indexed by unit name, returning an error
+	// satisfying [statuserrors.ApplicationNotFound] if the application doesn't
+	// exist.
+	GetUnitAgentStatusesForApplication(ctx context.Context, appID application.UUID) (map[unit.Name]status.StatusInfo, error)
+
+	// SetApplicationStatus saves the given application status, overwriting any
+	// current status data. If returns an error satisfying
+	// [statuserrors.ApplicationNotFound] if the application doesn't exist.
+	SetApplicationStatus(ctx context.Context, name string, info status.StatusInfo) error
+}
+
+type AgentPasswordService interface {
+	// SetApplicationPassword sets the password for the given application. If the
+	// app does not exist, an error satisfying [applicationerrors.ApplicationNotFound]
+	// is returned.
+	SetApplicationPassword(ctx context.Context, appID application.UUID, password string) error
+}
+
+type StorageProvisioningService interface {
+	// GetFilesystemTemplatesForApplication returns all the filesystem templates for
+	// a given application.
+	GetFilesystemTemplatesForApplication(ctx context.Context, appID application.UUID) ([]storageprovisioning.FilesystemTemplate, error)
+	// GetStorageResourceTagsForApplication returns the storage resource tags for
+	// the given application. These tags are used when creating a resource in an
+	// environ.
+	GetStorageResourceTagsForApplication(ctx context.Context, appID application.UUID) (map[string]string, error)
+}
+
+type ResourceOpenerGetter interface {
+	ResourceOpenerForApplication(ctx context.Context, appID application.UUID, appName string) (coreresource.Opener, error)
+}
+
+type ResourceOpenerGetterFunc func(context.Context, application.UUID, string) (coreresource.Opener, error)
+
+func (f ResourceOpenerGetterFunc) ResourceOpenerForApplication(ctx context.Context, appID application.UUID, appName string) (coreresource.Opener, error) {
+	return f(ctx, appID, appName)
 }
 
 // Config defines the operation of a Worker.
 type Config struct {
-	Facade       CAASProvisionerFacade
-	Broker       CAASBroker
-	ModelTag     names.ModelTag
-	Clock        clock.Clock
-	Logger       logger.Logger
-	NewAppWorker NewAppWorkerFunc
-	UnitFacade   CAASUnitProvisionerFacade
+	ApplicationService         ApplicationService
+	StatusService              StatusService
+	AgentPasswordService       AgentPasswordService
+	StorageProvisioningService StorageProvisioningService
+	ResourceOpenerGetter       ResourceOpenerGetter
+	Facade                     CAASProvisionerFacade
+	Broker                     CAASBroker
+	Clock                      clock.Clock
+	Logger                     logger.Logger
+	NewAppWorker               NewAppWorkerFunc
 }
 
 type provisioner struct {
-	catacomb     catacomb.Catacomb
-	runner       Runner
-	facade       CAASProvisionerFacade
-	broker       CAASBroker
-	clock        clock.Clock
-	logger       logger.Logger
-	newAppWorker NewAppWorkerFunc
-	modelTag     names.ModelTag
-	unitFacade   CAASUnitProvisionerFacade
+	catacomb                   catacomb.Catacomb
+	runner                     Runner
+	applicationService         ApplicationService
+	statusService              StatusService
+	agentPasswordService       AgentPasswordService
+	storageProvisioningService StorageProvisioningService
+	resourceOpenerGetter       ResourceOpenerGetter
+	Facade                     CAASProvisionerFacade
+	facade                     CAASProvisionerFacade
+	broker                     CAASBroker
+	clock                      clock.Clock
+	logger                     logger.Logger
+	newAppWorker               NewAppWorkerFunc
 }
 
 // NewProvisionerWorker starts and returns a new CAAS provisioner worker.
 func NewProvisionerWorker(config Config) (worker.Worker, error) {
-	return newProvisionerWorker(config,
-		worker.NewRunner(worker.RunnerParams{
-			Clock:        config.Clock,
-			IsFatal:      func(error) bool { return false },
-			RestartDelay: 3 * time.Second,
-			Logger:       config.Logger.Child("runner"),
-		}),
-	)
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:         "provisioner",
+		Clock:        config.Clock,
+		IsFatal:      func(error) bool { return false },
+		RestartDelay: 3 * time.Second,
+		Logger:       internalworker.WrapLogger(config.Logger.Child("runner")),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return newProvisionerWorker(config, runner)
 }
 
 func newProvisionerWorker(
 	config Config, runner Runner,
 ) (worker.Worker, error) {
 	p := &provisioner{
-		facade:       config.Facade,
-		broker:       config.Broker,
-		modelTag:     config.ModelTag,
-		clock:        config.Clock,
-		logger:       config.Logger,
-		newAppWorker: config.NewAppWorker,
-		runner:       runner,
-		unitFacade:   config.UnitFacade,
+		applicationService:         config.ApplicationService,
+		statusService:              config.StatusService,
+		agentPasswordService:       config.AgentPasswordService,
+		storageProvisioningService: config.StorageProvisioningService,
+		resourceOpenerGetter:       config.ResourceOpenerGetter,
+		facade:                     config.Facade,
+		broker:                     config.Broker,
+		clock:                      config.Clock,
+		logger:                     config.Logger,
+		newAppWorker:               config.NewAppWorker,
+		runner:                     runner,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-application-provisioner",
 		Site: &p.catacomb,
 		Work: p.loop,
 		Init: []worker.Worker{p.runner},
@@ -146,25 +240,15 @@ func (p *provisioner) Wait() error {
 }
 
 func (p *provisioner) loop() error {
-	appWatcher, err := p.facade.WatchApplications()
+	ctx, cancel := p.scopedContext()
+	defer cancel()
+
+	appWatcher, err := p.applicationService.WatchApplications(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if err := p.catacomb.Add(appWatcher); err != nil {
 		return errors.Trace(err)
-	}
-
-	config, err := p.facade.ProvisionerConfig()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	unmanagedApps := set.NewStrings()
-	for _, v := range config.UnmanagedApplications.Entities {
-		app, err := names.ParseApplicationTag(v.Tag)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		unmanagedApps.Add(app.Name)
 	}
 
 	for {
@@ -175,17 +259,13 @@ func (p *provisioner) loop() error {
 			if !ok {
 				return errors.New("app watcher closed channel")
 			}
-			for _, appName := range apps {
-				_, err := p.facade.Life(appName)
-				if err != nil && !errors.Is(err, errors.NotFound) {
+			for _, id := range apps {
+				appID, err := application.ParseUUID(id)
+				if err != nil {
 					return errors.Trace(err)
 				}
-				if errors.Is(err, errors.NotFound) {
-					p.logger.Debugf("application %q not found, ignoring", appName)
-					continue
-				}
 
-				existingWorker, err := p.runner.Worker(appName, p.catacomb.Dying())
+				existingWorker, err := p.runner.Worker(id, p.catacomb.Dying())
 				if errors.Is(err, errors.NotFound) {
 					// Ignore.
 				} else if err == worker.ErrDead {
@@ -202,22 +282,34 @@ func (p *provisioner) loop() error {
 				}
 
 				config := AppWorkerConfig{
-					Name:       appName,
-					Facade:     p.facade,
-					Broker:     p.broker,
-					ModelTag:   p.modelTag,
-					Clock:      p.clock,
-					Logger:     p.logger.Child(appName),
-					UnitFacade: p.unitFacade,
-					StatusOnly: unmanagedApps.Contains(appName),
+					AppID:                      appID,
+					ApplicationService:         p.applicationService,
+					StatusService:              p.statusService,
+					AgentPasswordService:       p.agentPasswordService,
+					StorageProvisioningService: p.storageProvisioningService,
+					ResourceOpenerGetter:       p.resourceOpenerGetter,
+					Facade:                     p.facade,
+					Broker:                     p.broker,
+					Clock:                      p.clock,
+					Logger:                     p.logger.Child(id),
 				}
 				startFunc := p.newAppWorker(config)
-				p.logger.Debugf("starting app worker %q", appName)
-				err = p.runner.StartWorker(appName, startFunc)
+				p.logger.Debugf(ctx, "starting app worker %q", appID)
+				err = p.runner.StartWorker(ctx, id, startFunc)
 				if err != nil {
 					return errors.Trace(err)
 				}
 			}
 		}
 	}
+}
+
+// Report calls onto the runner give back information about each application
+// worker for an engine report.
+func (p *provisioner) Report() map[string]any {
+	return p.runner.Report()
+}
+
+func (p *provisioner) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(p.catacomb.Context(context.Background()))
 }

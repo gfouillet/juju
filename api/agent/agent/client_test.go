@@ -4,84 +4,74 @@
 package agent_test
 
 import (
-	"context"
-	stdtesting "testing"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/agent/agent"
 	basetesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
 )
 
-func TestAll(t *stdtesting.T) {
-	gc.TestingT(t)
-}
-
 type clientSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&clientSuite{})
+func TestClientSuite(t *testing.T) {
+	tc.Run(t, &clientSuite{})
+}
 
-func (s *clientSuite) TestStateServingInfo(c *gc.C) {
+func (s *clientSuite) TestStateServingInfo(c *tc.C) {
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Agent")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "StateServingInfo")
-		c.Assert(arg, gc.IsNil)
-		c.Assert(result, gc.FitsTypeOf, &params.StateServingInfo{})
+		c.Check(objType, tc.Equals, "Agent")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "StateServingInfo")
+		c.Assert(arg, tc.IsNil)
+		c.Assert(result, tc.FitsTypeOf, &params.StateServingInfo{})
 		*result.(*params.StateServingInfo) = params.StateServingInfo{
-			APIPort:           666,
-			ControllerAPIPort: 668,
-			StatePort:         669,
-			Cert:              "some-cert",
-			PrivateKey:        "some-key",
-			CAPrivateKey:      "private-key",
-			SharedSecret:      "secret",
-			SystemIdentity:    "fred",
+			APIPort:        666,
+			Cert:           "some-cert",
+			PrivateKey:     "some-key",
+			CAPrivateKey:   "private-key",
+			SystemIdentity: "fred",
 		}
 		return nil
 	})
 	client, err := agent.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	info, err := client.StateServingInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(info, jc.DeepEquals, controller.StateServingInfo{
-		APIPort:           666,
-		ControllerAPIPort: 668,
-		StatePort:         669,
-		Cert:              "some-cert",
-		PrivateKey:        "some-key",
-		CAPrivateKey:      "private-key",
-		SharedSecret:      "secret",
-		SystemIdentity:    "fred",
+	c.Assert(err, tc.ErrorIsNil)
+	info, err := client.StateServingInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(info, tc.DeepEquals, controller.ControllerAgentInfo{
+		APIPort:        666,
+		Cert:           "some-cert",
+		PrivateKey:     "some-key",
+		CAPrivateKey:   "private-key",
+		SystemIdentity: "fred",
 	})
 }
 
-func (s *clientSuite) TestIsControllerShortCircuits(c *gc.C) {
-	result, err := agent.IsController(context.Background(), nil, names.NewControllerAgentTag("0"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.IsTrue)
+func (s *clientSuite) TestIsControllerShortCircuits(c *tc.C) {
+	result, err := agent.IsController(c.Context(), nil, names.NewControllerAgentTag("0"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.IsTrue)
 }
 
-func (s *clientSuite) TestMachineEntity(c *gc.C) {
+func (s *clientSuite) TestMachineEntity(c *tc.C) {
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Agent")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "GetEntities")
-		c.Assert(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Agent")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "GetEntities")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-42"}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.AgentGetEntitiesResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.AgentGetEntitiesResults{})
 		*result.(*params.AgentGetEntitiesResults) = params.AgentGetEntitiesResults{
 			Entities: []params.AgentGetEntitiesResult{{
 				Life: "alive",
@@ -92,10 +82,10 @@ func (s *clientSuite) TestMachineEntity(c *gc.C) {
 	})
 	tag := names.NewMachineTag("42")
 	client, err := agent.NewClient(apiCaller)
-	c.Assert(err, jc.ErrorIsNil)
-	m, err := client.Entity(context.Background(), tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(m.Tag(), gc.Equals, tag.String())
-	c.Assert(m.Life(), gc.Equals, life.Alive)
-	c.Assert(m.Jobs(), gc.DeepEquals, []model.MachineJob{model.JobHostUnits})
+	c.Assert(err, tc.ErrorIsNil)
+	m, err := client.Entity(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m.Tag(), tc.Equals, tag.String())
+	c.Assert(m.Life(), tc.Equals, life.Alive)
+	c.Assert(m.Jobs(), tc.DeepEquals, []model.MachineJob{model.JobHostUnits})
 }

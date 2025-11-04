@@ -27,20 +27,25 @@ func NewDeployerFacade(ctx facade.ModelContext) (*DeployerAPI, error) {
 		return nil, apiservererrors.ErrPerm
 	}
 
-	st := ctx.State()
-	resources := ctx.Resources()
 	leadershipRevoker, err := ctx.LeadershipRevoker()
 	if err != nil {
 		return nil, errors.Annotate(err, "getting leadership client")
 	}
+	watcherRegistry := ctx.WatcherRegistry()
 
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+	domainServices := ctx.DomainServices()
 
-	controllerConfigGetter := ctx.ServiceFactory().ControllerConfig()
-	unitRemover := ctx.ServiceFactory().Unit()
-
-	return NewDeployerAPI(controllerConfigGetter, unitRemover, authorizer, st, ctx.ObjectStore(), resources, leadershipRevoker, systemState)
+	return NewDeployerAPI(
+		domainServices.AgentPassword(),
+		domainServices.ControllerConfig(),
+		domainServices.Application(),
+		domainServices.ControllerNode(),
+		domainServices.Status(),
+		domainServices.Removal(),
+		authorizer,
+		ctx.ObjectStore(),
+		leadershipRevoker,
+		watcherRegistry,
+		ctx.Clock(),
+	)
 }

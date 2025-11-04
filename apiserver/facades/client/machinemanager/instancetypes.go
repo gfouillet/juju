@@ -4,14 +4,21 @@
 package machinemanager
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/rpc/params"
 )
+
+// instanceTypeConstraints holds necessary params to filter instance types.
+type instanceTypeConstraints struct {
+	constraints constraints.Value
+	fetcher     environs.InstanceTypesFetcher
+}
 
 func toParamsInstanceTypeResult(itypes []instances.InstanceType) []params.InstanceType {
 	result := make([]params.InstanceType, len(itypes))
@@ -35,25 +42,24 @@ func toParamsInstanceTypeResult(itypes []instances.InstanceType) []params.Instan
 	return result
 }
 
-// newInstanceTypeConstraints returns an instanceTypeConstraints with the passed
-// parameters.
-func newInstanceTypeConstraints(env environs.Environ, constraints constraints.Value) instanceTypeConstraints {
+// newInstanceTypeConstraints returns an instanceTypeConstraints.
+func newInstanceTypeConstraints(
+	fetcher environs.InstanceTypesFetcher,
+	constraints constraints.Value,
+) instanceTypeConstraints {
 	return instanceTypeConstraints{
-		environ:     env,
+		fetcher:     fetcher,
 		constraints: constraints,
 	}
 }
 
-// instanceTypeConstraints holds necessary params to filter instance types.
-type instanceTypeConstraints struct {
-	constraints constraints.Value
-	environ     environs.Environ
-}
-
-// getInstanceTypes returns a list of the available instance types in the provider according
-// to the passed constraints.
-func getInstanceTypes(ctx envcontext.ProviderCallContext, cons instanceTypeConstraints) (params.InstanceTypesResult, error) {
-	instanceTypes, err := cons.environ.InstanceTypes(ctx, cons.constraints)
+// getInstanceTypes returns a list of the available instance types according to
+// the [instanceTypeConstraints] passed in.
+func getInstanceTypes(
+	ctx context.Context,
+	cons instanceTypeConstraints,
+) (params.InstanceTypesResult, error) {
+	instanceTypes, err := cons.fetcher.InstanceTypes(ctx, cons.constraints)
 	if err != nil {
 		return params.InstanceTypesResult{}, errors.Trace(err)
 	}

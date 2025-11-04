@@ -4,12 +4,11 @@
 package broker
 
 import (
-	"io"
-	"os"
+	"context"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/core/instance"
@@ -27,9 +26,8 @@ import (
 type NewBrokerFunc func(Config) (environs.InstanceBroker, error)
 
 var (
-	systemNetworkInterfacesFile = "/etc/network/interfaces"
-	systemNetplanDirectory      = "/etc/netplan"
-	activateBridgesTimeout      = 5 * time.Minute
+	systemNetplanDirectory = "/etc/netplan"
+	activateBridgesTimeout = 5 * time.Minute
 )
 
 // NetConfigFunc returns a slice of NetworkConfig from a source config.
@@ -98,7 +96,7 @@ func New(config Config) (environs.InstanceBroker, error) {
 
 	broker, err := newBroker(prepareHost(config), config.APICaller, manager, config.AgentConfig)
 	if err != nil {
-		logger.Errorf("failed to create new %s broker", config.ContainerType)
+		logger.Errorf(context.TODO(), "failed to create new %s broker", config.ContainerType)
 		return nil, errors.Trace(err)
 	}
 
@@ -106,50 +104,22 @@ func New(config Config) (environs.InstanceBroker, error) {
 }
 
 func prepareHost(config Config) PrepareHostFunc {
-	return func(containerTag names.MachineTag, logger corelogger.Logger, abort <-chan struct{}) error {
+	return func(ctx context.Context, containerTag names.MachineTag, logger corelogger.Logger, abort <-chan struct{}) error {
+		bridger, err := network.DefaultNetplanBridger(activateBridgesTimeout, systemNetplanDirectory)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
 		preparer := NewHostPreparer(HostPreparerParams{
 			API:                config.APICaller,
 			ObserveNetworkFunc: observeNetwork(config),
 			AcquireLockFunc:    acquireLock(config),
-			CreateBridger:      defaultBridger,
+			Bridger:            bridger,
 			AbortChan:          abort,
 			MachineTag:         config.MachineTag,
 			Logger:             logger,
 		})
-		return errors.Trace(preparer.Prepare(containerTag))
-	}
-}
-
-// Patch for testing.
-var (
-	openFunc    = os.Open
-	readDirFunc = func(f *os.File, n int) (names []string, err error) {
-		return f.Readdirnames(n)
-	}
-)
-
-func isDirectoryEmpty(directory string) (bool, error) {
-	f, err := openFunc(directory)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = f.Close() }()
-
-	_, err = readDirFunc(f, 1)
-	if err == io.EOF {
-		return true, nil
-	}
-
-	return false, err
-}
-
-// defaultBridger will prefer to use netplan if there is an /etc/netplan directory
-// and it is not empty, falling back to ENI if the directory doesn't exist or is empty.
-func defaultBridger() (network.Bridger, error) {
-	if empty, err := isDirectoryEmpty(systemNetplanDirectory); (err == nil) && !empty {
-		return network.DefaultNetplanBridger(activateBridgesTimeout, systemNetplanDirectory)
-	} else {
-		return network.DefaultEtcNetworkInterfacesBridger(activateBridgesTimeout, systemNetworkInterfacesFile)
+		return errors.Trace(preparer.Prepare(ctx, containerTag))
 	}
 }
 
@@ -177,13 +147,13 @@ func observeNetwork(config Config) func() ([]params.NetworkConfig, error) {
 }
 
 type AvailabilityZoner interface {
-	AvailabilityZone() (string, error)
+	AvailabilityZone(ctx context.Context) (string, error)
 }
 
 // ConfigureAvailabilityZone reads the availability zone from the machine and
 // adds the resulting information to the the manager config.
-func ConfigureAvailabilityZone(managerConfig container.ManagerConfig, machineZone AvailabilityZoner) (container.ManagerConfig, error) {
-	availabilityZone, err := machineZone.AvailabilityZone()
+func ConfigureAvailabilityZone(ctx context.Context, managerConfig container.ManagerConfig, machineZone AvailabilityZoner) (container.ManagerConfig, error) {
+	availabilityZone, err := machineZone.AvailabilityZone(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

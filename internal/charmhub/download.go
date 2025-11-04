@@ -5,6 +5,9 @@ package charmhub
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,7 +18,6 @@ import (
 
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/trace"
-	"github.com/juju/juju/internal/charm"
 )
 
 // FileSystem defines a file system for modifying files on a users system.
@@ -33,6 +35,11 @@ func (fileSystem) Create(name string) (*os.File, error) {
 	return os.Create(name)
 }
 
+// DefaultFileSystem returns the default file system.
+func DefaultFileSystem() FileSystem {
+	return fileSystem{}
+}
+
 // DownloadOption to be passed to Info to customize the resulting request.
 type DownloadOption func(*downloadOptions)
 
@@ -47,21 +54,28 @@ func WithProgressBar(pb ProgressBar) DownloadOption {
 	}
 }
 
+// Digest represents a digest of a file.
+type Digest struct {
+	SHA256 string
+	SHA384 string
+	Size   int64
+}
+
 // Create a downloadOptions instance with default values.
 func newDownloadOptions() *downloadOptions {
 	return &downloadOptions{}
 }
 
-// downloadClient represents a client for downloading charm resources directly.
-type downloadClient struct {
+// DownloadClient represents a client for downloading charm resources directly.
+type DownloadClient struct {
 	httpClient HTTPClient
 	fileSystem FileSystem
 	logger     corelogger.Logger
 }
 
-// newDownloadClient creates a downloadClient for requesting
-func newDownloadClient(httpClient HTTPClient, fileSystem FileSystem, logger corelogger.Logger) *downloadClient {
-	return &downloadClient{
+// newDownloadClient creates a DownloadClient for requesting
+func NewDownloadClient(httpClient HTTPClient, fileSystem FileSystem, logger corelogger.Logger) *DownloadClient {
+	return &DownloadClient{
 		httpClient: httpClient,
 		fileSystem: fileSystem,
 		logger:     logger,
@@ -96,7 +110,7 @@ type ProgressBar interface {
 // TODO (stickupkid): We should either create and remove, or take a file and
 // let the callee remove. The fact that the operations are asymmetrical can lead
 // to unexpected expectations; namely leaking of files.
-func (c *downloadClient) Download(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (err error) {
+func (c *DownloadClient) Download(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (digest *Digest, err error) {
 	ctx, span := trace.Start(ctx, trace.NameFromFunc(), trace.WithAttributes(
 		trace.StringAttr("charmhub.request", "download"),
 		trace.StringAttr("charmhub.url", resourceURL.String()),
@@ -107,41 +121,12 @@ func (c *downloadClient) Download(ctx context.Context, resourceURL *url.URL, arc
 	}()
 
 	pprof.Do(ctx, pprof.Labels(trace.OTELTraceID, span.Scope().TraceID()), func(ctx context.Context) {
-		err = c.download(ctx, resourceURL, archivePath, options...)
+		digest, err = c.download(ctx, resourceURL, archivePath, options...)
 	})
 	return
 }
 
-// DownloadAndRead returns a charm archive retrieved from the given URL.
-func (c *downloadClient) DownloadAndRead(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (*charm.CharmArchive, error) {
-	err := c.Download(ctx, resourceURL, archivePath, options...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return charm.ReadCharmArchive(archivePath)
-}
-
-// DownloadAndReadBundle returns a bundle archive retrieved from the given URL.
-func (c *downloadClient) DownloadAndReadBundle(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) (*charm.BundleArchive, error) {
-	err := c.Download(ctx, resourceURL, archivePath, options...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return charm.ReadBundleArchive(archivePath)
-}
-
-// DownloadResource returns an io.ReadCloser to read the Resource from.
-func (c *downloadClient) DownloadResource(ctx context.Context, resourceURL *url.URL) (r io.ReadCloser, err error) {
-	resp, err := c.downloadFromURL(ctx, resourceURL)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return resp.Body, nil
-}
-
-func (c *downloadClient) download(ctx context.Context, resourceURL *url.URL, archivePath string, options ...DownloadOption) error {
+func (c *DownloadClient) download(ctx context.Context, url *url.URL, archivePath string, options ...DownloadOption) (*Digest, error) {
 	opts := newDownloadOptions()
 	for _, option := range options {
 		option(opts)
@@ -149,21 +134,21 @@ func (c *downloadClient) download(ctx context.Context, resourceURL *url.URL, arc
 
 	f, err := c.fileSystem.Create(archivePath)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	defer func() {
 		_ = f.Close()
 	}()
 
-	r, err := c.downloadFromURL(ctx, resourceURL)
+	r, err := c.downloadFromURL(ctx, url)
 	if err != nil {
-		return errors.Annotatef(err, "cannot retrieve %q", resourceURL)
+		return nil, errors.Annotatef(err, "cannot retrieve %q", url)
 	}
 	defer func() {
 		_ = r.Body.Close()
 	}()
 
-	var writer io.Writer = f
+	progressBar := io.Discard
 	if opts.progressBar != nil {
 		// Progress bar has this nifty feature where you can supply a name. In
 		// this case we can supply one to help with UI feedback.
@@ -174,30 +159,37 @@ func (c *downloadClient) download(ctx context.Context, resourceURL *url.URL, arc
 			}
 		}
 
-		// TODO (stickupkid): Would be good to verify the size, but
-		// unfortunately we don't have the information to hand. That information
-		// is further up the stack.
 		downloadSize := float64(r.ContentLength)
 		opts.progressBar.Start(name, downloadSize)
 		defer opts.progressBar.Finished()
 
-		writer = io.MultiWriter(f, opts.progressBar)
+		progressBar = opts.progressBar
 	}
 
-	if _, err := io.Copy(writer, r.Body); err != nil {
-		return errors.Trace(err)
+	hasher256 := sha256.New()
+	hasher384 := sha512.New384()
+
+	size, err := io.Copy(f, io.TeeReader(r.Body, io.MultiWriter(hasher256, hasher384, progressBar)))
+	if err != nil {
+		return nil, errors.Trace(err)
+	} else if size != r.ContentLength {
+		return nil, errors.Errorf("downloaded size %d does not match expected size %d", size, r.ContentLength)
 	}
 
-	return nil
+	return &Digest{
+		SHA256: hex.EncodeToString(hasher256.Sum(nil)),
+		SHA384: hex.EncodeToString(hasher384.Sum(nil)),
+		Size:   size,
+	}, nil
 }
 
-func (c *downloadClient) downloadFromURL(ctx context.Context, resourceURL *url.URL) (resp *http.Response, err error) {
+func (c *DownloadClient) downloadFromURL(ctx context.Context, resourceURL *url.URL) (resp *http.Response, err error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", resourceURL.String(), nil)
 	if err != nil {
 		return nil, errors.Annotatef(err, "cannot make new request")
 	}
 
-	c.logger.Tracef("download from URL %s", resourceURL.String())
+	c.logger.Tracef(ctx, "download from URL %s", resourceURL.String())
 
 	resp, err = c.httpClient.Do(req)
 	if err != nil {
@@ -209,7 +201,7 @@ func (c *downloadClient) downloadFromURL(ctx context.Context, resourceURL *url.U
 		return resp, nil
 	}
 
-	c.logger.Errorf("download failed from %s: response code: %s", resourceURL.String(), resp.Status)
+	c.logger.Errorf(ctx, "download failed from %s: response code: %s", resourceURL.String(), resp.Status)
 
 	// Ensure we drain the response body so this connection can be reused. As
 	// there is no error message, we have no ability other than to check the

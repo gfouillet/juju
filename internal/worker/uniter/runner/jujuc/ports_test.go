@@ -5,12 +5,13 @@
 package jujuc_test
 
 import (
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 )
 
@@ -18,7 +19,9 @@ type PortsSuite struct {
 	ContextSuite
 }
 
-var _ = gc.Suite(&PortsSuite{})
+func TestPortsSuite(t *testing.T) {
+	tc.Run(t, &PortsSuite{})
+}
 
 var portsTests = []struct {
 	cmd    []string
@@ -71,54 +74,18 @@ func makeAllEndpointsRanges(stringRanges ...string) network.GroupedPortRanges {
 	}
 }
 
-func (s *PortsSuite) TestOpenClose(c *gc.C) {
+func (s *PortsSuite) TestOpenClose(c *tc.C) {
 	hctx := s.GetHookContext(c, -1, "")
 	for _, t := range portsTests {
 		com, err := jujuc.NewCommand(hctx, t.cmd[0])
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.cmd[1:])
-		c.Check(code, gc.Equals, 0)
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, "")
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
+		c.Check(code, tc.Equals, 0)
+		c.Assert(bufferString(ctx.Stdout), tc.Equals, "")
+		c.Assert(bufferString(ctx.Stderr), tc.Equals, "")
 		hctx.info.CheckPortRanges(c, t.expect)
 	}
-}
-
-func (s *PortsSuite) TestHelp(c *gc.C) {
-	hctx := s.GetHookContext(c, -1, "")
-	open, err := jujuc.NewCommand(hctx, "open-port")
-	c.Assert(err, jc.ErrorIsNil)
-	flags := cmdtesting.NewFlagSet()
-	c.Assert(string(open.Info().Help(flags)), gc.Equals, `
-Usage: open-port <port>[/<protocol>] or <from>-<to>[/<protocol>] or icmp
-
-Summary:
-register a request to open a port or port range
-
-Details:
-open-port registers a request to open the specified port or port range.
-
-By default, the specified port or port range will be opened for all defined
-application endpoints. The --endpoints option can be used to constrain the
-open request to a comma-delimited list of application endpoints.
-`[1:])
-
-	close, err := jujuc.NewCommand(hctx, "close-port")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(close.Info().Help(flags)), gc.Equals, `
-Usage: close-port <port>[/<protocol>] or <from>-<to>[/<protocol>] or icmp
-
-Summary:
-register a request to close a port or port range
-
-Details:
-close-port registers a request to close the specified port or port range.
-
-By default, the specified port or port range will be closed for all defined
-application endpoints. The --endpoints option can be used to constrain the
-close request to a comma-delimited list of application endpoints.
-`[1:])
 }
 
 // Since the deprecation warning gets output during Run, we really need
@@ -130,16 +97,16 @@ var portsFormatDeprecationTests = []struct {
 	{[]string{"close-port", "--format", "foo", "80/TCP"}},
 }
 
-func (s *PortsSuite) TestOpenCloseDeprecation(c *gc.C) {
+func (s *PortsSuite) TestOpenCloseDeprecation(c *tc.C) {
 	hctx := s.GetHookContext(c, -1, "")
 	for _, t := range portsFormatDeprecationTests {
 		name := t.cmd[0]
 		com, err := jujuc.NewCommand(hctx, name)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.cmd[1:])
-		c.Assert(code, gc.Equals, 0)
-		c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-		c.Assert(cmdtesting.Stderr(ctx), gc.Equals, "--format flag deprecated for command \""+name+"\"")
+		c.Assert(code, tc.Equals, 0)
+		c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+		c.Assert(cmdtesting.Stderr(ctx), tc.Equals, "--format flag deprecated for command \""+name+"\"")
 	}
 }

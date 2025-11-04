@@ -4,10 +4,9 @@
 package machine
 
 import (
-	"github.com/juju/cmd/v4"
-
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageListMachinesSummary = `
@@ -15,8 +14,9 @@ Lists machines in a model.`[1:]
 
 var usageListMachinesDetails = `
 By default, the tabular format is used.
-The following sections are included: ID, STATE, DNS, INS-ID, SERIES, AZ
-Note: AZ above is the cloud region's availability zone.
+The following sections are included: ` + "`ID`" + `, ` + "`STATE`" + `, ` +
+	"`DNS`" + `, ` + "`INS-ID`" + `, ` + "`SERIES`" + `, ` + "`AZ`" + `
+Note: Above, ` + "`AZ`" + ` is the cloud region's availability zone.
 
 `
 

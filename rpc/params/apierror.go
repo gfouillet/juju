@@ -4,6 +4,7 @@
 package params
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -13,8 +14,10 @@ import (
 	"github.com/juju/errors"
 	"gopkg.in/macaroon.v2"
 
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	secreterrors "github.com/juju/juju/domain/secret/errors"
 	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	interrors "github.com/juju/juju/internal/errors"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -29,9 +32,18 @@ var MigrationInProgressError = errors.New(CodeMigrationInProgress)
 
 // Error is the type of error returned by any call to the state API.
 type Error struct {
-	Message string                 `json:"message"`
-	Code    string                 `json:"code"`
-	Info    map[string]interface{} `json:"info,omitempty"`
+	Message string         `json:"message"`
+	Code    string         `json:"code"`
+	Info    map[string]any `json:"info,omitempty"`
+}
+
+// WithInfo is responsible for setting the [Error.Info] information
+func (e Error) WithInfo(info map[string]any) *Error {
+	return &Error{
+		Code:    e.Code,
+		Message: e.Message,
+		Info:    info,
+	}
 }
 
 func (e Error) Error() string {
@@ -133,14 +145,14 @@ func (e RedirectErrorInfo) AsMap() map[string]interface{} {
 func serializeToMap(v interface{}) map[string]interface{} {
 	data, err := json.Marshal(v)
 	if err != nil {
-		logger.Criticalf("serializeToMap: marshal to json failed: %v", err)
+		logger.Criticalf(context.TODO(), "serializeToMap: marshal to json failed: %v", err)
 		return nil
 	}
 
 	var asMap map[string]interface{}
 	err = json.Unmarshal(data, &asMap)
 	if err != nil {
-		logger.Criticalf("serializeToMap: unmarshal to map failed: %v", err)
+		logger.Criticalf(context.TODO(), "serializeToMap: unmarshal to map failed: %v", err)
 		return nil
 	}
 
@@ -150,18 +162,17 @@ func serializeToMap(v interface{}) map[string]interface{} {
 // The Code constants hold error codes for well known errors.
 const (
 	CodeNotFound                   = "not found"
-	CodeUserNotFound               = "user not found"
 	CodeModelNotFound              = "model not found"
 	CodeSecretNotFound             = "secret not found"
 	CodeSecretRevisionNotFound     = "secret revision not found"
 	CodeSecretBackendNotFound      = "secret backend not found"
 	CodeSecretConsumerNotFound     = "secret consumer not found"
 	CodeUnauthorized               = "unauthorized access"
+	CodeSessionTokenInvalid        = "session token invalid"
 	CodeLoginExpired               = "login expired"
 	CodeNoCreds                    = "no credentials provided"
 	CodeCannotEnterScope           = "cannot enter scope"
 	CodeCannotEnterScopeYet        = "cannot enter scope yet"
-	CodeExcessiveContention        = "excessive contention"
 	CodeUnitHasSubordinates        = "unit has subordinates"
 	CodeNotAssigned                = "not assigned"
 	CodeStopped                    = "stopped"
@@ -204,6 +215,70 @@ const (
 	CodeSecretBackendNotValid      = "secret backend not valid"
 	CodeAccessRequired             = "access required"
 	CodeAppShouldNotHaveUnits      = "application should not have units"
+
+	//
+	// Tag based error
+	//
+
+	// CodeTagInvalid represents an error code when the tag supplied by the
+	// caller is not parsable.
+	CodeTagInvalid = "invalid tag"
+
+	// CodeTagKindNotSupport represents an error code when a tag has been
+	// provided to a facade call and the tags kind is unsupported by the facade.
+	CodeTagKindNotSupported = "tag kind not supported"
+
+	//
+	// Machine based errors
+	//
+
+	// CodeMachineInvalidID represents an error code that indicates a supplied
+	// machine id is invalid.
+	CodeMachineInvalidID = "invalid machine id"
+
+	// CodeMachineNotFound represents an error code that indicates the machine
+	// requested does not exist.
+	CodeMachineNotFound = "machine not found"
+
+	//
+	// User based errors
+	//
+
+	// CodeUserInvalidName represents an error that happens when a user name
+	// has been supplied that is invalid.
+	CodeUserInvalidName = "invalid user name"
+
+	// CodeUserNotFound represents an error that happens when a user requested
+	// does not exist.
+	CodeUserNotFound = "user not found"
+
+	//
+	// User ssh key errors
+	//
+
+	// CodeUserKeyInvalidComment represents an error where a requested key to be
+	// added by a user violates the Juju comment restrictions.
+	CodeUserKeyInvalidComment = "invalid public key comment"
+
+	// CodeUserKeyInvalidKey represents an error where a requested key to be
+	// added is not considered valid.
+	CodeUserKeyInvalidKey = "invalid public key"
+
+	// CodeUserKeyAlreadyExists represents an error where a requested key to be
+	// added already exists for the user.
+	CodeUserKeyAlreadyExists = "public key already exists"
+
+	// CodeUserKeyInvalidKeySource represents an error where by a public key
+	// ssh import source is not valid.
+	CodeUserKeyInvalidKeySource = "invalid user public key source"
+
+	// CodeUserKeyUnknownKeySource represents an error where the public key
+	// source being asked to import for is unknown and not supported.
+	CodeUserKeyUnknownKeySource = "unknown user public key source"
+
+	// CodeUserKeySourceSubjectNotFound represents an error where the key source
+	// has told us the subject being imported does not exist.
+	CodeUserKeySourceSubjectNotFound = "key source subject not found"
 )
 
 // TranslateWellKnownError translates well known wire error codes into a github.com/juju/errors error
@@ -258,6 +333,8 @@ func TranslateWellKnownError(err error) error {
 		return errors.NewQuotaLimitExceeded(err, "")
 	case CodeNotYetAvailable:
 		return errors.NewNotYetAvailable(err, "")
+	case CodeModelNotFound:
+		return fmt.Errorf("%s%w", err.Error(), errors.Hide(modelerrors.NotFound))
 	}
 	return err
 }
@@ -267,14 +344,24 @@ func TranslateWellKnownError(err error) error {
 // is none.
 func ErrCode(err error) string {
 	type ErrorCoder interface {
+		error
 		ErrorCode() string
 	}
-	switch err := errors.Cause(err).(type) {
-	case ErrorCoder:
-		return err.ErrorCode()
-	default:
-		return ""
+
+	// NOTE (tlm):
+	// Don't remove this line!!!!
+	// Because we use a very outdated http request library it still wraps some
+	// of it's errors with errgo pkg. We need Cause here to potentially pull
+	// out errors from this library.
+	//
+	// The soon we remove httprequest from Juju the better life will be.
+	err = errors.Cause(err)
+
+	coder, is := interrors.AsType[ErrorCoder](err)
+	if is {
+		return coder.ErrorCode()
 	}
+	return ""
 }
 
 func IsCodeActionNotAvailable(err error) bool {
@@ -283,6 +370,10 @@ func IsCodeActionNotAvailable(err error) bool {
 
 func IsCodeNotFound(err error) bool {
 	return ErrCode(err) == CodeNotFound
+}
+
+func IsCodeNotValid(err error) bool {
+	return ErrCode(err) == CodeNotValid
 }
 
 func IsCodeUserNotFound(err error) bool {
@@ -309,24 +400,18 @@ func IsCodeSecretBackendNotFound(err error) bool {
 	return ErrCode(err) == CodeSecretBackendNotFound
 }
 
-func IsCodeSecretBackendAlreadyExists(err error) bool {
-	return ErrCode(err) == CodeSecretBackendAlreadyExists
-}
-
-func IsCodeSecretBackendNotValid(err error) bool {
-	return ErrCode(err) == CodeSecretBackendAlreadyExists
-}
-
 func IsCodeSecretBackendForbidden(err error) bool {
 	return ErrCode(err) == CodeSecretBackendForbidden
 }
 
-func IsCodeSecretBackendNotSupported(err error) bool {
-	return ErrCode(err) == CodeSecretBackendNotSupported
-}
-
 func IsCodeUnauthorized(err error) bool {
 	return ErrCode(err) == CodeUnauthorized
+}
+
+// IsCodeSessionTokenInvalid returns true if err includes a SessionTokenInvalid
+// error code.
+func IsCodeSessionTokenInvalid(err error) bool {
+	return ErrCode(err) == CodeSessionTokenInvalid
 }
 
 func IsCodeNoCreds(err error) bool {
@@ -356,10 +441,6 @@ func IsCodeCannotEnterScope(err error) bool {
 
 func IsCodeCannotEnterScopeYet(err error) bool {
 	return ErrCode(err) == CodeCannotEnterScopeYet
-}
-
-func IsCodeExcessiveContention(err error) bool {
-	return ErrCode(err) == CodeExcessiveContention
 }
 
 func IsCodeUnitHasSubordinates(err error) bool {

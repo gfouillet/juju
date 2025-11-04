@@ -78,10 +78,10 @@ func (c *MockCharmActionsCall) DoAndReturn(f func() *charm.Actions) *MockCharmAc
 }
 
 // Config mocks base method.
-func (m *MockCharm) Config() *charm.Config {
+func (m *MockCharm) Config() *charm.ConfigSpec {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Config")
-	ret0, _ := ret[0].(*charm.Config)
+	ret0, _ := ret[0].(*charm.ConfigSpec)
 	return ret0
 }
 
@@ -98,19 +98,19 @@ type MockCharmConfigCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockCharmConfigCall) Return(arg0 *charm.Config) *MockCharmConfigCall {
+func (c *MockCharmConfigCall) Return(arg0 *charm.ConfigSpec) *MockCharmConfigCall {
 	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCharmConfigCall) Do(f func() *charm.Config) *MockCharmConfigCall {
+func (c *MockCharmConfigCall) Do(f func() *charm.ConfigSpec) *MockCharmConfigCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCharmConfigCall) DoAndReturn(f func() *charm.Config) *MockCharmConfigCall {
+func (c *MockCharmConfigCall) DoAndReturn(f func() *charm.ConfigSpec) *MockCharmConfigCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -225,6 +225,44 @@ func (c *MockCharmRevisionCall) Do(f func() int) *MockCharmRevisionCall {
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockCharmRevisionCall) DoAndReturn(f func() int) *MockCharmRevisionCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// Version mocks base method.
+func (m *MockCharm) Version() string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Version")
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// Version indicates an expected call of Version.
+func (mr *MockCharmMockRecorder) Version() *MockCharmVersionCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Version", reflect.TypeOf((*MockCharm)(nil).Version))
+	return &MockCharmVersionCall{Call: call}
+}
+
+// MockCharmVersionCall wrap *gomock.Call
+type MockCharmVersionCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockCharmVersionCall) Return(arg0 string) *MockCharmVersionCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockCharmVersionCall) Do(f func() string) *MockCharmVersionCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockCharmVersionCall) DoAndReturn(f func() string) *MockCharmVersionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

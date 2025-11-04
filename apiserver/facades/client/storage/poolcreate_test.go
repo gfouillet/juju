@@ -1,17 +1,15 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package storage_test
+package storage
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/apiserver/facades/client/storage"
 	"github.com/juju/juju/internal/storage/provider"
 	"github.com/juju/juju/rpc/params"
 )
@@ -20,13 +18,13 @@ type poolCreateSuite struct {
 	baseStorageSuite
 }
 
-var _ = gc.Suite(&poolCreateSuite{})
+func TestPoolCreateSuite(t *testing.T) {
+	tc.Run(t, &poolCreateSuite{})
+}
 
-func (s *poolCreateSuite) TestCreatePool(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolCreateSuite) TestCreatePool(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
 	s.storageService.EXPECT().CreateStoragePool(gomock.Any(), "pname", provider.LoopProviderType, nil).Return(nil)
 
 	args := params.StoragePoolArgs{
@@ -36,17 +34,15 @@ func (s *poolCreateSuite) TestCreatePool(c *gc.C) {
 			Attrs:    nil,
 		}},
 	}
-	results, err := s.api.CreatePool(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
+	results, err := s.api.CreatePool(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.IsNil)
 }
 
-func (s *poolCreateSuite) TestCreatePoolError(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *poolCreateSuite) TestCreatePoolError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.storageService = storage.NewMockStorageService(ctrl)
 	s.storageService.EXPECT().CreateStoragePool(gomock.Any(), "doesnt-matter", gomock.Any(), gomock.Any()).Return(errors.New("as expected"))
 
 	args := params.StoragePoolArgs{
@@ -54,10 +50,10 @@ func (s *poolCreateSuite) TestCreatePoolError(c *gc.C) {
 			Name: "doesnt-matter",
 		}},
 	}
-	results, err := s.api.CreatePool(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, jc.DeepEquals, &params.Error{
+	results, err := s.api.CreatePool(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.DeepEquals, &params.Error{
 		Message: "as expected",
 	})
 }

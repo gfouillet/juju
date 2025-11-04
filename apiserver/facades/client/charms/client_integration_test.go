@@ -5,17 +5,19 @@ package charms_test
 
 import (
 	"fmt"
-	"strings"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/client/charms"
+	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
+	usertesting "github.com/juju/juju/core/user/testing"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/domain/controllernode"
 	"github.com/juju/juju/internal/charm"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/testcharms"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // clientMacaroonIntegrationSuite tests that Client endpoints that are
@@ -25,17 +27,37 @@ type clientMacaroonIntegrationSuite struct {
 	jujutesting.MacaroonSuite
 }
 
-var _ = gc.Suite(&clientMacaroonIntegrationSuite{})
-
-func (s *clientMacaroonIntegrationSuite) createTestClient(c *gc.C) *charms.LocalCharmClient {
-	username := "testuser@somewhere"
+func TestClientMacaroonIntegrationSuite(t *testing.T) {
+	tc.Run(t, &clientMacaroonIntegrationSuite{})
+}
+func (s *clientMacaroonIntegrationSuite) createTestClient(c *tc.C) *charms.LocalCharmClient {
+	username := usertesting.GenNewName(c, "testuser@somewhere")
 	s.AddModelUser(c, username)
 	s.AddControllerUser(c, username, permission.LoginAccess)
+
+	controllerNodeService := s.ControllerDomainServices(c).ControllerNode()
+	addrs := network.SpaceHostPorts{
+		{
+			SpaceAddress: network.SpaceAddress{
+				MachineAddress: network.MachineAddress{
+					Value: "10.9.9.32",
+				},
+			},
+			NetPort: 42,
+		},
+	}
+	err := controllerNodeService.SetAPIAddresses(c.Context(), controllernode.SetAPIAddressArgs{
+		APIAddresses: map[string]network.SpaceHostPorts{
+			"0": addrs,
+		},
+	})
+	c.Assert(err, tc.IsNil)
+
 	cookieJar := jujutesting.NewClearableCookieJar()
-	s.DischargerLogin = func() string { return username }
+	s.DischargerLogin = func() string { return username.Name() }
 	api := s.OpenAPI(c, nil, cookieJar)
 	charmClient, err := charms.NewLocalCharmClient(api)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Even though we've logged into the API, we want
 	// the tests below to exercise the discharging logic
@@ -44,7 +66,13 @@ func (s *clientMacaroonIntegrationSuite) createTestClient(c *gc.C) *charms.Local
 	return charmClient
 }
 
-func (s *clientMacaroonIntegrationSuite) TestAddLocalCharmWithFailedDischarge(c *gc.C) {
+func (s *clientMacaroonIntegrationSuite) TestStub(c *tc.C) {
+	c.Skip(`This suite is missing tests for the following scenarios:
+- Deploying a local charm using a macaroon
+`)
+}
+
+func (s *clientMacaroonIntegrationSuite) TestAddLocalCharmWithFailedDischarge(c *tc.C) {
 	charmClient := s.createTestClient(c)
 	s.DischargerLogin = func() string { return "" }
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "dummy")
@@ -52,30 +80,6 @@ func (s *clientMacaroonIntegrationSuite) TestAddLocalCharmWithFailedDischarge(c 
 		fmt.Sprintf("local:%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
 	)
 	savedURL, err := charmClient.AddLocalCharm(curl, charmArchive, false, jujuversion.Current)
-	c.Assert(err, gc.ErrorMatches, `Put https://.+: cannot get discharge from "https://.*": third party refused discharge: cannot discharge: login denied by discharger`)
-	c.Assert(savedURL, gc.IsNil)
-}
-
-func (s *clientMacaroonIntegrationSuite) TestAddLocalCharmSuccess(c *gc.C) {
-	charmClient, err := charms.NewLocalCharmClient(s.OpenControllerModelAPI(c))
-	c.Assert(err, jc.ErrorIsNil)
-	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "dummy")
-	curl := charm.MustParseURL(
-		fmt.Sprintf("local:%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
-	)
-	testcharms.CheckCharmReady(c, charmArchive)
-
-	// Upload an archive with its original revision.
-	savedURL, err := charmClient.AddLocalCharm(curl, charmArchive, false, jujuversion.Current)
-	// We know that in testing we occasionally see "zip: not a valid zip file" occur.
-	// Even after many efforts, we haven't been able to find the source. It almost never
-	// happens locally, and we don't see this in production.
-	// TODO: remove the skip when we are using the fake charmstore.
-	if err != nil {
-		if strings.Contains(err.Error(), "zip: not a valid zip file") {
-			c.Skip("intermittent charmstore upload issue")
-		}
-	}
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, curl.String())
+	c.Assert(err, tc.ErrorMatches, `Put https://.+: cannot get discharge from "https://.*": third party refused discharge: cannot discharge: login denied by discharger`)
+	c.Assert(savedURL, tc.IsNil)
 }

@@ -4,99 +4,74 @@
 package common_test
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/common"
+	"github.com/juju/juju/apiserver/common/mocks"
+	"github.com/juju/juju/domain/blockcommand"
+	blockcommanderrors "github.com/juju/juju/domain/blockcommand/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
 )
 
-type mockBlock struct {
-	state.Block
-	t state.BlockType
-	m string
-}
-
-func (m mockBlock) Id() string { return "" }
-
-func (m mockBlock) Tag() (names.Tag, error) { return names.NewModelTag("mocktesting"), nil }
-
-func (m mockBlock) Type() state.BlockType { return m.t }
-
-func (m mockBlock) Message() string { return m.m }
-
-func (m mockBlock) ModelUUID() string { return "" }
-
 type blockCheckerSuite struct {
-	testing.FakeJujuXDGDataHomeSuite
-	aBlock                  state.Block
-	destroy, remove, change state.Block
-
+	service      *mocks.MockBlockCommandService
 	blockchecker *common.BlockChecker
 }
 
-var _ = gc.Suite(&blockCheckerSuite{})
-
-func (s *blockCheckerSuite) SetUpTest(c *gc.C) {
-	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
-	s.destroy = mockBlock{t: state.DestroyBlock, m: "Mock BLOCK testing: DESTROY"}
-	s.remove = mockBlock{t: state.RemoveBlock, m: "Mock BLOCK testing: REMOVE"}
-	s.change = mockBlock{t: state.ChangeBlock, m: "Mock BLOCK testing: CHANGE"}
-	s.blockchecker = common.NewBlockChecker(s)
+func TestBlockCheckerSuite(t *testing.T) {
+	tc.Run(t, &blockCheckerSuite{})
 }
 
-func (mock *blockCheckerSuite) GetBlockForType(t state.BlockType) (state.Block, bool, error) {
-	if mock.aBlock.Type() == t {
-		return mock.aBlock, true, nil
-	} else {
-		return nil, false, nil
-	}
+func (s *blockCheckerSuite) TestDestroyBlockChecker(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.DestroyBlock).Return("block", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(c.Context()), "block")
+
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.DestroyBlock).Return("", blockcommanderrors.NotFound)
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.RemoveBlock).Return("remove", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(c.Context()), "remove")
+
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.DestroyBlock).Return("", blockcommanderrors.NotFound)
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.RemoveBlock).Return("", blockcommanderrors.NotFound)
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.ChangeBlock).Return("change", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(c.Context()), "change")
 }
 
-func (s *blockCheckerSuite) TestDestroyBlockChecker(c *gc.C) {
-	s.aBlock = s.destroy
-	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(context.Background()), s.destroy.Message())
+func (s *blockCheckerSuite) TestRemoveBlockChecker(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.aBlock = s.remove
-	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(context.Background()), s.remove.Message())
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.RemoveBlock).Return("remove", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.RemoveAllowed(c.Context()), "remove")
 
-	s.aBlock = s.change
-	s.assertErrorBlocked(c, true, s.blockchecker.DestroyAllowed(context.Background()), s.change.Message())
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.RemoveBlock).Return("", blockcommanderrors.NotFound)
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.ChangeBlock).Return("change", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.RemoveAllowed(c.Context()), "change")
 }
 
-func (s *blockCheckerSuite) TestRemoveBlockChecker(c *gc.C) {
-	s.aBlock = s.destroy
-	s.assertErrorBlocked(c, false, s.blockchecker.RemoveAllowed(context.Background()), s.destroy.Message())
+func (s *blockCheckerSuite) TestChangeBlockChecker(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.aBlock = s.remove
-	s.assertErrorBlocked(c, true, s.blockchecker.RemoveAllowed(context.Background()), s.remove.Message())
-
-	s.aBlock = s.change
-	s.assertErrorBlocked(c, true, s.blockchecker.RemoveAllowed(context.Background()), s.change.Message())
+	s.service.EXPECT().GetBlockSwitchedOn(gomock.Any(), blockcommand.ChangeBlock).Return("change", nil)
+	s.assertErrorBlocked(c, true, s.blockchecker.ChangeAllowed(c.Context()), "change")
 }
 
-func (s *blockCheckerSuite) TestChangeBlockChecker(c *gc.C) {
-	s.aBlock = s.destroy
-	s.assertErrorBlocked(c, false, s.blockchecker.ChangeAllowed(context.Background()), s.destroy.Message())
-
-	s.aBlock = s.remove
-	s.assertErrorBlocked(c, false, s.blockchecker.ChangeAllowed(context.Background()), s.remove.Message())
-
-	s.aBlock = s.change
-	s.assertErrorBlocked(c, true, s.blockchecker.ChangeAllowed(context.Background()), s.change.Message())
+func (s *blockCheckerSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.service = mocks.NewMockBlockCommandService(ctrl)
+	s.blockchecker = common.NewBlockChecker(s.service)
+	return ctrl
 }
 
-func (s *blockCheckerSuite) assertErrorBlocked(c *gc.C, blocked bool, err error, msg string) {
+func (s *blockCheckerSuite) assertErrorBlocked(c *tc.C, blocked bool, err error, msg string) {
 	if blocked {
-		c.Assert(params.IsCodeOperationBlocked(err), jc.IsTrue)
-		c.Assert(err, gc.ErrorMatches, msg)
+		c.Assert(params.IsCodeOperationBlocked(err), tc.IsTrue)
+		c.Assert(err, tc.ErrorMatches, msg)
 	} else {
-		c.Assert(errors.Cause(err), jc.ErrorIsNil)
+		c.Assert(errors.Cause(err), tc.ErrorIsNil)
 	}
 }

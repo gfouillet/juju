@@ -9,8 +9,7 @@ import (
 
 // Leadership holds the values for the hook context.
 type Leadership struct {
-	IsLeader       bool
-	LeaderSettings map[string]string
+	IsLeader bool
 }
 
 // ContextLeader is a test double for jujuc.ContextLeader.
@@ -27,25 +26,4 @@ func (c *ContextLeader) IsLeader() (bool, error) {
 	}
 
 	return c.info.IsLeader, nil
-}
-
-// LeaderSettings implements jujuc.ContextLeader.
-func (c *ContextLeader) LeaderSettings() (map[string]string, error) {
-	c.stub.AddCall("LeaderSettings")
-	if err := c.stub.NextErr(); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return c.info.LeaderSettings, nil
-}
-
-// WriteLeaderSettings implements jujuc.ContextLeader.
-func (c *ContextLeader) WriteLeaderSettings(settings map[string]string) error {
-	c.stub.AddCall("WriteLeaderSettings")
-	if err := c.stub.NextErr(); err != nil {
-		return errors.Trace(err)
-	}
-
-	c.info.LeaderSettings = settings
-	return nil
 }

@@ -6,30 +6,30 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/collections/set"
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
+	corestorage "github.com/juju/juju/core/storage"
 	domainstorage "github.com/juju/juju/domain/storage"
 	"github.com/juju/juju/domain/storage/service"
 	"github.com/juju/juju/domain/storage/state"
-	internalstorage "github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/errors"
 )
 
 // RegisterExport registers the export operations with the given coordinator.
-func RegisterExport(coordinator Coordinator, registry internalstorage.ProviderRegistry, logger logger.Logger) {
+func RegisterExport(coordinator Coordinator, storageRegistryGetter corestorage.ModelStorageRegistryGetter, logger logger.Logger) {
 	coordinator.Add(&exportOperation{
-		registry: registry,
-		logger:   logger,
+		storageRegistryGetter: storageRegistryGetter,
+		logger:                logger,
 	})
 }
 
 // ExportService provides a subset of the storage domain
 // service methods needed for storage pool export.
 type ExportService interface {
-	AllStoragePools(ctx context.Context) ([]*internalstorage.Config, error)
+	// ListStoragePools returns all of the storage pools in the model.
+	ListStoragePools(ctx context.Context) ([]domainstorage.StoragePool, error)
 }
 
 // exportOperation describes a way to execute a migration for
@@ -37,9 +37,9 @@ type ExportService interface {
 type exportOperation struct {
 	modelmigration.BaseOperation
 
-	registry internalstorage.ProviderRegistry
-	service  ExportService
-	logger   logger.Logger
+	storageRegistryGetter corestorage.ModelStorageRegistryGetter
+	service               ExportService
+	logger                logger.Logger
 }
 
 // Name returns the name of this operation.
@@ -50,36 +50,32 @@ func (e *exportOperation) Name() string {
 // Setup implements Operation.
 func (e *exportOperation) Setup(scope modelmigration.Scope) error {
 	e.service = service.NewService(
-		state.NewState(scope.ModelDB()), e.logger, e.registry)
+		state.NewState(scope.ModelDB()), e.logger, e.storageRegistryGetter)
 	return nil
 }
 
 // Execute the export, adding the storage pools to the model.
 func (e *exportOperation) Execute(ctx context.Context, model description.Model) error {
-	poolConfigs, err := e.service.AllStoragePools(ctx)
+	pools, err := e.service.ListStoragePools(ctx)
 	if err != nil {
-		return errors.Annotate(err, "listing pools")
+		return errors.Errorf("listing pools: %w", err)
 	}
-
-	builtIn, err := domainstorage.BuiltInStoragePools()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	builtInNames := set.Strings{}
-	for _, p := range builtIn {
-		builtInNames.Add(p.Name)
-	}
-
-	for _, cfg := range poolConfigs {
-		// We don't want to export built in providers, eg loop, rootfs, tmpfs.
-		if builtInNames.Contains(cfg.Name()) {
-			continue
-		}
-		model.AddStoragePool(description.StoragePoolArgs{
-			Name:       cfg.Name(),
-			Provider:   string(cfg.Provider()),
-			Attributes: cfg.Attrs(),
-		})
+	for _, pool := range pools {
+		model.AddStoragePool(storagePoolToArgs(pool))
 	}
 	return nil
+}
+
+func storagePoolToArgs(pool domainstorage.StoragePool) description.StoragePoolArgs {
+	args := description.StoragePoolArgs{
+		Name:     pool.Name,
+		Provider: pool.Provider,
+	}
+	if len(pool.Attrs) > 0 {
+		args.Attributes = make(map[string]any, len(pool.Attrs))
+		for k, v := range pool.Attrs {
+			args.Attributes[k] = v
+		}
+	}
+	return args
 }

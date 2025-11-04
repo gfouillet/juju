@@ -7,13 +7,15 @@ test_storage() {
 	set_verbosity
 
 	echo "==> Checking for dependencies"
-	check_dependencies juju
+	check_dependencies juju charmcraft
 
 	file="${TEST_DIR}/test-storage.log"
 
 	bootstrap "test-storage" "${file}"
 
 	test_charm_storage
+	test_model_storage_block
+	test_model_storage_filesystem
 	test_persistent_storage
 
 	destroy_controller "test-storage"

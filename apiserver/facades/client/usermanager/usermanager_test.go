@@ -4,73 +4,73 @@
 package usermanager_test
 
 import (
-	"context"
 	"sort"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/apiserver/common"
-	commontesting "github.com/juju/juju/apiserver/common/testing"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade/facadetest"
 	"github.com/juju/juju/apiserver/facades/client/usermanager"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
 	coreuser "github.com/juju/juju/core/user"
+	coreusertesting "github.com/juju/juju/core/user/testing"
 	usererrors "github.com/juju/juju/domain/access/errors"
 	"github.com/juju/juju/domain/access/service"
+	blockcommanderrors "github.com/juju/juju/domain/blockcommand/errors"
 	"github.com/juju/juju/internal/auth"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing/factory"
 )
 
 type userManagerSuite struct {
 	jujutesting.ApiServerSuite
-	commontesting.BlockHelper
 
 	api        *usermanager.UserManagerAPI
 	authorizer apiservertesting.FakeAuthorizer
 	apiUser    coreuser.User
-	resources  *common.Resources
 
-	accessService *MockAccessService
+	accessService       *MockAccessService
+	modelService        *MockModelService
+	blockCommandService *MockBlockCommandService
 }
 
-var _ = gc.Suite(&userManagerSuite{})
+func TestUserManagerSuite(t *testing.T) {
+	tc.Run(t, &userManagerSuite{})
+}
 
-func (s *userManagerSuite) SetUpTest(c *gc.C) {
+func (s *userManagerSuite) SetUpTest(c *tc.C) {
 	s.ApiServerSuite.SetUpTest(c)
 
 	s.setAPIUserAndAuth(c, "admin")
-	s.resources = common.NewResources()
-
-	s.BlockHelper = commontesting.NewBlockHelper(s.OpenControllerModelAPI(c))
-	s.AddCleanup(func(*gc.C) { s.BlockHelper.Close() })
 }
 
-func (s *userManagerSuite) TestAddUser(c *gc.C) {
+func (s *userManagerSuite) TestAddUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
+
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
 	pass := auth.NewPassword("password")
 	s.accessService.EXPECT().AddUser(gomock.Any(), service.AddUserArg{
-		Name:        "foobar",
+		Name:        coreusertesting.GenNewName(c, "foobar"),
 		DisplayName: "Foo Bar",
 		Password:    &pass,
 		CreatorUUID: s.apiUser.UUID,
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	}).Return(newUserUUID(c), nil, nil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	sharedModelState := f.MakeModel(c, nil)
-	defer func() { _ = sharedModelState.Close() }()
 
 	args := params.AddUsers{
 		Users: []params.AddUser{{
@@ -79,22 +79,30 @@ func (s *userManagerSuite) TestAddUser(c *gc.C) {
 			Password:    "password",
 		}}}
 
-	result, err := s.api.AddUser(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
+	result, err := s.api.AddUser(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
 
 	foobarTag := names.NewLocalUserTag("foobar")
-	c.Check(result.Results[0], gc.DeepEquals, params.AddUserResult{Tag: foobarTag.String()})
+	c.Check(result.Results[0], tc.DeepEquals, params.AddUserResult{Tag: foobarTag.String()})
 }
 
-func (s *userManagerSuite) TestAddUserWithSecretKey(c *gc.C) {
+func (s *userManagerSuite) TestAddUserWithSecretKey(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
 	s.accessService.EXPECT().AddUser(gomock.Any(), service.AddUserArg{
-		Name:        "foobar",
+		Name:        coreusertesting.GenNewName(c, "foobar"),
 		DisplayName: "Foo Bar",
 		CreatorUUID: s.apiUser.UUID,
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	}).Return(newUserUUID(c), []byte("secret-key"), nil)
 
 	args := params.AddUsers{
@@ -103,16 +111,16 @@ func (s *userManagerSuite) TestAddUserWithSecretKey(c *gc.C) {
 			DisplayName: "Foo Bar",
 		}}}
 
-	result, err := s.api.AddUser(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
-	c.Check(result.Results[0], gc.DeepEquals, params.AddUserResult{
+	result, err := s.api.AddUser(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0], tc.DeepEquals, params.AddUserResult{
 		Tag:       names.NewLocalUserTag("foobar").String(),
 		SecretKey: []byte("secret-key"),
 	})
 }
 
-func (s *userManagerSuite) TestBlockAddUser(c *gc.C) {
+func (s *userManagerSuite) TestBlockAddUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
 	args := params.AddUsers{
@@ -122,20 +130,17 @@ func (s *userManagerSuite) TestBlockAddUser(c *gc.C) {
 			Password:    "password",
 		}}}
 
-	s.BlockAllChanges(c, "TestBlockAddUser")
-	result, err := s.api.AddUser(context.Background(), args)
-	s.AssertBlocked(c, err, "TestBlockAddUser")
-	c.Assert(result.Results, gc.HasLen, 0)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("TestBlockAddUser", nil)
+	result, err := s.api.AddUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "TestBlockAddUser")
+	assertBlocked(c, err, "TestBlockAddUser")
+	c.Check(result.Results, tc.HasLen, 0)
 }
 
-func (s *userManagerSuite) TestAddUserAsNormalUser(c *gc.C) {
+func (s *userManagerSuite) TestAddUserAsNormalUser(c *tc.C) {
 	s.setAPIUserAndAuth(c, "alex")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	_ = f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-
 	args := params.AddUsers{
 		Users: []params.AddUser{{
 			Username:    "foobar",
@@ -143,30 +148,32 @@ func (s *userManagerSuite) TestAddUserAsNormalUser(c *gc.C) {
 			Password:    "password",
 		}}}
 
-	_, err := s.api.AddUser(context.Background(), args)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	_, err := s.api.AddUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *userManagerSuite) TestDisableUser(c *gc.C) {
+func (s *userManagerSuite) TestDisableUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
 	exp := s.accessService.EXPECT()
-	exp.DisableUserAuthentication(gomock.Any(), "alex").Return(nil)
-	exp.DisableUserAuthentication(gomock.Any(), "barb").Return(nil)
-	exp.DisableUserAuthentication(gomock.Any(), "ellie").Return(errors.NotFound)
-	exp.DisableUserAuthentication(gomock.Any(), "fred").Return(errors.NotFound)
+	exp.DisableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "alex")).Return(nil)
+	exp.DisableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "barb")).Return(nil)
+	exp.DisableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "ellie")).Return(errors.NotFound)
+	exp.DisableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "fred@remote")).Return(errors.NotFound)
 
 	args := params.Entities{
 		Entities: []params.Entity{
-			{"user-alex"},
-			{"user-barb"},
-			{names.NewLocalUserTag("ellie").String()},
-			{names.NewUserTag("fred@remote").String()},
-			{"not-a-tag"},
+			{Tag: "user-alex"},
+			{Tag: "user-barb"},
+			{Tag: names.NewLocalUserTag("ellie").String()},
+			{Tag: names.NewUserTag("fred@remote").String()},
+			{Tag: "not-a-tag"},
 		}}
-	result, err := s.api.DisableUser(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+	result, err := s.api.DisableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
 			{Error: nil},
 			{Error: nil},
@@ -182,43 +189,46 @@ func (s *userManagerSuite) TestDisableUser(c *gc.C) {
 		}})
 }
 
-func (s *userManagerSuite) TestBlockDisableUser(c *gc.C) {
+func (s *userManagerSuite) TestBlockDisableUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
 	args := params.Entities{
 		Entities: []params.Entity{
-			{"user-alex"},
-			{"user-barb"},
-			{names.NewLocalUserTag("ellie").String()},
-			{names.NewUserTag("fred@remote").String()},
-			{"not-a-tag"},
+			{Tag: "user-alex"},
+			{Tag: "user-barb"},
+			{Tag: names.NewLocalUserTag("ellie").String()},
+			{Tag: names.NewUserTag("fred@remote").String()},
+			{Tag: "not-a-tag"},
 		}}
 
-	s.BlockAllChanges(c, "TestBlockDisableUser")
-	_, err := s.api.DisableUser(context.Background(), args)
-	s.AssertBlocked(c, err, "TestBlockDisableUser")
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("TestBlockDisableUser", nil)
+	_, err := s.api.DisableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "TestBlockDisableUser")
+	assertBlocked(c, err, "TestBlockDisableUser")
 }
 
-func (s *userManagerSuite) TestEnableUser(c *gc.C) {
+func (s *userManagerSuite) TestEnableUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
 	exp := s.accessService.EXPECT()
-	exp.EnableUserAuthentication(gomock.Any(), "alex").Return(nil)
-	exp.EnableUserAuthentication(gomock.Any(), "barb").Return(nil)
-	exp.EnableUserAuthentication(gomock.Any(), "ellie").Return(errors.NotFound)
-	exp.EnableUserAuthentication(gomock.Any(), "fred").Return(errors.NotFound)
+	exp.EnableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "alex")).Return(nil)
+	exp.EnableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "barb")).Return(nil)
+	exp.EnableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "ellie")).Return(errors.NotFound)
+	exp.EnableUserAuthentication(gomock.Any(), coreusertesting.GenNewName(c, "fred@remote")).Return(errors.NotFound)
 
 	args := params.Entities{
 		Entities: []params.Entity{
-			{"user-alex"},
-			{"user-barb"},
-			{names.NewLocalUserTag("ellie").String()},
-			{names.NewUserTag("fred@remote").String()},
-			{"not-a-tag"},
+			{Tag: "user-alex"},
+			{Tag: "user-barb"},
+			{Tag: names.NewLocalUserTag("ellie").String()},
+			{Tag: names.NewUserTag("fred@remote").String()},
+			{Tag: "not-a-tag"},
 		}}
-	result, err := s.api.EnableUser(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+	result, err := s.api.EnableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
 			{Error: nil},
 			{Error: nil},
@@ -234,103 +244,87 @@ func (s *userManagerSuite) TestEnableUser(c *gc.C) {
 		}})
 }
 
-func (s *userManagerSuite) TestBlockEnableUser(c *gc.C) {
+func (s *userManagerSuite) TestBlockEnableUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex"})
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb", Disabled: true})
+	alex := names.NewUserTag("alex")
+	barb := names.NewUserTag("barb")
 
 	args := params.Entities{
 		Entities: []params.Entity{
-			{alex.Tag().String()},
-			{barb.Tag().String()},
-			{names.NewLocalUserTag("ellie").String()},
-			{names.NewUserTag("fred@remote").String()},
-			{"not-a-tag"},
+			{Tag: alex.String()},
+			{Tag: barb.String()},
+			{Tag: names.NewLocalUserTag("ellie").String()},
+			{Tag: names.NewUserTag("fred@remote").String()},
+			{Tag: "not-a-tag"},
 		}}
 
-	s.BlockAllChanges(c, "TestBlockEnableUser")
-	_, err := s.api.EnableUser(context.Background(), args)
-	s.AssertBlocked(c, err, "TestBlockEnableUser")
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("TestBlockEnableUser", nil)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.EnableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "TestBlockEnableUser")
+	assertBlocked(c, err, "TestBlockEnableUser")
 }
 
-func (s *userManagerSuite) TestDisableUserAsNormalUser(c *gc.C) {
+func (s *userManagerSuite) TestDisableUserAsNormalUser(c *tc.C) {
 	s.setAPIUserAndAuth(c, "alex")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	_ = f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb"})
+	barb := names.NewUserTag("barb")
 
 	args := params.Entities{
-		Entities: []params.Entity{{barb.Tag().String()}},
+		Entities: []params.Entity{{Tag: barb.String()}},
 	}
-	_, err := s.api.DisableUser(context.Background(), args)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-
-	err = barb.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(barb.IsDisabled(), jc.IsFalse)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.DisableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *userManagerSuite) TestEnableUserAsNormalUser(c *gc.C) {
+func (s *userManagerSuite) TestEnableUserAsNormalUser(c *tc.C) {
 	s.setAPIUserAndAuth(c, "alex")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	_ = f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb", Disabled: true})
+	barb := names.NewUserTag("barb")
 
 	args := params.Entities{
-		Entities: []params.Entity{{barb.Tag().String()}},
+		Entities: []params.Entity{{Tag: barb.String()}},
 	}
-	_, err := s.api.EnableUser(context.Background(), args)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-
-	err = barb.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(barb.IsDisabled(), jc.IsTrue)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.EnableUser(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *userManagerSuite) TestUserInfo(c *gc.C) {
+func (s *userManagerSuite) TestUserInfo(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
 	exp := s.accessService.EXPECT()
 	a := gomock.Any()
-	exp.GetUserByName(a, "foobar").Return(coreuser.User{
+	exp.GetUserByName(a, coreusertesting.GenNewName(c, "mary@external")).Return(coreuser.User{
 		UUID:     newUserUUID(c),
-		Name:     "foobar",
+		Name:     coreusertesting.GenNewName(c, "mary@external"),
 		Disabled: false,
 	}, nil)
-	exp.GetUserByName(a, "barfoo").Return(coreuser.User{
+	exp.GetUserByName(a, coreusertesting.GenNewName(c, "foobar")).Return(coreuser.User{
 		UUID:     newUserUUID(c),
-		Name:     "barfoo",
+		Name:     coreusertesting.GenNewName(c, "foobar"),
+		Disabled: false,
+	}, nil)
+	exp.GetUserByName(a, coreusertesting.GenNewName(c, "barfoo")).Return(coreuser.User{
+		UUID:     newUserUUID(c),
+		Name:     coreusertesting.GenNewName(c, "barfoo"),
 		Disabled: true,
 	}, nil)
-	exp.GetUserByName(a, "ellie").Return(coreuser.User{}, usererrors.UserNotFound)
+	exp.GetUserByName(a, coreusertesting.GenNewName(c, "ellie")).Return(coreuser.User{}, usererrors.UserNotFound)
 
-	exp.ReadUserAccessForTarget(gomock.Any(), "foobar", permission.ID{
+	exp.ReadUserAccessLevelForTarget(gomock.Any(), coreusertesting.GenNewName(c, "foobar"), permission.ID{
 		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.LoginAccess}, nil)
+		Key:        s.ControllerUUID,
+	}).Return(permission.LoginAccess, nil)
 
-	// No access granted directly to the external user.
-	exp.ReadUserAccessForTarget(gomock.Any(), "mary@external", permission.ID{
+	exp.ReadUserAccessLevelForTarget(gomock.Any(), coreusertesting.GenNewName(c, "mary@external"), permission.ID{
 		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.NoAccess}, nil)
-
-	// But the special everyone group does have access.
-	exp.ReadUserAccessForTarget(gomock.Any(), "everyone@external", permission.ID{
-		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.SuperuserAccess}, nil)
+		Key:        s.ControllerUUID,
+	}).Return(permission.SuperuserAccess, nil)
 
 	args := params.UserInfoRequest{
 		Entities: []params.Entity{
@@ -347,50 +341,50 @@ func (s *userManagerSuite) TestUserInfo(c *gc.C) {
 			},
 		}}
 
-	results, err := s.api.UserInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+	results, err := s.api.UserInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 
 	res := results.Results
-	c.Assert(res, gc.HasLen, 5)
+	c.Assert(res, tc.HasLen, 5)
 
-	c.Assert(res[0].Error, gc.IsNil)
+	c.Assert(res[0].Error, tc.IsNil)
 	r0 := res[0].Result
-	c.Assert(r0, gc.NotNil)
-	c.Check(r0.Username, gc.Equals, "foobar")
-	c.Check(r0.Disabled, gc.Equals, false)
-	c.Check(r0.Access, gc.Equals, string(permission.LoginAccess))
+	c.Assert(r0, tc.NotNil)
+	c.Check(r0.Username, tc.Equals, "foobar")
+	c.Check(r0.Disabled, tc.Equals, false)
+	c.Check(r0.Access, tc.Equals, string(permission.LoginAccess))
 
-	c.Assert(res[1].Error, gc.IsNil)
+	c.Assert(res[1].Error, tc.IsNil)
 	r1 := res[1].Result
-	c.Assert(r1, gc.NotNil)
-	c.Check(r1.Username, gc.Equals, "barfoo")
-	c.Check(r1.Disabled, gc.Equals, true)
-	c.Check(r1.Access, gc.Equals, string(permission.NoAccess))
+	c.Assert(r1, tc.NotNil)
+	c.Check(r1.Username, tc.Equals, "barfoo")
+	c.Check(r1.Disabled, tc.Equals, true)
+	c.Check(r1.Access, tc.Equals, string(permission.NoAccess))
 
-	c.Check(res[2].Error.Code, gc.Equals, params.CodeUserNotFound)
-	c.Check(res[3].Error.Message, gc.Equals, `"not-a-tag" is not a valid tag`)
+	c.Check(res[2].Error.Code, tc.Equals, params.CodeUserNotFound)
+	c.Check(res[3].Error.Message, tc.Equals, `"not-a-tag" is not a valid tag`)
 
-	c.Assert(res[4].Error, gc.IsNil)
+	c.Assert(res[4].Error, tc.IsNil)
 	r4 := res[4].Result
-	c.Assert(r4, gc.NotNil)
-	c.Check(r4.Username, gc.Equals, "mary@external")
-	c.Check(r4.Access, gc.Equals, string(permission.SuperuserAccess))
+	c.Assert(r4, tc.NotNil)
+	c.Check(r4.Username, tc.Equals, "mary@external")
+	c.Check(r4.Access, tc.Equals, string(permission.SuperuserAccess))
 }
 
-func (s *userManagerSuite) TestUserInfoAll(c *gc.C) {
+func (s *userManagerSuite) TestUserInfoAll(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
 	users := []coreuser.User{
 		{
 			UUID:     newUserUUID(c),
-			Name:     "fred",
+			Name:     coreusertesting.GenNewName(c, "fred"),
 			Disabled: false,
 		},
 	}
 	usersIncDisabled := append(users,
 		coreuser.User{
 			UUID:     newUserUUID(c),
-			Name:     "nancy",
+			Name:     coreusertesting.GenNewName(c, "nancy"),
 			Disabled: true,
 		},
 	)
@@ -401,7 +395,7 @@ func (s *userManagerSuite) TestUserInfoAll(c *gc.C) {
 				Username:       "fred",
 				Disabled:       false,
 				Access:         "login",
-				LastConnection: &time.Time{},
+				LastConnection: nil,
 			},
 		}}}
 	expectedIncDisabled := params.UserInfoResults{
@@ -410,7 +404,7 @@ func (s *userManagerSuite) TestUserInfoAll(c *gc.C) {
 				Username:       "nancy",
 				Disabled:       true,
 				Access:         "",
-				LastConnection: &time.Time{},
+				LastConnection: nil,
 			},
 		}),
 	}
@@ -422,31 +416,33 @@ func (s *userManagerSuite) TestUserInfoAll(c *gc.C) {
 
 	// The access service is used only for none-deactivated users, deactivated
 	// users have NoPermissions.
-	s.accessService.EXPECT().ReadUserAccessForTarget(gomock.Any(), "fred", permission.ID{
+	s.accessService.EXPECT().ReadUserAccessLevelForTarget(gomock.Any(), coreusertesting.GenNewName(c, "fred"), permission.ID{
 		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.LoginAccess}, nil).Times(2)
+		Key:        s.ControllerUUID,
+	}).Return(permission.LoginAccess, nil).Times(2)
 
-	results, err := s.api.UserInfo(context.Background(), params.UserInfoRequest{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(results, jc.DeepEquals, expected)
+	results, err := s.api.UserInfo(c.Context(), params.UserInfoRequest{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, expected)
 
 	args := params.UserInfoRequest{IncludeDisabled: true}
-	results, err = s.api.UserInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(results, jc.DeepEquals, expectedIncDisabled)
+	results, err = s.api.UserInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, expectedIncDisabled)
 
 }
 
-func (s *userManagerSuite) TestUserInfoNonControllerAdmin(c *gc.C) {
+func (s *userManagerSuite) TestUserInfoNonControllerAdmin(c *tc.C) {
 	s.setAPIUserAndAuth(c, "aardvark")
 	defer s.setUpAPI(c).Finish()
+
+	userAardvark := names.NewUserTag("aardvark")
 
 	fakeCreatorUUID := newUserUUID(c)
 
 	fakeCreator := coreuser.User{
 		UUID:        fakeCreatorUUID,
-		Name:        "creator",
+		Name:        coreusertesting.GenNewName(c, "creator"),
 		DisplayName: "Creator",
 	}
 
@@ -460,7 +456,7 @@ func (s *userManagerSuite) TestUserInfoNonControllerAdmin(c *gc.C) {
 
 	s.accessService.EXPECT().GetUserByName(gomock.Any(), gomock.Any()).Return(coreuser.User{
 		UUID:        fakeUUID,
-		Name:        "aardvark",
+		Name:        coreuser.NameFromTag(userAardvark),
 		DisplayName: "Aard Vark",
 		CreatorUUID: fakeCreatorUUID,
 		CreatorName: fakeCreator.Name,
@@ -468,31 +464,26 @@ func (s *userManagerSuite) TestUserInfoNonControllerAdmin(c *gc.C) {
 		LastLogin:   fakeLastLogin,
 	}, nil)
 
-	s.accessService.EXPECT().ReadUserAccessForTarget(gomock.Any(), "aardvark", permission.ID{
+	s.accessService.EXPECT().ReadUserAccessLevelForTarget(gomock.Any(), coreuser.NameFromTag(userAardvark), permission.ID{
 		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.LoginAccess}, nil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	f.MakeUser(c, &factory.UserParams{Name: "foobar", DisplayName: "Foo Bar"})
-	userAardvark := f.MakeUser(c, &factory.UserParams{Name: "aardvark", DisplayName: "Aard Vark"})
+		Key:        s.ControllerUUID,
+	}).Return(permission.LoginAccess, nil)
 
 	args := params.UserInfoRequest{Entities: []params.Entity{
-		{Tag: userAardvark.Tag().String()},
+		{Tag: userAardvark.String()},
 		{Tag: names.NewUserTag("foobar").String()},
 	}}
-	results, err := s.api.UserInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+	results, err := s.api.UserInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 	// Non admin users can only see themselves.
-	c.Assert(results, jc.DeepEquals, params.UserInfoResults{
+	c.Assert(results, tc.DeepEquals, params.UserInfoResults{
 		Results: []params.UserInfoResult{
 			{
 				Result: &params.UserInfo{
 					Username:       "aardvark",
 					DisplayName:    "Aard Vark",
 					Access:         "login",
-					CreatedBy:      fakeCreator.Name,
+					CreatedBy:      fakeCreator.Name.Name(),
 					DateCreated:    fakeCreatedAt,
 					LastConnection: &fakeLastLogin,
 				},
@@ -506,497 +497,421 @@ func (s *userManagerSuite) TestUserInfoNonControllerAdmin(c *gc.C) {
 	})
 }
 
-func (s *userManagerSuite) TestUserInfoEveryonePermission(c *gc.C) {
+func (s *userManagerSuite) TestModelUsersInfo(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	// No access granted directly to the user.
-	s.accessService.EXPECT().ReadUserAccessForTarget(gomock.Any(), "aardvark@external", permission.ID{
-		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.NoAccess}, nil)
+	owner := names.NewUserTag("owner")
 
-	// But the special everyone group does have access.
-	s.accessService.EXPECT().ReadUserAccessForTarget(gomock.Any(), "everyone@external", permission.ID{
-		ObjectType: permission.Controller,
-		Key:        "controller",
-	}).Return(permission.UserAccess{Access: permission.SuperuserAccess}, nil)
+	s.modelService.EXPECT().GetModelUsers(gomock.Any(), coremodel.UUID(s.ApiServerSuite.ControllerModelUUID())).Return(
+		[]coremodel.ModelUserInfo{{
+			Name:           coreuser.NameFromTag(owner),
+			DisplayName:    owner.Name(),
+			Access:         permission.AdminAccess,
+			LastModelLogin: time.Time{},
+		}, {
+			Name:           coreusertesting.GenNewName(c, "ralphdoe"),
+			DisplayName:    "Ralph Doe",
+			Access:         permission.AdminAccess,
+			LastModelLogin: time.Time{},
+		}, {
+			Name:           coreusertesting.GenNewName(c, "samsmith"),
+			DisplayName:    "Sam Smith",
+			Access:         permission.AdminAccess,
+			LastModelLogin: time.Time{},
+		}, {
+			Name:           coreusertesting.GenNewName(c, "bobjohns@ubuntuone"),
+			DisplayName:    "Bob Johns",
+			Access:         permission.WriteAccess,
+			LastModelLogin: time.Time{},
+		}, {
+			Name:           coreusertesting.GenNewName(c, "nicshaw@idprovider"),
+			DisplayName:    "Nic Shaw",
+			Access:         permission.WriteAccess,
+			LastModelLogin: time.Time{},
+		}}, nil,
+	)
 
-	args := params.UserInfoRequest{Entities: []params.Entity{{Tag: names.NewUserTag("aardvark@external").String()}}}
+	controllerModelTag := names.NewModelTag(s.ApiServerSuite.ControllerModelUUID())
 
-	results, err := s.api.UserInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	// Non admin users can only see themselves.
-	c.Assert(results, jc.DeepEquals, params.UserInfoResults{
-		Results: []params.UserInfoResult{{Result: &params.UserInfo{
-			Username: "aardvark@external",
-			Access:   "superuser",
-		}}},
-	})
-}
-
-func (s *userManagerSuite) makeLocalModelUser(c *gc.C, username, displayname string) permission.UserAccess {
-	defer s.setUpAPI(c).Finish()
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	// factory.MakeUser will create an ModelUser for a local user by default.
-	user := f.MakeUser(c, &factory.UserParams{Name: username, DisplayName: displayname})
-	modelUser, err := s.ControllerModel(c).State().UserAccess(user.UserTag(), s.ControllerModel(c).ModelTag())
-	c.Assert(err, jc.ErrorIsNil)
-	return modelUser
-}
-
-func (s *userManagerSuite) TestModelUsersInfo(c *gc.C) {
-	testAdmin := jujutesting.AdminUser
-	model := s.ControllerModel(c)
-	st := model.State()
-	owner, err := s.ControllerModel(c).State().UserAccess(testAdmin, model.ModelTag())
-	c.Assert(err, jc.ErrorIsNil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	localUser1 := s.makeLocalModelUser(c, "ralphdoe", "Ralph Doe")
-	localUser2 := s.makeLocalModelUser(c, "samsmith", "Sam Smith")
-	remoteUser1 := f.MakeModelUser(c, &factory.ModelUserParams{User: "bobjohns@ubuntuone", DisplayName: "Bob Johns", Access: permission.WriteAccess})
-	remoteUser2 := f.MakeModelUser(c, &factory.ModelUserParams{User: "nicshaw@idprovider", DisplayName: "Nic Shaw", Access: permission.WriteAccess})
-
-	results, err := s.api.ModelUserInfo(context.Background(), params.Entities{Entities: []params.Entity{{
-		Tag: model.ModelTag().String(),
+	results, err := s.api.ModelUserInfo(c.Context(), params.Entities{Entities: []params.Entity{{
+		Tag: controllerModelTag.String(),
 	}}})
-	c.Assert(err, jc.ErrorIsNil)
-	var expected params.ModelUserInfoResults
-	for _, r := range []struct {
-		user permission.UserAccess
-		info *params.ModelUserInfo
-	}{
-		{
-			owner,
-			&params.ModelUserInfo{
-				ModelTag:    model.ModelTag().String(),
-				UserName:    owner.UserName,
-				DisplayName: owner.DisplayName,
+	c.Assert(err, tc.ErrorIsNil)
+
+	expected := params.ModelUserInfoResults{
+		Results: []params.ModelUserInfoResult{{
+			Result: &params.ModelUserInfo{
+				ModelTag:    controllerModelTag.String(),
+				UserName:    owner.Name(),
+				DisplayName: owner.Name(),
 				Access:      "admin",
 			},
 		}, {
-			localUser1,
-			&params.ModelUserInfo{
-				ModelTag:    model.ModelTag().String(),
+			Result: &params.ModelUserInfo{
+				ModelTag:    controllerModelTag.String(),
 				UserName:    "ralphdoe",
 				DisplayName: "Ralph Doe",
 				Access:      "admin",
 			},
 		}, {
-			localUser2,
-			&params.ModelUserInfo{
-				ModelTag:    model.ModelTag().String(),
+			Result: &params.ModelUserInfo{
+				ModelTag:    controllerModelTag.String(),
 				UserName:    "samsmith",
 				DisplayName: "Sam Smith",
 				Access:      "admin",
 			},
 		}, {
-			remoteUser1,
-			&params.ModelUserInfo{
-				ModelTag:    model.ModelTag().String(),
+			Result: &params.ModelUserInfo{
+				ModelTag:    controllerModelTag.String(),
 				UserName:    "bobjohns@ubuntuone",
 				DisplayName: "Bob Johns",
 				Access:      "write",
 			},
 		}, {
-			remoteUser2,
-			&params.ModelUserInfo{
-				ModelTag:    model.ModelTag().String(),
+			Result: &params.ModelUserInfo{
+				ModelTag:    controllerModelTag.String(),
 				UserName:    "nicshaw@idprovider",
 				DisplayName: "Nic Shaw",
 				Access:      "write",
 			},
-		},
-	} {
-		r.info.LastConnection = lastConnPointer(c, r.user, st)
-		expected.Results = append(expected.Results, params.ModelUserInfoResult{Result: r.info})
+		}},
 	}
 
 	sort.Sort(ByUserName(expected.Results))
 	sort.Sort(ByUserName(results.Results))
-	c.Assert(results, jc.DeepEquals, expected)
-}
-
-func lastConnPointer(c *gc.C, modelUser permission.UserAccess, st *state.State) *time.Time {
-	model, err := st.Model()
-	if err != nil {
-		c.Fatal(err)
-	}
-
-	lastConn, err := model.LastModelConnection(modelUser.UserTag)
-	if err != nil {
-		if state.IsNeverConnectedError(err) {
-			return nil
-		}
-		c.Fatal(err)
-	}
-	return &lastConn
+	c.Assert(results, tc.DeepEquals, expected)
 }
 
 // ByUserName implements sort.Interface for []params.ModelUserInfoResult based on
-// the UserName field.
+// the Name field.
 type ByUserName []params.ModelUserInfoResult
 
 func (a ByUserName) Len() int           { return len(a) }
 func (a ByUserName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByUserName) Less(i, j int) bool { return a[i].Result.UserName < a[j].Result.UserName }
 
-func (s *userManagerSuite) TestSetPassword(c *gc.C) {
+func (s *userManagerSuite) TestSetPassword(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().SetPassword(gomock.Any(), "alex", gomock.Any())
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
+	s.accessService.EXPECT().SetPassword(gomock.Any(), coreusertesting.GenNewName(c, "alex"), gomock.Any())
 
 	args := params.EntityPasswords{
 		Changes: []params.EntityPassword{{
 			Tag:      "user-alex",
 			Password: "new-password",
 		}}}
-	results, err := s.api.SetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0], gc.DeepEquals, params.ErrorResult{Error: nil})
+	results, err := s.api.SetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0], tc.DeepEquals, params.ErrorResult{Error: nil})
 }
 
-func (s *userManagerSuite) TestBlockSetPassword(c *gc.C) {
+func (s *userManagerSuite) TestBlockSetPassword(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-
+	alex := names.NewUserTag("alex")
 	args := params.EntityPasswords{
 		Changes: []params.EntityPassword{{
-			Tag:      alex.Tag().String(),
+			Tag:      alex.String(),
 			Password: "new-password",
 		}}}
 
-	s.BlockAllChanges(c, "TestBlockSetPassword")
-	_, err := s.api.SetPassword(context.Background(), args)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("TestBlockSetPassword", nil)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.SetPassword(c.Context(), args)
 	// Check that the call is blocked
-	s.AssertBlocked(c, err, "TestBlockSetPassword")
-
-	err = alex.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(alex.PasswordValid("new-password"), jc.IsFalse)
+	c.Assert(err, tc.ErrorMatches, "TestBlockSetPassword")
+	assertBlocked(c, err, "TestBlockSetPassword")
 }
 
-func (s *userManagerSuite) TestSetPasswordForSelf(c *gc.C) {
+func (s *userManagerSuite) TestSetPasswordForSelf(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().GetUserByName(gomock.Any(), gomock.Any()).Return(coreuser.User{}, nil).AnyTimes()
-	s.accessService.EXPECT().SetPassword(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
+	alex := names.NewUserTag("alex")
+	s.accessService.EXPECT().SetPassword(gomock.Any(), coreuser.NameFromTag(alex), auth.NewPassword("new-password")).Return(nil)
 
 	args := params.EntityPasswords{
 		Changes: []params.EntityPassword{{
-			Tag:      alex.Tag().String(),
+			Tag:      alex.String(),
 			Password: "new-password",
 		}}}
-	results, err := s.api.SetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0], gc.DeepEquals, params.ErrorResult{Error: nil})
-
+	results, err := s.api.SetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0], tc.DeepEquals, params.ErrorResult{Error: nil})
 }
 
-func (s *userManagerSuite) TestSetPasswordForOther(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb", NoModelUser: true})
-
+func (s *userManagerSuite) TestSetPasswordForOther(c *tc.C) {
+	alex := names.NewUserTag("alex")
+	barb := names.NewUserTag("barb")
 	s.setAPIUserAndAuth(c, alex.Name())
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
 	args := params.EntityPasswords{
 		Changes: []params.EntityPassword{{
-			Tag:      barb.Tag().String(),
+			Tag:      barb.String(),
 			Password: "new-password",
 		}}}
-	results, err := s.api.SetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0], gc.DeepEquals, params.ErrorResult{
+	// Do not expect any calls to the access service as this should fail.
+	results, err := s.api.SetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0], tc.DeepEquals, params.ErrorResult{
 		Error: &params.Error{
 			Message: "permission denied",
 			Code:    params.CodeUnauthorized,
 		}})
 
-	err = barb.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(barb.PasswordValid("new-password"), jc.IsFalse)
 }
 
-func (s *userManagerSuite) TestRemoveUserBadTag(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserBadTag(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
 	tag := "not-a-tag"
-	got, err := s.api.RemoveUser(context.Background(), params.Entities{
+	got, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{{Tag: tag}}})
-	c.Assert(got.Results, gc.HasLen, 1)
-	c.Assert(err, gc.Equals, nil)
-	c.Check(got.Results[0].Error, jc.DeepEquals, &params.Error{
+	c.Assert(got.Results, tc.HasLen, 1)
+	c.Assert(err, tc.Equals, nil)
+	c.Check(got.Results[0].Error, tc.DeepEquals, &params.Error{
 		Message: "\"not-a-tag\" is not a valid tag",
 	})
 }
 
-func (s *userManagerSuite) TestRemoveUserNonExistent(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserNonExistent(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	tag := "user-harvey"
-	s.accessService.EXPECT().RemoveUser(gomock.Any(), "harvey").Return(errors.NotFound)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	got, err := s.api.RemoveUser(context.Background(), params.Entities{
+	tag := "user-harvey"
+	s.accessService.EXPECT().RemoveUser(gomock.Any(), coreusertesting.GenNewName(c, "harvey")).Return(errors.NotFound)
+
+	got, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{{Tag: tag}}})
-	c.Assert(got.Results, gc.HasLen, 1)
-	c.Assert(err, gc.Equals, nil)
-	c.Check(got.Results[0].Error, jc.DeepEquals, &params.Error{
+	c.Assert(got.Results, tc.HasLen, 1)
+	c.Assert(err, tc.Equals, nil)
+	c.Check(got.Results[0].Error, tc.DeepEquals, &params.Error{
 		Message: "failed to delete user \"harvey\": not found",
 		Code:    "not found",
 	})
 }
 
-func (s *userManagerSuite) TestRemoveUser(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUser(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().RemoveUser(gomock.Any(), "jimmyjam").Return(nil)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	got, err := s.api.RemoveUser(context.Background(), params.Entities{
+	s.accessService.EXPECT().RemoveUser(gomock.Any(), coreusertesting.GenNewName(c, "jimmyjam")).Return(nil)
+
+	got, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{{Tag: "user-jimmyjam"}}})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(got.Results, gc.HasLen, 1)
-	c.Check(got.Results[0].Error, gc.IsNil)
+	c.Assert(got.Results, tc.HasLen, 1)
+	c.Check(got.Results[0].Error, tc.IsNil)
 }
 
-func (s *userManagerSuite) TestRemoveUserAsNormalUser(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserAsNormalUser(c *tc.C) {
 	s.setAPIUserAndAuth(c, "check")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	// Create a user to delete.
-	jjam := f.MakeUser(c, &factory.UserParams{Name: "jimmyjam"})
-	// Create a user to delete jjam.
-	_ = f.MakeUser(c, &factory.UserParams{
-		Name:        "chuck",
-		NoModelUser: true,
-	})
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	_, err := s.api.RemoveUser(context.Background(), params.Entities{
-		Entities: []params.Entity{{Tag: jjam.Tag().String()}}})
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	jjam := names.NewUserTag("jimmyjam")
 
-	// Make sure jjam is still around.
-	err = jjam.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.RemoveUser(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: jjam.String()}}})
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *userManagerSuite) TestRemoveUserSelfAsNormalUser(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserSelfAsNormalUser(c *tc.C) {
 	s.setAPIUserAndAuth(c, "someguy")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	_ = f.MakeUser(c, &factory.UserParams{Name: "someguy"})
-
-	_, err := s.api.RemoveUser(context.Background(), params.Entities{
+	// Do not expect any calls to the user service as this should fail.
+	_, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{{Tag: names.NewUserTag("someguy").String()}}})
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *userManagerSuite) TestRemoveUserAsSelfAdmin(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserAsSelfAdmin(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
+
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
 	expectedError := "cannot delete controller owner \"admin\""
 
-	got, err := s.api.RemoveUser(context.Background(), params.Entities{
+	got, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{{Tag: jujutesting.AdminUser.String()}}})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(got.Results, gc.HasLen, 1)
-	c.Check(got.Results[0].Error, jc.DeepEquals, &params.Error{
+	c.Assert(got.Results, tc.HasLen, 1)
+	c.Check(got.Results[0].Error, tc.DeepEquals, &params.Error{
 		Message: expectedError,
 	})
 }
 
-func (s *userManagerSuite) TestRemoveUserBulk(c *gc.C) {
+func (s *userManagerSuite) TestRemoveUserBulk(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().RemoveUser(gomock.Any(), "jimmyjam").Return(nil)
-	s.accessService.EXPECT().RemoveUser(gomock.Any(), "alice").Return(nil)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	got, err := s.api.RemoveUser(context.Background(), params.Entities{
+	s.accessService.EXPECT().RemoveUser(gomock.Any(), coreusertesting.GenNewName(c, "jimmyjam")).Return(nil)
+	s.accessService.EXPECT().RemoveUser(gomock.Any(), coreusertesting.GenNewName(c, "alice")).Return(nil)
+
+	got, err := s.api.RemoveUser(c.Context(), params.Entities{
 		Entities: []params.Entity{
 			{Tag: "user-jimmyjam"},
 			{Tag: "user-alice"},
 		}})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(got.Results, gc.HasLen, 2)
+	c.Check(got.Results, tc.HasLen, 2)
 	var paramErr *params.Error
-	c.Check(got.Results[0].Error, jc.DeepEquals, paramErr)
-	c.Check(got.Results[1].Error, jc.DeepEquals, paramErr)
+	c.Check(got.Results[0].Error, tc.DeepEquals, paramErr)
+	c.Check(got.Results[1].Error, tc.DeepEquals, paramErr)
 }
 
-func (s *userManagerSuite) TestResetPassword(c *gc.C) {
+func (s *userManagerSuite) TestResetPassword(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().ResetPassword(gomock.Any(), "alex").Return([]byte("secret-key"), nil)
+	alex := names.NewUserTag("alex")
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	args := params.Entities{Entities: []params.Entity{{Tag: alex.Tag().String()}}}
-	results, err := s.api.ResetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
+	s.accessService.EXPECT().ResetPassword(gomock.Any(), coreuser.NameFromTag(alex)).Return([]byte("secret-key"), nil)
 
-	c.Check(results.Results[0].Tag, gc.Equals, alex.Tag().String())
-	c.Check(string(results.Results[0].SecretKey), gc.DeepEquals, "secret-key")
+	args := params.Entities{Entities: []params.Entity{{Tag: alex.String()}}}
+	results, err := s.api.ResetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+
+	c.Check(results.Results[0].Tag, tc.Equals, alex.String())
+	c.Check(string(results.Results[0].SecretKey), tc.DeepEquals, "secret-key")
 }
 
-func (s *userManagerSuite) TestResetPasswordMultiple(c *gc.C) {
+func (s *userManagerSuite) TestResetPasswordMultiple(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
+	alex := names.NewUserTag("alex")
+	barb := names.NewUserTag("barb")
 	gomock.InOrder(
-		s.accessService.EXPECT().ResetPassword(gomock.Any(), "alex"),
-		s.accessService.EXPECT().ResetPassword(gomock.Any(), "barb"),
+		s.accessService.EXPECT().ResetPassword(gomock.Any(), coreuser.NameFromTag(alex)).Return([]byte("alex-secret"), nil),
+		s.accessService.EXPECT().ResetPassword(gomock.Any(), coreuser.NameFromTag(barb)).Return([]byte("barb-secret"), nil),
 	)
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb", NoModelUser: true})
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
-	c.Assert(barb.PasswordValid("password"), jc.IsTrue)
-
 	args := params.Entities{Entities: []params.Entity{
-		{Tag: alex.Tag().String()},
-		{Tag: barb.Tag().String()},
+		{Tag: alex.String()},
+		{Tag: barb.String()},
 	}}
-	results, err := s.api.ResetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+	results, err := s.api.ResetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(results.Results, gc.DeepEquals, []params.AddUserResult{
+	c.Assert(results.Results, tc.DeepEquals, []params.AddUserResult{
 		{
-			Tag:       alex.Tag().String(),
-			SecretKey: alex.SecretKey(),
+			Tag:       alex.String(),
+			SecretKey: []byte("alex-secret"),
 		},
 		{
-			Tag:       barb.Tag().String(),
-			SecretKey: barb.SecretKey(),
+			Tag:       barb.String(),
+			SecretKey: []byte("barb-secret"),
 		},
 	})
 }
 
-func (s *userManagerSuite) TestBlockResetPassword(c *gc.C) {
+func (s *userManagerSuite) TestBlockResetPassword(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-	args := params.Entities{Entities: []params.Entity{{Tag: alex.Tag().String()}}}
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
+	alex := names.NewUserTag("alex")
+	args := params.Entities{Entities: []params.Entity{{Tag: alex.String()}}}
 
-	s.BlockAllChanges(c, "TestBlockResetPassword")
-	_, err := s.api.ResetPassword(context.Background(), args)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("TestBlockResetPassword", nil)
+	// Do not expect any calls to the access service as this should fail.
+	_, err := s.api.ResetPassword(c.Context(), args)
 	// Check that the call is blocked
-	s.AssertBlocked(c, err, "TestBlockResetPassword")
-
-	err = alex.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
+	c.Assert(err, tc.ErrorMatches, "TestBlockResetPassword")
+	assertBlocked(c, err, "TestBlockResetPassword")
 }
 
-func (s *userManagerSuite) TestResetPasswordControllerAdminForSelf(c *gc.C) {
+func (s *userManagerSuite) TestResetPasswordControllerAdminForSelf(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	alex, err := s.ControllerModel(c).State().User(jujutesting.AdminUser)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{Entities: []params.Entity{{Tag: alex.Tag().String()}}}
-	c.Assert(alex.PasswordValid("dummy-secret"), jc.IsTrue)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
 
-	results, err := s.api.ResetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
+	admin := jujutesting.AdminUser
+	args := params.Entities{Entities: []params.Entity{{Tag: admin.String()}}}
 
-	err = alex.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.DeepEquals, []params.AddUserResult{
+	// Do not expect any calls to the access service as this should fail.
+	results, err := s.api.ResetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+
+	c.Assert(results.Results, tc.DeepEquals, []params.AddUserResult{
 		{
-			Tag:   alex.Tag().String(),
+			Tag:   admin.String(),
 			Error: apiservererrors.ServerError(apiservererrors.ErrPerm),
 		},
 	})
-	c.Assert(alex.PasswordValid("dummy-secret"), jc.IsTrue)
 }
 
-func (s *userManagerSuite) TestResetPasswordNotControllerAdmin(c *gc.C) {
+func (s *userManagerSuite) TestResetPasswordNotControllerAdmin(c *tc.C) {
 	s.setAPIUserAndAuth(c, "dope")
 	defer s.setUpAPI(c).Finish()
 
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-	alex := f.MakeUser(c, &factory.UserParams{Name: "alex", NoModelUser: true})
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
-	barb := f.MakeUser(c, &factory.UserParams{Name: "barb", NoModelUser: true})
-	c.Assert(barb.PasswordValid("password"), jc.IsTrue)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
+	alex := names.NewUserTag("alex")
+	barb := names.NewUserTag("barb")
 
 	args := params.Entities{Entities: []params.Entity{
-		{Tag: alex.Tag().String()},
-		{Tag: barb.Tag().String()},
+		{Tag: alex.String()},
+		{Tag: barb.String()},
 	}}
-	results, err := s.api.ResetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+	// Do not expect any calls to the access service as this should fail.
+	results, err := s.api.ResetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = alex.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	err = barb.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.DeepEquals, []params.AddUserResult{
+	c.Assert(results.Results, tc.DeepEquals, []params.AddUserResult{
 		{
-			Tag:   alex.Tag().String(),
+			Tag:   alex.String(),
 			Error: apiservererrors.ServerError(apiservererrors.ErrPerm),
 		},
 		{
-			Tag:   barb.Tag().String(),
+			Tag:   barb.String(),
 			Error: apiservererrors.ServerError(apiservererrors.ErrPerm),
 		},
 	})
-
-	c.Assert(alex.PasswordValid("password"), jc.IsTrue)
-	c.Assert(barb.PasswordValid("password"), jc.IsTrue)
 }
 
-func (s *userManagerSuite) TestResetPasswordMixedResult(c *gc.C) {
+func (s *userManagerSuite) TestResetPasswordMixedResult(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	s.accessService.EXPECT().ResetPassword(gomock.Any(), "alex").Return([]byte("secret-key"), nil)
-	s.accessService.EXPECT().ResetPassword(gomock.Any(), "invalid").Return(nil, errors.NotFound)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
+	s.accessService.EXPECT().ResetPassword(gomock.Any(), coreusertesting.GenNewName(c, "alex")).Return([]byte("secret-key"), nil)
+	s.accessService.EXPECT().ResetPassword(gomock.Any(), coreusertesting.GenNewName(c, "invalid")).Return(nil, errors.NotFound)
 
 	args := params.Entities{Entities: []params.Entity{
 		{Tag: "user-invalid"},
 		{Tag: "user-alex"},
 	}}
 
-	results, err := s.api.ResetPassword(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+	results, err := s.api.ResetPassword(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(results.Results, gc.DeepEquals, []params.AddUserResult{
+	c.Assert(results.Results, tc.DeepEquals, []params.AddUserResult{
 		{
 			Tag:   "user-invalid",
 			Error: apiservererrors.ServerError(errors.NotFound),
@@ -1008,18 +923,20 @@ func (s *userManagerSuite) TestResetPasswordMixedResult(c *gc.C) {
 	})
 }
 
-func (s *userManagerSuite) TestResetPasswordEmpty(c *gc.C) {
+func (s *userManagerSuite) TestResetPasswordEmpty(c *tc.C) {
 	defer s.setUpAPI(c).Finish()
 
-	results, err := s.api.ResetPassword(context.Background(), params.Entities{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 0)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound)
+
+	results, err := s.api.ResetPassword(c.Context(), params.Entities{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 0)
 }
 
 // setAPIUserAndAuth can be called prior to setUpAPI in order to simulate
 // calling the API as the input user. Any name other than "admin" indicates
 // that the caller is not an administrator of the controller.
-func (s *userManagerSuite) setAPIUserAndAuth(c *gc.C, name string) {
+func (s *userManagerSuite) setAPIUserAndAuth(c *tc.C, name string) {
 	tag := names.NewUserTag(name)
 	s.authorizer = apiservertesting.FakeAuthorizer{
 		Tag: tag,
@@ -1027,36 +944,43 @@ func (s *userManagerSuite) setAPIUserAndAuth(c *gc.C, name string) {
 
 	s.apiUser = coreuser.User{
 		UUID:        newUserUUID(c),
-		Name:        tag.Name(),
+		Name:        coreuser.NameFromTag(tag),
 		DisplayName: tag.Name(),
 	}
 }
 
-func (s *userManagerSuite) setUpAPI(c *gc.C) *gomock.Controller {
+func (s *userManagerSuite) setUpAPI(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.accessService = NewMockAccessService(ctrl)
+	s.modelService = NewMockModelService(ctrl)
+	s.blockCommandService = NewMockBlockCommandService(ctrl)
 
 	ctx := facadetest.ModelContext{
-		StatePool_: s.StatePool(),
-		State_:     s.ControllerModel(c).State(),
-		Resources_: s.resources,
-		Auth_:      s.authorizer,
+		Auth_: s.authorizer,
 	}
 
 	var err error
 	s.api, err = usermanager.NewAPI(
-		ctx.State(),
 		s.accessService,
-		ctx.StatePool(),
+		s.modelService,
 		ctx.Auth(),
-		common.NewBlockChecker(ctx.State()),
+		common.NewBlockChecker(s.blockCommandService),
 		ctx.Auth().GetAuthTag().(names.UserTag),
 		s.apiUser,
-		s.apiUser.Name == "admin",
+		s.apiUser.Name.Name() == "admin",
 		ctx.Logger(),
+		s.ControllerUUID,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return ctrl
+}
+
+func assertBlocked(c *tc.C, err error, msg string) {
+	c.Assert(params.IsCodeOperationBlocked(err), tc.IsTrue, tc.Commentf("error: %#v", err))
+	c.Assert(errors.Cause(err), tc.DeepEquals, &params.Error{
+		Message: msg,
+		Code:    "operation is blocked",
+	})
 }

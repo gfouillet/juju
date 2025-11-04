@@ -9,18 +9,17 @@ import (
 	"io"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/modelconfig"
-	apicontroller "github.com/juju/juju/api/controller/controller"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
 	coretools "github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
 )
@@ -32,21 +31,22 @@ var usageUpgradeJujuDetails = `
 Juju provides agent software to every machine it creates. This command
 upgrades that software across an entire model, which is, by default, the
 current model.
-A model's agent version can be shown with `[1:] + "`juju model-config agent-\nversion`" + `.
-A version is denoted by: major.minor.patch
 
-If '--agent-version' is not specified, then the upgrade candidate is
+A model's agent version can be shown with `[1:] + "`juju model-config agent-version`" + `.
+A version is denoted by: ` + "`major.minor.patch`" + `
+
+If ` + "`--agent-version`" + ` is not specified, then the upgrade candidate is
 selected to be the exact version the controller itself is running.
 
 If the controller is without internet access, the client must first supply
 the software to the controller's cache via the ` + "`juju sync-agent-binary`" + ` command.
 The command will abort if an upgrade is in progress. It will also abort if
-a previous upgrade was not fully completed (e.g.: if one of the
+a previous upgrade was not fully completed (e.g., if one of the
 controllers in a high availability model failed to upgrade).
 
 When looking for an agent to upgrade to, Juju will check the currently
 configured agent stream for that model. It's possible to overwrite this for
-the lifetime of this upgrade using --agent-stream
+the lifetime of this upgrade using ` + "`--agent-stream`" + `.
 
 Backups are recommended prior to upgrading.
 
@@ -70,7 +70,7 @@ type upgradeModelCommand struct {
 	modelcmd.ModelCommandBase
 
 	vers        string
-	Version     version.Number
+	Version     semversion.Number
 	DryRun      bool
 	AssumeYes   bool
 	AgentStream string
@@ -79,9 +79,11 @@ type upgradeModelCommand struct {
 	// version without waiting for all agents to be at the right version.
 	IgnoreAgentVersions bool
 
+	// model config API for the current model
 	modelConfigAPI   ModelConfigAPI
 	modelUpgraderAPI ModelUpgraderAPI
-	controllerAPI    ControllerAPI
+	// model config API for the controller model
+	controllerModelConfigAPI ModelConfigAPI
 }
 
 func (c *upgradeModelCommand) Info() *cmd.Info {
@@ -111,7 +113,7 @@ func (c *upgradeModelCommand) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *upgradeModelCommand) Init(args []string) error {
 	if c.vers != "" {
-		vers, err := version.Parse(c.vers)
+		vers, err := semversion.Parse(c.vers)
 		if err != nil {
 			return err
 		}
@@ -126,50 +128,51 @@ const (
 
 // ModelConfigAPI defines the model config API methods.
 type ModelConfigAPI interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 	Close() error
 }
 
 // ModelUpgraderAPI defines model upgrader API methods.
 type ModelUpgraderAPI interface {
 	UpgradeModel(
-		modelUUID string, targetVersion version.Number, stream string, ignoreAgentVersions, druRun bool,
-	) (version.Number, error)
-	UploadTools(ctx context.Context, r io.ReadSeeker, vers version.Binary) (coretools.List, error)
+		ctx context.Context,
+		modelUUID string, targetVersion semversion.Number, stream string, ignoreAgentVersions, druRun bool,
+	) (semversion.Number, error)
+	UploadTools(ctx context.Context, r io.Reader, vers semversion.Binary) (coretools.List, error)
 
 	Close() error
 }
 
-func (c *upgradeModelCommand) getModelUpgraderAPI() (ModelUpgraderAPI, error) {
+func (c *upgradeModelCommand) getModelUpgraderAPI(ctx context.Context) (ModelUpgraderAPI, error) {
 	if c.modelUpgraderAPI != nil {
 		return c.modelUpgraderAPI, nil
 	}
 
-	return c.NewModelUpgraderAPIClient()
+	return c.NewModelUpgraderAPIClient(ctx)
 }
 
-func (c *upgradeModelCommand) getModelConfigAPI() (ModelConfigAPI, error) {
+func (c *upgradeModelCommand) getModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.modelConfigAPI != nil {
 		return c.modelConfigAPI, nil
 	}
 
-	api, err := c.NewAPIRoot()
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return modelconfig.NewClient(api), nil
 }
 
-func (c *upgradeModelCommand) getControllerAPI() (ControllerAPI, error) {
-	if c.controllerAPI != nil {
-		return c.controllerAPI, nil
+func (c *upgradeModelCommand) getControllerModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
+	if c.controllerModelConfigAPI != nil {
+		return c.controllerModelConfigAPI, nil
 	}
 
-	api, err := c.NewControllerAPIRoot()
+	api, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return apicontroller.NewClient(api), nil
+	return modelconfig.NewClient(api), nil
 }
 
 // Run changes the version proposed for the juju envtools.
@@ -190,33 +193,33 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 		}
 
 		if errors.Is(err, errUpToDate) {
-			ctx.Infof(err.Error())
+			ctx.Infof("%s", err.Error())
 			err = nil
 		}
 		if err != nil {
-			logger.Debugf("upgradeModel failed %v", err)
+			logger.Debugf(context.TODO(), "upgradeModel failed %v", err)
 		}
 	}()
 
-	modelUpgrader, err := c.getModelUpgraderAPI()
+	modelUpgrader, err := c.getModelUpgraderAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelUpgrader.Close()
 
-	controllerClient, err := c.getControllerAPI()
+	controllerClient, err := c.getControllerModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer controllerClient.Close()
 
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelConfigClient.Close()
 
-	attrs, err := modelConfigClient.ModelGet()
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -235,7 +238,7 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 		return errUpToDate
 	}
 
-	controllerModelConfig, err := controllerClient.ModelConfig()
+	controllerModelConfig, err := controllerClient.ModelGet(ctx)
 	if err != nil && !params.IsCodeUnauthorized(err) {
 		return err
 	}
@@ -247,7 +250,7 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 
 	targetVersion, err = c.notifyControllerUpgrade(ctx, modelUpgrader, targetVersion, c.DryRun)
 	if err == nil {
-		logger.Debugf("upgraded to %s", targetVersion)
+		logger.Debugf(context.TODO(), "upgraded to %s", targetVersion)
 		return nil
 	}
 	if errors.Is(err, errors.NotFound) {
@@ -257,15 +260,16 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 }
 
 func (c *upgradeModelCommand) notifyControllerUpgrade(
-	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion version.Number, dryRun bool,
-) (chosenVersion version.Number, err error) {
-	_, details, err := c.ModelCommandBase.ModelDetails()
+	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion semversion.Number, dryRun bool,
+) (chosenVersion semversion.Number, err error) {
+	_, details, err := c.ModelCommandBase.ModelDetails(ctx)
 	if err != nil {
 		return chosenVersion, errors.Trace(err)
 	}
 	modelTag := names.NewModelTag(details.ModelUUID)
 
 	if chosenVersion, err = modelUpgrader.UpgradeModel(
+		ctx,
 		modelTag.Id(), targetVersion, c.AgentStream, c.IgnoreAgentVersions, dryRun,
 	); err != nil {
 		if params.IsCodeUpgradeInProgress(err) {

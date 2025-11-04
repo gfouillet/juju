@@ -4,13 +4,14 @@
 package gce_test
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"cloud.google.com/go/compute/apiv1/computepb"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/provider/gce"
-	"github.com/juju/juju/internal/provider/gce/google"
 	"github.com/juju/juju/internal/storage"
 )
 
@@ -18,154 +19,215 @@ type environAZSuite struct {
 	gce.BaseSuite
 }
 
-var _ = gc.Suite(&environAZSuite{})
-
-func (s *environAZSuite) TestAvailabilityZonesInvalidCredentialError(c *gc.C) {
-	s.FakeConn.Err = gce.InvalidCredentialError
-	c.Assert(s.InvalidatedCredentials, jc.IsFalse)
-	_, err := s.Env.AvailabilityZones(s.CallCtx)
-	c.Check(err, gc.NotNil)
-	c.Assert(s.InvalidatedCredentials, jc.IsTrue)
+func TestEnvironAZSuite(t *testing.T) {
+	tc.Run(t, &environAZSuite{})
 }
 
-func (s *environAZSuite) TestAvailabilityZones(c *gc.C) {
-	s.FakeConn.Zones = []google.AvailabilityZone{
-		google.NewZone("a-zone", google.StatusUp, "", ""),
-		google.NewZone("b-zone", google.StatusUp, "", ""),
-	}
+func (s *environAZSuite) TestAvailabilityZonesInvalidCredentialError(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	zones, err := s.Env.AvailabilityZones(s.CallCtx)
-	c.Assert(err, jc.ErrorIsNil)
+	env := s.SetupEnv(c, s.MockService)
+	c.Assert(s.InvalidatedCredentials, tc.IsFalse)
 
-	c.Check(zones, gc.HasLen, 2)
-	c.Check(zones[0].Name(), gc.Equals, "a-zone")
-	c.Check(zones[0].Available(), jc.IsTrue)
-	c.Check(zones[1].Name(), gc.Equals, "b-zone")
-	c.Check(zones[1].Available(), jc.IsTrue)
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return(nil, gce.InvalidCredentialError)
+
+	_, err := env.AvailabilityZones(c.Context())
+	c.Check(err, tc.NotNil)
+	c.Assert(s.InvalidatedCredentials, tc.IsTrue)
 }
 
-func (s *environAZSuite) TestAvailabilityZonesDeprecated(c *gc.C) {
-	zone := google.NewZone("a-zone", google.StatusUp, "DEPRECATED", "b-zone")
+func (s *environAZSuite) TestAvailabilityZones(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	c.Check(zone.Deprecated(), jc.IsTrue)
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("a-zone"),
+		Status: ptr("UP"),
+	}, {
+		Name:   ptr("b-zone"),
+		Status: ptr("DOWN"),
+	}, {
+		Name:       ptr("c-zone"),
+		Deprecated: &computepb.DeprecationStatus{},
+	}}, nil)
+
+	zones, err := env.AvailabilityZones(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Check(zones, tc.HasLen, 2)
+	c.Check(zones[0].Name(), tc.Equals, "a-zone")
+	c.Check(zones[0].Available(), tc.IsTrue)
+	c.Check(zones[1].Name(), tc.Equals, "b-zone")
+	c.Check(zones[1].Available(), tc.IsFalse)
 }
 
-func (s *environAZSuite) TestAvailabilityZonesAPI(c *gc.C) {
-	s.FakeConn.Zones = []google.AvailabilityZone{}
+func (s *environAZSuite) TestInstanceAvailabilityZoneNames(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	_, err := s.Env.AvailabilityZones(s.CallCtx)
-	c.Assert(err, jc.ErrorIsNil)
+	env := s.SetupEnv(c, s.MockService)
 
-	c.Check(s.FakeConn.Calls, gc.HasLen, 1)
-	c.Check(s.FakeConn.Calls[0].FuncName, gc.Equals, "AvailabilityZones")
-	c.Check(s.FakeConn.Calls[0].Region, gc.Equals, "us-east1")
-}
+	s.MockService.EXPECT().Instances(gomock.Any(), s.Prefix(env), "PENDING", "STAGING", "RUNNING").
+		Return([]*computepb.Instance{{
+			Name: ptr("inst-0"),
+			Zone: ptr("home-zone"),
+		}, {
+			Name: ptr("inst-1"),
+			Zone: ptr("home-a-zone"),
+		}}, nil)
 
-func (s *environAZSuite) TestInstanceAvailabilityZoneNames(c *gc.C) {
-	s.FakeEnviron.Insts = []instances.Instance{s.Instance}
-
-	id := instance.Id("spam")
+	id := instance.Id("inst-0")
 	ids := []instance.Id{id}
-	zones, err := s.Env.InstanceAvailabilityZoneNames(s.CallCtx, ids)
-	c.Assert(err, jc.ErrorIsNil)
+	zones, err := env.InstanceAvailabilityZoneNames(c.Context(), ids)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(zones, jc.DeepEquals, map[instance.Id]string{
+	c.Check(zones, tc.DeepEquals, map[instance.Id]string{
 		id: "home-zone",
 	})
 }
 
-func (s *environAZSuite) TestInstanceAvailabilityZoneNamesAPIs(c *gc.C) {
-	s.FakeEnviron.Insts = []instances.Instance{s.Instance}
+func (s *environAZSuite) TestDeriveAvailabilityZonesInvalidCredentialError(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	ids := []instance.Id{instance.Id("spam")}
-	_, err := s.Env.InstanceAvailabilityZoneNames(s.CallCtx, ids)
-	c.Assert(err, jc.ErrorIsNil)
+	env := s.SetupEnv(c, s.MockService)
+	c.Assert(s.InvalidatedCredentials, tc.IsFalse)
 
-	s.FakeEnviron.CheckCalls(c, []gce.FakeCall{{
-		FuncName: "GetInstances", Args: gce.FakeCallArgs{"switch": s.Env},
-	}})
-}
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return(nil, gce.InvalidCredentialError)
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesInvalidCredentialError(c *gc.C) {
 	s.StartInstArgs.Placement = "zone=test-available"
-	s.FakeConn.Err = gce.InvalidCredentialError
-	c.Assert(s.InvalidatedCredentials, jc.IsFalse)
-	_, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Check(err, gc.NotNil)
-	c.Assert(s.InvalidatedCredentials, jc.IsTrue)
+	_, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Check(err, tc.NotNil)
+	c.Assert(s.InvalidatedCredentials, tc.IsTrue)
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZones(c *gc.C) {
+func (s *environAZSuite) TestDeriveAvailabilityZones(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("test-available"),
+		Status: ptr("UP"),
+	}, {
+		Name:   ptr("test-unavailable"),
+		Status: ptr("DOWN"),
+	}}, nil)
+
 	s.StartInstArgs.Placement = "zone=test-available"
-	s.FakeConn.Zones = []google.AvailabilityZone{
-		google.NewZone("test-available", google.StatusUp, "", ""),
-	}
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(zones, gc.DeepEquals, []string{"test-available"})
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(zones, tc.DeepEquals, []string{"test-available"})
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeNoPlacement(c *gc.C) {
-	s.FakeConn.Zones = []google.AvailabilityZone{
-		google.NewZone("az1", google.StatusDown, "", ""),
-		google.NewZone("az2", google.StatusUp, "", ""),
-	}
+func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeNoPlacement(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("home-zone"),
+		Status: ptr("UP"),
+	}, {
+		Name:   ptr("away-zone"),
+		Status: ptr("UP"),
+	}}, nil)
+
 	s.StartInstArgs.VolumeAttachments = []storage.VolumeAttachmentParams{{
-		VolumeId: "az2--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
+		VolumeId: "away-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
 	}}
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(zones, gc.DeepEquals, []string{"az2"})
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(zones, tc.DeepEquals, []string{"away-zone"})
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesUnavailable(c *gc.C) {
+func (s *environAZSuite) TestDeriveAvailabilityZonesUnavailable(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("test-unavailable"),
+		Status: ptr("DOWN"),
+	}}, nil)
+
 	s.StartInstArgs.Placement = "zone=test-unavailable"
-	s.FakeConn.Zones = []google.AvailabilityZone{
-		google.NewZone("test-unavailable", google.StatusDown, "", ""),
-	}
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Check(err, gc.ErrorMatches, `.*availability zone "test-unavailable" is DOWN`)
-	c.Assert(zones, gc.HasLen, 0)
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Check(err, tc.ErrorMatches, `.*availability zone "test-unavailable" is DOWN`)
+	c.Assert(zones, tc.HasLen, 0)
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesUnknown(c *gc.C) {
+func (s *environAZSuite) TestDeriveAvailabilityZonesUnknown(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("home-zone"),
+		Status: ptr("UP"),
+	}}, nil)
+
 	s.StartInstArgs.Placement = "zone=test-unknown"
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, gc.ErrorMatches, `invalid availability zone "test-unknown" not found`)
-	c.Assert(zones, gc.HasLen, 0)
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorMatches, `invalid availability zone "test-unknown" not found`)
+	c.Assert(zones, tc.HasLen, 0)
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesConflictsVolume(c *gc.C) {
-	s.FakeConn.Zones = []google.AvailabilityZone{
-		google.NewZone("az1", google.StatusUp, "", ""),
-		google.NewZone("az2", google.StatusUp, "", ""),
-	}
-	s.StartInstArgs.Placement = "zone=az1"
+func (s *environAZSuite) TestDeriveAvailabilityZonesConflictsVolume(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.StartInstArgs.Placement = "zone=home-zone"
 	s.StartInstArgs.VolumeAttachments = []storage.VolumeAttachmentParams{{
-		VolumeId: "az2--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
+		VolumeId: "away-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
 	}}
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, gc.ErrorMatches, `cannot create instance with placement "zone=az1": cannot create instance in zone "az1", as this will prevent attaching the requested disks in zone "az2"`)
-	c.Assert(zones, gc.HasLen, 0)
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorMatches, `cannot create instance in zone "home-zone", as this will prevent attaching the requested disks in zone "away-zone"`)
+	c.Assert(zones, tc.HasLen, 0)
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeAttachments(c *gc.C) {
+func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeAttachments(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
+	s.MockService.EXPECT().AvailabilityZones(gomock.Any(), "us-east1").Return([]*computepb.Zone{{
+		Name:   ptr("home-zone"),
+		Status: ptr("UP"),
+	}, {
+		Name:   ptr("away-zone"),
+		Status: ptr("UP"),
+	}}, nil)
+
 	s.StartInstArgs.VolumeAttachments = []storage.VolumeAttachmentParams{{
 		VolumeId: "home-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
 	}}
-
-	zones, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(zones, gc.DeepEquals, []string{"home-zone"})
+	zones, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(zones, tc.DeepEquals, []string{"home-zone"})
 }
 
-func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeAttachmentsDifferentZones(c *gc.C) {
+func (s *environAZSuite) TestDeriveAvailabilityZonesVolumeAttachmentsDifferentZones(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+
 	s.StartInstArgs.VolumeAttachments = []storage.VolumeAttachmentParams{{
 		VolumeId: "home-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
 	}, {
 		VolumeId: "away-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4",
 	}}
-
-	_, err := s.Env.DeriveAvailabilityZones(s.CallCtx, s.StartInstArgs)
-	c.Assert(err, gc.ErrorMatches, `cannot attach volumes from multiple availability zones: home-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4 is in home-zone, away-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4 is in away-zone`)
+	_, err := env.DeriveAvailabilityZones(c.Context(), s.StartInstArgs)
+	c.Assert(err, tc.ErrorMatches, `cannot attach volumes from multiple availability zones: home-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4 is in home-zone, away-zone--c930380d-8337-4bf5-b07a-9dbb5ae771e4 is in away-zone`)
 }

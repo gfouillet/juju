@@ -8,14 +8,13 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/resources"
-	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/internal/docker"
@@ -33,7 +32,7 @@ type ContainerEnvironProvider interface {
 	//
 	// Open should not perform any expensive operations, such as querying
 	// the cloud API, as it will be called frequently.
-	Open(ctx context.Context, args environs.OpenParams) (Broker, error)
+	Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (Broker, error)
 }
 
 // RegisterContainerProvider is used for providers that we want to use for managing 'instances',
@@ -48,26 +47,26 @@ func RegisterContainerProvider(name string, p ContainerEnvironProvider, alias ..
 }
 
 // New returns a new broker based on the provided configuration.
-func New(ctx context.Context, args environs.OpenParams) (Broker, error) {
+func New(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (Broker, error) {
 	p, err := environs.Provider(args.Cloud.Type)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return Open(ctx, p, args)
+	return Open(ctx, p, args, invalidator)
 }
 
 // Open creates a Broker instance and errors if the provider is not for
 // a container substrate.
-func Open(ctx context.Context, p environs.EnvironProvider, args environs.OpenParams) (Broker, error) {
+func Open(ctx context.Context, p environs.EnvironProvider, args environs.OpenParams, invalidator environs.CredentialInvalidator) (Broker, error) {
 	if envProvider, ok := p.(ContainerEnvironProvider); !ok {
 		return nil, errors.NotValidf("container environ provider %T", p)
 	} else {
-		return envProvider.Open(ctx, args)
+		return envProvider.Open(ctx, args, invalidator)
 	}
 }
 
 // NewContainerBrokerFunc returns a Container Broker.
-type NewContainerBrokerFunc func(ctx context.Context, args environs.OpenParams) (Broker, error)
+type NewContainerBrokerFunc func(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (Broker, error)
 
 // StatusCallbackFunc represents a function that can be called to report a status.
 type StatusCallbackFunc func(appName string, settableStatus status.Status, info string, data map[string]interface{}) error
@@ -127,7 +126,7 @@ type ServiceParams struct {
 	ResourceTags map[string]string
 
 	// Constraints is a set of constraints on
-	// the pod to create.
+	// the workload containers.
 	Constraints constraints.Value
 
 	// Filesystems is a set of parameters for filesystems that should be created.
@@ -140,7 +139,7 @@ type ServiceParams struct {
 	CharmModifiedVersion int
 
 	// ImageDetails is the docker registry URL and auth details for the juju init container image.
-	ImageDetails resources.DockerImageDetails
+	ImageDetails resource.DockerImageDetails
 }
 
 // DeploymentState is returned by the OperatorExists call.
@@ -166,6 +165,10 @@ type Broker interface {
 
 	// ResourceAdopter defines methods for adopting resources.
 	environs.ResourceAdopter
+
+	// Networking is an interface providing networking-related operations
+	// for an CAAS Environ.
+	environs.Networking
 
 	// StorageValidator provides methods to validate storage.
 	StorageValidator
@@ -193,12 +196,6 @@ type Broker interface {
 	// ServiceManager provides an API for creating and watching services.
 	ServiceManager
 
-	// SecretsProvider provides an API for accessing the broker interface for managing secret k8s provider resources.
-	SecretsProvider
-
-	// SecretsBackend provides an API for managing Juju secrets.
-	SecretsBackend
-
 	// ModelOperatorManager provides an API for deploying operators for
 	// individual models.
 	ModelOperatorManager
@@ -225,24 +222,6 @@ type ApplicationBroker interface {
 	AnnotateUnit(ctx context.Context, appName string, podName string, unit names.UnitTag) error
 }
 
-// SecretsProvider provides an API for accessing the broker interface for managing secret k8s provider resources.
-type SecretsProvider interface {
-	// EnsureSecretAccessToken ensures the secret related RBAC resources for the provided entity.
-	EnsureSecretAccessToken(ctx context.Context, unitName string, owned, read, removed []string) (string, error)
-}
-
-// SecretsBackend provides an API for managing Juju secrets.
-type SecretsBackend interface {
-	// SaveJujuSecret saves a secret, returning an id used to access the secret later.
-	SaveJujuSecret(ctx context.Context, name string, value secrets.SecretValue) (string, error)
-
-	// GetJujuSecret gets the content of a Juju secret.
-	GetJujuSecret(ctx context.Context, id string) (secrets.SecretValue, error)
-
-	// DeleteJujuSecret deletes a Juju secret.
-	DeleteJujuSecret(ctx context.Context, id string) error
-}
-
 // ModelOperatorManager provides an API for deploying operators for individual
 // models.
 type ModelOperatorManager interface {
@@ -257,12 +236,15 @@ type ModelOperatorManager interface {
 	// ModelOperator return the model operator config used to create the current
 	// model operator for this broker
 	ModelOperator(ctx context.Context) (*ModelOperatorConfig, error)
+
+	// GetModelOperatorDeploymentImage returns the image used for the model operator deployment.
+	GetModelOperatorDeploymentImage(ctx context.Context) (string, error)
 }
 
 // Upgrader provides the API to perform upgrades.
 type Upgrader interface {
 	// Upgrade sets the OCI image for the app to the specified version.
-	Upgrade(ctx context.Context, appName string, vers version.Number) error
+	Upgrade(ctx context.Context, appName string, vers semversion.Number) error
 }
 
 // StorageValidator provides methods to validate storage.
@@ -274,7 +256,7 @@ type StorageValidator interface {
 // ClusterVersionGetter provides methods to get cluster version information.
 type ClusterVersionGetter interface {
 	// Version returns cluster version information.
-	Version() (*version.Number, error)
+	Version() (*semversion.Number, error)
 }
 
 // CredentialChecker provides an API for checking that the credentials
@@ -369,7 +351,7 @@ type ModelOperatorConfig struct {
 	AgentConf []byte
 
 	// ImageDetails is the docker registry URL and auth details for the juju operator image.
-	ImageDetails resources.DockerImageDetails
+	ImageDetails resource.DockerImageDetails
 
 	// Port is the socket port that the operator model will be listening on
 	Port int32
@@ -378,13 +360,13 @@ type ModelOperatorConfig struct {
 // OperatorConfig is the config to use when creating an operator.
 type OperatorConfig struct {
 	// ImageDetails is the docker registry URL and auth details for the juju operator image.
-	ImageDetails resources.DockerImageDetails
+	ImageDetails resource.DockerImageDetails
 
 	// BaseImageDetails is the docker registry URL and auth details for the charm base image.
-	BaseImageDetails resources.DockerImageDetails
+	BaseImageDetails resource.DockerImageDetails
 
 	// Version is the Juju version of the operator image.
-	Version version.Number
+	Version semversion.Number
 
 	// CharmStorage defines parameters used to optionally
 	// create storage for operators to use for charm state.

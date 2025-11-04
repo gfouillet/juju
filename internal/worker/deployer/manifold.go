@@ -8,7 +8,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
@@ -16,22 +16,17 @@ import (
 	"github.com/juju/juju/agent/engine"
 	apideployer "github.com/juju/juju/api/agent/deployer"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/logger"
 )
 
-// Hub is a pubsub hub used for internal messaging.
-type Hub interface {
-	Publish(topic string, data interface{}) func()
-	Subscribe(topic string, handler func(string, interface{})) func()
-}
-
 // ManifoldConfig defines the names of the manifolds on which a Manifold will depend.
 type ManifoldConfig struct {
-	AgentName     string
-	APICallerName string
-	Clock         clock.Clock
-	Hub           Hub
-	Logger        logger.Logger
+	AgentName      string
+	APICallerName  string
+	FlightRecorder flightrecorder.FlightRecorder
+	Clock          clock.Clock
+	Logger         logger.Logger
 
 	UnitEngineConfig func() dependency.EngineConfig
 	SetupLogging     func(logger.LoggerContext, agent.Config)
@@ -61,11 +56,12 @@ func (config ManifoldConfig) newWorker(_ context.Context, a agent.Agent, apiCall
 	if cfg.Tag().Kind() != names.MachineTagKind {
 		return nil, errors.New("agent's tag is not a machine tag")
 	}
+
 	deployerFacade := apideployer.NewClient(apiCaller)
 	contextConfig := ContextConfig{
 		Agent:            a,
+		FlightRecorder:   config.FlightRecorder,
 		Clock:            config.Clock,
-		Hub:              config.Hub,
 		Logger:           config.Logger,
 		UnitEngineConfig: config.UnitEngineConfig,
 		SetupLogging:     config.SetupLogging,
@@ -76,7 +72,7 @@ func (config ManifoldConfig) newWorker(_ context.Context, a agent.Agent, apiCall
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	shim := &facadeShim{deployerFacade}
+	shim := &facadeShim{st: deployerFacade}
 	w, err := NewDeployer(shim, config.Logger, context)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot start unit agent deployer worker")

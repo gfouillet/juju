@@ -29,11 +29,11 @@ run_enable_ha() {
 
 	ensure "enable-ha" "${file}"
 
-	juju deploy jameinel-ubuntu-lite
+	juju deploy ubuntu-lite
 
 	enable_microceph_backed_storage
 
-	juju enable-ha
+	juju add-unit -m controller controller -n 2
 
 	wait_for_controller_machines 3
 	wait_for_ha 3
@@ -44,15 +44,15 @@ run_enable_ha() {
 	# remove-machine will fail. Wait for the config to be
 	# settled before trying to tear down.
 	juju switch controller
-	wait_for "controller" "$(idle_condition "controller" 1 0)"
-	wait_for "controller" "$(idle_condition "controller" 1 1)"
-	wait_for "controller" "$(idle_condition "controller" 1 2)"
+	wait_for "controller" "$(idle_condition "controller" 0)"
+	wait_for "controller" "$(idle_condition "controller" 1)"
+	wait_for "controller" "$(idle_condition "controller" 2)"
 
 	juju switch enable-ha
 	controller_1=$(juju status -m controller --format json | jq -r '.applications.controller.units["controller/1"].machine')
-	juju remove-machine -m controller "${controller_1}"
+	juju remove-machine -m controller "${controller_1}" --force
 	controller_2=$(juju status -m controller --format json | jq -r '.applications.controller.units["controller/2"].machine')
-	juju remove-machine -m controller "${controller_2}"
+	juju remove-machine -m controller "${controller_2}" --force
 
 	wait_for_controller_no_leader
 	wait_for_controller_leader

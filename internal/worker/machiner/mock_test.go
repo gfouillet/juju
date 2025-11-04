@@ -6,13 +6,13 @@ package machiner_test
 import (
 	"context"
 
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/machiner"
 	"github.com/juju/juju/rpc/params"
 )
@@ -33,7 +33,7 @@ func (w *mockWatcher) Wait() error {
 
 type mockMachine struct {
 	machiner.Machine
-	jujutesting.Stub
+	testhelpers.Stub
 	watcher mockWatcher
 	life    life.Value
 }
@@ -48,22 +48,22 @@ func (m *mockMachine) Life() life.Value {
 	return m.life
 }
 
-func (m *mockMachine) EnsureDead() error {
+func (m *mockMachine) EnsureDead(context.Context) error {
 	m.MethodCall(m, "EnsureDead")
 	return m.NextErr()
 }
 
-func (m *mockMachine) SetMachineAddresses(addresses []network.MachineAddress) error {
+func (m *mockMachine) SetMachineAddresses(_ context.Context, addresses []network.MachineAddress) error {
 	m.MethodCall(m, "SetMachineAddresses", addresses)
 	return m.NextErr()
 }
 
-func (m *mockMachine) SetObservedNetworkConfig(netConfig []params.NetworkConfig) error {
+func (m *mockMachine) SetObservedNetworkConfig(_ context.Context, netConfig []params.NetworkConfig) error {
 	m.MethodCall(m, "SetObservedNetworkConfig", netConfig)
 	return m.NextErr()
 }
 
-func (m *mockMachine) SetStatus(status status.Status, info string, data map[string]interface{}) error {
+func (m *mockMachine) SetStatus(_ context.Context, status status.Status, info string, data map[string]interface{}) error {
 	m.MethodCall(m, "SetStatus", status, info, data)
 	return m.NextErr()
 }
@@ -77,7 +77,7 @@ func (m *mockMachine) Watch(_ context.Context) (watcher.NotifyWatcher, error) {
 }
 
 type mockMachineAccessor struct {
-	jujutesting.Stub
+	testhelpers.Stub
 	machine mockMachine
 }
 

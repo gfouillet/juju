@@ -5,11 +5,11 @@ package lxd_test
 
 import (
 	"errors"
+	"testing"
 
 	lxdapi "github.com/canonical/lxd/shared/api"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/internal/container/lxd"
@@ -21,7 +21,9 @@ type networkSuite struct {
 	lxdtesting.BaseSuite
 }
 
-var _ = gc.Suite(&networkSuite{})
+func TestNetworkSuite(t *testing.T) {
+	tc.Run(t, &networkSuite{})
+}
 
 func (s *networkSuite) patch() {
 	lxd.PatchGenerateVirtualMACAddress(s)
@@ -30,12 +32,10 @@ func (s *networkSuite) patch() {
 func defaultProfileWithNIC() *lxdapi.Profile {
 	return &lxdapi.Profile{
 		Name: "default",
-		ProfilePut: lxdapi.ProfilePut{
-			Devices: map[string]map[string]string{
-				"eth0": {
-					"network": network.DefaultLXDBridge,
-					"type":    "nic",
-				},
+		Devices: map[string]map[string]string{
+			"eth0": {
+				"network": network.DefaultLXDBridge,
+				"type":    "nic",
 			},
 		},
 	}
@@ -44,41 +44,37 @@ func defaultProfileWithNIC() *lxdapi.Profile {
 func defaultLegacyProfileWithNIC() *lxdapi.Profile {
 	return &lxdapi.Profile{
 		Name: "default",
-		ProfilePut: lxdapi.ProfilePut{
-			Devices: map[string]map[string]string{
-				"eth0": {
-					"parent":  network.DefaultLXDBridge,
-					"type":    "nic",
-					"nictype": "bridged",
-				},
+		Devices: map[string]map[string]string{
+			"eth0": {
+				"parent":  network.DefaultLXDBridge,
+				"type":    "nic",
+				"nictype": "bridged",
 			},
 		},
 	}
 }
 
-func (s *networkSuite) TestEnsureIPv4NoChange(c *gc.C) {
+func (s *networkSuite) TestEnsureIPv4NoChange(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
 
 	net := &lxdapi.Network{
-		NetworkPut: lxdapi.NetworkPut{
-			Config: map[string]string{
-				"ipv4.address": "10.5.3.1",
-			},
+		Config: map[string]string{
+			"ipv4.address": "10.5.3.1",
 		},
 	}
 	cSvr.EXPECT().GetNetwork("some-net-name").Return(net, lxdtesting.ETag, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	mod, err := jujuSvr.EnsureIPv4("some-net-name")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(mod, jc.IsFalse)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(mod, tc.IsFalse)
 }
 
-func (s *networkSuite) TestEnsureIPv4Modified(c *gc.C) {
+func (s *networkSuite) TestEnsureIPv4Modified(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
@@ -95,14 +91,14 @@ func (s *networkSuite) TestEnsureIPv4Modified(c *gc.C) {
 	)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	mod, err := jujuSvr.EnsureIPv4(network.DefaultLXDBridge)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(mod, jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(mod, tc.IsTrue)
 }
 
-func (s *networkSuite) TestGetNICsFromProfile(c *gc.C) {
+func (s *networkSuite) TestGetNICsFromProfile(c *tc.C) {
 	lxd.PatchGenerateVirtualMACAddress(s)
 
 	ctrl := gomock.NewController(c)
@@ -112,10 +108,10 @@ func (s *networkSuite) TestGetNICsFromProfile(c *gc.C) {
 	cSvr.EXPECT().GetProfile("default").Return(defaultLegacyProfileWithNIC(), lxdtesting.ETag, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	nics, err := jujuSvr.GetNICsFromProfile("default")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	exp := map[string]map[string]string{
 		"eth0": {
@@ -126,10 +122,10 @@ func (s *networkSuite) TestGetNICsFromProfile(c *gc.C) {
 		},
 	}
 
-	c.Check(nics, gc.DeepEquals, exp)
+	c.Check(nics, tc.DeepEquals, exp)
 }
 
-func (s *networkSuite) TestVerifyNetworkDevicePresentValid(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDevicePresentValid(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
@@ -142,13 +138,13 @@ func (s *networkSuite) TestVerifyNetworkDevicePresentValid(c *gc.C) {
 	cSvr.EXPECT().GetNetwork(network.DefaultLXDBridge).Return(net, "", nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(defaultProfileWithNIC(), "")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestVerifyNetworkDevicePresentValidLegacy(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDevicePresentValidLegacy(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
@@ -156,13 +152,13 @@ func (s *networkSuite) TestVerifyNetworkDevicePresentValidLegacy(c *gc.C) {
 	cSvr.EXPECT().GetNetwork(network.DefaultLXDBridge).Return(&lxdapi.Network{}, "", nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(defaultLegacyProfileWithNIC(), "")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestVerifyNetworkDeviceMultipleNICsOneValid(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceMultipleNICsOneValid(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerClustered(ctrl, "cluster-1")
@@ -174,10 +170,8 @@ func (s *networkSuite) TestVerifyNetworkDeviceMultipleNICsOneValid(c *gc.C) {
 	net := &lxdapi.Network{
 		Name:    network.DefaultLXDBridge,
 		Managed: true,
-		NetworkPut: lxdapi.NetworkPut{
-			Config: map[string]string{
-				"ipv6.address": "something-not-nothing",
-			},
+		Config: map[string]string{
+			"ipv6.address": "something-not-nothing",
 		},
 	}
 
@@ -186,15 +180,15 @@ func (s *networkSuite) TestVerifyNetworkDeviceMultipleNICsOneValid(c *gc.C) {
 	cSvr.EXPECT().GetNetwork("valid-net").Return(&lxdapi.Network{}, "", nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(profile, "")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(jujuSvr.LocalBridgeName(), gc.Equals, "valid-net")
+	c.Check(jujuSvr.LocalBridgeName(), tc.Equals, "valid-net")
 }
 
-func (s *networkSuite) TestVerifyNetworkDevicePresentBadNicType(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDevicePresentBadNicType(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
@@ -210,10 +204,10 @@ func (s *networkSuite) TestVerifyNetworkDevicePresentBadNicType(c *gc.C) {
 	cSvr.EXPECT().GetNetwork(network.DefaultLXDBridge).Return(net, "", nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(profile, "")
-	c.Assert(err, gc.ErrorMatches,
+	c.Assert(err, tc.ErrorMatches,
 		`profile "default": no network device found with nictype "bridged" or "macvlan"\n`+
 			`\tthe following devices were checked: eth0\n`+
 			`Reconfigure lxd to use a network of type "bridged" or "macvlan".`)
@@ -221,7 +215,7 @@ func (s *networkSuite) TestVerifyNetworkDevicePresentBadNicType(c *gc.C) {
 
 // Juju used to fail when IPv6 was enabled on the lxd network. This test now
 // checks regression to make sure that we know longer fail.
-func (s *networkSuite) TestVerifyNetworkDeviceIPv6PresentNoFail(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceIPv6PresentNoFail(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerWithExtensions(ctrl, "network")
@@ -229,22 +223,20 @@ func (s *networkSuite) TestVerifyNetworkDeviceIPv6PresentNoFail(c *gc.C) {
 	net := &lxdapi.Network{
 		Name:    network.DefaultLXDBridge,
 		Managed: true,
-		NetworkPut: lxdapi.NetworkPut{
-			Config: map[string]string{
-				"ipv6.address": "2001:DB8::1",
-			},
+		Config: map[string]string{
+			"ipv6.address": "2001:DB8::1",
 		},
 	}
 	cSvr.EXPECT().GetNetwork(network.DefaultLXDBridge).Return(net, "", nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(defaultLegacyProfileWithNIC(), "")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreated(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreated(c *tc.C) {
 	s.patch()
 
 	ctrl := gomock.NewController(c)
@@ -263,10 +255,10 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreated(c *gc.C) {
 		NetworkPut: lxdapi.NetworkPut{Config: netConf},
 	}
 	newNet := &lxdapi.Network{
-		Name:       network.DefaultLXDBridge,
-		Type:       "bridge",
-		Managed:    true,
-		NetworkPut: lxdapi.NetworkPut{Config: netConf},
+		Name:    network.DefaultLXDBridge,
+		Type:    "bridge",
+		Managed: true,
+		Config:  netConf,
 	}
 	gomock.InOrder(
 		cSvr.EXPECT().GetNetwork(network.DefaultLXDBridge).Return(nil, "", errors.New("network not found")),
@@ -279,13 +271,13 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreated(c *gc.C) {
 	delete(profile.Devices, "eth0")
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(profile, lxdtesting.ETag)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestVerifyNetworkDeviceNotPresentNoNetAPIError(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceNotPresentNoNetAPIError(c *tc.C) {
 	s.patch()
 
 	ctrl := gomock.NewController(c)
@@ -293,16 +285,16 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentNoNetAPIError(c *gc.C) {
 	cSvr := s.NewMockServer(ctrl)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	profile := defaultLegacyProfileWithNIC()
 	delete(profile.Devices, "eth0")
 
 	err = jujuSvr.VerifyNetworkDevice(profile, lxdtesting.ETag)
-	c.Assert(err, gc.ErrorMatches, `profile "default" does not have any devices configured with type "nic"`)
+	c.Assert(err, tc.ErrorMatches, `profile "default" does not have any devices configured with type "nic"`)
 }
 
-func (s *networkSuite) TestVerifyNetworkDevicePresentNoNetAPIError(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDevicePresentNoNetAPIError(c *tc.C) {
 	s.patch()
 
 	ctrl := gomock.NewController(c)
@@ -310,15 +302,15 @@ func (s *networkSuite) TestVerifyNetworkDevicePresentNoNetAPIError(c *gc.C) {
 	cSvr := s.NewMockServer(ctrl)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	profile := defaultLegacyProfileWithNIC()
 
 	err = jujuSvr.VerifyNetworkDevice(profile, lxdtesting.ETag)
-	c.Assert(err, gc.ErrorMatches, "versions of LXD without network API not supported")
+	c.Assert(err, tc.ErrorMatches, "versions of LXD without network API not supported")
 }
 
-func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreatedWithUnusedName(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreatedWithUnusedName(c *tc.C) {
 	s.patch()
 
 	ctrl := gomock.NewController(c)
@@ -329,13 +321,11 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreatedWithUnusedName(c 
 		Name:    network.DefaultLXDBridge,
 		Type:    "bridge",
 		Managed: true,
-		NetworkPut: lxdapi.NetworkPut{
-			Config: map[string]string{
-				"ipv4.address": "auto",
-				"ipv4.nat":     "true",
-				"ipv6.address": "none",
-				"ipv6.nat":     "false",
-			},
+		Config: map[string]string{
+			"ipv4.address": "auto",
+			"ipv4.nat":     "true",
+			"ipv6.address": "none",
+			"ipv6.nat":     "false",
 		},
 	}
 	devReq := lxdapi.ProfilePut{
@@ -360,13 +350,13 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentCreatedWithUnusedName(c 
 	profile.Devices["eth1"] = map[string]string{}
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(profile, lxdtesting.ETag)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestVerifyNetworkDeviceNotPresentErrorForCluster(c *gc.C) {
+func (s *networkSuite) TestVerifyNetworkDeviceNotPresentErrorForCluster(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	cSvr := s.NewMockServerClustered(ctrl, "cluster-1")
@@ -375,13 +365,13 @@ func (s *networkSuite) TestVerifyNetworkDeviceNotPresentErrorForCluster(c *gc.C)
 	delete(profile.Devices, "eth0")
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.VerifyNetworkDevice(profile, lxdtesting.ETag)
-	c.Assert(err, gc.ErrorMatches, `profile "default" does not have any devices configured with type "nic"`)
+	c.Assert(err, tc.ErrorMatches, `profile "default" does not have any devices configured with type "nic"`)
 }
 
-func (s *networkSuite) TestInterfaceInfoFromDevices(c *gc.C) {
+func (s *networkSuite) TestInterfaceInfoFromDevices(c *tc.C) {
 	nics := map[string]map[string]string{
 		"eth0": {
 			"parent":  network.DefaultLXDBridge,
@@ -398,7 +388,7 @@ func (s *networkSuite) TestInterfaceInfoFromDevices(c *gc.C) {
 	}
 
 	info, err := lxd.InterfaceInfoFromDevices(nics)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	exp := corenetwork.InterfaceInfos{
 		{
@@ -416,10 +406,10 @@ func (s *networkSuite) TestInterfaceInfoFromDevices(c *gc.C) {
 			Origin:              corenetwork.OriginProvider,
 		},
 	}
-	c.Check(info, jc.DeepEquals, exp)
+	c.Check(info, tc.DeepEquals, exp)
 }
 
-func (s *networkSuite) TestEnableHTTPSListener(c *gc.C) {
+func (s *networkSuite) TestEnableHTTPSListener(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -436,13 +426,13 @@ func (s *networkSuite) TestEnableHTTPSListener(c *gc.C) {
 	)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.EnableHTTPSListener()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestEnableHTTPSListenerWithFallbackToIPv4(c *gc.C) {
+func (s *networkSuite) TestEnableHTTPSListenerWithFallbackToIPv4(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -465,13 +455,13 @@ func (s *networkSuite) TestEnableHTTPSListenerWithFallbackToIPv4(c *gc.C) {
 	)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = jujuSvr.EnableHTTPSListener()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *networkSuite) TestEnableHTTPSListenerWithErrors(c *gc.C) {
+func (s *networkSuite) TestEnableHTTPSListenerWithErrors(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -481,13 +471,13 @@ func (s *networkSuite) TestEnableHTTPSListenerWithErrors(c *gc.C) {
 	cSvr.EXPECT().GetServer().Return(cfg, lxdtesting.ETag, nil)
 
 	jujuSvr, err := lxd.NewServer(cSvr)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// check on the first request
 	cSvr.EXPECT().GetServer().Return(cfg, lxdtesting.ETag, errors.New("bad"))
 
 	err = jujuSvr.EnableHTTPSListener()
-	c.Assert(err, gc.ErrorMatches, "bad")
+	c.Assert(err, tc.ErrorMatches, "bad")
 
 	// check on the second request
 	gomock.InOrder(
@@ -501,7 +491,7 @@ func (s *networkSuite) TestEnableHTTPSListenerWithErrors(c *gc.C) {
 	)
 
 	err = jujuSvr.EnableHTTPSListener()
-	c.Assert(err, gc.ErrorMatches, "bad")
+	c.Assert(err, tc.ErrorMatches, "bad")
 
 	// check on the third request
 	gomock.InOrder(
@@ -520,10 +510,10 @@ func (s *networkSuite) TestEnableHTTPSListenerWithErrors(c *gc.C) {
 	)
 
 	err = jujuSvr.EnableHTTPSListener()
-	c.Assert(err, gc.ErrorMatches, "bad")
+	c.Assert(err, tc.ErrorMatches, "bad")
 }
 
-func (s *networkSuite) TestNewNICDeviceWithoutMACAddressOrMTUGreaterThanZero(c *gc.C) {
+func (s *networkSuite) TestNewNICDeviceWithoutMACAddressOrMTUGreaterThanZero(c *tc.C) {
 	device := lxd.NewNICDevice("eth1", "br-eth1", "", 0)
 	expected := map[string]string{
 		"name":    "eth1",
@@ -531,10 +521,10 @@ func (s *networkSuite) TestNewNICDeviceWithoutMACAddressOrMTUGreaterThanZero(c *
 		"parent":  "br-eth1",
 		"type":    "nic",
 	}
-	c.Assert(device, gc.DeepEquals, expected)
+	c.Assert(device, tc.DeepEquals, expected)
 }
 
-func (s *networkSuite) TestNewNICDeviceWithMACAddressButNoMTU(c *gc.C) {
+func (s *networkSuite) TestNewNICDeviceWithMACAddressButNoMTU(c *tc.C) {
 	device := lxd.NewNICDevice("eth1", "br-eth1", "aa:bb:cc:dd:ee:f0", 0)
 	expected := map[string]string{
 		"hwaddr":  "aa:bb:cc:dd:ee:f0",
@@ -543,10 +533,10 @@ func (s *networkSuite) TestNewNICDeviceWithMACAddressButNoMTU(c *gc.C) {
 		"parent":  "br-eth1",
 		"type":    "nic",
 	}
-	c.Assert(device, gc.DeepEquals, expected)
+	c.Assert(device, tc.DeepEquals, expected)
 }
 
-func (s *networkSuite) TestNewNICDeviceWithoutMACAddressButMTUGreaterThanZero(c *gc.C) {
+func (s *networkSuite) TestNewNICDeviceWithoutMACAddressButMTUGreaterThanZero(c *tc.C) {
 	device := lxd.NewNICDevice("eth1", "br-eth1", "", 1492)
 	expected := map[string]string{
 		"mtu":     "1492",
@@ -555,10 +545,10 @@ func (s *networkSuite) TestNewNICDeviceWithoutMACAddressButMTUGreaterThanZero(c 
 		"parent":  "br-eth1",
 		"type":    "nic",
 	}
-	c.Assert(device, gc.DeepEquals, expected)
+	c.Assert(device, tc.DeepEquals, expected)
 }
 
-func (s *networkSuite) TestNewNICDeviceWithMACAddressAndMTUGreaterThanZero(c *gc.C) {
+func (s *networkSuite) TestNewNICDeviceWithMACAddressAndMTUGreaterThanZero(c *tc.C) {
 	device := lxd.NewNICDevice("eth1", "br-eth1", "aa:bb:cc:dd:ee:f0", 9000)
 	expected := map[string]string{
 		"hwaddr":  "aa:bb:cc:dd:ee:f0",
@@ -568,5 +558,5 @@ func (s *networkSuite) TestNewNICDeviceWithMACAddressAndMTUGreaterThanZero(c *gc
 		"parent":  "br-eth1",
 		"type":    "nic",
 	}
-	c.Assert(device, gc.DeepEquals, expected)
+	c.Assert(device, tc.DeepEquals, expected)
 }

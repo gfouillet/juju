@@ -6,246 +6,95 @@ package machinemanager
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
+	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/credentialcommon"
-	"github.com/juju/juju/apiserver/common/storagecommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/controller"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/instance"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/machine"
-	"github.com/juju/juju/core/network"
+	coremachine "github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/os/ostype"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/domain/constraints"
+	"github.com/juju/juju/domain/deployment"
+	domainmachine "github.com/juju/juju/domain/machine"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
 	"github.com/juju/juju/environs/config"
-	environscontext "github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/manual/sshprovisioner"
-	"github.com/juju/juju/internal/charmhub"
-	"github.com/juju/juju/internal/charmhub/transport"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
 )
-
-var ClassifyDetachedStorage = storagecommon.ClassifyDetachedStorage
-
-// ControllerConfigService defines a method for getting the controller config.
-type ControllerConfigService interface {
-	ControllerConfig(context.Context) (controller.Config, error)
-}
-
-// Leadership represents a type for modifying the leadership settings of an
-// application for series upgrades.
-type Leadership interface {
-	// GetMachineApplicationNames returns the applications associated with a
-	// machine.
-	GetMachineApplicationNames(context.Context, string) ([]string, error)
-
-	// UnpinApplicationLeadersByName takes a slice of application names and
-	// attempts to unpin them accordingly.
-	UnpinApplicationLeadersByName(context.Context, names.Tag, []string) (params.PinApplicationsResults, error)
-}
-
-// Authorizer checks to see if an operation can be performed.
-type Authorizer interface {
-	// CanRead checks to see if a read is possible. Returns an error if a read
-	// is not possible.
-	CanRead() error
-
-	// CanWrite checks to see if a write is possible. Returns an error if a
-	// write is not possible.
-	CanWrite() error
-
-	// AuthClient returns true if the entity is an external user.
-	AuthClient() bool
-}
-
-// MachineService manages machines.
-type MachineService interface {
-	CreateMachine(context.Context, machine.Name) (string, error)
-	DeleteMachine(context.Context, machine.Name) error
-}
-
-// CharmhubClient represents a way for querying the charmhub api for information
-// about the application charm.
-type CharmhubClient interface {
-	Refresh(ctx context.Context, config charmhub.RefreshConfig) ([]transport.RefreshResponse, error)
-}
-
-// NetworkService is the interface that is used to interact with the
-// network spaces/subnets.
-type NetworkService interface {
-	// GetAllSpaces returns all spaces for the model.
-	GetAllSpaces(ctx context.Context) (network.SpaceInfos, error)
-}
 
 // MachineManagerAPI provides access to the MachineManager API facade.
 type MachineManagerAPI struct {
+	controllerUUID  string
+	modelUUID       coremodel.UUID
+	authorizer      Authorizer
+	check           *common.BlockChecker
+	controllerStore objectstore.ObjectStore
+	clock           clock.Clock
+
+	agentBinaryService      AgentBinaryService
+	agentPasswordService    AgentPasswordService
+	applicationService      ApplicationService
+	cloudService            CloudService
 	controllerConfigService ControllerConfigService
-	st                      Backend
-	cloudService            common.CloudService
-	credentialService       common.CredentialService
-	storageAccess           StorageInterface
-	pool                    Pool
-	authorizer              Authorizer
-	check                   *common.BlockChecker
-	resources               facade.Resources
-	leadership              Leadership
-	upgradeSeriesAPI        UpgradeSeries
-	store                   objectstore.ObjectStore
-	controllerStore         objectstore.ObjectStore
+	controllerNodeService   ControllerNodeService
+	keyUpdaterService       KeyUpdaterService
+	machineService          MachineService
+	statusService           StatusService
+	modelConfigService      ModelConfigService
+	networkService          NetworkService
+	removalService          RemovalService
 
-	machineService MachineService
-	networkService NetworkService
-
-	credentialInvalidatorGetter environscontext.ModelCredentialInvalidatorGetter
-	logger                      corelogger.Logger
-}
-
-type MachineManagerV9 struct {
-	*MachineManagerAPI
-}
-
-// NewFacadeV9 create a new server-side MachineManager API facade. This
-// is used for facade registration.
-func NewFacadeV9(ctx facade.ModelContext) (*MachineManagerV9, error) {
-	api, err := NewFacadeV10(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &MachineManagerV9{
-		MachineManagerAPI: api,
-	}, nil
-}
-
-// NewFacadeV10 create a new server-side MachineManager API facade. This
-// is used for facade registration.
-func NewFacadeV10(ctx facade.ModelContext) (*MachineManagerAPI, error) {
-	st := ctx.State()
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	serviceFactory := ctx.ServiceFactory()
-
-	prechecker, err := stateenvirons.NewInstancePrechecker(st, serviceFactory.Cloud(), serviceFactory.Credential())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	backend := &stateShim{
-		State:     st,
-		prechcker: prechecker,
-	}
-	storageAccess, err := getStorageState(st)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	pool := &poolShim{ctx.StatePool()}
-
-	var leadership Leadership
-	leadership, err = common.NewLeadershipPinningFromContext(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	modelCfg, err := model.Config()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	logger := ctx.Logger().Child("machinemanager")
-	chURL, _ := modelCfg.CharmHubURL()
-	chClient, err := charmhub.NewClient(charmhub.Config{
-		URL:        chURL,
-		HTTPClient: ctx.HTTPClient(facade.CharmhubHTTPClient),
-		Logger:     logger,
-	})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	controllerConfigService := serviceFactory.ControllerConfig()
-
-	return NewMachineManagerAPI(
-		controllerConfigService,
-		backend,
-		serviceFactory.Cloud(),
-		serviceFactory.Credential(),
-		serviceFactory.Machine(),
-		ctx.ObjectStore(),
-		ctx.ControllerObjectStore(),
-		storageAccess,
-		pool,
-		ModelAuthorizer{
-			ModelTag:   model.ModelTag(),
-			Authorizer: ctx.Auth(),
-		},
-		credentialcommon.CredentialInvalidatorGetter(ctx),
-		ctx.Resources(),
-		leadership,
-		chClient,
-		logger,
-		ctx.ServiceFactory().Network(),
-	)
+	logger corelogger.Logger
 }
 
 // NewMachineManagerAPI creates a new server-side MachineManager API facade.
 func NewMachineManagerAPI(
-	controllerConfigService ControllerConfigService,
-	backend Backend,
-	cloudService common.CloudService,
-	credentialService common.CredentialService,
-	machineService MachineService,
-	store, controllerStore objectstore.ObjectStore,
-	storageAccess StorageInterface,
-	pool Pool,
+	controllerUUID string,
+	modelUUID coremodel.UUID,
+	controllerStore objectstore.ObjectStore,
 	auth Authorizer,
-	credentialInvalidatorGetter environscontext.ModelCredentialInvalidatorGetter,
-	resources facade.Resources,
-	leadership Leadership,
-	charmhubClient CharmhubClient,
 	logger corelogger.Logger,
-	networkService NetworkService,
-) (*MachineManagerAPI, error) {
-	if !auth.AuthClient() {
-		return nil, apiservererrors.ErrPerm
-	}
-
+	clock clock.Clock,
+	services Services,
+) *MachineManagerAPI {
 	api := &MachineManagerAPI{
-		controllerConfigService:     controllerConfigService,
-		st:                          backend,
-		cloudService:                cloudService,
-		credentialService:           credentialService,
-		machineService:              machineService,
-		store:                       store,
-		controllerStore:             controllerStore,
-		pool:                        pool,
-		authorizer:                  auth,
-		check:                       common.NewBlockChecker(backend),
-		credentialInvalidatorGetter: credentialInvalidatorGetter,
-		resources:                   resources,
-		leadership:                  leadership,
-		storageAccess:               storageAccess,
-		upgradeSeriesAPI: NewUpgradeSeriesAPI(
-			upgradeSeriesState{state: backend},
-			makeUpgradeSeriesValidator(charmhubClient),
-			auth,
-		),
-		logger:         logger,
-		networkService: networkService,
+		controllerUUID:  controllerUUID,
+		modelUUID:       modelUUID,
+		controllerStore: controllerStore,
+		authorizer:      auth,
+		check:           common.NewBlockChecker(services.BlockCommandService),
+		clock:           clock,
+		logger:          logger,
+
+		agentBinaryService:      services.AgentBinaryService,
+		agentPasswordService:    services.AgentPasswordService,
+		applicationService:      services.ApplicationService,
+		controllerConfigService: services.ControllerConfigService,
+		controllerNodeService:   services.ControllerNodeService,
+		cloudService:            services.CloudService,
+		keyUpdaterService:       services.KeyUpdaterService,
+		machineService:          services.MachineService,
+		statusService:           services.StatusService,
+		modelConfigService:      services.ModelConfigService,
+		networkService:          services.NetworkService,
+		removalService:          services.RemovalService,
 	}
-	return api, nil
+	return api
 }
 
 // AddMachines adds new machines with the supplied parameters.
@@ -254,44 +103,30 @@ func (mm *MachineManagerAPI) AddMachines(ctx context.Context, args params.AddMac
 	results := params.AddMachinesResults{
 		Machines: make([]params.AddMachinesResult, len(args.MachineParams)),
 	}
-	if err := mm.authorizer.CanWrite(); err != nil {
+	if err := mm.authorizer.CanWrite(ctx); err != nil {
 		return results, err
 	}
 	if err := mm.check.ChangeAllowed(ctx); err != nil {
 		return results, errors.Trace(err)
 	}
 
-	allSpaces, err := mm.networkService.GetAllSpaces(ctx)
-	if err != nil {
-		return results, errors.Trace(err)
-	}
 	for i, p := range args.MachineParams {
-		m, err := mm.addOneMachine(ctx, p, allSpaces)
+		machineName, err := mm.addOneMachine(ctx, p)
 		results.Machines[i].Error = apiservererrors.ServerError(err)
 		if err == nil {
-			results.Machines[i].Machine = m.Id()
+			results.Machines[i].Machine = machineName.String()
 		}
 	}
 	return results, nil
 }
 
-func (mm *MachineManagerAPI) addOneMachine(ctx context.Context, p params.AddMachineParams, allSpaces network.SpaceInfos) (result Machine, err error) {
+func (mm *MachineManagerAPI) addOneMachine(ctx context.Context, p params.AddMachineParams) (coremachine.Name, error) {
 	if p.ParentId != "" && p.ContainerType == "" {
-		return nil, fmt.Errorf("parent machine specified without container type")
+		return "", internalerrors.New("parent machine specified without container type")
 	}
 	if p.ContainerType != "" && p.Placement != nil {
-		return nil, fmt.Errorf("container type and placement are mutually exclusive")
+		return "", internalerrors.New("container type and placement are mutually exclusive")
 	}
-	if p.Placement != nil {
-		// Extract container type and parent from container placement directives.
-		containerType, err := instance.ParseContainerType(p.Placement.Scope)
-		if err == nil {
-			p.ContainerType = containerType
-			p.ParentId = p.Placement.Directive
-			p.Placement = nil
-		}
-	}
-
 	if p.ContainerType != "" || p.Placement != nil {
 		// Guard against dubious client by making sure that
 		// the following attributes can only be set when we're
@@ -304,166 +139,116 @@ func (mm *MachineManagerAPI) addOneMachine(ctx context.Context, p params.AddMach
 
 	var base corebase.Base
 	if p.Base == nil {
-		model, err := mm.st.Model()
+		conf, err := mm.modelConfigService.ModelConfig(ctx)
 		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		conf, err := model.Config()
-		if err != nil {
-			return nil, errors.Trace(err)
+			return "", errors.Trace(err)
 		}
 		base = config.PreferredBase(conf)
 	} else {
 		var err error
 		base, err = corebase.ParseBase(p.Base.Name, p.Base.Channel)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return "", errors.Trace(err)
 		}
 	}
 
-	var placementDirective string
-	if p.Placement != nil {
-		model, err := mm.st.Model()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		// For 1.21 we should support both UUID and name, and with 1.22
-		// just support UUID
-		if p.Placement.Scope != model.Name() && p.Placement.Scope != model.UUID() {
-			return nil, fmt.Errorf("invalid model name %q", p.Placement.Scope)
-		}
-		placementDirective = p.Placement.Directive
-	}
-
-	volumes := make([]state.HostVolumeParams, 0, len(p.Disks))
-	for _, cons := range p.Disks {
-		if cons.Count == 0 {
-			return nil, errors.Errorf("invalid volume params: count not specified")
-		}
-		// Pool and Size are validated by AddMachineX.
-		volumeParams := state.VolumeParams{
-			Pool: cons.Pool,
-			Size: cons.Size,
-		}
-		volumeAttachmentParams := state.VolumeAttachmentParams{}
-		for i := uint64(0); i < cons.Count; i++ {
-			volumes = append(volumes, state.HostVolumeParams{
-				Volume: volumeParams, Attachment: volumeAttachmentParams,
-			})
-		}
-	}
-
-	// Convert the params to provider addresses, then convert those to
-	// space addresses by looking up the spaces.
-	pas := params.ToProviderAddresses(p.Addrs...)
-	sAddrs, err := pas.ToSpaceAddresses(allSpaces)
+	// Check if the model exists in case of model scope placement.
+	parsedPlacement, err := deployment.ParsePlacement(p.Placement)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return "", internalerrors.Errorf("invalid placement: %w", err)
+	}
+	if parsedPlacement.Type == deployment.PlacementTypeProvider && parsedPlacement.Directive != mm.modelUUID.String() {
+		return "", internalerrors.Errorf("invalid model id %q", parsedPlacement.Directive)
 	}
 
-	jobs, err := common.StateJobs(p.Jobs)
-	if err != nil {
-		return nil, errors.Trace(err)
+	var n *string
+	if p.Nonce != "" {
+		n = &p.Nonce
 	}
-	template := state.MachineTemplate{
-		Base:                    state.Base{OS: base.OS, Channel: base.Channel.String()},
-		Constraints:             p.Constraints,
-		Volumes:                 volumes,
-		InstanceId:              p.InstanceId,
-		Jobs:                    jobs,
-		Nonce:                   p.Nonce,
+	osType, err := encodeOSType(base.OS)
+	if err != nil {
+		return "", internalerrors.Errorf("invalid placement: %w", err)
+	}
+	addedMachine, err := mm.machineService.AddMachine(ctx, domainmachine.AddMachineArgs{
+		Nonce:       n,
+		Constraints: constraints.DecodeConstraints(p.Constraints),
+		Platform: deployment.Platform{
+			Channel: base.Channel.String(),
+			OSType:  osType,
+		},
+		Directive:               parsedPlacement,
 		HardwareCharacteristics: p.HardwareCharacteristics,
-		Addresses:               sAddrs,
-		Placement:               placementDirective,
-	}
+	})
 
-	defer func() {
-		if err == nil {
-			// Ensure machine(s) exist in dqlite.
-			err = mm.saveMachineInfo(ctx, result.Id())
-		}
-	}()
-
-	if p.ContainerType == "" {
-		return mm.st.AddOneMachine(template)
+	if addedMachine.ChildMachineName != nil {
+		return *addedMachine.ChildMachineName, err
 	}
-	if p.ParentId != "" {
-		return mm.st.AddMachineInsideMachine(template, p.ParentId, p.ContainerType)
-	}
-	return mm.st.AddMachineInsideNewMachine(template, template, p.ContainerType)
+	return addedMachine.MachineName, err
 }
 
-func (mm *MachineManagerAPI) saveMachineInfo(ctx context.Context, machineName string) error {
-	// This is temporary - just insert the machine id all al the parent ones.
-	var errs []error
-	for machineName != "" {
-		if _, err := mm.machineService.CreateMachine(ctx, machine.Name(machineName)); err != nil {
-			errs = append(errs, errors.Annotatef(err, "saving info for machine %q", machineName))
-		}
-		parent := names.NewMachineTag(machineName).Parent()
-		if parent == nil {
-			break
-		}
-		machineName = parent.Id()
+func encodeOSType(os string) (deployment.OSType, error) {
+	switch ostype.OSTypeForName(os) {
+	case ostype.Ubuntu:
+		return deployment.Ubuntu, nil
+	default:
+		return 0, errors.Errorf("unknown os type %q, expected ubuntu", os)
 	}
-	if len(errs) == 0 {
-		return nil
-	}
-	var errStr string
-	for _, e := range errs {
-		errStr += e.Error() + "\n"
-	}
-	return errors.New(errStr)
 }
 
 // ProvisioningScript returns a shell script that, when run,
 // provisions a machine agent on the machine executing the script.
 func (mm *MachineManagerAPI) ProvisioningScript(ctx context.Context, args params.ProvisioningScriptParams) (params.ProvisioningScriptResult, error) {
-	if err := mm.authorizer.CanWrite(); err != nil {
+	if err := mm.authorizer.CanWrite(ctx); err != nil {
 		return params.ProvisioningScriptResult{}, err
 	}
 
 	var result params.ProvisioningScriptResult
-	st, err := mm.pool.SystemState()
-	if err != nil {
-		return result, errors.Trace(err)
-	}
 
 	services := InstanceConfigServices{
 		CloudService:            mm.cloudService,
-		CredentialService:       mm.credentialService,
 		ControllerConfigService: mm.controllerConfigService,
+		ControllerNodeService:   mm.controllerNodeService,
 		ObjectStore:             mm.controllerStore,
+		KeyUpdaterService:       mm.keyUpdaterService,
+		ModelConfigService:      mm.modelConfigService,
+		MachineService:          mm.machineService,
+		AgentBinaryService:      mm.agentBinaryService,
+		AgentPasswordService:    mm.agentPasswordService,
 	}
 
-	icfg, err := InstanceConfig(ctx, st, mm.st, services, args.MachineId, args.Nonce, args.DataDir)
+	machineName := coremachine.Name(args.MachineId)
+	icfg, err := InstanceConfig(
+		ctx,
+		mm.controllerUUID,
+		mm.modelUUID,
+		services, machineName, args.Nonce, args.DataDir)
 	if err != nil {
 		return result, apiservererrors.ServerError(errors.Annotate(
 			err, "getting instance config",
 		))
 	}
+
 	// Until DisablePackageCommands is retired, for backwards
 	// compatibility, we must respect the client's request and
 	// override any model settings the user may have specified.
 	// If the client does specify this setting, it will only ever be
 	// true. False indicates the client doesn't care and we should use
 	// what's specified in the environment config.
-	model, err := mm.st.Model()
-	if err != nil {
-		return result, apiservererrors.ServerError(errors.Annotate(
-			err, "getting model config",
-		))
-	}
 	if args.DisablePackageCommands {
 		icfg.EnableOSRefreshUpdate = false
 		icfg.EnableOSUpgrade = false
-	} else if cfg, err := model.Config(); err != nil {
-		return result, apiservererrors.ServerError(errors.Annotate(
-			err, "getting model config",
-		))
 	} else {
-		icfg.EnableOSUpgrade = cfg.EnableOSUpgrade()
-		icfg.EnableOSRefreshUpdate = cfg.EnableOSRefreshUpdate()
+		config, err := mm.modelConfigService.ModelConfig(ctx)
+		if err != nil {
+			mm.logger.Errorf(ctx,
+				"cannot getting model config for provisioning machine %q: %v",
+				args.MachineId, err,
+			)
+			return result, errors.New("controller failed to get model config for machine")
+		}
+
+		icfg.EnableOSUpgrade = config.EnableOSUpgrade()
+		icfg.EnableOSRefreshUpdate = config.EnableOSRefreshUpdate()
 	}
 
 	getProvisioningScript := sshprovisioner.ProvisioningScript
@@ -479,7 +264,7 @@ func (mm *MachineManagerAPI) ProvisioningScript(ctx context.Context, args params
 
 // RetryProvisioning marks a provisioning error as transient on the machines.
 func (mm *MachineManagerAPI) RetryProvisioning(ctx context.Context, p params.RetryProvisioningArgs) (params.ErrorResults, error) {
-	if err := mm.authorizer.CanWrite(); err != nil {
+	if err := mm.authorizer.CanWrite(ctx); err != nil {
 		return params.ErrorResults{}, err
 	}
 
@@ -487,7 +272,7 @@ func (mm *MachineManagerAPI) RetryProvisioning(ctx context.Context, p params.Ret
 		return params.ErrorResults{}, errors.Trace(err)
 	}
 	result := params.ErrorResults{}
-	machines, err := mm.st.AllMachines()
+	machineNames, err := mm.machineService.AllMachineNames(ctx)
 	if err != nil {
 		return params.ErrorResults{}, errors.Trace(err)
 	}
@@ -500,22 +285,25 @@ func (mm *MachineManagerAPI) RetryProvisioning(ctx context.Context, p params.Ret
 		}
 		wanted.Add(tag.Id())
 	}
-	for _, m := range machines {
-		if !p.All && !wanted.Contains(m.Id()) {
+	for _, machineName := range machineNames {
+		if !p.All && !wanted.Contains(machineName.String()) {
 			continue
 		}
-		if err := mm.maybeUpdateInstanceStatus(p.All, m, map[string]interface{}{"transient": true}); err != nil {
+		if err := mm.maybeUpdateInstanceStatus(ctx, p.All, machineName, map[string]interface{}{"transient": true}); err != nil {
 			result.Results = append(result.Results, params.ErrorResult{Error: apiservererrors.ServerError(err)})
 		}
 	}
 	return result, nil
 }
 
-func (mm *MachineManagerAPI) maybeUpdateInstanceStatus(all bool, m Machine, data map[string]interface{}) error {
-	existingStatusInfo, err := m.InstanceStatus()
-	if err != nil {
+func (mm *MachineManagerAPI) maybeUpdateInstanceStatus(ctx context.Context, all bool, machineName coremachine.Name, data map[string]interface{}) error {
+	existingStatusInfo, err := mm.statusService.GetInstanceStatus(ctx, machineName)
+	if errors.Is(err, machineerrors.MachineNotFound) {
+		return errors.NotFoundf("machine %q", machineName)
+	} else if err != nil {
 		return err
 	}
+
 	newData := existingStatusInfo.Data
 	if newData == nil {
 		newData = data
@@ -527,20 +315,25 @@ func (mm *MachineManagerAPI) maybeUpdateInstanceStatus(all bool, m Machine, data
 	if len(newData) > 0 && existingStatusInfo.Status != status.Error && existingStatusInfo.Status != status.ProvisioningError {
 		// If a specifc machine has been asked for and it's not in error, that's a problem.
 		if !all {
-			return fmt.Errorf("machine %s is not in an error state (%v)", m.Id(), existingStatusInfo.Status)
+			return fmt.Errorf("machine %s is not in an error state (%v)", machineName, existingStatusInfo.Status)
 		}
 		// Otherwise just skip it.
 		return nil
 	}
-	// TODO(perrito666) 2016-05-02 lp:1558657
-	now := time.Now()
+	now := mm.clock.Now()
 	sInfo := status.StatusInfo{
 		Status:  existingStatusInfo.Status,
 		Message: existingStatusInfo.Message,
 		Data:    newData,
 		Since:   &now,
 	}
-	return m.SetInstanceStatus(sInfo)
+	err = mm.statusService.SetInstanceStatus(ctx, machineName, sInfo)
+	if errors.Is(err, machineerrors.MachineNotFound) {
+		return errors.NotFoundf("machine %q", machineName)
+	} else if err != nil {
+		return errors.Trace(err)
+	}
+	return nil
 }
 
 // DestroyMachineWithParams removes a set of machines from the model.
@@ -552,17 +345,8 @@ func (mm *MachineManagerAPI) DestroyMachineWithParams(ctx context.Context, args 
 	return mm.destroyMachine(ctx, entities, args.Force, args.Keep, args.DryRun, common.MaxWait(args.MaxWait))
 }
 
-// DestroyMachineWithParams removes a set of machines from the model.
-func (mm *MachineManagerV9) DestroyMachineWithParams(ctx context.Context, args params.DestroyMachinesParamsV9) (params.DestroyMachineResults, error) {
-	entities := params.Entities{Entities: make([]params.Entity, len(args.MachineTags))}
-	for i, tag := range args.MachineTags {
-		entities.Entities[i].Tag = tag
-	}
-	return mm.destroyMachine(ctx, entities, args.Force, args.Keep, false, common.MaxWait(args.MaxWait))
-}
-
 func (mm *MachineManagerAPI) destroyMachine(ctx context.Context, args params.Entities, force, keep, dryRun bool, maxWait time.Duration) (params.DestroyMachineResults, error) {
-	if err := mm.authorizer.CanWrite(); err != nil {
+	if err := mm.authorizer.CanWrite(ctx); err != nil {
 		return params.DestroyMachineResults{}, err
 	}
 	if err := mm.check.RemoveAllowed(ctx); err != nil {
@@ -581,54 +365,22 @@ func (mm *MachineManagerAPI) destroyMachine(ctx context.Context, args params.Ent
 			fail(err)
 			continue
 		}
-		machine, err := mm.st.Machine(machineTag.Id())
+		machineName := coremachine.Name(machineTag.Id())
+		machineUUID, err := mm.machineService.GetMachineUUID(ctx, machineName)
+		if err != nil {
+			fail(internalerrors.Errorf("getting machine UUID: %w", err))
+			continue
+		}
+
+		containers, err := mm.machineService.GetMachineContainers(ctx, machineUUID)
+		if err != nil {
+			fail(internalerrors.Errorf("getting machine containers: %w", err))
+			continue
+		}
+		info, err := mm.calculateDestroyResult(ctx, machineName, containers)
 		if err != nil {
 			fail(err)
 			continue
-		}
-		if keep {
-			mm.logger.Infof("destroy machine %v but keep instance", machineTag.Id())
-			if err := machine.SetKeepInstance(keep); err != nil {
-				if !force {
-					fail(err)
-					continue
-				}
-				mm.logger.Warningf("could not keep instance for machine %v: %v", machineTag.Id(), err)
-			}
-		}
-		info := params.DestroyMachineInfo{
-			MachineId: machineTag.Id(),
-		}
-
-		containers, err := machine.Containers()
-		if err != nil {
-			fail(err)
-			continue
-		}
-		if force || dryRun {
-			info.DestroyedContainers, err = mm.destoryContainer(ctx, containers, force, keep, dryRun, maxWait)
-			if err != nil {
-				fail(err)
-				continue
-			}
-		}
-
-		units, err := machine.Units()
-		if err != nil {
-			fail(err)
-			continue
-		}
-		for _, unit := range units {
-			info.DestroyedUnits = append(info.DestroyedUnits, params.Entity{Tag: unit.UnitTag().String()})
-		}
-
-		info.DestroyedStorage, info.DetachedStorage, err = mm.classifyDetachedStorage(units)
-		if err != nil {
-			if !force {
-				fail(err)
-				continue
-			}
-			mm.logger.Warningf("could not deal with units' storage on machine %v: %v", machineTag.Id(), err)
 		}
 
 		if dryRun {
@@ -637,265 +389,79 @@ func (mm *MachineManagerAPI) destroyMachine(ctx context.Context, args params.Ent
 			continue
 		}
 
-		applicationNames, err := mm.leadership.GetMachineApplicationNames(ctx, machineTag.Id())
-		if err != nil {
-			fail(err)
+		if keep {
+			mm.logger.Infof(ctx, "destroy machine %v but keep instance", machineName)
+			if err := mm.machineService.SetKeepInstance(ctx, machineName, keep); err != nil {
+				if !force {
+					fail(err)
+					continue
+				}
+				mm.logger.Warningf(ctx, "could not keep instance for machine %v: %v", machineName, err)
+			}
+		}
+
+		if _, err := mm.removalService.RemoveMachine(ctx, machineUUID, force, maxWait); err != nil {
+			fail(internalerrors.Errorf("removing machine: %w", err))
 			continue
 		}
 
-		if force {
-			if err := machine.ForceDestroy(maxWait); err != nil {
-				fail(err)
-				continue
-			}
-		} else {
-			if err := machine.Destroy(mm.store); err != nil {
-				fail(err)
-				continue
-			}
-		}
-
-		// Ensure that when the machine has been removed that all the leadership
-		// references to that machine are also cleared up.
-		//
-		// Unfortunately we can't follow the normal practices of failing on the
-		// error, as we've already removed the machine and we'll tell the caller
-		// that we failed to remove the machine.
-		//
-		// Note: in some cases if a application has pinned during series upgrade
-		// and it has been pinned without a timeout, then the leadership will
-		// still prevent another leadership change. The work around for this
-		// case until we provide the ability for the operator to unpin via the
-		// CLI, is to remove the raft logs manually.
-		unpinResults, err := mm.leadership.UnpinApplicationLeadersByName(ctx, machineTag, applicationNames)
-		if err != nil {
-			mm.logger.Warningf("could not unpin application leaders for machine %s with error %v", machineTag.Id(), err)
-		}
-		for _, result := range unpinResults.Results {
-			if result.Error != nil {
-				mm.logger.Warningf(
-					"could not unpin application leaders for machine %s with error %v", machineTag.Id(), result.Error)
-			}
-		}
 		result.Info = &info
 		results[i] = result
 	}
 	return params.DestroyMachineResults{Results: results}, nil
 }
 
-func (mm *MachineManagerAPI) destoryContainer(ctx context.Context, containers []string, force, keep, dryRun bool, maxWait time.Duration) ([]params.DestroyMachineResult, error) {
-	if containers == nil || len(containers) == 0 {
-		return nil, nil
+func (mm *MachineManagerAPI) calculateDestroyResult(ctx context.Context, machineName coremachine.Name, containers []coremachine.Name) (params.DestroyMachineInfo, error) {
+	info, err := mm.destroyResultForMachine(ctx, machineName)
+	if err != nil {
+		return info, errors.Trace(err)
 	}
-	entities := params.Entities{Entities: make([]params.Entity, len(containers))}
-	for i, container := range containers {
-		entities.Entities[i] = params.Entity{Tag: names.NewMachineTag(container).String()}
+
+	if len(containers) > 0 {
+		info.DestroyedContainers = make([]params.DestroyMachineResult, len(containers))
+		for i, container := range containers {
+			containerInfo, err := mm.destroyResultForMachine(ctx, container)
+			if err != nil {
+				return info, errors.Trace(err)
+			}
+			info.DestroyedContainers[i].Info = &containerInfo
+		}
 	}
-	results, err := mm.destroyMachine(ctx, entities, force, keep, dryRun, maxWait)
-	return results.Results, err
+
+	return info, nil
 }
 
-func (mm *MachineManagerAPI) classifyDetachedStorage(units []Unit) (destroyed, detached []params.Entity, _ error) {
+func (mm *MachineManagerAPI) destroyResultForMachine(ctx context.Context, machineName coremachine.Name) (params.DestroyMachineInfo, error) {
+	info := params.DestroyMachineInfo{
+		MachineId: machineName.String(),
+	}
+
+	unitNames, err := mm.applicationService.GetUnitNamesOnMachine(ctx, machineName)
+	if errors.Is(err, applicationerrors.MachineNotFound) {
+		return info, errors.NotFoundf("machine %s", machineName)
+	} else if err != nil {
+		return info, errors.Trace(err)
+	}
+	for _, unitName := range unitNames {
+		unitTag := names.NewUnitTag(unitName.String())
+		info.DestroyedUnits = append(info.DestroyedUnits, params.Entity{Tag: unitTag.String()})
+	}
+
+	info.DestroyedStorage, info.DetachedStorage, err = mm.classifyDetachedStorage(unitNames)
+	if err != nil {
+		return info, internalerrors.Errorf("classifying storage for machine %q: %w", machineName, err)
+	}
+
+	return info, nil
+}
+
+func (mm *MachineManagerAPI) classifyDetachedStorage(unitNames []coreunit.Name) (destroyed, detached []params.Entity, _ error) {
 	var storageErrors []params.ErrorResult
-	storageError := func(e error) {
-		storageErrors = append(storageErrors, params.ErrorResult{Error: apiservererrors.ServerError(e)})
-	}
 
-	storageSeen := names.NewSet()
-	for _, unit := range units {
-		storage, err := storagecommon.UnitStorage(mm.storageAccess, unit.UnitTag())
-		if err != nil {
-			storageError(errors.Annotatef(err, "getting storage for unit %v", unit.UnitTag().Id()))
-			continue
-		}
+	// TODO(storage): classify detached storage
 
-		// Filter out storage we've already seen. Shared
-		// storage may be attached to multiple units.
-		var unseen []state.StorageInstance
-		for _, storage := range storage {
-			storageTag := storage.StorageTag()
-			if storageSeen.Contains(storageTag) {
-				continue
-			}
-			storageSeen.Add(storageTag)
-			unseen = append(unseen, storage)
-		}
-		storage = unseen
-
-		unitDestroyed, unitDetached, err := ClassifyDetachedStorage(
-			mm.storageAccess.VolumeAccess(), mm.storageAccess.FilesystemAccess(), storage,
-		)
-		if err != nil {
-			storageError(errors.Annotatef(err, "classifying storage for destruction for unit %v", unit.UnitTag().Id()))
-			continue
-		}
-		destroyed = append(destroyed, unitDestroyed...)
-		detached = append(detached, unitDetached...)
-	}
 	err := params.ErrorResults{Results: storageErrors}.Combine()
 	return destroyed, detached, err
-}
-
-// UpgradeSeriesValidate validates that the incoming arguments correspond to a
-// valid series upgrade for the target machine.
-// If they do, a list of the machine's current units is returned for use in
-// soliciting user confirmation of the command.
-func (mm *MachineManagerAPI) UpgradeSeriesValidate(
-	ctx context.Context,
-	args params.UpdateChannelArgs,
-) (params.UpgradeSeriesUnitsResults, error) {
-	entities := make([]ValidationEntity, len(args.Args))
-	for i, arg := range args.Args {
-		entities[i] = ValidationEntity{
-			Tag:     arg.Entity.Tag,
-			Channel: arg.Channel,
-			Force:   arg.Force,
-		}
-	}
-
-	validations, err := mm.upgradeSeriesAPI.Validate(ctx, entities)
-	if err != nil {
-		return params.UpgradeSeriesUnitsResults{}, apiservererrors.ServerError(err)
-	}
-
-	results := params.UpgradeSeriesUnitsResults{
-		Results: make([]params.UpgradeSeriesUnitsResult, len(validations)),
-	}
-	for i, v := range validations {
-		if v.Error != nil {
-			results.Results[i].Error = apiservererrors.ServerError(v.Error)
-			continue
-		}
-		results.Results[i].UnitNames = v.UnitNames
-	}
-	return results, nil
-}
-
-// UpgradeSeriesPrepare prepares a machine for a OS series upgrade.
-func (mm *MachineManagerAPI) UpgradeSeriesPrepare(ctx context.Context, arg params.UpdateChannelArg) (params.ErrorResult, error) {
-	if err := mm.authorizer.CanWrite(); err != nil {
-		return params.ErrorResult{}, err
-	}
-	if err := mm.check.ChangeAllowed(ctx); err != nil {
-		return params.ErrorResult{}, err
-	}
-	if err := mm.upgradeSeriesAPI.Prepare(ctx, arg.Entity.Tag, arg.Channel, arg.Force); err != nil {
-		return params.ErrorResult{Error: apiservererrors.ServerError(err)}, nil
-	}
-	return params.ErrorResult{}, nil
-}
-
-// UpgradeSeriesComplete marks a machine as having completed a managed series
-// upgrade.
-func (mm *MachineManagerAPI) UpgradeSeriesComplete(ctx context.Context, arg params.UpdateChannelArg) (params.ErrorResult, error) {
-	if err := mm.authorizer.CanWrite(); err != nil {
-		return params.ErrorResult{}, err
-	}
-	if err := mm.check.ChangeAllowed(ctx); err != nil {
-		return params.ErrorResult{}, err
-	}
-	err := mm.upgradeSeriesAPI.Complete(arg.Entity.Tag)
-	if err != nil {
-		return params.ErrorResult{Error: apiservererrors.ServerError(err)}, nil
-	}
-
-	return params.ErrorResult{}, nil
-}
-
-// WatchUpgradeSeriesNotifications returns a watcher that fires on upgrade
-// series events.
-func (mm *MachineManagerAPI) WatchUpgradeSeriesNotifications(ctx context.Context, args params.Entities) (params.NotifyWatchResults, error) {
-	err := mm.authorizer.CanRead()
-	if err != nil {
-		return params.NotifyWatchResults{}, err
-	}
-	result := params.NotifyWatchResults{
-		Results: make([]params.NotifyWatchResult, len(args.Entities)),
-	}
-	for i, entity := range args.Entities {
-		tag, err := names.ParseTag(entity.Tag)
-		if err != nil {
-			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
-			continue
-		}
-		var watcherID string
-		machine, err := mm.st.Machine(tag.Id())
-		if err != nil {
-			result.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		w, err := machine.WatchUpgradeSeriesNotifications()
-		if err != nil {
-			result.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		watcherID = mm.resources.Register(w)
-		result.Results[i].NotifyWatcherId = watcherID
-	}
-	return result, nil
-}
-
-// GetUpgradeSeriesMessages returns all new messages associated with upgrade
-// series events. Messages that have already been retrieved once are not
-// returned by this method.
-func (mm *MachineManagerAPI) GetUpgradeSeriesMessages(ctx context.Context, args params.UpgradeSeriesNotificationParams) (params.StringsResults, error) {
-	if err := mm.authorizer.CanRead(); err != nil {
-		return params.StringsResults{}, err
-	}
-	results := params.StringsResults{
-		Results: make([]params.StringsResult, len(args.Params)),
-	}
-	for i, param := range args.Params {
-		machine, err := mm.machineFromTag(param.Entity.Tag)
-		if err != nil {
-			err = errors.Trace(err)
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		messages, finished, err := machine.GetUpgradeSeriesMessages()
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		if finished {
-			// If there are no more messages we stop the watcher resource.
-			err = mm.resources.Stop(param.WatcherId)
-			if err != nil {
-				results.Results[i].Error = apiservererrors.ServerError(err)
-				continue
-			}
-		}
-		results.Results[i].Result = messages
-	}
-	return results, nil
-}
-
-// TODO (stickupkid): This will eventually be removed once we extract all the
-// other methods to commands.
-func (mm *MachineManagerAPI) machineFromTag(tag string) (Machine, error) {
-	machineTag, err := names.ParseMachineTag(tag)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	machine, err := mm.st.Machine(machineTag.Id())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return machine, nil
-}
-
-// isBaseLessThan returns a bool indicating whether the first argument's
-// version is lexicographically less than the second argument's, thus indicating
-// that the series represents an older version of the operating system. The
-// output is only valid for Ubuntu series.
-func isBaseLessThan(base1, base2 corebase.Base) (bool, error) {
-	// Versions may be numeric.
-	vers1Int, err1 := strconv.Atoi(base1.Channel.Track)
-	vers2Int, err2 := strconv.Atoi(base2.Channel.Track)
-	if err1 == nil && err2 == nil {
-		return vers2Int > vers1Int, nil
-	}
-	return base2.Channel.Track > base1.Channel.Track, nil
 }
 
 // ModelAuthorizer defines if a given operation can be performed based on a
@@ -907,14 +473,14 @@ type ModelAuthorizer struct {
 
 // CanRead checks to see if a read is possible. Returns an error if a read is
 // not possible.
-func (a ModelAuthorizer) CanRead() error {
-	return a.checkAccess(permission.ReadAccess)
+func (a ModelAuthorizer) CanRead(ctx context.Context) error {
+	return a.checkAccess(ctx, permission.ReadAccess)
 }
 
 // CanWrite checks to see if a write is possible. Returns an error if a write
 // is not possible.
-func (a ModelAuthorizer) CanWrite() error {
-	return a.checkAccess(permission.WriteAccess)
+func (a ModelAuthorizer) CanWrite(ctx context.Context) error {
+	return a.checkAccess(ctx, permission.WriteAccess)
 }
 
 // AuthClient returns true if the entity is an external user.
@@ -922,6 +488,6 @@ func (a ModelAuthorizer) AuthClient() bool {
 	return a.Authorizer.AuthClient()
 }
 
-func (a ModelAuthorizer) checkAccess(access permission.Access) error {
-	return a.Authorizer.HasPermission(access, a.ModelTag)
+func (a ModelAuthorizer) checkAccess(ctx context.Context, access permission.Access) error {
+	return a.Authorizer.HasPermission(ctx, access, a.ModelTag)
 }

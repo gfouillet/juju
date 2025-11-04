@@ -7,10 +7,11 @@ package app
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"sync"
 
-	"github.com/canonical/go-dqlite/app"
-	"github.com/canonical/go-dqlite/client"
+	"github.com/canonical/go-dqlite/v3/app"
+	"github.com/canonical/go-dqlite/v3/client"
 	"github.com/juju/errors"
 )
 
@@ -135,4 +136,10 @@ func (o *onceError) Do(f func() error) error {
 	})
 
 	return o.err
+}
+
+// SimpleDialTLSConfig returns a simple TLS configuration that can be used to
+// establish a secure connection with a dqlite node.
+func SimpleDialTLSConfig(cert tls.Certificate, pool *x509.CertPool) *tls.Config {
+	return app.SimpleDialTLSConfig(cert, pool)
 }

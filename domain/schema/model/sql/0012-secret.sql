@@ -7,7 +7,8 @@ CREATE TABLE secret_rotate_policy (
     CHECK (policy != '')
 );
 
-CREATE UNIQUE INDEX idx_secret_rotate_policy_policy ON secret_rotate_policy (policy);
+CREATE UNIQUE INDEX idx_secret_rotate_policy_policy
+ON secret_rotate_policy (policy);
 
 INSERT INTO secret_rotate_policy VALUES
 (0, 'never'),
@@ -19,7 +20,7 @@ INSERT INTO secret_rotate_policy VALUES
 (6, 'yearly');
 
 CREATE TABLE secret (
-    id TEXT PRIMARY KEY
+    id TEXT NOT NULL PRIMARY KEY
 );
 
 -- secret_reference stores details about
@@ -40,6 +41,7 @@ CREATE TABLE secret_metadata (
     description TEXT,
     rotate_policy_id INT NOT NULL,
     auto_prune BOOLEAN NOT NULL DEFAULT (FALSE),
+    latest_revision_checksum TEXT,
     create_time DATETIME NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW', 'utc')),
     update_time DATETIME NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW', 'utc')),
     CONSTRAINT fk_secret_id
@@ -69,6 +71,14 @@ CREATE TABLE secret_value_ref (
     REFERENCES secret_revision (uuid)
 );
 
+-- Deleted revisions for which content is stored externally.
+-- These rows are deleted after the external content has been deleted.
+CREATE TABLE secret_deleted_value_ref (
+    revision_uuid TEXT NOT NULL PRIMARY KEY,
+    backend_uuid TEXT NOT NULL,
+    revision_id TEXT NOT NULL
+);
+
 -- 1:many
 CREATE TABLE secret_content (
     revision_uuid TEXT NOT NULL,
@@ -85,7 +95,8 @@ CREATE TABLE secret_content (
     REFERENCES secret_revision (uuid)
 );
 
-CREATE INDEX idx_secret_content_revision_uuid ON secret_content (revision_uuid);
+CREATE INDEX idx_secret_content_revision_uuid
+ON secret_content (revision_uuid);
 
 CREATE TABLE secret_revision (
     uuid TEXT NOT NULL PRIMARY KEY,
@@ -97,7 +108,8 @@ CREATE TABLE secret_revision (
     REFERENCES secret_metadata (secret_id)
 );
 
-CREATE UNIQUE INDEX idx_secret_revision_secret_id_revision ON secret_revision (secret_id, revision);
+CREATE UNIQUE INDEX idx_secret_revision_secret_id_revision
+ON secret_revision (secret_id, revision);
 
 CREATE TABLE secret_revision_obsolete (
     revision_uuid TEXT NOT NULL PRIMARY KEY,
@@ -131,9 +143,11 @@ CREATE TABLE secret_application_owner (
     PRIMARY KEY (secret_id, application_uuid)
 );
 
-CREATE INDEX idx_secret_application_owner_secret_id ON secret_application_owner (secret_id);
+CREATE INDEX idx_secret_application_owner_secret_id
+ON secret_application_owner (secret_id);
 -- We need to ensure the label is unique per the application.
-CREATE UNIQUE INDEX idx_secret_application_owner_label ON secret_application_owner (label, application_uuid) WHERE label != '';
+CREATE UNIQUE INDEX idx_secret_application_owner_label
+ON secret_application_owner (label, application_uuid) WHERE label != '';
 
 CREATE TABLE secret_unit_owner (
     secret_id TEXT NOT NULL,
@@ -148,9 +162,11 @@ CREATE TABLE secret_unit_owner (
     PRIMARY KEY (secret_id, unit_uuid)
 );
 
-CREATE INDEX idx_secret_unit_owner_secret_id ON secret_unit_owner (secret_id);
+CREATE INDEX idx_secret_unit_owner_secret_id
+ON secret_unit_owner (secret_id);
 -- We need to ensure the label is unique per unit.
-CREATE UNIQUE INDEX idx_secret_unit_owner_label ON secret_unit_owner (label, unit_uuid) WHERE label != '';
+CREATE UNIQUE INDEX idx_secret_unit_owner_label
+ON secret_unit_owner (label, unit_uuid) WHERE label != '';
 
 CREATE TABLE secret_model_owner (
     secret_id TEXT NOT NULL PRIMARY KEY,
@@ -160,7 +176,8 @@ CREATE TABLE secret_model_owner (
     REFERENCES secret_metadata (secret_id)
 );
 
-CREATE UNIQUE INDEX idx_secret_model_owner_label ON secret_model_owner (label) WHERE label != '';
+CREATE UNIQUE INDEX idx_secret_model_owner_label
+ON secret_model_owner (label) WHERE label != '';
 
 CREATE TABLE secret_unit_consumer (
     secret_id TEXT NOT NULL,
@@ -178,8 +195,11 @@ CREATE TABLE secret_unit_consumer (
     REFERENCES secret (id)
 );
 
-CREATE UNIQUE INDEX idx_secret_unit_consumer_secret_id_unit_uuid ON secret_unit_consumer (secret_id, unit_uuid);
-CREATE UNIQUE INDEX idx_secret_unit_consumer_label ON secret_unit_consumer (label, unit_uuid) WHERE label != '';
+CREATE UNIQUE INDEX idx_secret_unit_consumer_secret_id_unit_uuid
+ON secret_unit_consumer (secret_id, unit_uuid);
+
+CREATE UNIQUE INDEX idx_secret_unit_consumer_label
+ON secret_unit_consumer (label, unit_uuid) WHERE label != '';
 
 -- This table records the tracked revisions from
 -- units in the consuming model for cross model secrets.
@@ -194,7 +214,8 @@ CREATE TABLE secret_remote_unit_consumer (
     REFERENCES secret_metadata (secret_id)
 );
 
-CREATE UNIQUE INDEX idx_secret_remote_unit_consumer_secret_id_unit_name ON secret_remote_unit_consumer (secret_id, unit_name);
+CREATE UNIQUE INDEX idx_secret_remote_unit_consumer_secret_id_unit_name
+ON secret_remote_unit_consumer (secret_id, unit_name);
 
 CREATE TABLE secret_role (
     id INT PRIMARY KEY,
@@ -216,8 +237,7 @@ CREATE TABLE secret_grant_subject_type (
 INSERT INTO secret_grant_subject_type VALUES
 (0, 'unit'),
 (1, 'application'),
-(2, 'model'),
-(3, 'remote-application');
+(2, 'model');
 
 CREATE TABLE secret_grant_scope_type (
     id INT PRIMARY KEY,
@@ -263,34 +283,39 @@ CREATE TABLE secret_permission (
     REFERENCES secret_grant_scope_type (id)
 );
 
-CREATE INDEX idx_secret_permission_secret_id ON secret_permission (secret_id);
-CREATE INDEX idx_secret_permission_subject_uuid_subject_type_id ON secret_permission (subject_uuid, subject_type_id);
+CREATE INDEX idx_secret_permission_secret_id
+ON secret_permission (secret_id);
 
+CREATE INDEX idx_secret_permission_subject_uuid_subject_type_id
+ON secret_permission (subject_uuid, subject_type_id);
+
+-- v_secret_permission is used to query secrets which can
+-- be accessed by a subject of application, unit, or model.
 CREATE VIEW v_secret_permission AS
 SELECT
     sp.secret_id,
     sp.role_id,
     sp.subject_type_id,
+    sp.subject_uuid,
     sp.scope_type_id,
+    sp.scope_uuid,
     -- subject_id is the natural id of the subject entity (uuid for model)
     (CASE
         WHEN sp.subject_type_id = 0 THEN suu.name
         WHEN sp.subject_type_id = 1 THEN sua.name
         WHEN sp.subject_type_id = 2 THEN m.uuid
-        -- TODO: we don't have a remote-application table yet
-        WHEN sp.subject_type_id = 3 THEN sp.subject_uuid
     END) AS subject_id,
     -- scope_id is the natural id of the scope entity (uuid for model)
+    -- relations are not processed here - their scope_id is the relation key
+    -- which needs to be composed in code. 
     (CASE
         WHEN sp.scope_type_id = 0 THEN scu.name
         WHEN sp.scope_type_id = 1 THEN sca.name
         WHEN sp.scope_type_id = 2 THEN m.uuid
-        -- TODO: we don't have a relation table yet
-        WHEN sp.scope_type_id = 3 THEN sp.scope_uuid
     END) AS scope_id
 FROM secret_permission AS sp
 LEFT JOIN unit AS suu ON sp.subject_uuid = suu.uuid
 LEFT JOIN application AS sua ON sp.subject_uuid = sua.uuid
 LEFT JOIN unit AS scu ON sp.scope_uuid = scu.uuid
 LEFT JOIN application AS sca ON sp.scope_uuid = sca.uuid
-INNER JOIN model AS m;
+JOIN model AS m;

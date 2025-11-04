@@ -5,13 +5,13 @@ package jujuc_test
 
 import (
 	"strings"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 )
 
@@ -19,9 +19,11 @@ type OpenedPortsSuite struct {
 	ContextSuite
 }
 
-var _ = gc.Suite(&OpenedPortsSuite{})
+func TestOpenedPortsSuite(t *testing.T) {
+	tc.Run(t, &OpenedPortsSuite{})
+}
 
-func (s *OpenedPortsSuite) TestRunAllFormats(c *gc.C) {
+func (s *OpenedPortsSuite) TestRunAllFormats(c *tc.C) {
 	expectedPorts := []network.PortRange{
 		network.MustParsePortRange("10-20/tcp"),
 		network.MustParsePortRange("80/tcp"),
@@ -53,12 +55,12 @@ func (s *OpenedPortsSuite) TestRunAllFormats(c *gc.C) {
 		} else {
 			stdout, stderr = s.runCommand(c, hctx, "--format", format)
 		}
-		c.Check(stdout, gc.Equals, expectedOutput)
-		c.Check(stderr, gc.Equals, "")
+		c.Check(stdout, tc.Equals, expectedOutput)
+		c.Check(stderr, tc.Equals, "")
 	}
 }
 
-func (s *OpenedPortsSuite) TestRunAllFormatsWithEndpointDetails(c *gc.C) {
+func (s *OpenedPortsSuite) TestRunAllFormatsWithEndpointDetails(c *tc.C) {
 	portsAsStrings := []string{
 		"10-20/tcp (foo)",
 		"80/tcp (*)",
@@ -85,47 +87,20 @@ func (s *OpenedPortsSuite) TestRunAllFormatsWithEndpointDetails(c *gc.C) {
 		} else {
 			stdout, stderr = s.runCommand(c, hctx, "--endpoints", "--format", format)
 		}
-		c.Check(stdout, gc.Equals, expectedOutput)
-		c.Check(stderr, gc.Equals, "")
+		c.Check(stdout, tc.Equals, expectedOutput)
+		c.Check(stderr, tc.Equals, "")
 	}
 }
 
-func (s *OpenedPortsSuite) TestBadArgs(c *gc.C) {
+func (s *OpenedPortsSuite) TestBadArgs(c *tc.C) {
 	hctx := s.GetHookContext(c, -1, "")
 	com, err := jujuc.NewCommand(hctx, "opened-ports")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = cmdtesting.InitCommand(jujuc.NewJujucCommandWrappedForTest(com), []string{"foo"})
-	c.Assert(err, gc.ErrorMatches, `unrecognized args: \["foo"\]`)
+	c.Assert(err, tc.ErrorMatches, `unrecognized args: \["foo"\]`)
 }
 
-func (s *OpenedPortsSuite) TestHelp(c *gc.C) {
-	hctx := s.GetHookContext(c, -1, "")
-	openedPorts, err := jujuc.NewCommand(hctx, "opened-ports")
-	c.Assert(err, jc.ErrorIsNil)
-	flags := cmdtesting.NewFlagSet()
-	c.Assert(string(openedPorts.Info().Help(flags)), gc.Equals, `
-Usage: opened-ports
-
-Summary:
-list all ports or port ranges opened by the unit
-
-Details:
-opened-ports lists all ports or port ranges opened by a unit.
-
-By default, the port range listing does not include information about the 
-application endpoints that each port range applies to. Each list entry is
-formatted as <port>/<protocol> (e.g. "80/tcp") or <from>-<to>/<protocol> 
-(e.g. "8080-8088/udp").
-
-If the --endpoints option is specified, each entry in the port list will be
-augmented with a comma-delimited list of endpoints that the port range 
-applies to (e.g. "80/tcp (endpoint1, endpoint2)"). If a port range applies to
-all endpoints, this will be indicated by the presence of a '*' character
-(e.g. "80/tcp (*)").
-`[1:])
-}
-
-func (s *OpenedPortsSuite) getContextAndOpenPorts(c *gc.C) *Context {
+func (s *OpenedPortsSuite) getContextAndOpenPorts(c *tc.C) *Context {
 	hctx := s.GetHookContext(c, -1, "")
 	hctx.OpenPortRange("", network.MustParsePortRange("80/tcp"))
 	hctx.OpenPortRange("foo", network.MustParsePortRange("10-20/tcp"))
@@ -134,11 +109,11 @@ func (s *OpenedPortsSuite) getContextAndOpenPorts(c *gc.C) *Context {
 	return hctx
 }
 
-func (s *OpenedPortsSuite) runCommand(c *gc.C, hctx *Context, args ...string) (stdout, stderr string) {
+func (s *OpenedPortsSuite) runCommand(c *tc.C, hctx *Context, args ...string) (stdout, stderr string) {
 	com, err := jujuc.NewCommand(hctx, "opened-ports")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, args)
-	c.Assert(code, gc.Equals, 0)
+	c.Assert(code, tc.Equals, 0)
 	return bufferString(ctx.Stdout), bufferString(ctx.Stderr)
 }

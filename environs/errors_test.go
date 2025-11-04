@@ -5,9 +5,9 @@ package environs_test
 
 import (
 	"fmt"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/environs"
 )
@@ -15,16 +15,18 @@ import (
 type errorsSuite struct {
 }
 
-var _ = gc.Suite(&errorsSuite{})
+func TestErrorsSuite(t *testing.T) {
+	tc.Run(t, &errorsSuite{})
+}
 
-func (*errorsSuite) TestZoneIndependentErrorConforms(c *gc.C) {
+func (*errorsSuite) TestZoneIndependentErrorConforms(c *tc.C) {
 	err := fmt.Errorf("fly screens on a submarine: %w", environs.ErrAvailabilityZoneIndependent)
-	c.Assert(err, jc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
+	c.Assert(err, tc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
 
 	err = fmt.Errorf("replace with solid doors: %w", err)
 	err = environs.ZoneIndependentError(err)
-	c.Assert(err, jc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
+	c.Assert(err, tc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
 
 	err = fmt.Errorf("or stay on dry land: %w", err)
-	c.Assert(err, jc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
+	c.Assert(err, tc.ErrorIs, environs.ErrAvailabilityZoneIndependent)
 }

@@ -5,21 +5,23 @@ package tools_test
 
 import (
 	"strings"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/tools"
 )
 
 type ListSuite struct{}
 
-var _ = gc.Suite(&ListSuite{})
+func TestListSuite(t *testing.T) {
+	tc.Run(t, &ListSuite{})
+}
 
 func mustParseTools(name string) *tools.Tools {
 	return &tools.Tools{
-		Version: version.MustParseBinary(name),
+		Version: semversion.MustParseBinary(name),
 		URL:     "http://testing.invalid/" + name,
 	}
 }
@@ -75,12 +77,12 @@ var releaseTests = []releaseTest{{
 	expect: []string{"centos", "ubuntu"},
 }}
 
-func (s *ListSuite) TestReleases(c *gc.C) {
+func (s *ListSuite) TestReleases(c *tc.C) {
 	for i, test := range releaseTests {
 		c.Logf("test %d", i)
-		c.Check(test.src.AllReleases(), gc.DeepEquals, test.expect)
+		c.Check(test.src.AllReleases(), tc.DeepEquals, test.expect)
 		if len(test.expect) == 1 {
-			c.Check(test.src.OneRelease(), gc.Equals, test.expect[0])
+			c.Check(test.src.OneRelease(), tc.Equals, test.expect[0])
 		}
 	}
 }
@@ -105,22 +107,22 @@ var archesTests = []archTest{{
 	err: "tools list is empty",
 }}
 
-func (s *ListSuite) TestOneArch(c *gc.C) {
+func (s *ListSuite) TestOneArch(c *tc.C) {
 	for i, test := range archesTests {
 		c.Logf("test %d", i)
 		arch, err := test.src.OneArch()
 		if test.err != "" {
-			c.Check(err, gc.ErrorMatches, test.err)
+			c.Check(err, tc.ErrorMatches, test.err)
 		} else {
-			c.Assert(err, jc.ErrorIsNil)
-			c.Check(arch, gc.Equals, test.expect)
+			c.Assert(err, tc.ErrorIsNil)
+			c.Check(arch, tc.Equals, test.expect)
 		}
 	}
 }
 
-func (s *ListSuite) TestURLs(c *gc.C) {
+func (s *ListSuite) TestURLs(c *tc.C) {
 	empty := tools.List{}
-	c.Check(empty.URLs(), gc.DeepEquals, map[version.Binary][]string{})
+	c.Check(empty.URLs(), tc.DeepEquals, map[semversion.Binary][]string{})
 
 	alt := *t100centos
 	alt.URL = strings.Replace(alt.URL, "testing.invalid", "testing.invalid2", 1)
@@ -131,7 +133,7 @@ func (s *ListSuite) TestURLs(c *gc.C) {
 		&alt,
 		t2001ubuntu,
 	}
-	c.Check(full.URLs(), gc.DeepEquals, map[version.Binary][]string{
+	c.Check(full.URLs(), tc.DeepEquals, map[semversion.Binary][]string{
 		t100ubuntu.Version:  {t100ubuntu.URL},
 		t100centos.Version:  {t100centos.URL, alt.URL},
 		t190centos.Version:  {t190centos.URL},
@@ -142,39 +144,39 @@ func (s *ListSuite) TestURLs(c *gc.C) {
 var newestTests = []struct {
 	src    tools.List
 	expect tools.List
-	number version.Number
+	number semversion.Number
 }{{
 	src:    nil,
 	expect: nil,
-	number: version.Zero,
+	number: semversion.Zero,
 }, {
 	src:    tools.List{t100ubuntu},
 	expect: tools.List{t100ubuntu},
-	number: version.MustParse("1.0.0"),
+	number: semversion.MustParse("1.0.0"),
 }, {
 	src:    t100all,
 	expect: t100all,
-	number: version.MustParse("1.0.0"),
+	number: semversion.MustParse("1.0.0"),
 }, {
 	src:    extend(t100all, t190all, t200all),
 	expect: t200all,
-	number: version.MustParse("2.0.0"),
+	number: semversion.MustParse("2.0.0"),
 }, {
 	src:    tAllBefore210,
 	expect: tools.List{t2001ubuntu},
-	number: version.MustParse("2.0.0.1"),
+	number: semversion.MustParse("2.0.0.1"),
 }}
 
-func (s *ListSuite) TestNewest(c *gc.C) {
+func (s *ListSuite) TestNewest(c *tc.C) {
 	for i, test := range newestTests {
 		c.Logf("test %d", i)
 		number, actual := test.src.Newest()
-		c.Check(number, gc.DeepEquals, test.number)
-		c.Check(actual, gc.DeepEquals, test.expect)
+		c.Check(number, tc.DeepEquals, test.number)
+		c.Check(actual, tc.DeepEquals, test.expect)
 	}
 }
 
-func (s *ListSuite) TestNewestVersions(c *gc.C) {
+func (s *ListSuite) TestNewestVersions(c *tc.C) {
 	for i, test := range newestTests {
 		c.Logf("test %d", i)
 		versions := make(tools.Versions, len(test.src))
@@ -182,67 +184,67 @@ func (s *ListSuite) TestNewestVersions(c *gc.C) {
 			versions[i] = v
 		}
 		number, actual := versions.Newest()
-		c.Check(number, gc.DeepEquals, test.number)
+		c.Check(number, tc.DeepEquals, test.number)
 
 		var expectVersions tools.Versions
 		for _, v := range test.expect {
 			expectVersions = append(expectVersions, v)
 		}
-		c.Check(actual, gc.DeepEquals, expectVersions)
+		c.Check(actual, tc.DeepEquals, expectVersions)
 	}
 }
 
 var newestCompatibleTests = []struct {
 	src            tools.List
-	base           version.Number
-	expect         version.Number
+	base           semversion.Number
+	expect         semversion.Number
 	allowDevBuilds bool
 	found          bool
 }{{
 	src:    nil,
-	base:   version.Zero,
-	expect: version.Zero,
+	base:   semversion.Zero,
+	expect: semversion.Zero,
 	found:  false,
 }, {
 	src:    tools.List{t100ubuntu},
-	base:   version.Zero,
-	expect: version.Zero,
+	base:   semversion.Zero,
+	expect: semversion.Zero,
 	found:  false,
 }, {
 	src:    t100all,
-	base:   version.MustParse("1.0.0"),
-	expect: version.MustParse("1.0.0"),
+	base:   semversion.MustParse("1.0.0"),
+	expect: semversion.MustParse("1.0.0"),
 	found:  true,
 }, {
 	src:            tAllBefore210,
-	base:           version.MustParse("2.0.0"),
-	expect:         version.MustParse("2.0.0.1"),
+	base:           semversion.MustParse("2.0.0"),
+	expect:         semversion.MustParse("2.0.0.1"),
 	allowDevBuilds: true,
 	found:          true,
 }, {
 	src:    tAllBefore210,
-	base:   version.MustParse("1.9.0"),
-	expect: version.MustParse("1.9.0"),
+	base:   semversion.MustParse("1.9.0"),
+	expect: semversion.MustParse("1.9.0"),
 	found:  true,
 }, {
 	src:            t210all,
-	base:           version.MustParse("2.1.1"),
-	expect:         version.MustParse("2.1.5.2"),
+	base:           semversion.MustParse("2.1.1"),
+	expect:         semversion.MustParse("2.1.5.2"),
 	allowDevBuilds: true,
 	found:          true,
 }, {
 	src:    t210all,
-	base:   version.MustParse("2.1.1"),
-	expect: version.MustParse("2.1.5"),
+	base:   semversion.MustParse("2.1.1"),
+	expect: semversion.MustParse("2.1.5"),
 	found:  true,
 }, {
 	src:    t210all,
-	base:   version.MustParse("2.0.0"),
-	expect: version.MustParse("2.0.0"),
+	base:   semversion.MustParse("2.0.0"),
+	expect: semversion.MustParse("2.0.0"),
 	found:  false,
 }}
 
-func (s *ListSuite) TestNewestCompatible(c *gc.C) {
+func (s *ListSuite) TestNewestCompatible(c *tc.C) {
 	for i, test := range newestCompatibleTests {
 		c.Logf("test %d", i)
 		versions := make(tools.Versions, len(test.src))
@@ -250,8 +252,8 @@ func (s *ListSuite) TestNewestCompatible(c *gc.C) {
 			versions[i] = v
 		}
 		actual, found := versions.NewestCompatible(test.base, test.allowDevBuilds)
-		c.Check(actual, gc.DeepEquals, test.expect)
-		c.Check(found, gc.Equals, test.found)
+		c.Check(actual, tc.DeepEquals, test.expect)
+		c.Check(found, tc.Equals, test.found)
 	}
 }
 
@@ -289,10 +291,10 @@ var excludeTests = []struct {
 	t100all,
 }}
 
-func (s *ListSuite) TestExclude(c *gc.C) {
+func (s *ListSuite) TestExclude(c *tc.C) {
 	for i, test := range excludeTests {
 		c.Logf("test %d", i)
-		c.Check(test.src.Exclude(test.arg), gc.DeepEquals, test.expect)
+		c.Check(test.src.Exclude(test.arg), tc.DeepEquals, test.expect)
 	}
 }
 
@@ -310,11 +312,11 @@ var matchTests = []struct {
 	tAllBefore210,
 }, {
 	tAllBefore210,
-	tools.Filter{Number: version.MustParse("1.9.0")},
+	tools.Filter{Number: semversion.MustParse("1.9.0")},
 	t190all,
 }, {
 	tAllBefore210,
-	tools.Filter{Number: version.MustParse("1.9.0.1")},
+	tools.Filter{Number: semversion.MustParse("1.9.0.1")},
 	nil,
 }, {
 	tAllBefore210,
@@ -335,27 +337,27 @@ var matchTests = []struct {
 }, {
 	tAllBefore210,
 	tools.Filter{
-		Number: version.MustParse("2.0.0"),
+		Number: semversion.MustParse("2.0.0"),
 		OSType: "centos",
 		Arch:   "i386",
 	},
 	tools.List{t200centos32},
 }}
 
-func (s *ListSuite) TestMatch(c *gc.C) {
+func (s *ListSuite) TestMatch(c *tc.C) {
 	for i, test := range matchTests {
 		c.Logf("test %d", i)
 		actual, err := test.src.Match(test.filter)
-		c.Check(actual, gc.DeepEquals, test.expect)
+		c.Check(actual, tc.DeepEquals, test.expect)
 		if len(test.expect) > 0 {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		} else {
-			c.Check(err, gc.Equals, tools.ErrNoMatches)
+			c.Check(err, tc.Equals, tools.ErrNoMatches)
 		}
 	}
 }
 
-func (s *ListSuite) TestMatchVersions(c *gc.C) {
+func (s *ListSuite) TestMatchVersions(c *tc.C) {
 	for i, test := range matchTests {
 		c.Logf("test %d", i)
 		versions := make(tools.Versions, len(test.src))
@@ -364,15 +366,15 @@ func (s *ListSuite) TestMatchVersions(c *gc.C) {
 		}
 		actual, err := versions.Match(test.filter)
 		if len(test.expect) > 0 {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		} else {
-			c.Check(err, gc.Equals, tools.ErrNoMatches)
+			c.Check(err, tc.Equals, tools.ErrNoMatches)
 		}
 
 		var expectVersions tools.Versions
 		for _, v := range test.expect {
 			expectVersions = append(expectVersions, v)
 		}
-		c.Check(actual, gc.DeepEquals, expectVersions)
+		c.Check(actual, tc.DeepEquals, expectVersions)
 	}
 }

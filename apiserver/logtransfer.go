@@ -9,24 +9,28 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/apiserver/common"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/apiserver/httpcontext"
 	"github.com/juju/juju/apiserver/logsink"
 	corelogger "github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/domain/modelmigration"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 type migrationLoggingStrategy struct {
 	modelLogger corelogger.ModelLogger
 
 	recordLogWriter corelogger.LogWriter
-	releaser        func() error
+
+	modelUUID coremodel.UUID
 }
 
-// newMigrationLogWriteCloserFunc returns a function that will create a
+// newMigrationLogWriteFunc returns a function that will create a
 // logsink.LoggingStrategy given an *http.Request, that writes log
 // messages to the state database and tracks their migration.
-func newMigrationLogWriteCloserFunc(ctxt httpContext, modelLogger corelogger.ModelLogger) logsink.NewLogWriteCloserFunc {
-	return func(req *http.Request) (logsink.LogWriteCloser, error) {
+func newMigrationLogWriteFunc(ctxt httpContext, modelLogger corelogger.ModelLogger) logsink.NewLogWriteFunc {
+	return func(req *http.Request) (logsink.LogWriter, error) {
 		strategy := &migrationLoggingStrategy{modelLogger: modelLogger}
 		if err := strategy.init(ctxt, req); err != nil {
 			return nil, errors.Annotate(err, "initialising migration logsink session")
@@ -36,11 +40,19 @@ func newMigrationLogWriteCloserFunc(ctxt httpContext, modelLogger corelogger.Mod
 }
 
 func (s *migrationLoggingStrategy) init(ctxt httpContext, req *http.Request) error {
-	// Require MigrationModeNone because logtransfer happens after the
-	// model proper is completely imported.
-	st, err := ctxt.stateForMigration(req, state.MigrationModeNone)
+	domainServices, err := ctxt.domainServicesForRequest(req.Context())
 	if err != nil {
 		return errors.Trace(err)
+	}
+	migrationMode, err := domainServices.ModelMigration().ModelMigrationMode(req.Context())
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// Require MigrationModeNone because logtransfer happens after the
+	// model proper is completely imported.
+	if migrationMode != modelmigration.MigrationModeNone {
+		return errors.BadRequestf(
+			"model migration mode is %q instead of None", migrationMode)
 	}
 
 	// Here the log messages are expected to be coming from another
@@ -51,43 +63,32 @@ func (s *migrationLoggingStrategy) init(ctxt httpContext, req *http.Request) err
 	// conversion of log messages from an old client.
 	_, err = common.JujuClientVersionFromRequest(req)
 	if err != nil {
-		st.Release()
 		return errors.Trace(err)
 	}
 
-	m, err := st.Model()
-	if err != nil {
-		st.Release()
-		return errors.Trace(err)
+	modelUUID, valid := httpcontext.RequestModelUUID(req.Context())
+	if !valid {
+		return errors.Trace(apiservererrors.ErrPerm)
 	}
-	if s.recordLogWriter, err = s.modelLogger.GetLogWriter(st.State.ModelUUID(), m.Name(), m.Owner().Id()); err != nil {
+	s.modelUUID = coremodel.UUID(modelUUID)
+
+	if s.recordLogWriter, err = s.modelLogger.GetLogWriter(req.Context(), s.modelUUID); err != nil {
 		return errors.Trace(err)
-	}
-	s.releaser = func() error {
-		if removed := st.Release(); removed {
-			return s.modelLogger.RemoveLogWriter(st.State.ModelUUID())
-		}
-		return nil
 	}
 	return nil
-}
-
-// Close is part of the logsink.LogWriteCloser interface.
-func (s *migrationLoggingStrategy) Close() error {
-	return s.releaser()
 }
 
 // WriteLog is part of the logsink.LogWriteCloser interface.
 func (s *migrationLoggingStrategy) WriteLog(m params.LogRecord) error {
 	level, _ := corelogger.ParseLevelFromString(m.Level)
-	err := s.recordLogWriter.Log([]corelogger.LogRecord{{
-		Time:     m.Time,
-		Entity:   m.Entity,
-		Module:   m.Module,
-		Location: m.Location,
-		Level:    level,
-		Message:  m.Message,
-		Labels:   m.Labels,
+	return s.recordLogWriter.Log([]corelogger.LogRecord{{
+		Time:      m.Time,
+		Entity:    m.Entity,
+		Module:    m.Module,
+		Location:  m.Location,
+		Level:     level,
+		Message:   m.Message,
+		Labels:    m.Labels,
+		ModelUUID: s.modelUUID.String(),
 	}})
-	return errors.Annotate(err, "writing model logs failed")
 }

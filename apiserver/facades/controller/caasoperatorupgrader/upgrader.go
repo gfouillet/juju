@@ -6,7 +6,7 @@ package caasoperatorupgrader
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -54,7 +54,7 @@ func (api *API) UpgradeOperator(ctx context.Context, arg params.KubernetesUpgrad
 		return serverErr(apiservererrors.ErrPerm), nil
 	}
 
-	api.logger.Debugf("upgrading caas agent for %s", tag)
+	api.logger.Debugf(ctx, "upgrading caas agent for %s", tag)
 	err = api.broker.Upgrade(ctx, arg.AgentTag, arg.Version)
 	if err != nil {
 		return serverErr(err), nil

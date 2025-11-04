@@ -7,45 +7,54 @@ import (
 	"fmt"
 	"testing"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/database"
 	dbtesting "github.com/juju/juju/internal/database/testing"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventsource -destination changestream_mock_test.go github.com/juju/juju/core/changestream Subscription,WatchableDB,EventSource
 //go:generate go run go.uber.org/mock/mockgen -typed -package eventsource -destination watcher_mock_test.go -source=./consume.go
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
 type ImportTest struct{}
 
-var _ = gc.Suite(&ImportTest{})
+func TestImportTest(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &ImportTest{})
+}
 
-func (*ImportTest) TestImports(c *gc.C) {
+func (*ImportTest) TestImports(c *tc.C) {
 	found := coretesting.FindJujuCoreImports(c, "github.com/juju/juju/core/watcher/eventsource")
 
 	// This package brings in nothing else from outside juju/juju/core
-	c.Assert(found, jc.SameContents, []string{
+	c.Assert(found, tc.SameContents, []string{
 		"core/changestream",
+		"core/credential",
 		"core/database",
+		"core/errors",
 		"core/life",
 		"core/logger",
 		"core/migration",
+		"core/model",
 		"core/network",
-		"core/resources",
+		"core/permission",
+		"core/resource",
 		"core/secrets",
+		"core/semversion",
 		"core/status",
+		"core/trace",
+		"core/unit",
+		"core/user",
 		"core/watcher",
 		"internal/charm/resource",
+		"internal/errors",
 		"internal/logger",
+		"internal/uuid",
 	})
 
 }
@@ -63,7 +72,7 @@ type baseSuite struct {
 	sub         *MockSubscription
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.eventsource = NewMockEventSource(ctrl)
@@ -76,7 +85,7 @@ func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *baseSuite) newBaseWatcher(c *gc.C) *BaseWatcher {
+func (s *baseSuite) newBaseWatcher(c *tc.C) *BaseWatcher {
 	return NewBaseWatcher(s.watchableDB, loggertesting.WrapCheckLog(c))
 }
 
@@ -119,4 +128,8 @@ func (e changeEvent) Namespace() string {
 
 func (e changeEvent) Changed() string {
 	return e.changed
+}
+
+func singleton(s string) []string {
+	return []string{s}
 }

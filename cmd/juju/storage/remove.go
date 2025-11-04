@@ -4,9 +4,9 @@
 package storage
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -14,6 +14,7 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -21,8 +22,8 @@ import (
 // used to remove storage from the model.
 func NewRemoveStorageCommandWithAPI() cmd.Command {
 	command := &removeStorageCommand{}
-	command.newStorageRemoverCloser = func() (StorageRemoverCloser, error) {
-		return command.NewStorageAPI()
+	command.newStorageRemoverCloser = func(ctx context.Context) (StorageRemoverCloser, error) {
+		return command.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(command)
 }
@@ -30,23 +31,23 @@ func NewRemoveStorageCommandWithAPI() cmd.Command {
 const (
 	removeStorageCommandDoc = `
 Removes storage from the model. Specify one or more
-storage IDs, as output by "juju storage".
+storage IDs, as output by ` + "`juju storage`" + `.
 
-By default, remove-storage will fail if the storage
+By default, ` + "`remove-storage`" + ` will fail if the storage
 is attached to any units. To override this behaviour,
-you can use "juju remove-storage --force".
-Note: forced detach is not available on container models.
+you can use ` + "`juju remove-storage --force`" + `.
+Note: Forced detach is not available on container models.
 `
 	removeStorageCommandExamples = `
-Remove the detached storage pgdata/0:
+Remove the detached storage ` + "`pgdata/0`" + `:
 
     juju remove-storage pgdata/0
 
-Remove the possibly attached storage pgdata/0:
+Remove the possibly attached storage ` + "`pgdata/0`" + `:
 
     juju remove-storage --force pgdata/0
 
-Remove the storage pgdata/0, without destroying
+Remove the storage ` + "`pgdata/0`" + `, without destroying
 the corresponding cloud storage:
 
     juju remove-storage --no-destroy pgdata/0
@@ -75,6 +76,14 @@ func (c *removeStorageCommand) Info() *cmd.Info {
 		Doc:      removeStorageCommandDoc,
 		Args:     removeStorageCommandArgs,
 		Examples: removeStorageCommandExamples,
+		SeeAlso: []string{
+			"add-storage",
+			"attach-storage",
+			"detach-storage",
+			"list-storage",
+			"show-storage",
+			"storage",
+		},
 	})
 }
 
@@ -92,7 +101,7 @@ func (c *removeStorageCommand) Init(args []string) error {
 		return errors.New("remove-storage requires at least one storage ID")
 	}
 	var err error
-	if c.modelType, err = c.ModelType(); err != nil {
+	if c.modelType, err = c.ModelType(context.TODO()); err != nil {
 		return errors.Trace(err)
 	}
 	if c.modelType == model.CAAS && c.force {
@@ -125,7 +134,7 @@ func (c *removeStorageCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	remover, err := c.newStorageRemoverCloser()
+	remover, err := c.newStorageRemoverCloser(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -133,7 +142,7 @@ func (c *removeStorageCommand) Run(ctx *cmd.Context) error {
 
 	destroyAttachments := c.force
 	destroyStorage := !c.noDestroy
-	results, err := remover.Remove(c.storageIds, destroyAttachments, destroyStorage, &c.force, maxWait)
+	results, err := remover.Remove(ctx, c.storageIds, destroyAttachments, destroyStorage, &c.force, maxWait)
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "remove storage")
@@ -170,7 +179,7 @@ before removing.`)
 
 // NewStorageRemoverCloserFunc is the type of a function that returns an
 // StorageRemoverCloser.
-type NewStorageRemoverCloserFunc func() (StorageRemoverCloser, error)
+type NewStorageRemoverCloserFunc func(ctx context.Context) (StorageRemoverCloser, error)
 
 // StorageRemoverCloser extends StorageRemover with a Closer method.
 type StorageRemoverCloser interface {
@@ -182,6 +191,7 @@ type StorageRemoverCloser interface {
 // with the specified IDs.
 type StorageRemover interface {
 	Remove(
+		ctx context.Context,
 		storageIds []string,
 		destroyAttachments, destroyStorage bool,
 		force *bool, maxWait *time.Duration,

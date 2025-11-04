@@ -5,21 +5,18 @@ package dbaccessor
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	"github.com/juju/clock"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
-	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/logger"
 	domaintesting "github.com/juju/juju/domain/schema/testing"
 	"github.com/juju/juju/internal/database/app"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package dbaccessor -destination package_mock_test.go github.com/juju/juju/internal/worker/dbaccessor DBApp,NodeManager,TrackedDB,Client,ClusterConfig
@@ -27,18 +24,11 @@ import (
 //go:generate go run go.uber.org/mock/mockgen -typed -package dbaccessor -destination metrics_mock_test.go github.com/prometheus/client_golang/prometheus Registerer
 //go:generate go run go.uber.org/mock/mockgen -typed -package dbaccessor -destination controllerconfig_mock_test.go github.com/juju/juju/internal/worker/controlleragentconfig ConfigWatcher
 
-func TestPackage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
-
 type baseSuite struct {
-	jujutesting.IsolationSuite
-
 	logger logger.Logger
 
-	clock                   *MockClock
+	clock                   clock.Clock
+	mockClock               *MockClock
 	timer                   *MockTimer
 	dbApp                   *MockDBApp
 	client                  *MockClient
@@ -48,10 +38,11 @@ type baseSuite struct {
 	clusterConfig           *MockClusterConfig
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.clock = NewMockClock(ctrl)
+	s.mockClock = NewMockClock(ctrl)
+	s.clock = s.mockClock
 	s.timer = NewMockTimer(ctrl)
 	s.dbApp = NewMockDBApp(ctrl)
 	s.client = NewMockClient(ctrl)
@@ -66,13 +57,13 @@ func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
 }
 
 func (s *baseSuite) expectClock() {
-	s.clock.EXPECT().Now().Return(time.Now()).AnyTimes()
-	s.clock.EXPECT().After(gomock.Any()).AnyTimes()
+	s.mockClock.EXPECT().Now().Return(time.Now()).AnyTimes()
+	s.mockClock.EXPECT().After(gomock.Any()).AnyTimes()
 }
 
 func (s *baseSuite) setupTimer(interval time.Duration) chan time.Time {
 	s.timer.EXPECT().Stop().MinTimes(1)
-	s.clock.EXPECT().NewTimer(interval).Return(s.timer)
+	s.mockClock.EXPECT().NewTimer(interval).Return(s.timer)
 
 	ch := make(chan time.Time)
 	s.timer.EXPECT().Chan().Return(ch).AnyTimes()
@@ -127,12 +118,12 @@ func (s *baseSuite) expectNodeStartupAndShutdown() {
 }
 
 func (s *baseSuite) expectWorkerRetry() {
-	s.clock.EXPECT().After(10 * time.Second).AnyTimes().DoAndReturn(func(d time.Duration) <-chan time.Time {
+	s.mockClock.EXPECT().After(10 * time.Second).AnyTimes().DoAndReturn(func(d time.Duration) <-chan time.Time {
 		return clock.WallClock.After(10 * time.Millisecond)
 	})
 }
 
-func (s *baseSuite) newWorkerWithDB(c *gc.C, db TrackedDB) worker.Worker {
+func (s *baseSuite) newWorkerWithDB(c *tc.C, db TrackedDB) worker.Worker {
 	cfg := WorkerConfig{
 		NodeManager:  s.nodeManager,
 		Clock:        s.clock,
@@ -150,7 +141,7 @@ func (s *baseSuite) newWorkerWithDB(c *gc.C, db TrackedDB) worker.Worker {
 	}
 
 	w, err := NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return w
 }
 
@@ -159,20 +150,18 @@ type dbBaseSuite struct {
 	baseSuite
 }
 
-func (s *dbBaseSuite) SetUpTest(c *gc.C) {
+func (s *dbBaseSuite) SetUpTest(c *tc.C) {
 	s.ControllerSuite.SetUpTest(c)
-	s.baseSuite.SetUpTest(c)
 }
 
-func (s *dbBaseSuite) TearDownTest(c *gc.C) {
+func (s *dbBaseSuite) TearDownTest(c *tc.C) {
 	s.ControllerSuite.TearDownTest(c)
-	s.baseSuite.TearDownTest(c)
 }
 
-func ensureStartup(c *gc.C, w *dbWorker) {
+func ensureStartup(c *tc.C, w *dbWorker) {
 	select {
 	case <-w.dbReady:
-	case <-time.After(jujutesting.LongWait):
+	case <-time.After(testhelpers.LongWait):
 		c.Fatal("timed out waiting for Dqlite node start")
 	}
 }

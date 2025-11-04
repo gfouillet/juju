@@ -7,7 +7,7 @@ test_relations() {
 	set_verbosity
 
 	echo "==> Checking for dependencies"
-	check_dependencies juju
+	check_dependencies juju charmcraft
 
 	file="${TEST_DIR}/test-relations.log"
 
@@ -16,6 +16,7 @@ test_relations() {
 	test_relation_data_exchange
 	test_relation_departing_unit
 	test_relation_list_app
+	test_relation_model_get
 
 	destroy_controller "test-relations"
 }

@@ -11,26 +11,28 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/apiserver/observer"
 	"github.com/juju/juju/core/auditlog"
-	"github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/pinger"
+	"github.com/juju/juju/core/securitylog"
 	"github.com/juju/juju/core/trace"
+	jujuversion "github.com/juju/juju/core/version"
 	accesserrors "github.com/juju/juju/domain/access/errors"
+	modelerrors "github.com/juju/juju/domain/model/errors"
+	"github.com/juju/juju/domain/modelmigration"
 	"github.com/juju/juju/internal/rpcreflect"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	jujuversion "github.com/juju/juju/version"
 )
 
 type adminAPIFactory func(*Server, *apiHandler, observer.Observer) interface{}
@@ -91,22 +93,21 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 		return fail, errAlreadyLoggedIn
 	}
 
-	authResult, err := a.authenticate(ctx, req)
+	migrationMode, modelExists, err := a.getModelMigrationDetails(ctx, req)
+	if err != nil {
+		return fail, errors.Trace(err)
+	}
+
+	authResult, err := a.authenticate(ctx, modelExists, req)
 	if err, ok := errors.Cause(err).(*apiservererrors.DischargeRequiredError); ok {
 		loginResult := params.LoginResult{
 			DischargeRequired:       err.LegacyMacaroon,
 			BakeryDischargeRequired: err.Macaroon,
 			DischargeRequiredReason: err.Error(),
 		}
-		logger.Infof("login failed with discharge-required error: %v", err)
+		logger.Infof(ctx, "login failed with discharge-required error: %v", err)
 		return loginResult, nil
 	}
-	if err != nil {
-		return fail, errors.Trace(err)
-	}
-
-	controllerConfigService := a.root.ServiceFactory().ControllerConfig()
-	controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return fail, errors.Trace(err)
 	}
@@ -114,21 +115,18 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 	// Fetch the API server addresses from state.
 	// If the login comes from a client, return all available addresses.
 	// Otherwise return the addresses suitable for agent use.
-	ctrlSt, err := a.root.shared.statePool.SystemState()
-	if err != nil {
-		return fail, errors.Trace(err)
-	}
-	getHostPorts := ctrlSt.APIHostPortsForAgents
+	controllerNodeService := a.root.DomainServices().ControllerNode()
+	getHostPorts := controllerNodeService.GetAPIHostPortsForAgents
 	if k, _ := names.TagKind(req.AuthTag); k == names.UserTagKind {
-		getHostPorts = ctrlSt.APIHostPortsForClients
+		getHostPorts = controllerNodeService.GetAPIHostPortsForClients
 	}
-	hostPorts, err := getHostPorts(controllerConfig)
+	hostPorts, err := getHostPorts(ctx)
 	if err != nil {
 		return fail, errors.Trace(err)
 	}
 	pServers := make([]network.HostPorts, len(hostPorts))
 	for i, hps := range hostPorts {
-		pServers[i] = hps.HostPorts()
+		pServers[i] = hps
 	}
 
 	// apiRoot is the API root exposed to the client after login.
@@ -138,7 +136,7 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 		a.srv.facades,
 		httpRequestRecorderWrapper{
 			collector: a.srv.metricsCollector,
-			modelUUID: a.root.model.UUID(),
+			modelUUID: a.root.modelUUID,
 		},
 		a.srv.clock,
 	)
@@ -146,10 +144,19 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 		return fail, errors.Trace(err)
 	}
 
+	modelInfo, err := a.root.domainServices.Model().Model(ctx, a.root.modelUUID)
+	if errors.Is(err, modelerrors.NotFound) {
+		return fail, errors.NotFoundf("model %q", a.root.modelUUID)
+	}
+	if err != nil {
+		return fail, errors.Trace(err)
+	}
+
 	apiRoot, err = restrictAPIRoot(
 		a.srv,
 		apiRoot,
-		a.root.model,
+		migrationMode,
+		modelInfo.ModelType,
 		*authResult,
 	)
 	if err != nil {
@@ -165,11 +172,11 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 		facadeFilters = append(facadeFilters, IsControllerFacade)
 	} else {
 		facadeFilters = append(facadeFilters, IsModelFacade)
-		modelTag = a.root.model.Tag().String()
+		modelTag = names.NewModelTag(a.root.modelUUID.String()).String()
 	}
 
 	auditConfig := a.srv.GetAuditConfig()
-	auditRecorder, err := a.getAuditRecorder(req, authResult, auditConfig)
+	auditRecorder, err := a.getAuditRecorder(ctx, req, modelInfo.Name, authResult, auditConfig)
 	if err != nil {
 		return fail, errors.Trace(err)
 	}
@@ -178,9 +185,15 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 		a.apiObserver, auditRecorder, auditConfig.CaptureAPIArgs,
 	)
 	a.root.rpcConn.ServeRoot(apiRoot, recorderFactory, serverError)
+
+	// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+	securitylog.LogLoginSuccess(securitylog.LoginSuccessSecurityEvent{
+		User: req.AuthTag,
+	})
+
 	return params.LoginResult{
 		Servers:       params.FromHostsPorts(pServers),
-		ControllerTag: a.root.model.ControllerTag().String(),
+		ControllerTag: names.NewControllerTag(a.srv.shared.controllerUUID).String(),
 		UserInfo:      authResult.userInfo,
 		ServerVersion: jujuversion.Current.String(),
 		PublicDNSName: a.srv.publicDNSName(),
@@ -189,7 +202,9 @@ func (a *admin) login(ctx context.Context, req params.LoginRequest, loginVersion
 	}, nil
 }
 
-func (a *admin) getAuditRecorder(req params.LoginRequest, authResult *authResult, cfg auditlog.Config) (*auditlog.Recorder, error) {
+func (a *admin) getAuditRecorder(
+	ctx context.Context, req params.LoginRequest, modelName string, authResult *authResult, cfg auditlog.Config,
+) (*auditlog.Recorder, error) {
 	if !authResult.userLogin || !cfg.Enabled {
 		return nil, nil
 	}
@@ -200,15 +215,15 @@ func (a *admin) getAuditRecorder(req params.LoginRequest, authResult *authResult
 		observer.NewAuditLogFilter(cfg.Target, filter),
 		a.srv.clock,
 		auditlog.ConversationArgs{
-			Who:          a.root.authInfo.Entity.Tag().Id(),
+			Who:          a.root.authInfo.Tag.Id(),
 			What:         req.CLIArgs,
-			ModelName:    a.root.model.Name(),
-			ModelUUID:    a.root.model.UUID(),
+			ModelName:    modelName,
+			ModelUUID:    a.root.modelUUID.String(),
 			ConnectionID: a.root.connectionID,
 		},
 	)
 	if err != nil {
-		logger.Errorf("couldn't add login to audit log: %+v", err)
+		logger.Errorf(ctx, "couldn't add login to audit log: %+v", err)
 		return nil, errors.Trace(err)
 	}
 	return result, nil
@@ -223,13 +238,13 @@ type authResult struct {
 	userInfo               *params.AuthUserInfo
 }
 
-func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*authResult, error) {
+func (a *admin) authenticate(ctx context.Context, modelExists bool, req params.LoginRequest) (*authResult, error) {
 	result := &authResult{
-		controllerOnlyLogin: a.root.modelUUID == "",
+		controllerOnlyLogin: a.root.controllerOnlyLogin,
 		userLogin:           true,
 	}
 
-	logger.Debugf("request authToken: %q", req.Token)
+	logger.Debugf(ctx, "request authToken: %q", req.Token)
 	if req.Token == "" && req.AuthTag != "" {
 		tag, err := names.ParseTag(req.AuthTag)
 		if err == nil {
@@ -243,26 +258,13 @@ func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*aut
 
 			// Users are not rate limited, all other entities are.
 			if err := a.srv.getAgentToken(); err != nil {
-				logger.Tracef("rate limiting for agent %s", req.AuthTag)
+				logger.Tracef(ctx, "rate limiting for agent %s", req.AuthTag)
 				return nil, errors.Trace(err)
 			}
 		}
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-	}
-
-	// If the login attempt is for a migrated model,
-	// a.root.model will be nil as the model document does not exist on this
-	// controller and a.root.modelUUID cannot be resolved.
-	// In this case use the requested model UUID to check if we need to return
-	// a redirect error.
-	modelUUID := a.root.modelUUID
-	if a.root.model != nil {
-		modelUUID = a.root.model.UUID()
-	}
-	if err := a.maybeEmitRedirectError(modelUUID, result.tag); err != nil {
-		return nil, errors.Trace(err)
 	}
 
 	switch result.tag.(type) {
@@ -277,10 +279,7 @@ func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*aut
 		result.userLogin = false
 	}
 
-	// Anonymous logins come from other controllers (in cross-model relations).
-	// We don't need to start pingers because we don't maintain presence
-	// information for them.
-	startPinger := !result.anonymousLogin
+	startPinger := result.anonymousLogin || !result.userLogin
 
 	var authInfo authentication.AuthInfo
 
@@ -301,8 +300,10 @@ func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*aut
 		for _, authenticator := range a.srv.loginAuthenticators {
 			var err error
 
-			authInfo, err = authenticator.AuthenticateLoginRequest(ctx, a.root.serverHost, modelUUID, authParams)
+			authInfo, err = authenticator.AuthenticateLoginRequest(ctx, a.root.serverHost, a.root.modelUUID, authParams)
 			if errors.Is(err, errors.NotSupported) {
+				continue
+			} else if errors.Is(err, errors.NotImplemented) {
 				continue
 			} else if err != nil {
 				return nil, a.handleAuthError(err)
@@ -318,14 +319,22 @@ func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*aut
 			return nil, fmt.Errorf("failed to authenticate request: %w", errors.Unauthorized)
 		}
 
-		if result.controllerMachineLogin && !a.root.state.IsController() {
+		isController, err := a.root.domainServices.ModelInfo().IsControllerModel(ctx)
+		if errors.Is(err, modelerrors.NotFound) {
+			return nil, errors.NotFoundf("model")
+		}
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+		if result.controllerMachineLogin && !isController {
 			// We only need to run a pinger for controller machine
 			// agents when logging into the controller model.
 			startPinger = false
 			controllerConn = true
 		}
 	}
-	if a.root.model == nil {
+	if !modelExists {
 		// Login to an unknown or migrated model.
 		// See maybeEmitRedirectError for user logins who are redirected.
 		// Hide the fact that the model does not exist.
@@ -333,44 +342,69 @@ func (a *admin) authenticate(ctx context.Context, req params.LoginRequest) (*aut
 	}
 	// TODO(wallyworld) - we can't yet observe anonymous logins as entity must be non-nil
 	if !result.anonymousLogin {
-		a.apiObserver.Login(a.root.authInfo.Entity.Tag(), a.root.model.ModelTag(), controllerConn, req.UserData)
+		tag := names.NewModelTag(a.root.modelUUID.String())
+		a.apiObserver.Login(ctx, a.root.authInfo.Tag, tag, a.root.modelUUID, controllerConn, req.UserData)
 	}
 	a.loggedIn = true
 
 	if startPinger {
-		if err := setupPingTimeoutDisconnect(a.srv.pingClock, a.root, a.root.authInfo.Entity); err != nil {
+		if err := setupPingTimeoutDisconnect(ctx, a.srv.pingClock, a.root); err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
 
 	var lastConnection *time.Time
-	if err := a.fillLoginDetails(authInfo, result, lastConnection); err != nil {
+	if err := a.fillLoginDetails(ctx, authInfo, result, lastConnection); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return result, nil
 }
 
-func (a *admin) maybeEmitRedirectError(modelUUID string, authTag names.Tag) error {
-	userTag, ok := authTag.(names.UserTag)
-	if !ok {
-		return nil
+func (a *admin) getModelMigrationDetails(ctx context.Context, req params.LoginRequest) (modelmigration.MigrationMode, bool, error) {
+	// If the login attempt is by a user for a migrated model,
+	// return a redirect error.
+	// TODO - we'd want to use the model service here but migration
+	//  artefacts still live in mongo.
+	//  Ultimately we'd want a domain service API returning just:
+	//    - model type
+	//    - model name
+	//    - migration mode
+
+	exists, err := a.root.domainServices.Model().CheckModelExists(ctx, a.root.modelUUID)
+	if err != nil {
+		return "", false, errors.Trace(err)
+	} else if !exists {
+		err := a.maybeEmitRedirectError(ctx, req)
+		return "", false, errors.Trace(err)
 	}
 
-	st, err := a.root.shared.statePool.Get(modelUUID)
+	migrationMode, err := a.root.domainServices.ModelMigration().ModelMigrationMode(ctx)
+	if err != nil {
+		return "", false, errors.Trace(err)
+	}
+
+	return migrationMode, true, nil
+}
+
+func (a *admin) maybeEmitRedirectError(ctx context.Context, req params.LoginRequest) error {
+	// Only need to redirect for user logins.
+	if req.AuthTag == "" {
+		return nil
+	}
+	authTag, err := names.ParseTag(req.AuthTag)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer func() { _ = st.Release() }()
-
-	// If the model exists on this controller then no redirect is possible.
-	if _, err := st.Model(); err == nil || !errors.Is(err, errors.NotFound) {
+	if authTag.Kind() != names.UserTagKind {
 		return nil
 	}
 
-	// Check if the model was not found due to
-	// being migrated to another controller.
-	mig, err := st.CompletedMigration()
-	if err != nil && !errors.Is(err, errors.NotFound) {
+	// Check if the model was not found due to being migrated to another
+	// controller.
+	redirectionTarget, err := a.root.domainServices.Model().ModelRedirection(ctx, a.root.modelUUID)
+	if errors.Is(err, modelerrors.ModelNotRedirected) {
+		return nil
+	} else if err != nil {
 		return errors.Trace(err)
 	}
 
@@ -378,25 +412,18 @@ func (a *admin) maybeEmitRedirectError(modelUUID string, authTag names.Tag) erro
 	// granted access, do not return a redirect error.
 	// We need to return redirects if possible for anonymous logins in order
 	// to ensure post-migration operation of CMRs.
-	if mig == nil || (userTag.Id() != api.AnonymousUsername && mig.ModelUserAccess(userTag) == permission.NoAccess) {
-		return nil
-	}
+	// TODO(aflynn): reinstate check for unauthorised user (JUJU-6669).
 
-	target, err := mig.TargetInfo()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	hps, err := network.ParseProviderHostPorts(target.Addrs...)
+	hps, err := network.ParseProviderHostPorts(redirectionTarget.Addresses...)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	return &apiservererrors.RedirectError{
 		Servers:         []network.ProviderHostPorts{hps},
-		CACert:          target.CACert,
-		ControllerTag:   target.ControllerTag,
-		ControllerAlias: target.ControllerAlias,
+		CACert:          redirectionTarget.CACert,
+		ControllerTag:   names.NewControllerTag(redirectionTarget.ControllerUUID),
+		ControllerAlias: redirectionTarget.ControllerAlias,
 	}
 }
 
@@ -415,11 +442,11 @@ func (a *admin) handleAuthError(err error) error {
 	return err
 }
 
-func (a *admin) fillLoginDetails(authInfo authentication.AuthInfo, result *authResult, lastConnection *time.Time) error {
+func (a *admin) fillLoginDetails(ctx context.Context, authInfo authentication.AuthInfo, result *authResult, lastConnection *time.Time) error {
 	// Send back user info if user
 	if result.userLogin {
 		var err error
-		result.userInfo, err = a.checkUserPermissions(authInfo, result.controllerOnlyLogin)
+		result.userInfo, err = a.checkUserPermissions(ctx, authInfo, result.controllerOnlyLogin)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -427,64 +454,41 @@ func (a *admin) fillLoginDetails(authInfo authentication.AuthInfo, result *authR
 	}
 	if result.controllerOnlyLogin {
 		if result.anonymousLogin {
-			logger.Debugf(" anonymous controller login")
+			logger.Debugf(ctx, " anonymous controller login")
 		} else {
-			logger.Debugf("controller login: %s", a.root.authInfo.Entity.Tag())
+			logger.Debugf(ctx, "controller login: %s", a.root.authInfo.Tag)
 		}
 	} else {
 		if result.anonymousLogin {
-			logger.Debugf("anonymous model login")
+			logger.Debugf(ctx, "anonymous model login")
 		} else {
-			logger.Debugf("model login: %s for %s", a.root.authInfo.Entity.Tag(), a.root.model.ModelTag().Id())
+			logger.Debugf(ctx, "model login: %s for model %s", a.root.authInfo.Tag, a.root.modelUUID)
 		}
 	}
 	return nil
 }
 
-func (a *admin) checkUserPermissions(authInfo authentication.AuthInfo, controllerOnlyLogin bool) (*params.AuthUserInfo, error) {
-	userTag, ok := authInfo.Entity.Tag().(names.UserTag)
+func (a *admin) checkUserPermissions(
+	ctx context.Context,
+	authInfo authentication.AuthInfo,
+	controllerOnlyLogin bool,
+) (*params.AuthUserInfo, error) {
+	userTag, ok := authInfo.Tag.(names.UserTag)
 	if !ok {
 		return nil, fmt.Errorf("establishing user tag from authenticated user entity")
 	}
 
-	modelAccess := permission.NoAccess
-
-	// TODO(perrito666) remove the following section about everyone group
-	// when groups are implemented, this accounts only for the lack of a local
-	// ControllerUser when logging in from an external user that has not been granted
-	// permissions on the controller but there are permissions for the special
-	// everyone group.
-	everyoneGroupAccess := permission.NoAccess
-	if !userTag.IsLocal() {
-
-		// TODO (manadart 2024-05-27): This is a huge wart.
-		// Having to acquire the service this way is an abysmal failure of
-		// encapsulation.
-		// The best option might be to round up all of these special case
-		// "everyone@external" checks and push them into either the permission
-		// delegator or the service itself.
-		accessService := a.srv.shared.serviceFactoryGetter.FactoryForModel(database.ControllerNS).Access()
-		everyoneGroupUser, err := accessService.ReadUserAccessForTarget(
-			context.TODO(),
-			common.EveryoneTagName,
-			permission.ID{
-				ObjectType: permission.Controller,
-				Key:        "controller",
-			},
-		)
-		if err != nil && !errors.Is(err, accesserrors.UserNotFound) && !errors.Is(err, accesserrors.PermissionNotFound) {
-			return nil, errors.Annotatef(err, "obtaining ControllerUser for everyone group")
-		}
-		everyoneGroupAccess = everyoneGroupUser.Access
-	}
-
-	controllerAccess, err := authInfo.SubjectPermissions(a.root.state.ControllerTag())
+	controllerAccess, err := authInfo.SubjectPermissions(ctx, permission.ID{
+		ObjectType: permission.Controller,
+		Key:        a.srv.shared.controllerUUID,
+	})
 	if errors.Is(err, accesserrors.PermissionNotFound) || errors.Is(err, accesserrors.UserNotFound) {
-		controllerAccess = everyoneGroupAccess
+		controllerAccess = permission.NoAccess
 	} else if err != nil {
 		return nil, errors.Annotatef(err, "obtaining ControllerUser for logged in user %s", userTag.Id())
 	}
 
+	modelAccess := permission.NoAccess
 	if !controllerOnlyLogin {
 		// Only grab modelUser permissions if this is not a controller only
 		// login. In all situations, if the model user is not found, they have
@@ -492,7 +496,10 @@ func (a *admin) checkUserPermissions(authInfo authentication.AuthInfo, controlle
 		// admin.
 
 		var err error
-		modelAccess, err = authInfo.SubjectPermissions(a.root.model.ModelTag())
+		modelAccess, err = authInfo.SubjectPermissions(ctx, permission.ID{
+			ObjectType: permission.Model,
+			Key:        a.root.modelUUID.String(),
+		})
 		if err != nil {
 			if controllerAccess != permission.SuperuserAccess {
 				return nil, errors.Wrap(err, apiservererrors.ErrPerm)
@@ -501,11 +508,6 @@ func (a *admin) checkUserPermissions(authInfo authentication.AuthInfo, controlle
 		}
 	}
 
-	// It is possible that the everyoneGroup permissions are more capable than an
-	// individuals. If they are, use them.
-	if everyoneGroupAccess.GreaterControllerAccessThan(controllerAccess) {
-		controllerAccess = everyoneGroupAccess
-	}
 	if controllerOnlyLogin || !a.srv.allowModelAccess {
 		// We're either explicitly logging into the controller or
 		// we must check that the user has access to the controller
@@ -515,10 +517,10 @@ func (a *admin) checkUserPermissions(authInfo authentication.AuthInfo, controlle
 		}
 	}
 	if controllerOnlyLogin {
-		logger.Debugf("controller login: user %s has %q access", userTag.Id(), controllerAccess)
+		logger.Debugf(ctx, "controller login: user %s has %q access", userTag.Id(), controllerAccess)
 	} else {
-		logger.Debugf("model login: user %s has %q for controller; %q for model %s",
-			userTag.Id(), controllerAccess, modelAccess, a.root.model.ModelTag().Id())
+		logger.Debugf(ctx, "model login: user %s has %q for controller; %q for model %s",
+			userTag.Id(), controllerAccess, modelAccess, a.root.modelUUID)
 	}
 	return &params.AuthUserInfo{
 		Identity:         userTag.String(),
@@ -549,16 +551,11 @@ func filterFacades(registry *facade.Registry, allowFacadeAllMustMatch ...facadeF
 // PingRootHandler is the interface that the root handler must implement
 // to allow the pinger to be registered.
 type PingRootHandler interface {
-	WatcherRegistry() facade.WatcherRegistry
+	WatcherRegistry() watcherregistry.WatcherRegistry
 	CloseConn() error
 }
 
-func setupPingTimeoutDisconnect(clock clock.Clock, root PingRootHandler, entity state.Entity) error {
-	tag := entity.Tag()
-	if tag.Kind() == names.UserTagKind {
-		return nil
-	}
-
+func setupPingTimeoutDisconnect(ctx context.Context, clock clock.Clock, root *apiHandler) error {
 	// pingTimeout, by contrast, *is* used by the Pinger facade to
 	// stave off the call to action() that will shut down the agent
 	// connection if it gets lackadaisical about sending keepalive
@@ -570,13 +567,13 @@ func setupPingTimeoutDisconnect(clock clock.Clock, root PingRootHandler, entity 
 	//
 	// We should have picked better names...
 	action := func() {
-		logger.Debugf("closing connection due to ping timeout")
+		logger.Debugf(ctx, "closing connection due to ping timeout")
 		if err := root.CloseConn(); err != nil {
-			logger.Errorf("error closing the RPC connection: %v", err)
+			logger.Errorf(ctx, "error closing the RPC connection: %v", err)
 		}
 	}
 	p := pinger.NewPinger(action, clock, maxClientPingInterval)
-	return root.WatcherRegistry().RegisterNamed("pingTimeout", p)
+	return root.WatcherRegistry().RegisterNamed(ctx, "pingTimeout", p)
 }
 
 // errRoot implements the API that a client first sees
@@ -596,6 +593,11 @@ func (r *errRoot) FindMethod(rootName string, version int, methodName string) (r
 // TODO(stickupkid): Revisit this when we understand this path better.
 func (r *errRoot) StartTrace(ctx context.Context) (context.Context, trace.Span) {
 	return ctx, trace.NoopSpan{}
+}
+
+// FlightRecorder returns a noop flight recorder.
+func (r *errRoot) FlightRecorder() flightrecorder.FlightRecorder {
+	return flightrecorder.NoopRecorder{}
 }
 
 func (r *errRoot) Kill() {}

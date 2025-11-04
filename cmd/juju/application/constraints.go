@@ -4,32 +4,34 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageGetConstraintsSummary = `
 Displays machine constraints for an application.`[1:]
 
 var usageGetConstraintsDetails = `
-Shows machine constraints that have been set for an application with ` + "`juju set-\nconstraints`" + `.
+Shows machine constraints that have been set for an application with
+` + "`juju set-constraints`" + `.
+
 By default, the model is the current model.
-Application constraints are combined with model constraints, set with ` +
-	"`juju \nset-model-constraints`" + `, for commands (such as 'deploy') that provision
-machines for applications. Where model and application constraints overlap, the
-application constraints take precedence.
-Constraints for a specific model can be viewed with ` + "`juju model-\nconstraints`" + `.`
+
+Where model and application constraints overlap, the application constraints take precedence.
+
+`
 
 const usageGetConstraintsExamples = `
     juju constraints mysql
@@ -42,17 +44,17 @@ Sets machine constraints for an application.`[1:]
 // setConstraintsDoc is multi-line since we need to use ` to denote
 // commands for ease in markdown.
 var usageSetConstraintsDetails = `
-Sets constraints for an application, which are used for all new machines 
+Sets constraints for an application, which are used for all new machines
 provisioned for that application. They can be viewed with `[1:] + "`juju constraints`" + `.
 By default, the model is the current model.
 Application constraints are combined with model constraints, set with ` +
-	"`juju \nset-model-constraints`" + `, for commands (such as 'juju deploy') that 
+	"`juju set-model-constraints`" + `, for commands (such as ` + "`juju deploy`" + `) that
 provision machines for applications. Where model and application constraints
 overlap, the application constraints take precedence.
 Constraints for a specific model can be viewed with ` + "`juju model-constraints`" + `.
-This command requires that the application to have at least one unit. To apply 
+This command requires the application to have at least one unit. To apply
 constraints to
-the first unit set them at the model level or pass them as an argument
+the first unit, set them at the model level or pass them as an argument
 when deploying.
 `
 
@@ -68,8 +70,8 @@ func NewApplicationGetConstraintsCommand() modelcmd.ModelCommand {
 
 type applicationConstraintsAPI interface {
 	Close() error
-	GetConstraints(...string) ([]constraints.Value, error)
-	SetConstraints(string, constraints.Value) error
+	GetConstraints(context.Context, ...string) ([]constraints.Value, error)
+	SetConstraints(context.Context, string, constraints.Value) error
 }
 
 type applicationConstraintsCommand struct {
@@ -79,11 +81,11 @@ type applicationConstraintsCommand struct {
 	api             applicationConstraintsAPI
 }
 
-func (c *applicationConstraintsCommand) getAPI() (applicationConstraintsAPI, error) {
+func (c *applicationConstraintsCommand) getAPI(ctx context.Context) (applicationConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -136,13 +138,13 @@ func (c *applicationGetConstraintsCommand) Init(args []string) error {
 }
 
 func (c *applicationGetConstraintsCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.getAPI()
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer apiclient.Close()
 
-	cons, err := apiclient.GetConstraints(c.ApplicationName)
+	cons, err := apiclient.GetConstraints(ctx, c.ApplicationName)
 	if err != nil {
 		return err
 	}
@@ -188,13 +190,13 @@ func (c *applicationSetConstraintsCommand) Init(args []string) (err error) {
 	return err
 }
 
-func (c *applicationSetConstraintsCommand) Run(_ *cmd.Context) (err error) {
-	apiclient, err := c.getAPI()
+func (c *applicationSetConstraintsCommand) Run(ctx *cmd.Context) (err error) {
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer apiclient.Close()
 
-	err = apiclient.SetConstraints(c.ApplicationName, c.Constraints)
+	err = apiclient.SetConstraints(ctx, c.ApplicationName, c.Constraints)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }

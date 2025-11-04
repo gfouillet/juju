@@ -4,36 +4,26 @@
 package providertracker
 
 import (
-	stdtesting "testing"
-	"time"
-
-	"github.com/juju/testing"
-	"go.uber.org/goleak"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/logger"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package providertracker -destination providertracker_mock_test.go github.com/juju/juju/internal/worker/providertracker ServiceFactoryGetter,ServiceFactory,ModelService,CloudService,ConfigService,CredentialService
+//go:generate go run go.uber.org/mock/mockgen -typed -package providertracker -destination providertracker_mock_test.go github.com/juju/juju/internal/worker/providertracker DomainServicesGetter,DomainServices,ModelService,CloudService,ConfigService,CredentialService
 //go:generate go run go.uber.org/mock/mockgen -typed -package providertracker -destination environs_mock_test.go github.com/juju/juju/environs Environ,CloudDestroyer,CloudSpecSetter
 //go:generate go run go.uber.org/mock/mockgen -typed -package providertracker -destination storage_mock_test.go github.com/juju/juju/internal/storage ProviderRegistry
 //go:generate go run go.uber.org/mock/mockgen -typed -package providertracker -destination caas_mock_test.go github.com/juju/juju/caas Broker
 
-func TestPackage(t *stdtesting.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
-
 type baseSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	states chan string
 
-	serviceFactoryGetter *MockServiceFactoryGetter
-	serviceFactory       *MockServiceFactory
+	domainServicesGetter *MockDomainServicesGetter
+	domainServices       *MockDomainServices
 	modelService         *MockModelService
 	cloudService         *MockCloudService
 	configService        *MockConfigService
@@ -48,15 +38,15 @@ type baseSuite struct {
 	logger logger.Logger
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	// Ensure we buffer the channel, this is because we might miss the
 	// event if we're too quick at starting up.
 	s.states = make(chan string, 1)
 
 	ctrl := gomock.NewController(c)
 
-	s.serviceFactoryGetter = NewMockServiceFactoryGetter(ctrl)
-	s.serviceFactory = NewMockServiceFactory(ctrl)
+	s.domainServicesGetter = NewMockDomainServicesGetter(ctrl)
+	s.domainServices = NewMockDomainServices(ctrl)
 	s.modelService = NewMockModelService(ctrl)
 	s.cloudService = NewMockCloudService(ctrl)
 	s.configService = NewMockConfigService(ctrl)
@@ -73,19 +63,19 @@ func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *baseSuite) ensureStartup(c *gc.C) {
+func (s *baseSuite) ensureStartup(c *tc.C) {
 	select {
 	case state := <-s.states:
-		c.Assert(state, gc.Equals, stateStarted)
-	case <-time.After(testing.ShortWait * 10):
+		c.Assert(state, tc.Equals, stateStarted)
+	case <-c.Context().Done():
 		c.Fatalf("timed out waiting for startup")
 	}
 }
 
-func (s *baseSuite) expectServiceFactory(namespace string) {
-	s.serviceFactoryGetter.EXPECT().FactoryForModel(namespace).Return(s.serviceFactory)
-	s.serviceFactory.EXPECT().Cloud().Return(s.cloudService)
-	s.serviceFactory.EXPECT().Config().Return(s.configService)
-	s.serviceFactory.EXPECT().Credential().Return(s.credentialService)
-	s.serviceFactory.EXPECT().Model().Return(s.modelService)
+func (s *baseSuite) expectDomainServices(namespace string) {
+	s.domainServicesGetter.EXPECT().ServicesForModel(namespace).Return(s.domainServices)
+	s.domainServices.EXPECT().Cloud().Return(s.cloudService)
+	s.domainServices.EXPECT().Config().Return(s.configService)
+	s.domainServices.EXPECT().Credential().Return(s.credentialService)
+	s.domainServices.EXPECT().Model().Return(s.modelService)
 }

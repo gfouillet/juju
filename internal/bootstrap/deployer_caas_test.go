@@ -4,178 +4,109 @@
 package bootstrap
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/core/network"
+	network "github.com/juju/juju/core/network"
+	unit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/core/version"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/internal/uuid"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/version"
 )
 
 type deployerCAASSuite struct {
 	baseSuite
-
-	cloudService       *MockCloudService
-	cloudServiceGetter *MockCloudServiceGetter
-	operationApplier   *MockOperationApplier
+	serviceManager *MockServiceManager
 }
 
-var _ = gc.Suite(&deployerCAASSuite{})
+func TestDeployerCAASSuite(t *testing.T) {
+	tc.Run(t, &deployerCAASSuite{})
+}
 
-func (s *deployerCAASSuite) TestValidate(c *gc.C) {
+func (s *deployerCAASSuite) TestValidate(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.newConfig(c)
 	err := cfg.Validate()
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
 	cfg = s.newConfig(c)
-	cfg.CloudServiceGetter = nil
+	cfg.ServiceManager = nil
 	err = cfg.Validate()
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
-
-	cfg = s.newConfig(c)
-	cfg.OperationApplier = nil
-	err = cfg.Validate()
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *deployerCAASSuite) TestControllerAddress(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	cfg := s.newConfig(c)
-
-	s.cloudService.EXPECT().Addresses().Return(network.NewSpaceAddresses("10.0.0.1"))
-	s.cloudServiceGetter.EXPECT().CloudService(cfg.ControllerConfig.ControllerUUID()).Return(s.cloudService, nil)
-
-	deployer := s.newDeployerWithConfig(c, cfg)
-	address, err := deployer.ControllerAddress(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(address, gc.Equals, "10.0.0.1:0")
-}
-
-func (s *deployerCAASSuite) TestControllerAddressMultipleAddresses(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	// Ensure that the test picks the first address.
-
-	cfg := s.newConfig(c)
-
-	s.cloudService.EXPECT().Addresses().Return(network.NewSpaceAddresses("10.0.0.1", "10.0.0.2"))
-	s.cloudServiceGetter.EXPECT().CloudService(cfg.ControllerConfig.ControllerUUID()).Return(s.cloudService, nil)
-
-	deployer := s.newDeployerWithConfig(c, cfg)
-	address, err := deployer.ControllerAddress(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(address, gc.Equals, "10.0.0.1:0")
-}
-
-func (s *deployerCAASSuite) TestControllerAddressMultipleAddressesScopeNonLocal(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	// Ensure that we always pick local over non-local
-
-	cfg := s.newConfig(c)
-
-	s.cloudService.EXPECT().Addresses().Return(network.NewSpaceAddresses("2.201.120.241", "10.0.0.2"))
-	s.cloudServiceGetter.EXPECT().CloudService(cfg.ControllerConfig.ControllerUUID()).Return(s.cloudService, nil)
-
-	deployer := s.newDeployerWithConfig(c, cfg)
-	address, err := deployer.ControllerAddress(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(address, gc.Equals, "10.0.0.2:0")
-}
-
-func (s *deployerCAASSuite) TestControllerAddressScopeNonLocal(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	// Ensure that we return the non scoped local address if we don't have
-	// any local addresses.
-
-	cfg := s.newConfig(c)
-
-	s.cloudService.EXPECT().Addresses().Return(network.NewSpaceAddresses("2.201.120.241"))
-	s.cloudServiceGetter.EXPECT().CloudService(cfg.ControllerConfig.ControllerUUID()).Return(s.cloudService, nil)
-
-	deployer := s.newDeployerWithConfig(c, cfg)
-	address, err := deployer.ControllerAddress(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(address, gc.Equals, "2.201.120.241:0")
-}
-
-func (s *deployerCAASSuite) TestControllerAddressNoAddresses(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	cfg := s.newConfig(c)
-
-	s.cloudService.EXPECT().Addresses().Return(network.NewSpaceAddresses())
-	s.cloudServiceGetter.EXPECT().CloudService(cfg.ControllerConfig.ControllerUUID()).Return(s.cloudService, nil)
-
-	deployer := s.newDeployerWithConfig(c, cfg)
-	address, err := deployer.ControllerAddress(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(address, gc.Equals, "")
-}
-
-func (s *deployerCAASSuite) TestControllerCharmBase(c *gc.C) {
+func (s *deployerCAASSuite) TestControllerCharmBase(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	deployer := s.newDeployer(c)
 	base, err := deployer.ControllerCharmBase()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(base, gc.DeepEquals, version.DefaultSupportedLTSBase())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(base, tc.DeepEquals, version.DefaultSupportedLTSBase())
 }
 
-func (s *deployerCAASSuite) TestCompleteProcess(c *gc.C) {
+func (s *deployerCAASSuite) TestCompleteCAASProcess(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.newConfig(c)
 
-	op := &state.UpdateUnitOperation{}
+	unitName := unit.Name("controller/0")
 
-	s.unit.EXPECT().UnitTag().Return(names.NewUnitTag("controller/0"))
-	s.unit.EXPECT().UpdateOperation(state.UnitUpdateProperties{
-		ProviderId: ptr("controller-0"),
-	}).Return(op)
-	s.operationApplier.EXPECT().ApplyOperation(op).Return(nil)
-	s.unit.EXPECT().SetPassword(cfg.UnitPassword).Return(nil)
+	providerAddress := network.ProviderAddresses{
+		{
+			MachineAddress: network.MachineAddress{
+				Value: "10.0.0.1",
+				Type:  network.IPv4Address,
+				Scope: network.ScopeMachineLocal,
+			},
+		},
+		{
+			MachineAddress: network.MachineAddress{
+				Value: "203.0.113.1",
+				Type:  network.IPv4Address,
+				Scope: network.ScopePublic,
+			},
+		},
+	}
+
+	s.caasApplicationService.EXPECT().UpdateCloudService(gomock.Any(), bootstrap.ControllerApplicationName, controllerProviderID(unitName), providerAddress).Return(nil)
+	s.caasApplicationService.EXPECT().UpdateCAASUnit(gomock.Any(), unitName, applicationservice.UpdateCAASUnitParams{
+		ProviderID: ptr("controller-0"),
+	})
+	s.agentPasswordService.EXPECT().SetUnitPassword(gomock.Any(), unitName, cfg.UnitPassword)
 
 	deployer := s.newDeployerWithConfig(c, cfg)
-	err := deployer.CompleteProcess(context.Background(), s.unit)
-	c.Assert(err, jc.ErrorIsNil)
+	err := deployer.CompleteCAASProcess(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *deployerCAASSuite) newDeployer(c *gc.C) *CAASDeployer {
+func (s *deployerCAASSuite) newDeployer(c *tc.C) *CAASDeployer {
 	return s.newDeployerWithConfig(c, s.newConfig(c))
 }
 
-func (s *deployerCAASSuite) newDeployerWithConfig(c *gc.C, cfg CAASDeployerConfig) *CAASDeployer {
+func (s *deployerCAASSuite) newDeployerWithConfig(c *tc.C, cfg CAASDeployerConfig) *CAASDeployer {
 	deployer, err := NewCAASDeployer(cfg)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 	return deployer
 }
 
-func (s *deployerCAASSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *deployerCAASSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := s.baseSuite.setupMocks(c)
 
-	s.cloudService = NewMockCloudService(ctrl)
-	s.cloudServiceGetter = NewMockCloudServiceGetter(ctrl)
-	s.operationApplier = NewMockOperationApplier(ctrl)
+	s.serviceManager = NewMockServiceManager(ctrl)
 
 	return ctrl
 }
 
-func (s *deployerCAASSuite) newConfig(c *gc.C) CAASDeployerConfig {
+func (s *deployerCAASSuite) newConfig(c *tc.C) CAASDeployerConfig {
 	return CAASDeployerConfig{
 		BaseDeployerConfig: s.baseSuite.newConfig(c),
-		CloudServiceGetter: s.cloudServiceGetter,
-		OperationApplier:   s.operationApplier,
+		ApplicationService: s.caasApplicationService,
 		UnitPassword:       uuid.MustNewUUID().String(),
+		ServiceManager:     s.serviceManager,
 	}
 }

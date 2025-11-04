@@ -6,13 +6,14 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
-
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/changestream"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
+	"github.com/juju/juju/internal/errors"
 )
 
 // ModificationValidatorFunc is a function that validates a modification
@@ -21,19 +22,34 @@ type ModificationValidatorFunc = func(map[string]string) error
 
 // State defines an interface for interacting with the underlying state.
 type State interface {
+	// ControllerConfig returns the config values for the controller.
 	ControllerConfig(context.Context) (map[string]string, error)
+
+	// UpdateControllerConfig updates the controller config.
 	UpdateControllerConfig(ctx context.Context, updateAttrs map[string]string, removeAttrs []string, validateModification ModificationValidatorFunc) error
 
 	// AllKeysQuery is used to get the initial state
 	// for the controller configuration watcher.
 	AllKeysQuery() string
+
+	// NamespaceForWatchControllerConfig returns the namespace identifier
+	// used for watching controller configuration changes.
+	NamespaceForWatchControllerConfig() []string
 }
 
 // WatcherFactory describes methods for creating watchers.
 type WatcherFactory interface {
-	// NewNamespaceWatcher returns a new namespace watcher
-	// for events based on the input change mask.
-	NewNamespaceWatcher(string, changestream.ChangeType, eventsource.NamespaceQuery) (watcher.StringsWatcher, error)
+	// NewNamespaceWatcher returns a new watcher that filters changes from the
+	// input base watcher's db/queue. Change-log events will be emitted only if
+	// the filter accepts them, and dispatching the notifications via the
+	// Changes channel. A filter option is required, though additional filter
+	// options can be provided.
+	NewNamespaceWatcher(
+		ctx context.Context,
+		query eventsource.NamespaceQuery,
+		summary string,
+		filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
+	) (watcher.StringsWatcher, error)
 }
 
 // Service defines a service for interacting with the underlying state.
@@ -50,13 +66,16 @@ func NewService(st State) *Service {
 
 // ControllerConfig returns the config values for the controller.
 func (s *Service) ControllerConfig(ctx context.Context) (controller.Config, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	ctrlConfigMap, err := s.st.ControllerConfig(ctx)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unable to get controller config")
+		return nil, errors.Errorf("unable to get controller config: %w", err)
 	}
 	coerced, err := deserializeMap(ctrlConfigMap)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unable to coerce controller config")
+		return nil, errors.Errorf("unable to coerce controller config: %w", err)
 	}
 
 	// Get the controller UUID and CA cert from the config, so we can generate
@@ -66,30 +85,33 @@ func (s *Service) ControllerConfig(ctx context.Context) (controller.Config, erro
 		ok               bool
 	)
 	if ctrlUUID, ok = coerced[controller.ControllerUUIDKey].(string); !ok {
-		return nil, errors.NotFoundf("controller UUID")
+		return nil, errors.Errorf("controller UUID %w", coreerrors.NotFound)
 	}
 	if caCert, ok = coerced[controller.CACertKey].(string); !ok {
-		return nil, errors.NotFoundf("controller CACert")
+		return nil, errors.Errorf("controller CACert %w", coreerrors.NotFound)
 	}
 
 	// Make a new controller config based on the coerced controller config map
 	// returned from state.
 	ctrlConfig, err := controller.NewConfig(ctrlUUID, caCert, coerced)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unable to create controller config")
+		return nil, errors.Errorf("unable to create controller config: %w", err)
 	}
-	return ctrlConfig, errors.Annotate(err, "getting controller config state")
+	return ctrlConfig, nil
 }
 
 // UpdateControllerConfig updates the controller config.
 func (s *Service) UpdateControllerConfig(ctx context.Context, updateAttrs controller.Config, removeAttrs []string) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	coerced, err := controller.EncodeToString(updateAttrs)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	err = validateConfig(coerced, removeAttrs)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	// Drop controller UUID, as we don't need to set it and it will be validated
@@ -104,35 +126,38 @@ func (s *Service) UpdateControllerConfig(ctx context.Context, updateAttrs contro
 		// For example, is it possible to move from filestorage to s3storage.
 		// But it is not possible to move from s3storage to filestorage.
 		if err := validObjectStoreProgression(current, updateAttrs, removeAttrs); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		return nil
 	})
-	return errors.Annotate(err, "updating controller config state")
+	if err != nil {
+		return errors.Errorf("updating controller config state: %w", err)
+	}
+	return nil
 }
 
 // validateConfig validates the given updateAttrs and removeAttrs.
 func validateConfig(updateAttrs map[string]string, removeAttrs []string) error {
 	fields, _, err := controller.ConfigSchema.ValidationSchema()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	for k := range updateAttrs {
 		if err := validateConfigField(k); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		if field, ok := fields[k]; ok {
 			_, err := field.Coerce(updateAttrs[k], []string{k})
 			if err != nil {
-				return errors.Annotatef(err, "unable to coerce controller config key %q", k)
+				return errors.Errorf("unable to coerce controller config key %q: %w", k, err)
 			}
 		}
 	}
 	for _, r := range removeAttrs {
 		if err := validateConfigField(r); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	return nil
@@ -154,7 +179,7 @@ func validateConfigField(name string) error {
 func deserializeMap(m map[string]string) (map[string]any, error) {
 	fields, _, err := controller.ConfigSchema.ValidationSchema()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	result := make(map[string]any, len(m))
@@ -162,7 +187,7 @@ func deserializeMap(m map[string]string) (map[string]any, error) {
 		if field, ok := fields[key]; ok {
 			v, err := field.Coerce(m[key], []string{key})
 			if err != nil {
-				return nil, errors.Annotatef(err, "unable to coerce controller config key %q", key)
+				return nil, errors.Errorf("unable to coerce controller config key %q: %w", key, err)
 			}
 			result[key] = v
 			continue
@@ -201,7 +226,7 @@ func validObjectStoreProgression(current map[string]string, updateAttrs controll
 		// This is rather expensive, but it's the only way to be sure that we
 		// can change from filestorage to s3storage.
 		if err := updateCompletesS3Config(current, updateAttrs); err != nil {
-			return errors.Annotatef(err, "can not change %q from %q to %q without complete s3 config", controller.ObjectStoreType, cur, upd)
+			return errors.Errorf("can not change %q from %q to %q without complete s3 config: %w", controller.ObjectStoreType, cur, upd, err)
 		}
 		return nil
 	}
@@ -251,11 +276,26 @@ func NewWatchableService(st State, wf WatcherFactory) *WatchableService {
 	}
 }
 
-// It's for testing.
-var InitialNamespaceChanges = eventsource.InitialNamespaceChanges
-
 // Watch returns a watcher that returns keys for any changes to controller
 // config.
-func (s *WatchableService) WatchControllerConfig() (watcher.StringsWatcher, error) {
-	return s.watcherFactory.NewNamespaceWatcher("controller_config", changestream.All, InitialNamespaceChanges(s.st.AllKeysQuery()))
+func (s *WatchableService) WatchControllerConfig(ctx context.Context) (watcher.StringsWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	namespaces := s.st.NamespaceForWatchControllerConfig()
+	if len(namespaces) == 0 {
+		return nil, errors.Errorf("no namespaces for watching controller config")
+	}
+
+	filters := make([]eventsource.FilterOption, 0, len(namespaces))
+	for _, ns := range namespaces {
+		filters = append(filters, eventsource.NamespaceFilter(ns, changestream.All))
+	}
+
+	return s.watcherFactory.NewNamespaceWatcher(
+		ctx,
+		eventsource.InitialNamespaceChanges(s.st.AllKeysQuery()),
+		"controller config watcher",
+		filters[0], filters[1:]...,
+	)
 }

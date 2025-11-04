@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 	"github.com/juju/worker/v4/dependency"
@@ -44,7 +44,7 @@ type Config struct {
 type State interface {
 	broker.APICalls
 	Machines(context.Context, ...names.MachineTag) ([]provisioner.MachineResult, error)
-	ContainerManagerConfig(params.ContainerManagerConfigParams) (params.ContainerManagerConfig, error)
+	ContainerManagerConfig(context.Context, params.ContainerManagerConfigParams) (params.ContainerManagerConfig, error)
 }
 
 // Validate returns an error if the config cannot be used to start a Tracker.
@@ -108,13 +108,14 @@ func NewTracker(ctx context.Context, config Config) (*Tracker, error) {
 	// types to prevent confusion.
 	containerType := instance.LXD
 	managerConfigResult, err := provisioner.ContainerManagerConfig(
+		ctx,
 		params.ContainerManagerConfigParams{Type: containerType},
 	)
 	if err != nil {
 		return nil, errors.Annotate(err, "generating container manager config")
 	}
 	managerConfig := container.ManagerConfig(managerConfigResult.ManagerConfig)
-	managerConfigWithZones, err := broker.ConfigureAvailabilityZone(managerConfig, result[0].Machine)
+	managerConfigWithZones, err := broker.ConfigureAvailabilityZone(ctx, managerConfig, result[0].Machine)
 	if err != nil {
 		return nil, errors.Annotate(err, "configuring availability zones")
 	}
@@ -137,6 +138,7 @@ func NewTracker(ctx context.Context, config Config) (*Tracker, error) {
 		broker: broker,
 	}
 	err = catacomb.Invoke(catacomb.Plan{
+		Name: "container-broker-tracker",
 		Site: &t.catacomb,
 		Work: t.loop,
 	})

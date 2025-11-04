@@ -2,6 +2,13 @@
 #
 # Create a new machine, wait for it to boot and hotplug a pre-allocated
 # network interface which has been tagged: "nic-type: hotpluggable".
+# Then restart the machine agent and wait for juju to detect 2 network
+# interfaces before returning.
+#
+# NICs are automatically setup on Ubuntu 24.04+ by cloud-init's hotplug module.
+# See https://repost.aws/knowledge-center/ec2-ubuntu-secondary-network-interface
+# as a reference. If provisioning older Ubuntu releases, additional steps
+# with netplan are required.
 add_multi_nic_machine() {
 	local hotplug_nic_id
 	hotplug_nic_id=$1
@@ -38,112 +45,11 @@ add_multi_nic_machine() {
 
 		sleep 1
 	done
-}
 
-# configure_multi_mic_netplan()
-#
-# Patch the netplan settings for the new interface, apply the new plan,
-# restart the machine agent and wait for juju to detect the new interface
-# before returning.
-configure_multi_nic_netplan() {
-	local juju_machine_id hotplug_iface
-	juju_machine_id=$1
-	hotplug_iface=$2
-
-	# Add an entry to netplan and apply it so the second interface comes online
-	echo "[+] updating netplan and restarting machine agent"
-	# shellcheck disable=SC2086,SC2016
-	juju ssh ${juju_machine_id} 'sudo sh -c "sed -i \"/version:/d\" /etc/netplan/50-cloud-init.yaml"'
-	# shellcheck disable=SC2086,SC2016
-	default_route=$(juju ssh ${juju_machine_id} 'ip route | grep default | cut -d " " -f3')
-	# shellcheck disable=SC2086,SC2016
-	juju ssh ${juju_machine_id} "sudo sh -c 'echo \"            routes:\n                - to: default\n                  via: ${default_route}\n        ${hotplug_iface}:\n            dhcp4: true\n    version: 2\n\" >> /etc/netplan/50-cloud-init.yaml'"
-
-	# shellcheck disable=SC2086,SC2016
-	echo "[+] Reconfiguring netplan:"
-	juju ssh ${juju_machine_id} 'sudo cat /etc/netplan/50-cloud-init.yaml'
-	# shellcheck disable=SC2086,SC2016
-	juju ssh ${juju_machine_id} 'sudo netplan apply' || true
-	echo "[+] Applied"
-	# shellcheck disable=SC2086,SC2016
-	juju ssh ${juju_machine_id} 'sudo systemctl restart jujud-machine-*'
+	echo "[+] restarting machine agent on ${juju_machine_id}..."
+	juju ssh "${juju_machine_id}" 'sudo systemctl restart jujud-machine-*'
 
 	# Wait for the interface to be detected by juju
 	echo "[+] waiting for juju to detect added NIC"
-	wait_for_machine_netif_count "$juju_machine_id" "3"
-}
-
-# assert_net_iface_for_endpoint_matches(app_name, endpoint_name, exp_if_name)
-#
-# Verify that the (non-fan) network adaptor assigned to the specified endpoint
-# matches the provided value.
-assert_net_iface_for_endpoint_matches() {
-	local app_name endpoint_name exp_if_name
-
-	app_name=${1}
-	endpoint_name=${2}
-	exp_if_name=${3}
-
-	# shellcheck disable=SC2086,SC2016
-	got_if=$(juju exec -a ${app_name} "network-get ${endpoint_name}" | grep "interfacename: en" | awk '{print $2}' || echo "")
-	if [ "$got_if" != "$exp_if_name" ]; then
-		# shellcheck disable=SC2086,SC2016,SC2046
-		echo $(red "Expected network interface for ${app_name}:${endpoint_name} to be ${exp_if_name}; got ${got_if}")
-		exit 1
-	fi
-}
-
-# assert_endpoint_binding_matches(app_name, endpoint_name, exp_space_name)
-#
-# Verify that show-application shows that the specified endpoint is bound to
-# the provided space name.
-assert_endpoint_binding_matches() {
-	local app_name endpoint_name exp_space_name
-
-	app_name=${1}
-	endpoint_name=${2}
-	exp_space_name=${3}
-
-	# shellcheck disable=SC2086,SC2016
-	got=$(juju show-application ${app_name} --format json | jq -r ".[\"${app_name}\"] | .[\"endpoint-bindings\"] | .[\"${endpoint_name}\"]" || echo "")
-	if [ "$got" != "$exp_space_name" ]; then
-		# shellcheck disable=SC2086,SC2016,SC2046
-		echo $(red "Expected endpoint ${endpoint_name} in juju show-application ${app_name} to be ${exp_space_name}; got ${got}")
-		exit 1
-	fi
-}
-
-assert_machine_ip_is_in_cidrs() {
-	local machine_index cidrs
-
-	machine_index=${1}
-	cidrs=${2}
-
-	if ! which "grepcidr" >/dev/null 2>&1; then
-		sudo apt install grepcidr -y
-	fi
-
-	for cidr in $cidrs; do
-		machine_ip_in_cidr=$(juju machines --format json | jq -r ".machines[\"${machine_index}\"][\"ip-addresses\"][]" | grepcidr "${cidr}" || echo "")
-		if [ -n "${machine_ip_in_cidr}" ]; then
-			echo "${machine_ip_in_cidr}"
-			return
-		fi
-	done
-
-	# shellcheck disable=SC2086,SC2016,SC2046
-	echo $(red "machine ${machine_index} has no ips in subnet ${cidrs}") 1>&2
-	exit 1
-}
-
-# get_unit_index(app_name)
-#
-# Lookup and return the unit index for app_name.
-get_unit_index() {
-	local app_name
-
-	app_name=${1}
-
-	index=$(juju status | grep "${app_name}/" | cut -d' ' -f1 | cut -d'/' -f2 | cut -d'*' -f1)
-	echo "$index"
+	wait_for_machine_netif_count "$juju_machine_id" "2"
 }

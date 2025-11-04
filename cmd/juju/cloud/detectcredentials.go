@@ -5,25 +5,26 @@ package cloud
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/naturalsort"
 
 	apicloud "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/naturalsort"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -42,7 +43,7 @@ type detectCredentialsCommand struct {
 	cloudByNameFunc func(string) (*jujucloud.Cloud, error)
 
 	// These attributes are used when adding credentials to a controller.
-	credentialAPIFunc func() (CredentialAPI, error)
+	credentialAPIFunc func(ctx context.Context) (CredentialAPI, error)
 	remoteClouds      map[string]jujucloud.Cloud
 }
 
@@ -55,36 +56,36 @@ in a series of prompts to facilitated interactive addition and upload.
 An alternative to this command is ` + "`juju add-credential`" + `.
 
 After validating the contents, credentials are added to
-this Juju client if --client is specified.
+this Juju client if ` + "`--client`" + ` is specified.
 
-To upload credentials to a controller, use --controller option. 
+To upload credentials to a controller, use ` + "`--controller`" + ` option.
 
 Below are the cloud types for which credentials may be autoloaded,
 including the locations searched.
 
-EC2
-  Credentials and regions:
-    1. On Linux, $HOME/.aws/credentials and $HOME/.aws/config
-    2. Environment variables AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+- EC2
+  - Credentials and regions:
+    - On Linux, ` + "`$HOME/.aws/credentials`" + ` and ` + "`$HOME/.aws/config`" + `.
+    - Environment variables: ` + "`AWS_ACCESS_KEY_ID`" + `, ` + "`AWS_SECRET_ACCESS_KEY`" + `.
 
-GCE
-  Credentials:
-    1. A JSON file whose path is specified by the
-       GOOGLE_APPLICATION_CREDENTIALS environment variable
-    2. On Linux, $HOME/.config/gcloud/application_default_credentials.json
-       Default region is specified by the CLOUDSDK_COMPUTE_REGION environment
+- GCE
+  - Credentials:
+    - A JSON file whose path is specified by the
+       ` + "`GOOGLE_APPLICATION_CREDENTIALS`" + ` environment variable.
+    - On Linux, ` + "`$HOME/.config/gcloud/application_default_credentials.json`" + `.
+       Default region is specified by the ` + "`CLOUDSDK_COMPUTE_REGION`" + ` environment
        variable.
-    3. On Windows, %APPDATA%\gcloud\application_default_credentials.json
+    - On Windows, ` + "`%APPDATA%gcloud\application_default_credentials.json`" + `.
 
-OpenStack
-  Credentials:
-    1. On Linux, $HOME/.novarc
-    2. Environment variables OS_USERNAME, OS_PASSWORD, OS_TENANT_NAME,
-	   OS_DOMAIN_NAME
+- OpenStack
+  - Credentials:
+    - On Linux, ` + "`$HOME/.novarc`" + `.
+    - Environment variables: ` + "`OS_USERNAME`" + `, ` + "`OS_PASSWORD`" + `, ` + "`OS_TENANT_NAME`" + `,
+	   ` + "`OS_DOMAIN_NAME`" + `.
 
-LXD
-  Credentials:
-    1. On Linux, $HOME/.config/lxc/config.yml
+- LXD
+  - Credentials:
+    - On Linux, ` + "`$HOME/.config/lxc/config.yml`" + `.
 
 `[1:]
 
@@ -153,9 +154,9 @@ type discoveredCredential struct {
 	isDefault        bool
 }
 
-func (c *detectCredentialsCommand) credentialsAPI() (CredentialAPI, error) {
+func (c *detectCredentialsCommand) credentialsAPI(ctx context.Context) (CredentialAPI, error) {
 	var err error
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -187,13 +188,13 @@ func (c *detectCredentialsCommand) allClouds(ctxt *cmd.Context) (map[string]juju
 		// If there is a cloud definition for the same cloud both
 		// on the controller and on the client and they conflict,
 		// we want definition from the controller to take precedence.
-		client, err := c.credentialAPIFunc()
+		client, err := c.credentialAPIFunc(ctxt)
 		if err != nil {
 			return nil, err
 		}
 		defer client.Close()
 
-		remoteUserClouds, err := client.Clouds()
+		remoteUserClouds, err := client.Clouds(ctxt)
 		if err != nil {
 			return nil, err
 		}
@@ -250,13 +251,13 @@ func (c *detectCredentialsCommand) Run(ctxt *cmd.Context) error {
 		if err != nil {
 			// Should never happen but it will on go 1.2
 			// because lxd provider is not built.
-			logger.Errorf("provider %q not available on this platform", providerName)
+			logger.Errorf(context.TODO(), "provider %q not available on this platform", providerName)
 			continue
 		}
 		if detectCredentials, ok := provider.(environs.ProviderCredentials); ok {
 			detected, err := detectCredentials.DetectCredentials("")
 			if err != nil && !errors.Is(err, errors.NotFound) {
-				logger.Errorf("could not detect credentials for provider %q: %v", providerName, err)
+				logger.Errorf(context.TODO(), "could not detect credentials for provider %q: %v", providerName, err)
 				continue
 			}
 			if errors.Is(err, errors.NotFound) || len(detected.AuthCredentials) == 0 {
@@ -277,7 +278,7 @@ func (c *detectCredentialsCommand) Run(ctxt *cmd.Context) error {
 			for _, credName := range sortedName {
 				newCred := detected.AuthCredentials[credName]
 				if credName == "" {
-					logger.Debugf("ignoring unnamed credential for provider %s", providerName)
+					logger.Debugf(context.TODO(), "ignoring unnamed credential for provider %s", providerName)
 					continue
 				}
 				// Ignore empty credentials.
@@ -483,7 +484,7 @@ func (c *detectCredentialsCommand) addRemoteCredentials(ctxt *cmd.Context, cloud
 		return err
 	}
 
-	client, err := c.credentialAPIFunc()
+	client, err := c.credentialAPIFunc(ctxt)
 	if err != nil {
 		return err
 	}
@@ -503,9 +504,9 @@ func (c *detectCredentialsCommand) addRemoteCredentials(ctxt *cmd.Context, cloud
 			if len(verified) == 0 {
 				return erred
 			}
-			result, err := client.AddCloudsCredentials(verified)
+			result, err := client.AddCloudsCredentials(ctxt, verified)
 			if err != nil {
-				logger.Errorf("%v", err)
+				logger.Errorf(context.TODO(), "%v", err)
 				ctxt.Warningf("Could not upload credentials to controller %q", c.ControllerName)
 			}
 			results = append(results, result...)

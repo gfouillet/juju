@@ -5,19 +5,19 @@ package uniter_test
 
 import (
 	"fmt"
+	stdtesting "testing"
 	"time"
 
 	"github.com/canonical/pebble/client"
 	"github.com/juju/clock/testclock"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/uniter"
 	"github.com/juju/juju/internal/worker/uniter/container"
-	"github.com/juju/juju/testing"
 )
 
 type pebbleNoticerSuite struct {
@@ -28,9 +28,11 @@ type pebbleNoticerSuite struct {
 	workloadEvents    container.WorkloadEvents
 }
 
-var _ = gc.Suite(&pebbleNoticerSuite{})
+func TestPebbleNoticerSuite(t *stdtesting.T) {
+	tc.Run(t, &pebbleNoticerSuite{})
+}
 
-func (s *pebbleNoticerSuite) setUpWorker(c *gc.C, containerNames []string) {
+func (s *pebbleNoticerSuite) setUpWorker(c *tc.C, containerNames []string) {
 	s.clock = testclock.NewClock(time.Time{})
 	s.workloadEventChan = make(chan string)
 	s.workloadEvents = container.NewWorkloadEvents()
@@ -42,26 +44,26 @@ func (s *pebbleNoticerSuite) setUpWorker(c *gc.C, containerNames []string) {
 		}
 	}
 	newClient := func(cfg *client.Config) (uniter.PebbleClient, error) {
-		c.Assert(cfg.Socket, gc.Matches, pebbleSocketPathRegexpString)
+		c.Assert(cfg.Socket, tc.Matches, pebbleSocketPathRegexpString)
 		matches := pebbleSocketPathRegexp.FindAllStringSubmatch(cfg.Socket, 1)
 		return s.clients[matches[0][1]], nil
 	}
 	s.worker = uniter.NewPebbleNoticer(loggertesting.WrapCheckLog(c), s.clock, containerNames, s.workloadEventChan, s.workloadEvents, newClient)
 }
 
-func (s *pebbleNoticerSuite) waitWorkloadEvent(c *gc.C, expected container.WorkloadEvent) {
+func (s *pebbleNoticerSuite) waitWorkloadEvent(c *tc.C, expected container.WorkloadEvent) {
 	select {
 	case id := <-s.workloadEventChan:
 		event, callback, err := s.workloadEvents.GetWorkloadEvent(id)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(event, gc.DeepEquals, expected)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(event, tc.DeepEquals, expected)
 		callback(nil)
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for event")
 	}
 }
 
-func (s *pebbleNoticerSuite) TestWaitNotices(c *gc.C) {
+func (s *pebbleNoticerSuite) TestWaitNotices(c *tc.C) {
 	s.setUpWorker(c, []string{"c1"})
 	defer workertest.CleanKill(c, s.worker)
 
@@ -113,7 +115,57 @@ func (s *pebbleNoticerSuite) TestWaitNotices(c *gc.C) {
 	})
 }
 
-func (s *pebbleNoticerSuite) TestWaitNoticesError(c *gc.C) {
+// TestCheckFailed verifies that a change-updated notice that is of kind
+// perform-check and has a status of Error results in a CheckFailed event.
+func (s *pebbleNoticerSuite) TestCheckFailed(c *tc.C) {
+	s.setUpWorker(c, []string{"c1"})
+	defer workertest.CleanKill(c, s.worker)
+
+	s.clients["c1"].AddChange(c, &client.Change{
+		ID:     "42",
+		Kind:   "perform-check",
+		Status: "Error",
+	})
+	s.clients["c1"].AddNotice(c, &client.Notice{
+		ID:           "1",
+		Type:         "change-update",
+		Key:          "42",
+		LastRepeated: time.Now(),
+		LastData:     map[string]string{"kind": "perform-check", "check-name": "http-check"},
+	})
+	s.waitWorkloadEvent(c, container.WorkloadEvent{
+		Type:         container.CheckFailedEvent,
+		WorkloadName: "c1",
+		CheckName:    "http-check",
+	})
+}
+
+// TestCheckRecovered verifies that a change-updated notice that is of kind
+// recover-check and has a status of Done results in a CheckRecovered event.
+func (s *pebbleNoticerSuite) TestCheckRecovered(c *tc.C) {
+	s.setUpWorker(c, []string{"c1"})
+	defer workertest.CleanKill(c, s.worker)
+
+	s.clients["c1"].AddChange(c, &client.Change{
+		ID:     "42",
+		Kind:   "recover-check",
+		Status: "Done",
+	})
+	s.clients["c1"].AddNotice(c, &client.Notice{
+		ID:           "1",
+		Type:         "change-update",
+		Key:          "42",
+		LastRepeated: time.Now(),
+		LastData:     map[string]string{"kind": "recover-check", "check-name": "tcp-check"},
+	})
+	s.waitWorkloadEvent(c, container.WorkloadEvent{
+		Type:         container.CheckRecoveredEvent,
+		WorkloadName: "c1",
+		CheckName:    "tcp-check",
+	})
+}
+
+func (s *pebbleNoticerSuite) TestWaitNoticesError(c *tc.C) {
 	s.setUpWorker(c, []string{"c1"})
 	defer workertest.CleanKill(c, s.worker)
 
@@ -138,7 +190,7 @@ func (s *pebbleNoticerSuite) TestWaitNoticesError(c *gc.C) {
 	})
 }
 
-func (s *pebbleNoticerSuite) TestIgnoreUnhandledType(c *gc.C) {
+func (s *pebbleNoticerSuite) TestIgnoreUnhandledType(c *tc.C) {
 	s.setUpWorker(c, []string{"c1"})
 	defer workertest.CleanKill(c, s.worker)
 
@@ -155,7 +207,66 @@ func (s *pebbleNoticerSuite) TestIgnoreUnhandledType(c *gc.C) {
 	}
 }
 
-func (s *pebbleNoticerSuite) TestMultipleContainers(c *gc.C) {
+func (s *pebbleNoticerSuite) TestFailedChangeNotFound(c *tc.C) {
+	s.setUpWorker(c, []string{"c1"})
+	defer workertest.CleanKill(c, s.worker)
+
+	s.clients["c1"].AddNotice(c, &client.Notice{
+		ID:           "1",
+		Type:         "change-update",
+		Key:          "42",
+		LastRepeated: time.Now(),
+		LastData:     map[string]string{"kind": "perform-check", "check-name": "http-check"},
+	})
+	s.waitWorkloadEvent(c, container.WorkloadEvent{
+		Type:         container.CheckFailedEvent,
+		WorkloadName: "c1",
+		CheckName:    "http-check",
+	})
+}
+
+func (s *pebbleNoticerSuite) TestRecoveredChangeNotFound(c *tc.C) {
+	s.setUpWorker(c, []string{"c1"})
+	defer workertest.CleanKill(c, s.worker)
+
+	s.clients["c1"].AddNotice(c, &client.Notice{
+		ID:           "1",
+		Type:         "change-update",
+		Key:          "42",
+		LastRepeated: time.Now(),
+		LastData:     map[string]string{"kind": "recover-check", "check-name": "http-check"},
+	})
+	s.waitWorkloadEvent(c, container.WorkloadEvent{
+		Type:         container.CheckRecoveredEvent,
+		WorkloadName: "c1",
+		CheckName:    "http-check",
+	})
+}
+
+func (s *pebbleNoticerSuite) TestOtherChangeError(c *tc.C) {
+	s.setUpWorker(c, []string{"c1"})
+	defer func() {
+		err := workertest.CheckKilled(c, s.worker)
+		c.Assert(err, tc.ErrorMatches, ".*some other error")
+	}()
+
+	s.clients["c1"].changeErr = fmt.Errorf("some other error")
+	s.clients["c1"].AddNotice(c, &client.Notice{
+		ID:           "1",
+		Type:         "change-update",
+		Key:          "42",
+		LastRepeated: time.Now(),
+		LastData:     map[string]string{"kind": "perform-check", "check-name": "http-check"},
+	})
+
+	select {
+	case <-s.workloadEventChan:
+		c.Fatalf("should ignore this notice")
+	case <-time.After(testing.ShortWait):
+	}
+}
+
+func (s *pebbleNoticerSuite) TestMultipleContainers(c *tc.C) {
 	s.setUpWorker(c, []string{"c1", "c2"})
 	defer workertest.CleanKill(c, s.worker)
 

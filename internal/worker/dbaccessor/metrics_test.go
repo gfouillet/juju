@@ -5,22 +5,24 @@ package dbaccessor
 
 import (
 	"bytes"
+	stdtesting "testing"
 	time "time"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/goleak"
 
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
-type metricsSuite struct {
-	baseSuite
+type metricsSuite struct{}
+
+func TestMetricsSuite(t *stdtesting.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &metricsSuite{})
 }
 
-var _ = gc.Suite(&metricsSuite{})
-
-func (s *metricsSuite) TestMetricsAreCollected(c *gc.C) {
+func (s *metricsSuite) TestMetricsAreCollected(c *tc.C) {
 	collector := NewMetricsCollector()
 
 	done := make(chan struct{})
@@ -28,6 +30,8 @@ func (s *metricsSuite) TestMetricsAreCollected(c *gc.C) {
 		defer close(done)
 		collector.DBDuration.WithLabelValues("foo", "success").Observe(0.1)
 		collector.DBRequests.WithLabelValues("foo").Inc()
+		collector.DBErrors.WithLabelValues("foo", "bar").Inc()
+		collector.DBSuccess.WithLabelValues("foo").Inc()
 		collector.TxnRequests.WithLabelValues("foo").Inc()
 		collector.TxnRetries.WithLabelValues("foo").Inc()
 	}()
@@ -55,9 +59,15 @@ juju_db_duration_seconds_bucket{namespace="foo",result="success",le="10"} 1
 juju_db_duration_seconds_bucket{namespace="foo",result="success",le="+Inf"} 1
 juju_db_duration_seconds_sum{namespace="foo",result="success"} 0.1
 juju_db_duration_seconds_count{namespace="foo",result="success"} 1
+# HELP juju_db_errors_total Total number of db errors.
+# TYPE juju_db_errors_total counter
+juju_db_errors_total{error="bar",namespace="foo"} 1
 # HELP juju_db_requests_total Number of active db requests.
 # TYPE juju_db_requests_total gauge
 juju_db_requests_total{namespace="foo"} 1
+# HELP juju_db_success_total Total number of successful db operations.
+# TYPE juju_db_success_total counter
+juju_db_success_total{namespace="foo"} 1
 # HELP juju_db_txn_requests_total Total number of txn requests including retries.
 # TYPE juju_db_txn_requests_total counter
 juju_db_txn_requests_total{namespace="foo"} 1
@@ -70,10 +80,12 @@ juju_db_txn_retries_total{namespace="foo"} 1
 		collector, expected,
 		"juju_db_requests_total",
 		"juju_db_duration_seconds",
+		"juju_db_errors_total",
+		"juju_db_success_total",
 		"juju_db_txn_requests_total",
 		"juju_db_txn_retries_total",
 	)
-	if !c.Check(err, jc.ErrorIsNil) {
+	if !c.Check(err, tc.ErrorIsNil) {
 		c.Logf("\nerror:\n%v", err)
 	}
 }

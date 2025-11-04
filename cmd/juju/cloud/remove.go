@@ -4,16 +4,18 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
+	"github.com/juju/gnuflag"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageRemoveCloudSummary = `
@@ -22,10 +24,10 @@ Removes a cloud from Juju.`[1:]
 var usageRemoveCloudDetails = `
 Remove a cloud from Juju.
 
-If --controller is used, also remove the cloud from the specified controller,
+If ` + "`--controller`" + ` is used, also remove the cloud from the specified controller,
 if it is not in use.
 
-If --client is specified, Juju removes the cloud from this client.
+If ` + "`--client`" + ` is specified, Juju removes the cloud from this client.
 
 `
 
@@ -42,11 +44,15 @@ type removeCloudCommand struct {
 	Cloud string
 
 	// Used when querying a controller for its cloud details
-	removeCloudAPIFunc func() (RemoveCloudAPI, error)
+	removeCloudAPIFunc func(ctx context.Context) (RemoveCloudAPI, error)
+
+	// targetController holds a controller name when removing
+	// a cloud from a controller managed by JAAS.
+	targetController string
 }
 
 type RemoveCloudAPI interface {
-	RemoveCloud(cloud string) error
+	RemoveCloud(ctx context.Context, cloud string) error
 	Close() error
 }
 
@@ -62,8 +68,8 @@ func NewRemoveCloudCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *removeCloudCommand) cloudAPI() (RemoveCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *removeCloudCommand) cloudAPI(ctx context.Context) (RemoveCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -85,7 +91,17 @@ func (c *removeCloudCommand) Info() *cmd.Info {
 	})
 }
 
+// SetFlags initializes the flags supported by the command.
+func (c *removeCloudCommand) SetFlags(f *gnuflag.FlagSet) {
+	c.OptionalControllerCommand.SetFlags(f)
+	f.StringVar(&c.targetController, "target-controller", "", "The name of a JAAS managed controller to remove a cloud from")
+}
+
 func (c *removeCloudCommand) Init(args []string) (err error) {
+	if c.targetController != "" {
+		return cmd.ErrCommandMissing
+	}
+
 	if err := c.OptionalControllerCommand.Init(args); err != nil {
 		return err
 	}
@@ -161,12 +177,12 @@ func (c *removeCloudCommand) removeLocalPersonalCloud(ctxt *cmd.Context) error {
 }
 
 func (c *removeCloudCommand) removeControllerCloud(ctxt *cmd.Context) error {
-	api, err := c.removeCloudAPIFunc()
+	api, err := c.removeCloudAPIFunc(ctxt)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
-	err = api.RemoveCloud(c.Cloud)
+	err = api.RemoveCloud(ctxt, c.Cloud)
 	if err != nil {
 		return err
 	}

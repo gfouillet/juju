@@ -7,11 +7,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
-
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageAddSSHKeySummary = `
@@ -21,7 +20,7 @@ var usageAddSSHKeyDetails = `
 Juju maintains a per-model cache of public SSH keys which it copies to
 each unit (including units already deployed). By default this includes the
 key of the user who created the model (assuming it is stored in the
-default location ~/.ssh/). Additional keys may be added with this command,
+default location ` + "`~/.ssh/`" + `). Additional keys may be added with this command,
 quoting the entire public key as an argument.
 
 `[1:]
@@ -37,7 +36,7 @@ const usageAddSSHKeyExamples = `
     VCAfjjHObWHwNQ/ZU2KrX1/lv/+lBChx2tJliqQpyYMiA3nrtS
     jfqQgZfjVF5vz8LESQbGc6+vLcXZ9KQpuYDt joe@ubuntu"
 
-For ease of use it is possible to use shell substitution to pass the key 
+For ease of use it is possible to use shell substitution to pass the key
 to the command:
 
     juju add-ssh-key "$(cat ~/mykey.pub)"
@@ -84,8 +83,8 @@ func (c *addKeysCommand) Init(args []string) error {
 }
 
 // Run implements Command.Run.
-func (c *addKeysCommand) Run(context *cmd.Context) error {
-	client, err := c.NewKeyManagerClient()
+func (c *addKeysCommand) Run(ctx *cmd.Context) error {
+	client, err := c.NewKeyManagerClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -93,13 +92,13 @@ func (c *addKeysCommand) Run(context *cmd.Context) error {
 	// TODO(alexisb) - currently keys are global which is not ideal.
 	// keymanager needs to be updated to allow keys per user
 	c.user = "admin"
-	results, err := client.AddKeys(c.user, c.sshKeys...)
+	results, err := client.AddKeys(ctx, c.user, c.sshKeys...)
 	if err != nil {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
 	for i, result := range results {
 		if result.Error != nil {
-			fmt.Fprintf(context.Stderr, "cannot add key %q: %v\n", c.sshKeys[i], result.Error)
+			fmt.Fprintf(ctx.Stderr, "cannot add key %q: %v\n", c.sshKeys[i], result.Error)
 		}
 	}
 	return nil

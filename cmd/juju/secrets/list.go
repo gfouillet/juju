@@ -4,14 +4,14 @@
 package secrets
 
 import (
+	"context"
 	"io"
 	"sort"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apisecrets "github.com/juju/juju/api/client/secrets"
 	jujucmd "github.com/juju/juju/cmd"
@@ -19,13 +19,14 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type listSecretsCommand struct {
 	modelcmd.ModelCommandBase
 	out cmd.Output
 
-	listSecretsAPIFunc func() (ListSecretsAPI, error)
+	listSecretsAPIFunc func(ctx context.Context) (ListSecretsAPI, error)
 	revealSecrets      bool
 	owner              string
 }
@@ -41,7 +42,7 @@ const listSecretsExamples = `
 
 // ListSecretsAPI is the secrets client API.
 type ListSecretsAPI interface {
-	ListSecrets(bool, secrets.Filter) ([]apisecrets.SecretDetails, error)
+	ListSecrets(context.Context, bool, secrets.Filter) ([]apisecrets.SecretDetails, error)
 	Close() error
 }
 
@@ -53,8 +54,8 @@ func NewListSecretsCommand() cmd.Command {
 	return modelcmd.Wrap(c)
 }
 
-func (c *listSecretsCommand) secretsAPI() (ListSecretsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *listSecretsCommand) secretsAPI(ctx context.Context) (ListSecretsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -70,6 +71,12 @@ func (c *listSecretsCommand) Info() *cmd.Info {
 		Doc:      listSecretsDoc,
 		Examples: listSecretsExamples,
 		Aliases:  []string{"list-secrets"},
+		SeeAlso: []string{
+			"add-secret",
+			"remove-secret",
+			"show-secret",
+			"update-secret",
+		},
 	})
 }
 
@@ -101,21 +108,22 @@ type secretRevisionDetails struct {
 type secretDetailsByID map[string]secretDisplayDetails
 
 type secretDisplayDetails struct {
-	URI              *secrets.URI            `json:"-" yaml:"-"`
-	LatestRevision   int                     `json:"revision" yaml:"revision"`
-	LatestExpireTime *time.Time              `json:"expires,omitempty" yaml:"expires,omitempty"`
-	RotatePolicy     secrets.RotatePolicy    `json:"rotation,omitempty" yaml:"rotation,omitempty"`
-	NextRotateTime   *time.Time              `json:"rotates,omitempty" yaml:"rotates,omitempty"`
-	Owner            string                  `json:"owner,omitempty" yaml:"owner,omitempty"`
-	Description      string                  `json:"description,omitempty" yaml:"description,omitempty"`
-	Name             string                  `json:"name,omitempty" yaml:"name,omitempty"`
-	Label            string                  `json:"label,omitempty" yaml:"label,omitempty"`
-	CreateTime       time.Time               `json:"created" yaml:"created"`
-	UpdateTime       time.Time               `json:"updated" yaml:"updated"`
-	Error            string                  `json:"error,omitempty" yaml:"error,omitempty"`
-	Value            *secretValueDetails     `json:"content,omitempty" yaml:"content,omitempty"`
-	Revisions        []secretRevisionDetails `json:"revisions,omitempty" yaml:"revisions,omitempty"`
-	Access           []AccessInfo            `yaml:"access,omitempty" json:"access,omitempty"`
+	URI                    *secrets.URI            `json:"-" yaml:"-"`
+	LatestRevision         int                     `json:"revision" yaml:"revision"`
+	LatestRevisionChecksum string                  `json:"checksum,omitempty" yaml:"checksum,omitempty"`
+	LatestExpireTime       *time.Time              `json:"expires,omitempty" yaml:"expires,omitempty"`
+	RotatePolicy           secrets.RotatePolicy    `json:"rotation,omitempty" yaml:"rotation,omitempty"`
+	NextRotateTime         *time.Time              `json:"rotates,omitempty" yaml:"rotates,omitempty"`
+	Owner                  string                  `json:"owner,omitempty" yaml:"owner,omitempty"`
+	Description            string                  `json:"description,omitempty" yaml:"description,omitempty"`
+	Name                   string                  `json:"name,omitempty" yaml:"name,omitempty"`
+	Label                  string                  `json:"label,omitempty" yaml:"label,omitempty"`
+	CreateTime             time.Time               `json:"created" yaml:"created"`
+	UpdateTime             time.Time               `json:"updated" yaml:"updated"`
+	Error                  string                  `json:"error,omitempty" yaml:"error,omitempty"`
+	Value                  *secretValueDetails     `json:"content,omitempty" yaml:"content,omitempty"`
+	Revisions              []secretRevisionDetails `json:"revisions,omitempty" yaml:"revisions,omitempty"`
+	Access                 []AccessInfo            `yaml:"access,omitempty" json:"access,omitempty"`
 }
 
 // AccessInfo holds info about a secret access information.
@@ -144,7 +152,7 @@ func (c *listSecretsCommand) Run(ctxt *cmd.Context) error {
 		c.revealSecrets = false
 	}
 
-	api, err := c.listSecretsAPIFunc()
+	api, err := c.listSecretsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -165,7 +173,7 @@ func (c *listSecretsCommand) Run(ctxt *cmd.Context) error {
 			return errors.Errorf("invalid owner %q", c.owner)
 		}
 	}
-	result, err := api.ListSecrets(c.revealSecrets, filter)
+	result, err := api.ListSecrets(ctxt, c.revealSecrets, filter)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -235,6 +243,7 @@ func gatherSecretInfo(
 			}
 		}
 		if reveal && m.Value != nil && !m.Value.IsEmpty() {
+			info.LatestRevisionChecksum = m.Metadata.LatestRevisionChecksum
 			valueDetails := &secretValueDetails{}
 			val, err := m.Value.Values()
 			if err != nil {

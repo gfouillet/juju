@@ -7,14 +7,14 @@ import (
 	"context"
 	"time"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/lease"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/domain/lease/service"
 	"github.com/juju/juju/domain/lease/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 const (
@@ -65,8 +65,15 @@ func (o *importOperation) Setup(scope modelmigration.Scope) error {
 // if the operation fails.
 func (o *importOperation) Execute(ctx context.Context, model description.Model) error {
 	for _, app := range model.Applications() {
+		if app.Leader() == "" {
+			// If no leader is set, we don't need to claim a lease. The lease
+			// worker will select one at the next iteration.
+			o.logger.Infof(ctx, "application %q has no leader", app.Name())
+			continue
+		}
+
 		key := lease.Key{
-			ModelUUID: model.Tag().Id(),
+			ModelUUID: model.UUID(),
 			Namespace: app.Name(),
 			Lease:     lease.ApplicationLeadershipNamespace,
 		}
@@ -75,7 +82,7 @@ func (o *importOperation) Execute(ctx context.Context, model description.Model) 
 			Duration: LeadershipGuarantee,
 		}
 		if err := o.service.ClaimLease(ctx, key, req); err != nil {
-			return errors.Annotatef(err, "claiming lease for %q", key)
+			return errors.Errorf("claiming lease for %q: %w", key, err)
 		}
 	}
 

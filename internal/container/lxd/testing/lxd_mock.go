@@ -1310,6 +1310,84 @@ func (c *MockImageServerGetImagesCall) DoAndReturn(f func() ([]api.Image, error)
 	return c
 }
 
+// GetImagesAllProjects mocks base method.
+func (m *MockImageServer) GetImagesAllProjects() ([]api.Image, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImagesAllProjects")
+	ret0, _ := ret[0].([]api.Image)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImagesAllProjects indicates an expected call of GetImagesAllProjects.
+func (mr *MockImageServerMockRecorder) GetImagesAllProjects() *MockImageServerGetImagesAllProjectsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImagesAllProjects", reflect.TypeOf((*MockImageServer)(nil).GetImagesAllProjects))
+	return &MockImageServerGetImagesAllProjectsCall{Call: call}
+}
+
+// MockImageServerGetImagesAllProjectsCall wrap *gomock.Call
+type MockImageServerGetImagesAllProjectsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockImageServerGetImagesAllProjectsCall) Return(arg0 []api.Image, arg1 error) *MockImageServerGetImagesAllProjectsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockImageServerGetImagesAllProjectsCall) Do(f func() ([]api.Image, error)) *MockImageServerGetImagesAllProjectsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockImageServerGetImagesAllProjectsCall) DoAndReturn(f func() ([]api.Image, error)) *MockImageServerGetImagesAllProjectsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetImagesAllProjectsWithFilter mocks base method.
+func (m *MockImageServer) GetImagesAllProjectsWithFilter(arg0 []string) ([]api.Image, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImagesAllProjectsWithFilter", arg0)
+	ret0, _ := ret[0].([]api.Image)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImagesAllProjectsWithFilter indicates an expected call of GetImagesAllProjectsWithFilter.
+func (mr *MockImageServerMockRecorder) GetImagesAllProjectsWithFilter(arg0 any) *MockImageServerGetImagesAllProjectsWithFilterCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImagesAllProjectsWithFilter", reflect.TypeOf((*MockImageServer)(nil).GetImagesAllProjectsWithFilter), arg0)
+	return &MockImageServerGetImagesAllProjectsWithFilterCall{Call: call}
+}
+
+// MockImageServerGetImagesAllProjectsWithFilterCall wrap *gomock.Call
+type MockImageServerGetImagesAllProjectsWithFilterCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockImageServerGetImagesAllProjectsWithFilterCall) Return(arg0 []api.Image, arg1 error) *MockImageServerGetImagesAllProjectsWithFilterCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockImageServerGetImagesAllProjectsWithFilterCall) Do(f func([]string) ([]api.Image, error)) *MockImageServerGetImagesAllProjectsWithFilterCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockImageServerGetImagesAllProjectsWithFilterCall) DoAndReturn(f func([]string) ([]api.Image, error)) *MockImageServerGetImagesAllProjectsWithFilterCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // GetImagesWithFilter mocks base method.
 func (m *MockImageServer) GetImagesWithFilter(arg0 []string) ([]api.Image, error) {
 	m.ctrl.T.Helper()
@@ -1803,6 +1881,44 @@ func (c *MockInstanceServerCopyStoragePoolVolumeCall) DoAndReturn(f func(string,
 	return c
 }
 
+// CreateAuthGroup mocks base method.
+func (m *MockInstanceServer) CreateAuthGroup(arg0 api.AuthGroupsPost) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateAuthGroup", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreateAuthGroup indicates an expected call of CreateAuthGroup.
+func (mr *MockInstanceServerMockRecorder) CreateAuthGroup(arg0 any) *MockInstanceServerCreateAuthGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateAuthGroup", reflect.TypeOf((*MockInstanceServer)(nil).CreateAuthGroup), arg0)
+	return &MockInstanceServerCreateAuthGroupCall{Call: call}
+}
+
+// MockInstanceServerCreateAuthGroupCall wrap *gomock.Call
+type MockInstanceServerCreateAuthGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerCreateAuthGroupCall) Return(arg0 error) *MockInstanceServerCreateAuthGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerCreateAuthGroupCall) Do(f func(api.AuthGroupsPost) error) *MockInstanceServerCreateAuthGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerCreateAuthGroupCall) DoAndReturn(f func(api.AuthGroupsPost) error) *MockInstanceServerCreateAuthGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // CreateCertificate mocks base method.
 func (m *MockInstanceServer) CreateCertificate(arg0 api.CertificatesPost) error {
 	m.ctrl.T.Helper()
@@ -2224,6 +2340,121 @@ func (c *MockInstanceServerCreateContainerTemplateFileCall) Do(f func(string, st
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerCreateContainerTemplateFileCall) DoAndReturn(f func(string, string, io.ReadSeeker) error) *MockInstanceServerCreateContainerTemplateFileCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// CreateIdentityProviderGroup mocks base method.
+func (m *MockInstanceServer) CreateIdentityProviderGroup(arg0 api.IdentityProviderGroup) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateIdentityProviderGroup", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreateIdentityProviderGroup indicates an expected call of CreateIdentityProviderGroup.
+func (mr *MockInstanceServerMockRecorder) CreateIdentityProviderGroup(arg0 any) *MockInstanceServerCreateIdentityProviderGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateIdentityProviderGroup", reflect.TypeOf((*MockInstanceServer)(nil).CreateIdentityProviderGroup), arg0)
+	return &MockInstanceServerCreateIdentityProviderGroupCall{Call: call}
+}
+
+// MockInstanceServerCreateIdentityProviderGroupCall wrap *gomock.Call
+type MockInstanceServerCreateIdentityProviderGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerCreateIdentityProviderGroupCall) Return(arg0 error) *MockInstanceServerCreateIdentityProviderGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerCreateIdentityProviderGroupCall) Do(f func(api.IdentityProviderGroup) error) *MockInstanceServerCreateIdentityProviderGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerCreateIdentityProviderGroupCall) DoAndReturn(f func(api.IdentityProviderGroup) error) *MockInstanceServerCreateIdentityProviderGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// CreateIdentityTLS mocks base method.
+func (m *MockInstanceServer) CreateIdentityTLS(arg0 api.IdentitiesTLSPost) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateIdentityTLS", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreateIdentityTLS indicates an expected call of CreateIdentityTLS.
+func (mr *MockInstanceServerMockRecorder) CreateIdentityTLS(arg0 any) *MockInstanceServerCreateIdentityTLSCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateIdentityTLS", reflect.TypeOf((*MockInstanceServer)(nil).CreateIdentityTLS), arg0)
+	return &MockInstanceServerCreateIdentityTLSCall{Call: call}
+}
+
+// MockInstanceServerCreateIdentityTLSCall wrap *gomock.Call
+type MockInstanceServerCreateIdentityTLSCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerCreateIdentityTLSCall) Return(arg0 error) *MockInstanceServerCreateIdentityTLSCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerCreateIdentityTLSCall) Do(f func(api.IdentitiesTLSPost) error) *MockInstanceServerCreateIdentityTLSCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerCreateIdentityTLSCall) DoAndReturn(f func(api.IdentitiesTLSPost) error) *MockInstanceServerCreateIdentityTLSCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// CreateIdentityTLSToken mocks base method.
+func (m *MockInstanceServer) CreateIdentityTLSToken(arg0 api.IdentitiesTLSPost) (*api.CertificateAddToken, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateIdentityTLSToken", arg0)
+	ret0, _ := ret[0].(*api.CertificateAddToken)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreateIdentityTLSToken indicates an expected call of CreateIdentityTLSToken.
+func (mr *MockInstanceServerMockRecorder) CreateIdentityTLSToken(arg0 any) *MockInstanceServerCreateIdentityTLSTokenCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateIdentityTLSToken", reflect.TypeOf((*MockInstanceServer)(nil).CreateIdentityTLSToken), arg0)
+	return &MockInstanceServerCreateIdentityTLSTokenCall{Call: call}
+}
+
+// MockInstanceServerCreateIdentityTLSTokenCall wrap *gomock.Call
+type MockInstanceServerCreateIdentityTLSTokenCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerCreateIdentityTLSTokenCall) Return(arg0 *api.CertificateAddToken, arg1 error) *MockInstanceServerCreateIdentityTLSTokenCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerCreateIdentityTLSTokenCall) Do(f func(api.IdentitiesTLSPost) (*api.CertificateAddToken, error)) *MockInstanceServerCreateIdentityTLSTokenCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerCreateIdentityTLSTokenCall) DoAndReturn(f func(api.IdentitiesTLSPost) (*api.CertificateAddToken, error)) *MockInstanceServerCreateIdentityTLSTokenCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -3267,6 +3498,44 @@ func (c *MockInstanceServerCreateStoragePoolVolumeSnapshotCall) DoAndReturn(f fu
 	return c
 }
 
+// DeleteAuthGroup mocks base method.
+func (m *MockInstanceServer) DeleteAuthGroup(arg0 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteAuthGroup", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteAuthGroup indicates an expected call of DeleteAuthGroup.
+func (mr *MockInstanceServerMockRecorder) DeleteAuthGroup(arg0 any) *MockInstanceServerDeleteAuthGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteAuthGroup", reflect.TypeOf((*MockInstanceServer)(nil).DeleteAuthGroup), arg0)
+	return &MockInstanceServerDeleteAuthGroupCall{Call: call}
+}
+
+// MockInstanceServerDeleteAuthGroupCall wrap *gomock.Call
+type MockInstanceServerDeleteAuthGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerDeleteAuthGroupCall) Return(arg0 error) *MockInstanceServerDeleteAuthGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerDeleteAuthGroupCall) Do(f func(string) error) *MockInstanceServerDeleteAuthGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerDeleteAuthGroupCall) DoAndReturn(f func(string) error) *MockInstanceServerDeleteAuthGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // DeleteCertificate mocks base method.
 func (m *MockInstanceServer) DeleteCertificate(arg0 string) error {
 	m.ctrl.T.Helper()
@@ -3646,6 +3915,82 @@ func (c *MockInstanceServerDeleteContainerTemplateFileCall) Do(f func(string, st
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerDeleteContainerTemplateFileCall) DoAndReturn(f func(string, string) error) *MockInstanceServerDeleteContainerTemplateFileCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// DeleteIdentity mocks base method.
+func (m *MockInstanceServer) DeleteIdentity(arg0, arg1 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteIdentity", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteIdentity indicates an expected call of DeleteIdentity.
+func (mr *MockInstanceServerMockRecorder) DeleteIdentity(arg0, arg1 any) *MockInstanceServerDeleteIdentityCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteIdentity", reflect.TypeOf((*MockInstanceServer)(nil).DeleteIdentity), arg0, arg1)
+	return &MockInstanceServerDeleteIdentityCall{Call: call}
+}
+
+// MockInstanceServerDeleteIdentityCall wrap *gomock.Call
+type MockInstanceServerDeleteIdentityCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerDeleteIdentityCall) Return(arg0 error) *MockInstanceServerDeleteIdentityCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerDeleteIdentityCall) Do(f func(string, string) error) *MockInstanceServerDeleteIdentityCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerDeleteIdentityCall) DoAndReturn(f func(string, string) error) *MockInstanceServerDeleteIdentityCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// DeleteIdentityProviderGroup mocks base method.
+func (m *MockInstanceServer) DeleteIdentityProviderGroup(arg0 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteIdentityProviderGroup", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteIdentityProviderGroup indicates an expected call of DeleteIdentityProviderGroup.
+func (mr *MockInstanceServerMockRecorder) DeleteIdentityProviderGroup(arg0 any) *MockInstanceServerDeleteIdentityProviderGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteIdentityProviderGroup", reflect.TypeOf((*MockInstanceServer)(nil).DeleteIdentityProviderGroup), arg0)
+	return &MockInstanceServerDeleteIdentityProviderGroupCall{Call: call}
+}
+
+// MockInstanceServerDeleteIdentityProviderGroupCall wrap *gomock.Call
+type MockInstanceServerDeleteIdentityProviderGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerDeleteIdentityProviderGroupCall) Return(arg0 error) *MockInstanceServerDeleteIdentityProviderGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerDeleteIdentityProviderGroupCall) Do(f func(string) error) *MockInstanceServerDeleteIdentityProviderGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerDeleteIdentityProviderGroupCall) DoAndReturn(f func(string) error) *MockInstanceServerDeleteIdentityProviderGroupCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -4832,6 +5177,124 @@ func (c *MockInstanceServerExportImageCall) Do(f func(string, api.ImageExportPos
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerExportImageCall) DoAndReturn(f func(string, api.ImageExportPost) (lxd.Operation, error)) *MockInstanceServerExportImageCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetAuthGroup mocks base method.
+func (m *MockInstanceServer) GetAuthGroup(arg0 string) (*api.AuthGroup, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetAuthGroup", arg0)
+	ret0, _ := ret[0].(*api.AuthGroup)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetAuthGroup indicates an expected call of GetAuthGroup.
+func (mr *MockInstanceServerMockRecorder) GetAuthGroup(arg0 any) *MockInstanceServerGetAuthGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAuthGroup", reflect.TypeOf((*MockInstanceServer)(nil).GetAuthGroup), arg0)
+	return &MockInstanceServerGetAuthGroupCall{Call: call}
+}
+
+// MockInstanceServerGetAuthGroupCall wrap *gomock.Call
+type MockInstanceServerGetAuthGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetAuthGroupCall) Return(arg0 *api.AuthGroup, arg1 string, arg2 error) *MockInstanceServerGetAuthGroupCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetAuthGroupCall) Do(f func(string) (*api.AuthGroup, string, error)) *MockInstanceServerGetAuthGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetAuthGroupCall) DoAndReturn(f func(string) (*api.AuthGroup, string, error)) *MockInstanceServerGetAuthGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetAuthGroupNames mocks base method.
+func (m *MockInstanceServer) GetAuthGroupNames() ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetAuthGroupNames")
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetAuthGroupNames indicates an expected call of GetAuthGroupNames.
+func (mr *MockInstanceServerMockRecorder) GetAuthGroupNames() *MockInstanceServerGetAuthGroupNamesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAuthGroupNames", reflect.TypeOf((*MockInstanceServer)(nil).GetAuthGroupNames))
+	return &MockInstanceServerGetAuthGroupNamesCall{Call: call}
+}
+
+// MockInstanceServerGetAuthGroupNamesCall wrap *gomock.Call
+type MockInstanceServerGetAuthGroupNamesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetAuthGroupNamesCall) Return(arg0 []string, arg1 error) *MockInstanceServerGetAuthGroupNamesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetAuthGroupNamesCall) Do(f func() ([]string, error)) *MockInstanceServerGetAuthGroupNamesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetAuthGroupNamesCall) DoAndReturn(f func() ([]string, error)) *MockInstanceServerGetAuthGroupNamesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetAuthGroups mocks base method.
+func (m *MockInstanceServer) GetAuthGroups() ([]api.AuthGroup, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetAuthGroups")
+	ret0, _ := ret[0].([]api.AuthGroup)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetAuthGroups indicates an expected call of GetAuthGroups.
+func (mr *MockInstanceServerMockRecorder) GetAuthGroups() *MockInstanceServerGetAuthGroupsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAuthGroups", reflect.TypeOf((*MockInstanceServer)(nil).GetAuthGroups))
+	return &MockInstanceServerGetAuthGroupsCall{Call: call}
+}
+
+// MockInstanceServerGetAuthGroupsCall wrap *gomock.Call
+type MockInstanceServerGetAuthGroupsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetAuthGroupsCall) Return(arg0 []api.AuthGroup, arg1 error) *MockInstanceServerGetAuthGroupsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetAuthGroupsCall) Do(f func() ([]api.AuthGroup, error)) *MockInstanceServerGetAuthGroupsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetAuthGroupsCall) DoAndReturn(f func() ([]api.AuthGroup, error)) *MockInstanceServerGetAuthGroupsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -6056,6 +6519,46 @@ func (c *MockInstanceServerGetContainersFullCall) DoAndReturn(f func() ([]api.Co
 	return c
 }
 
+// GetCurrentIdentityInfo mocks base method.
+func (m *MockInstanceServer) GetCurrentIdentityInfo() (*api.IdentityInfo, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetCurrentIdentityInfo")
+	ret0, _ := ret[0].(*api.IdentityInfo)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetCurrentIdentityInfo indicates an expected call of GetCurrentIdentityInfo.
+func (mr *MockInstanceServerMockRecorder) GetCurrentIdentityInfo() *MockInstanceServerGetCurrentIdentityInfoCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetCurrentIdentityInfo", reflect.TypeOf((*MockInstanceServer)(nil).GetCurrentIdentityInfo))
+	return &MockInstanceServerGetCurrentIdentityInfoCall{Call: call}
+}
+
+// MockInstanceServerGetCurrentIdentityInfoCall wrap *gomock.Call
+type MockInstanceServerGetCurrentIdentityInfoCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetCurrentIdentityInfoCall) Return(arg0 *api.IdentityInfo, arg1 string, arg2 error) *MockInstanceServerGetCurrentIdentityInfoCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetCurrentIdentityInfoCall) Do(f func() (*api.IdentityInfo, string, error)) *MockInstanceServerGetCurrentIdentityInfoCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetCurrentIdentityInfoCall) DoAndReturn(f func() (*api.IdentityInfo, string, error)) *MockInstanceServerGetCurrentIdentityInfoCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // GetEvents mocks base method.
 func (m *MockInstanceServer) GetEvents() (*lxd.EventListener, error) {
 	m.ctrl.T.Helper()
@@ -6169,6 +6672,320 @@ func (c *MockInstanceServerGetHTTPClientCall) Do(f func() (*http.Client, error))
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerGetHTTPClientCall) DoAndReturn(f func() (*http.Client, error)) *MockInstanceServerGetHTTPClientCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentities mocks base method.
+func (m *MockInstanceServer) GetIdentities() ([]api.Identity, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentities")
+	ret0, _ := ret[0].([]api.Identity)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentities indicates an expected call of GetIdentities.
+func (mr *MockInstanceServerMockRecorder) GetIdentities() *MockInstanceServerGetIdentitiesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentities", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentities))
+	return &MockInstanceServerGetIdentitiesCall{Call: call}
+}
+
+// MockInstanceServerGetIdentitiesCall wrap *gomock.Call
+type MockInstanceServerGetIdentitiesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentitiesCall) Return(arg0 []api.Identity, arg1 error) *MockInstanceServerGetIdentitiesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentitiesCall) Do(f func() ([]api.Identity, error)) *MockInstanceServerGetIdentitiesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentitiesCall) DoAndReturn(f func() ([]api.Identity, error)) *MockInstanceServerGetIdentitiesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentitiesByAuthenticationMethod mocks base method.
+func (m *MockInstanceServer) GetIdentitiesByAuthenticationMethod(arg0 string) ([]api.Identity, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentitiesByAuthenticationMethod", arg0)
+	ret0, _ := ret[0].([]api.Identity)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentitiesByAuthenticationMethod indicates an expected call of GetIdentitiesByAuthenticationMethod.
+func (mr *MockInstanceServerMockRecorder) GetIdentitiesByAuthenticationMethod(arg0 any) *MockInstanceServerGetIdentitiesByAuthenticationMethodCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentitiesByAuthenticationMethod", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentitiesByAuthenticationMethod), arg0)
+	return &MockInstanceServerGetIdentitiesByAuthenticationMethodCall{Call: call}
+}
+
+// MockInstanceServerGetIdentitiesByAuthenticationMethodCall wrap *gomock.Call
+type MockInstanceServerGetIdentitiesByAuthenticationMethodCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentitiesByAuthenticationMethodCall) Return(arg0 []api.Identity, arg1 error) *MockInstanceServerGetIdentitiesByAuthenticationMethodCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentitiesByAuthenticationMethodCall) Do(f func(string) ([]api.Identity, error)) *MockInstanceServerGetIdentitiesByAuthenticationMethodCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentitiesByAuthenticationMethodCall) DoAndReturn(f func(string) ([]api.Identity, error)) *MockInstanceServerGetIdentitiesByAuthenticationMethodCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentity mocks base method.
+func (m *MockInstanceServer) GetIdentity(arg0, arg1 string) (*api.Identity, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentity", arg0, arg1)
+	ret0, _ := ret[0].(*api.Identity)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetIdentity indicates an expected call of GetIdentity.
+func (mr *MockInstanceServerMockRecorder) GetIdentity(arg0, arg1 any) *MockInstanceServerGetIdentityCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentity", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentity), arg0, arg1)
+	return &MockInstanceServerGetIdentityCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityCall wrap *gomock.Call
+type MockInstanceServerGetIdentityCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityCall) Return(arg0 *api.Identity, arg1 string, arg2 error) *MockInstanceServerGetIdentityCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityCall) Do(f func(string, string) (*api.Identity, string, error)) *MockInstanceServerGetIdentityCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityCall) DoAndReturn(f func(string, string) (*api.Identity, string, error)) *MockInstanceServerGetIdentityCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentityAuthenticationMethodsIdentifiers mocks base method.
+func (m *MockInstanceServer) GetIdentityAuthenticationMethodsIdentifiers() (map[string][]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentityAuthenticationMethodsIdentifiers")
+	ret0, _ := ret[0].(map[string][]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentityAuthenticationMethodsIdentifiers indicates an expected call of GetIdentityAuthenticationMethodsIdentifiers.
+func (mr *MockInstanceServerMockRecorder) GetIdentityAuthenticationMethodsIdentifiers() *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentityAuthenticationMethodsIdentifiers", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentityAuthenticationMethodsIdentifiers))
+	return &MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall wrap *gomock.Call
+type MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall) Return(arg0 map[string][]string, arg1 error) *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall) Do(f func() (map[string][]string, error)) *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall) DoAndReturn(f func() (map[string][]string, error)) *MockInstanceServerGetIdentityAuthenticationMethodsIdentifiersCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentityIdentifiersByAuthenticationMethod mocks base method.
+func (m *MockInstanceServer) GetIdentityIdentifiersByAuthenticationMethod(arg0 string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentityIdentifiersByAuthenticationMethod", arg0)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentityIdentifiersByAuthenticationMethod indicates an expected call of GetIdentityIdentifiersByAuthenticationMethod.
+func (mr *MockInstanceServerMockRecorder) GetIdentityIdentifiersByAuthenticationMethod(arg0 any) *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentityIdentifiersByAuthenticationMethod", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentityIdentifiersByAuthenticationMethod), arg0)
+	return &MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall wrap *gomock.Call
+type MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall) Return(arg0 []string, arg1 error) *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall) Do(f func(string) ([]string, error)) *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall) DoAndReturn(f func(string) ([]string, error)) *MockInstanceServerGetIdentityIdentifiersByAuthenticationMethodCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentityProviderGroup mocks base method.
+func (m *MockInstanceServer) GetIdentityProviderGroup(arg0 string) (*api.IdentityProviderGroup, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentityProviderGroup", arg0)
+	ret0, _ := ret[0].(*api.IdentityProviderGroup)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetIdentityProviderGroup indicates an expected call of GetIdentityProviderGroup.
+func (mr *MockInstanceServerMockRecorder) GetIdentityProviderGroup(arg0 any) *MockInstanceServerGetIdentityProviderGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentityProviderGroup", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentityProviderGroup), arg0)
+	return &MockInstanceServerGetIdentityProviderGroupCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityProviderGroupCall wrap *gomock.Call
+type MockInstanceServerGetIdentityProviderGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityProviderGroupCall) Return(arg0 *api.IdentityProviderGroup, arg1 string, arg2 error) *MockInstanceServerGetIdentityProviderGroupCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityProviderGroupCall) Do(f func(string) (*api.IdentityProviderGroup, string, error)) *MockInstanceServerGetIdentityProviderGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityProviderGroupCall) DoAndReturn(f func(string) (*api.IdentityProviderGroup, string, error)) *MockInstanceServerGetIdentityProviderGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentityProviderGroupNames mocks base method.
+func (m *MockInstanceServer) GetIdentityProviderGroupNames() ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentityProviderGroupNames")
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentityProviderGroupNames indicates an expected call of GetIdentityProviderGroupNames.
+func (mr *MockInstanceServerMockRecorder) GetIdentityProviderGroupNames() *MockInstanceServerGetIdentityProviderGroupNamesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentityProviderGroupNames", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentityProviderGroupNames))
+	return &MockInstanceServerGetIdentityProviderGroupNamesCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityProviderGroupNamesCall wrap *gomock.Call
+type MockInstanceServerGetIdentityProviderGroupNamesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityProviderGroupNamesCall) Return(arg0 []string, arg1 error) *MockInstanceServerGetIdentityProviderGroupNamesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityProviderGroupNamesCall) Do(f func() ([]string, error)) *MockInstanceServerGetIdentityProviderGroupNamesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityProviderGroupNamesCall) DoAndReturn(f func() ([]string, error)) *MockInstanceServerGetIdentityProviderGroupNamesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetIdentityProviderGroups mocks base method.
+func (m *MockInstanceServer) GetIdentityProviderGroups() ([]api.IdentityProviderGroup, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetIdentityProviderGroups")
+	ret0, _ := ret[0].([]api.IdentityProviderGroup)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetIdentityProviderGroups indicates an expected call of GetIdentityProviderGroups.
+func (mr *MockInstanceServerMockRecorder) GetIdentityProviderGroups() *MockInstanceServerGetIdentityProviderGroupsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetIdentityProviderGroups", reflect.TypeOf((*MockInstanceServer)(nil).GetIdentityProviderGroups))
+	return &MockInstanceServerGetIdentityProviderGroupsCall{Call: call}
+}
+
+// MockInstanceServerGetIdentityProviderGroupsCall wrap *gomock.Call
+type MockInstanceServerGetIdentityProviderGroupsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetIdentityProviderGroupsCall) Return(arg0 []api.IdentityProviderGroup, arg1 error) *MockInstanceServerGetIdentityProviderGroupsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetIdentityProviderGroupsCall) Do(f func() ([]api.IdentityProviderGroup, error)) *MockInstanceServerGetIdentityProviderGroupsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetIdentityProviderGroupsCall) DoAndReturn(f func() ([]api.IdentityProviderGroup, error)) *MockInstanceServerGetIdentityProviderGroupsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -6562,6 +7379,84 @@ func (c *MockInstanceServerGetImagesCall) Do(f func() ([]api.Image, error)) *Moc
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerGetImagesCall) DoAndReturn(f func() ([]api.Image, error)) *MockInstanceServerGetImagesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetImagesAllProjects mocks base method.
+func (m *MockInstanceServer) GetImagesAllProjects() ([]api.Image, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImagesAllProjects")
+	ret0, _ := ret[0].([]api.Image)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImagesAllProjects indicates an expected call of GetImagesAllProjects.
+func (mr *MockInstanceServerMockRecorder) GetImagesAllProjects() *MockInstanceServerGetImagesAllProjectsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImagesAllProjects", reflect.TypeOf((*MockInstanceServer)(nil).GetImagesAllProjects))
+	return &MockInstanceServerGetImagesAllProjectsCall{Call: call}
+}
+
+// MockInstanceServerGetImagesAllProjectsCall wrap *gomock.Call
+type MockInstanceServerGetImagesAllProjectsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetImagesAllProjectsCall) Return(arg0 []api.Image, arg1 error) *MockInstanceServerGetImagesAllProjectsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetImagesAllProjectsCall) Do(f func() ([]api.Image, error)) *MockInstanceServerGetImagesAllProjectsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetImagesAllProjectsCall) DoAndReturn(f func() ([]api.Image, error)) *MockInstanceServerGetImagesAllProjectsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetImagesAllProjectsWithFilter mocks base method.
+func (m *MockInstanceServer) GetImagesAllProjectsWithFilter(arg0 []string) ([]api.Image, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImagesAllProjectsWithFilter", arg0)
+	ret0, _ := ret[0].([]api.Image)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImagesAllProjectsWithFilter indicates an expected call of GetImagesAllProjectsWithFilter.
+func (mr *MockInstanceServerMockRecorder) GetImagesAllProjectsWithFilter(arg0 any) *MockInstanceServerGetImagesAllProjectsWithFilterCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImagesAllProjectsWithFilter", reflect.TypeOf((*MockInstanceServer)(nil).GetImagesAllProjectsWithFilter), arg0)
+	return &MockInstanceServerGetImagesAllProjectsWithFilterCall{Call: call}
+}
+
+// MockInstanceServerGetImagesAllProjectsWithFilterCall wrap *gomock.Call
+type MockInstanceServerGetImagesAllProjectsWithFilterCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetImagesAllProjectsWithFilterCall) Return(arg0 []api.Image, arg1 error) *MockInstanceServerGetImagesAllProjectsWithFilterCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetImagesAllProjectsWithFilterCall) Do(f func([]string) ([]api.Image, error)) *MockInstanceServerGetImagesAllProjectsWithFilterCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetImagesAllProjectsWithFilterCall) DoAndReturn(f func([]string) ([]api.Image, error)) *MockInstanceServerGetImagesAllProjectsWithFilterCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -7431,6 +8326,46 @@ func (c *MockInstanceServerGetInstanceTemplateFilesCall) DoAndReturn(f func(stri
 	return c
 }
 
+// GetInstanceUEFIVars mocks base method.
+func (m *MockInstanceServer) GetInstanceUEFIVars(arg0 string) (*api.InstanceUEFIVars, string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetInstanceUEFIVars", arg0)
+	ret0, _ := ret[0].(*api.InstanceUEFIVars)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// GetInstanceUEFIVars indicates an expected call of GetInstanceUEFIVars.
+func (mr *MockInstanceServerMockRecorder) GetInstanceUEFIVars(arg0 any) *MockInstanceServerGetInstanceUEFIVarsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInstanceUEFIVars", reflect.TypeOf((*MockInstanceServer)(nil).GetInstanceUEFIVars), arg0)
+	return &MockInstanceServerGetInstanceUEFIVarsCall{Call: call}
+}
+
+// MockInstanceServerGetInstanceUEFIVarsCall wrap *gomock.Call
+type MockInstanceServerGetInstanceUEFIVarsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetInstanceUEFIVarsCall) Return(arg0 *api.InstanceUEFIVars, arg1 string, arg2 error) *MockInstanceServerGetInstanceUEFIVarsCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetInstanceUEFIVarsCall) Do(f func(string) (*api.InstanceUEFIVars, string, error)) *MockInstanceServerGetInstanceUEFIVarsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetInstanceUEFIVarsCall) DoAndReturn(f func(string) (*api.InstanceUEFIVars, string, error)) *MockInstanceServerGetInstanceUEFIVarsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // GetInstances mocks base method.
 func (m *MockInstanceServer) GetInstances(arg0 api.InstanceType) ([]api.Instance, error) {
 	m.ctrl.T.Helper()
@@ -7739,6 +8674,45 @@ func (c *MockInstanceServerGetInstancesWithFilterCall) Do(f func(api.InstanceTyp
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerGetInstancesWithFilterCall) DoAndReturn(f func(api.InstanceType, []string) ([]api.Instance, error)) *MockInstanceServerGetInstancesWithFilterCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetMetadataConfiguration mocks base method.
+func (m *MockInstanceServer) GetMetadataConfiguration() (*api.MetadataConfiguration, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetMetadataConfiguration")
+	ret0, _ := ret[0].(*api.MetadataConfiguration)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetMetadataConfiguration indicates an expected call of GetMetadataConfiguration.
+func (mr *MockInstanceServerMockRecorder) GetMetadataConfiguration() *MockInstanceServerGetMetadataConfigurationCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMetadataConfiguration", reflect.TypeOf((*MockInstanceServer)(nil).GetMetadataConfiguration))
+	return &MockInstanceServerGetMetadataConfigurationCall{Call: call}
+}
+
+// MockInstanceServerGetMetadataConfigurationCall wrap *gomock.Call
+type MockInstanceServerGetMetadataConfigurationCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetMetadataConfigurationCall) Return(arg0 *api.MetadataConfiguration, arg1 error) *MockInstanceServerGetMetadataConfigurationCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetMetadataConfigurationCall) Do(f func() (*api.MetadataConfiguration, error)) *MockInstanceServerGetMetadataConfigurationCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetMetadataConfigurationCall) DoAndReturn(f func() (*api.MetadataConfiguration, error)) *MockInstanceServerGetMetadataConfigurationCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -9036,6 +10010,84 @@ func (c *MockInstanceServerGetOperationsAllProjectsCall) Do(f func() ([]api.Oper
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerGetOperationsAllProjectsCall) DoAndReturn(f func() ([]api.Operation, error)) *MockInstanceServerGetOperationsAllProjectsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetPermissions mocks base method.
+func (m *MockInstanceServer) GetPermissions(arg0 lxd.GetPermissionsArgs) ([]api.Permission, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPermissions", arg0)
+	ret0, _ := ret[0].([]api.Permission)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPermissions indicates an expected call of GetPermissions.
+func (mr *MockInstanceServerMockRecorder) GetPermissions(arg0 any) *MockInstanceServerGetPermissionsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPermissions", reflect.TypeOf((*MockInstanceServer)(nil).GetPermissions), arg0)
+	return &MockInstanceServerGetPermissionsCall{Call: call}
+}
+
+// MockInstanceServerGetPermissionsCall wrap *gomock.Call
+type MockInstanceServerGetPermissionsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetPermissionsCall) Return(arg0 []api.Permission, arg1 error) *MockInstanceServerGetPermissionsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetPermissionsCall) Do(f func(lxd.GetPermissionsArgs) ([]api.Permission, error)) *MockInstanceServerGetPermissionsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetPermissionsCall) DoAndReturn(f func(lxd.GetPermissionsArgs) ([]api.Permission, error)) *MockInstanceServerGetPermissionsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetPermissionsInfo mocks base method.
+func (m *MockInstanceServer) GetPermissionsInfo(arg0 lxd.GetPermissionsArgs) ([]api.PermissionInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPermissionsInfo", arg0)
+	ret0, _ := ret[0].([]api.PermissionInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPermissionsInfo indicates an expected call of GetPermissionsInfo.
+func (mr *MockInstanceServerMockRecorder) GetPermissionsInfo(arg0 any) *MockInstanceServerGetPermissionsInfoCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPermissionsInfo", reflect.TypeOf((*MockInstanceServer)(nil).GetPermissionsInfo), arg0)
+	return &MockInstanceServerGetPermissionsInfoCall{Call: call}
+}
+
+// MockInstanceServerGetPermissionsInfoCall wrap *gomock.Call
+type MockInstanceServerGetPermissionsInfoCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetPermissionsInfoCall) Return(arg0 []api.PermissionInfo, arg1 error) *MockInstanceServerGetPermissionsInfoCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetPermissionsInfoCall) Do(f func(lxd.GetPermissionsArgs) ([]api.PermissionInfo, error)) *MockInstanceServerGetPermissionsInfoCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetPermissionsInfoCall) DoAndReturn(f func(lxd.GetPermissionsArgs) ([]api.PermissionInfo, error)) *MockInstanceServerGetPermissionsInfoCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -10454,6 +11506,84 @@ func (c *MockInstanceServerGetStoragePoolsCall) DoAndReturn(f func() ([]api.Stor
 	return c
 }
 
+// GetVolumesWithFilter mocks base method.
+func (m *MockInstanceServer) GetVolumesWithFilter(arg0 []string) ([]api.StorageVolume, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetVolumesWithFilter", arg0)
+	ret0, _ := ret[0].([]api.StorageVolume)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetVolumesWithFilter indicates an expected call of GetVolumesWithFilter.
+func (mr *MockInstanceServerMockRecorder) GetVolumesWithFilter(arg0 any) *MockInstanceServerGetVolumesWithFilterCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetVolumesWithFilter", reflect.TypeOf((*MockInstanceServer)(nil).GetVolumesWithFilter), arg0)
+	return &MockInstanceServerGetVolumesWithFilterCall{Call: call}
+}
+
+// MockInstanceServerGetVolumesWithFilterCall wrap *gomock.Call
+type MockInstanceServerGetVolumesWithFilterCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetVolumesWithFilterCall) Return(arg0 []api.StorageVolume, arg1 error) *MockInstanceServerGetVolumesWithFilterCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetVolumesWithFilterCall) Do(f func([]string) ([]api.StorageVolume, error)) *MockInstanceServerGetVolumesWithFilterCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetVolumesWithFilterCall) DoAndReturn(f func([]string) ([]api.StorageVolume, error)) *MockInstanceServerGetVolumesWithFilterCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// GetVolumesWithFilterAllProjects mocks base method.
+func (m *MockInstanceServer) GetVolumesWithFilterAllProjects(arg0 []string) ([]api.StorageVolume, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetVolumesWithFilterAllProjects", arg0)
+	ret0, _ := ret[0].([]api.StorageVolume)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetVolumesWithFilterAllProjects indicates an expected call of GetVolumesWithFilterAllProjects.
+func (mr *MockInstanceServerMockRecorder) GetVolumesWithFilterAllProjects(arg0 any) *MockInstanceServerGetVolumesWithFilterAllProjectsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetVolumesWithFilterAllProjects", reflect.TypeOf((*MockInstanceServer)(nil).GetVolumesWithFilterAllProjects), arg0)
+	return &MockInstanceServerGetVolumesWithFilterAllProjectsCall{Call: call}
+}
+
+// MockInstanceServerGetVolumesWithFilterAllProjectsCall wrap *gomock.Call
+type MockInstanceServerGetVolumesWithFilterAllProjectsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerGetVolumesWithFilterAllProjectsCall) Return(arg0 []api.StorageVolume, arg1 error) *MockInstanceServerGetVolumesWithFilterAllProjectsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerGetVolumesWithFilterAllProjectsCall) Do(f func([]string) ([]api.StorageVolume, error)) *MockInstanceServerGetVolumesWithFilterAllProjectsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerGetVolumesWithFilterAllProjectsCall) DoAndReturn(f func([]string) ([]api.StorageVolume, error)) *MockInstanceServerGetVolumesWithFilterAllProjectsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // GetWarning mocks base method.
 func (m *MockInstanceServer) GetWarning(arg0 string) (*api.Warning, string, error) {
 	m.ctrl.T.Helper()
@@ -11118,6 +12248,44 @@ func (c *MockInstanceServerRefreshImageCall) DoAndReturn(f func(string) (lxd.Ope
 	return c
 }
 
+// RenameAuthGroup mocks base method.
+func (m *MockInstanceServer) RenameAuthGroup(arg0 string, arg1 api.AuthGroupPost) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RenameAuthGroup", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RenameAuthGroup indicates an expected call of RenameAuthGroup.
+func (mr *MockInstanceServerMockRecorder) RenameAuthGroup(arg0, arg1 any) *MockInstanceServerRenameAuthGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RenameAuthGroup", reflect.TypeOf((*MockInstanceServer)(nil).RenameAuthGroup), arg0, arg1)
+	return &MockInstanceServerRenameAuthGroupCall{Call: call}
+}
+
+// MockInstanceServerRenameAuthGroupCall wrap *gomock.Call
+type MockInstanceServerRenameAuthGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerRenameAuthGroupCall) Return(arg0 error) *MockInstanceServerRenameAuthGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerRenameAuthGroupCall) Do(f func(string, api.AuthGroupPost) error) *MockInstanceServerRenameAuthGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerRenameAuthGroupCall) DoAndReturn(f func(string, api.AuthGroupPost) error) *MockInstanceServerRenameAuthGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // RenameClusterGroup mocks base method.
 func (m *MockInstanceServer) RenameClusterGroup(arg0 string, arg1 api.ClusterGroupPost) error {
 	m.ctrl.T.Helper()
@@ -11307,6 +12475,44 @@ func (c *MockInstanceServerRenameContainerSnapshotCall) Do(f func(string, string
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerRenameContainerSnapshotCall) DoAndReturn(f func(string, string, api.ContainerSnapshotPost) (lxd.Operation, error)) *MockInstanceServerRenameContainerSnapshotCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// RenameIdentityProviderGroup mocks base method.
+func (m *MockInstanceServer) RenameIdentityProviderGroup(arg0 string, arg1 api.IdentityProviderGroupPost) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RenameIdentityProviderGroup", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RenameIdentityProviderGroup indicates an expected call of RenameIdentityProviderGroup.
+func (mr *MockInstanceServerMockRecorder) RenameIdentityProviderGroup(arg0, arg1 any) *MockInstanceServerRenameIdentityProviderGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RenameIdentityProviderGroup", reflect.TypeOf((*MockInstanceServer)(nil).RenameIdentityProviderGroup), arg0, arg1)
+	return &MockInstanceServerRenameIdentityProviderGroupCall{Call: call}
+}
+
+// MockInstanceServerRenameIdentityProviderGroupCall wrap *gomock.Call
+type MockInstanceServerRenameIdentityProviderGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerRenameIdentityProviderGroupCall) Return(arg0 error) *MockInstanceServerRenameIdentityProviderGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerRenameIdentityProviderGroupCall) Do(f func(string, api.IdentityProviderGroupPost) error) *MockInstanceServerRenameIdentityProviderGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerRenameIdentityProviderGroupCall) DoAndReturn(f func(string, api.IdentityProviderGroupPost) error) *MockInstanceServerRenameIdentityProviderGroupCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -11847,6 +13053,44 @@ func (c *MockInstanceServerSetContainerMetadataCall) DoAndReturn(f func(string, 
 	return c
 }
 
+// UpdateAuthGroup mocks base method.
+func (m *MockInstanceServer) UpdateAuthGroup(arg0 string, arg1 api.AuthGroupPut, arg2 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateAuthGroup", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateAuthGroup indicates an expected call of UpdateAuthGroup.
+func (mr *MockInstanceServerMockRecorder) UpdateAuthGroup(arg0, arg1, arg2 any) *MockInstanceServerUpdateAuthGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateAuthGroup", reflect.TypeOf((*MockInstanceServer)(nil).UpdateAuthGroup), arg0, arg1, arg2)
+	return &MockInstanceServerUpdateAuthGroupCall{Call: call}
+}
+
+// MockInstanceServerUpdateAuthGroupCall wrap *gomock.Call
+type MockInstanceServerUpdateAuthGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerUpdateAuthGroupCall) Return(arg0 error) *MockInstanceServerUpdateAuthGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerUpdateAuthGroupCall) Do(f func(string, api.AuthGroupPut, string) error) *MockInstanceServerUpdateAuthGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerUpdateAuthGroupCall) DoAndReturn(f func(string, api.AuthGroupPut, string) error) *MockInstanceServerUpdateAuthGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // UpdateCertificate mocks base method.
 func (m *MockInstanceServer) UpdateCertificate(arg0 string, arg1 api.CertificatePut, arg2 string) error {
 	m.ctrl.T.Helper()
@@ -12232,6 +13476,82 @@ func (c *MockInstanceServerUpdateContainerTemplateFileCall) DoAndReturn(f func(s
 	return c
 }
 
+// UpdateIdentity mocks base method.
+func (m *MockInstanceServer) UpdateIdentity(arg0, arg1 string, arg2 api.IdentityPut, arg3 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateIdentity", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateIdentity indicates an expected call of UpdateIdentity.
+func (mr *MockInstanceServerMockRecorder) UpdateIdentity(arg0, arg1, arg2, arg3 any) *MockInstanceServerUpdateIdentityCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateIdentity", reflect.TypeOf((*MockInstanceServer)(nil).UpdateIdentity), arg0, arg1, arg2, arg3)
+	return &MockInstanceServerUpdateIdentityCall{Call: call}
+}
+
+// MockInstanceServerUpdateIdentityCall wrap *gomock.Call
+type MockInstanceServerUpdateIdentityCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerUpdateIdentityCall) Return(arg0 error) *MockInstanceServerUpdateIdentityCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerUpdateIdentityCall) Do(f func(string, string, api.IdentityPut, string) error) *MockInstanceServerUpdateIdentityCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerUpdateIdentityCall) DoAndReturn(f func(string, string, api.IdentityPut, string) error) *MockInstanceServerUpdateIdentityCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// UpdateIdentityProviderGroup mocks base method.
+func (m *MockInstanceServer) UpdateIdentityProviderGroup(arg0 string, arg1 api.IdentityProviderGroupPut, arg2 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateIdentityProviderGroup", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateIdentityProviderGroup indicates an expected call of UpdateIdentityProviderGroup.
+func (mr *MockInstanceServerMockRecorder) UpdateIdentityProviderGroup(arg0, arg1, arg2 any) *MockInstanceServerUpdateIdentityProviderGroupCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateIdentityProviderGroup", reflect.TypeOf((*MockInstanceServer)(nil).UpdateIdentityProviderGroup), arg0, arg1, arg2)
+	return &MockInstanceServerUpdateIdentityProviderGroupCall{Call: call}
+}
+
+// MockInstanceServerUpdateIdentityProviderGroupCall wrap *gomock.Call
+type MockInstanceServerUpdateIdentityProviderGroupCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerUpdateIdentityProviderGroupCall) Return(arg0 error) *MockInstanceServerUpdateIdentityProviderGroupCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerUpdateIdentityProviderGroupCall) Do(f func(string, api.IdentityProviderGroupPut, string) error) *MockInstanceServerUpdateIdentityProviderGroupCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerUpdateIdentityProviderGroupCall) DoAndReturn(f func(string, api.IdentityProviderGroupPut, string) error) *MockInstanceServerUpdateIdentityProviderGroupCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // UpdateImage mocks base method.
 func (m *MockInstanceServer) UpdateImage(arg0 string, arg1 api.ImagePut, arg2 string) error {
 	m.ctrl.T.Helper()
@@ -12459,6 +13779,44 @@ func (c *MockInstanceServerUpdateInstanceStateCall) Do(f func(string, api.Instan
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockInstanceServerUpdateInstanceStateCall) DoAndReturn(f func(string, api.InstanceStatePut, string) (lxd.Operation, error)) *MockInstanceServerUpdateInstanceStateCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// UpdateInstanceUEFIVars mocks base method.
+func (m *MockInstanceServer) UpdateInstanceUEFIVars(arg0 string, arg1 api.InstanceUEFIVars, arg2 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateInstanceUEFIVars", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateInstanceUEFIVars indicates an expected call of UpdateInstanceUEFIVars.
+func (mr *MockInstanceServerMockRecorder) UpdateInstanceUEFIVars(arg0, arg1, arg2 any) *MockInstanceServerUpdateInstanceUEFIVarsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateInstanceUEFIVars", reflect.TypeOf((*MockInstanceServer)(nil).UpdateInstanceUEFIVars), arg0, arg1, arg2)
+	return &MockInstanceServerUpdateInstanceUEFIVarsCall{Call: call}
+}
+
+// MockInstanceServerUpdateInstanceUEFIVarsCall wrap *gomock.Call
+type MockInstanceServerUpdateInstanceUEFIVarsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockInstanceServerUpdateInstanceUEFIVarsCall) Return(arg0 error) *MockInstanceServerUpdateInstanceUEFIVarsCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockInstanceServerUpdateInstanceUEFIVarsCall) Do(f func(string, api.InstanceUEFIVars, string) error) *MockInstanceServerUpdateInstanceUEFIVarsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockInstanceServerUpdateInstanceUEFIVarsCall) DoAndReturn(f func(string, api.InstanceUEFIVars, string) error) *MockInstanceServerUpdateInstanceUEFIVarsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

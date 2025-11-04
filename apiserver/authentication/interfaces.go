@@ -10,11 +10,11 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/state"
 )
 
 // AuthInfo is returned by Authenticator and RequestAuthInfo.
@@ -23,13 +23,19 @@ type AuthInfo struct {
 	// helping with permission questions about the authed entity.
 	Delegator PermissionDelegator
 
-	// Entity is the user/machine/unit/etc that has authenticated.
-	Entity Entity
+	// Tag is the user/machine/unit/etc that has authenticated.
+	Tag names.Tag
 
 	// PermissionsFn is a function that can return the permissions associated
 	// with  the current AuthInfo. PermissionsFn should not be considered
 	// concurrency safe.
 	// PermissionsFn AuthInfoPermissions
+
+	// ModelTag is the tag of the model for which access
+	// may be required. Not all auth operations will use it,
+	// eg checking for controller admin.
+	// The model UUID for the tag comes off the login request.
+	ModelTag names.ModelTag
 
 	// Controller reports whether or not the authenticated
 	// entity is a controller agent.
@@ -61,7 +67,7 @@ type AuthParams struct {
 type PermissionDelegator interface {
 	// SubjectPermissions returns the permission the entity has for the
 	// specified subject.
-	SubjectPermissions(entity Entity, subject names.Tag) (permission.Access, error)
+	SubjectPermissions(ctx context.Context, userName string, target permission.ID) (permission.Access, error)
 
 	// PermissionError is a helper implemented by the Authenticator for
 	// returning the appropriate error when an authenticated entity is missing
@@ -73,21 +79,18 @@ type PermissionDelegator interface {
 // implement to authenticate juju entities.
 type EntityAuthenticator interface {
 	// Authenticate authenticates the given entity.
-	Authenticate(ctx context.Context, authParams AuthParams) (state.Entity, error)
+	Authenticate(ctx context.Context, authParams AuthParams) (names.Tag, error)
 }
 
 // Authorizer is a function type for authorizing a request.
 //
 // If this returns an error, the handler should return StatusForbidden.
 type Authorizer interface {
-	Authorize(AuthInfo) error
+	Authorize(context.Context, AuthInfo) error
 }
 
-// Entity represents a user, machine, or unit that might be
-// authenticated.
-type Entity interface {
-	Tag() names.Tag
-}
+// AuthorizerFunc is a func type implementing the [Authorizer] interface.
+type AuthorizerFunc func(context.Context, AuthInfo) error
 
 // HTTPAuthenticator provides an interface for authenticating a raw http request
 // from a client.
@@ -110,7 +113,7 @@ type LoginAuthenticator interface {
 	AuthenticateLoginRequest(
 		ctx context.Context,
 		serverHost string,
-		modelUUID string,
+		modelUUID model.UUID,
 		authParams AuthParams,
 	) (AuthInfo, error)
 }
@@ -123,13 +126,18 @@ type RequestAuthenticator interface {
 	LoginAuthenticator
 }
 
+// Authorize calls the func represented by [AuthorizeFunc] return the result.
+func (f AuthorizerFunc) Authorize(c context.Context, i AuthInfo) error {
+	return f(c, i)
+}
+
 // SubjectPermissions is a convenience wrapper around the AuthInfo permissions
 // delegator. errors.NotImplemented is returned if the permission delegator
 // on this AuthInfo is nil.
-func (a *AuthInfo) SubjectPermissions(subject names.Tag) (permission.Access, error) {
+func (a *AuthInfo) SubjectPermissions(ctx context.Context, subject permission.ID) (permission.Access, error) {
 	if a.Delegator == nil {
 		return permission.NoAccess, fmt.Errorf("permissions delegator %w", errors.NotImplemented)
 	}
 
-	return a.Delegator.SubjectPermissions(a.Entity, subject)
+	return a.Delegator.SubjectPermissions(ctx, a.Tag.Id(), subject)
 }

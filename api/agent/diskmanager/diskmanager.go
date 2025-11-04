@@ -6,7 +6,7 @@ package diskmanager
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/blockdevice"
@@ -62,12 +62,12 @@ func blockDevicesToParams(in []blockdevice.BlockDevice) []params.BlockDevice {
 		out[i] = params.BlockDevice{
 			DeviceName:     d.DeviceName,
 			DeviceLinks:    d.DeviceLinks,
-			Label:          d.Label,
-			UUID:           d.UUID,
+			Label:          d.FilesystemLabel,
+			UUID:           d.FilesystemUUID,
 			HardwareId:     d.HardwareId,
 			WWN:            d.WWN,
 			BusAddress:     d.BusAddress,
-			Size:           d.SizeMiB,
+			SizeMiB:        d.SizeMiB,
 			FilesystemType: d.FilesystemType,
 			InUse:          d.InUse,
 			MountPoint:     d.MountPoint,

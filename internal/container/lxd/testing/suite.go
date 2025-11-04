@@ -4,20 +4,24 @@
 package testing
 
 import (
+	"context"
+
 	lxdapi "github.com/canonical/lxd/shared/api"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/status"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 const ETag = "eTag"
 
 // NoOpCallback can be passed to methods that receive a callback for setting
 // status messages.
-var NoOpCallback = func(st status.Status, info string, data map[string]interface{}) error { return nil }
+var NoOpCallback = func(ctx context.Context, st status.Status, info string, data map[string]interface{}) error {
+	return nil
+}
 
 // BaseSuite facilitates LXD testing.
 // Do not instantiate this suite directly.
@@ -26,7 +30,7 @@ type BaseSuite struct {
 	arch string
 }
 
-func (s *BaseSuite) SetUpSuite(c *gc.C) {
+func (s *BaseSuite) SetUpSuite(c *tc.C) {
 	s.BaseSuite.SetUpSuite(c)
 	s.arch = arch.HostArch()
 }

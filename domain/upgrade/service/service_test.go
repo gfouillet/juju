@@ -5,18 +5,20 @@ package service
 
 import (
 	"context"
-	"database/sql"
+	"testing"
 
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	"github.com/mattn/go-sqlite3"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	coreupgrade "github.com/juju/juju/core/upgrade"
+	watcher "github.com/juju/juju/core/watcher"
+	eventsource "github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/core/watcher/watchertest"
 	upgradeerrors "github.com/juju/juju/domain/upgrade/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 type serviceSuite struct {
@@ -28,180 +30,230 @@ type serviceSuite struct {
 	service *WatchableService
 }
 
-var _ = gc.Suite(&serviceSuite{})
+func TestServiceSuite(t *testing.T) {
+	tc.Run(t, &serviceSuite{})
+}
 
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *serviceSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.state = NewMockState(ctrl)
 	s.watcherFactory = NewMockWatcherFactory(ctrl)
 
+	s.state.EXPECT().NamespaceForWatchUpgradeReady().Return("upgrade_info_controller_node").AnyTimes()
+	s.state.EXPECT().NamespaceForWatchUpgradeState().Return("upgrade_info").AnyTimes()
+
 	s.service = NewWatchableService(s.state, s.watcherFactory)
+
+	c.Cleanup(func() {
+		s.state = nil
+		s.watcherFactory = nil
+		s.service = nil
+	})
 	return ctrl
 }
 
-func (s *serviceSuite) TestCreateUpgrade(c *gc.C) {
+func (s *serviceSuite) TestCreateUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.state.EXPECT().CreateUpgrade(gomock.Any(), version.MustParse("3.0.0"), version.MustParse("3.0.1")).Return(s.upgradeUUID, nil)
+	s.state.EXPECT().CreateUpgrade(gomock.Any(), semversion.MustParse("3.0.0"), semversion.MustParse("3.0.1")).Return(s.upgradeUUID, nil)
 
-	upgradeUUID, err := s.service.CreateUpgrade(context.Background(), version.MustParse("3.0.0"), version.MustParse("3.0.1"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(upgradeUUID, gc.Equals, s.upgradeUUID)
+	upgradeUUID, err := s.service.CreateUpgrade(c.Context(), semversion.MustParse("3.0.0"), semversion.MustParse("3.0.1"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(upgradeUUID, tc.Equals, s.upgradeUUID)
 }
 
-func (s *serviceSuite) TestCreateUpgradeAlreadyExists(c *gc.C) {
+func (s *serviceSuite) TestCreateUpgradeAlreadyExists(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	ucErr := sqlite3.Error{ExtendedCode: sqlite3.ErrConstraintUnique}
-	s.state.EXPECT().CreateUpgrade(gomock.Any(), version.MustParse("3.0.0"), version.MustParse("3.0.1")).Return(s.upgradeUUID, ucErr)
+	s.state.EXPECT().CreateUpgrade(gomock.Any(), semversion.MustParse("3.0.0"), semversion.MustParse("3.0.1")).Return(s.upgradeUUID, upgradeerrors.AlreadyExists)
 
-	_, err := s.service.CreateUpgrade(context.Background(), version.MustParse("3.0.0"), version.MustParse("3.0.1"))
-	c.Assert(err, jc.ErrorIs, upgradeerrors.ErrUpgradeAlreadyStarted)
+	_, err := s.service.CreateUpgrade(c.Context(), semversion.MustParse("3.0.0"), semversion.MustParse("3.0.1"))
+	c.Assert(err, tc.ErrorIs, upgradeerrors.AlreadyExists)
 }
 
-func (s *serviceSuite) TestCreateUpgradeInvalidVersions(c *gc.C) {
-	_, err := s.service.CreateUpgrade(context.Background(), version.MustParse("3.0.1"), version.MustParse("3.0.0"))
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+func (s *serviceSuite) TestCreateUpgradeInvalidVersions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	_, err = s.service.CreateUpgrade(context.Background(), version.MustParse("3.0.1"), version.MustParse("3.0.1"))
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	_, err := s.service.CreateUpgrade(c.Context(), semversion.MustParse("3.0.1"), semversion.MustParse("3.0.0"))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid)
+
+	_, err = s.service.CreateUpgrade(c.Context(), semversion.MustParse("3.0.1"), semversion.MustParse("3.0.1"))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid)
 }
 
-func (s *serviceSuite) TestSetControllerReady(c *gc.C) {
+func (s *serviceSuite) GetAllModelUUIDsEmptyResult(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	stExp := s.state.EXPECT()
+	stExp.GetAllModelUUIDs(gomock.Any()).Return(nil, nil)
+
+	results, err := s.service.GetAllModelUUIDs(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(results, tc.HasLen, 0)
+}
+
+func (s *serviceSuite) GetAllModelUUIDs(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	modelUUID1 := tc.Must(c, coremodel.NewUUID)
+	modelUUID2 := tc.Must(c, coremodel.NewUUID)
+
+	stExp := s.state.EXPECT()
+	stExp.GetAllModelUUIDs(gomock.Any()).Return(
+		[]coremodel.UUID{modelUUID2, modelUUID1}, nil,
+	)
+
+	results, err := s.service.GetAllModelUUIDs(c.Context())
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(results, tc.SameContents, []coremodel.UUID{
+		modelUUID1, modelUUID2,
+	})
+}
+
+func (s *serviceSuite) TestSetControllerReady(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().SetControllerReady(gomock.Any(), s.upgradeUUID, s.controllerUUID).Return(nil)
 
-	err := s.service.SetControllerReady(context.Background(), s.upgradeUUID, s.controllerUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.service.SetControllerReady(c.Context(), s.upgradeUUID, s.controllerUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestSetControllerReadyForeignKey(c *gc.C) {
+func (s *serviceSuite) TestSetControllerReadyForeignKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	fkErr := sqlite3.Error{ExtendedCode: sqlite3.ErrConstraintForeignKey}
-	s.state.EXPECT().SetControllerReady(gomock.Any(), s.upgradeUUID, s.controllerUUID).Return(fkErr)
+	s.state.EXPECT().SetControllerReady(gomock.Any(), s.upgradeUUID, s.controllerUUID).Return(upgradeerrors.NotFound)
 
-	err := s.service.SetControllerReady(context.Background(), s.upgradeUUID, s.controllerUUID)
+	err := s.service.SetControllerReady(c.Context(), s.upgradeUUID, s.controllerUUID)
 	c.Log(err)
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	c.Assert(err, tc.ErrorIs, upgradeerrors.NotFound)
 }
 
-func (s *serviceSuite) TestStartUpgrade(c *gc.C) {
+func (s *serviceSuite) TestStartUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().StartUpgrade(gomock.Any(), s.upgradeUUID).Return(nil)
 
-	err := s.service.StartUpgrade(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.service.StartUpgrade(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestStartUpgradeBeforeCreated(c *gc.C) {
+func (s *serviceSuite) TestStartUpgradeBeforeCreated(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.state.EXPECT().StartUpgrade(gomock.Any(), s.upgradeUUID).Return(sql.ErrNoRows)
+	s.state.EXPECT().StartUpgrade(gomock.Any(), s.upgradeUUID).Return(upgradeerrors.NotFound)
 
-	err := s.service.StartUpgrade(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err := s.service.StartUpgrade(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIs, upgradeerrors.NotFound)
 }
 
-func (s *serviceSuite) TestActiveUpgrade(c *gc.C) {
+func (s *serviceSuite) TestActiveUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
 
-	activeUpgrade, err := s.service.ActiveUpgrade(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(activeUpgrade, gc.Equals, s.upgradeUUID)
+	activeUpgrade, err := s.service.ActiveUpgrade(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(activeUpgrade, tc.Equals, s.upgradeUUID)
 }
 
-func (s *serviceSuite) TestActiveUpgradeNoUpgrade(c *gc.C) {
+func (s *serviceSuite) TestActiveUpgradeNoUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, errors.Trace(sql.ErrNoRows))
+	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, errors.Capture(upgradeerrors.NotFound))
 
-	_, err := s.service.ActiveUpgrade(context.Background())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	_, err := s.service.ActiveUpgrade(c.Context())
+	c.Assert(err, tc.ErrorIs, upgradeerrors.NotFound)
 }
 
-func (s *serviceSuite) TestSetDBUpgradeCompleted(c *gc.C) {
+func (s *serviceSuite) TestSetDBUpgradeCompleted(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().SetDBUpgradeCompleted(gomock.Any(), s.upgradeUUID).Return(nil)
 
-	err := s.service.SetDBUpgradeCompleted(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.service.SetDBUpgradeCompleted(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestSetDBUpgradeFailed(c *gc.C) {
+func (s *serviceSuite) TestSetDBUpgradeFailed(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).Return(nil)
 
-	err := s.service.SetDBUpgradeFailed(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.service.SetDBUpgradeFailed(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestUpgradeInfo(c *gc.C) {
+func (s *serviceSuite) TestUpgradeInfo(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(coreupgrade.Info{}, nil)
 
-	_, err := s.service.UpgradeInfo(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.service.UpgradeInfo(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestWatchForUpgradeReady(c *gc.C) {
+func (s *serviceSuite) TestWatchForUpgradeReady(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	nw := watchertest.NewMockNotifyWatcher(nil)
 
-	s.watcherFactory.EXPECT().NewValueMapperWatcher(gomock.Any(), s.upgradeUUID.String(), gomock.Any(), gomock.Any()).Return(nw, nil)
+	s.watcherFactory.EXPECT().NewNotifyMapperWatcher(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, _ eventsource.Mapper, fo eventsource.FilterOption, _ ...eventsource.FilterOption) (watcher.Watcher[struct{}], error) {
+			c.Assert(fo.Namespace(), tc.Equals, "upgrade_info_controller_node")
+			return nw, nil
+		},
+	)
 
-	watcher, err := s.service.WatchForUpgradeReady(context.Background(), s.upgradeUUID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(watcher, gc.NotNil)
+	watcher, err := s.service.WatchForUpgradeReady(c.Context(), s.upgradeUUID)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(watcher, tc.NotNil)
 }
 
-func (s *serviceSuite) TestWatchForUpgradeState(c *gc.C) {
+func (s *serviceSuite) TestWatchForUpgradeState(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	nw := watchertest.NewMockNotifyWatcher(nil)
 
-	s.watcherFactory.EXPECT().NewValueMapperWatcher(gomock.Any(), s.upgradeUUID.String(), gomock.Any(), gomock.Any()).Return(nw, nil)
+	s.watcherFactory.EXPECT().NewNotifyMapperWatcher(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, _ eventsource.Mapper, fo eventsource.FilterOption, _ ...eventsource.FilterOption) (watcher.Watcher[struct{}], error) {
+			c.Assert(fo.Namespace(), tc.Equals, "upgrade_info")
+			return nw, nil
+		},
+	)
 
-	watcher, err := s.service.WatchForUpgradeState(context.Background(), s.upgradeUUID, coreupgrade.Started)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(watcher, gc.NotNil)
+	watcher, err := s.service.WatchForUpgradeState(c.Context(), s.upgradeUUID, coreupgrade.Started)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(watcher, tc.NotNil)
 }
 
-func (s *serviceSuite) TestIsUpgrade(c *gc.C) {
+func (s *serviceSuite) TestIsUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
 
-	upgrading, err := s.service.IsUpgrading(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(upgrading, jc.IsTrue)
+	upgrading, err := s.service.IsUpgrading(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(upgrading, tc.IsTrue)
 }
 
-func (s *serviceSuite) TestIsUpgradeNoUpgrade(c *gc.C) {
+func (s *serviceSuite) TestIsUpgradeNoUpgrade(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, errors.Trace(sql.ErrNoRows))
+	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, errors.Capture(upgradeerrors.NotFound))
 
-	upgrading, err := s.service.IsUpgrading(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(upgrading, jc.IsFalse)
+	upgrading, err := s.service.IsUpgrading(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(upgrading, tc.IsFalse)
 }
 
-func (s *serviceSuite) TestIsUpgradeError(c *gc.C) {
+func (s *serviceSuite) TestIsUpgradeError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, errors.New("boom"))
 
-	upgrading, err := s.service.IsUpgrading(context.Background())
-	c.Assert(err, gc.ErrorMatches, `boom`)
-	c.Assert(upgrading, jc.IsFalse)
+	upgrading, err := s.service.IsUpgrading(c.Context())
+	c.Assert(err, tc.ErrorMatches, `boom`)
+	c.Assert(upgrading, tc.IsFalse)
 }

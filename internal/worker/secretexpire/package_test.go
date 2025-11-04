@@ -3,14 +3,4 @@
 
 package secretexpire_test
 
-import (
-	stdtesting "testing"
-
-	gc "gopkg.in/check.v1"
-)
-
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/client_mock.go -source secretexpire.go
-
-func TestPackage(t *stdtesting.T) {
-	gc.TestingT(t)
-}

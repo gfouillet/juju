@@ -4,8 +4,10 @@
 package context
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/logger"
@@ -66,8 +68,9 @@ func (s *secretsChangeRecorder) update(arg uniter.SecretUpdateArg) {
 		if arg.Description != nil {
 			c.Description = arg.Description
 		}
-		if !arg.Value.IsEmpty() {
+		if arg.Value != nil && !arg.Value.IsEmpty() {
 			c.Value = arg.Value
+			c.Checksum = arg.Checksum
 		}
 		if arg.RotatePolicy != nil {
 			c.RotatePolicy = arg.RotatePolicy
@@ -78,7 +81,28 @@ func (s *secretsChangeRecorder) update(arg uniter.SecretUpdateArg) {
 		s.pendingCreates[arg.URI.ID] = c
 		return
 	}
-	s.pendingUpdates[arg.URI.ID] = arg
+	previous, ok := s.pendingUpdates[arg.URI.ID]
+	if !ok {
+		s.pendingUpdates[arg.URI.ID] = arg
+		return
+	}
+	if arg.Label != nil {
+		previous.Label = arg.Label
+	}
+	if arg.Description != nil {
+		previous.Description = arg.Description
+	}
+	if arg.Value != nil && !arg.Value.IsEmpty() {
+		previous.Value = arg.Value
+		previous.Checksum = arg.Checksum
+	}
+	if arg.RotatePolicy != nil {
+		previous.RotatePolicy = arg.RotatePolicy
+	}
+	if arg.ExpireTime != nil {
+		previous.ExpireTime = arg.ExpireTime
+	}
+	s.pendingUpdates[arg.URI.ID] = previous
 }
 
 func (s *secretsChangeRecorder) remove(uri *secrets.URI, revision *int) {
@@ -87,7 +111,24 @@ func (s *secretsChangeRecorder) remove(uri *secrets.URI, revision *int) {
 	delete(s.pendingGrants, uri.ID)
 	delete(s.pendingRevokes, uri.ID)
 	delete(s.pendingTrackLatest, uri.ID)
-	s.pendingDeletes[uri.ID] = uniter.SecretDeleteArg{URI: uri, Revision: revision}
+	toDelete, exists := s.pendingDeletes[uri.ID]
+	if exists {
+		if toDelete.Revisions != nil {
+			if revision != nil {
+				toDelete.Revisions = append(toDelete.Revisions, *revision)
+			} else {
+				// we didn't pass a revision, so now we are deleting all revisions
+				toDelete.Revisions = nil
+			}
+		}
+	} else {
+		if revision != nil {
+			toDelete = uniter.SecretDeleteArg{URI: uri, Revisions: []int{*revision}}
+		} else {
+			toDelete = uniter.SecretDeleteArg{URI: uri, Revisions: nil}
+		}
+	}
+	s.pendingDeletes[uri.ID] = toDelete
 }
 
 func (s *secretsChangeRecorder) grant(arg uniter.SecretGrantRevokeArgs) {
@@ -117,7 +158,7 @@ func (s *secretsChangeRecorder) revoke(arg uniter.SecretGrantRevokeArgs) {
 	s.pendingRevokes[arg.URI.ID] = append(s.pendingRevokes[arg.URI.ID], arg)
 }
 
-func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...secrets.AccessInfo) ([]secrets.AccessInfo, error) {
+func (s *secretsChangeRecorder) secretGrantInfo(ctx context.Context, uri *secrets.URI, applied ...secrets.AccessInfo) ([]secrets.AccessInfo, error) {
 	mergePendingGrants := func() {
 		grants, ok := s.pendingGrants[uri.ID]
 		if !ok {
@@ -127,7 +168,7 @@ func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...sec
 			params := grant.ToParams()
 			if len(params.SubjectTags) == 0 {
 				// This should never happen.
-				s.logger.Warningf("missing SubjectTags: %+v", params)
+				s.logger.Warningf(ctx, "missing SubjectTags: %+v", params)
 				continue
 			}
 			applied = append(applied, secrets.AccessInfo{
@@ -146,7 +187,7 @@ func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...sec
 			params := revoke.ToParams()
 			if len(params.SubjectTags) == 0 {
 				// This should never happen.
-				s.logger.Warningf("missing SubjectTags: %+v", params)
+				s.logger.Warningf(ctx, "missing SubjectTags: %+v", params)
 				continue
 			}
 			for j, grant := range applied {

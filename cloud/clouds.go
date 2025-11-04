@@ -54,6 +54,11 @@ const (
 	// You only get these credentials by running within that machine.
 	InstanceRoleAuthType AuthType = "instance-role"
 
+	// ManagedIdentityAuthType is an authentication type used by sourcing
+	// credentials from a user managed identity from within the machine's context.
+	// You only get these credentials by running within that machine.
+	ManagedIdentityAuthType AuthType = "managed-identity"
+
 	// UserPassAuthType is an authentication type using a username and password.
 	UserPassAuthType AuthType = "userpass"
 
@@ -66,6 +71,12 @@ const (
 	// JSONFileAuthType is an authentication type that takes a path to
 	// a JSON file.
 	JSONFileAuthType AuthType = "jsonfile"
+
+	// ServiceAccountAuthType is an authentication type used by sourcing
+	// a bearer token from a cloud metadata service tied to an instance's
+	// attached service account.
+	// You only get these credentials by running within that machine.
+	ServiceAccountAuthType AuthType = "service-account"
 
 	// ClientCertificateAuthType is an authentication type using client
 	// certificates.
@@ -82,7 +93,7 @@ const (
 	InteractiveAuthType = "interactive"
 
 	// EmptyAuthType is the authentication type used for providers
-	// that require no credentials, e.g. "lxd", and "manual".
+	// that require no credentials, e.g. "lxd", and "unmanaged".
 	EmptyAuthType AuthType = "empty"
 
 	// AuthTypesKey is the name of the key in a cloud config or cloud schema
@@ -374,6 +385,22 @@ func JujuPublicCloudsPath() string {
 // PublicCloudMetadata looks in searchPath for cloud metadata files and if none
 // are found, returns the fallback public cloud metadata.
 func PublicCloudMetadata(searchPath ...string) (result map[string]Cloud, fallbackUsed bool, err error) {
+	defer func() {
+		// Until we can be sure the public clouds yaml is updated to support
+		// Azure managed identity auth types, add it manually.
+		// This is a short term compatibility fix.
+		for name, cld := range result {
+			if cld.Type == "azure" && !cld.AuthTypes.Contains(ManagedIdentityAuthType) {
+				cld.AuthTypes = append(cld.AuthTypes, ManagedIdentityAuthType)
+				result[name] = cld
+			}
+			if cld.Type == "gce" && !cld.AuthTypes.Contains(ServiceAccountAuthType) {
+				cld.AuthTypes = append(cld.AuthTypes, ServiceAccountAuthType)
+				result[name] = cld
+			}
+		}
+
+	}()
 	for _, file := range searchPath {
 		data, err := os.ReadFile(file)
 		if err != nil && os.IsNotExist(err) {

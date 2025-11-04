@@ -5,12 +5,15 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"sort"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Private and special use network ranges for IPv4 and IPv6.
@@ -75,6 +78,10 @@ const (
 // machine belongs to, or to the machine itself for containers.
 type Scope string
 
+func (s Scope) String() string {
+	return string(s)
+}
+
 const (
 	ScopeUnknown      Scope = ""
 	ScopePublic       Scope = "public"
@@ -134,6 +141,23 @@ func ExactScopeMatch(addr Address, addrScopes ...Scope) bool {
 		}
 	}
 	return false
+}
+
+// SortOrderOrigin calculates the "weight" of the address origin to use when
+// sorting such that the most accessible addresses will appear first:
+// - provider addresses first;
+// - machine addresses next;
+// - unknown addresses last.
+func SortOrderOrigin(sas SpaceAddress) int {
+	switch sas.Origin {
+	case OriginProvider:
+		return 0
+	case OriginMachine:
+		return 1
+	case OriginUnknown:
+		return 2
+	}
+	return 3
 }
 
 // SortOrderMostPublic calculates the "weight" of the address to use when
@@ -214,7 +238,11 @@ type MachineAddress struct {
 
 // Host returns the value for the host-name/IP address.
 func (a MachineAddress) Host() string {
-	return a.Value
+	ip := a.IP()
+	if ip == nil {
+		return a.Value
+	}
+	return ip.String()
 }
 
 // AddressType returns the type of the address.
@@ -254,12 +282,14 @@ func (a MachineAddress) String() string {
 	if a.Scope != ScopeUnknown {
 		prefix = string(a.Scope) + ":"
 	}
-	return prefix + a.Value
+	// Use the Host rather than the IP method to ensure the result contains
+	// either the host name or the IP Address.
+	return prefix + a.Host()
 }
 
 // IP returns the net.IP representation of this address.
 func (a MachineAddress) IP() net.IP {
-	return net.ParseIP(a.Value)
+	return DeriveNetIP(a.Value)
 }
 
 // ValueWithMask returns the value of the address combined
@@ -270,12 +300,12 @@ func (a MachineAddress) ValueWithMask() (string, error) {
 	// TODO (manadart 2021-03-16): Rethink this as we clean up InterfaceInfos
 	// and its corresponding wire type.
 	if a.Value == "" || a.CIDR == "" {
-		return "", errors.NotFoundf("address and CIDR pair (%q, %q)", a.Value, a.CIDR)
+		return "", errors.Errorf("address and CIDR pair (%q, %q) %w", a.Value, a.CIDR, coreerrors.NotFound)
 	}
 
 	_, ipNet, err := net.ParseCIDR(a.CIDR)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
 	ip := a.IP()
@@ -363,6 +393,20 @@ func (as MachineAddresses) Values() []string {
 	return toStrings(as)
 }
 
+// DeriveNetIP returns a net.IP for the given input.
+// The input can be a hostname (juju-4febc8-0), an ip address (192.168.0.6),
+// or an ip address with subnetmask (192.168.0.6/24). The result is nil if
+// the input is a hostname.
+func DeriveNetIP(value string) net.IP {
+	// ParseCidr will fail on a host name. If there is an error, fallback
+	// and try ParseIP.
+	ip, _, err := net.ParseCIDR(value)
+	if err != nil {
+		ip = net.ParseIP(value)
+	}
+	return ip
+}
+
 // deriveScope attempts to derive the network scope from an address'
 // type and value, returning the original network scope if no
 // deduction can be made.
@@ -370,7 +414,7 @@ func deriveScope(addr MachineAddress) Scope {
 	if addr.Type == HostName {
 		return addr.Scope
 	}
-	ip := net.ParseIP(addr.Value)
+	ip := addr.IP()
 	if ip == nil {
 		return addr.Scope
 	}
@@ -429,7 +473,7 @@ var InterfaceAddrs = func() ([]net.Addr, error) {
 func IsLocalAddress(ip net.IP) (bool, error) {
 	addrs, err := InterfaceAddrs()
 	if err != nil {
-		return false, errors.Trace(err)
+		return false, errors.Capture(err)
 	}
 
 	for _, addr := range addrs {
@@ -527,9 +571,9 @@ func (pas ProviderAddresses) ToSpaceAddresses(spaceInfos SpaceInfos) (SpaceAddre
 
 		// If the provider explicitly sets the space, i.e. MAAS, prefer the name.
 		if pa.SpaceName != "" {
-			info := spaceInfos.GetByName(string(pa.SpaceName))
+			info := spaceInfos.GetByName(pa.SpaceName)
 			if info == nil {
-				return nil, errors.NotFoundf("space with name %q", pa.SpaceName)
+				return nil, errors.Errorf("space with name %q %w", pa.SpaceName, coreerrors.NotFound)
 			}
 			sas[i].SpaceID = info.ID
 			continue
@@ -538,7 +582,7 @@ func (pas ProviderAddresses) ToSpaceAddresses(spaceInfos SpaceInfos) (SpaceAddre
 		// Otherwise attempt to look up the CIDR.
 		sInfo, err := spaceInfos.InferSpaceFromCIDRAndSubnetID(pa.CIDR, string(pa.ProviderSubnetID))
 		if err != nil {
-			logger.Debugf("no matching subnet for CIDR %q and provider ID %q", pa.CIDR, pa.ProviderSubnetID)
+			logger.Debugf(context.TODO(), "no matching subnet for CIDR %q and provider ID %q", pa.CIDR, pa.ProviderSubnetID)
 			continue
 		}
 		sas[i].SpaceID = sInfo.ID
@@ -554,7 +598,7 @@ func (pas ProviderAddresses) OneMatchingScope(getMatcher ScopeMatchFunc) (Provid
 		return ProviderAddress{}, false
 	}
 	addr := pas[indexes[0]]
-	logger.Debugf("selected %q as address, using scope %q", addr.Value, addr.Scope)
+	logger.Debugf(context.TODO(), "selected %q as address, using scope %q", addr.Value, addr.Scope)
 	return addr, true
 }
 
@@ -564,7 +608,8 @@ func (pas ProviderAddresses) OneMatchingScope(getMatcher ScopeMatchFunc) (Provid
 // It is used in logic for filtering addresses by space.
 type SpaceAddress struct {
 	MachineAddress
-	SpaceID string
+	Origin  Origin
+	SpaceID SpaceUUID
 }
 
 // GoString implements fmt.GoStringer.
@@ -584,7 +629,7 @@ func (a SpaceAddress) String() string {
 
 	if a.SpaceID != "" {
 		buf.WriteString("@space:")
-		buf.WriteString(a.SpaceID)
+		buf.WriteString(a.SpaceID.String())
 	}
 
 	return buf.String()
@@ -629,7 +674,7 @@ func (sas SpaceAddresses) ToProviderAddresses(spaceInfos SpaceInfos) (ProviderAd
 		if sa.SpaceID != "" {
 			info := spaceInfos.GetByID(sa.SpaceID)
 			if info == nil {
-				return nil, errors.NotFoundf("space with ID %q", sa.SpaceID)
+				return nil, errors.Errorf("space with ID %q %w", sa.SpaceID, coreerrors.NotFound)
 			}
 			pas[i].SpaceName = info.Name
 			pas[i].ProviderSpaceID = info.ProviderId
@@ -641,7 +686,7 @@ func (sas SpaceAddresses) ToProviderAddresses(spaceInfos SpaceInfos) (ProviderAd
 // InSpaces returns the SpaceAddresses that are in the input spaces.
 func (sas SpaceAddresses) InSpaces(spaces ...SpaceInfo) (SpaceAddresses, bool) {
 	if len(spaces) == 0 {
-		logger.Errorf("addresses not filtered - no spaces given.")
+		logger.Errorf(context.TODO(), "addresses not filtered - no spaces given.")
 		return sas, false
 	}
 
@@ -649,7 +694,7 @@ func (sas SpaceAddresses) InSpaces(spaces ...SpaceInfo) (SpaceAddresses, bool) {
 	var selectedAddresses SpaceAddresses
 	for _, addr := range sas {
 		if space := spaceInfos.GetByID(addr.SpaceID); space != nil {
-			logger.Debugf("selected %q as an address in space %q", addr.Value, space.Name)
+			logger.Debugf(context.TODO(), "selected %q as an address in space %q", addr.Value, space.Name)
 			selectedAddresses = append(selectedAddresses, addr)
 		}
 	}
@@ -658,7 +703,7 @@ func (sas SpaceAddresses) InSpaces(spaces ...SpaceInfo) (SpaceAddresses, bool) {
 		return selectedAddresses, true
 	}
 
-	logger.Errorf("no addresses found in spaces %s", spaceInfos)
+	logger.Errorf(context.TODO(), "no addresses found in spaces %s", spaceInfos)
 	return sas, false
 }
 
@@ -700,17 +745,23 @@ func (sas SpaceAddresses) Swap(i, j int) { sas[i], sas[j] = sas[j], sas[i] }
 func (sas SpaceAddresses) Less(i, j int) bool {
 	addr1 := sas[i]
 	addr2 := sas[j]
+	// Sort by scope first, then by origin then by address value.
 	order1 := SortOrderMostPublic(addr1)
 	order2 := SortOrderMostPublic(addr2)
 	if order1 == order2 {
-		return addr1.Value < addr2.Value
+		originOrder1 := SortOrderOrigin(addr1)
+		originOrder2 := SortOrderOrigin(addr2)
+		if originOrder1 == originOrder2 {
+			return addr1.Value < addr2.Value
+		}
+		return originOrder1 < originOrder2
 	}
 	return order1 < order2
 }
 
 // DeriveAddressType attempts to detect the type of address given.
 func DeriveAddressType(value string) AddressType {
-	ip := net.ParseIP(value)
+	ip := DeriveNetIP(value)
 	switch {
 	case ip == nil:
 		// TODO(gz): Check value is a valid hostname
@@ -856,7 +907,7 @@ type SpaceAddressCandidate interface {
 func ConvertToSpaceAddress(addr SpaceAddressCandidate, lookup SubnetLookup) (SpaceAddress, error) {
 	subnets, err := lookup.AllSubnetInfos()
 	if err != nil {
-		return SpaceAddress{}, errors.Trace(err)
+		return SpaceAddress{}, errors.Capture(err)
 	}
 
 	cidr := addr.SubnetCIDR()
@@ -874,7 +925,7 @@ func ConvertToSpaceAddress(addr SpaceAddressCandidate, lookup SubnetLookup) (Spa
 	if cidr != "" {
 		allMatching, err := subnets.GetByCIDR(cidr)
 		if err != nil {
-			return SpaceAddress{}, errors.Trace(err)
+			return SpaceAddress{}, errors.Capture(err)
 		}
 
 		// This only holds true while CIDRs uniquely identify subnets.
@@ -888,21 +939,19 @@ func ConvertToSpaceAddress(addr SpaceAddressCandidate, lookup SubnetLookup) (Spa
 
 // noAddress represents an error when an address is requested but not available.
 type noAddress struct {
-	errors.Err
+	error
 }
 
 // NoAddressError returns an error which satisfies IsNoAddressError(). The given
 // addressKind specifies what kind of address(es) is(are) missing, usually
 // "private" or "public".
 func NoAddressError(addressKind string) error {
-	newErr := errors.NewErr("no %s address(es)", addressKind)
-	newErr.SetLocation(1)
+	newErr := errors.Errorf("no %s address(es)", addressKind)
 	return &noAddress{newErr}
 }
 
 // IsNoAddressError reports whether err was created with NoAddressError().
 func IsNoAddressError(err error) bool {
-	err = errors.Cause(err)
 	_, ok := err.(*noAddress)
 	return ok
 }

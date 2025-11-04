@@ -44,18 +44,18 @@ func (m *MockDBGetter) EXPECT() *MockDBGetterMockRecorder {
 }
 
 // GetDB mocks base method.
-func (m *MockDBGetter) GetDB(arg0 string) (database.TxnRunner, error) {
+func (m *MockDBGetter) GetDB(arg0 context.Context, arg1 string) (database.TxnRunner, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetDB", arg0)
+	ret := m.ctrl.Call(m, "GetDB", arg0, arg1)
 	ret0, _ := ret[0].(database.TxnRunner)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetDB indicates an expected call of GetDB.
-func (mr *MockDBGetterMockRecorder) GetDB(arg0 any) *MockDBGetterGetDBCall {
+func (mr *MockDBGetterMockRecorder) GetDB(arg0, arg1 any) *MockDBGetterGetDBCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDB", reflect.TypeOf((*MockDBGetter)(nil).GetDB), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDB", reflect.TypeOf((*MockDBGetter)(nil).GetDB), arg0, arg1)
 	return &MockDBGetterGetDBCall{Call: call}
 }
 
@@ -71,13 +71,13 @@ func (c *MockDBGetterGetDBCall) Return(arg0 database.TxnRunner, arg1 error) *Moc
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockDBGetterGetDBCall) Do(f func(string) (database.TxnRunner, error)) *MockDBGetterGetDBCall {
+func (c *MockDBGetterGetDBCall) Do(f func(context.Context, string) (database.TxnRunner, error)) *MockDBGetterGetDBCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockDBGetterGetDBCall) DoAndReturn(f func(string) (database.TxnRunner, error)) *MockDBGetterGetDBCall {
+func (c *MockDBGetterGetDBCall) DoAndReturn(f func(context.Context, string) (database.TxnRunner, error)) *MockDBGetterGetDBCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -103,6 +103,44 @@ func NewMockWatchableDBWorker(ctrl *gomock.Controller) *MockWatchableDBWorker {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockWatchableDBWorker) EXPECT() *MockWatchableDBWorkerMockRecorder {
 	return m.recorder
+}
+
+// Dying mocks base method.
+func (m *MockWatchableDBWorker) Dying() <-chan struct{} {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Dying")
+	ret0, _ := ret[0].(<-chan struct{})
+	return ret0
+}
+
+// Dying indicates an expected call of Dying.
+func (mr *MockWatchableDBWorkerMockRecorder) Dying() *MockWatchableDBWorkerDyingCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Dying", reflect.TypeOf((*MockWatchableDBWorker)(nil).Dying))
+	return &MockWatchableDBWorkerDyingCall{Call: call}
+}
+
+// MockWatchableDBWorkerDyingCall wrap *gomock.Call
+type MockWatchableDBWorkerDyingCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockWatchableDBWorkerDyingCall) Return(arg0 <-chan struct{}) *MockWatchableDBWorkerDyingCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockWatchableDBWorkerDyingCall) Do(f func() <-chan struct{}) *MockWatchableDBWorkerDyingCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockWatchableDBWorkerDyingCall) DoAndReturn(f func() <-chan struct{}) *MockWatchableDBWorkerDyingCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
 }
 
 // Kill mocks base method.
@@ -180,10 +218,10 @@ func (c *MockWatchableDBWorkerStdTxnCall) DoAndReturn(f func(context.Context, fu
 }
 
 // Subscribe mocks base method.
-func (m *MockWatchableDBWorker) Subscribe(arg0 ...changestream.SubscriptionOption) (changestream.Subscription, error) {
+func (m *MockWatchableDBWorker) Subscribe(arg0 string, arg1 ...changestream.SubscriptionOption) (changestream.Subscription, error) {
 	m.ctrl.T.Helper()
-	varargs := []any{}
-	for _, a := range arg0 {
+	varargs := []any{arg0}
+	for _, a := range arg1 {
 		varargs = append(varargs, a)
 	}
 	ret := m.ctrl.Call(m, "Subscribe", varargs...)
@@ -193,9 +231,10 @@ func (m *MockWatchableDBWorker) Subscribe(arg0 ...changestream.SubscriptionOptio
 }
 
 // Subscribe indicates an expected call of Subscribe.
-func (mr *MockWatchableDBWorkerMockRecorder) Subscribe(arg0 ...any) *MockWatchableDBWorkerSubscribeCall {
+func (mr *MockWatchableDBWorkerMockRecorder) Subscribe(arg0 any, arg1 ...any) *MockWatchableDBWorkerSubscribeCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Subscribe", reflect.TypeOf((*MockWatchableDBWorker)(nil).Subscribe), arg0...)
+	varargs := append([]any{arg0}, arg1...)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Subscribe", reflect.TypeOf((*MockWatchableDBWorker)(nil).Subscribe), varargs...)
 	return &MockWatchableDBWorkerSubscribeCall{Call: call}
 }
 
@@ -211,13 +250,13 @@ func (c *MockWatchableDBWorkerSubscribeCall) Return(arg0 changestream.Subscripti
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockWatchableDBWorkerSubscribeCall) Do(f func(...changestream.SubscriptionOption) (changestream.Subscription, error)) *MockWatchableDBWorkerSubscribeCall {
+func (c *MockWatchableDBWorkerSubscribeCall) Do(f func(string, ...changestream.SubscriptionOption) (changestream.Subscription, error)) *MockWatchableDBWorkerSubscribeCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockWatchableDBWorkerSubscribeCall) DoAndReturn(f func(...changestream.SubscriptionOption) (changestream.Subscription, error)) *MockWatchableDBWorkerSubscribeCall {
+func (c *MockWatchableDBWorkerSubscribeCall) DoAndReturn(f func(string, ...changestream.SubscriptionOption) (changestream.Subscription, error)) *MockWatchableDBWorkerSubscribeCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

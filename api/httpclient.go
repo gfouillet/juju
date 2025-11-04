@@ -5,40 +5,41 @@ package api
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	gopath "path"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/errors"
 	"gopkg.in/httprequest.v1"
-	"gopkg.in/macaroon.v2"
 
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/rpc/params"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // HTTPClient implements Connection.APICaller.HTTPClient and returns an HTTP
 // client pointing to the API server "/model/:uuid/" path.
 func (c *conn) HTTPClient() (*httprequest.Client, error) {
-	baseURL, err := c.apiEndpoint("/", "")
+	apiPath, err := apiPath(c.modelTag.Id(), "/")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return c.httpClient(baseURL)
+	url := c.Addr()
+	url.Scheme = c.serverScheme
+	url.Path = gopath.Join(url.Path, apiPath)
+
+	return c.httpClient(url)
 }
 
 // RootHTTPClient implements Connection.APICaller.HTTPClient and returns an HTTP
 // client pointing to the API server root path.
 func (c *conn) RootHTTPClient() (*httprequest.Client, error) {
-	return c.httpClient(&url.URL{
-		Scheme: c.serverScheme,
-		Host:   c.Addr(),
-	})
+	url := c.Addr()
+	url.Scheme = c.serverScheme
+	return c.httpClient(url)
 }
 
 func (c *conn) httpClient(baseURL *url.URL) (*httprequest.Client, error) {
@@ -67,10 +68,7 @@ var _ httprequest.Doer = httpRequestDoer{}
 func (doer httpRequestDoer) Do(req *http.Request) (*http.Response, error) {
 	if err := authHTTPRequest(
 		req,
-		doer.c.tag,
-		doer.c.password,
-		doer.c.nonce,
-		doer.c.macaroons,
+		doer.c.loginProvider,
 	); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -79,9 +77,18 @@ func (doer httpRequestDoer) Do(req *http.Request) (*http.Response, error) {
 		// the bakery cares about, and the CodeDischargeRequired
 		// error is the only one, and that always comes with a
 		// response code StatusUnauthorized.
+		// The caller of [Do] is now responsible for using the
+		// response and closing the body
 		if resp.StatusCode != http.StatusUnauthorized {
 			return nil
 		}
+
+		// We are returning an error on this path, so we close the body.
+		defer func() {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+		}()
 		return bakeryError(unmarshalHTTPErrorResponse(resp))
 	})
 }
@@ -89,42 +96,21 @@ func (doer httpRequestDoer) Do(req *http.Request) (*http.Response, error) {
 // AuthHTTPRequest adds Juju auth info (username, password, nonce, macaroons)
 // to the given HTTP request, suitable for sending to a Juju API server.
 func AuthHTTPRequest(req *http.Request, info *Info) error {
-	var tag string
-	if info.Tag != nil {
-		tag = info.Tag.String()
-	}
-	return authHTTPRequest(req, tag, info.Password, info.Nonce, info.Macaroons)
+	lp := NewLegacyLoginProvider(info.Tag, info.Password, info.Nonce, info.Macaroons, nil, nil)
+	return authHTTPRequest(req, lp)
 }
 
-func authHTTPRequest(req *http.Request, tag, password, nonce string, macaroons []macaroon.Slice) error {
-	if tag != "" {
-		// Note that password may be empty here; we still
-		// want to pass the tag along. An empty password
-		// indicates that we're using macaroon authentication.
-		req.SetBasicAuth(tag, password)
+func authHTTPRequest(req *http.Request, lp LoginProvider) error {
+	header, err := lp.AuthHeader()
+	if err != nil {
+		return errors.Trace(err)
 	}
-	if nonce != "" {
-		req.Header.Set(params.MachineNonceHeader, nonce)
+	// Copy headers to the request, using the first available value for each key.
+	for key := range header {
+		req.Header.Set(key, header.Get(key))
 	}
 	req.Header.Set(params.JujuClientVersion, jujuversion.Current.String())
-	req.Header.Set(httpbakery.BakeryProtocolHeader, fmt.Sprint(bakery.LatestVersion))
-	for _, ms := range macaroons {
-		encoded, err := encodeMacaroonSlice(ms)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		req.Header.Add(httpbakery.MacaroonsHeader, encoded)
-	}
 	return nil
-}
-
-// encodeMacaroonSlice base64-JSON-encodes a slice of macaroons.
-func encodeMacaroonSlice(ms macaroon.Slice) (string, error) {
-	data, err := json.Marshal(ms)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func isJSONMediaType(header http.Header) bool {
@@ -140,7 +126,7 @@ func isJSONMediaType(header http.Header) bool {
 // It always returns a non-nil error.
 func unmarshalHTTPErrorResponse(resp *http.Response) error {
 	if !isJSONMediaType(resp.Header) {
-		// response body is not JSON. This is probably a response
+		// Response body is not JSON. This is probably a response
 		// from the underlying webserver
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -156,7 +142,7 @@ func unmarshalHTTPErrorResponse(resp *http.Response) error {
 		case 405:
 			return errors.MethodNotAllowedf(string(body))
 		default:
-			return errors.Errorf(string(body))
+			return errors.New(string(body))
 		}
 	}
 
@@ -242,7 +228,8 @@ func bakeryError(err error) error {
 		if dcMac == nil {
 			dcMac, err = bakery.NewLegacyMacaroon(info.Macaroon)
 			if err != nil {
-				return errors.Annotate(err, "unable to create legacy macaroon details from discharge-required response error")
+				return errors.Annotate(err,
+					"unable to create legacy macaroon details from discharge-required response error")
 			}
 		}
 		bakeryErr.Info.Macaroon = dcMac

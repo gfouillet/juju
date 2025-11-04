@@ -20,15 +20,20 @@ import (
 // DownloadBundleClient represents a way to download a bundle from a given
 // resource URL.
 type DownloadBundleClient interface {
-	DownloadAndReadBundle(context.Context, *url.URL, string, ...charmhub.DownloadOption) (charm.Bundle, error)
+	Download(context.Context, *url.URL, string, ...charmhub.DownloadOption) (*charmhub.Digest, error)
 }
 
 // DownloadBundleClientFunc lazily construct a download bundle client.
-type DownloadBundleClientFunc = func() (DownloadBundleClient, error)
+type DownloadBundleClientFunc = func(ctx context.Context) (DownloadBundleClient, error)
 
 // BundleFactory represents a type for getting a bundle from a given url.
 type BundleFactory interface {
 	GetBundle(context.Context, *charm.URL, commoncharm.Origin, string) (charm.Bundle, error)
+}
+
+// CharmReader represents a type for reading a bundle archive.
+type CharmReader interface {
+	ReadBundleArchive(path string) (charm.Bundle, error)
 }
 
 // BundleRepoFunc creates a bundle factory from a charm URL.
@@ -48,6 +53,7 @@ func NewCharmAdaptor(charmsAPI CharmsAPI, downloadBundleClientFunc DownloadBundl
 		bundleRepoFn: func(url *charm.URL) (BundleFactory, error) {
 			return chBundleFactory{
 				charmsAPI:                charmsAPI,
+				charmReader:              charmReader{},
 				downloadBundleClientFunc: downloadBundleClientFunc,
 			}, nil
 		},
@@ -56,8 +62,8 @@ func NewCharmAdaptor(charmsAPI CharmsAPI, downloadBundleClientFunc DownloadBundl
 
 // ResolveCharm tries to interpret url as a Charmhub charm and
 // returns the resolved URL, origin and a slice of supported series.
-func (c *CharmAdaptor) ResolveCharm(url *charm.URL, preferredOrigin commoncharm.Origin, switchCharm bool) (*charm.URL, commoncharm.Origin, []base.Base, error) {
-	resolved, err := c.charmsAPI.ResolveCharms([]apicharm.CharmToResolve{{URL: url, Origin: preferredOrigin, SwitchCharm: switchCharm}})
+func (c *CharmAdaptor) ResolveCharm(ctx context.Context, url *charm.URL, preferredOrigin commoncharm.Origin, switchCharm bool) (*charm.URL, commoncharm.Origin, []base.Base, error) {
+	resolved, err := c.charmsAPI.ResolveCharms(ctx, []apicharm.CharmToResolve{{URL: url, Origin: preferredOrigin, SwitchCharm: switchCharm}})
 	if err != nil {
 		return nil, commoncharm.Origin{}, nil, errors.Trace(err)
 	}
@@ -76,11 +82,11 @@ func (c *CharmAdaptor) ResolveCharm(url *charm.URL, preferredOrigin commoncharm.
 // bundle. If it turns out to be a bundle, the resolved
 // URL and origin are returned. If it isn't but there wasn't a problem
 // checking it, it returns a nil charm URL.
-func (c *CharmAdaptor) ResolveBundleURL(maybeBundle *charm.URL, preferredOrigin commoncharm.Origin) (*charm.URL, commoncharm.Origin, error) {
+func (c *CharmAdaptor) ResolveBundleURL(ctx context.Context, maybeBundle *charm.URL, preferredOrigin commoncharm.Origin) (*charm.URL, commoncharm.Origin, error) {
 	// Charm or bundle has been supplied as a URL so we resolve and
 	// deploy using the store. In this case, a --switch is not possible
 	// so we pass "false" to ResolveCharm.
-	storeCharmOrBundleURL, origin, _, err := c.ResolveCharm(maybeBundle, preferredOrigin, false)
+	storeCharmOrBundleURL, origin, _, err := c.ResolveCharm(ctx, maybeBundle, preferredOrigin, false)
 	if err != nil {
 		return nil, commoncharm.Origin{}, errors.Trace(err)
 	}
@@ -101,18 +107,25 @@ func (c *CharmAdaptor) GetBundle(ctx context.Context, url *charm.URL, origin com
 	return repo.GetBundle(ctx, url, origin, path)
 }
 
+type charmReader struct{}
+
+func (charmReader) ReadBundleArchive(path string) (charm.Bundle, error) {
+	return charm.ReadBundleArchive(path)
+}
+
 type chBundleFactory struct {
 	charmsAPI                CharmsAPI
+	charmReader              CharmReader
 	downloadBundleClientFunc DownloadBundleClientFunc
 }
 
 func (ch chBundleFactory) GetBundle(ctx context.Context, curl *charm.URL, origin commoncharm.Origin, path string) (charm.Bundle, error) {
-	client, err := ch.downloadBundleClientFunc()
+	client, err := ch.downloadBundleClientFunc(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	info, err := ch.charmsAPI.GetDownloadInfo(curl, origin)
+	info, err := ch.charmsAPI.GetDownloadInfo(ctx, curl, origin)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -120,5 +133,13 @@ func (ch chBundleFactory) GetBundle(ctx context.Context, curl *charm.URL, origin
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return client.DownloadAndReadBundle(ctx, url, path)
+	_, err = client.Download(ctx, url, path)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	bundle, err := ch.charmReader.ReadBundleArchive(path)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return bundle, nil
 }

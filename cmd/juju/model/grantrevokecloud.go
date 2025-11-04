@@ -4,17 +4,18 @@
 package model
 
 import (
+	"context"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var validCloudAccessLevels = `
@@ -27,7 +28,7 @@ Grants access level to a Juju user for a cloud.`[1:]
 var usageGrantCloudDetails = validCloudAccessLevels
 
 const usageGrantCloudExamples = `
-Grant user 'joe' 'add-model' access to cloud 'fluffy':
+Grant user ` + "`joe`" + ` ` + "`add-model`" + ` access to cloud ` + "`fluffy`" + `:
 
     juju grant-cloud joe add-model fluffy
 `
@@ -37,17 +38,17 @@ Revokes access from a Juju user for a cloud.`[1:]
 
 var usageRevokeCloudDetails = `
 Revoking admin access, from a user who has that permission, will leave
-that user with add-model access. Revoking add-model access, however, also revokes
+that user with ` + "`add-model`" + ` access. Revoking ` + "`add-model`" + ` access, however, also revokes
 admin access.
 
 `[1:] + validCloudAccessLevels
 
 const usageRevokeCloudExamples = `
-Revoke 'add-model' (and 'admin') access from user 'joe' for cloud 'fluffy':
+Revoke ` + "`add-model`" + ` (and 'admin') access from user ` + "`joe`" + ` for cloud ` + "`fluffy`" + `:
 
     juju revoke-cloud joe add-model fluffy
 
-Revoke 'admin' access from user 'sam' for clouds 'fluffy' and 'rainy':
+Revoke ` + "`admin`" + ` access from user ` + "`sam`" + ` for clouds ` + "`fluffy`" + ` and ` + "`rainy`" + `:
 
     juju revoke-cloud sam admin fluffy rainy
 
@@ -112,17 +113,18 @@ func (c *grantCloudCommand) Info() *cmd.Info {
 		Doc:      usageGrantCloudDetails,
 		Examples: usageGrantCloudExamples,
 		SeeAlso: []string{
+			"grant",
 			"revoke-cloud",
 			"add-user",
 		},
 	})
 }
 
-func (c *grantCloudCommand) getCloudsAPI() (GrantCloudAPI, error) {
+func (c *grantCloudCommand) getCloudsAPI(ctx context.Context) (GrantCloudAPI, error) {
 	if c.cloudsApi != nil {
 		return c.cloudsApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -132,18 +134,18 @@ func (c *grantCloudCommand) getCloudsAPI() (GrantCloudAPI, error) {
 // GrantCloudAPI defines the API functions used by the grant command.
 type GrantCloudAPI interface {
 	Close() error
-	GrantCloud(user, access string, clouds ...string) error
+	GrantCloud(ctx context.Context, user, access string, clouds ...string) error
 }
 
 // Run implements cmd.Command.
 func (c *grantCloudCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getCloudsAPI()
+	client, err := c.getCloudsAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	return block.ProcessBlockedError(client.GrantCloud(c.User, c.Access, c.Clouds...), block.BlockChange)
+	return block.ProcessBlockedError(client.GrantCloud(ctx, c.User, c.Access, c.Clouds...), block.BlockChange)
 }
 
 // NewRevokeCloudCommand returns a new revoke command.
@@ -171,11 +173,11 @@ func (c *revokeCloudCommand) Info() *cmd.Info {
 	})
 }
 
-func (c *revokeCloudCommand) getCloudAPI() (RevokeCloudAPI, error) {
+func (c *revokeCloudCommand) getCloudAPI(ctx context.Context) (RevokeCloudAPI, error) {
 	if c.cloudsApi != nil {
 		return c.cloudsApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -185,16 +187,16 @@ func (c *revokeCloudCommand) getCloudAPI() (RevokeCloudAPI, error) {
 // RevokeCloudAPI defines the API functions used by the revoke cloud command.
 type RevokeCloudAPI interface {
 	Close() error
-	RevokeCloud(user, access string, clouds ...string) error
+	RevokeCloud(ctx context.Context, user, access string, clouds ...string) error
 }
 
 // Run implements cmd.Command.
 func (c *revokeCloudCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getCloudAPI()
+	client, err := c.getCloudAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	return block.ProcessBlockedError(client.RevokeCloud(c.User, c.Access, c.Clouds...), block.BlockChange)
+	return block.ProcessBlockedError(client.RevokeCloud(ctx, c.User, c.Access, c.Clouds...), block.BlockChange)
 }

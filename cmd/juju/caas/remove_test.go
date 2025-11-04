@@ -4,21 +4,23 @@
 package caas_test
 
 import (
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
+	"context"
+	"testing"
+
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/cmd/juju/caas"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type fakeCredentialStore struct {
-	jujutesting.Stub
+	testhelpers.Stub
 	*jujuclient.MemStore
 }
 
@@ -38,20 +40,22 @@ func (fcs *fakeCredentialStore) UpdateCredential(cloudName string, details cloud
 }
 
 type removeCAASSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	fakeCloudAPI       *fakeRemoveCloudAPI
 	cloudMetadataStore *fakeCloudMetadataStore
 	store              *fakeCredentialStore
 }
 
-var _ = gc.Suite(&removeCAASSuite{})
+func TestRemoveCAASSuite(t *testing.T) {
+	tc.Run(t, &removeCAASSuite{})
+}
 
 type fakeRemoveCloudAPI struct {
 	caas.RemoveCloudAPI
-	jujutesting.Stub
+	testhelpers.Stub
 }
 
-func (api *fakeRemoveCloudAPI) RemoveCloud(cloud string) error {
+func (api *fakeRemoveCloudAPI) RemoveCloud(ctx context.Context, cloud string) error {
 	api.AddCall("RemoveCloud", cloud)
 	return api.NextErr()
 }
@@ -60,7 +64,7 @@ func (api *fakeRemoveCloudAPI) Close() error {
 	return nil
 }
 
-func (s *removeCAASSuite) SetUpTest(c *gc.C) {
+func (s *removeCAASSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.fakeCloudAPI = &fakeRemoveCloudAPI{}
 	s.store = &fakeCredentialStore{
@@ -68,7 +72,7 @@ func (s *removeCAASSuite) SetUpTest(c *gc.C) {
 	}
 
 	var logger loggo.Logger
-	s.cloudMetadataStore = &fakeCloudMetadataStore{CallMocker: jujutesting.NewCallMocker(logger)}
+	s.cloudMetadataStore = &fakeCloudMetadataStore{CallMocker: testhelpers.NewCallMocker(logger)}
 
 	k8sCloud := cloud.Cloud{Name: "myk8s", Type: "kubernetes"}
 	initialCloudMap := map[string]cloud.Cloud{"myk8s": k8sCloud}
@@ -82,33 +86,33 @@ func (s *removeCAASSuite) makeCommand() cmd.Command {
 		s.cloudMetadataStore,
 		s.store,
 		s.store,
-		func() (caas.RemoveCloudAPI, error) {
+		func(ctx context.Context) (caas.RemoveCloudAPI, error) {
 			return s.fakeCloudAPI, nil
 		},
 	)
 	return removecmd
 }
 
-func (s *removeCAASSuite) runCommand(c *gc.C, cmd cmd.Command, args ...string) (*cmd.Context, error) {
+func (s *removeCAASSuite) runCommand(c *tc.C, cmd cmd.Command, args ...string) (*cmd.Context, error) {
 	return cmdtesting.RunCommand(c, cmd, args...)
 }
 
-func (s *removeCAASSuite) TestExtraArg(c *gc.C) {
+func (s *removeCAASSuite) TestExtraArg(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "k8sname", "extra")
-	c.Assert(err, gc.ErrorMatches, `unrecognized args: \["extra"\]`)
+	c.Assert(err, tc.ErrorMatches, `unrecognized args: \["extra"\]`)
 }
 
-func (s *removeCAASSuite) TestMissingName(c *gc.C) {
+func (s *removeCAASSuite) TestMissingName(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command)
-	c.Assert(err, gc.ErrorMatches, `missing k8s cloud name.`)
+	c.Assert(err, tc.ErrorMatches, `missing k8s cloud name.`)
 }
 
-func (s *removeCAASSuite) TestRemove(c *gc.C) {
+func (s *removeCAASSuite) TestRemove(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "myk8s", "-c", "foo", "--client")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.fakeCloudAPI.CheckCallNames(c, "RemoveCloud")
 	s.fakeCloudAPI.CheckCall(c, 0, "RemoveCloud", "myk8s")
@@ -120,10 +124,10 @@ func (s *removeCAASSuite) TestRemove(c *gc.C) {
 	s.store.CheckCall(c, 1, "UpdateCredential", "myk8s", cloud.CloudCredential{})
 }
 
-func (s *removeCAASSuite) TestRemoveControllerOnly(c *gc.C) {
+func (s *removeCAASSuite) TestRemoveControllerOnly(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "myk8s", "-c", "foo")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// controller side operations
 	s.fakeCloudAPI.CheckCallNames(c, "RemoveCloud")
@@ -134,10 +138,10 @@ func (s *removeCAASSuite) TestRemoveControllerOnly(c *gc.C) {
 	s.store.CheckNoCalls(c)
 }
 
-func (s *removeCAASSuite) TestRemoveClientOnly(c *gc.C) {
+func (s *removeCAASSuite) TestRemoveClientOnly(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "myk8s", "--client")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// controller side operations
 	s.fakeCloudAPI.CheckNoCalls(c)
@@ -149,18 +153,18 @@ func (s *removeCAASSuite) TestRemoveClientOnly(c *gc.C) {
 	s.store.CheckCall(c, 0, "UpdateCredential", "myk8s", cloud.CloudCredential{})
 }
 
-func (s *removeCAASSuite) TestRemoveNotInController(c *gc.C) {
+func (s *removeCAASSuite) TestRemoveNotInController(c *tc.C) {
 	s.fakeCloudAPI.SetErrors(errors.NotFoundf("cloud"))
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "myk8s", "-c", "foo")
-	c.Assert(err, gc.ErrorMatches, "cannot remove k8s cloud from controller.*")
+	c.Assert(err, tc.ErrorMatches, "cannot remove k8s cloud from controller.*")
 	s.store.CheckNoCalls(c)
 }
 
-func (s *removeCAASSuite) TestRemoveNotInLocal(c *gc.C) {
+func (s *removeCAASSuite) TestRemoveNotInLocal(c *tc.C) {
 	command := s.makeCommand()
 	_, err := s.runCommand(c, command, "yourk8s", "-c", "foo", "--client")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.fakeCloudAPI.CheckCallNames(c, "RemoveCloud")
 	s.fakeCloudAPI.CheckCall(c, 0, "RemoveCloud", "yourk8s")

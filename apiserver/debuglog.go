@@ -4,6 +4,7 @@
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/juju/loggo/v2"
 
 	"github.com/juju/juju/apiserver/authentication"
+	"github.com/juju/juju/apiserver/httpcontext"
 	"github.com/juju/juju/apiserver/websocket"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/logtailer"
@@ -95,27 +97,22 @@ func newDebugLogHandler(
 //	   - but the command does not wait for new ones.
 func (h *debugLogHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	handler := func(conn *websocket.Conn) {
-		socket := &debugLogSocketImpl{conn}
+		socket := &debugLogSocketImpl{conn: conn}
 		defer conn.Close()
+
 		// Authentication and authorization has to be done after the http
 		// connection has been upgraded to a websocket.
-
 		authInfo, err := h.authenticator.Authenticate(req)
 		if err != nil {
 			socket.sendError(errors.Annotate(err, "authentication failed"))
 			return
 		}
-		if err := h.authorizer.Authorize(authInfo); err != nil {
+		if err := h.authorizer.Authorize(req.Context(), authInfo); err != nil {
 			socket.sendError(errors.Annotate(err, "authorization failed"))
 			return
 		}
 
-		st, err := h.ctxt.stateForRequestUnauthenticated(req)
-		if err != nil {
-			socket.sendError(err)
-			return
-		}
-		defer st.Release()
+		modelUUID, _ := httpcontext.RequestModelUUID(req.Context())
 
 		params, err := readDebugLogParams(req.URL.Query())
 		if err != nil {
@@ -127,29 +124,33 @@ func (h *debugLogHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		maxDuration := h.ctxt.srv.shared.maxDebugLogDuration()
 
 		logTailerFunc := func(p logtailer.LogTailerParams) (logtailer.LogTailer, error) {
-			m, err := st.Model()
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			var (
-				logFile   string
-				modelUUID string
-			)
+			// TODO (stickupkid): This should come from the logsink directly, to
+			// prevent unfettered access.
+			logFile := filepath.Join(h.logDir, "logsink.log")
 			if p.Firehose {
-				logFile = filepath.Join(h.logDir, "logsink.log")
-			} else {
-				modelOwnerAndName := corelogger.ModelFilePrefix(m.Owner().Id(), m.Name())
-				logFile = corelogger.ModelLogFile(h.logDir, m.UUID(), modelOwnerAndName)
-				modelUUID = m.UUID()
+				modelUUID = ""
 			}
 
 			return logtailer.NewLogTailer(modelUUID, logFile, p)
 		}
-		if err := h.handle(clock, maxDuration, params, socket, logTailerFunc, h.ctxt.stop()); err != nil {
+
+		// This should really use a tomb, then we don't have to do this song
+		// and dance with the channel.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+
+			select {
+			case <-req.Context().Done():
+			case <-h.ctxt.stop():
+			}
+		}()
+
+		if err := h.handle(clock, maxDuration, params, socket, logTailerFunc, done); err != nil {
 			if isBrokenPipe(err) {
-				logger.Tracef("debug-log handler stopped (client disconnected)")
+				logger.Tracef(req.Context(), "debug-log handler stopped (client disconnected)")
 			} else {
-				logger.Errorf("debug-log handler error: %v", err)
+				logger.Errorf(req.Context(), "debug-log handler error: %v", err)
 			}
 		}
 	}
@@ -177,7 +178,7 @@ type debugLogSocket interface {
 	sendError(err error)
 
 	// sendLogRecord sends record JSON encoded.
-	sendLogRecord(record *params.LogMessage, version int) error
+	sendLogRecord(*params.LogMessage, int) error
 }
 
 // debugLogSocketImpl implements the debugLogSocket interface. It
@@ -195,8 +196,8 @@ func (s *debugLogSocketImpl) sendOk() {
 // sendError implements debugLogSocket.
 func (s *debugLogSocketImpl) sendError(err error) {
 	if sendErr := s.conn.SendInitialErrorV0(err); sendErr != nil {
-		logger.Errorf("closing websocket, %v", err)
-		s.conn.Close()
+		logger.Errorf(context.Background(), "closing websocket, %v", err)
+		_ = s.conn.Close()
 		return
 	}
 }
@@ -224,11 +225,10 @@ func (s *debugLogSocketImpl) sendLogRecord(record *params.LogMessage, version in
 type debugLogParams struct {
 	version       int
 	startTime     time.Time
-	maxLines      uint
 	fromTheStart  bool
 	noTail        bool
 	firehose      bool
-	backlog       uint
+	initialLines  uint
 	filterLevel   corelogger.Level
 	includeEntity []string
 	excludeEntity []string
@@ -249,20 +249,20 @@ func readDebugLogParams(queryMap url.Values) (debugLogParams, error) {
 		params.version = vers
 	}
 
+	if value := queryMap.Get("backlog"); value != "" {
+		backLogVal, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return params, errors.Errorf("backlog value %q is not a valid unsigned number", value)
+		}
+		params.initialLines = uint(backLogVal)
+	}
+
 	if value := queryMap.Get("maxLines"); value != "" {
-		num, err := strconv.ParseUint(value, 10, 64)
+		maxLinesVal, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
 			return params, errors.Errorf("maxLines value %q is not a valid unsigned number", value)
 		}
-		params.maxLines = uint(num)
-	}
-
-	if value := queryMap.Get("replay"); value != "" {
-		replay, err := strconv.ParseBool(value)
-		if err != nil {
-			return params, errors.Errorf("replay value %q is not a valid boolean", value)
-		}
-		params.fromTheStart = replay
+		params.initialLines = uint(maxLinesVal)
 	}
 
 	if value := queryMap.Get("noTail"); value != "" {
@@ -281,12 +281,12 @@ func readDebugLogParams(queryMap url.Values) (debugLogParams, error) {
 		params.firehose = firehose
 	}
 
-	if value := queryMap.Get("backlog"); value != "" {
-		num, err := strconv.ParseUint(value, 10, 64)
+	if value := queryMap.Get("replay"); value != "" {
+		replay, err := strconv.ParseBool(value)
 		if err != nil {
-			return params, errors.Errorf("backlog value %q is not a valid unsigned number", value)
+			return params, errors.Errorf("replay value %q is not a valid boolean", value)
 		}
-		params.backlog = uint(num)
+		params.fromTheStart = replay
 	}
 
 	if value := queryMap.Get("level"); value != "" {

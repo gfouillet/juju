@@ -7,11 +7,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
-
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageRemoveSSHKeySummary = `
@@ -19,7 +18,7 @@ Removes a public SSH key (or keys) from a model.`[1:]
 
 var usageRemoveSSHKeyDetails = `
 Juju maintains a per-model cache of public SSH keys which it copies to
-each unit. This command will remove a specified key (or space separated
+each unit. This command will remove a specified key (or space-separated
 list of keys) from the model cache and all current units deployed in that
 model. The keys to be removed may be specified by the key's fingerprint
 using a SHA256 sum or by the text label associated with them. Keys may also be
@@ -72,8 +71,8 @@ func (c *removeKeysCommand) Init(args []string) error {
 }
 
 // Run implements Command.Run.
-func (c *removeKeysCommand) Run(context *cmd.Context) error {
-	client, err := c.NewKeyManagerClient()
+func (c *removeKeysCommand) Run(ctx *cmd.Context) error {
+	client, err := c.NewKeyManagerClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -82,13 +81,13 @@ func (c *removeKeysCommand) Run(context *cmd.Context) error {
 	// TODO(alexisb) - currently keys are global which is not ideal.
 	// keymanager needs to be updated to allow keys per user
 	c.user = "admin"
-	results, err := client.DeleteKeys(c.user, c.keyIds...)
+	results, err := client.DeleteKeys(ctx, c.user, c.keyIds...)
 	if err != nil {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
 	for i, result := range results {
 		if result.Error != nil {
-			fmt.Fprintf(context.Stderr, "cannot remove key id %q: %v\n", c.keyIds[i], result.Error)
+			fmt.Fprintf(ctx.Stderr, "cannot remove key id %q: %v\n", c.keyIds[i], result.Error)
 		}
 	}
 	return nil

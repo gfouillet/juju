@@ -32,12 +32,13 @@ run_simplestream_metadata() {
 		--show-log \
 		--config agent-metadata-url="http://${server_address}:8666/" \
 		--config test-mode=true \
-		--add-model=default \
 		--bootstrap-base="${BOOTSTRAP_BASE}" \
 		--agent-version="${JUJUD_VERSION}" 2>&1 | OUTPUT "${file}"
 	echo "${name}" >>"${TEST_DIR}/jujus"
 
-	juju deploy jameinel-ubuntu-lite
+	juju add-model default
+
+	juju deploy ubuntu-lite
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 }
 

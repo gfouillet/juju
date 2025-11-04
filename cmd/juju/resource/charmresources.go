@@ -4,7 +4,8 @@
 package resource
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -15,16 +16,17 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/internal/charm"
 	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ResourceLister lists resources for the given charm ids.
 type ResourceLister interface {
-	ListResources(ids []CharmID) ([][]charmresource.Resource, error)
+	ListResources(ctx context.Context, ids []CharmID) ([][]charmresource.Resource, error)
 }
 
 // CharmResourceLister lists the resource of a charm.
 type CharmResourceLister interface {
-	ListCharmResources(curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
+	ListCharmResources(ctx context.Context, curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
 }
 
 // CharmID represents the charm identifier.
@@ -37,17 +39,17 @@ type CharmID struct {
 }
 
 // APIRoot defines a way to create a new API root.
-type APIRoot = func() (api.Connection, error)
+type APIRoot = func(ctx context.Context) (api.Connection, error)
 
 // ResourceListerDependencies defines the dependencies to create a store
 // dependant resource lister.
 type ResourceListerDependencies interface {
-	NewAPIRoot() (api.Connection, error)
+	NewAPIRoot(ctx context.Context) (api.Connection, error)
 }
 
 // CreateResourceListener defines a factory function to create a resource
 // lister.
-type CreateResourceListener = func(string, ResourceListerDependencies) (ResourceLister, error)
+type CreateResourceListener = func(context.Context, string, ResourceListerDependencies) (ResourceLister, error)
 
 // CharmResourcesCommand implements the "juju charm-resources" command.
 type CharmResourcesCommand struct {
@@ -70,7 +72,7 @@ func NewCharmResourcesCommand() modelcmd.ModelCommand {
 func NewCharmResourcesCommandWithClient(client ResourceLister) modelcmd.ModelCommand {
 	c := CharmResourcesCommand{
 		baseCharmResourcesCommand{
-			CreateResourceListerFn: func(schema string, deps ResourceListerDependencies) (ResourceLister, error) {
+			CreateResourceListerFn: func(ctx context.Context, schema string, deps ResourceListerDependencies) (ResourceLister, error) {
 				return client, nil
 			},
 		},
@@ -170,7 +172,7 @@ func (c *baseCharmResourcesCommand) baseRun(ctx *cmd.Context) error {
 		channel = charm.MakePermissiveChannel("", c.channel, "")
 	}
 
-	resourceLister, err := c.CreateResourceListerFn(charmURL.Schema, c)
+	resourceLister, err := c.CreateResourceListerFn(ctx, charmURL.Schema, c)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -180,7 +182,7 @@ func (c *baseCharmResourcesCommand) baseRun(ctx *cmd.Context) error {
 		Channel: channel,
 	}
 
-	resources, err := resourceLister.ListResources([]CharmID{
+	resources, err := resourceLister.ListResources(ctx, []CharmID{
 		charm,
 	})
 	if err != nil {
@@ -207,17 +209,16 @@ const charmResourcesDoc = `
 This command will report the resources and the current revision of each
 resource for a charm in a repository.
 
-Channel can be specified with --channel.  If not provided, stable is used.
+Channel can be specified with ` + "`--channel`" + `.  If not provided, ` + "`stable`" + ` is used.
 
-Where a channel is not supplied, stable is used.
 `
 
 const charmResourcesExamples = `
-Display charm resources for the postgresql charm:
+Display charm resources for the ` + "`postgresql`" + ` charm:
 
     juju charm-resources postgresql
 
-Display charm resources for mycharm in the 2.0/edge channel:
+Display charm resources for ` + "`mycharm`" + ` in the ` + "`2.0/edge`" + ` channel:
 
     juju charm-resources mycharm --channel 2.0/edge
 
@@ -235,7 +236,7 @@ func resolveCharm(raw string) (*charm.URL, error) {
 	return charmURL, nil
 }
 
-func defaultResourceLister(schema string, deps ResourceListerDependencies) (ResourceLister, error) {
+func defaultResourceLister(ctx context.Context, schema string, deps ResourceListerDependencies) (ResourceLister, error) {
 	return &CharmhubResourceLister{
 		APIRootFn: deps.NewAPIRoot,
 	}, nil
@@ -247,7 +248,7 @@ type CharmhubResourceLister struct {
 }
 
 // ListResources implements CharmResourceLister.
-func (c *CharmhubResourceLister) ListResources(ids []CharmID) ([][]charmresource.Resource, error) {
+func (c *CharmhubResourceLister) ListResources(ctx context.Context, ids []CharmID) ([][]charmresource.Resource, error) {
 	if len(ids) != 1 {
 		return nil, errors.Errorf("expected one resource to list")
 	}
@@ -257,16 +258,20 @@ func (c *CharmhubResourceLister) ListResources(ids []CharmID) ([][]charmresource
 		track = &id.Channel.Track
 	}
 
-	apiRoot, err := c.APIRootFn()
+	apiRoot, err := c.APIRootFn(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	client := charms.NewClient(apiRoot)
-	results, err := client.ListCharmResources(id.URL.String(), apicharm.Origin{
-		Source: apicharm.OriginCharmHub,
-		Track:  track,
-		Risk:   string(id.Channel.Risk),
-	})
+	results, err := client.ListCharmResources(
+		ctx,
+		id.URL.String(),
+		apicharm.Origin{
+			Source: apicharm.OriginCharmHub,
+			Track:  track,
+			Risk:   string(id.Channel.Risk),
+		},
+	)
 	if errors.Is(err, errors.NotSupported) {
 		return nil, errors.Errorf("charmhub charms are not supported with the current controller, try upgrading the controller to a newer version")
 	} else if err != nil {

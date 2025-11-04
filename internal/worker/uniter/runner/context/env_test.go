@@ -4,40 +4,41 @@
 package context_test
 
 import (
-	stdcontext "context"
 	"sort"
+	stdtesting "testing"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	jujuos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/os/ostype"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
-	jujuversion "github.com/juju/juju/version"
 )
 
 type EnvSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&EnvSuite{})
+func TestEnvSuite(t *stdtesting.T) {
+	tc.Run(t, &EnvSuite{})
+}
 
-func (s *EnvSuite) assertVars(c *gc.C, actual []string, expect ...[]string) {
+func (s *EnvSuite) assertVars(c *tc.C, actual []string, expect ...[]string) {
 	var fullExpect []string
 	for _, someExpect := range expect {
 		fullExpect = append(fullExpect, someExpect...)
 	}
 	sort.Strings(actual)
 	sort.Strings(fullExpect)
-	c.Assert(actual, jc.DeepEquals, fullExpect)
+	c.Assert(actual, tc.DeepEquals, fullExpect)
 }
 
 func (s *EnvSuite) getPaths() (paths context.Paths, expectVars []string) {
@@ -50,7 +51,7 @@ func (s *EnvSuite) getPaths() (paths context.Paths, expectVars []string) {
 	}
 }
 
-func (s *EnvSuite) getHookContext(c *gc.C, newProxyOnly bool, uniter api.UniterClient, unit context.HookUnit) (ctx *context.HookContext, expectVars []string) {
+func (s *EnvSuite) getHookContext(c *tc.C, newProxyOnly bool, uniter api.UniterClient, unit context.HookUnit) (ctx *context.HookContext, expectVars []string) {
 	var (
 		legacyProxy proxy.Settings
 		jujuProxy   proxy.Settings
@@ -134,17 +135,32 @@ func (s *EnvSuite) setSecret(ctx *context.HookContext) (expectVars []string) {
 	}
 }
 
-func (s *EnvSuite) setNotice(ctx *context.HookContext) (expectVars []string) {
+func (s *EnvSuite) setWorkload(ctx *context.HookContext) (expectVars []string) {
 	workload := "wrk"
+	context.SetEnvironmentHookContextWorkload(ctx, workload)
+	return []string{
+		"JUJU_WORKLOAD_NAME=" + workload,
+	}
+}
+
+func (s *EnvSuite) setNotice(ctx *context.HookContext) (expectVars []string) {
 	id := "1"
 	typ := "custom"
 	key := "a.com/b"
-	context.SetEnvironmentHookContextNotice(ctx, workload, id, typ, key)
+	context.SetEnvironmentHookContextNotice(ctx, id, typ, key)
 	return []string{
-		"JUJU_WORKLOAD_NAME=" + workload,
 		"JUJU_NOTICE_ID=" + id,
 		"JUJU_NOTICE_TYPE=" + typ,
 		"JUJU_NOTICE_KEY=" + key,
+	}
+}
+
+// setCheck sets the context for a check hook.
+func (s *EnvSuite) setCheck(ctx *context.HookContext) (expectVars []string) {
+	name := "http-check"
+	context.SetEnvironmentHookContextCheck(ctx, name)
+	return []string{
+		"JUJU_PEBBLE_CHECK_NAME=" + name,
 	}
 }
 
@@ -169,19 +185,12 @@ func (s *EnvSuite) setStorage(ctx *context.HookContext) (expectVars []string) {
 	}
 }
 
-func (s *EnvSuite) setBaseUpgrade(ctx *context.HookContext) (expectedVars []string) {
-	context.SetEnvironmentHookContextTargetBase(ctx, "ubuntu@24.04")
-	return []string{
-		"JUJU_TARGET_BASE=ubuntu@24.04",
-	}
-}
-
-func (s *EnvSuite) TestHostEnv(c *gc.C) {
+func (s *EnvSuite) TestHostEnv(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	state := api.NewMockUniterClient(ctrl)
-	state.EXPECT().StorageAttachment(names.NewStorageTag("data/0"), names.NewUnitTag("this-unit/123")).Return(params.StorageAttachment{
+	state.EXPECT().StorageAttachment(gomock.Any(), names.NewStorageTag("data/0"), names.NewUnitTag("this-unit/123")).Return(params.StorageAttachment{
 		Kind:     params.StorageKindBlock,
 		Location: "/dev/sdb",
 	}, nil).AnyTimes()
@@ -189,7 +198,7 @@ func (s *EnvSuite) TestHostEnv(c *gc.C) {
 	unit.EXPECT().Tag().Return(names.NewUnitTag("this-unit/123")).AnyTimes()
 
 	s.PatchValue(&jujuos.HostOS, func() ostype.OSType { return ostype.Ubuntu })
-	s.PatchValue(&jujuversion.Current, version.MustParse("1.2.3"))
+	s.PatchValue(&jujuversion.Current, semversion.MustParse("1.2.3"))
 
 	ubuntuVars := []string{
 		"APT_LISTCHANGES_FRONTEND=none",
@@ -200,7 +209,7 @@ func (s *EnvSuite) TestHostEnv(c *gc.C) {
 	}
 
 	environmenter := context.NewRemoteEnvironmenter(
-		func() []string { return []string{"KUBERNETES_SERVICE=test"} },
+		func() []string { return []string{} },
 		func(k string) string {
 			switch k {
 			case "PATH":
@@ -210,8 +219,6 @@ func (s *EnvSuite) TestHostEnv(c *gc.C) {
 		},
 		func(k string) (string, bool) {
 			switch k {
-			case "KUBERNETES_SERVICE":
-				return "test", true
 			case "PATH":
 				return "foo:bar", true
 			}
@@ -219,33 +226,35 @@ func (s *EnvSuite) TestHostEnv(c *gc.C) {
 		},
 	)
 
+	//ctx, contextVars := s.getContext(false, state, unit)
 	hookContext, contextVars := s.getHookContext(c, false, state, unit)
 	paths, pathsVars := s.getPaths()
-	actualVars, err := hookContext.HookVars(stdcontext.Background(), paths, false, environmenter)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertVars(c, actualVars, contextVars, pathsVars, ubuntuVars, []string{"KUBERNETES_SERVICE=test"})
+	actualVars, err := hookContext.HookVars(c.Context(), paths, environmenter)
+	c.Assert(err, tc.ErrorIsNil)
+	s.assertVars(c, actualVars, contextVars, pathsVars, ubuntuVars)
 
 	relationVars := s.setDepartingRelation(hookContext)
 	secretVars := s.setSecret(hookContext)
 	storageVars := s.setStorage(hookContext)
+	workloadVars := s.setWorkload(hookContext)
 	noticeVars := s.setNotice(hookContext)
-	upgradeVars := s.setBaseUpgrade(hookContext)
-	actualVars, err = hookContext.HookVars(stdcontext.Background(), paths, false, environmenter)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertVars(c, actualVars, contextVars, pathsVars, ubuntuVars, relationVars, secretVars, storageVars, noticeVars, upgradeVars, []string{"KUBERNETES_SERVICE=test"})
+	checkVars := s.setCheck(hookContext)
+	actualVars, err = hookContext.HookVars(c.Context(), paths, environmenter)
+	c.Assert(err, tc.ErrorIsNil)
+	s.assertVars(c, actualVars, contextVars, pathsVars, ubuntuVars, relationVars, secretVars, storageVars, workloadVars, noticeVars, checkVars)
 }
 
-func (s *EnvSuite) TestContextDependentDoesNotIncludeUnSet(c *gc.C) {
+func (s *EnvSuite) TestContextDependentDoesNotIncludeUnSet(c *tc.C) {
 	environmenter := context.NewRemoteEnvironmenter(
 		func() []string { return []string{} },
 		func(_ string) string { return "" },
 		func(_ string) (string, bool) { return "", false },
 	)
 
-	c.Assert(len(context.ContextDependentEnvVars(environmenter)), gc.Equals, 0)
+	c.Assert(len(context.ContextDependentEnvVars(environmenter)), tc.Equals, 0)
 }
 
-func (s *EnvSuite) TestContextDependentDoesIncludeAll(c *gc.C) {
+func (s *EnvSuite) TestContextDependentDoesIncludeAll(c *tc.C) {
 	counter := 0
 	environmenter := context.NewRemoteEnvironmenter(
 		func() []string { return []string{} },
@@ -255,10 +264,10 @@ func (s *EnvSuite) TestContextDependentDoesIncludeAll(c *gc.C) {
 			return "dummy-val", true
 		},
 	)
-	c.Assert(len(context.ContextDependentEnvVars(environmenter)), gc.Equals, counter)
+	c.Assert(len(context.ContextDependentEnvVars(environmenter)), tc.Equals, counter)
 }
 
-func (s *EnvSuite) TestContextDependentPartialInclude(c *gc.C) {
+func (s *EnvSuite) TestContextDependentPartialInclude(c *tc.C) {
 	counter := 0
 	environmenter := context.NewRemoteEnvironmenter(
 		func() []string { return []string{} },
@@ -274,11 +283,11 @@ func (s *EnvSuite) TestContextDependentPartialInclude(c *gc.C) {
 		},
 	)
 
-	c.Assert(len(context.ContextDependentEnvVars(environmenter)), gc.Equals, counter)
-	c.Assert(counter, gc.Equals, 2)
+	c.Assert(len(context.ContextDependentEnvVars(environmenter)), tc.Equals, counter)
+	c.Assert(counter, tc.Equals, 2)
 }
 
-func (s *EnvSuite) TestContextDependentCallsAllVarKeys(c *gc.C) {
+func (s *EnvSuite) TestContextDependentCallsAllVarKeys(c *tc.C) {
 	queriedVars := map[string]bool{}
 	environmenter := context.NewRemoteEnvironmenter(
 		func() []string { return []string{} },
@@ -299,6 +308,6 @@ func (s *EnvSuite) TestContextDependentCallsAllVarKeys(c *gc.C) {
 	)
 
 	rval := context.ContextDependentEnvVars(environmenter)
-	c.Assert(len(rval), gc.Equals, len(queriedVars))
-	c.Assert(len(queriedVars), gc.Equals, len(context.ContextAllowedEnvVars))
+	c.Assert(len(rval), tc.Equals, len(queriedVars))
+	c.Assert(len(queriedVars), tc.Equals, len(context.ContextAllowedEnvVars))
 }

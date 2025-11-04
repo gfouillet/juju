@@ -10,17 +10,16 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/caas"
+	coreapplication "github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
 	"github.com/juju/juju/internal/password"
-	"github.com/juju/juju/rpc/params"
 )
 
 type appNotifyWorker interface {
@@ -29,60 +28,77 @@ type appNotifyWorker interface {
 }
 
 type appWorker struct {
-	catacomb   catacomb.Catacomb
-	facade     CAASProvisionerFacade
-	broker     CAASBroker
-	clock      clock.Clock
-	logger     logger.Logger
-	unitFacade CAASUnitProvisionerFacade
-	ops        ApplicationOps
+	catacomb catacomb.Catacomb
 
-	name        string
-	modelTag    names.ModelTag
-	changes     chan struct{}
-	password    string
-	lastApplied caas.ApplicationConfig
-	life        life.Value
-	statusOnly  bool
+	agentPasswordService       AgentPasswordService
+	applicationService         ApplicationService
+	statusService              StatusService
+	storageProvisioningService StorageProvisioningService
+	resourceOpenerGetter       ResourceOpenerGetter
+
+	facade CAASProvisionerFacade
+	broker CAASBroker
+	clock  clock.Clock
+	logger logger.Logger
+	ops    ApplicationOps
+
+	appUUID          coreapplication.UUID
+	changes          chan struct{}
+	password         string
+	lastApplied      caas.ApplicationConfig
+	provisioningInfo *ProvisioningInfo
+	life             life.Value
+
+	engineReportRequest chan chan<- map[string]any
 }
 
 type AppWorkerConfig struct {
-	Name       string
-	Facade     CAASProvisionerFacade
-	Broker     CAASBroker
-	ModelTag   names.ModelTag
-	Clock      clock.Clock
-	Logger     logger.Logger
-	UnitFacade CAASUnitProvisionerFacade
-	Ops        ApplicationOps
-	StatusOnly bool
+	AppID coreapplication.UUID
+
+	AgentPasswordService       AgentPasswordService
+	ApplicationService         ApplicationService
+	StatusService              StatusService
+	StorageProvisioningService StorageProvisioningService
+	ResourceOpenerGetter       ResourceOpenerGetter
+
+	Ops    ApplicationOps
+	Broker CAASBroker
+	Clock  clock.Clock
+	Logger logger.Logger
+
+	// TODO: remove these
+	Facade CAASProvisionerFacade
 }
 
 const tryAgain errors.ConstError = "try again"
 
-type NewAppWorkerFunc func(AppWorkerConfig) func() (worker.Worker, error)
+type NewAppWorkerFunc func(AppWorkerConfig) func(ctx context.Context) (worker.Worker, error)
 
-func NewAppWorker(config AppWorkerConfig) func() (worker.Worker, error) {
+func NewAppWorker(config AppWorkerConfig) func(ctx context.Context) (worker.Worker, error) {
 	ops := config.Ops
 	if ops == nil {
 		ops = &applicationOps{}
 	}
-	return func() (worker.Worker, error) {
+	return func(ctx context.Context) (worker.Worker, error) {
 		changes := make(chan struct{}, 1)
 		changes <- struct{}{}
 		a := &appWorker{
-			name:       config.Name,
-			facade:     config.Facade,
-			broker:     config.Broker,
-			modelTag:   config.ModelTag,
-			clock:      config.Clock,
-			logger:     config.Logger,
-			changes:    changes,
-			unitFacade: config.UnitFacade,
-			ops:        ops,
-			statusOnly: config.StatusOnly,
+			agentPasswordService:       config.AgentPasswordService,
+			applicationService:         config.ApplicationService,
+			statusService:              config.StatusService,
+			storageProvisioningService: config.StorageProvisioningService,
+			resourceOpenerGetter:       config.ResourceOpenerGetter,
+			appUUID:                    config.AppID,
+			facade:                     config.Facade,
+			broker:                     config.Broker,
+			clock:                      config.Clock,
+			logger:                     config.Logger,
+			changes:                    changes,
+			ops:                        ops,
+			engineReportRequest:        make(chan chan<- map[string]any),
 		}
 		err := catacomb.Invoke(catacomb.Plan{
+			Name: "caas-application-provisioner",
 			Site: &a.catacomb,
 			Work: a.loop,
 		})
@@ -109,84 +125,99 @@ func (a *appWorker) loop() error {
 	ctx, cancel := a.scopedContext()
 	defer cancel()
 
+	// TODO: eliminate name at this level, it should be only in provisioning info
+	// when creating resources on the k8s broker.
+	name, err := a.applicationService.GetApplicationName(ctx, a.appUUID)
+	if errors.Is(err, applicationerrors.ApplicationNotFound) {
+		a.logger.Debugf(ctx, "application %q no longer exists", a.appUUID)
+		return nil
+	} else if err != nil {
+		return errors.Annotatef(err, "fetching info for application %q", a.appUUID)
+	}
+
+	// If the application is the Juju controller, only provide updates on the
+	// status of the application.
+	statusOnly, err := a.applicationService.IsControllerApplication(ctx, a.appUUID)
+	if errors.Is(err, applicationerrors.ApplicationNotFound) {
+		a.logger.Debugf(ctx, "application %q no longer exists", a.appUUID)
+		return nil
+	} else if err != nil {
+		return errors.Annotatef(err, "fetching info for application %q", a.appUUID)
+	}
+
 	// TODO(sidecar): support more than statefulset
-	app := a.broker.Application(a.name, caas.DeploymentStateful)
+	app := a.broker.Application(name, caas.DeploymentStateful)
 
 	// If the application no longer exists, return immediately. If it's in
 	// Dead state, ensure it's deleted and terminated.
-	appLife, err := a.facade.Life(a.name)
-	if errors.Is(err, errors.NotFound) {
-		a.logger.Debugf("application %q no longer exists", a.name)
+	appLife, err := a.applicationService.GetApplicationLife(ctx, a.appUUID)
+	if errors.Is(err, applicationerrors.ApplicationNotFound) {
+		a.logger.Debugf(ctx, "application %q no longer exists", name)
 		return nil
 	} else if err != nil {
-		return errors.Annotatef(err, "fetching life status for application %q", a.name)
+		return errors.Annotatef(err, "fetching life status for application %q", name)
 	}
 	a.life = appLife
 	if appLife == life.Dead {
-		if !a.statusOnly {
-			err = a.ops.AppDying(a.name, app, a.life, a.facade, a.unitFacade, a.logger)
+		if !statusOnly {
+			err = a.ops.AppDying(ctx, name, a.appUUID, app, a.life, a.facade,
+				a.applicationService, a.statusService, a.logger)
 			if err != nil {
-				return errors.Annotatef(err, "deleting application %q", a.name)
+				return errors.Annotatef(err, "deleting application %q", name)
 			}
-			err = a.ops.AppDead(a.name, app, a.broker, a.facade, a.unitFacade, a.clock, a.logger)
+			err = a.ops.AppDead(ctx, name, a.appUUID, app, a.broker,
+				a.applicationService, a.statusService, a.clock, a.logger)
 			if err != nil {
-				return errors.Annotatef(err, "deleting application %q", a.name)
+				return errors.Annotatef(err, "deleting application %q", name)
 			}
 		}
 		return nil
 	}
 
-	// Ensure the charm is to a v2 charm.
-	isOk, err := a.ops.CheckCharmFormat(a.name, a.facade, a.logger)
-	if !isOk || err != nil {
-		return errors.Trace(err)
-	}
-
-	if !a.statusOnly {
+	if appLife == life.Alive && !statusOnly {
 		// Update the password once per worker start to avoid it changing too frequently.
 		a.password, err = password.RandomPassword()
 		if err != nil {
 			return errors.Trace(err)
 		}
-		err = a.facade.SetPassword(a.name, a.password)
+		err = a.agentPasswordService.SetApplicationPassword(ctx, a.appUUID, a.password)
 		if err != nil {
-			return errors.Annotate(err, "failed to set application api passwords")
+			return errors.Annotate(err, "failed to set application api password")
 		}
 	}
 
 	var appChanges watcher.NotifyChannel
 	var appProvisionChanges watcher.NotifyChannel
 	var replicaChanges watcher.NotifyChannel
-	var lastReportedStatus map[string]status.StatusInfo
+	var lastReportedStatus UpdateStatusState
 
-	appScaleWatcher, err := a.unitFacade.WatchApplicationScale(a.name)
+	appScaleWatcher, err := a.applicationService.WatchApplicationScale(ctx, name)
 	if err != nil {
-		return errors.Annotatef(err, "creating application %q scale watcher", a.name)
+		return errors.Annotatef(err, "creating application %q scale watcher", name)
 	}
 	if err := a.catacomb.Add(appScaleWatcher); err != nil {
-		return errors.Annotatef(err, "failed to watch for application %q scale changes", a.name)
+		return errors.Annotatef(err, "failed to watch for application %q scale changes", name)
 	}
 
-	appTrustWatcher, err := a.unitFacade.WatchApplicationTrustHash(a.name)
+	appSettingsWatcher, err := a.applicationService.WatchApplicationSettings(ctx, name)
 	if err != nil {
-		return errors.Annotatef(err, "creating application %q trust watcher", a.name)
+		return errors.Annotatef(err, "creating application %q trust watcher", name)
 	}
-	if err := a.catacomb.Add(appTrustWatcher); err != nil {
-		return errors.Annotatef(err, "failed to watch for application %q trust changes", a.name)
+	if err := a.catacomb.Add(appSettingsWatcher); err != nil {
+		return errors.Annotatef(err, "failed to watch for application %q trust changes", name)
 	}
 
-	var appUnitsWatcher watcher.StringsWatcher
-	appUnitsWatcher, err = a.facade.WatchUnits(a.name)
+	appUnitsWatcher, err := a.applicationService.WatchApplicationUnitLife(ctx, name)
 	if err != nil {
-		return errors.Annotatef(err, "creating application %q units watcher", a.name)
+		return errors.Annotatef(err, "creating application %q units life watcher", name)
 	}
 	if err := a.catacomb.Add(appUnitsWatcher); err != nil {
-		return errors.Annotatef(err, "failed to watch for application %q units changes", a.name)
+		return errors.Annotatef(err, "failed to watch for application %q units life changes", name)
 	}
 
-	var done bool
-
 	var (
+		done                = false // done is true when the app is dead and cleaned up.
+		ready               = false // ready is true when the k8s resources are created.
 		initial             = true
 		scaleChan           <-chan time.Time
 		scaleTries          int
@@ -201,8 +232,8 @@ func (a *appWorker) loop() error {
 	)
 
 	handleChange := func() error {
-		appLife, err = a.facade.Life(a.name)
-		if errors.Is(err, errors.NotFound) {
+		appLife, err := a.applicationService.GetApplicationLife(ctx, a.appUUID)
+		if errors.Is(err, applicationerrors.ApplicationNotFound) {
 			appLife = life.Dead
 		} else if err != nil {
 			return errors.Trace(err)
@@ -211,14 +242,14 @@ func (a *appWorker) loop() error {
 
 		if initial {
 			initial = false
-			ps, err := a.facade.ProvisioningState(a.name)
+			ps, err := a.applicationService.GetApplicationScalingState(ctx, name)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			if ps != nil && ps.Scaling {
-				if a.statusOnly {
+			if ps.Scaling {
+				if statusOnly {
 					// Clear provisioning state for status only app.
-					err = a.facade.SetProvisioningState(a.name, params.CAASApplicationProvisioningState{})
+					err = a.applicationService.SetApplicationScalingState(ctx, name, 0, false)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -231,29 +262,39 @@ func (a *appWorker) loop() error {
 		switch appLife {
 		case life.Alive:
 			if appProvisionChanges == nil {
-				appProvisionWatcher, err := a.facade.WatchProvisioningInfo(a.name)
+				appProvisionWatcher, err := a.facade.WatchProvisioningInfo(ctx, name)
 				if err != nil {
-					return errors.Annotatef(err, "failed to watch facade for changes to application provisioning %q", a.name)
+					return errors.Annotatef(err, "failed to watch facade for changes to application provisioning %q", name)
 				}
 				if err := a.catacomb.Add(appProvisionWatcher); err != nil {
 					return errors.Trace(err)
 				}
 				appProvisionChanges = appProvisionWatcher.Changes()
 			}
-			if !a.statusOnly {
-				err = a.ops.AppAlive(a.name, app, a.password, &a.lastApplied, a.facade, a.clock, a.logger)
+			if !statusOnly {
+				a.provisioningInfo, err = a.ops.ProvisioningInfo(ctx, name,
+					a.appUUID, a.facade, a.storageProvisioningService,
+					a.applicationService, a.resourceOpenerGetter,
+					a.provisioningInfo, a.logger)
 				if errors.Is(err, errors.NotProvisioned) {
+					a.logger.Debugf(ctx, "application %q is not provisioned", name)
 					// State not ready for this application to be provisioned yet.
 					// Usually because the charm has not yet been downloaded.
-					break
+					return tryAgain
 				} else if err != nil {
+					return errors.Annotatef(err, "failed to get provisioning info for %q", name)
+				}
+				err = a.ops.AppAlive(ctx, name, a.appUUID, app, a.password,
+					&a.lastApplied, a.provisioningInfo, a.statusService,
+					a.clock, a.logger)
+				if err != nil {
 					return errors.Trace(err)
 				}
 			}
 			if appChanges == nil {
 				appWatcher, err := app.Watch(ctx)
 				if err != nil {
-					return errors.Annotatef(err, "failed to watch for changes to application %q", a.name)
+					return errors.Annotatef(err, "failed to watch for changes to application %q", name)
 				}
 				if err := a.catacomb.Add(appWatcher); err != nil {
 					return errors.Trace(err)
@@ -263,32 +304,39 @@ func (a *appWorker) loop() error {
 			if replicaChanges == nil {
 				replicaWatcher, err := app.WatchReplicas()
 				if err != nil {
-					return errors.Annotatef(err, "failed to watch for changes to replicas %q", a.name)
+					return errors.Annotatef(err, "failed to watch for changes to replicas %q", name)
 				}
 				if err := a.catacomb.Add(replicaWatcher); err != nil {
 					return errors.Trace(err)
 				}
 				replicaChanges = replicaWatcher.Changes()
 			}
+			a.logger.Debugf(ctx, "application %q is ready", name)
+			ready = true
 		case life.Dying:
-			if !a.statusOnly {
-				err = a.ops.AppDying(a.name, app, a.life, a.facade, a.unitFacade, a.logger)
+			if !statusOnly {
+				err = a.ops.AppDying(ctx, name, a.appUUID, app, a.life,
+					a.facade, a.applicationService, a.statusService, a.logger)
 				if err != nil {
 					return errors.Trace(err)
 				}
 			}
+			ready = false
 		case life.Dead:
-			if !a.statusOnly {
-				err = a.ops.AppDying(a.name, app, a.life, a.facade, a.unitFacade, a.logger)
+			if !statusOnly {
+				err = a.ops.AppDying(ctx, name, a.appUUID, app, a.life,
+					a.facade, a.applicationService, a.statusService, a.logger)
 				if err != nil {
 					return errors.Trace(err)
 				}
-				err = a.ops.AppDead(a.name, app, a.broker, a.facade, a.unitFacade, a.clock, a.logger)
+				err = a.ops.AppDead(ctx, name, a.appUUID, app, a.broker,
+					a.applicationService, a.statusService, a.clock, a.logger)
 				if err != nil {
 					return errors.Trace(err)
 				}
 			}
 			done = true
+			ready = false
 			return nil
 		default:
 			return errors.NotImplementedf("unknown life %q", a.life)
@@ -296,12 +344,14 @@ func (a *appWorker) loop() error {
 		return nil
 	}
 
+	refreshTimer := a.clock.NewTimer(10 * time.Second)
+	defer refreshTimer.Stop()
 	for {
 		shouldRefresh := true
 		select {
 		case _, ok := <-appScaleWatcher.Changes():
 			if !ok {
-				return fmt.Errorf("application %q scale watcher closed channel", a.name)
+				return fmt.Errorf("application %q scale watcher closed channel", name)
 			}
 			if scaleChan == nil {
 				scaleTries = 0
@@ -309,11 +359,17 @@ func (a *appWorker) loop() error {
 			}
 			shouldRefresh = false
 		case <-scaleChan:
-			if a.statusOnly {
+			if statusOnly {
 				scaleChan = nil
 				break
 			}
-			err := a.ops.EnsureScale(a.name, app, a.life, a.facade, a.unitFacade, a.logger)
+			if !ready {
+				scaleChan = a.clock.After(retryDelay)
+				shouldRefresh = false
+				break
+			}
+			err := a.ops.EnsureScale(ctx, name, a.appUUID, app, a.life, a.facade,
+				a.applicationService, a.statusService, a.logger)
 			if errors.Is(err, errors.NotFound) {
 				if scaleTries >= maxRetries {
 					return errors.Annotatef(err, "more than %d retries ensuring scale", maxRetries)
@@ -329,9 +385,9 @@ func (a *appWorker) loop() error {
 			} else {
 				scaleChan = nil
 			}
-		case _, ok := <-appTrustWatcher.Changes():
+		case _, ok := <-appSettingsWatcher.Changes():
 			if !ok {
-				return fmt.Errorf("application %q trust watcher closed channel", a.name)
+				return fmt.Errorf("application %q trust watcher closed channel", name)
 			}
 			if trustChan == nil {
 				trustTries = 0
@@ -339,11 +395,16 @@ func (a *appWorker) loop() error {
 			}
 			shouldRefresh = false
 		case <-trustChan:
-			if a.statusOnly {
+			if statusOnly {
 				trustChan = nil
 				break
 			}
-			err := a.ops.EnsureTrust(a.name, app, a.unitFacade, a.logger)
+			if !ready {
+				trustChan = a.clock.After(retryDelay)
+				shouldRefresh = false
+				break
+			}
+			err := a.ops.EnsureTrust(ctx, name, app, a.applicationService, a.logger)
 			if errors.Is(err, errors.NotFound) {
 				if trustTries >= maxRetries {
 					return errors.Annotatef(err, "more than %d retries ensuring trust", maxRetries)
@@ -358,18 +419,19 @@ func (a *appWorker) loop() error {
 			}
 		case _, ok := <-appUnitsWatcher.Changes():
 			if !ok {
-				return fmt.Errorf("application %q units watcher closed channel", a.name)
+				return fmt.Errorf("application %q units watcher closed channel", name)
 			}
 			if reconcileDeadChan == nil {
 				reconcileDeadChan = a.clock.After(0)
 			}
 			shouldRefresh = false
 		case <-reconcileDeadChan:
-			if a.statusOnly {
+			if statusOnly {
 				reconcileDeadChan = nil
 				break
 			}
-			err := a.ops.ReconcileDeadUnitScale(a.name, app, a.facade, a.logger)
+			err := a.ops.ReconcileDeadUnitScale(ctx, name, a.appUUID, app,
+				a.facade, a.applicationService, a.statusService, a.logger)
 			if errors.Is(err, errors.NotFound) {
 				reconcileDeadChan = a.clock.After(retryDelay)
 				shouldRefresh = false
@@ -406,27 +468,73 @@ func (a *appWorker) loop() error {
 			}
 		case <-appChanges:
 			// Respond to changes in provider application.
-			lastReportedStatus, err = a.ops.UpdateState(a.name, app, lastReportedStatus, a.broker, a.facade, a.unitFacade, a.logger)
+			lastReportedStatus, err = a.ops.UpdateState(
+				ctx, name, a.appUUID, app, lastReportedStatus,
+				a.broker, a.applicationService,
+				a.statusService, a.clock, a.logger)
 			if err != nil {
 				return errors.Trace(err)
 			}
 		case <-replicaChanges:
 			// Respond to changes in replicas of the application.
-			lastReportedStatus, err = a.ops.UpdateState(a.name, app, lastReportedStatus, a.broker, a.facade, a.unitFacade, a.logger)
+			lastReportedStatus, err = a.ops.UpdateState(
+				ctx, name, a.appUUID, app, lastReportedStatus,
+				a.broker, a.applicationService,
+				a.statusService, a.clock, a.logger)
 			if err != nil {
 				return errors.Trace(err)
 			}
-		case <-a.clock.After(10 * time.Second):
+		case <-refreshTimer.Chan():
 			// Force refresh of application status.
+		case reportChan := <-a.engineReportRequest:
+			// Respond to engine reports.
+			var reportErrors []string
+			ps, err := a.applicationService.GetApplicationScalingState(ctx, name)
+			if err != nil {
+				reportErrors = append(reportErrors, err.Error())
+			}
+			report := map[string]any{
+				"application-uuid": a.appUUID,
+				"application-name": name,
+				"status-only":      statusOnly,
+				"application-life": a.life,
+				"scale-target":     ps.ScaleTarget,
+				"scaling":          ps.Scaling,
+				"report-error":     reportErrors,
+			}
+			select {
+			case reportChan <- report:
+			case <-a.catacomb.Dying():
+				return a.catacomb.ErrDying()
+			}
+			shouldRefresh = false
 		}
 		if done {
 			return nil
 		}
 		if shouldRefresh {
-			if err = a.ops.RefreshApplicationStatus(a.name, app, appLife, a.facade, a.logger); err != nil {
-				return errors.Annotatef(err, "refreshing application status for %q", a.name)
+			err := a.ops.RefreshApplicationStatus(ctx, name, a.appUUID, app, appLife,
+				a.statusService, a.clock, a.logger)
+			if err != nil {
+				return errors.Annotatef(err, "refreshing application status for %q", name)
 			}
 		}
+	}
+}
+
+// Report returns a report about this application provisioner.
+func (a *appWorker) Report() map[string]any {
+	reportChan := make(chan map[string]any)
+	select {
+	case a.engineReportRequest <- reportChan:
+	case <-a.catacomb.Dying():
+		return nil
+	}
+	select {
+	case report := <-reportChan:
+		return report
+	case <-a.catacomb.Dying():
+		return nil
 	}
 }
 

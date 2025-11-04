@@ -5,18 +5,17 @@ package uniter
 
 import (
 	"context"
-	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiServerErrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/core/leadership"
 	coresecrets "github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/unit"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
 	secretservice "github.com/juju/juju/domain/secret/service"
 	"github.com/juju/juju/internal/secrets"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 // SecretService provides core secrets operations.
@@ -28,7 +27,7 @@ type SecretService interface {
 	GrantSecretAccess(context.Context, *coresecrets.URI, secretservice.SecretAccessParams) error
 	RevokeSecretAccess(context.Context, *coresecrets.URI, secretservice.SecretAccessParams) error
 	GetConsumedRevision(
-		ctx context.Context, uri *coresecrets.URI, unitName string,
+		ctx context.Context, uri *coresecrets.URI, unitName unit.Name,
 		refresh, peek bool, labelToUpdate *string) (int, error)
 }
 
@@ -40,7 +39,7 @@ func (u *UniterAPI) createSecrets(ctx context.Context, args params.CreateSecretA
 	for i, arg := range args.Args {
 		id, err := u.createSecret(ctx, arg)
 		result.Results[i].Result = id
-		if errors.Is(err, state.LabelExists) {
+		if errors.Is(err, secreterrors.SecretLabelAlreadyExists) {
 			err = errors.AlreadyExistsf("secret with label %q", *arg.Label)
 		}
 		result.Results[i].Error = apiServerErrors.ServerError(err)
@@ -64,8 +63,6 @@ func (u *UniterAPI) createSecret(ctx context.Context, arg params.CreateSecretArg
 		return "", apiServerErrors.ErrPerm
 	}
 
-	appName, _ := names.UnitApplication(authTag.Id())
-	token := u.leadershipChecker.LeadershipCheck(appName, authTag.Id())
 	var uri *coresecrets.URI
 	if arg.URI != nil {
 		uri, err = coresecrets.ParseURI(*arg.URI)
@@ -78,8 +75,10 @@ func (u *UniterAPI) createSecret(ctx context.Context, arg params.CreateSecretArg
 
 	params := secretservice.CreateCharmSecretParams{
 		Version: secrets.Version,
-		// Secret accessor not needed when creating a secret since we are using the secret owner.
-		UpdateCharmSecretParams: fromUpsertParams(arg.UpsertSecretArg, secretservice.SecretAccessor{}, token),
+		UpdateCharmSecretParams: fromUpsertParams(arg.UpsertSecretArg, secretservice.SecretAccessor{
+			Kind: secretservice.UnitAccessor,
+			ID:   authTag.Id(),
+		}),
 	}
 	switch kind := secretOwner.Kind(); kind {
 	case names.UnitTagKind:
@@ -96,7 +95,7 @@ func (u *UniterAPI) createSecret(ctx context.Context, arg params.CreateSecretArg
 	return uri.String(), nil
 }
 
-func fromUpsertParams(p params.UpsertSecretArg, accessor secretservice.SecretAccessor, token leadership.Token) secretservice.UpdateCharmSecretParams {
+func fromUpsertParams(p params.UpsertSecretArg, accessor secretservice.SecretAccessor) secretservice.UpdateCharmSecretParams {
 	var valueRef *coresecrets.ValueRef
 	if p.Content.ValueRef != nil {
 		valueRef = &coresecrets.ValueRef{
@@ -105,7 +104,6 @@ func fromUpsertParams(p params.UpsertSecretArg, accessor secretservice.SecretAcc
 		}
 	}
 	return secretservice.UpdateCharmSecretParams{
-		LeaderToken:  token,
 		Accessor:     accessor,
 		RotatePolicy: p.RotatePolicy,
 		ExpireTime:   p.ExpireTime,
@@ -114,6 +112,7 @@ func fromUpsertParams(p params.UpsertSecretArg, accessor secretservice.SecretAcc
 		Params:       p.Params,
 		Data:         p.Content.Data,
 		ValueRef:     valueRef,
+		Checksum:     p.Content.Checksum,
 	}
 }
 
@@ -124,7 +123,7 @@ func (u *UniterAPI) updateSecrets(ctx context.Context, args params.UpdateSecretA
 	}
 	for i, arg := range args.Args {
 		err := u.updateSecret(ctx, arg)
-		if errors.Is(err, state.LabelExists) {
+		if errors.Is(err, secreterrors.SecretLabelAlreadyExists) {
 			err = errors.AlreadyExistsf("secret with label %q", *arg.Label)
 		}
 		result.Results[i].Error = apiServerErrors.ServerError(err)
@@ -142,14 +141,11 @@ func (u *UniterAPI) updateSecret(ctx context.Context, arg params.UpdateSecretArg
 		return errors.New("at least one attribute to update must be specified")
 	}
 
-	authTag := u.auth.GetAuthTag()
 	accessor := secretservice.SecretAccessor{
 		Kind: secretservice.UnitAccessor,
-		ID:   authTag.Id(),
+		ID:   u.auth.GetAuthTag().Id(),
 	}
-	appName, _ := names.UnitApplication(authTag.Id())
-	token := u.leadershipChecker.LeadershipCheck(appName, authTag.Id())
-	err = u.secretService.UpdateCharmSecret(ctx, uri, fromUpsertParams(arg.UpsertSecretArg, accessor, token))
+	err = u.secretService.UpdateCharmSecret(ctx, uri, fromUpsertParams(arg.UpsertSecretArg, accessor))
 	return errors.Trace(err)
 }
 
@@ -163,13 +159,11 @@ func (u *UniterAPI) removeSecrets(ctx context.Context, args params.DeleteSecretA
 		return result, nil
 	}
 
-	authTag := u.auth.GetAuthTag()
 	accessor := secretservice.SecretAccessor{
 		Kind: secretservice.UnitAccessor,
-		ID:   authTag.Id(),
+		ID:   u.auth.GetAuthTag().Id(),
 	}
-	appName, _ := names.UnitApplication(authTag.Id())
-	token := u.leadershipChecker.LeadershipCheck(appName, authTag.Id())
+
 	for i, arg := range args.Args {
 		uri, err := coresecrets.ParseURI(arg.URI)
 		if err != nil {
@@ -177,13 +171,16 @@ func (u *UniterAPI) removeSecrets(ctx context.Context, args params.DeleteSecretA
 			continue
 		}
 		p := secretservice.DeleteSecretParams{
-			LeaderToken: token,
-			Accessor:    accessor,
-			Revisions:   arg.Revisions,
+			Accessor:  accessor,
+			Revisions: arg.Revisions,
 		}
 		err = u.secretService.DeleteSecret(ctx, uri, p)
 		if err != nil {
-			result.Results[i].Error = apiServerErrors.ServerError(err)
+			if errors.Is(err, secreterrors.SecretRevisionNotFound) {
+				result.Results[i].Error = apiServerErrors.ParamsErrorf(params.CodeNotFound, "secret %q not found", uri)
+			} else {
+				result.Results[i].Error = apiServerErrors.ServerError(err)
+			}
 			continue
 		}
 	}
@@ -224,11 +221,7 @@ func accessorFromTag(tag names.Tag) (secretservice.SecretAccessor, error) {
 	}
 	switch kind := tag.Kind(); kind {
 	case names.ApplicationTagKind:
-		if strings.HasPrefix(result.ID, "remote-") {
-			result.Kind = secretservice.RemoteApplicationAccessor
-		} else {
-			result.Kind = secretservice.ApplicationAccessor
-		}
+		result.Kind = secretservice.ApplicationAccessor
 	case names.UnitTagKind:
 		result.Kind = secretservice.UnitAccessor
 	case names.ModelTagKind:
@@ -283,13 +276,10 @@ func (u *UniterAPI) secretsGrantRevoke(ctx context.Context, args params.GrantRev
 			return errors.NotValidf("secret role %q", arg.Role)
 		}
 
-		authTag := u.auth.GetAuthTag()
 		accessor := secretservice.SecretAccessor{
 			Kind: secretservice.UnitAccessor,
-			ID:   authTag.Id(),
+			ID:   u.auth.GetAuthTag().Id(),
 		}
-		appName, _ := names.UnitApplication(authTag.Id())
-		token := u.leadershipChecker.LeadershipCheck(appName, authTag.Id())
 
 		for _, tagStr := range arg.SubjectTags {
 			subjectTag, err := names.ParseTag(tagStr)
@@ -301,11 +291,10 @@ func (u *UniterAPI) secretsGrantRevoke(ctx context.Context, args params.GrantRev
 				return errors.Trace(err)
 			}
 			if err := op(ctx, uri, secretservice.SecretAccessParams{
-				LeaderToken: token,
-				Accessor:    accessor,
-				Scope:       scope,
-				Subject:     subject,
-				Role:        role,
+				Accessor: accessor,
+				Scope:    scope,
+				Subject:  subject,
+				Role:     role,
 			}); err != nil {
 				return errors.Annotatef(err, "cannot change access to %q for %q", uri, tagStr)
 			}
@@ -333,7 +322,12 @@ func (u *UniterAPI) updateTrackedRevisions(ctx context.Context, uris []string) (
 			result.Results[i].Error = apiServerErrors.ServerError(err)
 			continue
 		}
-		_, err = u.secretService.GetConsumedRevision(ctx, uri, authTag.Id(), true, false, nil)
+		unitName, err := unit.NewName(authTag.Id())
+		if err != nil {
+			result.Results[i].Error = apiServerErrors.ServerError(err)
+			continue
+		}
+		_, err = u.secretService.GetConsumedRevision(ctx, uri, unitName, true, false, nil)
 		result.Results[i].Error = apiServerErrors.ServerError(err)
 	}
 	return result, nil

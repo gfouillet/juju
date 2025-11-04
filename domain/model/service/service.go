@@ -6,21 +6,32 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
+	"github.com/juju/clock"
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/cloud"
+	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/credential"
+	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
 	coremodel "github.com/juju/juju/core/model"
+	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/trace"
 	coreuser "github.com/juju/juju/core/user"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
+	accesserrors "github.com/juju/juju/domain/access/errors"
+	domainlife "github.com/juju/juju/domain/life"
 	"github.com/juju/juju/domain/model"
 	modelerrors "github.com/juju/juju/domain/model/errors"
 	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	"github.com/juju/juju/domain/status"
+	"github.com/juju/juju/internal/errors"
 	jujusecrets "github.com/juju/juju/internal/secrets/provider/juju"
 	kubernetessecrets "github.com/juju/juju/internal/secrets/provider/kubernetes"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/internal/statushistory"
 )
 
 // ModelActivator describes a closure type that must be called after creating a
@@ -40,30 +51,70 @@ type ModelTypeState interface {
 	CloudType(context.Context, string) (string, error)
 }
 
+// StatusHistory records status information into a generalized way.
+type StatusHistory interface {
+	// RecordStatus records the given status information.
+	// If the status data cannot be marshalled, it will not be recorded, instead
+	// the error will be logged under the data_error key.
+	RecordStatus(context.Context, statushistory.Namespace, corestatus.StatusInfo) error
+}
+
+// StatusHistoryGetter provides a way to retrieve status history for a model.
+type StatusHistoryGetter interface {
+	// GetStatusHistoryForModel returns the status history for the model
+	// identified by the model UUID.
+	GetStatusHistoryForModel(ctx context.Context, modelUUID coremodel.UUID) (StatusHistory, error)
+}
+
 // State is the model state required by this service.
 type State interface {
 	ModelTypeState
+	ProviderControllerState
+
+	// CheckModelExists is a check that allows the caller to find out if a model
+	// exists and is active within the controller. True or false is returned
+	// indicating if the model exists.
+	CheckModelExists(context.Context, coremodel.UUID) (bool, error)
 
 	// Create creates a new model with all of its associated metadata.
-	Create(context.Context, coremodel.UUID, coremodel.ModelType, model.ModelCreationArgs) error
+	Create(context.Context, coremodel.UUID, coremodel.ModelType, model.GlobalModelCreationArgs) error
 
 	// Activate is responsible for setting a model as fully constructed and
 	// indicates the final system state for the model is ready for use.
 	// If no model exists for the provided id then a [modelerrors.NotFound] will be
 	// returned. If the model has previously been activated a
 	// [modelerrors.AlreadyActivated] error will be returned.
-	Activate(ctx context.Context, uuid coremodel.UUID) error
+	Activate(context.Context, coremodel.UUID) error
+
+	// CloudSupportsAuthType is a check that allows the caller to find out if a
+	// cloud supports a specific auth type. If the cloud doesn't support the
+	// authtype then false is return with a nil error.
+	// If no cloud exists for the supplied name an error satisfying
+	// [github.com/juju/juju/domain/cloud/errors.NotFound] is returned.
+	CloudSupportsAuthType(context.Context, string, cloud.AuthType) (bool, error)
 
 	// GetModel returns the model associated with the provided uuid.
 	GetModel(context.Context, coremodel.UUID) (coremodel.Model, error)
 
-	// GetModelByName returns the model associated with the given user and name.
-	// If no model exists for the provided user or model name then an error of
+	// GetModelByName returns the model associated with the given qualifier and name.
+	// If no model exists for the provided qualified model name then an error of
 	// [modelerrors.NotFound] will be returned.
 	GetModelByName(context.Context, string, string) (coremodel.Model, error)
 
-	// GetModelType returns the model type for a model with the provided uuid.
-	GetModelType(context.Context, coremodel.UUID) (coremodel.ModelType, error)
+	// GetControllerModel returns the model the controller is running in.
+	// If no controller model exists then an error satisfying
+	// [modelerrors.NotFound] is returned.
+	GetControllerModel(ctx context.Context) (coremodel.Model, error)
+
+	// GetControllerModelUUID returns the model uuid for the controller model.
+	// If no controller model exists then an error satisfying
+	// [modelerrors.NotFound] is returned.
+	GetControllerModelUUID(context.Context) (coremodel.UUID, error)
+
+	// GetModelCloudInfo returns the cloud name, cloud region name for a
+	// model identified by the model uuid. If no model exists for the
+	// provided name and user a [modelerrors.NotFound] error is returned.
+	GetModelCloudInfo(context.Context, coremodel.UUID) (string, string, error)
 
 	// Delete removes a model and all of it's associated data from Juju.
 	Delete(context.Context, coremodel.UUID) error
@@ -72,124 +123,131 @@ type State interface {
 	// models exist a zero value slice will be returned.
 	ListAllModels(context.Context) ([]coremodel.Model, error)
 
-	// ListModelIDs returns a list of all model UUIDs.
-	ListModelIDs(context.Context) ([]coremodel.UUID, error)
+	// ListModelUUIDs returns a list of all model UUIDs in the controller that
+	// are active. If no models exist then an empty slice is returned.
+	ListModelUUIDs(context.Context) ([]coremodel.UUID, error)
+
+	// ListModelUUIDsForUser returns a slice of model UUIDs that the supplied
+	// user has access to. If the user has no models that they have access to
+	// then an empty slice is returned.
+	// - [accesserrors.UserNotFound] when the user does not exist.
+	ListModelUUIDsForUser(context.Context, coreuser.UUID) ([]coremodel.UUID, error)
 
 	// ListModelsForUser returns a slice of models owned by the user
 	// specified by user id. If no user or models are found an empty slice is
 	// returned.
 	ListModelsForUser(context.Context, coreuser.UUID) ([]coremodel.Model, error)
 
-	// ModelCloudNameAndCredential returns the cloud name and credential id for a
-	// model identified by the model name and the owner. If no model exists for
-	// the provided name and user a [modelerrors.NotFound] error is returned.
-	ModelCloudNameAndCredential(context.Context, string, string) (string, credential.Key, error)
+	// GetModelUsers will retrieve basic information about all users with
+	// permissions on the given model UUID.
+	// If the model cannot be found it will return modelerrors.NotFound.
+	GetModelUsers(context.Context, coremodel.UUID) ([]coremodel.ModelUserInfo, error)
 
 	// UpdateCredential updates a model's cloud credential.
 	UpdateCredential(context.Context, coremodel.UUID, credential.Key) error
-}
 
-// ModelDeleter is an interface for deleting models.
-type ModelDeleter interface {
-	// DeleteDB is responsible for removing a model from Juju and all of it's
-	// associated metadata.
-	DeleteDB(string) error
+	// DefaultCloudCredentialNameForOwner returns the owner's default cloud credential name for a given
+	// cloud. If user has multiple (or no) credentials for the specified cloud a NotFound error is returned as
+	// we cannot determine the default credential.
+	DefaultCloudCredentialNameForOwner(ctx context.Context, owner coreuser.Name, cloudName string) (string, error)
+
+	// GetActivatedModelUUIDs returns the subset of model UUIDS from the
+	// supplied list that are activated. If no model uuids are activated then an
+	// empty slice is returned.
+	GetActivatedModelUUIDs(ctx context.Context, uuids []coremodel.UUID) ([]coremodel.UUID, error)
+
+	// GetDeadModels returns all the dead model UUIDs in the controller.
+	GetDeadModels(ctx context.Context) ([]coremodel.UUID, error)
+
+	// GetModelLife returns the life associated with the provided uuid.
+	// The following error types can be expected to be returned:
+	// - [modelerrors.NotFound]: When the model does not exist.
+	// - [modelerrors.NotActivated]: When the model has not been activated.
+	GetModelLife(ctx context.Context, uuid coremodel.UUID) (domainlife.Life, error)
+
+	// InitialWatchActivatedModelsStatement returns a SQL statement that will
+	// get all the activated models UUIDS in the controller.
+	InitialWatchActivatedModelsStatement() (string, string)
+
+	// InitialWatchModelTableName returns the name of the model table to be used
+	// for the initial watch statement.
+	InitialWatchModelTableName() string
 }
 
 // Service defines a service for interacting with the underlying state based
 // information of a model.
 type Service struct {
-	st                State
-	modelDeleter      ModelDeleter
-	agentBinaryFinder AgentBinaryFinder
-	logger            Logger
+	st                  State
+	logger              logger.Logger
+	clock               clock.Clock
+	statusHistoryGetter StatusHistoryGetter
 }
-
-// AgentBinaryFinder represents a helper for establishing if agent binaries for
-// a specific Juju version are available.
-type AgentBinaryFinder interface {
-	// HasBinariesForVersion will interrogate the tools available in the system
-	// and return true or false if agent binaries exist for the provided
-	// version. Any errors finding the requested binaries will be returned
-	// through error.
-	HasBinariesForVersion(version.Number) (bool, error)
-}
-
-// agentBinaryFinderFn is func type for the AgentBinaryFinder interface.
-type agentBinaryFinderFn func(version.Number) (bool, error)
 
 var (
 	caasCloudTypes = []string{cloud.CloudTypeKubernetes}
 )
 
-func (t agentBinaryFinderFn) HasBinariesForVersion(v version.Number) (bool, error) {
-	return t(v)
-}
-
-// Logger is an interface for logging information.
-type Logger interface {
-	Infof(string, ...any)
-}
-
 // NewService returns a new Service for interacting with a models state.
 func NewService(
 	st State,
-	modelDeleter ModelDeleter,
-	agentBinaryFinder AgentBinaryFinder,
-	logger Logger,
+	statusHistoryGetter StatusHistoryGetter,
+	clock clock.Clock,
+	logger logger.Logger,
 ) *Service {
 	return &Service{
-		st:                st,
-		modelDeleter:      modelDeleter,
-		agentBinaryFinder: agentBinaryFinder,
-		logger:            logger,
+		st:                  st,
+		logger:              logger,
+		clock:               clock,
+		statusHistoryGetter: statusHistoryGetter,
 	}
 }
 
-// DefaultAgentBinaryFinder is a transition implementation of the agent binary
-// finder that will true for any version.
-// This will be removed and replaced soon.
-func DefaultAgentBinaryFinder() AgentBinaryFinder {
-	return agentBinaryFinderFn(func(v version.Number) (bool, error) {
-		// This is a temporary implementation that will be replaced. We need
-		// to ensure that we always return true for now, so that we can be
-		// sure that the 3.6 LTS release will work with the controller.
-		return true, nil
-	})
+// CheckModelExists checks if a model exists within the controller. True or
+// false is returned indiciating of the model exists.
+func (s *Service) CheckModelExists(ctx context.Context, modelUUID coremodel.UUID) (bool, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	return s.st.CheckModelExists(ctx, modelUUID)
 }
 
-// agentVersionSelector is used to find a suitable agent version to use for
-// newly created models. This is useful when creating new models where no
-// specific version has been requested.
-func agentVersionSelector() version.Number {
-	return jujuversion.Current
+// ModelRedirection returns redirection information for the current model. If it
+// is not redirected, [modelmigrationerrors.ModelNotRedirected] is returned.
+// Placeholder for model migration.
+func (s *Service) ModelRedirection(ctx context.Context, modelUUID coremodel.UUID) (model.ModelRedirection, error) {
+	return model.ModelRedirection{}, modelerrors.ModelNotRedirected
 }
 
-// DefaultModelCloudNameAndCredential returns the default cloud name and
-// credential that should be used for newly created models that haven't had
-// either cloud or credential specified. If no default credential is available
-// the zero value of [credential.ID] will be returned.
+// DefaultModelCloudInfo returns the default cloud name and region name
+// that should be used for newly created models that haven't had
+// either cloud or credential specified.
 //
 // The defaults that are sourced come from the controller's default model. If
 // there is a no controller model a [modelerrors.NotFound] error will be
 // returned.
-func (s *Service) DefaultModelCloudNameAndCredential(
+func (s *Service) DefaultModelCloudInfo(
 	ctx context.Context,
-) (string, credential.Key, error) {
-	cloudName, cred, err := s.st.ModelCloudNameAndCredential(
-		ctx, coremodel.ControllerModelName, coremodel.ControllerModelOwnerUsername,
-	)
+) (string, string, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	ctrlUUID, err := s.st.GetControllerModelUUID(ctx)
+	if err != nil {
+		return "", "", errors.Errorf(
+			"getting controller model uuid: %w", err,
+		)
+	}
+	cloudName, regionName, err := s.st.GetModelCloudInfo(ctx, ctrlUUID)
 
 	if err != nil {
-		return "", credential.Key{}, fmt.Errorf("getting default model cloud name and credential: %w", err)
+		return "", "", errors.Errorf(
+			"getting controller model %q cloud name and credential: %w",
+			ctrlUUID, err,
+		)
 	}
-	return cloudName, cred, nil
+	return cloudName, regionName, nil
 }
 
 // CreateModel is responsible for creating a new model from start to finish with
 // its associated metadata. The function will return the created model's id.
-// If the ModelCreationArgs does not have a credential name set then no cloud
-// credential will be associated with model.
 //
 // If the caller has not prescribed a specific agent version to use for the
 // model the current controllers supported agent version will be used.
@@ -210,32 +268,52 @@ func (s *Service) DefaultModelCloudNameAndCredential(
 // cannot be used with this controller.
 // - [secretbackenderrors.NotFound] When the secret backend for the model
 // cannot be found.
+// - [modelerrors.CredentialNotValid]: When the cloud credential for the model
+// is not valid. This means that either the credential is not supported with
+// the cloud or the cloud doesn't support having an empty credential.
 func (s *Service) CreateModel(
 	ctx context.Context,
-	args model.ModelCreationArgs,
+	args model.GlobalModelCreationArgs,
 ) (coremodel.UUID, func(context.Context) error, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := args.Validate(); err != nil {
-		return "", nil, fmt.Errorf(
+		return "", nil, errors.Errorf(
 			"cannot validate model creation args: %w", err,
 		)
 	}
 
 	modelID, err := coremodel.NewUUID()
 	if err != nil {
-		return "", nil, fmt.Errorf(
+		return "", nil, errors.Errorf(
 			"cannot generate id for model %q: %w", args.Name, err,
 		)
 	}
 
-	activator, err := s.createModel(ctx, modelID, args)
-	return modelID, activator, err
+	activator, err := createModel(ctx, s.st, modelID, args)
+	if err != nil {
+		return "", nil, errors.Errorf("creating model %q: %w", args.Name, err)
+	}
+
+	if statusHistory, err := s.statusHistoryGetter.GetStatusHistoryForModel(ctx, modelID); err == nil {
+		if err := statusHistory.RecordStatus(ctx, status.ModelNamespace.WithID(modelID.String()), corestatus.StatusInfo{
+			Status: corestatus.Available,
+			Since:  ptr(s.clock.Now()),
+		}); err != nil {
+			s.logger.Warningf(ctx, "recording status for model %q: %v", modelID, err)
+		}
+	} else {
+		s.logger.Warningf(ctx, "getting status history for model %q: %v", modelID, err)
+	}
+
+	return modelID, activator, nil
 }
 
 // createModel is responsible for creating a new model from start to finish with
 // its associated metadata. The function takes the model id to be used as part
 // of the creation. This helps serve both new model creation and model
-// importing. If the ModelCreationArgs does not have a credential name set then
-// no cloud credential will be associated with model.
+// importing.
 //
 // If the caller has not prescribed a specific agent version to use for the
 // model the current controllers supported agent version will be used.
@@ -257,14 +335,18 @@ func (s *Service) CreateModel(
 // cannot be used with this controller.
 // - [secretbackenderrors.NotFound] When the secret backend for the model
 // cannot be found.
-func (s *Service) createModel(
+// - [modelerrors.CredentialNotValid]: When the cloud credential for the model
+// is not valid. This means that either the credential is not supported with
+// the cloud or the cloud doesn't support having an empty credential.
+func createModel(
 	ctx context.Context,
+	st State,
 	id coremodel.UUID,
-	args model.ModelCreationArgs,
+	args model.GlobalModelCreationArgs,
 ) (func(context.Context) error, error) {
-	modelType, err := ModelTypeForCloud(ctx, s.st, args.Cloud)
+	modelType, err := ModelTypeForCloud(ctx, st, args.Cloud)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, errors.Errorf(
 			"determining model type when creating model %q: %w",
 			args.Name, err,
 		)
@@ -275,7 +357,7 @@ func (s *Service) createModel(
 	} else if args.SecretBackend == "" && modelType == coremodel.IAAS {
 		args.SecretBackend = jujusecrets.BackendName
 	} else if args.SecretBackend == "" {
-		return nil, fmt.Errorf(
+		return nil, errors.Errorf(
 			"%w for model type %q when creating model with name %q",
 			secretbackenderrors.NotFound,
 			modelType,
@@ -283,151 +365,109 @@ func (s *Service) createModel(
 		)
 	}
 
-	agentVersion := args.AgentVersion
-	if args.AgentVersion == version.Zero {
-		agentVersion = agentVersionSelector()
-	}
+	if args.Credential.IsZero() {
+		supports, err := st.CloudSupportsAuthType(ctx, args.Cloud, cloud.EmptyAuthType)
+		if err != nil {
+			return nil, errors.Errorf(
+				"checking if cloud %q support empty authentication for new model %q: %w",
+				args.Cloud, args.Name, err,
+			)
+		}
 
-	if err := validateAgentVersion(agentVersion, s.agentBinaryFinder); err != nil {
-		return nil, fmt.Errorf(
-			"creating model %q with agent version %q: %w",
-			args.Name, agentVersion, err,
-		)
+		if !supports {
+			return nil, errors.Errorf(
+				"new model %q cloud %q does not support empty authentication, a credential needs to be specified",
+				args.Name, args.Cloud,
+			).Add(modelerrors.CredentialNotValid)
+		}
 	}
-
-	args.AgentVersion = agentVersion
 
 	activator := ModelActivator(func(ctx context.Context) error {
-		return s.st.Activate(ctx, id)
+		return st.Activate(ctx, id)
 	})
 
-	return activator, s.st.Create(ctx, id, modelType, args)
-}
-
-// ImportModel is responsible for importing an existing model into this Juju
-// controller. The caller must explicitly specify the agent version that is in
-// use for the imported model.
-//
-// Models created by this function must be activated using the returned
-// ModelActivator.
-//
-// The following error types can be expected to be returned:
-// - [modelerrors.AlreadyExists]: When the model uuid is already in use or a
-// model with the same name and owner already exists.
-// - [errors.NotFound]: When the cloud, cloud region, or credential do not
-// exist.
-// - [github.com/juju/juju/domain/access/errors.NotFound]: When the owner of the
-// model can not be found.
-// - [modelerrors.AgentVersionNotSupported]: When the prescribed agent version
-// cannot be used with this controller or the agent version is set to zero.
-// - [secretbackenderrors.NotFound] When the secret backend for the model
-// cannot be found.
-func (s *Service) ImportModel(
-	ctx context.Context,
-	args model.ModelImportArgs,
-) (func(context.Context) error, error) {
-	if err := args.Validate(); err != nil {
-		return nil, fmt.Errorf(
-			"cannot validate model import args: %w", err,
-		)
-	}
-
-	// If we are importing a model we need to know the agent version in use to
-	// make sure we have tools to support the model and it will work with this
-	// controller.
-	if args.AgentVersion == version.Zero {
-		return nil, fmt.Errorf(
-			"cannot import model with id %q, agent version cannot be zero: %w",
-			args.ID, modelerrors.AgentVersionNotSupported,
-		)
-	}
-
-	return s.createModel(ctx, args.ID, args.ModelCreationArgs)
+	return activator, st.Create(ctx, id, modelType, args)
 }
 
 // ControllerModel returns the model used for housing the Juju controller.
 // Should no model exist for the controller an error of [modelerrors.NotFound]
 // will be returned.
 func (s *Service) ControllerModel(ctx context.Context) (coremodel.Model, error) {
-	return s.st.GetModelByName(ctx, coremodel.ControllerModelOwnerUsername, coremodel.ControllerModelName)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	model, err := s.st.GetControllerModel(ctx)
+	if err != nil {
+		return coremodel.Model{}, errors.Errorf("getting controller model: %w", err)
+	}
+	if err := model.UUID.Validate(); err != nil {
+		return coremodel.Model{}, errors.Errorf("validating controller model uuid: %w", err)
+	}
+	return model, nil
+}
+
+// GetControllerModelUUID returns the model uuid for the controller model.
+// The following errors may be returned:
+// - [modelerrors.NotFound]: If no the controller model exists.
+func (s *Service) GetControllerModelUUID(context.Context) (coremodel.UUID, error) {
+	ctx, span := trace.Start(context.Background(), trace.NameFromFunc())
+	defer span.End()
+	return s.st.GetControllerModelUUID(ctx)
 }
 
 // Model returns the model associated with the provided uuid.
 // The following error types can be expected to be returned:
-// - [modelerrors.ModelNotFound]: When the model does not exist.
+// - [modelerrors.NotFound]: When the model does not exist.
 func (s *Service) Model(ctx context.Context, uuid coremodel.UUID) (coremodel.Model, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := uuid.Validate(); err != nil {
-		return coremodel.Model{}, fmt.Errorf("model uuid: %w", err)
+		return coremodel.Model{}, errors.Errorf("model uuid: %w", err)
 	}
 
 	return s.st.GetModel(ctx, uuid)
 }
 
-// ModelType returns the current model type based on the cloud name being used
-// for the model.
-func (s *Service) ModelType(ctx context.Context, uuid coremodel.UUID) (coremodel.ModelType, error) {
-	if err := uuid.Validate(); err != nil {
-		return "", fmt.Errorf("model type uuid: %w", err)
-	}
+// ListModelUUIDs returns a list of all model UUIDs in the controller that are
+// active.
+func (s *Service) ListModelUUIDs(ctx context.Context) ([]coremodel.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 
-	return s.st.GetModelType(ctx, uuid)
-}
-
-// DeleteModel is responsible for removing a model from Juju and all of it's
-// associated metadata.
-// - errors.NotValid: When the model uuid is not valid.
-// - modelerrors.ModelNotFound: When the model does not exist.
-func (s *Service) DeleteModel(
-	ctx context.Context,
-	uuid coremodel.UUID,
-	opts ...model.DeleteModelOption,
-) error {
-	options := model.DefaultDeleteModelOptions()
-	for _, fn := range opts {
-		fn(options)
-	}
-
-	if err := uuid.Validate(); err != nil {
-		return fmt.Errorf("delete model, uuid: %w", err)
-	}
-
-	// Delete common items from the model. This helps to ensure that the
-	// model is cleaned up correctly.
-	if err := s.st.Delete(ctx, uuid); err != nil && !errors.Is(err, modelerrors.NotFound) {
-		return fmt.Errorf("delete model: %w", err)
-	}
-
-	// If the db should not be deleted then we can return early.
-	if !options.DeleteDB() {
-		s.logger.Infof("skipping model deletion, model database will still be present")
-		return nil
-	}
-
-	// Delete the db completely from the system. Currently, this will remove
-	// the db from the dbaccessor, but it will not drop the db (currently not
-	// supported in dqlite). For now we do a best effort to remove all items
-	// with in the db.
-	if err := s.modelDeleter.DeleteDB(uuid.String()); err != nil {
-		return fmt.Errorf("delete model: %w", err)
-	}
-
-	return nil
-}
-
-// ListModelIDs returns a list of all model UUIDs in the system that have not been
-// deleted. This list does not represent one or more lifecycle states for
-// models.
-func (s *Service) ListModelIDs(ctx context.Context) ([]coremodel.UUID, error) {
-	uuids, err := s.st.ListModelIDs(ctx)
+	uuids, err := s.st.ListModelUUIDs(ctx)
 	if err != nil {
-		return nil, errors.Annotatef(err, "retrieving model list")
+		return nil, errors.Errorf("getting list of model uuids for controller: %w", err)
 	}
 	return uuids, nil
+}
+
+// ListModelUUIDsForUser returns a list of model UUIDs that the supplied user
+// has access to. If the user supplied does not have access to any models then
+// an empty slice is returned.
+// The following errors can be expected:
+// - [github.com/juju/juju/core/errors.NotValid] when the user uuid supplied is
+// not valid.
+// - [accesserrors.UserNotFound] when the user does not exist.
+func (s *Service) ListModelUUIDsForUser(
+	ctx context.Context,
+	userUUID coreuser.UUID,
+) ([]coremodel.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if err := userUUID.Validate(); err != nil {
+		return nil, errors.Errorf("validating user uuid: %w", err)
+	}
+
+	return s.st.ListModelUUIDsForUser(ctx, userUUID)
 }
 
 // ListAllModels  lists all models in the controller. If no models exist then
 // an empty slice is returned.
 func (s *Service) ListAllModels(ctx context.Context) ([]coremodel.Model, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	return s.st.ListAllModels(ctx)
 }
 
@@ -435,8 +475,10 @@ func (s *Service) ListAllModels(ctx context.Context) ([]coremodel.Model, error) 
 // accessible  by the user specified by the user id. If no user or models exists
 // an empty slice of models will be returned.
 func (s *Service) ListModelsForUser(ctx context.Context, userID coreuser.UUID) ([]coremodel.Model, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 	if err := userID.Validate(); err != nil {
-		return nil, fmt.Errorf("listing models owned by user: %w", err)
+		return nil, errors.Errorf("listing models owned by user: %w", err)
 	}
 
 	return s.st.ListModelsForUser(ctx, userID)
@@ -452,7 +494,7 @@ func ModelTypeForCloud(
 ) (coremodel.ModelType, error) {
 	cloudType, err := state.CloudType(ctx, cloudName)
 	if err != nil {
-		return "", fmt.Errorf("determining model type from cloud: %w", err)
+		return "", errors.Errorf("determining model type from cloud: %w", err)
 	}
 
 	if set.NewStrings(caasCloudTypes...).Contains(cloudType) {
@@ -461,11 +503,62 @@ func ModelTypeForCloud(
 	return coremodel.IAAS, nil
 }
 
+// GetModelUsers will retrieve basic information about users with permissions on
+// the given model UUID.
+// If the model cannot be found it will return [modelerrors.NotFound].
+func (s *Service) GetModelUsers(ctx context.Context, modelUUID coremodel.UUID) ([]coremodel.ModelUserInfo, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if err := modelUUID.Validate(); err != nil {
+		return nil, errors.Capture(err)
+	}
+	modelUserInfo, err := s.st.GetModelUsers(ctx, modelUUID)
+	if err != nil {
+		return nil, errors.Errorf("getting users for model %q: %w", modelUUID, err)
+	}
+	return modelUserInfo, nil
+}
+
+// GetModelUser will retrieve basic information about the specified model user.
+// If the model cannot be found it will return [modelerrors.NotFound].
+// If the user cannot be found it will return [modelerrors.UserNotFoundOnModel].
+func (s *Service) GetModelUser(ctx context.Context, modelUUID coremodel.UUID, name coreuser.Name) (coremodel.ModelUserInfo, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if name.IsZero() {
+		return coremodel.ModelUserInfo{}, errors.New(
+			"empty username not allowed",
+		).Add(accesserrors.UserNameNotValid)
+	}
+	if err := modelUUID.Validate(); err != nil {
+		return coremodel.ModelUserInfo{}, errors.Capture(err)
+	}
+	modelUserInfo, err := s.st.GetModelUsers(ctx, modelUUID)
+	if err != nil {
+		return coremodel.ModelUserInfo{}, errors.Errorf(
+			"getting info of user %q on model %q: %w",
+			name, modelUUID, err,
+		)
+	}
+
+	for _, mui := range modelUserInfo {
+		if mui.Name == name {
+			return mui, nil
+		}
+	}
+	return coremodel.ModelUserInfo{}, errors.Errorf(
+		"getting info of user %q on model %q: %w",
+		name, modelUUID, err,
+	)
+}
+
 // UpdateCredential is responsible for updating the cloud credential
 // associated with a model. The cloud credential must be of the same cloud type
 // as that of the model.
 // The following error types can be expected to be returned:
-// - modelerrors.ModelNotFound: When the model does not exist.
+// - modelerrors.NotFound: When the model does not exist.
 // - errors.NotFound: When the cloud or credential cannot be found.
 // - errors.NotValid: When the cloud credential is not of the same cloud as the
 // model or the model uuid is not valid.
@@ -474,60 +567,310 @@ func (s *Service) UpdateCredential(
 	uuid coremodel.UUID,
 	key credential.Key,
 ) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := uuid.Validate(); err != nil {
-		return fmt.Errorf("updating cloud credential model uuid: %w", err)
+		return errors.Errorf("updating cloud credential model uuid: %w", err)
 	}
 	if err := key.Validate(); err != nil {
-		return fmt.Errorf("updating cloud credential: %w", err)
+		return errors.Errorf("updating cloud credential: %w", err)
 	}
 
 	return s.st.UpdateCredential(ctx, uuid, key)
 }
 
-// validateAgentVersion is responsible for checking that the agent version that
-// is about to be chosen for a model is valid for use.
-//
-// If the agent version is equal to that of the currently running controller
-// then this will be allowed.
-//
-// If the agent version is greater than that of the currently running controller
-// then a [modelerrors.AgentVersionNotSupported] error is returned as
-// we can't run an agent version that is greater than that of a controller.
-//
-// If the agent version is less than that of the current controller we use the
-// toolFinder to make sure that we have tools available for this version. If no
-// tools are available to support the agent version a
-// [modelerrors.AgentVersionNotSupported] error is returned.
-func validateAgentVersion(
-	agentVersion version.Number,
-	agentFinder AgentBinaryFinder,
-) error {
-	n := agentVersion.Compare(jujuversion.Current)
-	switch {
-	// agentVersion is greater than that of the current version.
-	case n > 0:
-		return fmt.Errorf(
-			"%w %q cannot be greater then the controller version %q",
-			modelerrors.AgentVersionNotSupported,
-			agentVersion.String(), jujuversion.Current.String(),
-		)
-	// agentVersion is less than that of the current version.
-	case n < 0:
-		has, err := agentFinder.HasBinariesForVersion(agentVersion)
-		if err != nil {
-			return fmt.Errorf(
-				"validating agent version %q for available tools: %w",
-				agentVersion.String(), err,
-			)
-		}
-		if !has {
-			return fmt.Errorf(
-				"%w %q no agent binaries found",
-				modelerrors.AgentVersionNotSupported,
-				agentVersion,
-			)
-		}
+// DefaultCloudCredentialKeyForOwner returns the owner's valid (and non-revoked) credential key for a given cloud
+// if only one credential exists. If owner has multiple valid cloud credentials a NotFound error is returned as
+// we cannot determine the default credential.
+func (s *Service) DefaultCloudCredentialKeyForOwner(ctx context.Context, owner coreuser.Name, cloudName string) (credential.Key, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	name, err := s.st.DefaultCloudCredentialNameForOwner(ctx, owner, cloudName)
+	if err != nil {
+		return credential.Key{}, errors.Capture(err)
 	}
 
-	return nil
+	return credential.Key{
+		Cloud: cloudName,
+		Owner: owner,
+		Name:  name,
+	}, nil
+}
+
+// GetModelLife returns the life associated with the provided uuid.
+// The following error types can be expected to be returned:
+// - [modelerrors.NotFound]: When the model does not exist.
+// - [modelerrors.NotActivated]: When the model has not been activated.
+func (s *Service) GetModelLife(ctx context.Context, uuid coremodel.UUID) (life.Value, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if err := uuid.Validate(); err != nil {
+		return "", errors.Errorf("model uuid: %w", err)
+	}
+
+	result, err := s.st.GetModelLife(ctx, uuid)
+	if err != nil {
+		return "", errors.Errorf("getting model life: %w", err)
+	}
+	return result.Value()
+}
+
+// GetModelByNameAndQualifier returns the model associated with the given model name and qualifier.
+// The following errors may be returned:
+// - [modelerrors.NotFound] if no model exists.
+// - [github.com/juju/juju/core/errors.NotValid] if qualifier is not valid.
+func (s *Service) GetModelByNameAndQualifier(ctx context.Context, name string, qualifier coremodel.Qualifier) (coremodel.Model, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if err := qualifier.Validate(); err != nil {
+		return coremodel.Model{}, errors.Capture(err)
+	}
+	return s.st.GetModelByName(ctx, qualifier.String(), name)
+}
+
+// GetDeadModels returns all the dead model UUIDs in the controller.
+func (s *Service) GetDeadModels(ctx context.Context) ([]coremodel.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	return s.st.GetDeadModels(ctx)
+}
+
+// WatcherFactory describes methods for creating watchers.
+type WatcherFactory interface {
+	// NewNamespaceMapperWatcher returns a new namespace watcher for events
+	// based on the input change mask. The initialStateQuery ensures the watcher
+	// starts with the current state of the system, preventing data loss from
+	// prior events.
+	NewNamespaceMapperWatcher(
+		ctx context.Context,
+		initialStateQuery eventsource.NamespaceQuery,
+		summary string,
+		mapper eventsource.Mapper,
+		filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
+	) (watcher.StringsWatcher, error)
+
+	// NewNotifyWatcher returns a new watcher that filters changes from the input
+	// base watcher's db/queue. A single filter option is required, though
+	// additional filter options can be provided.
+	NewNotifyWatcher(
+		ctx context.Context,
+		summary string,
+		filter eventsource.FilterOption,
+		filterOpts ...eventsource.FilterOption,
+	) (watcher.NotifyWatcher, error)
+
+	// NewNotifyMapperWatcher returns a new watcher that receives changes from the
+	// input base watcher's db/queue. A single filter option is required, though
+	// additional filter options can be provided. Filtering of values is done first
+	// by the filter, and then subsequently by the mapper. Based on the mapper's
+	// logic a subset of them (or none) may be emitted.
+	NewNotifyMapperWatcher(
+		ctx context.Context,
+		summary string,
+		mapper eventsource.Mapper,
+		filter eventsource.FilterOption,
+		filterOpts ...eventsource.FilterOption,
+	) (watcher.NotifyWatcher, error)
+}
+
+// WatchableService extends Service to provide interactions with model state
+// and integrates a watcher factory for monitoring changes.
+type WatchableService struct {
+	// Service is the inherited model service to extend upon.
+	Service
+	watcherFactory WatcherFactory
+}
+
+// NewWatchableService provides a new Service for interacting with the
+// underlying state and the ability to create watchers.
+func NewWatchableService(
+	st State,
+	watcherFactory WatcherFactory,
+	statusHistoryGetter StatusHistoryGetter,
+	clock clock.Clock,
+	logger logger.Logger,
+) *WatchableService {
+	return &WatchableService{
+		Service: Service{
+			st:                  st,
+			statusHistoryGetter: statusHistoryGetter,
+			clock:               clock,
+			logger:              logger,
+		},
+		watcherFactory: watcherFactory,
+	}
+}
+
+// WatchActivatedModels returns a watcher that emits an event containing the
+// model UUID when a model becomes activated or an activated model receives an
+// update. The events returned are maintained in the same order as they are
+// received. Newly created models will not be reported since they are not
+// activated at creation. Deletion of activated models is also not reported.
+func (s *WatchableService) WatchActivatedModels(ctx context.Context) (watcher.StringsWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	mapper := getWatchActivatedModelsMapper(s.st)
+	modelTableName, query := s.st.InitialWatchActivatedModelsStatement()
+
+	return s.watcherFactory.NewNamespaceMapperWatcher(
+		ctx,
+		eventsource.InitialNamespaceChanges(query),
+		"activated models watcher",
+		mapper,
+		eventsource.NamespaceFilter(modelTableName, changestream.All),
+	)
+}
+
+// getWatchActivatedModelsMapper returns a mapper function that filters change
+// events to include only those associated with activated models. The subset of
+// changes returned is maintained in the same order as they are received.
+func getWatchActivatedModelsMapper(st State) eventsource.Mapper {
+	return func(ctx context.Context, changes []changestream.ChangeEvent) ([]string, error) {
+		modelUUIDs := make([]coremodel.UUID, len(changes))
+		for i, change := range changes {
+			modelUUIDs[i] = coremodel.UUID(change.Changed())
+		}
+
+		// Retrieve all activate status of all models with associated uuids
+		activatedModelUUIDs, err := st.GetActivatedModelUUIDs(ctx, modelUUIDs)
+
+		// There will be no errors returned if there are no activated models
+		// found.
+		if err != nil {
+			return nil, err
+		}
+
+		if len(activatedModelUUIDs) == 0 {
+			return nil, nil
+		}
+
+		activatedModelUUIDToChangeEventMap := make(map[coremodel.UUID]struct{}, len(activatedModelUUIDs))
+		for _, activatedModelUUID := range activatedModelUUIDs {
+			activatedModelUUIDToChangeEventMap[activatedModelUUID] = struct{}{}
+		}
+
+		changed := make([]string, 0, len(changes))
+
+		// Add all events associated with activated model UUIDs
+		for _, change := range changes {
+			uuid := coremodel.UUID(change.Changed())
+			if _, exists := activatedModelUUIDToChangeEventMap[uuid]; !exists {
+				continue
+			}
+
+			changed = append(changed, uuid.String())
+		}
+
+		return changed, nil
+	}
+}
+
+// WatchModels returns a watcher that emits an event if the model changes.
+func (s *WatchableService) WatchModels(ctx context.Context) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	return s.watcherFactory.NewNotifyWatcher(
+		ctx,
+		"models watcher",
+		eventsource.NamespaceFilter("model", changestream.All),
+	)
+}
+
+// WatchModel returns a watcher that emits an event if the model changes.
+func (s *WatchableService) WatchModel(ctx context.Context, modelUUID coremodel.UUID) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	return s.watcherFactory.NewNotifyWatcher(
+		ctx,
+		"model watcher",
+		eventsource.PredicateFilter("model", changestream.All, eventsource.EqualsPredicate(modelUUID.String())),
+	)
+}
+
+// WatchModelCloudCredential returns a new NotifyWatcher watching for changes that
+// result in the cloud spec for a model changing. The changes watched for are:
+// - updates to model cloud.
+// - updates to model credential.
+// - changes to the credential set on a model.
+// The following errors can be expected:
+// - [modelerrors.NotFound] when the model is not found.
+func (s *WatchableService) WatchModelCloudCredential(ctx context.Context, modelUUID coremodel.UUID) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	return watchModelCloudCredential(ctx, s.st, s.watcherFactory, modelUUID)
+}
+
+func watchModelCloudCredential(
+	ctx context.Context, st ProviderControllerState, watcherFactory WatcherFactory, modelUUID coremodel.UUID,
+) (watcher.NotifyWatcher, error) {
+	if err := modelUUID.Validate(); err != nil {
+		return nil, errors.Errorf("invalid model UUID watching model cloud credential: %w", err)
+	}
+
+	// Get the model's cloud and credential UUID to use in the watcher filters.
+	cloudUUID, credentialUUID, err := st.GetModelCloudAndCredential(ctx, modelUUID)
+	if err != nil {
+		return nil, errors.Errorf("getting model cloud and credential: %w", err)
+	}
+
+	var lastSeenCredentialUUID atomic.Pointer[credential.UUID]
+	lastSeenCredentialUUID.Store(&credentialUUID)
+
+	// The mapper is used to filter out any model events where the credential UUID has not changed.
+	mapper := func(ctx context.Context, events []changestream.ChangeEvent) ([]string, error) {
+		// Get the current model credential UUID.
+		_, currentModelCredentialUUID, err := st.GetModelCloudAndCredential(ctx, modelUUID)
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
+
+		var out []string
+		for _, e := range events {
+			var wantEvent bool
+			switch e.Namespace() {
+			case "cloud", "cloud_ca_cert":
+				wantEvent = true
+			case "model":
+				if *lastSeenCredentialUUID.Load() != currentModelCredentialUUID {
+					wantEvent = true
+					lastSeenCredentialUUID.Store(&currentModelCredentialUUID)
+				}
+			case "cloud_credential", "cloud_credential_attribute":
+				wantEvent = currentModelCredentialUUID.String() == e.Changed()
+			}
+
+			if wantEvent {
+				out = append(out, e.Changed())
+			}
+		}
+		return out, nil
+	}
+
+	result, err := watcherFactory.NewNotifyMapperWatcher(
+		ctx,
+		fmt.Sprintf("model cloud and credential watcher for %q", modelUUID),
+		mapper,
+		eventsource.PredicateFilter("model", changestream.Changed, eventsource.EqualsPredicate(modelUUID.String())),
+		eventsource.PredicateFilter("cloud", changestream.Changed, eventsource.EqualsPredicate(cloudUUID.String())),
+		eventsource.PredicateFilter("cloud_ca_cert", changestream.Changed, eventsource.EqualsPredicate(cloudUUID.String())),
+		eventsource.NamespaceFilter("cloud_credential", changestream.Changed),
+		eventsource.NamespaceFilter("cloud_credential_attribute", changestream.Changed),
+	)
+	if err != nil {
+		return nil, errors.Errorf("watching model cloud and credential: %w", err)
+	}
+	return result, nil
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

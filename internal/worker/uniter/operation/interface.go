@@ -7,15 +7,13 @@ import (
 	stdcontext "context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	utilexec "github.com/juju/utils/v4/exec"
 
 	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
-	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 )
 
@@ -102,16 +100,6 @@ type Factory interface {
 	// NewUpgrade creates an upgrade operation for the supplied charm.
 	NewUpgrade(charmURL string) (Operation, error)
 
-	// NewRemoteInit inits the remote charm on CAAS pod.
-	NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (Operation, error)
-
-	// NewSkipRemoteInit skips a remote-init operation.
-	NewSkipRemoteInit(retry bool) (Operation, error)
-
-	// NewNoOpFinishUpgradeSeries creates a noop which simply resets the
-	// status of a units upgrade series.
-	NewNoOpFinishUpgradeSeries() (Operation, error)
-
 	// NewRevertUpgrade creates an operation to clear the unit's resolved flag,
 	// and execute an upgrade to the supplied charm that is careful to excise
 	// remnants of a previously failed upgrade to a different charm.
@@ -149,8 +137,8 @@ type Factory interface {
 	NewResignLeadership() (Operation, error)
 
 	// NewNoOpSecretsRemoved creates an operation to update the secrets
-	// state when secrets are removed.
-	NewNoOpSecretsRemoved(uris []string) (Operation, error)
+	// state when secret revisions are removed.
+	NewNoOpSecretsRemoved(deletedRevisions, deletedObsoleteRevisions map[string][]int) (Operation, error)
 }
 
 // CommandArgs stores the arguments for a Command operation.
@@ -164,8 +152,6 @@ type CommandArgs struct {
 	// TODO(jam): 2019-10-24 Include RemoteAppName
 	// ForceRemoteUnit skips unit inference and existence validation.
 	ForceRemoteUnit bool
-	// RunLocation describes where the command must run.
-	RunLocation runner.RunLocation
 }
 
 // Validate the command arguments.
@@ -198,7 +184,7 @@ type Callbacks interface {
 	CommitHook(ctx stdcontext.Context, info hook.Info) error
 
 	// SetExecutingStatus sets the agent state to "Executing" with a message.
-	SetExecutingStatus(string) error
+	SetExecutingStatus(stdcontext.Context, string) error
 
 	// NotifyHook* exist so that we can defer worrying about how to untangle the
 	// callbacks inserted for uniter_test. They're only used by RunHook operations.
@@ -209,9 +195,13 @@ type Callbacks interface {
 	// The following methods exist primarily to allow us to test operation code
 	// without using a live api connection.
 
-	// FailAction marks the supplied action failed. It's only used by
-	// RunActions operations.
+	// FailAction marks the supplied action status as "failed". It's only used
+	// by RunActions operations.
 	FailAction(ctx stdcontext.Context, actionId, message string) error
+
+	// ErrorAction marks the supplied action status as "error". It's only used
+	// by RunActions operations.
+	ErrorAction(ctx stdcontext.Context, actionId, message string) error
 
 	// ActionStatus returns the status of the action required by the action operation for
 	// cancelation.
@@ -225,23 +215,14 @@ type Callbacks interface {
 	// *before* recording local state referencing that charm, to ensure there's
 	// no path by which the controller can legitimately garbage collect that
 	// charm or the application's settings for it. It's only used by Deploy operations.
-	SetCurrentCharm(charmURL string) error
-
-	// SetUpgradeSeriesStatus is intended to give the uniter a chance to
-	// upgrade the status of a running series upgrade before or after
-	// upgrade series hook code completes and, for display purposes, to
-	// supply a reason as to why it is making the change.
-	SetUpgradeSeriesStatus(ctx stdcontext.Context, status model.UpgradeSeriesStatus, reason string) error
+	SetCurrentCharm(ctx stdcontext.Context, charmURL string) error
 
 	// SetSecretRotated updates the secret rotation status.
-	SetSecretRotated(url string, originalRevision int) error
+	SetSecretRotated(ctx stdcontext.Context, url string, originalRevision int) error
 
 	// SecretsRemoved updates the unit secret state when
-	// secrets are removed.
-	SecretsRemoved(ctx stdcontext.Context, uris []string) error
-
-	// RemoteInit copies the charm to the remote instance. CAAS only.
-	RemoteInit(runningStatus remotestate.ContainerRunningStatus, abort <-chan struct{}) error
+	// secret revisions are removed.
+	SecretsRemoved(ctx stdcontext.Context, deletedRevisions, deletedObsoleteRevisions map[string][]int) error
 }
 
 // StorageUpdater is an interface used for updating local knowledge of storage

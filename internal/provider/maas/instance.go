@@ -4,6 +4,7 @@
 package maas
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -14,7 +15,6 @@ import (
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/environs/envcontext"
 )
 
 type maasInstance struct {
@@ -39,11 +39,13 @@ func (mi *maasInstance) hardwareCharacteristics() (*instance.HardwareCharacteris
 	zone, _ := mi.zone()
 	tags := mi.machine.Tags()
 	hc := &instance.HardwareCharacteristics{
-		Arch:             &nodeArch,
-		CpuCores:         &nodeCpuCount,
-		Mem:              &nodeMemoryMB,
-		AvailabilityZone: &zone,
-		Tags:             &tags,
+		Arch:     &nodeArch,
+		CpuCores: &nodeCpuCount,
+		Mem:      &nodeMemoryMB,
+		Tags:     &tags,
+	}
+	if zone != "" {
+		hc.AvailabilityZone = &zone
 	}
 	return hc, nil
 }
@@ -64,7 +66,7 @@ func (mi *maasInstance) Id() instance.Id {
 	return instance.Id(mi.machine.SystemID())
 }
 
-func (mi *maasInstance) Addresses(ctx envcontext.ProviderCallContext) (corenetwork.ProviderAddresses, error) {
+func (mi *maasInstance) Addresses(ctx context.Context) (corenetwork.ProviderAddresses, error) {
 	subnetsMap, err := mi.environ.subnetToSpaceIds(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -81,31 +83,31 @@ func (mi *maasInstance) Addresses(ctx envcontext.ProviderCallContext) (corenetwo
 		if primAddr := iface.PrimaryAddress(); primAddr.Value != "" {
 			addresses = append(addresses, primAddr)
 		} else {
-			logger.Debugf("no address found on interface %q", iface.InterfaceName)
+			logger.Debugf(ctx, "no address found on interface %q", iface.InterfaceName)
 		}
 	}
 
-	logger.Debugf("%q has addresses %q", mi.machine.Hostname(), addresses)
+	logger.Debugf(ctx, "%q has addresses %q", mi.machine.Hostname(), addresses)
 	return addresses, nil
 }
 
 // Status returns a juju status based on the maas instance returned
 // status message.
-func (mi *maasInstance) Status(ctx envcontext.ProviderCallContext) instance.Status {
+func (mi *maasInstance) Status(ctx context.Context) instance.Status {
 	// A fresh status is not obtained here because the interface it is intended
 	// to satisfy gets a new maasInstance before each call, using a fresh status
 	// would cause us to mask errors since this interface does not contemplate
 	// returning them.
 	statusName := mi.machine.StatusName()
 	statusMsg := mi.machine.StatusMessage()
-	return convertInstanceStatus(statusName, statusMsg, mi.Id())
+	return convertInstanceStatus(ctx, statusName, statusMsg, mi.Id())
 }
 
-func convertInstanceStatus(statusMsg, substatus string, id instance.Id) instance.Status {
+func convertInstanceStatus(ctx context.Context, statusMsg, substatus string, id instance.Id) instance.Status {
 	maasInstanceStatus := status.Empty
 	switch normalizeStatus(statusMsg) {
 	case "":
-		logger.Debugf("unable to obtain status of instance %s", id)
+		logger.Debugf(ctx, "unable to obtain status of instance %s", id)
 		statusMsg = "error in getting status"
 	case "deployed":
 		maasInstanceStatus = status.Running
@@ -135,17 +137,17 @@ func normalizeStatus(statusMsg string) string {
 
 // MAAS does not do firewalling so these port methods do nothing.
 
-func (mi *maasInstance) OpenPorts(_ envcontext.ProviderCallContext, _ string, _ firewall.IngressRules) error {
-	logger.Debugf("unimplemented OpenPorts() called")
+func (mi *maasInstance) OpenPorts(ctx context.Context, _ string, _ firewall.IngressRules) error {
+	logger.Debugf(ctx, "unimplemented OpenPorts() called")
 	return nil
 }
 
-func (mi *maasInstance) ClosePorts(_ envcontext.ProviderCallContext, _ string, _ firewall.IngressRules) error {
-	logger.Debugf("unimplemented ClosePorts() called")
+func (mi *maasInstance) ClosePorts(ctx context.Context, _ string, _ firewall.IngressRules) error {
+	logger.Debugf(ctx, "unimplemented ClosePorts() called")
 	return nil
 }
 
-func (mi *maasInstance) IngressRules(_ envcontext.ProviderCallContext, _ string) (firewall.IngressRules, error) {
-	logger.Debugf("unimplemented IngressRules() called")
+func (mi *maasInstance) IngressRules(ctx context.Context, _ string) (firewall.IngressRules, error) {
+	logger.Debugf(ctx, "unimplemented IngressRules() called")
 	return nil, nil
 }

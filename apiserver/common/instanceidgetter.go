@@ -6,41 +6,43 @@ package common
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/machine"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
+
+// MachineService defines the methods that the facade assumes from the Machine
+// service.
+type MachineService interface {
+	// GetMachineUUID returns the UUID of a machine identified by its name.
+	GetMachineUUID(ctx context.Context, name machine.Name) (machine.UUID, error)
+	// GetInstanceID returns the cloud specific instance id for this machine.
+	GetInstanceID(ctx context.Context, mUUID machine.UUID) (instance.Id, error)
+	// GetMachineLife returns the lifecycle of the machine.
+	GetMachineLife(ctx context.Context, name machine.Name) (life.Value, error)
+}
 
 // InstanceIdGetter implements a common InstanceId method for use by
 // various facades.
 type InstanceIdGetter struct {
-	st         state.EntityFinder
-	getCanRead GetAuthFunc
+	machineService MachineService
+	getCanRead     GetAuthFunc
 }
 
 // NewInstanceIdGetter returns a new InstanceIdGetter. The GetAuthFunc
 // will be used on each invocation of InstanceId to determine current
 // permissions.
-func NewInstanceIdGetter(st state.EntityFinder, getCanRead GetAuthFunc) *InstanceIdGetter {
+func NewInstanceIdGetter(machineService MachineService, getCanRead GetAuthFunc) *InstanceIdGetter {
 	return &InstanceIdGetter{
-		st:         st,
-		getCanRead: getCanRead,
+		machineService: machineService,
+		getCanRead:     getCanRead,
 	}
-}
-
-func (ig *InstanceIdGetter) getInstanceId(tag names.Tag) (instance.Id, error) {
-	entity0, err := ig.st.FindEntity(tag)
-	if err != nil {
-		return "", err
-	}
-	entity, ok := entity0.(state.InstanceIdGetter)
-	if !ok {
-		return "", apiservererrors.NotSupportedError(tag, "instance id")
-	}
-	return entity.InstanceId()
 }
 
 // InstanceId returns the provider specific instance id for each given
@@ -49,7 +51,7 @@ func (ig *InstanceIdGetter) InstanceId(ctx context.Context, args params.Entities
 	result := params.StringResults{
 		Results: make([]params.StringResult, len(args.Entities)),
 	}
-	canRead, err := ig.getCanRead()
+	canRead, err := ig.getCanRead(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -59,15 +61,28 @@ func (ig *InstanceIdGetter) InstanceId(ctx context.Context, args params.Entities
 			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
 			continue
 		}
-		err = apiservererrors.ErrPerm
-		if canRead(tag) {
-			var instanceId instance.Id
-			instanceId, err = ig.getInstanceId(tag)
-			if err == nil {
-				result.Results[i].Result = string(instanceId)
-			}
+		if !canRead(tag) {
+			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
+			continue
 		}
-		result.Results[i].Error = apiservererrors.ServerError(err)
+		machineUUID, err := ig.machineService.GetMachineUUID(ctx, machine.Name(tag.Id()))
+		if errors.Is(err, machineerrors.MachineNotFound) {
+			result.Results[i].Error = apiservererrors.ServerError(errors.NotFoundf("machine %s", tag.Id()))
+			continue
+		}
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		instanceId, err := ig.machineService.GetInstanceID(ctx, machineUUID)
+		if errors.Is(err, machineerrors.NotProvisioned) {
+			result.Results[i].Error = apiservererrors.ServerError(errors.NotProvisionedf("machine %s", tag.Id()))
+			continue
+		} else if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		result.Results[i].Result = instanceId.String()
 	}
 	return result, nil
 }

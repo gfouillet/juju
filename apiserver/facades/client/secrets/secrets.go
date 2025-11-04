@@ -7,21 +7,21 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common"
+	commonmodel "github.com/juju/juju/apiserver/common/model"
 	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
 	coresecrets "github.com/juju/juju/core/secrets"
 	domainsecret "github.com/juju/juju/domain/secret"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
 	secretservice "github.com/juju/juju/domain/secret/service"
 	"github.com/juju/juju/internal/secrets"
 	"github.com/juju/juju/internal/secrets/provider/juju"
 	"github.com/juju/juju/internal/secrets/provider/kubernetes"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 // SecretsAPI is the backend for the Secrets facade.
@@ -41,16 +41,16 @@ type SecretsAPIV1 struct {
 	*SecretsAPI
 }
 
-func (s *SecretsAPI) checkCanRead() error {
-	return s.authorizer.HasPermission(permission.ReadAccess, names.NewModelTag(s.modelUUID))
+func (s *SecretsAPI) checkCanRead(ctx context.Context) error {
+	return s.authorizer.HasPermission(ctx, permission.ReadAccess, names.NewModelTag(s.modelUUID))
 }
 
-func (s *SecretsAPI) checkCanWrite() error {
-	return s.authorizer.HasPermission(permission.WriteAccess, names.NewModelTag(s.modelUUID))
+func (s *SecretsAPI) checkCanWrite(ctx context.Context) error {
+	return s.authorizer.HasPermission(ctx, permission.WriteAccess, names.NewModelTag(s.modelUUID))
 }
 
-func (s *SecretsAPI) checkCanAdmin() error {
-	isAdmin, err := common.HasModelAdmin(s.authorizer, names.NewControllerTag(s.controllerUUID), names.NewModelTag(s.modelUUID))
+func (s *SecretsAPI) checkCanAdmin(ctx context.Context) error {
+	isAdmin, err := commonmodel.HasModelAdmin(ctx, s.authorizer, names.NewControllerTag(s.controllerUUID), names.NewModelTag(s.modelUUID))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -66,11 +66,11 @@ func (s *SecretsAPI) checkCanAdmin() error {
 func (s *SecretsAPI) ListSecrets(ctx context.Context, arg params.ListSecretsArgs) (params.ListSecretResults, error) {
 	result := params.ListSecretResults{}
 	if arg.ShowSecrets {
-		if err := s.checkCanAdmin(); err != nil {
+		if err := s.checkCanAdmin(ctx); err != nil {
 			return result, errors.Trace(err)
 		}
 	} else {
-		if err := s.checkCanRead(); err != nil {
+		if err := s.checkCanRead(ctx); err != nil {
 			return result, errors.Trace(err)
 		}
 	}
@@ -129,17 +129,18 @@ func (s *SecretsAPI) ListSecrets(ctx context.Context, arg params.ListSecretsArgs
 			return params.ListSecretResults{}, errors.Trace(err)
 		}
 		secretResult := params.ListSecretResult{
-			URI:              m.URI.String(),
-			Version:          m.Version,
-			OwnerTag:         ownerTag.String(),
-			Description:      m.Description,
-			Label:            m.Label,
-			RotatePolicy:     string(m.RotatePolicy),
-			NextRotateTime:   m.NextRotateTime,
-			LatestRevision:   m.LatestRevision,
-			LatestExpireTime: m.LatestExpireTime,
-			CreateTime:       m.CreateTime,
-			UpdateTime:       m.UpdateTime,
+			URI:                    m.URI.String(),
+			Version:                m.Version,
+			OwnerTag:               ownerTag.String(),
+			Description:            m.Description,
+			Label:                  m.Label,
+			RotatePolicy:           string(m.RotatePolicy),
+			NextRotateTime:         m.NextRotateTime,
+			LatestRevision:         m.LatestRevision,
+			LatestRevisionChecksum: m.LatestRevisionChecksum,
+			LatestExpireTime:       m.LatestExpireTime,
+			CreateTime:             m.CreateTime,
+			UpdateTime:             m.UpdateTime,
 		}
 		grants, err := s.secretService.GetSecretGrants(ctx, m.URI, coresecrets.RoleView)
 		if err != nil {
@@ -234,13 +235,13 @@ func (s *SecretsAPI) CreateSecrets(ctx context.Context, args params.CreateSecret
 	result := params.StringResults{
 		Results: make([]params.StringResult, len(args.Args)),
 	}
-	if err := s.checkCanWrite(); err != nil {
+	if err := s.checkCanWrite(ctx); err != nil {
 		return result, errors.Trace(err)
 	}
 	for i, arg := range args.Args {
 		id, err := s.createSecret(ctx, arg)
 		result.Results[i].Result = id
-		if errors.Is(err, state.LabelExists) {
+		if errors.Is(err, secreterrors.SecretLabelAlreadyExists) {
 			err = errors.AlreadyExistsf("secret with name %q", *arg.Label)
 		}
 		result.Results[i].Error = apiservererrors.ServerError(err)
@@ -267,6 +268,15 @@ func (s *SecretsAPI) createSecret(ctx context.Context, arg params.CreateSecretAr
 		uri = coresecrets.NewURI()
 	}
 
+	if len(arg.Content.Data) == 0 {
+		return "", errors.NotValidf("empty secret value")
+	}
+	v := coresecrets.NewSecretValue(arg.Content.Data)
+	checksum, err := v.Checksum()
+	if err != nil {
+		return "", errors.Annotate(err, "calculating secret checksum")
+	}
+	arg.UpsertSecretArg.Content.Checksum = checksum
 	err = s.secretService.CreateUserSecret(ctx, uri, secretservice.CreateUserSecretParams{
 		Version:                secrets.Version,
 		UpdateUserSecretParams: fromUpsertParams(s.modelUUID, nil, arg.UpsertSecretArg),
@@ -285,6 +295,7 @@ func fromUpsertParams(modelUUID string, autoPrune *bool, p params.UpsertSecretAr
 		Label:       p.Label,
 		Params:      p.Params,
 		Data:        p.Content.Data,
+		Checksum:    p.Content.Checksum,
 	}
 }
 
@@ -296,12 +307,12 @@ func (s *SecretsAPI) UpdateSecrets(ctx context.Context, args params.UpdateUserSe
 	result := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Args)),
 	}
-	if err := s.checkCanWrite(); err != nil {
+	if err := s.checkCanWrite(ctx); err != nil {
 		return result, errors.Trace(err)
 	}
 	for i, arg := range args.Args {
 		err := s.updateSecret(ctx, arg)
-		if errors.Is(err, state.LabelExists) {
+		if errors.Is(err, secreterrors.SecretLabelAlreadyExists) {
 			err = errors.AlreadyExistsf("secret with name %q", *arg.Label)
 		}
 		result.Results[i].Error = apiservererrors.ServerError(err)
@@ -317,7 +328,14 @@ func (s *SecretsAPI) updateSecret(ctx context.Context, arg params.UpdateUserSecr
 	if err != nil {
 		return errors.Trace(err)
 	}
-
+	if len(arg.Content.Data) > 0 {
+		v := coresecrets.NewSecretValue(arg.Content.Data)
+		checksum, err := v.Checksum()
+		if err != nil {
+			return errors.Annotate(err, "calculating secret checksum")
+		}
+		arg.Content.Checksum = checksum
+	}
 	err = s.secretService.UpdateUserSecret(ctx, uri, fromUpsertParams(s.modelUUID, arg.AutoPrune, arg.UpsertSecretArg))
 	return errors.Trace(err)
 }
@@ -349,7 +367,7 @@ func (s *SecretsAPI) RemoveSecrets(ctx context.Context, args params.DeleteSecret
 		return result, nil
 	}
 
-	if err := s.checkCanWrite(); err != nil {
+	if err := s.checkCanWrite(ctx); err != nil {
 		return result, errors.Trace(err)
 	}
 
@@ -398,7 +416,7 @@ func (s *SecretsAPI) secretsGrantRevoke(ctx context.Context, arg params.GrantRev
 		return results, errors.New("must specify either URI or name")
 	}
 
-	if err := s.checkCanWrite(); err != nil {
+	if err := s.checkCanWrite(ctx); err != nil {
 		return results, errors.Trace(err)
 	}
 

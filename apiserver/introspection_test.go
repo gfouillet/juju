@@ -4,17 +4,17 @@
 package apiserver_test
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/url"
+	stdtesting "testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	apitesting "github.com/juju/juju/apiserver/testing"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/user"
 	"github.com/juju/juju/domain/access/service"
 	"github.com/juju/juju/internal/auth"
 	"github.com/juju/juju/juju/testing"
@@ -25,9 +25,11 @@ type introspectionSuite struct {
 	url string
 }
 
-var _ = gc.Suite(&introspectionSuite{})
+func TestIntrospectionSuite(t *stdtesting.T) {
+	tc.Run(t, &introspectionSuite{})
+}
 
-func (s *introspectionSuite) SetUpTest(c *gc.C) {
+func (s *introspectionSuite) SetUpTest(c *tc.C) {
 	s.WithIntrospection = func(f func(path string, h http.Handler)) {
 		f("navel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "gazing")
@@ -37,21 +39,27 @@ func (s *introspectionSuite) SetUpTest(c *gc.C) {
 	s.url = s.URL("/introspection/navel", url.Values{}).String()
 }
 
-func (s *introspectionSuite) TestAccess(c *gc.C) {
+func (s *introspectionSuite) TestAccess(c *tc.C) {
 	s.testAccess(c, testing.AdminUser.String(), testing.AdminSecret)
 
-	accessService := s.ControllerServiceFactory(c).Access()
+	accessService := s.ControllerDomainServices(c).Access()
 	userTag := names.NewUserTag("bobbrown")
-	_, _, err := accessService.AddUser(context.Background(), service.AddUserArg{
-		Name:        userTag.Name(),
+	_, _, err := accessService.AddUser(c.Context(), service.AddUserArg{
+		Name:        user.NameFromTag(userTag),
 		DisplayName: "Bob Brown",
 		CreatorUUID: s.AdminUserUUID,
 		Password:    ptr(auth.NewPassword("hunter2")),
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = accessService.CreatePermission(context.Background(), permission.UserAccessSpec{
+	_, err = accessService.CreatePermission(c.Context(), permission.UserAccessSpec{
 		AccessSpec: permission.AccessSpec{
 			Target: permission.ID{
 				ObjectType: permission.Model,
@@ -59,24 +67,30 @@ func (s *introspectionSuite) TestAccess(c *gc.C) {
 			},
 			Access: permission.ReadAccess,
 		},
-		User: userTag.Name(),
+		User: user.NameFromTag(userTag),
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.testAccess(c, "user-bobbrown", "hunter2")
 }
 
-func (s *introspectionSuite) TestAccessDenied(c *gc.C) {
-	accessService := s.ControllerServiceFactory(c).Access()
+func (s *introspectionSuite) TestAccessDenied(c *tc.C) {
+	accessService := s.ControllerDomainServices(c).Access()
 	userTag := names.NewUserTag("bobbrown")
-	_, _, err := accessService.AddUser(context.Background(), service.AddUserArg{
-		Name:        userTag.Name(),
+	_, _, err := accessService.AddUser(c.Context(), service.AddUserArg{
+		Name:        user.NameFromTag(userTag),
 		DisplayName: "Bob Brown",
 		CreatorUUID: s.AdminUserUUID,
 		Password:    ptr(auth.NewPassword("hunter2")),
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{
 		Method:   "GET",
@@ -85,10 +99,10 @@ func (s *introspectionSuite) TestAccessDenied(c *gc.C) {
 		Password: "hunter2",
 	})
 	defer resp.Body.Close()
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusForbidden)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusForbidden)
 }
 
-func (s *introspectionSuite) testAccess(c *gc.C, tag, password string) {
+func (s *introspectionSuite) testAccess(c *tc.C, tag, password string) {
 	resp := apitesting.SendHTTPRequest(c, apitesting.HTTPRequestParams{
 		Method:   "GET",
 		URL:      s.url,
@@ -96,8 +110,8 @@ func (s *introspectionSuite) testAccess(c *gc.C, tag, password string) {
 		Password: password,
 	})
 	defer resp.Body.Close()
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusOK)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusOK)
 	content, err := io.ReadAll(resp.Body)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(content), gc.Equals, "gazing")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(content), tc.Equals, "gazing")
 }

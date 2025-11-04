@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql/driver"
 	"io"
 	"net"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/juju/juju/internal/database/app"
 	"github.com/juju/juju/internal/database/client"
 	"github.com/juju/juju/internal/database/dqlite"
+	dqlitedriver "github.com/juju/juju/internal/database/driver"
 	"github.com/juju/juju/internal/network"
 )
 
@@ -55,7 +57,7 @@ type NodeManager struct {
 //
 // If isLoopbackPreferred is true, we bind Dqlite to 127.0.0.1 and eschew TLS
 // termination. This is useful primarily in unit testing and a temporary
-// workaround for CAAS, which does not yet support enable-ha.
+// workaround for CAAS, which does not yet support high availability.
 //
 // If it is false, we attempt to identify a unique local-cloud address.
 // If we find one, we use it as the bind address. Otherwise, we fall back
@@ -79,7 +81,7 @@ func NewNodeManager(cfg agent.Config, isLoopbackPreferred bool, logger logger.Lo
 // IsLoopbackPreferred returns true if we should prefer to bind Dqlite
 // to the loopback IP address.
 // This is currently true for CAAS and unit testing. Once CAAS supports
-// enable-ha we'll have to revisit this.
+// high availability we'll have to revisit this.
 func (m *NodeManager) IsLoopbackPreferred() bool {
 	return m.isLoopbackPreferred
 }
@@ -266,7 +268,7 @@ func (m *NodeManager) WithPreferredCloudLocalAddressOption(source corenetwork.Co
 		return m.WithAddressOption(cloudLocal[0]), nil
 	}
 
-	m.logger.Warningf("failed to determine a unique local-cloud address; falling back to 127.0.0.1 for Dqlite")
+	m.logger.Warningf(context.TODO(), "failed to determine a unique local-cloud address; falling back to 127.0.0.1 for Dqlite")
 	return m.WithLoopbackAddressOption(), nil
 }
 
@@ -287,7 +289,7 @@ func (m *NodeManager) WithAddressOption(ip string) app.Option {
 // WithTLSOption returns a Dqlite application Option for TLS encryption
 // of traffic between clients and clustered application nodes.
 func (m *NodeManager) WithTLSOption() (app.Option, error) {
-	stateInfo, ok := m.cfg.StateServingInfo()
+	stateInfo, ok := m.cfg.ControllerAgentInfo()
 	if !ok {
 		return nil, errors.NotSupportedf("Dqlite node initialisation on non-controller machine/container")
 	}
@@ -323,8 +325,79 @@ func (m *NodeManager) WithClusterOption(addrs []string) app.Option {
 		return net.JoinHostPort(addr, strconv.Itoa(m.port))
 	})
 
-	m.logger.Debugf("determined Dqlite cluster members: %v", peerAddrs)
+	m.logger.Debugf(context.TODO(), "determined Dqlite cluster members: %v", peerAddrs)
 	return app.WithCluster(peerAddrs)
+}
+
+// TLSDialer returns a Dqlite DialFunc that uses TLS encryption
+// for traffic between clients and clustered application nodes.
+func (m *NodeManager) TLSDialer(ctx context.Context) (client.DialFunc, error) {
+	loopbackBound, err := m.IsLoopbackBound(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if loopbackBound {
+		return client.DefaultDialFunc, nil
+	}
+
+	stateInfo, ok := m.cfg.ControllerAgentInfo()
+	if !ok {
+		return nil, errors.NotSupportedf("Dqlite node initialisation on non-controller machine/container")
+	}
+
+	cert, err := tls.X509KeyPair([]byte(stateInfo.Cert), []byte(stateInfo.PrivateKey))
+	if err != nil {
+		return nil, errors.Annotate(err, "parsing controller certificate")
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(stateInfo.Cert)) {
+		return nil, errors.New("failed to append controller cert to pool")
+	}
+
+	return client.DialFuncWithTLS(
+		client.DefaultDialFunc,
+		app.SimpleDialTLSConfig(cert, pool),
+	), nil
+}
+
+// DqliteSQLDriver returns a Dqlite SQL driver that can be used to
+// connect to the Dqlite cluster. This is a read only connection, which is
+// intended to be used for running queries against the Dqlite cluster (REPL).
+func (m *NodeManager) DqliteSQLDriver(ctx context.Context) (driver.Driver, error) {
+	store, err := m.nodeClusterStore()
+	if err != nil {
+		return nil, errors.Annotate(err, "opening node cluster store")
+	}
+
+	dialer, err := m.TLSDialer(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return dqlitedriver.New(store, dialer)
+}
+
+// LeaderClient returns a Dqlite client that is connected to the leader
+// of the Dqlite cluster. This client can be used to run queries directly
+// against the leader node, which is useful for administrative tasks or
+// for running queries that require a consistent view of the data.
+func (s *NodeManager) LeaderClient(ctx context.Context) (*client.Client, error) {
+	store, err := s.nodeClusterStore()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	dialer, err := s.TLSDialer(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	cli, err := client.FindLeader(ctx, store, client.WithDialFunc(dialer))
+	if err != nil {
+		return nil, errors.Annotate(err, "finding Dqlite leader")
+	}
+	return cli, nil
 }
 
 // nodeClusterStore returns a YamlNodeStore instance based
@@ -367,7 +440,7 @@ func (m *NodeManager) appLogFunc(level client.LogLevel, msg string, args ...inte
 	case client.LogError:
 		translatedLevel = logger.ERROR
 	}
-	m.logger.Logf(translatedLevel, msg, args...)
+	m.logger.Logf(context.TODO(), translatedLevel, logger.Labels{}, msg, args...)
 }
 
 // QueryType represents the type of query that is being sent. This simplifies

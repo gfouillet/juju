@@ -4,26 +4,27 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	stdtesting "testing"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/utils/v4/ssh"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/client/client"
 	"github.com/juju/juju/cmd/juju/ssh/mocks"
 	"github.com/juju/juju/core/network"
 	jujussh "github.com/juju/juju/internal/network/ssh"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
 )
 
 // argsSpec is a test helper which converts a number of options into
@@ -57,7 +58,7 @@ type argsSpec struct {
 	argsMatch string
 }
 
-func (s *argsSpec) check(c *gc.C, output string) {
+func (s *argsSpec) check(c tc.LikeC, output string) {
 	// The first line in the output from the fake ssh/scp is the
 	// command line. The remaining lines should contain the contents
 	// of the UserKnownHostsFile file provided (if any).
@@ -96,7 +97,7 @@ func (s *argsSpec) check(c *gc.C, output string) {
 
 		// Check that the provided known_hosts file contained the
 		// expected keys.
-		c.Check(actualKnownHosts, gc.Matches, s.expectedKnownHosts())
+		c.Check(actualKnownHosts, tc.Matches, s.expectedKnownHosts())
 	}
 
 	if s.argsMatch != "" {
@@ -107,7 +108,7 @@ func (s *argsSpec) check(c *gc.C, output string) {
 
 	// Check the command line matches what is expected.
 	pattern := "^" + strings.Join(expected, " ") + "$"
-	c.Check(actualCommandLine, gc.Matches, pattern)
+	c.Check(actualCommandLine, tc.Matches, pattern)
 }
 
 func (s *argsSpec) expectedKnownHosts() string {
@@ -124,7 +125,9 @@ type SSHMachineSuite struct {
 	hostChecker jujussh.ReachableChecker
 }
 
-var _ = gc.Suite(&SSHMachineSuite{})
+func TestSSHMachineSuite(t *stdtesting.T) {
+	tc.Run(t, &SSHMachineSuite{})
+}
 
 // Commands to patch
 var patchedCommands = []string{"ssh", "scp"}
@@ -150,6 +153,7 @@ var fakecommand = `#!/bin/bash
 
 type fakeHostChecker struct {
 	acceptedAddresses set.Strings
+	acceptedPort      int
 }
 
 var _ jujussh.ReachableChecker = (*fakeHostChecker)(nil)
@@ -158,7 +162,7 @@ func (f *fakeHostChecker) FindHost(hostPorts network.HostPorts, publicKeys []str
 	// TODO(jam): The real reachable checker won't give deterministic ordering
 	// for hostPorts, maybe we should do a random return value?
 	for _, hostPort := range hostPorts {
-		if f.acceptedAddresses.Contains(hostPort.Host()) {
+		if f.acceptedAddresses.Contains(hostPort.Host()) && f.acceptedPort == hostPort.Port() {
 			return hostPort, nil
 		}
 	}
@@ -167,11 +171,19 @@ func (f *fakeHostChecker) FindHost(hostPorts network.HostPorts, publicKeys []str
 
 func validAddresses(acceptedAddresses ...string) *fakeHostChecker {
 	return &fakeHostChecker{
+		acceptedPort:      22,
 		acceptedAddresses: set.NewStrings(acceptedAddresses...),
 	}
 }
 
-func (s *SSHMachineSuite) SetUpTest(c *gc.C) {
+func validAddressesWithPort(port int, acceptedAddresses ...string) *fakeHostChecker {
+	return &fakeHostChecker{
+		acceptedPort:      port,
+		acceptedAddresses: set.NewStrings(acceptedAddresses...),
+	}
+}
+
+func (s *SSHMachineSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	ssh.ClearClientKeys()
 	s.PatchValue(&getJujuExecutable, func() (string, error) { return "juju", nil })
@@ -180,23 +192,23 @@ func (s *SSHMachineSuite) SetUpTest(c *gc.C) {
 	s.PatchEnvPathPrepend(s.binDir)
 	for _, name := range patchedCommands {
 		f, err := os.OpenFile(filepath.Join(s.binDir, name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		_, err = f.Write([]byte(fakecommand))
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		err = f.Close()
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
 	client, _ := ssh.NewOpenSSHClient()
 	s.PatchValue(&ssh.DefaultClient, client)
 }
 
-func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForHostMachineTarget(c *gc.C) {
+func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForHostMachineTarget(c *tc.C) {
 	target := &resolvedTarget{
 		host: "10.0.0.1",
 	}
 
-	statusGetter := func(_ *client.StatusArgs) (*params.FullStatus, error) {
+	statusGetter := func(ctx context.Context, _ *client.StatusArgs) (*params.FullStatus, error) {
 		return &params.FullStatus{
 			Machines: map[string]params.MachineStatus{
 				"0": {
@@ -208,18 +220,18 @@ func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForHostMachineTarget(c 
 		}, nil
 	}
 
-	err := new(sshMachine).maybePopulateTargetViaField(target, statusGetter)
-	c.Assert(err, jc.ErrorIsNil)
+	err := new(sshMachine).maybePopulateTargetViaField(c.Context(), target, statusGetter)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(target.via, gc.IsNil, gc.Commentf("expected target.via not to be populated for a non-container target"))
+	c.Assert(target.via, tc.IsNil, tc.Commentf("expected target.via not to be populated for a non-container target"))
 }
 
-func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForContainerMachineTarget(c *gc.C) {
+func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForContainerMachineTarget(c *tc.C) {
 	target := &resolvedTarget{
 		host: "252.66.6.42",
 	}
 
-	statusGetter := func(_ *client.StatusArgs) (*params.FullStatus, error) {
+	statusGetter := func(ctx context.Context, _ *client.StatusArgs) (*params.FullStatus, error) {
 		return &params.FullStatus{
 			Machines: map[string]params.MachineStatus{
 				"0": {
@@ -239,12 +251,12 @@ func (s *SSHMachineSuite) TestMaybePopulateTargetViaFieldForContainerMachineTarg
 		}, nil
 	}
 
-	err := new(sshMachine).maybePopulateTargetViaField(target, statusGetter)
-	c.Assert(err, jc.ErrorIsNil)
+	err := new(sshMachine).maybePopulateTargetViaField(c.Context(), target, statusGetter)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(target.via, gc.Not(gc.IsNil), gc.Commentf("expected target.via to be populated for container target"))
-	c.Assert(target.via.user, gc.Equals, "ubuntu")
-	c.Assert(target.via.host, gc.Equals, "10.0.0.1", gc.Commentf("expected target.via.host to be set to the container's host machine address"))
+	c.Assert(target.via, tc.Not(tc.IsNil), tc.Commentf("expected target.via to be populated for container target"))
+	c.Assert(target.via.user, tc.Equals, "ubuntu")
+	c.Assert(target.via.host, tc.Equals, "10.0.0.1", tc.Commentf("expected target.via.host to be set to the container's host machine address"))
 }
 
 func (s *SSHMachineSuite) setHostChecker(hostChecker jujussh.ReachableChecker) {
@@ -252,9 +264,9 @@ func (s *SSHMachineSuite) setHostChecker(hostChecker jujussh.ReachableChecker) {
 }
 
 func (s *SSHMachineSuite) setupModel(
-	ctrl *gomock.Controller, withProxy bool,
+	ctrl *gomock.Controller, withProxy bool, noClose bool,
 	machineAddresses func() []string,
-	keysForTarget func(target string) ([]string, error),
+	keysForTarget func(ctx context.Context, target string) ([]string, error),
 	targets ...string,
 ) (SSHClientAPI, *mocks.MockApplicationAPI, StatusClientAPI) {
 	applicationClient := mocks.NewMockApplicationAPI(ctrl)
@@ -296,7 +308,7 @@ func (s *SSHMachineSuite) setupModel(
 		return addr, nil
 	}
 	for _, t := range targets {
-		sshClient.EXPECT().AllAddresses(t).DoAndReturn(func(target string) ([]string, error) {
+		sshClient.EXPECT().AllAddresses(gomock.Any(), t).DoAndReturn(func(ctx context.Context, target string) ([]string, error) {
 			if target == "5" {
 				return nil, errors.NotFoundf("machine 5")
 			}
@@ -305,7 +317,7 @@ func (s *SSHMachineSuite) setupModel(
 			}
 			return getAddresses(target)
 		}).MaxTimes(5)
-		sshClient.EXPECT().PrivateAddress(t).DoAndReturn(func(target string) (string, error) {
+		sshClient.EXPECT().PrivateAddress(gomock.Any(), t).DoAndReturn(func(ctx context.Context, target string) (string, error) {
 			addr, err := getAddresses(target)
 			if err != nil || len(addr) == 0 {
 				return "", err
@@ -319,7 +331,7 @@ func (s *SSHMachineSuite) setupModel(
 		}).MaxTimes(5)
 	}
 	for _, t := range targets {
-		f := func(target string) ([]string, error) {
+		f := func(ctx context.Context, target string) ([]string, error) {
 			machine := machineTarget(target)
 			if machine != "1" {
 				return []string{
@@ -332,10 +344,10 @@ func (s *SSHMachineSuite) setupModel(
 		if keysForTarget != nil {
 			f = keysForTarget
 		}
-		sshClient.EXPECT().PublicKeys(t).DoAndReturn(f).AnyTimes()
+		sshClient.EXPECT().PublicKeys(gomock.Any(), t).DoAndReturn(f).AnyTimes()
 	}
 
-	statusClient.EXPECT().Status(nil).DoAndReturn(func(_ *client.StatusArgs) (*params.FullStatus, error) {
+	statusClient.EXPECT().Status(gomock.Any(), nil).DoAndReturn(func(ctx context.Context, _ *client.StatusArgs) (*params.FullStatus, error) {
 		machine := machineTarget(targets[0])
 		addr, err := getAddresses(machine)
 		if err != nil {
@@ -349,10 +361,15 @@ func (s *SSHMachineSuite) setupModel(
 			},
 		}, nil
 	}).MaxTimes(2)
-	sshClient.EXPECT().Proxy().Return(withProxy, nil).MaxTimes(1)
-	sshClient.EXPECT().Close().Return(nil)
-	statusClient.EXPECT().Close().Return(nil)
-	// leader api attribute is assigned the application api and both may be closed.
-	applicationClient.EXPECT().Close().Return(nil).MinTimes(1)
+	sshClient.EXPECT().Proxy(gomock.Any()).Return(withProxy, nil).MaxTimes(1)
+	if noClose {
+		sshClient.EXPECT().Close().Return(nil).MaxTimes(1)
+		statusClient.EXPECT().Close().Return(nil).MaxTimes(1)
+		applicationClient.EXPECT().Close().Return(nil).AnyTimes()
+	} else {
+		sshClient.EXPECT().Close().Return(nil)
+		statusClient.EXPECT().Close().Return(nil)
+		applicationClient.EXPECT().Close().Return(nil).MinTimes(1)
+	}
 	return sshClient, applicationClient, statusClient
 }

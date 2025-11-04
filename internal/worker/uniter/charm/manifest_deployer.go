@@ -4,6 +4,7 @@
 package charm
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/rpc/params"
 )
 
 const (
@@ -59,13 +61,13 @@ type manifestDeployer struct {
 	}
 }
 
-func (d *manifestDeployer) Stage(info BundleInfo, abort <-chan struct{}) error {
+func (d *manifestDeployer) Stage(ctx context.Context, info BundleInfo) error {
 	bdr := RetryingBundleReader{
 		BundleReader: d.bundles,
 		Clock:        clock.WallClock,
 		Logger:       d.logger,
 	}
-	bundle, err := bdr.Read(info, abort)
+	bundle, err := bdr.Read(ctx, info)
 	if err != nil {
 		return err
 	}
@@ -101,7 +103,7 @@ func (d *manifestDeployer) Deploy() (err error) {
 				// manipulate the charm directory -- as a conflict, because it's
 				// actually plausible for a user (or at least a charm author, who
 				// is the real audience for this case) to get in there and fix it.
-				d.logger.Errorf("cannot upgrade charm: %v", *err)
+				d.logger.Errorf(context.Background(), "cannot upgrade charm: %v", *err)
 				*err = ErrConflict
 			} else {
 				// ...but if we can't install at all, we just fail out as the old
@@ -131,7 +133,7 @@ func (d *manifestDeployer) Deploy() (err error) {
 	}
 
 	// Overwrite whatever's in place with the staged charm.
-	d.logger.Debugf("deploying charm %q", d.staged.url)
+	d.logger.Debugf(context.Background(), "deploying charm %q", d.staged.url)
 	if err := d.staged.bundle.ExpandTo(d.charmPath); err != nil {
 		return err
 	}
@@ -142,7 +144,7 @@ func (d *manifestDeployer) Deploy() (err error) {
 
 // startDeploy persists the fact that we've started deploying the staged bundle.
 func (d *manifestDeployer) startDeploy() error {
-	d.logger.Debugf("preparing to deploy charm %q", d.staged.url)
+	d.logger.Debugf(context.Background(), "preparing to deploy charm %q", d.staged.url)
 	if err := os.MkdirAll(d.charmPath, 0755); err != nil {
 		return err
 	}
@@ -163,7 +165,7 @@ func (d *manifestDeployer) removeDiff(oldManifest, newManifest set.Strings) erro
 
 // finishDeploy persists the fact that we've finished deploying the staged bundle.
 func (d *manifestDeployer) finishDeploy() error {
-	d.logger.Debugf("finishing deploy of charm %q", d.staged.url)
+	d.logger.Debugf(context.Background(), "finishing deploy of charm %q", d.staged.url)
 	oldPath := d.CharmPath(deployingURLPath)
 	newPath := d.CharmPath(CharmURLPath)
 	return utils.ReplaceFile(oldPath, newPath)
@@ -181,9 +183,9 @@ func (d *manifestDeployer) finishDeploy() error {
 func (d *manifestDeployer) ensureBaseFiles(baseManifest set.Strings) error {
 	deployingURL, deployingManifest, err := d.loadManifest(deployingURLPath)
 	if err == nil {
-		d.logger.Infof("detected interrupted deploy of charm %q", deployingURL)
+		d.logger.Infof(context.Background(), "detected interrupted deploy of charm %q", deployingURL)
 		if deployingURL != d.staged.url {
-			d.logger.Infof("removing files from charm %q", deployingURL)
+			d.logger.Infof(context.Background(), "removing files from charm %q", deployingURL)
 			if err := d.removeDiff(deployingManifest, baseManifest); err != nil {
 				return err
 			}
@@ -217,7 +219,7 @@ func (d *manifestDeployer) loadManifest(urlFilePath string) (string, set.Strings
 	manifest := []string{}
 	err = utils.ReadYaml(path, &manifest)
 	if os.IsNotExist(err) {
-		d.logger.Warningf("manifest not found at %q: files from charm %q may be left unremoved", path, url)
+		d.logger.Warningf(context.Background(), "manifest not found at %q: files from charm %q may be left unremoved", path, url)
 		err = nil
 	}
 	return url, set.NewStrings(manifest...), err
@@ -240,7 +242,7 @@ type RetryingBundleReader struct {
 	Logger logger.Logger
 }
 
-func (rbr RetryingBundleReader) Read(bi BundleInfo, abort <-chan struct{}) (Bundle, error) {
+func (rbr RetryingBundleReader) Read(ctx context.Context, bi BundleInfo) (Bundle, error) {
 	var (
 		bundle   Bundle
 		minDelay = 200 * time.Millisecond
@@ -253,7 +255,7 @@ func (rbr RetryingBundleReader) Read(bi BundleInfo, abort <-chan struct{}) (Bund
 		BackoffFunc: retry.ExpBackoff(minDelay, maxDelay, 2.0, true),
 		Clock:       rbr.Clock,
 		Func: func() error {
-			b, err := rbr.BundleReader.Read(bi, abort)
+			b, err := rbr.BundleReader.Read(ctx, bi)
 			if err != nil {
 				return err
 			}
@@ -261,15 +263,19 @@ func (rbr RetryingBundleReader) Read(bi BundleInfo, abort <-chan struct{}) (Bund
 			return nil
 		},
 		IsFatalError: func(err error) bool {
-			return err != nil && !errors.Is(err, errors.NotYetAvailable)
+			return err != nil && !errors.Is(err, errors.NotYetAvailable) && !params.IsCodeNotYetAvailable(err)
 		},
+		Stop: ctx.Done(),
 	})
 
 	if fetchErr != nil {
 		// If the charm is still not available something went wrong.
 		// Report a NotFound error instead
-		if errors.Is(fetchErr, errors.NotYetAvailable) {
-			rbr.Logger.Errorf("exceeded max retry attempts while waiting for blob data for %q to become available", bi.URL())
+		// We need to unwrap to check the code, because retry.Call wraps the error
+		// in a attemptsExceeded error.
+		unwrapErr := errors.Unwrap(fetchErr)
+		if errors.Is(unwrapErr, errors.NotYetAvailable) || params.IsCodeNotYetAvailable(unwrapErr) {
+			rbr.Logger.Errorf(ctx, "exceeded max retry attempts while waiting for blob data for %q to become available", bi.URL())
 			fetchErr = fmt.Errorf("blob data for %q %w", bi.URL(), errors.NotFound)
 		}
 		return nil, errors.Trace(fetchErr)

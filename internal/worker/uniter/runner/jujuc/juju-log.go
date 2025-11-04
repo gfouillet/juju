@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // JujuLogContext is the Context for the JujuLogCommand
@@ -39,10 +39,14 @@ func NewJujuLogCommand(ctx Context) (cmd.Command, error) {
 }
 
 func (c *JujuLogCommand) Info() *cmd.Info {
+	examples := `
+    juju-log -l 'WARN' Something has transpired
+`
 	return jujucmd.Info(&cmd.Info{
-		Name:    "juju-log",
-		Args:    "<message>",
-		Purpose: "write a message to the juju log",
+		Name:     "juju-log",
+		Args:     "<message>",
+		Purpose:  "Write a message to the juju log.",
+		Examples: examples,
 	})
 }
 
@@ -74,7 +78,7 @@ func (c *JujuLogCommand) Run(ctx *cmd.Context) error {
 		var ok bool
 		logLevel, ok = corelogger.ParseLevelFromString(c.Level)
 		if !ok {
-			logger.Warningf("Specified log level of %q is not valid", c.Level)
+			logger.Warningf(ctx, "Specified log level of %q is not valid", c.Level)
 			logLevel = corelogger.INFO
 		}
 	}
@@ -89,6 +93,6 @@ func (c *JujuLogCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	logger.Logf(logLevel, "%s%s", prefix, c.Message)
+	logger.Logf(ctx, logLevel, corelogger.Labels{}, "%s%s", prefix, c.Message)
 	return nil
 }

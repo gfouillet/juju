@@ -20,10 +20,11 @@ package progress_test
 import (
 	"bytes"
 	"fmt"
+	"testing"
 
 	"github.com/juju/clock"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/output/progress"
 	"github.com/juju/juju/core/output/progress/mocks"
@@ -31,20 +32,22 @@ import (
 
 type ProgressTestSuite struct{}
 
-var _ = gc.Suite(&ProgressTestSuite{})
-
-func (ts *ProgressTestSuite) testNotify(c *gc.C, buf *bytes.Buffer, t progress.Meter, desc, expected string) {
-	t.Notify("blah blah")
-
-	c.Check(buf.String(), gc.Equals, expected, gc.Commentf(desc))
+func TestProgressTestSuite(t *testing.T) {
+	tc.Run(t, &ProgressTestSuite{})
 }
 
-func (ts *ProgressTestSuite) TestQuietNotify(c *gc.C) {
+func (ts *ProgressTestSuite) testNotify(c *tc.C, buf *bytes.Buffer, t progress.Meter, desc, expected string) {
+	t.Notify("blah blah")
+
+	c.Check(buf.String(), tc.Equals, expected, tc.Commentf(desc))
+}
+
+func (ts *ProgressTestSuite) TestQuietNotify(c *tc.C) {
 	buf := new(bytes.Buffer)
 	ts.testNotify(c, buf, progress.NewQuietMeter(buf), "quiet", "blah blah\n")
 }
 
-func (ts *ProgressTestSuite) TestANSINotify(c *gc.C) {
+func (ts *ProgressTestSuite) TestANSINotify(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 

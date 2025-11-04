@@ -4,28 +4,29 @@
 package block
 
 import (
+	"context"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewDisableCommand returns a disable-command command instance
 // that will use the default API.
 func NewDisableCommand() cmd.Command {
 	return modelcmd.Wrap(&disableCommand{
-		apiFunc: func(c newAPIRoot) (blockClientAPI, error) {
-			return getBlockAPI(c)
+		apiFunc: func(ctx context.Context, c newAPIRoot) (blockClientAPI, error) {
+			return getBlockAPI(ctx, c)
 		},
 	})
 }
 
 type disableCommand struct {
 	modelcmd.ModelCommandBase
-	apiFunc func(newAPIRoot) (blockClientAPI, error)
+	apiFunc func(context.Context, newAPIRoot) (blockClientAPI, error)
 	target  string
 	message string
 }
@@ -50,7 +51,7 @@ func (c *disableCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:     "disable-command",
 		Args:     "<command set> [message...]",
-		Purpose:  "Disable commands for the model.",
+		Purpose:  "Disables commands for the model.",
 		Doc:      disableCommandDoc,
 		Examples: disableCommandExamples,
 		SeeAlso: []string{
@@ -62,18 +63,18 @@ func (c *disableCommand) Info() *cmd.Info {
 
 type blockClientAPI interface {
 	Close() error
-	SwitchBlockOn(blockType, msg string) error
+	SwitchBlockOn(ctx context.Context, blockType, msg string) error
 }
 
 // Run implements Command.Run
 func (c *disableCommand) Run(ctx *cmd.Context) error {
-	api, err := c.apiFunc(c)
+	api, err := c.apiFunc(ctx, c)
 	if err != nil {
 		return errors.Annotate(err, "cannot connect to the API")
 	}
 	defer api.Close()
 
-	return api.SwitchBlockOn(c.target, c.message)
+	return api.SwitchBlockOn(ctx, c.target, c.message)
 }
 
 var disableCommandDoc = `
@@ -83,7 +84,7 @@ execution of operations that could alter model.
 This is done by disabling certain sets of commands from successful execution.
 Disabled commands must be manually enabled to proceed.
 
-Some commands offer a --force option that can be used to bypass the disabling.
+Some commands offer a ` + "`--force`" + ` option that can be used to bypass the disabling.
 ` + commandSets
 
 const disableCommandExamples = `

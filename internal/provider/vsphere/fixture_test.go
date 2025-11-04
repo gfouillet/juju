@@ -10,36 +10,39 @@ import (
 	"net/http/httptest"
 
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/imagemetadata"
+	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/provider/vsphere"
 	"github.com/juju/juju/internal/provider/vsphere/internal/ovatest"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type ProviderFixture struct {
-	testing.IsolationSuite
-	dialStub testing.Stub
+	testhelpers.IsolationSuite
+	dialStub testhelpers.Stub
 	client   *mockClient
 	provider environs.CloudEnvironProvider
-	callCtx  envcontext.ProviderCallContext
 }
 
-func (s *ProviderFixture) SetUpTest(c *gc.C) {
+func (s *ProviderFixture) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.dialStub.ResetCalls()
 	s.client = &mockClient{}
 	s.provider = vsphere.NewEnvironProvider(vsphere.EnvironProviderConfig{
 		Dial: newMockDialFunc(&s.dialStub, s.client),
 	})
-	s.callCtx = envcontext.WithoutCredentialInvalidator(context.Background())
+}
+
+type credentialInvalidator func(ctx context.Context, reason environs.CredentialInvalidReason) error
+
+func (c credentialInvalidator) InvalidateCredentials(ctx context.Context, reason environs.CredentialInvalidReason) error {
+	return c(ctx, reason)
 }
 
 type EnvironFixture struct {
@@ -47,30 +50,34 @@ type EnvironFixture struct {
 	imageServer         *httptest.Server
 	imageServerRequests []*http.Request
 	env                 environs.Environ
-	callCtx             envcontext.ProviderCallContext
+	invalidator         credentialInvalidator
 }
 
-func (s *EnvironFixture) SetUpTest(c *gc.C) {
+func (s *EnvironFixture) SetUpTest(c *tc.C) {
 	s.ProviderFixture.SetUpTest(c)
 
 	s.imageServerRequests = nil
 	s.imageServer = serveImageMetadata(&s.imageServerRequests)
-	s.AddCleanup(func(*gc.C) {
+	s.AddCleanup(func(*tc.C) {
 		s.imageServer.Close()
 	})
 
-	env, err := s.provider.Open(context.Background(), environs.OpenParams{
+	s.invalidator = func(ctx context.Context, reason environs.CredentialInvalidReason) error {
+		s.ProviderFixture.client.invalid = true
+		s.ProviderFixture.client.invalidReason = string(reason)
+		return nil
+	}
+	env, err := s.provider.Open(c.Context(), environs.OpenParams{
 		Cloud: fakeCloudSpec(),
 		Config: fakeConfig(c, coretesting.Attrs{
 			"image-metadata-url": s.imageServer.URL,
 		}),
-	})
-	c.Assert(err, jc.ErrorIsNil)
+	}, common.NewCredentialInvalidator(s.invalidator, vsphere.IsAuthorisationFailure))
+	c.Assert(err, tc.ErrorIsNil)
 	s.env = env
 
 	// Make sure we don't fall back to the public image sources.
 	s.PatchValue(&imagemetadata.DefaultUbuntuBaseURL, "")
-	s.callCtx = envcontext.WithoutCredentialInvalidator(context.Background())
 }
 
 func serveImageMetadata(requests *[]*http.Request) *httptest.Server {
@@ -130,7 +137,7 @@ func serveImageMetadata(requests *[]*http.Request) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-func AssertInvalidatesCredential(c *gc.C, client *mockClient, f func(envcontext.ProviderCallContext) error) {
+func AssertInvalidatesCredential(c *tc.C, client *mockClient, f func(context.Context) error) {
 	client.SetErrors(soap.WrapSoapFault(&soap.Fault{
 		Code:   "ServerFaultCode",
 		String: "No way José",
@@ -138,12 +145,7 @@ func AssertInvalidatesCredential(c *gc.C, client *mockClient, f func(envcontext.
 			Fault types.AnyType `xml:",any,typeattr"`
 		}{Fault: types.NoPermission{}},
 	}), errors.New("find folder failed"))
-	var called bool
-	ctx := envcontext.WithCredentialInvalidator(context.Background(), func(context.Context, string) error {
-		called = true
-		return nil
-	})
-	err := f(ctx)
-	c.Assert(err, gc.ErrorMatches, ".*ServerFaultCode: No way José$")
-	c.Assert(called, gc.Equals, true)
+	err := f(c.Context())
+	c.Assert(err, tc.ErrorMatches, ".*ServerFaultCode: No way José$")
+	c.Assert(client.invalid, tc.IsTrue)
 }

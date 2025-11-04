@@ -4,17 +4,17 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/core/instance"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/lxdprofile"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 	"github.com/juju/juju/internal/container"
@@ -23,7 +23,7 @@ import (
 
 var lxdLogger = internallogger.GetLogger("juju.container.broker.lxd")
 
-type PrepareHostFunc func(containerTag names.MachineTag, log corelogger.Logger, abort <-chan struct{}) error
+type PrepareHostFunc func(ctx context.Context, containerTag names.MachineTag, log corelogger.Logger, abort <-chan struct{}) error
 
 // NewLXDBroker creates a Broker that can be used to start LXD containers in a
 // similar fashion to normal StartInstance requests.
@@ -56,31 +56,31 @@ type lxdBroker struct {
 	agentConfig agent.Config
 }
 
-func (broker *lxdBroker) StartInstance(ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
+func (broker *lxdBroker) StartInstance(ctx context.Context, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
 	containerMachineID := args.InstanceConfig.MachineId
 
-	config, err := broker.api.ContainerConfig()
+	config, err := broker.api.ContainerConfig(ctx)
 	if err != nil {
-		lxdLogger.Errorf("failed to get container config: %v", err)
+		lxdLogger.Errorf(ctx, "failed to get container config: %v", err)
 		return nil, err
 	}
 
-	if err := broker.prepareHost(names.NewMachineTag(containerMachineID), lxdLogger, args.Abort); err != nil {
+	if err := broker.prepareHost(ctx, names.NewMachineTag(containerMachineID), lxdLogger, args.Abort); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	preparedInfo, err := prepareContainerInterfaceInfo(broker.api, containerMachineID, lxdLogger)
+	preparedInfo, err := prepareContainerInterfaceInfo(ctx, broker.api, containerMachineID, lxdLogger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	interfaces, err := finishNetworkConfig(preparedInfo)
+	interfaces, err := finishNetworkConfig(ctx, preparedInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	net := container.BridgeNetworkConfig(0, interfaces)
 
-	pNames, err := broker.writeProfiles(containerMachineID)
+	pNames, err := broker.writeProfiles(ctx, containerMachineID)
 	if err != nil {
 		err = fmt.Errorf("cannot write charm profile: %w", err)
 		return nil, errors.WithType(err, environs.ErrAvailabilityZoneIndependent)
@@ -111,7 +111,6 @@ func (broker *lxdBroker) StartInstance(ctx envcontext.ProviderCallContext, args 
 	if err := instancecfg.PopulateInstanceConfig(
 		args.InstanceConfig,
 		config.ProviderType,
-		config.AuthorizedKeys,
 		config.SSLHostnameVerification,
 		proxyConfigurationFromContainerCfg(config),
 		config.EnableOSRefreshUpdate,
@@ -119,7 +118,7 @@ func (broker *lxdBroker) StartInstance(ctx envcontext.ProviderCallContext, args 
 		cloudInitUserData,
 		append([]string{"default"}, pNames...),
 	); err != nil {
-		lxdLogger.Errorf("failed to populate machine config: %v", err)
+		lxdLogger.Errorf(ctx, "failed to populate machine config: %v", err)
 		return nil, err
 	}
 
@@ -137,26 +136,26 @@ func (broker *lxdBroker) StartInstance(ctx envcontext.ProviderCallContext, args 
 	}, nil
 }
 
-func (broker *lxdBroker) StopInstances(ctx envcontext.ProviderCallContext, ids ...instance.Id) error {
+func (broker *lxdBroker) StopInstances(ctx context.Context, ids ...instance.Id) error {
 	// TODO: potentially parallelise.
 	for _, id := range ids {
-		lxdLogger.Infof("stopping lxd container for instance: %s", id)
+		lxdLogger.Infof(ctx, "stopping lxd container for instance: %s", id)
 		if err := broker.manager.DestroyContainer(id); err != nil {
-			lxdLogger.Errorf("container did not stop: %v", err)
+			lxdLogger.Errorf(ctx, "container did not stop: %v", err)
 			return err
 		}
-		releaseContainerAddresses(broker.api, id, broker.manager.Namespace(), lxdLogger)
+		releaseContainerAddresses(ctx, broker.api, id, broker.manager.Namespace(), lxdLogger)
 	}
 	return nil
 }
 
 // AllInstances returns all containers.
-func (broker *lxdBroker) AllInstances(ctx envcontext.ProviderCallContext) (result []instances.Instance, err error) {
+func (broker *lxdBroker) AllInstances(ctx context.Context) (result []instances.Instance, err error) {
 	return broker.manager.ListContainers()
 }
 
 // AllRunningInstances only returns running containers.
-func (broker *lxdBroker) AllRunningInstances(ctx envcontext.ProviderCallContext) (result []instances.Instance, err error) {
+func (broker *lxdBroker) AllRunningInstances(ctx context.Context) (result []instances.Instance, err error) {
 	return broker.manager.ListContainers()
 }
 
@@ -171,9 +170,9 @@ func (broker *lxdBroker) LXDProfileNames(containerName string) ([]string, error)
 	return nameRetriever.LXDProfileNames(containerName)
 }
 
-func (broker *lxdBroker) writeProfiles(machineID string) ([]string, error) {
+func (broker *lxdBroker) writeProfiles(ctx context.Context, machineID string) ([]string, error) {
 	containerTag := names.NewMachineTag(machineID)
-	profileInfo, err := broker.api.GetContainerProfileInfo(containerTag)
+	profileInfo, err := broker.api.GetContainerProfileInfo(ctx, containerTag)
 	if err != nil {
 		return nil, err
 	}

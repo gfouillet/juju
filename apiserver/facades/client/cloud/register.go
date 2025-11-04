@@ -4,78 +4,43 @@
 package cloud
 
 import (
-	stdcontext "context"
+	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	"github.com/juju/juju/apiserver/facade"
-	coremodel "github.com/juju/juju/core/model"
-	"github.com/juju/juju/domain/credential/service"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Cloud", 7, func(stdCtx stdcontext.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newFacadeV7(ctx) // Do not set error if forcing credential update.
+	registry.MustRegister("Cloud", 7, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV7(stdCtx, ctx) // Do not set error if forcing credential update.
 	}, reflect.TypeOf((*CloudAPI)(nil)))
 }
 
 // newFacadeV7 is used for API registration.
-func newFacadeV7(context facade.ModelContext) (*CloudAPI, error) {
-	serviceFactory := context.ServiceFactory()
-	systemState, err := context.StatePool().SystemState()
+func newFacadeV7(stdCtx context.Context, context facade.ModelContext) (*CloudAPI, error) {
+	domainServices := context.DomainServices()
+	credentialService := domainServices.Credential()
+	modelService := domainServices.Model()
+
+	// Get the controller UUID
+	controllerUUID := context.ControllerUUID()
+
+	// Get the controller cloud name
+	controllerCloud, _, err := modelService.DefaultModelCloudInfo(stdCtx)
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	credentialService := serviceFactory.Credential().
-		WithLegacyUpdater(systemState.CloudCredentialUpdated).
-		WithLegacyRemover(systemState.RemoveModelsCredential)
-
-	credentialCallContextGetter := func(ctx stdcontext.Context, modelUUID coremodel.UUID) (service.CredentialValidationContext, error) {
-		modelState, err := context.StatePool().Get(modelUUID.String())
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-		defer modelState.Release()
-
-		m, err := modelState.Model()
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-		cfg, err := m.Config()
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-
-		cld, err := context.ServiceFactory().Cloud().Cloud(ctx, m.CloudName())
-		if err != nil {
-			return service.CredentialValidationContext{}, err
-		}
-
-		return service.CredentialValidationContext{
-			ControllerUUID: context.ControllerUUID(),
-			Config:         cfg,
-			MachineService: credentialcommon.NewMachineService(modelState.State),
-			ModelType:      coremodel.ModelType(m.Type()),
-			Cloud:          *cld,
-			Region:         m.CloudRegion(),
-		}, nil
-	}
-
-	credentialService = credentialService.WithValidationContextGetter(credentialCallContextGetter)
-
-	controllerInfo, err := systemState.ControllerInfo()
-	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Errorf("failed to get controller cloud name: %v", err)
 	}
 
 	return NewCloudAPI(
-		systemState.ControllerTag(),
-		controllerInfo.CloudName,
-		serviceFactory.Cloud(),
-		serviceFactory.Access(),
+		stdCtx,
+		names.NewControllerTag(controllerUUID),
+		controllerCloud,
+		domainServices.Cloud(),
+		domainServices.Access(),
 		credentialService,
 		context.Auth(), context.Logger().Child("cloud"),
 	)

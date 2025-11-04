@@ -8,16 +8,15 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	apiuniter "github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/lxdprofile"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
+	corerelation "github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/status"
 	jujucharm "github.com/juju/juju/internal/charm"
 	uniterapi "github.com/juju/juju/internal/worker/uniter/api"
@@ -52,12 +51,12 @@ func (ctx *testContext) makeApplication(appTag names.ApplicationTag) *applicatio
 	app.EXPECT().Tag().Return(appTag).AnyTimes()
 	app.EXPECT().Life().Return(life.Alive).AnyTimes()
 	app.EXPECT().Refresh(gomock.Any()).Return(nil).AnyTimes()
-	app.EXPECT().CharmURL().DoAndReturn(func() (string, bool, error) {
+	app.EXPECT().CharmURL(gomock.Any()).DoAndReturn(func(context.Context) (string, bool, error) {
 		app.mu.Lock()
 		defer app.mu.Unlock()
 		return app.charmURL, app.charmForced, nil
 	}).AnyTimes()
-	app.EXPECT().CharmModifiedVersion().DoAndReturn(func() (int, error) {
+	app.EXPECT().CharmModifiedVersion(gomock.Any()).DoAndReturn(func(context.Context) (int, error) {
 		app.mu.Lock()
 		defer app.mu.Unlock()
 		return app.charmModifiedVersion, nil
@@ -93,7 +92,7 @@ func (u *unit) String() string {
 	return u.MockUnit.Name()
 }
 
-func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *unit {
+func (ctx *testContext) makeUnit(c tc.LikeC, unitTag names.UnitTag, l life.Value) *unit {
 	u := &unit{
 		MockUnit: uniterapi.NewMockUnit(ctx.ctrl),
 		life:     l,
@@ -107,19 +106,18 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 	u.EXPECT().ApplicationTag().Return(appTag).AnyTimes()
 	u.EXPECT().Refresh(gomock.Any()).Return(nil).AnyTimes()
 	u.EXPECT().ProviderID().Return("").AnyTimes()
-	u.EXPECT().UpgradeSeriesStatus(gomock.Any()).Return(model.UpgradeSeriesNotStarted, "", nil).AnyTimes()
-	u.EXPECT().PrincipalName().Return("u", false, nil).AnyTimes()
-	u.EXPECT().EnsureDead().DoAndReturn(func() error {
+	u.EXPECT().PrincipalName(gomock.Any()).Return("u", false, nil).AnyTimes()
+	u.EXPECT().EnsureDead(gomock.Any()).DoAndReturn(func(context.Context) error {
 		u.mu.Lock()
 		u.life = life.Dead
 		u.mu.Unlock()
 		return nil
 	}).AnyTimes()
-	u.EXPECT().PrivateAddress().Return(dummyPrivateAddress.Value, nil).AnyTimes()
-	u.EXPECT().PublicAddress().Return(dummyPublicAddress.Value, nil).AnyTimes()
-	u.EXPECT().AvailabilityZone().Return("zone-1", nil).AnyTimes()
+	u.EXPECT().PrivateAddress(gomock.Any()).Return(dummyPrivateAddress.Value, nil).AnyTimes()
+	u.EXPECT().PublicAddress(gomock.Any()).Return(dummyPublicAddress.Value, nil).AnyTimes()
+	u.EXPECT().AvailabilityZone(gomock.Any()).Return("zone-1", nil).AnyTimes()
 
-	u.EXPECT().SetCharmURL(gomock.Any()).DoAndReturn(func(curl string) error {
+	u.EXPECT().SetCharm(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, curl string) error {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		u.charmURL = curl
@@ -131,13 +129,13 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 		defer u.mu.Unlock()
 		return u.life
 	}).AnyTimes()
-	u.EXPECT().CharmURL().DoAndReturn(func() (string, error) {
+	u.EXPECT().CharmURL(gomock.Any()).DoAndReturn(func(context.Context) (string, error) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		return u.charmURL, nil
 	}).AnyTimes()
 
-	u.EXPECT().DestroyAllSubordinates().DoAndReturn(func() error {
+	u.EXPECT().DestroyAllSubordinates(gomock.Any()).DoAndReturn(func(context.Context) error {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		if u.subordinate == nil {
@@ -149,20 +147,20 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 		return nil
 	}).AnyTimes()
 
-	u.EXPECT().Resolved().DoAndReturn(func() params.ResolvedMode {
+	u.EXPECT().Resolved(gomock.Any()).DoAndReturn(func(context.Context) (params.ResolvedMode, error) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
-		return u.resolved
+		return u.resolved, nil
 	}).AnyTimes()
-	u.EXPECT().ClearResolved().DoAndReturn(func() error {
+	u.EXPECT().ClearResolved(gomock.Any()).DoAndReturn(func(context.Context) error {
 		u.mu.Lock()
 		u.resolved = params.ResolvedNone
 		u.mu.Unlock()
-		ctx.sendUnitNotify(c, "send clear resolved event")
+		ctx.sendNotify(c, ctx.unitResolveCh, "send clear resolved event")
 		return nil
 	}).AnyTimes()
 
-	u.EXPECT().HasSubordinates().DoAndReturn(func() (bool, error) {
+	u.EXPECT().HasSubordinates(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		return u.subordinate != nil, nil
@@ -178,7 +176,7 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 		u.mu.Unlock()
 		return nil
 	}).AnyTimes()
-	u.EXPECT().SetAgentStatus(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(st status.Status, info string, data map[string]any) error {
+	u.EXPECT().SetAgentStatus(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, st status.Status, info string, data map[string]any) error {
 		u.mu.Lock()
 		u.agentStatus = status.StatusInfo{
 			Status:  st,
@@ -201,7 +199,7 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 	}
 	u.EXPECT().State(gomock.Any()).DoAndReturn(getState).AnyTimes()
 
-	u.EXPECT().RelationsStatus().DoAndReturn(func() ([]apiuniter.RelationStatus, error) {
+	u.EXPECT().RelationsStatus(gomock.Any()).DoAndReturn(func(context.Context) ([]apiuniter.RelationStatus, error) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		var result []apiuniter.RelationStatus
@@ -230,14 +228,14 @@ func (ctx *testContext) makeUnit(c *gc.C, unitTag names.UnitTag, l life.Value) *
 		return ctx.app, nil
 	}).AnyTimes()
 
-	u.EXPECT().CanApplyLXDProfile().DoAndReturn(func() (bool, error) {
+	u.EXPECT().CanApplyLXDProfile(gomock.Any()).DoAndReturn(func(context.Context) (bool, error) {
 		u.mu.Lock()
-		tag, err := u.AssignedMachine()
-		c.Assert(err, jc.ErrorIsNil)
+		tag, err := u.AssignedMachine(c.Context())
+		c.Assert(err, tc.ErrorIsNil)
 		u.mu.Unlock()
 		return tag.ContainerType() == "lxd", nil
 	}).AnyTimes()
-	u.EXPECT().LXDProfileName().DoAndReturn(func() (string, error) {
+	u.EXPECT().LXDProfileName(gomock.Any()).DoAndReturn(func(context.Context) (string, error) {
 		ctx.stateMu.Lock()
 		defer ctx.stateMu.Unlock()
 		return lxdprofile.MatchProfileNameByAppName(ctx.machineProfiles, ctx.app.Tag().Id())
@@ -282,9 +280,9 @@ var endpointsForTest = map[string]apiuniter.Endpoint{
 	},
 	"logging:info u:juju-info": {
 		Relation: jujucharm.Relation{
-			Name:      "juju-info",
+			Name:      corerelation.JujuInfo,
 			Role:      "provider",
-			Interface: "juju-info",
+			Interface: corerelation.JujuInfo,
 			Scope:     "container",
 		},
 	},
@@ -292,7 +290,7 @@ var endpointsForTest = map[string]apiuniter.Endpoint{
 
 func subordinateRelationKey(ifce string) string {
 	relKey := "logging:logging-directory u:logging-dir"
-	if ifce == "juju-info" {
+	if ifce == corerelation.JujuInfo {
 		relKey = "logging:info u:juju-info"
 	}
 	return relKey
@@ -305,14 +303,14 @@ type relation struct {
 	life life.Value
 }
 
-func (ctx *testContext) makeRelation(c *gc.C, relTag names.RelationTag, l life.Value, otherApp string) *relation {
+func (ctx *testContext) makeRelation(c tc.LikeC, relTag names.RelationTag, l life.Value, otherApp string) *relation {
 	r := &relation{
 		MockRelation: uniterapi.NewMockRelation(ctx.ctrl),
 		life:         l,
 	}
 
 	ep, ok := endpointsForTest[relTag.Id()]
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 
 	relId := int(ctx.relCounter.Add(1))
 	r.EXPECT().Tag().Return(relTag).AnyTimes()
@@ -340,17 +338,17 @@ type relationUnit struct {
 	*uniterapi.MockRelationUnit
 }
 
-func (ctx *testContext) makeRelationUnit(c *gc.C, rel *relation, u *unit) *relationUnit {
+func (ctx *testContext) makeRelationUnit(c tc.LikeC, rel *relation, u *unit) *relationUnit {
 	ru := &relationUnit{
 		MockRelationUnit: uniterapi.NewMockRelationUnit(ctx.ctrl),
 	}
 
 	ru.EXPECT().Relation().Return(rel).AnyTimes()
-	ep, err := rel.Endpoint(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	ep, err := rel.Endpoint(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 	ru.EXPECT().Endpoint().Return(*ep).AnyTimes()
 
-	ru.EXPECT().EnterScope().DoAndReturn(func() error {
+	ru.EXPECT().EnterScope(gomock.Any()).DoAndReturn(func(context.Context) error {
 		if u.Life() != life.Alive || rel.Life() != life.Alive {
 			return &params.Error{Code: params.CodeCannotEnterScope, Message: "cannot enter scope: unit or relation is not alive"}
 		}
@@ -359,7 +357,7 @@ func (ctx *testContext) makeRelationUnit(c *gc.C, rel *relation, u *unit) *relat
 		u.mu.Unlock()
 		return nil
 	}).AnyTimes()
-	ru.EXPECT().LeaveScope().DoAndReturn(func() error {
+	ru.EXPECT().LeaveScope(gomock.Any()).DoAndReturn(func(context.Context) error {
 		u.mu.Lock()
 		u.inScope = false
 		u.mu.Unlock()
@@ -367,22 +365,4 @@ func (ctx *testContext) makeRelationUnit(c *gc.C, rel *relation, u *unit) *relat
 	}).AnyTimes()
 
 	return ru
-}
-
-type stubLeadershipSettingsAccessor struct {
-	results map[string]string
-}
-
-func (s *stubLeadershipSettingsAccessor) Read(_ string) (result map[string]string, _ error) {
-	return result, nil
-}
-
-func (s *stubLeadershipSettingsAccessor) Merge(_, _ string, settings map[string]string) error {
-	if s.results == nil {
-		s.results = make(map[string]string)
-	}
-	for k, v := range settings {
-		s.results[k] = v
-	}
-	return nil
 }

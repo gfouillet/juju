@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -15,12 +16,12 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/proxy"
 	"github.com/juju/juju/rpc/jsoncodec"
 	"github.com/juju/juju/rpc/params"
@@ -29,7 +30,12 @@ import (
 // AnonymousUsername is the special username to use for anonymous logins.
 const AnonymousUsername = "jujuanonymous"
 
-// Info encapsulates information about a server holding juju conn and
+const (
+	// ErrorLoginFirst indicates that login has not taken place yet.
+	ErrorLoginFirst = errors.ConstError("login provider needs to be logged in")
+)
+
+// Info encapsulates information about a server holding juju state and
 // can be used to make a connection to it.
 type Info struct {
 
@@ -107,9 +113,9 @@ func (info *Info) Validate() error {
 	}
 
 	for _, addr := range info.Addrs {
-		_, err := network.ParseMachineHostPort(addr)
-		if err != nil {
-			return errors.NotValidf("host addresses: %v", err)
+		_, ok := parseURLWithOptionalScheme(addr)
+		if !ok {
+			return errors.NotValidf("host address: %s", addr)
 		}
 	}
 
@@ -137,7 +143,7 @@ type LoginResultParams struct {
 	servers          []network.MachineHostPorts
 	facades          []params.FacadeVersions
 	publicDNSName    string
-	serverVersion    version.Number
+	serverVersion    semversion.Number
 }
 
 // EnsureTag should be used when a login provider needs to ensure
@@ -164,7 +170,7 @@ func NewLoginResultParams(result params.LoginResult) (*LoginResultParams, error)
 		modelAccess = result.UserInfo.ModelAccess
 	}
 	servers := params.ToMachineHostsPorts(result.Servers)
-	serverVersion, err := version.Parse(result.ServerVersion)
+	serverVersion, err := semversion.Parse(result.ServerVersion)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -185,6 +191,13 @@ func NewLoginResultParams(result params.LoginResult) (*LoginResultParams, error)
 type LoginProvider interface {
 	// Login performs log in when connecting to the controller.
 	Login(ctx context.Context, caller base.APICaller) (*LoginResultParams, error)
+	// AuthHeader returns an HTTP header used for authentication.
+	// This is normally used as part of basic authentication in scenarios where a client
+	// makes use of a StreamConnector like when fetching logs using `juju debug-log`.
+	// Can return [ErrorLoginFirst] when the provider requires an RPC login before basic auth
+	// can be performed.
+	// Other errors are also possible indicating an internal error in the provider.
+	AuthHeader() (http.Header, error)
 }
 
 // DialOpts holds configuration parameters that control the
@@ -300,7 +313,7 @@ func WithLoginProvider(lp LoginProvider) DialOption {
 }
 
 // OpenFunc is the usual form of a function that opens an API connection.
-type OpenFunc func(*Info, DialOpts) (Connection, error)
+type OpenFunc func(context.Context, *Info, DialOpts) (Connection, error)
 
 // Connection exists purely to make api-opening funcs mockable. It's just a
 // dumb copy of all the methods on api.conn; we can and should be extracting
@@ -314,14 +327,19 @@ type Connection interface {
 	// Close closes the connection.
 	Close() error
 
-	// Addr returns the address used to connect to the API server.
-	Addr() string
+	// Addr returns a copy of the address used to connect to the API server.
+	Addr() *url.URL
 
 	// IPAddr returns the IP address used to connect to the API server.
 	IPAddr() string
 
 	// APIHostPorts returns addresses that may be used to connect
-	// to the API server, including the address used to connect.
+	// to the API server, conditionally including the address used
+	// to connect when the address does not include a path segment.
+	// Use Addr() and IsProxied() to inspect the address used to
+	// to connect. This distinction is made because HostPorts
+	// do not carry information for routing through things like
+	// L7 load-balancers while Addr() does.
 	//
 	// The addresses are scoped (public, cloud-internal, etc.), so
 	// the client may choose which addresses to attempt. For the
@@ -357,7 +375,7 @@ type Connection interface {
 	// These are a bit off -- ServerVersion is apparently not known until after
 	// Login()? Maybe evidence of need for a separate AuthenticatedConnection..?
 	Login(ctx context.Context, name names.Tag, password, nonce string, ms []macaroon.Slice) error
-	ServerVersion() (version.Number, bool)
+	ServerVersion() (semversion.Number, bool)
 
 	// APICaller provides the facility to make API calls directly.
 	// This should not be used outside the api/* packages or tests.

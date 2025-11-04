@@ -4,9 +4,13 @@
 package controller_test
 
 import (
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/domain/controllernode"
 	"github.com/juju/juju/juju/testing"
 )
 
@@ -21,65 +25,47 @@ type ControllerIntegrationSuite struct {
 	client *controller.Client
 }
 
-var _ = gc.Suite(&ControllerIntegrationSuite{})
-
-func (s *ControllerIntegrationSuite) SetUpTest(c *gc.C) {
+func TestControllerIntegrationSuite(t *stdtesting.T) {
+	tc.Run(t, &ControllerIntegrationSuite{})
+}
+func (s *ControllerIntegrationSuite) SetUpTest(c *tc.C) {
 	s.ApiServerSuite.SetUpTest(c)
+
+	controllerNodeService := s.ControllerDomainServices(c).ControllerNode()
+	addrs := network.SpaceHostPorts{
+		{
+			SpaceAddress: network.SpaceAddress{
+				MachineAddress: network.MachineAddress{
+					Value: "10.9.9.32",
+				},
+			},
+			NetPort: 42,
+		},
+	}
+	err := controllerNodeService.SetAPIAddresses(c.Context(), controllernode.SetAPIAddressArgs{
+		APIAddresses: map[string]network.SpaceHostPorts{
+			"0": addrs,
+		},
+	})
+	c.Assert(err, tc.IsNil)
 
 	api := s.OpenControllerAPI(c)
 	s.client = controller.NewClient(api)
-	s.AddCleanup(func(*gc.C) { s.client.Close() })
+	s.AddCleanup(func(*tc.C) { _ = s.client.Close() })
 }
 
-func (s *ControllerIntegrationSuite) TestWatchModelSummaries(c *gc.C) {
-
+func (s *ControllerIntegrationSuite) TestWatchModelSummaries(c *tc.C) {
+	c.Skip("TODO (alvin) - reimplement when facade moved off of mongo")
 	// TODO(dqlite) - implement me
-	watcher, err := s.client.WatchModelSummaries()
-	c.Assert(watcher, gc.IsNil)
-	c.Assert(err, gc.NotNil)
-	//c.Assert(err, jc.ErrorIsNil)
-	//defer func() {
-	//	c.Check(watcher.Stop(), jc.ErrorIsNil)
-	//}()
-	//
-	//summaries, err := watcher.Next()
-	//c.Assert(err, jc.ErrorIsNil)
-	//
-	//c.Assert(summaries, jc.DeepEquals, []params.ModelAbstract{
-	//	{
-	//		UUID:       "deadbeef-0bad-400d-8000-4b1d0d06f00d",
-	//		Name:       "controller",
-	//		Admins:     []string{"admin"},
-	//		Cloud:      "dummy",
-	//		Region:     "dummy-region",
-	//		Credential: "dummy/admin/default",
-	//		Status:     "green",
-	//	},
-	//})
+	watcher, err := s.client.WatchModelSummaries(c.Context())
+	c.Assert(watcher, tc.IsNil)
+	c.Assert(err, tc.NotNil)
 }
 
-func (s *ControllerIntegrationSuite) TestWatchAllModelSummaries(c *gc.C) {
-
+func (s *ControllerIntegrationSuite) TestWatchAllModelSummaries(c *tc.C) {
+	c.Skip("TODO (alvin) - reimplement when facade moved off of mongo")
 	// TODO(dqlite) - implement me
-	watcher, err := s.client.WatchAllModelSummaries()
-	c.Assert(watcher, gc.IsNil)
-	c.Assert(err, gc.NotNil)
-	//defer func() {
-	//	c.Check(watcher.Stop(), jc.ErrorIsNil)
-	//}()
-	//
-	//summaries, err := watcher.Next()
-	//c.Assert(err, jc.ErrorIsNil)
-	//
-	//c.Assert(summaries, jc.DeepEquals, []params.ModelAbstract{
-	//	{
-	//		UUID:       "deadbeef-0bad-400d-8000-4b1d0d06f00d",
-	//		Name:       "controller",
-	//		Admins:     []string{"admin"},
-	//		Cloud:      "dummy",
-	//		Region:     "dummy-region",
-	//		Credential: "dummy/admin/default",
-	//		Status:     "green",
-	//	},
-	//})
+	watcher, err := s.client.WatchAllModelSummaries(c.Context())
+	c.Assert(watcher, tc.IsNil)
+	c.Assert(err, tc.NotNil)
 }

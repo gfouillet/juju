@@ -4,22 +4,23 @@
 package errors
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/juju/errors"
-	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/upgrade"
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	secreterrors "github.com/juju/juju/domain/secret/errors"
 	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	interrors "github.com/juju/juju/internal/errors"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
-	stateerrors "github.com/juju/juju/state/errors"
 )
 
 var logger = internallogger.GetLogger("juju.apiserver.common.errors")
@@ -53,14 +54,8 @@ func OperationBlockedError(msg string) error {
 }
 
 var singletonErrorCodes = map[errors.ConstError]string{
-	stateerrors.ErrCannotEnterScopeYet:           params.CodeCannotEnterScopeYet,
-	stateerrors.ErrCannotEnterScope:              params.CodeCannotEnterScope,
-	stateerrors.ErrUnitHasSubordinates:           params.CodeUnitHasSubordinates,
-	stateerrors.ErrDead:                          params.CodeDead,
-	stateerrors.ErrApplicationShouldNotHaveUnits: params.CodeAppShouldNotHaveUnits,
-	jujutxn.ErrExcessiveContention:               params.CodeExcessiveContention, // TODO(dqlite): remove jujutxn.ErrExcessiveContention from api errors
-	leadership.ErrClaimDenied:                    params.CodeLeadershipClaimDenied,
-	lease.ErrClaimDenied:                         params.CodeLeaseClaimDenied,
+	errors.ConstError(leadership.ErrClaimDenied): params.CodeLeadershipClaimDenied,
+	errors.ConstError(lease.ErrClaimDenied):      params.CodeLeaseClaimDenied,
 	ErrBadId:                                     params.CodeNotFound,
 	ErrUnauthorized:                              params.CodeUnauthorized,
 	ErrNoCreds:                                   params.CodeNoCreds,
@@ -73,9 +68,22 @@ var singletonErrorCodes = map[errors.ConstError]string{
 	ErrActionNotAvailable:                        params.CodeActionNotAvailable,
 }
 
+// ParamsErrorf is responsible for constructing a [params.Error] with the given
+// code and formatted error message.
+func ParamsErrorf(code string, format string, a ...any) *params.Error {
+	return &params.Error{
+		Code:    code,
+		Message: fmt.Sprintf(format, a...),
+	}
+}
+
 func singletonCode(err error) (string, bool) {
 	if e, is := errors.AsType[errors.ConstError](err); is {
 		code, ok := singletonErrorCodes[e]
+		return code, ok
+	}
+	if e, is := errors.AsType[interrors.ConstError](err); is {
+		code, ok := singletonErrorCodes[errors.ConstError(e)]
 		return code, ok
 	}
 	return "", false
@@ -148,7 +156,7 @@ func ServerError(err error) *params.Error {
 		return nil
 	}
 	if logger.IsLevelEnabled(corelogger.TRACE) {
-		logger.Tracef("server RPC error %v", errors.Details(err))
+		logger.Tracef(context.TODO(), "server RPC error %v", errors.Details(err))
 	}
 
 	var (
@@ -157,11 +165,10 @@ func ServerError(err error) *params.Error {
 	)
 
 	var (
-		dischargeRequiredError       *DischargeRequiredError
-		notLeaderError               *NotLeaderError
-		redirectError                *RedirectError
-		upgradeSeriesValidationError *UpgradeSeriesValidationError
-		accessRequiredError          *AccessRequiredError
+		dischargeRequiredError *DischargeRequiredError
+		notLeaderError         *NotLeaderError
+		redirectError          *RedirectError
+		accessRequiredError    *AccessRequiredError
 	)
 	// Skip past annotations when looking for the code.
 	err = errors.Cause(err)
@@ -182,20 +189,14 @@ func ServerError(err error) *params.Error {
 		code = params.CodeSecretConsumerNotFound
 	case errors.Is(err, secretbackenderrors.NotFound):
 		code = params.CodeSecretBackendNotFound
+	case errors.Is(err, modelerrors.NotFound):
+		code = params.CodeModelNotFound
 	case errors.Is(err, errors.AlreadyExists):
 		code = params.CodeAlreadyExists
 	case errors.Is(err, secretbackenderrors.AlreadyExists):
 		code = params.CodeSecretBackendAlreadyExists
 	case errors.Is(err, errors.NotAssigned):
 		code = params.CodeNotAssigned
-	case errors.Is(err, stateerrors.HasAssignedUnitsError):
-		code = params.CodeHasAssignedUnits
-	case errors.Is(err, stateerrors.HasHostedModelsError):
-		code = params.CodeHasHostedModels
-	case errors.Is(err, stateerrors.PersistentStorageError):
-		code = params.CodeHasPersistentStorage
-	case errors.Is(err, stateerrors.ModelNotEmptyError):
-		code = params.CodeModelNotEmpty
 	case errors.Is(err, NoAddressSetError):
 		code = params.CodeNoAddressSet
 	case errors.Is(err, errors.NotProvisioned):
@@ -203,14 +204,6 @@ func ServerError(err error) *params.Error {
 	case errors.Is(err, params.UpgradeInProgressError),
 		errors.Is(err, upgrade.ErrUpgradeInProgress):
 		code = params.CodeUpgradeInProgress
-	case errors.Is(err, stateerrors.HasAttachmentsError):
-		code = params.CodeMachineHasAttachedStorage
-	case errors.Is(err, stateerrors.HasContainersError):
-		code = params.CodeMachineHasContainers
-	case errors.Is(err, stateerrors.StorageAttachedError):
-		code = params.CodeStorageAttached
-	case errors.Is(err, stateerrors.IsControllerMemberError):
-		code = params.CodeTryAgain
 	case errors.Is(err, UnknownModelError):
 		code = params.CodeModelNotFound
 	case errors.Is(err, errors.NotSupported):
@@ -231,7 +224,7 @@ func ServerError(err error) *params.Error {
 		code = params.CodeNotValid
 	case errors.Is(err, secretbackenderrors.NotValid):
 		code = params.CodeSecretBackendNotValid
-	case errors.Is(err, IncompatibleBaseError), errors.Is(err, stateerrors.IncompatibleBaseError):
+	case errors.Is(err, IncompatibleBaseError):
 		code = params.CodeIncompatibleBase
 	case errors.Is(err, secreterrors.PermissionDenied):
 		code = params.CodeUnauthorized
@@ -242,10 +235,6 @@ func ServerError(err error) *params.Error {
 			BakeryMacaroon: dischargeRequiredError.Macaroon,
 			// One macaroon fits all.
 			MacaroonPath: "/",
-		}.AsMap()
-	case errors.As(err, &upgradeSeriesValidationError):
-		info = params.UpgradeSeriesValidationErrorInfo{
-			Status: upgradeSeriesValidationError.Status,
 		}.AsMap()
 	case errors.As(err, &redirectError):
 		code = params.CodeRedirect

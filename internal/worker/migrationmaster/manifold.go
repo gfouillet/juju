@@ -14,18 +14,18 @@ import (
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/api/client/charms"
-	"github.com/juju/juju/api/http"
 	"github.com/juju/juju/internal/migration"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/fortress"
 )
 
 // ManifoldConfig defines the names of the manifolds on which a
 // Worker manifold will depend.
 type ManifoldConfig struct {
-	AgentName     string
-	APICallerName string
-	FortressName  string
+	AgentName          string
+	APICallerName      string
+	DomainServicesName string
+	FortressName       string
 
 	Clock     clock.Clock
 	NewFacade func(base.APICaller) (Facade, error)
@@ -39,6 +39,9 @@ func (config ManifoldConfig) Validate() error {
 	}
 	if config.APICallerName == "" {
 		return errors.NotValidf("empty APICallerName")
+	}
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.FortressName == "" {
 		return errors.NotValidf("empty FortressName")
@@ -69,6 +72,10 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 	if err := getter.Get(config.APICallerName, &apiConn); err != nil {
 		return nil, errors.Trace(err)
 	}
+	var domainServices services.DomainServices
+	if err := getter.Get(config.DomainServicesName, &domainServices); err != nil {
+		return nil, errors.Trace(err)
+	}
 	var guard fortress.Guard
 	if err := getter.Get(config.FortressName, &guard); err != nil {
 		return nil, errors.Trace(err)
@@ -77,23 +84,15 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	charmDownloader, err := charms.NewCharmOpener(apiConn)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	toolsDownloader, err := http.NewURIOpener(apiConn)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	w, err := config.NewWorker(Config{
-		ModelUUID:       agent.CurrentConfig().Model().Id(),
-		Facade:          facade,
-		Guard:           guard,
-		APIOpen:         api.Open,
-		UploadBinaries:  migration.UploadBinaries,
-		CharmDownloader: charmDownloader,
-		ToolsDownloader: toolsDownloader,
-		Clock:           config.Clock,
+		ModelUUID:        agent.CurrentConfig().Model().Id(),
+		Facade:           facade,
+		CharmService:     domainServices.Application(),
+		Guard:            guard,
+		APIOpen:          api.Open,
+		UploadBinaries:   migration.UploadBinaries,
+		AgentBinaryStore: domainServices.AgentBinaryStore(),
+		Clock:            config.Clock,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -123,6 +122,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 		Inputs: []string{
 			config.AgentName,
 			config.APICallerName,
+			config.DomainServicesName,
 			config.FortressName,
 		},
 		Start:  config.start,

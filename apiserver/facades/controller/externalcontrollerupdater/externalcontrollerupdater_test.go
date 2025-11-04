@@ -4,66 +4,60 @@
 package externalcontrollerupdater_test
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/apiserver/common"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/apiserver/facades/controller/externalcontrollerupdater"
 	"github.com/juju/juju/core/crossmodel"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&CrossControllerSuite{})
+func TestCrossControllerSuite(t *testing.T) {
+	tc.Run(t, &CrossControllerSuite{})
+}
 
 type CrossControllerSuite struct {
 	coretesting.BaseSuite
-
-	resources *common.Resources
 }
 
-func (s *CrossControllerSuite) SetUpTest(c *gc.C) {
-	s.BaseSuite.SetUpTest(c)
-	s.resources = common.NewResources()
-	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
-}
-
-func (s *CrossControllerSuite) TestExternalControllerInfo(c *gc.C) {
+func (s *CrossControllerSuite) TestExternalControllerInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	ecService := NewMockECService(ctrl)
+	ecService := NewMockExternalControllerService(ctrl)
+	watcherRegistry := facademocks.NewMockWatcherRegistry(ctrl)
 
 	ctrlTag, err := names.ParseControllerTag(coretesting.ControllerTag.String())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ecService.EXPECT().Controller(gomock.Any(), ctrlTag.Id()).Return(&crossmodel.ControllerInfo{
-		ControllerTag: coretesting.ControllerTag,
-		Alias:         "foo",
-		Addrs:         []string{"bar"},
-		CACert:        "baz",
+		ControllerUUID: coretesting.ControllerTag.Id(),
+		Alias:          "foo",
+		Addrs:          []string{"bar"},
+		CACert:         "baz",
 	}, nil)
 
 	modelTag, err := names.ParseControllerTag("controller-" + coretesting.ModelTag.Id())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ecService.EXPECT().Controller(gomock.Any(), modelTag.Id()).Return(nil, errors.NotFoundf("external controller with UUID deadbeef-0bad-400d-8000-4b1d0d06f00d"))
 
-	api, err := externalcontrollerupdater.NewAPI(s.resources, ecService)
-	c.Assert(err, jc.ErrorIsNil)
-	results, err := api.ExternalControllerInfo(context.Background(), params.Entities{
+	api, err := externalcontrollerupdater.NewAPI(ecService, watcherRegistry)
+	c.Assert(err, tc.ErrorIsNil)
+	results, err := api.ExternalControllerInfo(c.Context(), params.Entities{
 		Entities: []params.Entity{
-			{coretesting.ControllerTag.String()},
-			{"controller-" + coretesting.ModelTag.Id()},
-			{"machine-42"},
+			{Tag: coretesting.ControllerTag.String()},
+			{Tag: "controller-" + coretesting.ModelTag.Id()},
+			{Tag: "machine-42"},
 		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ExternalControllerInfoResults{
-		[]params.ExternalControllerInfoResult{{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ExternalControllerInfoResults{
+		Results: []params.ExternalControllerInfoResult{{
 			Result: &params.ExternalControllerInfo{
 				ControllerTag: coretesting.ControllerTag.String(),
 				Alias:         "foo",
@@ -81,101 +75,106 @@ func (s *CrossControllerSuite) TestExternalControllerInfo(c *gc.C) {
 	})
 }
 
-func (s *CrossControllerSuite) TestSetExternalControllerInfo(c *gc.C) {
+func (s *CrossControllerSuite) TestSetExternalControllerInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	ecService := NewMockECService(ctrl)
+	ecService := NewMockExternalControllerService(ctrl)
+	watcherRegistry := facademocks.NewMockWatcherRegistry(ctrl)
 
 	firstControllerTag := coretesting.ControllerTag.String()
 	firstControllerTagParsed, err := names.ParseControllerTag(firstControllerTag)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	secondControllerTag := "controller-" + coretesting.ModelTag.Id()
 	secondControllerTagParsed, err := names.ParseControllerTag(secondControllerTag)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	ecService.EXPECT().UpdateExternalController(gomock.Any(), crossmodel.ControllerInfo{
-		ControllerTag: firstControllerTagParsed,
-		Alias:         "foo",
-		Addrs:         []string{"bar"},
-		CACert:        "baz",
+		ControllerUUID: firstControllerTagParsed.Id(),
+		Alias:          "foo",
+		Addrs:          []string{"bar"},
+		CACert:         "baz",
 	})
 	ecService.EXPECT().UpdateExternalController(gomock.Any(), crossmodel.ControllerInfo{
-		ControllerTag: secondControllerTagParsed,
-		Alias:         "qux",
-		Addrs:         []string{"quux"},
-		CACert:        "quuz",
+		ControllerUUID: secondControllerTagParsed.Id(),
+		Alias:          "qux",
+		Addrs:          []string{"quux"},
+		CACert:         "quuz",
 	})
 
-	api, err := externalcontrollerupdater.NewAPI(s.resources, ecService)
-	c.Assert(err, jc.ErrorIsNil)
+	api, err := externalcontrollerupdater.NewAPI(ecService, watcherRegistry)
+	c.Assert(err, tc.ErrorIsNil)
 
-	results, err := api.SetExternalControllerInfo(context.Background(), params.SetExternalControllersInfoParams{
-		[]params.SetExternalControllerInfoParams{{
-			params.ExternalControllerInfo{
+	results, err := api.SetExternalControllerInfo(c.Context(), params.SetExternalControllersInfoParams{
+		Controllers: []params.SetExternalControllerInfoParams{{
+			Info: params.ExternalControllerInfo{
 				ControllerTag: firstControllerTag,
 				Alias:         "foo",
 				Addrs:         []string{"bar"},
 				CACert:        "baz",
 			},
 		}, {
-			params.ExternalControllerInfo{
+			Info: params.ExternalControllerInfo{
 				ControllerTag: secondControllerTag,
 				Alias:         "qux",
 				Addrs:         []string{"quux"},
 				CACert:        "quuz",
 			},
 		}, {
-			params.ExternalControllerInfo{
+			Info: params.ExternalControllerInfo{
 				ControllerTag: "machine-42",
 			},
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ErrorResults{
-		[]params.ErrorResult{
-			{nil},
-			{nil},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: nil},
+			{Error: nil},
 			{Error: &params.Error{Message: `"machine-42" is not a valid controller tag`}},
 		},
 	})
 }
 
-func (s *CrossControllerSuite) TestWatchExternalControllers(c *gc.C) {
+func (s *CrossControllerSuite) TestWatchExternalControllers(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	ecService := NewMockECService(ctrl)
+	ecService := NewMockExternalControllerService(ctrl)
 	mockKeysWatcher := NewMockStringsWatcher(ctrl)
-	ecService.EXPECT().Watch().Return(mockKeysWatcher, nil)
+	watcherRegistry := facademocks.NewMockWatcherRegistry(ctrl)
+	watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("w-1", nil)
+
+	ecService.EXPECT().Watch(gomock.Any()).Return(mockKeysWatcher, nil)
+
 	changes := make(chan []string, 1)
 	mockKeysWatcher.EXPECT().Changes().Return(changes)
-	mockKeysWatcher.EXPECT().Kill().AnyTimes()
-	mockKeysWatcher.EXPECT().Wait().Return(nil).AnyTimes()
 
-	api, err := externalcontrollerupdater.NewAPI(s.resources, ecService)
-	c.Assert(err, jc.ErrorIsNil)
+	api, err := externalcontrollerupdater.NewAPI(ecService, watcherRegistry)
+	c.Assert(err, tc.ErrorIsNil)
 
 	changes <- []string{"a", "b"} // initial value
 
-	results, err := api.WatchExternalControllers(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.StringsWatchResults{
-		[]params.StringsWatchResult{{
-			StringsWatcherId: "1",
+	results, err := api.WatchExternalControllers(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{{
+			StringsWatcherId: "w-1",
 			Changes:          []string{"a", "b"},
 		}},
 	})
-	c.Assert(s.resources.Get("1"), gc.Equals, mockKeysWatcher)
 }
 
-func (s *CrossControllerSuite) TestWatchControllerInfoError(c *gc.C) {
+func (s *CrossControllerSuite) TestWatchControllerInfoError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	ecService := NewMockECService(ctrl)
+	ecService := NewMockExternalControllerService(ctrl)
 	mockKeysWatcher := NewMockStringsWatcher(ctrl)
-	ecService.EXPECT().Watch().Return(mockKeysWatcher, nil)
+	watcherRegistry := facademocks.NewMockWatcherRegistry(ctrl)
+
+	ecService.EXPECT().Watch(gomock.Any()).Return(mockKeysWatcher, nil)
+
 	changes := make(chan []string, 1)
 	mockKeysWatcher.EXPECT().Changes().Return(changes)
 	mockKeysWatcher.EXPECT().Kill().AnyTimes()
@@ -183,15 +182,14 @@ func (s *CrossControllerSuite) TestWatchControllerInfoError(c *gc.C) {
 
 	close(changes)
 
-	api, err := externalcontrollerupdater.NewAPI(s.resources, ecService)
-	c.Assert(err, jc.ErrorIsNil)
+	api, err := externalcontrollerupdater.NewAPI(ecService, watcherRegistry)
+	c.Assert(err, tc.ErrorIsNil)
 
-	results, err := api.WatchExternalControllers(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.StringsWatchResults{
-		[]params.StringsWatchResult{{
+	results, err := api.WatchExternalControllers(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{{
 			Error: &params.Error{Message: "watching external controllers changes: nope"},
 		}},
 	})
-	c.Assert(s.resources.Get("1"), gc.IsNil)
 }

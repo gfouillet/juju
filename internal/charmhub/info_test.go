@@ -8,11 +8,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/internal/charmhub/path"
 	"github.com/juju/juju/internal/charmhub/transport"
@@ -22,9 +22,11 @@ type InfoSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&InfoSuite{})
+func TestInfoSuite(t *testing.T) {
+	tc.Run(t, &InfoSuite{})
+}
 
-func (s *InfoSuite) TestInfoCharm(c *gc.C) {
+func (s *InfoSuite) TestInfoCharm(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -37,13 +39,13 @@ func (s *InfoSuite) TestInfoCharm(c *gc.C) {
 	s.expectCharmGet(c, restClient, path, name)
 
 	client := newInfoClient(path, restClient, s.logger)
-	response, err := client.Info(context.Background(), name)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(response.Name, gc.Equals, name)
-	c.Assert(response.DefaultRelease.Revision.MetadataYAML, gc.Equals, "YAML")
+	response, err := client.Info(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(response.Name, tc.Equals, name)
+	c.Assert(response.DefaultRelease.Revision.MetadataYAML, tc.Equals, "YAML")
 }
 
-func (s *InfoSuite) TestInfoBundle(c *gc.C) {
+func (s *InfoSuite) TestInfoBundle(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -56,13 +58,13 @@ func (s *InfoSuite) TestInfoBundle(c *gc.C) {
 	s.expectBundleGet(c, restClient, path, name)
 
 	client := newInfoClient(path, restClient, s.logger)
-	response, err := client.Info(context.Background(), name)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(response.Name, gc.Equals, name)
-	c.Assert(response.DefaultRelease.Revision.BundleYAML, gc.Equals, "YAML")
+	response, err := client.Info(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(response.Name, tc.Equals, name)
+	c.Assert(response.DefaultRelease.Revision.BundleYAML, tc.Equals, "YAML")
 }
 
-func (s *InfoSuite) TestInfoFailure(c *gc.C) {
+func (s *InfoSuite) TestInfoFailure(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -75,11 +77,11 @@ func (s *InfoSuite) TestInfoFailure(c *gc.C) {
 	s.expectGetFailure(restClient)
 
 	client := newInfoClient(path, restClient, s.logger)
-	_, err := client.Info(context.Background(), name)
-	c.Assert(err, gc.Not(jc.ErrorIsNil))
+	_, err := client.Info(c.Context(), name)
+	c.Assert(err, tc.Not(tc.ErrorIsNil))
 }
 
-func (s *InfoSuite) TestInfoError(c *gc.C) {
+func (s *InfoSuite) TestInfoError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -92,15 +94,15 @@ func (s *InfoSuite) TestInfoError(c *gc.C) {
 	s.expectGetError(c, restClient, path, name)
 
 	client := newInfoClient(path, restClient, s.logger)
-	_, err := client.Info(context.Background(), name)
-	c.Assert(err, gc.Not(jc.ErrorIsNil))
+	_, err := client.Info(c.Context(), name)
+	c.Assert(err, tc.Not(tc.ErrorIsNil))
 }
 
-func (s *InfoSuite) expectCharmGet(c *gc.C, client *MockRESTClient, p path.Path, name string) {
+func (s *InfoSuite) expectCharmGet(c *tc.C, client *MockRESTClient, p path.Path, name string) {
 	namedPath, err := p.Join(name)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	namedPath, err = namedPath.Query("fields", defaultInfoFilter())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	client.EXPECT().Get(gomock.Any(), namedPath, gomock.Any()).DoAndReturn(func(_ context.Context, _ path.Path, r any) (restResponse, error) {
 		response := r.(*transport.InfoResponse)
@@ -115,11 +117,11 @@ func (s *InfoSuite) expectCharmGet(c *gc.C, client *MockRESTClient, p path.Path,
 	})
 }
 
-func (s *InfoSuite) expectBundleGet(c *gc.C, client *MockRESTClient, p path.Path, name string) {
+func (s *InfoSuite) expectBundleGet(c *tc.C, client *MockRESTClient, p path.Path, name string) {
 	namedPath, err := p.Join(name)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	namedPath, err = namedPath.Query("fields", defaultInfoFilter())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	client.EXPECT().Get(gomock.Any(), namedPath, gomock.Any()).Do(func(_ context.Context, _ path.Path, r any) (restResponse, error) {
 		response := r.(*transport.InfoResponse)
@@ -138,11 +140,11 @@ func (s *InfoSuite) expectGetFailure(client *MockRESTClient) {
 	client.EXPECT().Get(gomock.Any(), gomock.Any(), gomock.Any()).Return(restResponse{StatusCode: http.StatusInternalServerError}, errors.Errorf("boom"))
 }
 
-func (s *InfoSuite) expectGetError(c *gc.C, client *MockRESTClient, p path.Path, name string) {
+func (s *InfoSuite) expectGetError(c *tc.C, client *MockRESTClient, p path.Path, name string) {
 	namedPath, err := p.Join(name)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	namedPath, err = namedPath.Query("fields", defaultInfoFilter())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	client.EXPECT().Get(gomock.Any(), namedPath, gomock.Any()).Do(func(_ context.Context, _ path.Path, r any) (restResponse, error) {
 		response := r.(*transport.InfoResponse)
@@ -153,7 +155,7 @@ func (s *InfoSuite) expectGetError(c *gc.C, client *MockRESTClient, p path.Path,
 	})
 }
 
-func (s *InfoSuite) TestInfoRequestPayload(c *gc.C) {
+func (s *InfoSuite) TestInfoRequestPayload(c *tc.C) {
 	infoResponse := transport.InfoResponse{
 		Name: "wordpress",
 		Type: "charm",
@@ -242,23 +244,23 @@ func (s *InfoSuite) TestInfoRequestPayload(c *gc.C) {
 		w.WriteHeader(http.StatusOK)
 
 		err := json.NewEncoder(w).Encode(infoResponse)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	})
 
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
 	basePath, err := basePath(server.URL)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	infoPath, err := basePath.Join("info")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	apiRequester := newAPIRequester(DefaultHTTPClient(s.logger), s.logger)
 	restClient := newHTTPRESTClient(apiRequester)
 
 	client := newInfoClient(infoPath, restClient, s.logger)
-	response, err := client.Info(context.Background(), "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(response, gc.DeepEquals, infoResponse)
+	response, err := client.Info(c.Context(), "wordpress")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(response, tc.DeepEquals, infoResponse)
 }

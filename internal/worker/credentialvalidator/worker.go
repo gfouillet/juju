@@ -32,9 +32,6 @@ type Facade interface {
 	// false to signify that credential was not set.
 	ModelCredential(context.Context) (base.StoredCredential, bool, error)
 
-	// WatchCredential gets cloud credential watcher.
-	WatchCredential(context.Context, string) (watcher.NotifyWatcher, error)
-
 	// WatchModelCredential gets model's cloud credential watcher.
 	WatchModelCredential(context.Context) (watcher.NotifyWatcher, error)
 }
@@ -94,20 +91,10 @@ func NewWorker(ctx context.Context, config Config) (worker.Worker, error) {
 	// miss out on a first call of Worker's Plan.Work method and can, thus,
 	// be missing out on an initial change.
 	plan := catacomb.Plan{
+		Name: "credential-validator",
 		Site: &v.catacomb,
 		Work: v.loop,
 		Init: []worker.Worker{v.modelCredentialWatcher},
-	}
-
-	if mc.CloudCredential != "" {
-		var err error
-		v.credentialWatcher, err = config.Facade.WatchCredential(ctx, mc.CloudCredential)
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			return nil, errors.Trace(err)
-		}
-		if err == nil {
-			plan.Init = append(plan.Init, v.credentialWatcher)
-		}
 	}
 
 	if err := catacomb.Invoke(plan); err != nil {
@@ -124,8 +111,6 @@ type validator struct {
 	modelCredentialWatcher watcher.NotifyWatcher
 
 	credential base.StoredCredential
-	// could be nil when there is no model credential to watch
-	credentialWatcher watcher.NotifyWatcher
 }
 
 // Kill is part of the worker.Worker interface.
@@ -144,10 +129,8 @@ func (v *validator) Check() bool {
 }
 
 func (v *validator) loop() error {
-	var watcherChanges watcher.NotifyChannel
-	if v.credentialWatcher != nil {
-		watcherChanges = v.credentialWatcher.Changes()
-	}
+	ctx, cancel := v.scopedContext()
+	defer cancel()
 
 	for {
 		select {
@@ -157,26 +140,22 @@ func (v *validator) loop() error {
 			if !ok {
 				return v.catacomb.ErrDying()
 			}
-			updatedCredential, err := modelCredential(context.TODO(), v.validatorFacade)
+			updatedCredential, err := modelCredential(ctx, v.validatorFacade)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			if v.credential.CloudCredential != updatedCredential.CloudCredential {
 				return ErrModelCredentialChanged
 			}
-		case _, ok := <-watcherChanges:
-			if !ok {
-				return v.catacomb.ErrDying()
-			}
-			updatedCredential, err := modelCredential(context.TODO(), v.validatorFacade)
-			if err != nil {
-				return errors.Trace(err)
-			}
 			if v.credential.Valid != updatedCredential.Valid {
 				return ErrValidityChanged
 			}
 		}
 	}
+}
+
+func (v *validator) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(v.catacomb.Context(context.Background()))
 }
 
 func modelCredential(ctx context.Context, v Facade) (base.StoredCredential, error) {

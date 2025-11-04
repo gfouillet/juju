@@ -4,11 +4,39 @@
 package service
 
 import (
-	"testing"
+	"context"
 
-	gc "gopkg.in/check.v1"
+	"github.com/juju/clock"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/domain"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
+//go:generate go run go.uber.org/mock/mockgen -typed -package service -destination package_mock_test.go github.com/juju/juju/domain/model/service CloudInfoProvider,ControllerState,EnvironVersionProvider,ModelDeleter,ModelState,ModelResourcesProvider,RegionProvider,State,StorageProviderRegistryGetter,WatcherFactory
+//go:generate go run go.uber.org/mock/mockgen -typed -package service -destination internal_storage_mock_test.go -mock_names Provider=MockStorageProvider github.com/juju/juju/internal/storage ProviderRegistry,Provider
+
+type statusHistoryGetter struct {
+	loggerContextGetter logger.LoggerContextGetter
+	clock               clock.Clock
+}
+
+func newStatusHistoryGetter(c *tc.C) StatusHistoryGetter {
+	return statusHistoryGetter{
+		loggerContextGetter: loggertesting.WrapCheckLogForContextGetter(c),
+		clock:               clock.WallClock,
+	}
+}
+
+// GetLoggerContext returns a logger context for the given model UUID.
+func (l statusHistoryGetter) GetStatusHistoryForModel(ctx context.Context, modelUUID coremodel.UUID) (StatusHistory, error) {
+	loggerContext, err := l.loggerContextGetter.GetLoggerContext(ctx, modelUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	logger := loggerContext.GetLogger("juju.services")
+	return domain.NewStatusHistory(logger, l.clock), nil
 }

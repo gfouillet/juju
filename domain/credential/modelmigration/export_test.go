@@ -4,17 +4,16 @@
 package modelmigration
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
+	usertesting "github.com/juju/juju/core/user/testing"
 )
 
 type exportSuite struct {
@@ -22,9 +21,11 @@ type exportSuite struct {
 	service     *MockExportService
 }
 
-var _ = gc.Suite(&exportSuite{})
+func TestExportSuite(t *testing.T) {
+	tc.Run(t, &exportSuite{})
+}
 
-func (s *exportSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *exportSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.coordinator = NewMockCoordinator(ctrl)
@@ -39,46 +40,46 @@ func (s *exportSuite) newExportOperation() *exportOperation {
 	}
 }
 
-func (s *exportSuite) TestExport(c *gc.C) {
+func (s *exportSuite) TestExport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
 	dst.SetCloudCredential(description.CloudCredentialArgs{
-		Owner: names.NewUserTag("fred"),
-		Cloud: names.NewCloudTag("cirrus"),
+		Owner: "fred",
+		Cloud: "cirrus",
 		Name:  "foo",
 	})
 
-	key := credential.Key{Cloud: "cirrus", Owner: "fred", Name: "foo"}
+	key := credential.Key{Cloud: "cirrus", Owner: usertesting.GenNewName(c, "fred"), Name: "foo"}
 	cred := cloud.NewNamedCredential("foo", cloud.UserPassAuthType, map[string]string{"foo": "bar"}, false)
 	s.service.EXPECT().CloudCredential(gomock.Any(), key).
 		Times(1).
 		Return(cred, nil)
 
 	op := s.newExportOperation()
-	err := op.Execute(context.Background(), dst)
-	c.Assert(err, jc.ErrorIsNil)
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorIsNil)
 
 	got := dst.CloudCredential()
-	c.Assert(got, gc.NotNil)
+	c.Assert(got, tc.NotNil)
 }
 
-func (s *exportSuite) TestExportNotFound(c *gc.C) {
+func (s *exportSuite) TestExportNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	dst := description.NewModel(description.ModelArgs{})
 	dst.SetCloudCredential(description.CloudCredentialArgs{
-		Owner: names.NewUserTag("fred"),
-		Cloud: names.NewCloudTag("cirrus"),
+		Owner: "fred",
+		Cloud: "cirrus",
 		Name:  "foo",
 	})
 
-	key := credential.Key{Cloud: "cirrus", Owner: "fred", Name: "foo"}
+	key := credential.Key{Cloud: "cirrus", Owner: usertesting.GenNewName(c, "fred"), Name: "foo"}
 	s.service.EXPECT().CloudCredential(gomock.Any(), key).
 		Times(1).
-		Return(cloud.Credential{}, errors.NotFound)
+		Return(cloud.Credential{}, coreerrors.NotFound)
 
 	op := s.newExportOperation()
-	err := op.Execute(context.Background(), dst)
-	c.Assert(err, gc.ErrorMatches, "not found")
+	err := op.Execute(c.Context(), dst)
+	c.Assert(err, tc.ErrorMatches, "not found")
 }

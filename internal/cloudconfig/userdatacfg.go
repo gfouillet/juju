@@ -6,6 +6,7 @@ package cloudconfig
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	stdos "os"
@@ -16,7 +17,7 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 	"github.com/juju/utils/v4"
 
@@ -24,7 +25,6 @@ import (
 	"github.com/juju/juju/core/os/ostype"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/simplestreams"
-	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/cloudconfig/cloudinit"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 	"github.com/juju/juju/internal/featureflag"
@@ -111,7 +111,7 @@ if [ ! -z "$has_juju_db_snap" ]; then
 fi
 `
 	// We look to see if the proxy line is there already as
-	// the manual provider may have had it already.
+	// the unmanaged provider may have had it already.
 	// We write this file out whether we are using the legacy proxy
 	// or the juju proxy to deal with runtime changes. The proxy updater worker
 	// only modifies /etc/juju-proxy.conf, so if changes are written to that file
@@ -315,6 +315,9 @@ func (w *userdataConfig) ConfigureJuju() error {
 		// we also softly fail on ed25519 as it may not be supported by the target
 		// machine.
 		w.conf.AddBootCmd(`ssh-keygen -t ed25519 -N "" -f /etc/ssh/ssh_host_ed25519_key || true`)
+		// Reload the ssh service to ensure that the newly generated keys are
+		// loaded into the ssh daemon.
+		w.conf.AddBootCmd(`service ssh reload`)
 	}
 
 	if err := w.conf.AddPackageCommands(
@@ -524,7 +527,7 @@ func (w *userdataConfig) addLocalSnapUpload() error {
 		return nil
 	}
 
-	logger.Infof("preparing to upload juju-db snap from %v", snapPath)
+	logger.Infof(context.TODO(), "preparing to upload juju-db snap from %v", snapPath)
 	snapData, err := stdos.ReadFile(snapPath)
 	if err != nil {
 		return errors.Trace(err)
@@ -532,7 +535,7 @@ func (w *userdataConfig) addLocalSnapUpload() error {
 	_, snapName := path.Split(snapPath)
 	w.conf.AddRunBinaryFile(path.Join(w.icfg.SnapDir(), snapName), snapData, 0644)
 
-	logger.Infof("preparing to upload juju-db assertions from %v", assertionsPath)
+	logger.Infof(context.TODO(), "preparing to upload juju-db assertions from %v", assertionsPath)
 	snapAssertionsData, err := stdos.ReadFile(assertionsPath)
 	if err != nil {
 		return errors.Trace(err)
@@ -554,28 +557,10 @@ func (w *userdataConfig) addLocalControllerCharmsUpload() error {
 		return nil
 	}
 
-	logger.Infof("preparing to upload controller charm from %v", charmPath)
-	_, err := charm.ReadCharm(charmPath)
+	logger.Infof(context.TODO(), "preparing to upload controller charm from %v", charmPath)
+	charmData, err := stdos.ReadFile(charmPath)
 	if err != nil {
 		return errors.Trace(err)
-	}
-	var charmData []byte
-	if charm.IsCharmDir(charmPath) {
-		ch, err := charm.ReadCharmDir(charmPath)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		buf := bytes.NewBuffer(nil)
-		err = ch.ArchiveTo(buf)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		charmData = buf.Bytes()
-	} else {
-		charmData, err = stdos.ReadFile(charmPath)
-		if err != nil {
-			return errors.Trace(err)
-		}
 	}
 	w.conf.AddRunBinaryFile(path.Join(w.icfg.CharmDir(), bootstrap.ControllerCharmArchive), charmData, 0644)
 
@@ -625,7 +610,7 @@ func (w *userdataConfig) addDownloadToolsCmds() error {
 		}
 		curlCommand += " -o $bin/tools.tar.gz"
 		w.conf.AddRunCmd(cloudinit.LogProgressCmd("Fetching Juju agent version %s for %s", tools.Version.Number, tools.Version.Arch))
-		logger.Infof("Fetching agent: %s <%s>", curlCommand, urls)
+		logger.Infof(context.TODO(), "Fetching agent: %s <%s>", curlCommand, urls)
 		w.conf.AddRunCmd(toolsDownloadCommand(curlCommand, urls))
 	}
 

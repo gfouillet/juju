@@ -4,20 +4,21 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/modelconfig"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -51,7 +52,7 @@ var helpDetailsRmApp = `
 Removing an application will terminate any relations that application has, remove
 all units of the application, and in the case that this leaves machines with
 no running applications, Juju will also remove the machine. For this reason,
-you should retrieve any logs or data required from applications and units 
+you should retrieve any logs or data required from applications and units
 before removing them. Removing units which are co-located with units of
 other charms or a Juju controller will not result in the removal of the
 machine.
@@ -60,14 +61,14 @@ Sometimes, the removal of the application may fail as Juju encounters errors
 and failures that need to be dealt with before an application can be removed.
 For example, Juju will not remove an application if there are hook failures.
 However, at times, there is a need to remove an application ignoring
-all operational errors. In these rare cases, use --force option but note 
-that --force will also remove all units of the application, its subordinates
+all operational errors. In these rare cases, use the ` + "`--force`" + ` option but note
+that ` + "`--force`" + ` will also remove all units of the application, its subordinates
 and, potentially, machines without given them the opportunity to shutdown cleanly.
 
 Application removal is a multi-step process. Under normal circumstances, Juju will not
-proceed to the next step until the current step has finished. 
-However, when using --force, users can also specify --no-wait to progress through steps 
-without delay waiting for each step to complete.
+proceed to the next step until the current step has finished.
+However, when using ` + "`--force`" + `, users can also specify ` + "`--no-wait`" + `
+to progress through steps without delay waiting for each step to complete.
 
 `[1:]
 
@@ -93,6 +94,10 @@ func (c *removeApplicationCommand) Info() *cmd.Info {
 		Purpose:  helpSummaryRmApp,
 		Doc:      helpDetailsRmApp,
 		Examples: helpExamplesRmApp,
+		SeeAlso: []string{
+			"scale-application",
+			"show-application",
+		},
 	})
 }
 
@@ -124,29 +129,29 @@ func (c *removeApplicationCommand) Init(args []string) error {
 
 type RemoveApplicationAPI interface {
 	Close() error
-	ScaleApplication(application.ScaleApplicationParams) (params.ScaleApplicationResult, error)
-	DestroyApplications(application.DestroyApplicationsParams) ([]params.DestroyApplicationResult, error)
-	DestroyUnits(application.DestroyUnitsParams) ([]params.DestroyUnitResult, error)
+	ScaleApplication(context.Context, application.ScaleApplicationParams) (params.ScaleApplicationResult, error)
+	DestroyApplications(context.Context, application.DestroyApplicationsParams) ([]params.DestroyApplicationResult, error)
+	DestroyUnits(context.Context, application.DestroyUnitsParams) ([]params.DestroyUnitResult, error)
 	ModelUUID() string
 	BestAPIVersion() int
 }
 
-func (c *removeApplicationCommand) getAPI() (RemoveApplicationAPI, error) {
+func (c *removeApplicationCommand) getAPI(ctx context.Context) (RemoveApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return application.NewClient(root), nil
 }
 
-func (c *removeApplicationCommand) getModelConfigAPI() (ModelConfigClient, error) {
+func (c *removeApplicationCommand) getModelConfigAPI(ctx context.Context) (ModelConfigClient, error) {
 	if c.modelConfigApi != nil {
 		return c.modelConfigApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -160,13 +165,13 @@ func (c *removeApplicationCommand) Run(ctx *cmd.Context) error {
 		maxWait = &zeroSec
 	}
 
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -176,7 +181,7 @@ func (c *removeApplicationCommand) Run(ctx *cmd.Context) error {
 		return c.performDryRun(ctx, client)
 	}
 
-	needsConfirmation := c.NeedsConfirmation(modelConfigClient)
+	needsConfirmation := c.NeedsConfirmation(ctx, modelConfigClient)
 	if needsConfirmation {
 		err := c.performDryRun(ctx, client)
 		if err == errDryRunNotSupportedByController {
@@ -189,7 +194,7 @@ func (c *removeApplicationCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	results, err := client.DestroyApplications(application.DestroyApplicationsParams{
+	results, err := client.DestroyApplications(ctx, application.DestroyApplicationsParams{
 		Applications:   c.ApplicationNames,
 		DestroyStorage: c.DestroyStorage,
 		Force:          c.Force,
@@ -215,7 +220,7 @@ func (c *removeApplicationCommand) performDryRun(
 	if client.BestAPIVersion() < 16 {
 		return errDryRunNotSupportedByController
 	}
-	results, err := client.DestroyApplications(application.DestroyApplicationsParams{
+	results, err := client.DestroyApplications(ctx, application.DestroyApplicationsParams{
 		Applications:   c.ApplicationNames,
 		DestroyStorage: c.DestroyStorage,
 		DryRun:         true,

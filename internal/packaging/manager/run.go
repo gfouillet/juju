@@ -5,6 +5,7 @@
 package manager
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,10 +22,6 @@ import (
 
 var (
 	logger = internallogger.GetLogger("juju.packaging.manager")
-
-	// Override for testing.
-	Delay    = 10 * time.Second
-	Attempts = 30
 )
 
 // CommandOutput is cmd.Output. It was aliased for testing purposes.
@@ -32,13 +29,6 @@ var CommandOutput = (*exec.Cmd).CombinedOutput
 
 // ProcessStateSys is ps.Sys. It was aliased for testing purposes.
 var ProcessStateSys = (*os.ProcessState).Sys
-
-// RunCommand is helper function to execute the command and gather the output.
-var RunCommand = func(command string, args ...string) (output string, err error) {
-	cmd := exec.Command(command, args...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
-}
 
 // exitStatuser is a mini-interface for the ExitStatus() method.
 type exitStatuser interface {
@@ -66,14 +56,6 @@ type RetryPolicy struct {
 	Attempts int
 }
 
-// DefaultRetryPolicy returns the default retry policy.
-func DefaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{
-		Delay:    Delay,
-		Attempts: Attempts,
-	}
-}
-
 // RunCommandWithRetry is a helper function which tries to execute the given command.
 // It tries to do so for 30 times with a 10 second sleep between commands.
 // It returns the output of the command, the exit code, and an error, if one occurs,
@@ -86,11 +68,10 @@ var RunCommandWithRetry = func(cmd string, retryable Retryable, policy RetryPoli
 		return "", -1, errors.New(fmt.Sprintf("too few arguments: expected at least 2, got %d", len(args)))
 	}
 
-	logger.Infof("Running: %s", cmd)
+	logger.Infof(context.TODO(), "Running: %s", cmd)
 
-	// Retry operation 30 times, sleeping every 10 seconds between attempts.
-	// This avoids failure in the case of something else having the dpkg lock
-	// (e.g. a charm on the machine we're deploying containers to).
+	// Retry operation, sleeping between attempts. This avoids failure in the
+	// case of something else having the, for example, dpkg lock.
 	var (
 		out      []byte
 		fatalErr error
@@ -100,7 +81,7 @@ var RunCommandWithRetry = func(cmd string, retryable Retryable, policy RetryPoli
 		Delay:    policy.Delay,
 		Attempts: policy.Attempts,
 		NotifyFunc: func(lastError error, attempt int) {
-			logger.Infof("Retrying: %s", cmd)
+			logger.Infof(context.TODO(), "Retrying: %s", cmd)
 		},
 		Func: func() error {
 			// Create the command for each attempt, because we need to
@@ -114,12 +95,12 @@ var RunCommandWithRetry = func(cmd string, retryable Retryable, policy RetryPoli
 		IsFatalError: func(err error) bool {
 			exitError, ok := errors.Cause(err).(*exec.ExitError)
 			if !ok {
-				logger.Errorf("unexpected error type %T", err)
+				logger.Errorf(context.TODO(), "unexpected error type %T", err)
 				return true
 			}
 			waitStatus, ok := ProcessStateSys(exitError.ProcessState).(exitStatuser)
 			if !ok {
-				logger.Errorf("unexpected process state type %T", exitError.ProcessState.Sys())
+				logger.Errorf(context.TODO(), "unexpected process state type %T", exitError.ProcessState.Sys())
 				return true
 			}
 
@@ -142,7 +123,7 @@ var RunCommandWithRetry = func(cmd string, retryable Retryable, policy RetryPoli
 	}
 
 	if retryErr != nil {
-		logger.Errorf("packaging command failed: %v; cmd: %q; output: %s",
+		logger.Errorf(context.TODO(), "packaging command failed: %v; cmd: %q; output: %s",
 			retryErr, cmd, string(out))
 		return string(out), code, errors.Errorf("packaging command failed: %v", retryErr)
 	}

@@ -4,24 +4,23 @@
 package upgradesteps
 
 import (
-	context "context"
+	"context"
 	"errors"
+	stdtesting "testing"
 	"time"
 
-	jc "github.com/juju/testing/checkers"
-	version "github.com/juju/version/v2"
-	"github.com/juju/worker/v4"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	agent "github.com/juju/juju/agent"
+	version "github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/upgrade"
 	"github.com/juju/juju/core/watcher/watchertest"
 	domainupgrade "github.com/juju/juju/domain/upgrade"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/upgradesteps"
-	"github.com/juju/juju/testing"
 )
 
 type controllerWorkerSuite struct {
@@ -31,9 +30,11 @@ type controllerWorkerSuite struct {
 	upgradeService *MockUpgradeService
 }
 
-var _ = gc.Suite(&controllerWorkerSuite{})
+func TestControllerWorkerSuite(t *stdtesting.T) {
+	tc.Run(t, &controllerWorkerSuite{})
+}
 
-func (s *controllerWorkerSuite) TestAlreadyUpgraded(c *gc.C) {
+func (s *controllerWorkerSuite) TestAlreadyUpgraded(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -45,7 +46,7 @@ func (s *controllerWorkerSuite) TestAlreadyUpgraded(c *gc.C) {
 		return true
 	})
 
-	w := s.newWorker(c)
+	w := s.newWorker(c, nil)
 	defer workertest.DirtyKill(c, w)
 
 	select {
@@ -57,7 +58,7 @@ func (s *controllerWorkerSuite) TestAlreadyUpgraded(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestInvalidState(c *gc.C) {
+func (s *controllerWorkerSuite) TestInvalidState(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -66,7 +67,7 @@ func (s *controllerWorkerSuite) TestInvalidState(c *gc.C) {
 	s.expectUpgradeInfo(c, upgrade.Error)
 	done := s.expectAbort(c)
 
-	w := s.newWorker(c)
+	w := s.newWorker(c, nil)
 	defer workertest.DirtyKill(c, w)
 
 	select {
@@ -78,7 +79,7 @@ func (s *controllerWorkerSuite) TestInvalidState(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestWatchingFailures(c *gc.C) {
+func (s *controllerWorkerSuite) TestWatchingFailures(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -106,25 +107,37 @@ func (s *controllerWorkerSuite) TestWatchingFailures(c *gc.C) {
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.StepsCompleted).Return(completedWatcher, nil)
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
 
-	w := s.newWorker(c)
+	sync := make(chan struct{})
+
+	srv.SetControllerDone(gomock.Any(), s.upgradeUUID, "0").DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID, tag string) error {
+		defer close(sync)
+		return nil
+	})
+
+	w := s.newWorker(c, nil)
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
 	s.dispatchChange(c, chCompleted)
 	s.dispatchChange(c, chFailed)
 
-	s.dispatchChange(c, chFailed)
+	select {
+	case <-sync:
+		s.dispatchChange(c, chFailed)
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting setting controller done")
+	}
 
 	select {
 	case <-done:
-	case <-time.After(testing.LongWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out waiting abort")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestWatchingCompleted(c *gc.C) {
+func (s *controllerWorkerSuite) TestWatchingCompleted(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -159,7 +172,7 @@ func (s *controllerWorkerSuite) TestWatchingCompleted(c *gc.C) {
 		return nil
 	})
 
-	w := s.newWorker(c)
+	w := s.newWorker(c, nil)
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
@@ -182,7 +195,7 @@ func (s *controllerWorkerSuite) TestWatchingCompleted(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestUpgradeFailure(c *gc.C) {
+func (s *controllerWorkerSuite) TestUpgradeFailure(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -210,10 +223,11 @@ func (s *controllerWorkerSuite) TestUpgradeFailure(c *gc.C) {
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.StepsCompleted).Return(completedWatcher, nil)
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
 
-	w := s.newWorker(c)
-	w.base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
-		return errors.New("boom")
-	}
+	w := s.newWorker(c, func(base *upgradesteps.BaseWorker) {
+		base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
+			return errors.New("boom")
+		}
+	})
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
@@ -229,7 +243,7 @@ func (s *controllerWorkerSuite) TestUpgradeFailure(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestUpgradeFailureWithAPILostError(c *gc.C) {
+func (s *controllerWorkerSuite) TestUpgradeFailureWithAPILostError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -255,10 +269,11 @@ func (s *controllerWorkerSuite) TestUpgradeFailureWithAPILostError(c *gc.C) {
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.StepsCompleted).Return(completedWatcher, nil)
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
 
-	w := s.newWorker(c)
-	w.base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
-		return upgradesteps.NewAPILostDuringUpgrade(errors.New("boom"))
-	}
+	w := s.newWorker(c, func(base *upgradesteps.BaseWorker) {
+		base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
+			return upgradesteps.NewAPILostDuringUpgrade(errors.New("boom"))
+		}
+	})
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
@@ -280,10 +295,10 @@ func (s *controllerWorkerSuite) TestUpgradeFailureWithAPILostError(c *gc.C) {
 	}
 
 	err := workertest.CheckKill(c, w)
-	c.Assert(err, gc.ErrorMatches, `.*API connection lost during upgrade: boom`)
+	c.Assert(err, tc.ErrorMatches, `.*API connection lost during upgrade: boom`)
 }
 
-func (s *controllerWorkerSuite) TestUpgradeStepsComplete(c *gc.C) {
+func (s *controllerWorkerSuite) TestUpgradeStepsComplete(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -319,7 +334,7 @@ func (s *controllerWorkerSuite) TestUpgradeStepsComplete(c *gc.C) {
 		return nil
 	})
 
-	w := s.newWorker(c)
+	w := s.newWorker(c, nil)
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
@@ -342,7 +357,7 @@ func (s *controllerWorkerSuite) TestUpgradeStepsComplete(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) TestUpgradeFailsWhenKilled(c *gc.C) {
+func (s *controllerWorkerSuite) TestUpgradeFailsWhenKilled(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Walk through the upgrade process:
@@ -367,25 +382,29 @@ func (s *controllerWorkerSuite) TestUpgradeFailsWhenKilled(c *gc.C) {
 	defer workertest.DirtyKill(c, failedWatcher)
 
 	done := make(chan struct{})
-	kill := make(chan worker.Worker)
+	kill := make(chan *controllerWorker)
 
 	srv := s.upgradeService.EXPECT()
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.StepsCompleted).Return(completedWatcher, nil)
 	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
 
-	srv.SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).Return(nil)
-
-	w := s.newWorker(c)
-	w.base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
-		select {
-		case w := <-kill:
-			defer close(done)
-			w.Kill()
-		case <-time.After(testing.LongWait):
-			c.Fatalf("timed out waiting for kill")
-		}
+	srv.SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).DoAndReturn(func(context.Context, domainupgrade.UUID) error {
+		defer close(done)
 		return nil
-	}
+	})
+
+	w := s.newWorker(c, func(base *upgradesteps.BaseWorker) {
+		base.PreUpgradeSteps = func(_ agent.Config, _ bool) error {
+			select {
+			case w := <-kill:
+				w.Kill()
+			case <-c.Context().Done():
+				c.Error("timed out waiting for kill")
+				return errors.New("timed out waiting for kill")
+			}
+			return nil
+		}
+	})
 	defer workertest.DirtyKill(c, w)
 
 	// Dispatch the initial event.
@@ -394,37 +413,47 @@ func (s *controllerWorkerSuite) TestUpgradeFailsWhenKilled(c *gc.C) {
 
 	select {
 	case kill <- w:
-	case <-time.After(testing.LongWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out waiting for kill")
 	}
 
 	select {
 	case <-done:
-	case <-time.After(testing.LongWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out waiting for done")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *controllerWorkerSuite) newWorker(c *gc.C) *controllerWorker {
+func (s *controllerWorkerSuite) newWorker(c *tc.C, configureBase func(base *upgradesteps.BaseWorker)) *controllerWorker {
 	baseWorker := s.newBaseWorker(c, version.MustParse("6.6.6"), version.MustParse("9.9.9"))
+	if configureBase != nil {
+		configureBase(baseWorker)
+	}
 	w, err := newControllerWorker(baseWorker, s.upgradeService)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return w
 }
 
-func (s *controllerWorkerSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *controllerWorkerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := s.baseSuite.setupMocks(c)
 
-	s.upgradeUUID = domainupgrade.MustNewUUID()
+	var err error
+	s.upgradeUUID, err = domainupgrade.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.upgradeService = NewMockUpgradeService(ctrl)
+
+	c.Cleanup(func() {
+		s.upgradeUUID = ""
+		s.upgradeService = nil
+	})
 
 	return ctrl
 }
 
-func (s *controllerWorkerSuite) expectUpgradeInfo(c *gc.C, state upgrade.State) {
+func (s *controllerWorkerSuite) expectUpgradeInfo(c *tc.C, state upgrade.State) {
 	s.lock.EXPECT().IsUnlocked().Return(false)
 	s.upgradeService.EXPECT().ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
 	s.upgradeService.EXPECT().UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(upgrade.Info{
@@ -432,11 +461,11 @@ func (s *controllerWorkerSuite) expectUpgradeInfo(c *gc.C, state upgrade.State) 
 	}, nil)
 }
 
-func (s *controllerWorkerSuite) expectAbort(c *gc.C) chan struct{} {
+func (s *controllerWorkerSuite) expectAbort(c *tc.C) chan struct{} {
 	done := make(chan struct{})
 	// Return an error during setting status and set db upgrade failed when
 	// aborting to ensure that we ignore it.
-	s.statusSetter.EXPECT().SetStatus(status.Error, gomock.Any(), gomock.Any()).Return(errors.New("should never be the cause of a failure"))
+	s.statusSetter.EXPECT().SetStatus(gomock.Any(), status.Error, gomock.Any(), gomock.Any()).Return(errors.New("should never be the cause of a failure"))
 	s.upgradeService.EXPECT().SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID) error {
 		defer close(done)
 		return errors.New("this should still abort the work flow")
@@ -444,18 +473,18 @@ func (s *controllerWorkerSuite) expectAbort(c *gc.C) chan struct{} {
 	return done
 }
 
-func (s *controllerWorkerSuite) expectComplete(c *gc.C) chan struct{} {
+func (s *controllerWorkerSuite) expectComplete(c *tc.C) chan struct{} {
 	done := make(chan struct{})
 	// Return an error during setting status and set db upgrade failed when
 	// aborting to ensure that we ignore it.
-	s.statusSetter.EXPECT().SetStatus(status.Started, gomock.Any(), gomock.Any()).Return(errors.New("should never be the cause of a failure"))
+	s.statusSetter.EXPECT().SetStatus(gomock.Any(), status.Started, gomock.Any(), gomock.Any()).Return(errors.New("should never be the cause of a failure"))
 	s.lock.EXPECT().Unlock().Do(func() {
 		close(done)
 	})
 	return done
 }
 
-func (s *controllerWorkerSuite) expectRunUpdates(c *gc.C) {
+func (s *controllerWorkerSuite) expectRunUpdates(c *tc.C) {
 	s.agent.EXPECT().CurrentConfig().Return(s.config).AnyTimes()
 	s.agent.EXPECT().ChangeConfig(gomock.Any()).Return(nil).AnyTimes()
 }

@@ -7,11 +7,13 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/crossmodel"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/domain/model"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -19,6 +21,25 @@ import (
 // configuration for the model.
 type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
+}
+
+// ModelService is an interface that provides information about hosted models.
+type ModelService interface {
+	// CheckModelExists checks if a model exists within the controller. True or
+	// false is returned indiciating of the model exists.
+	CheckModelExists(ctx context.Context, modelUUID coremodel.UUID) (bool, error)
+
+	// ModelRedirection returns redirection information for the current model. If it
+	// is not redirected, [modelmigrationerrors.ModelNotRedirected] is returned.
+	ModelRedirection(ctx context.Context, modelUUID coremodel.UUID) (model.ModelRedirection, error)
+}
+
+// APIHostPortsForAgentsGetter represents a way to get controller api addresses.
+type APIHostPortsForAgentsGetter interface {
+	// GetAllAPIAddressesForAgents returns a string of api
+	// addresses available for agents ordered to prefer local-cloud scoped
+	// addresses and IPv4 over IPv6 for each machine.
+	GetAllAPIAddressesForAgents(ctx context.Context) ([]string, error)
 }
 
 // ExternalControllerService defines the methods that the controller
@@ -36,21 +57,24 @@ type ExternalControllerService interface {
 // ControllerConfigAPI implements two common methods for use by various
 // facades - eg Provisioner and ControllerConfig.
 type ControllerConfigAPI struct {
-	controllerConfigService   ControllerConfigService
-	externalControllerService ExternalControllerService
-	st                        ControllerConfigState
+	controllerConfigService     ControllerConfigService
+	apiHostPortsForAgentsGetter APIHostPortsForAgentsGetter
+	externalControllerService   ExternalControllerService
+	modelService                ModelService
 }
 
 // NewControllerConfigAPI returns a new ControllerConfigAPI.
 func NewControllerConfigAPI(
-	st ControllerConfigState,
 	controllerConfigService ControllerConfigService,
+	apiHostPortsForAgentsGetter APIHostPortsForAgentsGetter,
 	externalControllerService ExternalControllerService,
+	modelService ModelService,
 ) *ControllerConfigAPI {
 	return &ControllerConfigAPI{
-		st:                        st,
-		controllerConfigService:   controllerConfigService,
-		externalControllerService: externalControllerService,
+		controllerConfigService:     controllerConfigService,
+		apiHostPortsForAgentsGetter: apiHostPortsForAgentsGetter,
+		externalControllerService:   externalControllerService,
+		modelService:                modelService,
 	}
 }
 
@@ -86,13 +110,14 @@ func (s *ControllerConfigAPI) getModelControllerInfo(ctx context.Context, model 
 	if err != nil {
 		return params.ControllerAPIInfoResult{}, errors.Trace(err)
 	}
+	modelUUID := coremodel.UUID(modelTag.Id())
 	// First see if the requested model UUID is hosted by this controller.
-	modelExists, err := s.st.ModelExists(modelTag.Id())
+	modelExists, err := s.modelService.CheckModelExists(ctx, modelUUID)
 	if err != nil {
 		return params.ControllerAPIInfoResult{}, errors.Trace(err)
 	}
 	if modelExists {
-		addrs, caCert, err := ControllerAPIInfo(ctx, s.st, s.controllerConfigService)
+		addrs, caCert, err := ControllerAPIInfo(ctx, s.controllerConfigService, s.apiHostPortsForAgentsGetter)
 		if err != nil {
 			return params.ControllerAPIInfoResult{}, errors.Trace(err)
 		}
@@ -119,40 +144,40 @@ func (s *ControllerConfigAPI) getModelControllerInfo(ctx context.Context, model 
 	// on the same controller as migrated model, but not for consumers on other
 	// controllers.
 	// They will have to follow redirects and update their own relation data.
-	mig, err := s.st.CompletedMigrationForModel(modelTag.Id())
-	if err != nil {
-		return params.ControllerAPIInfoResult{}, errors.Trace(err)
-	}
-	target, err := mig.TargetInfo()
+	modelRedirection, err := s.modelService.ModelRedirection(ctx, modelUUID)
 	if err != nil {
 		return params.ControllerAPIInfoResult{}, errors.Trace(err)
 	}
 
-	logger.Debugf("found migrated model on another controller, saving the information")
+	logger.Debugf(ctx, "found migrated model on another controller, saving the information")
 	err = s.externalControllerService.UpdateExternalController(ctx, crossmodel.ControllerInfo{
-		ControllerTag: target.ControllerTag,
-		Alias:         target.ControllerAlias,
-		Addrs:         target.Addrs,
-		CACert:        target.CACert,
-		ModelUUIDs:    []string{modelTag.Id()},
+		ControllerUUID: modelRedirection.ControllerUUID,
+		Alias:          modelRedirection.ControllerAlias,
+		Addrs:          modelRedirection.Addresses,
+		CACert:         modelRedirection.CACert,
+		ModelUUIDs:     []string{modelUUID.String()},
 	})
 	if err != nil {
 		return params.ControllerAPIInfoResult{}, errors.Trace(err)
 	}
 	return params.ControllerAPIInfoResult{
-		Addresses: target.Addrs,
-		CACert:    target.CACert,
+		Addresses: modelRedirection.Addresses,
+		CACert:    modelRedirection.CACert,
 	}, nil
 }
 
 // ControllerAPIInfo returns the local controller details for the given State.
-func ControllerAPIInfo(ctx context.Context, st controllerInfoState, controllerConfigService ControllerConfigService) ([]string, string, error) {
+func ControllerAPIInfo(
+	ctx context.Context,
+	controllerConfigService ControllerConfigService,
+	apiHostPortsGetter APIHostPortsForAgentsGetter,
+) ([]string, string, error) {
 	controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
 
-	addrs, err := apiAddresses(controllerConfig, st)
+	addrs, err := apiHostPortsGetter.GetAllAPIAddressesForAgents(ctx)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}

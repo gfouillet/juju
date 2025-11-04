@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -36,8 +36,8 @@ Adds a new space with the given name and associates the given
 
 const addCommandExamples = `
 
-Add space "beta" with subnet 172.31.0.0/20:
-    
+Add space ` + "`beta`" + ` with subnet ` + "`172.31.0.0/20`" + `:
+
     juju add-space beta 172.31.0.0/20
 `
 
@@ -78,7 +78,7 @@ func (c *AddCommand) Run(ctx *cmd.Context) error {
 
 		// Add the new space.
 		// TODO(dimitern): Accept --public|--private and pass it here.
-		err := api.AddSpace(c.Name, subnetIds, true)
+		err := api.AddSpace(ctx, c.Name, subnetIds, true)
 		if err != nil {
 			if errors.Is(err, errors.NotSupported) {
 				ctx.Infof("cannot add space %q: %v", c.Name, err)

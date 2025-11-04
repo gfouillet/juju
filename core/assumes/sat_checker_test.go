@@ -5,23 +5,25 @@ package assumes
 
 import (
 	"strings"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	"gopkg.in/yaml.v3"
 
+	"github.com/juju/juju/core/semversion"
 	chassumes "github.com/juju/juju/internal/charm/assumes"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type SatCheckerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&SatCheckerSuite{})
+func TestSatCheckerSuite(t *testing.T) {
+	tc.Run(t, &SatCheckerSuite{})
+}
 
-func (s *SatCheckerSuite) TestErrorReportingForSimpleExpression(c *gc.C) {
+func (s *SatCheckerSuite) TestErrorReportingForSimpleExpression(c *tc.C) {
 	fs := genFeatureSet(c)
 
 	exprTree := mustParseAssumesExpr(c, `
@@ -31,20 +33,16 @@ assumes:
 `)
 
 	expErr := `
-Charm feature requirements cannot be met:
+Charm cannot be deployed because:
   - charm requires feature "storage" (version >= 2.19.43) but model currently supports version 2.19.42
-
-Feature descriptions:
-  - "storage": create and manipulate storage primitives
-
-For additional information please see: https://juju.is/docs/olm/supported-features`[1:]
+`[1:]
 
 	err := fs.Satisfies(exprTree)
-	c.Assert(err, jc.Satisfies, IsRequirementsNotSatisfiedError, gc.Commentf("expected to get a RequirementsNotSatisfied error"))
-	c.Assert(err.Error(), gc.Equals, expErr)
+	c.Assert(err, tc.Satisfies, IsRequirementsNotSatisfiedError, tc.Commentf("expected to get a RequirementsNotSatisfied error"))
+	c.Assert(err.Error(), tc.Equals, expErr)
 }
 
-func (s *SatCheckerSuite) TestErrorReportingForCompositeExpressions(c *gc.C) {
+func (s *SatCheckerSuite) TestErrorReportingForCompositeExpressions(c *tc.C) {
 	fs := genFeatureSet(c)
 
 	exprTree := mustParseAssumesExpr(c, `
@@ -58,26 +56,21 @@ assumes:
 `)
 
 	expErr := `
-Charm feature requirements cannot be met:
+Charm cannot be deployed because:
   - charm requires at least one of the following:
-    - charm requires feature "k8s-api" (version >= 42.0.0) but model currently supports version 1.18.0
+    - charm requires Kubernetes version >= 42.0.0, model is running on version 1.18.0
     - charm requires feature "random-feature-a" but model does not support it
   - charm requires all of the following:
     - charm requires feature "block-storage" but model does not support it
-    - charm requires feature "juju" (version >= 3.0.0) but model currently supports version 2.19.42
-
-Feature descriptions:
-  - "juju": version of Juju running on the controller
-  - "k8s-api": access to the kubernetes API
-
-For additional information please see: https://juju.is/docs/olm/supported-features`[1:]
+    - charm requires Juju version >= 3.0.0, model has version 2.19.42
+`[1:]
 
 	err := fs.Satisfies(exprTree)
-	c.Assert(err, jc.Satisfies, IsRequirementsNotSatisfiedError, gc.Commentf("expected to get a RequirementsNotSatisfied error"))
-	c.Assert(err.Error(), gc.Equals, expErr)
+	c.Assert(err, tc.Satisfies, IsRequirementsNotSatisfiedError, tc.Commentf("expected to get a RequirementsNotSatisfied error"))
+	c.Assert(err.Error(), tc.Equals, expErr)
 }
 
-func (s *SatCheckerSuite) TestErrorReportingForMultiLevelExpressionTree(c *gc.C) {
+func (s *SatCheckerSuite) TestErrorReportingForMultiLevelExpressionTree(c *tc.C) {
 	fs := genFeatureSet(c)
 
 	exprTree := mustParseAssumesExpr(c, `
@@ -99,29 +92,24 @@ assumes:
 `)
 
 	expErr := `
-Charm feature requirements cannot be met:
+Charm cannot be deployed because:
   - charm requires feature "storage" (version >= 42.0.0) but model currently supports version 2.19.42
   - charm requires all of the following:
-    - charm requires feature "juju" (version >= 3.0.0) but model currently supports version 2.19.42
+    - charm requires Juju version >= 3.0.0, model has version 2.19.42
     - charm requires at least one of the following:
       - charm requires feature "random-feature-b" but model does not support it
       - charm requires feature "random-feature-c" but model does not support it
   - charm requires at least one of the following:
     - charm requires feature "random-feature-d" but model does not support it
     - charm requires feature "random-feature-e" but model does not support it
-
-Feature descriptions:
-  - "juju": version of Juju running on the controller
-  - "storage": create and manipulate storage primitives
-
-For additional information please see: https://juju.is/docs/olm/supported-features`[1:]
+`[1:]
 
 	err := fs.Satisfies(exprTree)
-	c.Assert(err, jc.Satisfies, IsRequirementsNotSatisfiedError, gc.Commentf("expected to get a RequirementsNotSatisfied error"))
-	c.Assert(err.Error(), gc.Equals, expErr)
+	c.Assert(err, tc.Satisfies, IsRequirementsNotSatisfiedError, tc.Commentf("expected to get a RequirementsNotSatisfied error"))
+	c.Assert(err.Error(), tc.Equals, expErr)
 }
 
-func (s *SatCheckerSuite) TestAssumesExpressionSatisfied(c *gc.C) {
+func (s *SatCheckerSuite) TestAssumesExpressionSatisfied(c *tc.C) {
 	fs := genFeatureSet(c)
 
 	exprTree := mustParseAssumesExpr(c, `
@@ -138,10 +126,10 @@ assumes:
 `)
 
 	err := fs.Satisfies(exprTree)
-	c.Assert(err, jc.ErrorIsNil, gc.Commentf("expected assumes expression tree to be satisfied"))
+	c.Assert(err, tc.ErrorIsNil, tc.Commentf("expected assumes expression tree to be satisfied"))
 }
 
-func genFeatureSet(c *gc.C) FeatureSet {
+func genFeatureSet(c *tc.C) FeatureSet {
 	var fs FeatureSet
 	fs.Add(
 		Feature{
@@ -168,19 +156,19 @@ func genFeatureSet(c *gc.C) FeatureSet {
 	return fs
 }
 
-func mustParseVersion(c *gc.C, verStr string) *version.Number {
-	ver, err := version.ParseNonStrict(verStr)
-	c.Assert(err, jc.ErrorIsNil)
+func mustParseVersion(c *tc.C, verStr string) *semversion.Number {
+	ver, err := semversion.ParseNonStrict(verStr)
+	c.Assert(err, tc.ErrorIsNil)
 	return &ver
 }
 
-func mustParseAssumesExpr(c *gc.C, exprYAML string) *chassumes.ExpressionTree {
+func mustParseAssumesExpr(c *tc.C, exprYAML string) *chassumes.ExpressionTree {
 	var payload = struct {
 		ExprTree chassumes.ExpressionTree `yaml:"assumes"`
 	}{}
 
 	err := yaml.NewDecoder(strings.NewReader(exprYAML)).Decode(&payload)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return &payload.ExprTree
 }

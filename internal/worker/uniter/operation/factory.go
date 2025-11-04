@@ -7,13 +7,12 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/rpc/params"
 )
@@ -24,7 +23,6 @@ type FactoryParams struct {
 	RunnerFactory  runner.Factory
 	Callbacks      Callbacks
 	ActionGetter   ActionGetter
-	Abort          <-chan struct{}
 	MetricSpoolDir string
 	Logger         logger.Logger
 }
@@ -58,7 +56,6 @@ func (f *factory) newDeploy(kind Kind, charmURL string, revert, resolved bool) (
 		resolved:  resolved,
 		callbacks: f.config.Callbacks,
 		deployer:  f.config.Deployer,
-		abort:     f.config.Abort,
 	}
 	return op, nil
 }
@@ -71,23 +68,6 @@ func (f *factory) NewInstall(charmURL string) (Operation, error) {
 // NewUpgrade is part of the Factory interface.
 func (f *factory) NewUpgrade(charmURL string) (Operation, error) {
 	return f.newDeploy(Upgrade, charmURL, false, false)
-}
-
-// NewRemoteInit is part of the Factory interface.
-func (f *factory) NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (Operation, error) {
-	return &remoteInit{
-		callbacks:     f.config.Callbacks,
-		abort:         f.config.Abort,
-		runningStatus: runningStatus,
-	}, nil
-}
-
-func (f *factory) NewSkipRemoteInit(retry bool) (Operation, error) {
-	return &skipRemoteInit{retry}, nil
-}
-
-func (f *factory) NewNoOpFinishUpgradeSeries() (Operation, error) {
-	return &noOpFinishUpgradeSeries{&skipOperation{}}, nil
 }
 
 // NewRevertUpgrade is part of the Factory interface.
@@ -123,10 +103,12 @@ func (f *factory) NewSkipHook(hookInfo hook.Info) (Operation, error) {
 }
 
 // NewNoOpSecretsRemoved is part of the Factory interface.
-func (f *factory) NewNoOpSecretsRemoved(uris []string) (Operation, error) {
+func (f *factory) NewNoOpSecretsRemoved(deletedRevisions, deletedObsoleteRevisions map[string][]int) (Operation, error) {
 	return &noOpSecretsRemoved{
-		Operation: &skipOperation{}, uris: uris,
-		callbacks: f.config.Callbacks,
+		Operation:                &skipOperation{},
+		deletedRevisions:         deletedRevisions,
+		deletedObsoleteRevisions: deletedObsoleteRevisions,
+		callbacks:                f.config.Callbacks,
 	}, nil
 }
 

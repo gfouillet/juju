@@ -4,17 +4,19 @@
 package storage
 
 import (
+	"context"
 	"regexp"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/gnuflag"
+	"github.com/juju/names/v6"
 
 	apistorage "github.com/juju/juju/api/client/storage"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/jujuclient"
 )
 
 // NewImportFilesystemCommand returns a command used to import a filesystem.
@@ -39,13 +41,13 @@ func NewImportFilesystemCommand(
 
 // NewStorageImporterFunc is the type of a function passed to
 // NewImportFilesystemCommand, in order to acquire a StorageImporter.
-type NewStorageImporterFunc func(*StorageCommandBase) (StorageImporter, error)
+type NewStorageImporterFunc func(context.Context, *StorageCommandBase) (StorageImporter, error)
 
 // NewStorageImporter returns a new StorageImporter,
 // given a StorageCommandBase.
-func NewStorageImporter(cmd *StorageCommandBase) (StorageImporter, error) {
-	api, err := cmd.NewStorageAPI()
-	return apiStorageImporter{api}, err
+func NewStorageImporter(ctx context.Context, cmd *StorageCommandBase) (StorageImporter, error) {
+	api, err := cmd.NewStorageAPI(ctx)
+	return apiStorageImporter{Client: api}, err
 }
 
 const (
@@ -65,15 +67,34 @@ To import a filesystem, you must specify three things:
 
 Once a filesystem is imported, Juju will create an associated storage
 instance using the given storage name.
+
+For Kubernetes models, when importing a ` + "`PersistentVolume`" + `, the following
+conditions must be met:
+
+ - the ` + "`PersistentVolume`" + `'s reclaim policy must be set to ` + "`Retain`" + `.
+ - the ` + "`PersistentVolume`" + ` must not be bound to any ` + "`PersistentVolumeClaim`" + `.
+
+If the PersistentVolume is bound to a PersistentVolumeClaim that is not used
+by another Juju application, you can use the --force option to make the PV
+available for import.
+
 `
 	importFilesystemCommandExamples = `
 Import an existing filesystem backed by an EBS volume,
-and assign it the "pgdata" storage name. Juju will
-associate a storage instance ID like "pgdata/0" with
+and assign it the ` + "`pgdata`" + ` storage name. Juju will
+associate a storage instance ID like ` + "`pgdata/0`" + ` with
 the volume and filesystem contained within.
 
     juju import-filesystem ebs vol-123456 pgdata
 
+Import an existing unbound ` + "`PersistentVolume`" + ` in a Kubernetes model,
+and assign it the ` + "`pgdata`" + ` storage name:
+
+    juju import-filesystem kubernetes pv-data-001 pgdata
+
+Import a PersistentVolume that is bound to a PVC not used by Juju:
+
+    juju import-filesystem kubernetes pv-data-001 pgdata --force
 `
 
 	importFilesystemCommandAgs = `
@@ -84,12 +105,12 @@ the volume and filesystem contained within.
 // importFilesystemCommand imports filesystems into the model.
 type importFilesystemCommand struct {
 	StorageCommandBase
-	modelcmd.IAASOnlyCommand
 	newAPIFunc NewStorageImporterFunc
 
 	storagePool       string
 	storageProviderId string
 	storageName       string
+	force             bool
 }
 
 // Init implements Command.Init.
@@ -115,6 +136,12 @@ func (c *importFilesystemCommand) Init(args []string) error {
 	return nil
 }
 
+// SetFlags implements Command.SetFlags.
+func (c *importFilesystemCommand) SetFlags(f *gnuflag.FlagSet) {
+	c.StorageCommandBase.SetFlags(f)
+	f.BoolVar(&c.force, "force", false, "import a volume even if otherwise prohibited (cloud specific)")
+}
+
 // Info implements Command.Info.
 func (c *importFilesystemCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
@@ -123,12 +150,13 @@ func (c *importFilesystemCommand) Info() *cmd.Info {
 		Doc:      importFilesystemCommandDoc,
 		Args:     importFilesystemCommandAgs,
 		Examples: importFilesystemCommandExamples,
+		SeeAlso:  []string{"storage"},
 	})
 }
 
 // Run implements Command.Run.
 func (c *importFilesystemCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc(&c.StorageCommandBase)
+	api, err := c.newAPIFunc(ctx, &c.StorageCommandBase)
 	if err != nil {
 		return err
 	}
@@ -139,8 +167,9 @@ func (c *importFilesystemCommand) Run(ctx *cmd.Context) (err error) {
 		c.storageProviderId, c.storagePool, c.storageName,
 	)
 	storageTag, err := api.ImportStorage(
+		ctx,
 		storage.StorageKindFilesystem,
-		c.storagePool, c.storageProviderId, c.storageName,
+		c.storagePool, c.storageProviderId, c.storageName, c.force,
 	)
 	if err != nil {
 		return err
@@ -154,8 +183,10 @@ type StorageImporter interface {
 	Close() error
 
 	ImportStorage(
+		ctx context.Context,
 		kind storage.StorageKind,
 		storagePool, storageProviderId, storageName string,
+		force bool,
 	) (names.StorageTag, error)
 }
 
@@ -164,7 +195,8 @@ type apiStorageImporter struct {
 }
 
 func (a apiStorageImporter) ImportStorage(
-	kind storage.StorageKind, storagePool, storageProviderId, storageName string,
+	ctx context.Context,
+	kind storage.StorageKind, storagePool, storageProviderId, storageName string, force bool,
 ) (names.StorageTag, error) {
-	return a.Import(kind, storagePool, storageProviderId, storageName)
+	return a.Import(ctx, kind, storagePool, storageProviderId, storageName, force)
 }

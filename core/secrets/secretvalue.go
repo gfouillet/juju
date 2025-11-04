@@ -5,11 +5,15 @@ package secrets
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"strings"
 
-	"github.com/juju/errors"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // SecretValue holds the value of a secret.
@@ -36,6 +40,9 @@ type SecretValue interface {
 
 	// IsEmpty checks if the value is empty.
 	IsEmpty() bool
+
+	// Checksum is the checksum of the secret content.
+	Checksum() (string, error)
 }
 
 type secretValue struct {
@@ -72,7 +79,7 @@ func (v secretValue) IsEmpty() bool {
 }
 
 // EncodedValues implements SecretValue.
-func (v *secretValue) EncodedValues() map[string]string {
+func (v secretValue) EncodedValues() map[string]string {
 	dataCopy := make(map[string]string, len(v.data))
 	for k, val := range v.data {
 		dataCopy[k] = string(val)
@@ -81,12 +88,12 @@ func (v *secretValue) EncodedValues() map[string]string {
 }
 
 // Values implements SecretValue.
-func (v *secretValue) Values() (map[string]string, error) {
+func (v secretValue) Values() (map[string]string, error) {
 	dataCopy := v.EncodedValues()
 	for k, v := range dataCopy {
 		data, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		dataCopy[k] = string(data)
 	}
@@ -94,7 +101,7 @@ func (v *secretValue) Values() (map[string]string, error) {
 }
 
 // KeyValue implements SecretValue.
-func (v *secretValue) KeyValue(key string) (string, error) {
+func (v secretValue) KeyValue(key string) (string, error) {
 	useBase64 := false
 	if strings.HasSuffix(key, base64Suffix) {
 		key = strings.TrimSuffix(key, base64Suffix)
@@ -102,7 +109,7 @@ func (v *secretValue) KeyValue(key string) (string, error) {
 	}
 	val, ok := v.data[key]
 	if !ok {
-		return "", errors.NotFoundf("secret key value %q", key)
+		return "", errors.Errorf("secret key value %q %w", key, coreerrors.NotFound)
 	}
 	// The stored value is always base64 encoded.
 	if useBase64 {
@@ -111,7 +118,21 @@ func (v *secretValue) KeyValue(key string) (string, error) {
 	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewReader(val))
 	result, err := io.ReadAll(b64)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 	return string(result), nil
+}
+
+// Checksum implements SecretValue.
+func (v secretValue) Checksum() (string, error) {
+	data, err := json.Marshal(v.EncodedValues())
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	hash := sha256.New()
+	_, err = hash.Write(data)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

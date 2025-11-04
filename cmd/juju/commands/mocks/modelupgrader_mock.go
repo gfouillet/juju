@@ -14,8 +14,8 @@ import (
 	io "io"
 	reflect "reflect"
 
+	semversion "github.com/juju/juju/core/semversion"
 	tools "github.com/juju/juju/internal/tools"
-	version "github.com/juju/version/v2"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -81,18 +81,18 @@ func (c *MockModelUpgraderAPICloseCall) DoAndReturn(f func() error) *MockModelUp
 }
 
 // UpgradeModel mocks base method.
-func (m *MockModelUpgraderAPI) UpgradeModel(arg0 string, arg1 version.Number, arg2 string, arg3, arg4 bool) (version.Number, error) {
+func (m *MockModelUpgraderAPI) UpgradeModel(arg0 context.Context, arg1 string, arg2 semversion.Number, arg3 string, arg4, arg5 bool) (semversion.Number, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpgradeModel", arg0, arg1, arg2, arg3, arg4)
-	ret0, _ := ret[0].(version.Number)
+	ret := m.ctrl.Call(m, "UpgradeModel", arg0, arg1, arg2, arg3, arg4, arg5)
+	ret0, _ := ret[0].(semversion.Number)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // UpgradeModel indicates an expected call of UpgradeModel.
-func (mr *MockModelUpgraderAPIMockRecorder) UpgradeModel(arg0, arg1, arg2, arg3, arg4 any) *MockModelUpgraderAPIUpgradeModelCall {
+func (mr *MockModelUpgraderAPIMockRecorder) UpgradeModel(arg0, arg1, arg2, arg3, arg4, arg5 any) *MockModelUpgraderAPIUpgradeModelCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpgradeModel", reflect.TypeOf((*MockModelUpgraderAPI)(nil).UpgradeModel), arg0, arg1, arg2, arg3, arg4)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpgradeModel", reflect.TypeOf((*MockModelUpgraderAPI)(nil).UpgradeModel), arg0, arg1, arg2, arg3, arg4, arg5)
 	return &MockModelUpgraderAPIUpgradeModelCall{Call: call}
 }
 
@@ -102,25 +102,25 @@ type MockModelUpgraderAPIUpgradeModelCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockModelUpgraderAPIUpgradeModelCall) Return(arg0 version.Number, arg1 error) *MockModelUpgraderAPIUpgradeModelCall {
+func (c *MockModelUpgraderAPIUpgradeModelCall) Return(arg0 semversion.Number, arg1 error) *MockModelUpgraderAPIUpgradeModelCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockModelUpgraderAPIUpgradeModelCall) Do(f func(string, version.Number, string, bool, bool) (version.Number, error)) *MockModelUpgraderAPIUpgradeModelCall {
+func (c *MockModelUpgraderAPIUpgradeModelCall) Do(f func(context.Context, string, semversion.Number, string, bool, bool) (semversion.Number, error)) *MockModelUpgraderAPIUpgradeModelCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockModelUpgraderAPIUpgradeModelCall) DoAndReturn(f func(string, version.Number, string, bool, bool) (version.Number, error)) *MockModelUpgraderAPIUpgradeModelCall {
+func (c *MockModelUpgraderAPIUpgradeModelCall) DoAndReturn(f func(context.Context, string, semversion.Number, string, bool, bool) (semversion.Number, error)) *MockModelUpgraderAPIUpgradeModelCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // UploadTools mocks base method.
-func (m *MockModelUpgraderAPI) UploadTools(arg0 context.Context, arg1 io.ReadSeeker, arg2 version.Binary) (tools.List, error) {
+func (m *MockModelUpgraderAPI) UploadTools(arg0 context.Context, arg1 io.Reader, arg2 semversion.Binary) (tools.List, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UploadTools", arg0, arg1, arg2)
 	ret0, _ := ret[0].(tools.List)
@@ -147,13 +147,13 @@ func (c *MockModelUpgraderAPIUploadToolsCall) Return(arg0 tools.List, arg1 error
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockModelUpgraderAPIUploadToolsCall) Do(f func(context.Context, io.ReadSeeker, version.Binary) (tools.List, error)) *MockModelUpgraderAPIUploadToolsCall {
+func (c *MockModelUpgraderAPIUploadToolsCall) Do(f func(context.Context, io.Reader, semversion.Binary) (tools.List, error)) *MockModelUpgraderAPIUploadToolsCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockModelUpgraderAPIUploadToolsCall) DoAndReturn(f func(context.Context, io.ReadSeeker, version.Binary) (tools.List, error)) *MockModelUpgraderAPIUploadToolsCall {
+func (c *MockModelUpgraderAPIUploadToolsCall) DoAndReturn(f func(context.Context, io.Reader, semversion.Binary) (tools.List, error)) *MockModelUpgraderAPIUploadToolsCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

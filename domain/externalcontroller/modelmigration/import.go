@@ -6,13 +6,13 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/domain/externalcontroller/service"
 	"github.com/juju/juju/domain/externalcontroller/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Coordinator is the interface that is used to add operations to a migration.
@@ -61,14 +61,17 @@ func (i *importOperation) Execute(ctx context.Context, model description.Model) 
 	var controllers []crossmodel.ControllerInfo
 	for _, entity := range externalControllers {
 		controllers = append(controllers, crossmodel.ControllerInfo{
-			ControllerTag: entity.ID(),
-			Alias:         entity.Alias(),
-			CACert:        entity.CACert(),
-			Addrs:         entity.Addrs(),
-			ModelUUIDs:    entity.Models(),
+			ControllerUUID: entity.ID(),
+			Alias:          entity.Alias(),
+			CACert:         entity.CACert(),
+			Addrs:          entity.Addrs(),
+			ModelUUIDs:     entity.Models(),
 		})
 	}
 
 	err := i.service.ImportExternalControllers(ctx, controllers)
-	return errors.Annotatef(err, "cannot import external controllers")
+	if err != nil {
+		return errors.Errorf("cannot import external controllers: %w", err)
+	}
+	return nil
 }

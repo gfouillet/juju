@@ -4,24 +4,26 @@
 package access
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/permission"
+	usertesting "github.com/juju/juju/core/user/testing"
 )
 
 type typesSuite struct{}
 
-var _ = gc.Suite(&typesSuite{})
+func TestTypesSuite(t *testing.T) {
+	tc.Run(t, &typesSuite{})
+}
 
-func (s *typesSuite) TestUpsertPermissionArgsValidationFail(c *gc.C) {
+func (s *typesSuite) TestUpsertPermissionArgsValidationFail(c *tc.C) {
 	argsToTest := []UpdatePermissionArgs{
 		{}, { // Missing Subject
-			ApiUser: "admin",
-		}, { // Missing Target
-			ApiUser: "admin",
-			Subject: "testme",
+		}, {  // Missing Target
+			Subject: usertesting.GenNewName(c, "testme"),
 		}, { // Target and Access don't mesh
 			AccessSpec: permission.AccessSpec{
 				Access: permission.AddModelAccess,
@@ -30,8 +32,7 @@ func (s *typesSuite) TestUpsertPermissionArgsValidationFail(c *gc.C) {
 					Key:        "aws",
 				},
 			},
-			ApiUser: "admin",
-			Subject: "testme",
+			Subject: usertesting.GenNewName(c, "testme"),
 		}, { // Invalid Change
 			AccessSpec: permission.AccessSpec{
 				Access: permission.AddModelAccess,
@@ -40,12 +41,11 @@ func (s *typesSuite) TestUpsertPermissionArgsValidationFail(c *gc.C) {
 					Key:        "aws",
 				},
 			},
-			ApiUser: "admin",
 			Change:  "testing",
-			Subject: "testme",
+			Subject: usertesting.GenNewName(c, "testme"),
 		}}
 	for i, args := range argsToTest {
 		c.Logf("Test %d", i)
-		c.Check(args.Validate(), checkers.ErrorIs, errors.NotValid)
+		c.Check(args.Validate(), tc.ErrorIs, coreerrors.NotValid)
 	}
 }

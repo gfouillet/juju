@@ -7,7 +7,19 @@ test_firewall() {
 	set_verbosity
 
 	echo "==> Checking for dependencies"
-	check_dependencies juju aws
+	case "${BOOTSTRAP_PROVIDER:-}" in
+	"ec2")
+		setup_awscli_credential
+		check_dependencies juju aws
+		;;
+	"gce")
+		setup_gcloudcli_credential
+		check_dependencies juju gcloud
+		;;
+	*)
+		check_dependencies juju
+		;;
+	esac
 
 	file="${TEST_DIR}/test-firewall.txt"
 
@@ -15,10 +27,13 @@ test_firewall() {
 
 	case "${BOOTSTRAP_PROVIDER:-}" in
 	"ec2")
-		test_firewall_ssh
+		test_firewall_ssh_ec2
+		;;
+	"gce")
+		test_firewall_ssh_gce
 		;;
 	*)
-		echo "==> TEST SKIPPED: test_firewall_ssh test runs on aws only"
+		echo "==> TEST SKIPPED: test_firewall_ssh test runs on aws or gce only"
 		;;
 	esac
 

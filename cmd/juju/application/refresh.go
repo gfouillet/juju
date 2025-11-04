@@ -7,12 +7,14 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
-	"github.com/juju/cmd/v4"
+	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+	"github.com/juju/retry"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -37,6 +39,7 @@ import (
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
 )
@@ -72,19 +75,21 @@ func newRefreshCommand() *refreshCommand {
 		},
 		NewCharmResolver: func(apiRoot base.APICallCloser, downloadClient store.DownloadBundleClient) CharmResolver {
 			return store.NewCharmAdaptor(apicharms.NewClient(apiRoot),
-				func() (store.DownloadBundleClient, error) {
+				func(ctx context.Context) (store.DownloadBundleClient, error) {
 					return downloadClient, nil
 				},
 			)
 		},
 		NewRefresherFactory: refresher.NewRefresherFactory,
+		RetryGetCharmCount:  10,
+		RetryGetCharmDelay:  500 * time.Millisecond,
 	}
 }
 
 // CharmResolver defines methods required to resolve charms, as required
 // by the refresh command.
 type CharmResolver interface {
-	ResolveCharm(url *charm.URL, preferredOrigin commoncharm.Origin, switchCHarm bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error)
+	ResolveCharm(ctx context.Context, url *charm.URL, preferredOrigin commoncharm.Origin, switchCHarm bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error)
 }
 
 // NewRefreshCommand returns a command which upgrades application's charm.
@@ -95,9 +100,9 @@ func NewRefreshCommand() cmd.Command {
 // CharmRefreshClient defines a subset of the application facade, as required
 // by the refresh command.
 type CharmRefreshClient interface {
-	GetCharmURLOrigin(string, string) (*charm.URL, commoncharm.Origin, error)
-	Get(string, string) (*params.ApplicationGetResults, error)
-	SetCharm(string, application.SetCharmConfig) error
+	GetCharmURLOrigin(context.Context, string) (*charm.URL, commoncharm.Origin, error)
+	Get(context.Context, string) (*params.ApplicationGetResults, error)
+	SetCharm(context.Context, application.SetCharmConfig) error
 }
 
 // NewCharmAdderFunc is the type of a function used to construct
@@ -109,7 +114,7 @@ type NewCharmAdderFunc func(
 // NewCharmResolverFunc returns a client implementing CharmResolver.
 type NewCharmResolverFunc func(base.APICallCloser, store.DownloadBundleClient) CharmResolver
 
-// RefreshCharm is responsible for upgrading an application's charm.
+// refreshCommand handles the process of refreshing an application's charm.
 type refreshCommand struct {
 	modelcmd.ModelCommandBase
 
@@ -125,6 +130,9 @@ type refreshCommand struct {
 	NewRefresherFactory   func(refresher.RefresherDependencies) refresher.RefresherFactory
 
 	ApplicationName string
+
+	// Base represents the base (eg ubuntu@22.04) of the new charm to use
+	Base string
 	// Force should be ubiquitous and we should eventually deprecate both
 	// ForceUnits and ForceBase; instead just using "force"
 	Force      bool
@@ -133,6 +141,13 @@ type refreshCommand struct {
 	SwitchURL  string
 	CharmPath  string
 	Revision   int // defaults to -1 (latest)
+
+	// RetryGetCharmCount allows to retry several time to get the Charm URL. Indeed, there is a timing window where
+	// deploy has been called and the charm is not yet downloaded, so we may want to retry during the refresh instead of
+	// fails to refresh then retry in enclosing code. It is especially useful in CI
+	RetryGetCharmCount int
+	// RetryGetCharmDelay is the delay between two retries
+	RetryGetCharmDelay time.Duration
 
 	BindToSpaces string
 	Bindings     map[string]string
@@ -162,52 +177,51 @@ type refreshCommand struct {
 const refreshDoc = `
 When no options are set, the application's charm will be refreshed to the latest
 revision available in the repository from which it was originally deployed. An
-explicit revision can be chosen with the --revision option.
+explicit revision can be chosen with the ` + "`--revision`" + ` option.
 
-A path will need to be supplied to allow an updated copy of the charm
-to be located.
+Refreshing a local packaged charm will require a path to be supplied to allow an
+updated copy of the charm.
 
 Deploying from a path is intended to suit the workflow of a charm author working
 on a single client machine; use of this deployment method from multiple clients
-is not supported and may lead to confusing behaviour. Each local charm gets
-uploaded with the revision specified in the charm, if possible, otherwise it
-gets a unique revision (highest in state + 1).
+is not supported and may lead to confusing behaviour. Each local packaged charm
+gets uploaded with the revision specified in the charm, if possible, otherwise
+it gets a unique revision (highest in state + 1).
 
-When deploying from a path, the --path option is used to specify the location from
-which to load the updated charm. Note that the directory containing the charm must
-match what was originally used to deploy the charm as a superficial check that the
-updated charm is compatible.
+When deploying from a path, the ` + "`--path`" + ` option is used to specify the location
+of the packaged charm. Note that the charm must match what was originally used
+to deploy the charm as a superficial check that the updated charm is compatible.
 
-Resources may be uploaded at upgrade time by specifying the --resource option.
+Resources may be uploaded at upgrade time by specifying the ` + "`--resource`" + ` option.
 Following the resource option should be name=filepath pair.  This option may be
 repeated more than once to upload more than one resource.
 
-  juju refresh foo --resource bar=/some/file.tgz --resource baz=./docs/cfg.xml
+    juju refresh foo --resource bar=/some/file.tgz --resource baz=./docs/cfg.xml
 
 Where bar and baz are resources named in the metadata for the foo charm.
 
 Storage directives may be added or updated at upgrade time by specifying
-the --storage option, with the same format as specified in "juju deploy".
+the ` + "`--storage`" + ` option, with the same format as specified in ` + "`juju deploy`" + `.
 If new required storage is added by the new charm revision, then you must
 specify directives or the defaults will be applied.
 
-  juju refresh foo --storage cache=ssd,10G
+    juju refresh foo --storage cache=ssd,10G
 
 Charm settings may be added or updated at upgrade time by specifying the
---config option, pointing to a YAML-encoded application config file.
+` + "`--config`" + ` option, pointing to a ` + "`YAML`" + `-encoded application config file.
 
-  juju refresh foo --config config.yaml
+    juju refresh foo --config config.yaml
 
-If the new version of a charm does not explicitly support the application's series, the
-upgrade is disallowed unless the --force-series option is used. This option should be
-used with caution since using a charm on a machine running an unsupported series may
+If the new version of a charm does not explicitly support the application's base, the
+upgrade is disallowed unless the --force-base option is used. This option should be
+used with caution since using a charm on a machine running an unsupported base may
 cause unexpected behavior.
 
-The --switch option allows you to replace the charm with an entirely different one.
+The ` + "`--switch`" + ` option allows you to replace the charm with an entirely different one.
 The new charm's URL and revision are inferred as they would be when running a
 deploy command.
 
-Please note that --switch is dangerous, because juju only has limited
+Please note that ` + "`--switch`" + ` is dangerous, because juju only has limited
 information with which to determine compatibility; the operation will succeed,
 regardless of potential havoc, so long as the following conditions hold:
 
@@ -219,23 +233,37 @@ regardless of potential havoc, so long as the following conditions hold:
 The new charm may add new relations and configuration settings.
 
 The new charm may also need to be granted access to trusted credentials.
-Use --trust to grant such access.
-Or use --trust=false to revoke such access.
+Use ` + "`--trust`" + ` to grant such access.
+Or use ` + "`--trust=false`" + ` to revoke such access.
 
---switch and --path are mutually exclusive.
+` + "`--switch`" + ` and ` + "`--path`" + ` are mutually exclusive.
 
---path and --revision are mutually exclusive. The revision of the updated charm
+` + "`--path`" + ` and ` + "`--revision`" + ` are mutually exclusive. The revision of the updated charm
 is determined by the contents of the charm at the specified path.
 
---switch and --revision are mutually exclusive.
+` + "`--switch`" + ` and ` + "`--revision`" + ` are mutually exclusive.
 
-Use of the --force-units option is not generally recommended; units upgraded
-while in an error state will not have refreshed hooks executed, and may cause
-unexpected behavior.
+Use of the ` + "`--force-units`" + ` option is not generally recommended; units upgraded
+while in an error state will not have ` + "`upgrade-charm`" + ` hooks executed, and may
+cause unexpected behavior.
 
---force option for LXD Profiles is not generally recommended when upgrading an
+` + "`--force`" + ` option for LXD Profiles is not generally recommended when upgrading an
 application; overriding profiles on the container may cause unexpected
 behavior.
+`
+
+const refreshExamples = `
+To refresh the storage constraints for application ` + "`foo`" + `:
+
+	juju refresh foo --storage cache=ssd,10G
+
+To refresh the application config from a file for application ` + "`foo`" + `:
+
+	juju refresh foo --config config.yaml
+
+To refresh the resources for application ` + "`foo`" + `:
+
+	juju refresh foo --resource bar=/some/file.tgz --resource baz=./docs/cfg.xml
 `
 
 const upgradedApplicationHasUnitsMessage = `
@@ -250,10 +278,12 @@ all those units to disappear before continuing.
 
 func (c *refreshCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "refresh",
-		Args:    "<application>",
-		Purpose: "Refresh an application's charm.",
-		Doc:     refreshDoc,
+		Name:     "refresh",
+		Args:     "<application>",
+		Purpose:  "Refresh an application's charm.",
+		Doc:      refreshDoc,
+		SeeAlso:  []string{"deploy"},
+		Examples: refreshExamples,
 	})
 }
 
@@ -262,12 +292,13 @@ func (c *refreshCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.BoolVar(&c.Force, "force", false, "Allow a charm to be refreshed which bypasses LXD profile allow list")
 	f.BoolVar(&c.ForceUnits, "force-units", false, "Refresh all units immediately, even if in error state")
 	f.StringVar(&c.channelStr, "channel", "", "Channel to use when getting the charm from Charmhub")
-	f.BoolVar(&c.ForceBase, "force-series", false, "Refresh even if series of deployed applications are not supported by the new charm")
+	f.BoolVar(&c.ForceBase, "force-base", false, "Refresh even if the base of the deployed application is not supported by the new charm")
 	f.StringVar(&c.SwitchURL, "switch", "", "Crossgrade to a different charm")
 	f.StringVar(&c.CharmPath, "path", "", "Refresh to a charm located at path")
+	f.StringVar(&c.Base, "base", "", "Select a different base than what is currently running.")
 	f.IntVar(&c.Revision, "revision", -1, "Explicit revision of current charm")
-	f.Var(stringMap{&c.Resources}, "resource", "Resource to be uploaded to the controller")
-	f.Var(storageFlag{&c.Storage, nil}, "storage", "Charm storage directives")
+	f.Var(stringMap{mapping: &c.Resources}, "resource", "Resource to be uploaded to the controller")
+	f.Var(storageFlag{stores: &c.Storage, bundleStores: nil}, "storage", "Charm storage directives")
 	f.Var(&c.ConfigOptions, "config", "Either a path to yaml-formatted application config file or a key=value pair ")
 	f.StringVar(&c.BindToSpaces, "bind", "", "Configure application endpoint bindings to spaces")
 	f.Var(newOptBoolValue(&c.Trust), "trust", "Allows charm to run hooks that require access credentials")
@@ -331,29 +362,54 @@ func (c *refreshCommand) Init(args []string) error {
 // Run connects to the specified environment and starts the charm
 // upgrade process.
 func (c *refreshCommand) Run(ctx *cmd.Context) error {
-	apiRoot, err := c.NewAPIRoot()
+	apiRoot, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer func() { _ = apiRoot.Close() }()
 
-	generation, err := c.ActiveBranch()
-	if err != nil {
-		return errors.Trace(err)
-	}
 	charmRefreshClient := c.NewCharmRefreshClient(apiRoot)
-	oldURL, oldOrigin, err := charmRefreshClient.GetCharmURLOrigin(generation, c.ApplicationName)
-	if err != nil {
-		return errors.Trace(err)
-	}
 
 	// There is a timing window where deploy has been called and the charm
 	// is not yet downloaded. Check here to verify the origin has an ID,
-	// otherwise refresh result may be in accurate. We could use the
-	// retry package, but the issue is only seen in automated test due to
-	// speed. Can always use retry if it becomes an issue.
-	if oldOrigin.Source == commoncharm.OriginCharmHub && oldOrigin.ID == "" {
+	// otherwise refresh result may be in accurate.
+	// It should only occur in automated test, but if the default retries isn't enough,
+	// the returned error should help to investigate.
+	// Outside automated test, a new refresh will end up to works
+	var (
+		oldURL    *charm.URL
+		oldOrigin commoncharm.Origin
+	)
+
+	err = retry.Call(retry.CallArgs{
+		Func: func() error {
+			oldURL, oldOrigin, err = charmRefreshClient.GetCharmURLOrigin(ctx, c.ApplicationName)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if oldOrigin.Source == commoncharm.OriginCharmHub && oldOrigin.ID == "" {
+				return errors.Errorf("attempt exceeded")
+			}
+			return nil
+		},
+		Stop:     ctx.Done(),
+		Attempts: c.RetryGetCharmCount,
+		Delay:    c.RetryGetCharmDelay,
+		Clock:    clock.WallClock,
+	})
+	if err != nil {
 		return errors.Errorf("%q deploy incomplete, please try refresh again in a little bit.", c.ApplicationName)
+	}
+
+	newOrigin := oldOrigin
+	if c.Base != "" {
+		if newBase, err := corebase.ParseBaseFromString(c.Base); err != nil {
+			return errors.Trace(err)
+		} else {
+			newOrigin.Base.OS = newBase.OS
+			newOrigin.Base.Channel = newBase.Channel
+
+		}
 	}
 
 	// Set a default URL schema for charm URLs that don't provide one.
@@ -371,7 +427,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if c.BindToSpaces != "" {
-		if err := c.parseBindFlag(apiRoot); err != nil && errors.Is(err, errors.NotSupported) {
+		if err := c.parseBindFlag(ctx, apiRoot); err != nil && errors.Is(err, errors.NotSupported) {
 			ctx.Infof("Spaces not supported by this model's cloud, ignoring bindings.")
 		} else if err != nil {
 			return err
@@ -392,7 +448,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 		newRef = oldURL.WithRevision(c.Revision).String()
 	}
 
-	applicationInfo, err := charmRefreshClient.Get(generation, c.ApplicationName)
+	applicationInfo, err := charmRefreshClient.Get(ctx, c.ApplicationName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -412,7 +468,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	cfg := refresher.RefresherConfig{
 		ApplicationName: c.ApplicationName,
 		CharmURL:        oldURL,
-		CharmOrigin:     oldOrigin.CoreCharmOrigin(),
+		CharmOrigin:     newOrigin.CoreCharmOrigin(),
 		CharmRef:        newRef,
 		Channel:         c.Channel,
 		Force:           c.Force,
@@ -422,11 +478,11 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 		Switch: c.SwitchURL != "" || c.Revision != -1,
 		Logger: ctx,
 	}
-	factory, err := c.getRefresherFactory(apiRoot)
+	factory, err := c.getRefresherFactory(ctx, apiRoot)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	charmID, runErr := factory.Run(cfg)
+	charmID, runErr := factory.Run(ctx, cfg)
 	if runErr != nil && !errors.Is(runErr, refresher.ErrAlreadyUpToDate) {
 		// Process errors.Is(runErr, refresher.ErrAlreadyUpToDate) after reviewing resources.
 		if termErr, ok := errors.Cause(runErr).(*common.TermsRequiredError); ok {
@@ -463,12 +519,16 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 	// 1. There is a change to the charm's channel.
 	// 2. There is a resource change to process.
 	if errors.Is(runErr, refresher.ErrAlreadyUpToDate) {
-		ctx.Infof(runErr.Error())
-		if len(resourceIDs) == 0 && c.Channel.String() == oldOrigin.CoreCharmOrigin().Channel.String() {
+		ctx.Infof("%s", runErr.Error())
+		oldCoreCharmOriginChannel := oldOrigin.CoreCharmOrigin().Channel
+		if oldCoreCharmOriginChannel == nil {
 			return nil
 		}
-		if c.Channel.String() != oldOrigin.CoreCharmOrigin().Channel.String() {
-			ctx.Infof("Note: all future refreshes will now use channel %q", charmID.Origin.Channel.String())
+		if len(resourceIDs) == 0 && c.Channel.String() == oldCoreCharmOriginChannel.String() {
+			return nil
+		}
+		if c.Channel.String() != oldCoreCharmOriginChannel.String() {
+			ctx.Infof("Note: all future refreshes will now use channel %q", oldCoreCharmOriginChannel.String())
 		}
 		if len(resourceIDs) > 0 {
 			ctx.Infof("resources to be upgraded")
@@ -477,7 +537,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 
 	// Print out the updated endpoint binding plan.
 	charmsClient := c.NewCharmClient(apiRoot)
-	charmInfo, err := charmsClient.CharmInfo(curl.String())
+	charmInfo, err := charmsClient.CharmInfo(ctx, curl.String())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -508,7 +568,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 		EndpointBindings:   c.Bindings,
 	}
 
-	err = charmRefreshClient.SetCharm(generation, charmCfg)
+	err = charmRefreshClient.SetCharm(ctx, charmCfg)
 	err = block.ProcessBlockedError(err, block.BlockChange)
 	if params.IsCodeAppShouldNotHaveUnits(err) {
 		return errors.Errorf(upgradedApplicationHasUnitsMessage[1:], c.ApplicationName)
@@ -518,7 +578,7 @@ func (c *refreshCommand) Run(ctx *cmd.Context) error {
 
 	// Emit binding changelog after a successful call to SetCharm.
 	for _, change := range bindingsChangelog {
-		ctx.Infof(change)
+		ctx.Infof("%s", change)
 	}
 
 	return nil
@@ -537,13 +597,13 @@ func (c *refreshCommand) validateEndpointNames(newCharmEndpoints set.Strings, ol
 	return nil
 }
 
-func (c *refreshCommand) parseBindFlag(apiRoot base.APICallCloser) error {
+func (c *refreshCommand) parseBindFlag(ctx context.Context, apiRoot base.APICallCloser) error {
 	if c.BindToSpaces == "" {
 		return nil
 	}
 
 	// Fetch known spaces from server
-	knownSpaces, err := c.NewSpacesClient(apiRoot).ListSpaces()
+	knownSpaces, err := c.NewSpacesClient(apiRoot).ListSpaces(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -579,11 +639,12 @@ func (c *refreshCommand) upgradeResources(
 		return nil, errors.Trace(err)
 	}
 	charmsClient := c.NewCharmClient(apiRoot)
-	meta, err := utils.GetMetaResources(chID.URL, charmsClient)
+	meta, err := utils.GetMetaResources(ctx, chID.URL, charmsClient)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	filtered, err := utils.GetUpgradeResources(
+		ctx,
 		chID,
 		charmsClient,
 		resourceLister,
@@ -637,8 +698,8 @@ type charmAdderShim struct {
 	api *apiclient.Client
 }
 
-func (c *charmAdderShim) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool) (*charm.URL, error) {
-	agentVersion, err := agentVersion(c.modelConfigClient)
+func (c *charmAdderShim) AddLocalCharm(ctx context.Context, curl *charm.URL, ch charm.Charm, force bool) (*charm.URL, error) {
+	agentVersion, err := agentVersion(ctx, c.modelConfigClient)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -663,8 +724,8 @@ func allEndpoints(ci *apicommoncharms.CharmInfo) set.Strings {
 	return epSet
 }
 
-func (c *refreshCommand) getRefresherFactory(apiRoot api.Connection) (refresher.RefresherFactory, error) {
-	charmHubURL, err := c.getCharmHubURL(apiRoot)
+func (c *refreshCommand) getRefresherFactory(ctx context.Context, apiRoot api.Connection) (refresher.RefresherFactory, error) {
+	charmHubURL, err := c.getCharmHubURL(ctx, apiRoot)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -685,10 +746,10 @@ func (c *refreshCommand) getRefresherFactory(apiRoot api.Connection) (refresher.
 	return c.NewRefresherFactory(deps), nil
 }
 
-func (c *refreshCommand) getCharmHubURL(apiRoot base.APICallCloser) (string, error) {
+func (c *refreshCommand) getCharmHubURL(ctx context.Context, apiRoot base.APICallCloser) (string, error) {
 	modelConfigClient := c.ModelConfigClient(apiRoot)
 
-	attrs, err := modelConfigClient.ModelGet()
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

@@ -4,12 +4,10 @@
 package changestream
 
 import (
-	"testing"
 	"time"
 
-	"go.uber.org/goleak"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	domaintesting "github.com/juju/juju/domain/schema/testing"
 )
@@ -18,12 +16,6 @@ import (
 //go:generate go run go.uber.org/mock/mockgen -typed -package changestream -destination clock_mock_test.go github.com/juju/clock Clock,Timer
 //go:generate go run go.uber.org/mock/mockgen -typed -package changestream -destination source_mock_test.go github.com/juju/juju/core/changestream EventSource
 //go:generate go run go.uber.org/mock/mockgen -typed -package changestream -destination metrics_mock_test.go github.com/prometheus/client_golang/prometheus Registerer
-
-func TestPackage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
 
 type baseSuite struct {
 	domaintesting.ControllerSuite
@@ -37,7 +29,7 @@ type baseSuite struct {
 	watchableDBWorker    *MockWatchableDBWorker
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.dbGetter = NewMockDBGetter(ctrl)

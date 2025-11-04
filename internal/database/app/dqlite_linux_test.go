@@ -7,43 +7,46 @@ package app
 
 import (
 	"fmt"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type onceErrorSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&onceErrorSuite{})
+func TestOnceErrorSuite(t *testing.T) {
+	tc.Run(t, &onceErrorSuite{})
+}
 
-func (s *onceErrorSuite) TestDoWithNil(c *gc.C) {
+func (s *onceErrorSuite) TestDoWithNil(c *tc.C) {
 	var oe onceError
 	err := oe.Do(func() error {
 		return nil
 	})
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
 	var called bool
 	err = oe.Do(func() error {
 		called = true
 		return nil
 	})
-	c.Assert(err, gc.IsNil)
-	c.Check(called, jc.IsFalse)
+	c.Assert(err, tc.IsNil)
+	c.Check(called, tc.IsFalse)
 }
 
-func (s *onceErrorSuite) TestDoWithError(c *gc.C) {
+func (s *onceErrorSuite) TestDoWithError(c *tc.C) {
 	var oe onceError
 	err := oe.Do(func() error {
 		return fmt.Errorf("boom")
 	})
-	c.Assert(err, gc.ErrorMatches, "boom")
+	c.Assert(err, tc.ErrorMatches, "boom")
 
 	err = oe.Do(func() error {
 		return fmt.Errorf("blah")
 	})
-	c.Assert(err, gc.ErrorMatches, "boom")
+	c.Assert(err, tc.ErrorMatches, "boom")
 }

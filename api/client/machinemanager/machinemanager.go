@@ -8,12 +8,9 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
-	apiwatcher "github.com/juju/juju/api/watcher"
-	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -50,13 +47,13 @@ func (c *Client) ModelUUID() (string, bool) {
 }
 
 // AddMachines adds new machines with the supplied parameters, creating any requested disks.
-func (client *Client) AddMachines(machineParams []params.AddMachineParams) ([]params.AddMachinesResult, error) {
+func (client *Client) AddMachines(ctx context.Context, machineParams []params.AddMachineParams) ([]params.AddMachinesResult, error) {
 	args := params.AddMachines{
 		MachineParams: machineParams,
 	}
 	results := new(params.AddMachinesResults)
 
-	err := client.facade.FacadeCall(context.TODO(), "AddMachines", args, results)
+	err := client.facade.FacadeCall(ctx, "AddMachines", args, results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -70,7 +67,7 @@ func (client *Client) AddMachines(machineParams []params.AddMachineParams) ([]pa
 
 // DestroyMachinesWithParams removes the given set of machines, the semantics of which
 // is determined by the force and keep parameters.
-func (client *Client) DestroyMachinesWithParams(force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error) {
+func (client *Client) DestroyMachinesWithParams(ctx context.Context, force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error) {
 	args := params.DestroyMachinesParams{
 		Force:       force,
 		Keep:        keep,
@@ -92,7 +89,7 @@ func (client *Client) DestroyMachinesWithParams(force, keep, dryRun bool, maxWai
 	}
 	if len(args.MachineTags) > 0 {
 		var result params.DestroyMachineResults
-		if err := client.facade.FacadeCall(context.TODO(), "DestroyMachineWithParams", args, &result); err != nil {
+		if err := client.facade.FacadeCall(ctx, "DestroyMachineWithParams", args, &result); err != nil {
 			return nil, errors.Trace(err)
 		}
 		if n := len(result.Results); n != len(args.MachineTags) {
@@ -107,9 +104,9 @@ func (client *Client) DestroyMachinesWithParams(force, keep, dryRun bool, maxWai
 
 // ProvisioningScript returns a shell script that, when run,
 // provisions a machine agent on the machine executing the script.
-func (c *Client) ProvisioningScript(args params.ProvisioningScriptParams) (script string, err error) {
+func (c *Client) ProvisioningScript(ctx context.Context, args params.ProvisioningScriptParams) (script string, err error) {
 	var result params.ProvisioningScriptResult
-	if err = c.facade.FacadeCall(context.TODO(), "ProvisioningScript", args, &result); err != nil {
+	if err = c.facade.FacadeCall(ctx, "ProvisioningScript", args, &result); err != nil {
 		return "", err
 	}
 	return result.Script, nil
@@ -117,7 +114,7 @@ func (c *Client) ProvisioningScript(args params.ProvisioningScriptParams) (scrip
 
 // RetryProvisioning updates the provisioning status of a machine allowing the
 // provisioner to retry.
-func (c *Client) RetryProvisioning(all bool, machines ...names.MachineTag) ([]params.ErrorResult, error) {
+func (c *Client) RetryProvisioning(ctx context.Context, all bool, machines ...names.MachineTag) ([]params.ErrorResult, error) {
 	p := params.RetryProvisioningArgs{
 		All: all,
 	}
@@ -126,118 +123,6 @@ func (c *Client) RetryProvisioning(all bool, machines ...names.MachineTag) ([]pa
 		p.Machines[i] = machine.String()
 	}
 	var results params.ErrorResults
-	err := c.facade.FacadeCall(context.TODO(), "RetryProvisioning", p, &results)
+	err := c.facade.FacadeCall(ctx, "RetryProvisioning", p, &results)
 	return results.Results, err
-}
-
-// UpgradeSeriesPrepare notifies the controller that a series upgrade is taking
-// place for a given machine and as such the machine is guarded against
-// operations that would impede, fail, or interfere with the upgrade process.
-func (client *Client) UpgradeSeriesPrepare(machineName, channel string, force bool) error {
-	args := params.UpdateChannelArg{
-		Entity: params.Entity{
-			Tag: names.NewMachineTag(machineName).String(),
-		},
-		Channel: channel,
-		Force:   force,
-	}
-	var result params.ErrorResult
-	if err := client.facade.FacadeCall(context.TODO(), "UpgradeSeriesPrepare", args, &result); err != nil {
-		return errors.Trace(err)
-	}
-
-	if err := result.Error; err != nil {
-		return apiservererrors.RestoreError(err)
-	}
-	return nil
-}
-
-// UpgradeSeriesComplete notifies the controller that a given machine has
-// successfully completed the managed series upgrade process.
-func (client *Client) UpgradeSeriesComplete(machineName string) error {
-	args := params.UpdateChannelArg{
-		Entity: params.Entity{Tag: names.NewMachineTag(machineName).String()},
-	}
-	result := new(params.ErrorResult)
-	err := client.facade.FacadeCall(context.TODO(), "UpgradeSeriesComplete", args, result)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if result.Error != nil {
-		return result.Error
-	}
-
-	return nil
-}
-
-func (client *Client) UpgradeSeriesValidate(machineName, channel string) ([]string, error) {
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{
-			{
-				Entity:  params.Entity{Tag: names.NewMachineTag(machineName).String()},
-				Channel: channel,
-			},
-		},
-	}
-	results := new(params.UpgradeSeriesUnitsResults)
-	err := client.facade.FacadeCall(context.TODO(), "UpgradeSeriesValidate", args, results)
-	if err != nil {
-		return nil, err
-	}
-	if n := len(results.Results); n != 1 {
-		return nil, errors.Errorf("expected 1 result, got %d", n)
-	}
-	if results.Results[0].Error != nil {
-		return nil, results.Results[0].Error
-	}
-	return results.Results[0].UnitNames, nil
-}
-
-// WatchUpgradeSeriesNotifications returns a NotifyWatcher for observing the state of
-// a series upgrade.
-func (client *Client) WatchUpgradeSeriesNotifications(machineName string) (watcher.NotifyWatcher, string, error) {
-	var results params.NotifyWatchResults
-	args := params.Entities{
-		Entities: []params.Entity{{Tag: names.NewMachineTag(machineName).String()}},
-	}
-	err := client.facade.FacadeCall(context.TODO(), "WatchUpgradeSeriesNotifications", args, &results)
-	if err != nil {
-		return nil, "", errors.Trace(err)
-	}
-	if len(results.Results) != 1 {
-		return nil, "", errors.Errorf("expected 1 result, got %d", len(results.Results))
-	}
-	result := results.Results[0]
-	if result.Error != nil {
-		return nil, "", result.Error
-	}
-	w := apiwatcher.NewNotifyWatcher(client.facade.RawAPICaller(), result)
-	return w, result.NotifyWatcherId, nil
-}
-
-// GetUpgradeSeriesMessages returns a StringsWatcher for observing the state of
-// a series upgrade.
-func (client *Client) GetUpgradeSeriesMessages(machineName, watcherId string) ([]string, error) {
-	var results params.StringsResults
-	args := params.UpgradeSeriesNotificationParams{
-		Params: []params.UpgradeSeriesNotificationParam{
-			{
-				Entity:    params.Entity{Tag: names.NewMachineTag(machineName).String()},
-				WatcherId: watcherId,
-			},
-		},
-	}
-	err := client.facade.FacadeCall(context.TODO(), "GetUpgradeSeriesMessages", args, &results)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if len(results.Results) != 1 {
-		return nil, errors.Errorf("expected 1 result, got %d", len(results.Results))
-	}
-	result := results.Results[0]
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	return result.Result, nil
 }

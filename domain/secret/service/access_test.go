@@ -4,44 +4,36 @@
 package service
 
 import (
-	"context"
-
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	coresecrets "github.com/juju/juju/core/secrets"
 	domainsecret "github.com/juju/juju/domain/secret"
 )
 
-func (s *serviceSuite) TestCanManageOwnerUnit(c *gc.C) {
-	ctrl := gomock.NewController(c)
+func (s *serviceSuite) TestGetManagementCaveatOwnerUnit(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	uri := coresecrets.NewURI()
 
-	s.state = NewMockState(ctrl)
 	s.state.EXPECT().GetSecretAccess(gomock.Any(), uri, domainsecret.AccessParams{
 		SubjectTypeID: domainsecret.SubjectUnit,
 		SubjectID:     "mariadb/0",
 	}).Return("manage", nil)
 
-	token := NewMockToken(ctrl)
-
-	err := s.service(c).canManage(context.Background(), uri, SecretAccessor{
+	_, err := s.service.getManagementCaveat(c.Context(), uri, SecretAccessor{
 		Kind: UnitAccessor,
 		ID:   "mariadb/0",
-	}, token)
-	c.Assert(err, jc.ErrorIsNil)
+	})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestCanManageLeaderUnitAppSecret(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
+func (s *serviceSuite) TestGetManagementCaveatLeaderUnitAppSecret(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
 	uri := coresecrets.NewURI()
 
-	s.state = NewMockState(ctrl)
 	s.state.EXPECT().GetSecretAccess(gomock.Any(), uri, domainsecret.AccessParams{
 		SubjectTypeID: domainsecret.SubjectUnit,
 		SubjectID:     "mariadb/0",
@@ -51,44 +43,39 @@ func (s *serviceSuite) TestCanManageLeaderUnitAppSecret(c *gc.C) {
 		SubjectID:     "mariadb",
 	}).Return("manage", nil)
 
-	token := NewMockToken(ctrl)
-	token.EXPECT().Check().Return(nil)
+	s.ensurer.EXPECT().LeadershipCheck("mariadb", "mariadb/0").Return(goodToken{})
 
-	err := s.service(c).canManage(context.Background(), uri, SecretAccessor{
+	_, err := s.service.getManagementCaveat(c.Context(), uri, SecretAccessor{
 		Kind: UnitAccessor,
 		ID:   "mariadb/0",
-	}, token)
-	c.Assert(err, jc.ErrorIsNil)
+	})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestCanManageUserSecrets(c *gc.C) {
-	ctrl := gomock.NewController(c)
+func (s *serviceSuite) TestGetManagementCaveatUserSecrets(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	uri := coresecrets.NewURI()
 
-	s.state = NewMockState(ctrl)
 	s.state.EXPECT().GetSecretAccess(gomock.Any(), uri, domainsecret.AccessParams{
 		SubjectTypeID: domainsecret.SubjectModel,
 		SubjectID:     "model-uuid",
 	}).Return("manage", nil)
 
-	token := NewMockToken(ctrl)
-
-	err := s.service(c).canManage(context.Background(), uri, SecretAccessor{
+	_, err := s.service.getManagementCaveat(c.Context(), uri, SecretAccessor{
 		Kind: ModelAccessor,
 		ID:   "model-uuid",
-	}, token)
-	c.Assert(err, jc.ErrorIsNil)
+	})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestCanReadAppSecret(c *gc.C) {
-	ctrl := gomock.NewController(c)
+func (s *serviceSuite) TestCanReadAppSecret(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	uri := coresecrets.NewURI()
 
-	s.state = NewMockState(ctrl)
 	s.state.EXPECT().GetSecretAccess(gomock.Any(), uri, domainsecret.AccessParams{
 		SubjectTypeID: domainsecret.SubjectUnit,
 		SubjectID:     "mariadb/0",
@@ -98,9 +85,9 @@ func (s *serviceSuite) TestCanReadAppSecret(c *gc.C) {
 		SubjectID:     "mariadb",
 	}).Return("view", nil)
 
-	err := s.service(c).canRead(context.Background(), uri, SecretAccessor{
+	err := s.service.canRead(c.Context(), uri, SecretAccessor{
 		Kind: UnitAccessor,
 		ID:   "mariadb/0",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

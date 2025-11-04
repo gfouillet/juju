@@ -4,15 +4,15 @@
 package agent
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/voyeur"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
@@ -21,18 +21,20 @@ import (
 	"github.com/juju/juju/agent/engine"
 	agenterrors "github.com/juju/juju/agent/errors"
 	"github.com/juju/juju/caas"
-	caasprovider "github.com/juju/juju/caas/kubernetes/provider"
-	caasconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/agent/agentconf"
 	"github.com/juju/juju/cmd/jujud/agent/modeloperator"
 	cmdutil "github.com/juju/juju/cmd/jujud/util"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
+	internaldependency "github.com/juju/juju/internal/dependency"
 	internallogger "github.com/juju/juju/internal/logger"
+	caasprovider "github.com/juju/juju/internal/provider/kubernetes"
+	caasconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/upgrade"
-	jworker "github.com/juju/juju/internal/worker"
+	internalworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/gate"
 	"github.com/juju/juju/internal/worker/logsender"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // ModelCommand is a cmd.Command responsible for running a model agent.
@@ -72,12 +74,18 @@ func (m *ModelCommand) Init(args []string) error {
 		return err
 	}
 
-	m.runner = worker.NewRunner(worker.RunnerParams{
+	var err error
+	m.runner, err = worker.NewRunner(worker.RunnerParams{
+		Name:          "model",
 		IsFatal:       agenterrors.IsFatal,
 		MoreImportant: agenterrors.MoreImportant,
-		RestartDelay:  jworker.RestartDelay,
-		Logger:        logger,
+		RestartDelay:  internalworker.RestartDelay,
+		Logger:        internalworker.WrapLogger(logger),
 	})
+	if err != nil {
+		return errors.Trace(err)
+	}
+
 	return nil
 }
 
@@ -89,13 +97,13 @@ func (m *ModelCommand) maybeCopyAgentConfig() error {
 		return nil
 	}
 	if !os.IsNotExist(errors.Cause(err)) {
-		logger.Errorf("reading initial agent config file: %v", err)
+		logger.Errorf(context.TODO(), "reading initial agent config file: %v", err)
 		return errors.Trace(err)
 	}
 
 	templateFile := filepath.Join(agent.Dir(m.DataDir(), m.Tag()), caasconstants.TemplateFileNameAgentConf)
 	if err := copyFile(agent.ConfigPath(m.DataDir(), m.Tag()), templateFile); err != nil {
-		logger.Errorf("copying agent config file template: %v", err)
+		logger.Errorf(context.TODO(), "copying agent config file template: %v", err)
 		return errors.Trace(err)
 	}
 	return m.ReadConfig(m.Tag().String())
@@ -132,7 +140,7 @@ func NewModelCommand(
 
 // Run implements Command
 func (m *ModelCommand) Run(ctx *cmd.Context) error {
-	logger.Infof("caas model operator start (%s [%s])", jujuversion.Current,
+	logger.Infof(ctx, "caas model operator start (%s [%s])", jujuversion.Current,
 		runtime.Compiler)
 
 	if err := m.maybeCopyAgentConfig(); err != nil {
@@ -141,7 +149,7 @@ func (m *ModelCommand) Run(ctx *cmd.Context) error {
 
 	m.upgradeStepsLock = upgrade.NewLock(m.CurrentConfig(), jujuversion.Current)
 
-	_ = m.runner.StartWorker("modeloperator", m.Workers)
+	_ = m.runner.StartWorker(ctx, "modeloperator", m.Workers)
 	return cmdutil.AgentDone(logger, m.runner.Wait())
 }
 
@@ -166,7 +174,7 @@ func (m *ModelCommand) Wait() error {
 	return m.errReason
 }
 
-func (m *ModelCommand) Workers() (worker.Worker, error) {
+func (m *ModelCommand) Workers(ctx context.Context) (worker.Worker, error) {
 	port := os.Getenv(caasprovider.EnvModelAgentHTTPPort)
 	if port == "" {
 		return nil, errors.NotValidf("env %s missing", caasprovider.EnvModelAgentHTTPPort)
@@ -206,14 +214,14 @@ func (m *ModelCommand) Workers() (worker.Worker, error) {
 	// should work out the best way to get it into here.
 	engine, err := dependency.NewEngine(engine.DependencyEngineConfig(
 		dependency.DefaultMetrics(),
-		internallogger.GetLogger("juju.worker.dependency"),
+		internaldependency.WrapLogger(internallogger.GetLogger("juju.worker.dependency")),
 	))
 	if err != nil {
 		return nil, err
 	}
 	if err := dependency.Install(engine, manifolds); err != nil {
 		if err := worker.Stop(engine); err != nil {
-			logger.Errorf("while stopping engine with bad manifolds: %v", err)
+			logger.Errorf(context.TODO(), "while stopping engine with bad manifolds: %v", err)
 		}
 		return nil, err
 	}

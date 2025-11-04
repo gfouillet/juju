@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"gopkg.in/tomb.v2"
 
@@ -15,11 +16,17 @@ import (
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/flags"
 	"github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
-	usererrors "github.com/juju/juju/domain/access/errors"
+	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/user"
+	accesserrors "github.com/juju/juju/domain/access/errors"
 	userservice "github.com/juju/juju/domain/access/service"
+	"github.com/juju/juju/domain/controllernode"
+	macaroonerrors "github.com/juju/juju/domain/macaroon/errors"
+	networkerrors "github.com/juju/juju/domain/network/errors"
+	"github.com/juju/juju/domain/status"
 	domainstorage "github.com/juju/juju/domain/storage"
 	storageerrors "github.com/juju/juju/domain/storage/errors"
 	storageservice "github.com/juju/juju/domain/storage/service"
@@ -29,7 +36,6 @@ import (
 	"github.com/juju/juju/internal/password"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/worker/gate"
-	"github.com/juju/juju/state/binarystorage"
 )
 
 const (
@@ -38,48 +44,39 @@ const (
 	stateCompleted = "completed"
 )
 
-// LegacyState is the interface that is used to get the legacy state (mongo).
-type LegacyState interface {
-	// ControllerModelUUID returns the UUID of the model that was
-	// bootstrapped.  This is the only model that can have controller
-	// machines.  The owner of this model is also considered "special", in
-	// that they are the only user that is able to create other users
-	// (until we have more fine grained permissions), and they cannot be
-	// disabled.
-	ControllerModelUUID() string
-	// ToolsStorage returns a new binarystorage.StorageCloser that stores tools
-	// metadata in the "juju" database "toolsmetadata" collection.
-	ToolsStorage(store objectstore.ObjectStore) (binarystorage.StorageCloser, error)
-}
-
 // WorkerConfig encapsulates the configuration options for the
 // bootstrap worker.
 type WorkerConfig struct {
-	Agent                   agent.Agent
-	ObjectStoreGetter       ObjectStoreGetter
-	ControllerConfigService ControllerConfigService
-	CredentialService       CredentialService
-	CloudService            CloudService
-	UserService             UserService
-	StorageService          StorageService
-	ProviderRegistry        storage.ProviderRegistry
-	ApplicationService      ApplicationService
-	FlagService             FlagService
-	NetworkService          NetworkService
-	BakeryConfigService     BakeryConfigService
-	BootstrapUnlocker       gate.Unlocker
-	AgentBinaryUploader     AgentBinaryBootstrapFunc
-	ControllerCharmDeployer ControllerCharmDeployerFunc
-	PopulateControllerCharm PopulateControllerCharmFunc
-	CharmhubHTTPClient      HTTPClient
-	UnitPassword            string
-	NewEnviron              NewEnvironFunc
-	BootstrapAddresses      BootstrapAddressesFunc
-	BootstrapAddressFinder  BootstrapAddressFinderFunc
-	Logger                  logger.Logger
-
-	// Deprecated: This is only here, until we can remove the state layer.
-	SystemState SystemState
+	Agent                      agent.Agent
+	ObjectStoreGetter          ObjectStoreGetter
+	ControllerAgentBinaryStore AgentBinaryStore
+	ControllerConfigService    ControllerConfigService
+	ControllerNodeService      ControllerNodeService
+	CloudService               CloudService
+	UserService                UserService
+	StorageService             StorageService
+	AgentPasswordService       AgentPasswordService
+	ApplicationService         ApplicationService
+	ControllerModel            coremodel.Model
+	ModelConfigService         ModelConfigService
+	ModelInfoService           ModelInfoService
+	MachineService             MachineService
+	KeyManagerService          KeyManagerService
+	FlagService                FlagService
+	NetworkService             NetworkService
+	BakeryConfigService        BakeryConfigService
+	BootstrapAddressFinder     BootstrapAddressFinderFunc
+	BootstrapUnlocker          gate.Unlocker
+	AgentBinaryUploader        AgentBinaryBootstrapFunc
+	ControllerCharmDeployer    ControllerCharmDeployerFunc
+	PopulateControllerCharm    PopulateControllerCharmFunc
+	AgentFinalizer             AgentFinalizerFunc
+	CharmhubHTTPClient         HTTPClient
+	UnitPassword               string
+	ServiceManagerGetter       ServiceManagerGetterFunc
+	StatusHistory              StatusHistory
+	Logger                     logger.Logger
+	Clock                      clock.Clock
 }
 
 // Validate ensures that the config values are valid.
@@ -90,11 +87,14 @@ func (c *WorkerConfig) Validate() error {
 	if c.ObjectStoreGetter == nil {
 		return errors.NotValidf("nil ObjectStoreGetter")
 	}
+	if c.ControllerAgentBinaryStore == nil {
+		return errors.NotValidf("nil ControllerAgentBinaryStore")
+	}
 	if c.ControllerConfigService == nil {
 		return errors.NotValidf("nil ControllerConfigService")
 	}
-	if c.CredentialService == nil {
-		return errors.NotValidf("nil CredentialService")
+	if c.ControllerNodeService == nil {
+		return errors.NotValidf("nil ControllerNodeService")
 	}
 	if c.CloudService == nil {
 		return errors.NotValidf("nil CloudService")
@@ -105,8 +105,20 @@ func (c *WorkerConfig) Validate() error {
 	if c.StorageService == nil {
 		return errors.NotValidf("nil StorageService")
 	}
+	if c.AgentPasswordService == nil {
+		return errors.NotValidf("nil AgentPasswordService")
+	}
 	if c.ApplicationService == nil {
 		return errors.NotValidf("nil ApplicationService")
+	}
+	if c.ModelConfigService == nil {
+		return errors.NotValidf("nil ModelConfigService")
+	}
+	if c.MachineService == nil {
+		return errors.NotValidf("nil MachineService")
+	}
+	if c.KeyManagerService == nil {
+		return errors.NotValidf("nil KeyManagerService")
 	}
 	if c.BootstrapUnlocker == nil {
 		return errors.NotValidf("nil BootstrapUnlocker")
@@ -132,20 +144,23 @@ func (c *WorkerConfig) Validate() error {
 	if c.CharmhubHTTPClient == nil {
 		return errors.NotValidf("nil CharmhubHTTPClient")
 	}
-	if c.Logger == nil {
-		return errors.NotValidf("nil Logger")
+	if c.AgentFinalizer == nil {
+		return errors.NotValidf("nil AgentFinalizer")
 	}
-	if c.SystemState == nil {
-		return errors.NotValidf("nil SystemState")
+	if c.StatusHistory == nil {
+		return errors.NotValidf("nil StatusHistory")
 	}
 	if c.BootstrapAddressFinder == nil {
 		return errors.NotValidf("nil BootstrapAddressFinder")
 	}
-	if c.NewEnviron == nil {
-		return errors.NotValidf("nil NewEnviron")
+	if err := c.ControllerModel.UUID.Validate(); err != nil {
+		return fmt.Errorf("controller model id: %w", err)
 	}
-	if c.BootstrapAddresses == nil {
-		return errors.NotValidf("nil BootstrapAddresses")
+	if c.Logger == nil {
+		return errors.NotValidf("nil Logger")
+	}
+	if c.Clock == nil {
+		return errors.NotValidf("nil Clock")
 	}
 	return nil
 }
@@ -229,23 +244,13 @@ func (w *bootstrapWorker) loop() error {
 		return errors.Trace(err)
 	}
 
-	if err := w.seedControllerCharm(ctx, dataDir, bootstrapParams); err != nil {
-		return errors.Trace(err)
-	}
-
 	// Retrieve controller addresses needed to set the API host ports.
-	bootstrapAddresses, err := w.cfg.BootstrapAddressFinder(ctx, BootstrapAddressesConfig{
-		BootstrapInstanceID:    bootstrapParams.BootstrapMachineInstanceId,
-		SystemState:            w.cfg.SystemState,
-		CloudService:           w.cfg.CloudService,
-		CredentialService:      w.cfg.CredentialService,
-		NewEnvironFunc:         w.cfg.NewEnviron,
-		BootstrapAddressesFunc: w.cfg.BootstrapAddresses,
-	})
+	bootstrapAddresses, err := w.cfg.BootstrapAddressFinder(ctx, bootstrapParams.BootstrapMachineInstanceId)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	servingInfo, ok := agentConfig.StateServingInfo()
+
+	servingInfo, ok := agentConfig.ControllerAgentInfo()
 	if !ok {
 		return errors.Errorf("state serving information not available")
 	}
@@ -255,12 +260,30 @@ func (w *bootstrapWorker) loop() error {
 		if !errors.Is(err, errors.NotSupported) {
 			return errors.Trace(err)
 		}
-		w.logger.Debugf("reload spaces not supported due to a non-networking environement")
+		w.logger.Debugf(ctx, "reload spaces not supported due to a non-networking environment")
+	}
+
+	// Deploy the controller charm after calling reload spaces or
+	// no subnets will be available for the ip address table with
+	// kubernetes.
+	if err := w.seedControllerCharm(ctx, dataDir, bootstrapParams, bootstrapAddresses); err != nil {
+		return errors.Trace(err)
+	}
+
+	if err := w.seedInitialAuthorizedKeys(ctx, bootstrapParams.ControllerModelAuthorizedKeys); err != nil {
+		return errors.Trace(err)
+	}
+
+	// Finialize the agent by either setting the machine as provisioned
+	// or by setting the controller node password.
+	if err := w.cfg.AgentFinalizer(ctx, w.cfg.AgentPasswordService, w.cfg.MachineService, bootstrapParams, agentConfig); err != nil {
+		return errors.Annotatef(err, "finalizing agent")
 	}
 
 	// Convert the provider addresses that we got from the bootstrap instance
 	// to space ID decorated addresses.
 	if err := w.initAPIHostPorts(ctx, controllerConfig, bootstrapAddresses, servingInfo.APIPort); err != nil {
+		w.logger.Errorf(ctx, "unable to set API host ports %v:%w", bootstrapAddresses, err)
 		return errors.Trace(err)
 	}
 
@@ -275,42 +298,119 @@ func (w *bootstrapWorker) loop() error {
 	w.reportInternalState(stateCompleted)
 
 	w.cfg.BootstrapUnlocker.Unlock()
+
+	// Write the domain status history for the model. We don't care if this
+	// fails, but we also are trying to ensure it's written only once. By
+	// writing it here, we know that at the very least that the bootstrap
+	// worker hasn't been restarted.
+	modelUUID := w.cfg.ControllerModel.UUID
+	if err := w.cfg.StatusHistory.RecordStatus(ctx, status.ModelNamespace.WithID(modelUUID.String()), corestatus.StatusInfo{
+		Status: corestatus.Available,
+		Since:  ptr(w.cfg.Clock.Now()),
+	}); err != nil {
+		w.logger.Warningf(ctx, "recording status for model %q: %v", modelUUID, err)
+	}
+
 	return nil
 }
 
 func (w *bootstrapWorker) seedMacaroonConfig(ctx context.Context) error {
-	return w.cfg.BakeryConfigService.InitialiseBakeryConfig(ctx)
+	err := w.cfg.BakeryConfigService.InitialiseBakeryConfig(ctx)
+	if errors.Is(err, macaroonerrors.BakeryConfigAlreadyInitialised) {
+		return nil
+	}
+	return errors.Trace(err)
 }
 
 func (w *bootstrapWorker) seedInitialUsers(ctx context.Context) error {
 	// Any failure should be retryable, so we can re-attempt to bootstrap.
-
-	adminUser, err := w.cfg.UserService.GetUserByName(ctx, "admin")
+	controllerCfg, err := w.cfg.ControllerConfigService.ControllerConfig(ctx)
 	if err != nil {
-		return errors.Annotatef(err, "getting admin user")
+		return errors.Trace(err)
+	}
+
+	controllerUUID := controllerCfg.ControllerUUID()
+
+	adminUser, err := w.cfg.UserService.GetUserByName(ctx, user.AdminUserName)
+	if err != nil {
+		return errors.Annotatef(err, "getting admin user %q", user.AdminUserName)
 	}
 
 	pass, err := password.RandomPassword()
 	if err != nil {
 		return errors.Annotatef(err, "generating metrics password")
 	}
-	password := auth.NewPassword(pass)
+	metricsPassword := auth.NewPassword(pass)
+
+	metricsName, err := user.NewName("juju-metrics")
+	if err != nil {
+		return errors.Trace(err)
+	}
 	_, _, err = w.cfg.UserService.AddUser(ctx, userservice.AddUserArg{
-		Name:        "juju-metrics",
+		Name:        metricsName,
 		DisplayName: "Juju Metrics",
-		Password:    &password,
+		Password:    &metricsPassword,
 		CreatorUUID: adminUser.UUID,
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        controllerUUID,
+			},
+		},
 	})
-	// User already exists, we don't need to do anything in this scenario.
-	if errors.Is(err, usererrors.UserAlreadyExists) {
+	if errors.Is(err, accesserrors.UserAlreadyExists) {
 		return nil
 	}
+
+	err = w.cfg.UserService.AddExternalUser(
+		ctx,
+		permission.EveryoneUserName,
+		"",
+		adminUser.UUID,
+	)
+	if errors.Is(err, accesserrors.UserAlreadyExists) {
+		return nil
+	}
+
 	return errors.Annotatef(err, "inserting initial users")
 }
 
+// seedInitialAuthorisedKeys is responsible for adding any extra authorised keys
+// requested during bootstrap to the admin user on the controller model. It is
+// valid and safe to pass in a nil slice of keys to this function.
+func (w *bootstrapWorker) seedInitialAuthorizedKeys(
+	ctx context.Context,
+	keys []string,
+) error {
+	adminUser, err := w.cfg.UserService.GetUserByName(ctx, coremodel.ControllerModelOwnerUsername)
+	if err != nil {
+		return fmt.Errorf(
+			"cannot get %q user to seed %d authorized keys into the controller model: %w",
+			coremodel.ControllerModelOwnerUsername,
+			len(keys),
+			err,
+		)
+	}
+
+	err = w.cfg.KeyManagerService.AddPublicKeysForUser(ctx, adminUser.UUID, keys...)
+	if err != nil {
+		return fmt.Errorf("cannot seed %d authorized keys into the controller model: %w",
+			len(keys),
+			err,
+		)
+	}
+
+	return nil
+}
+
 func (w *bootstrapWorker) seedStoragePools(ctx context.Context, poolParams map[string]storage.Attrs) error {
-	storagePools, err := initialStoragePools(w.cfg.ProviderRegistry, poolParams)
+	err := w.cfg.ModelInfoService.SeedDefaultStoragePools(ctx)
+	if err != nil {
+		return fmt.Errorf("seeding default storage pools into model: %w", err)
+	}
+
+	storagePools, err := initialStoragePools(poolParams)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -344,13 +444,22 @@ func (w *bootstrapWorker) initAPIHostPorts(ctx context.Context, controllerConfig
 	if err != nil {
 		return errors.Trace(err)
 	}
+	hostPorts := network.SpaceAddressesWithPort(addrs, apiPort)
 
-	hostPorts := []network.SpaceHostPorts{network.SpaceAddressesWithPort(addrs, apiPort)}
+	mgmtSpaceCfg := controllerConfig.JujuManagementSpace()
+	mgmtSpace, err := w.cfg.NetworkService.SpaceByName(ctx, mgmtSpaceCfg)
+	if err != nil && !errors.Is(err, networkerrors.SpaceNotFound) {
+		return errors.Trace(err)
+	}
 
-	mgmtSpace := controllerConfig.JujuManagementSpace()
-	hostPortsForAgents := w.filterHostPortsForManagementSpace(mgmtSpace, hostPorts, allSpaces)
-
-	return w.cfg.SystemState.SetAPIHostPorts(controllerConfig, hostPorts, hostPortsForAgents)
+	// During bootstrap, the controller node will always be "0".
+	args := controllernode.SetAPIAddressArgs{
+		MgmtSpace: mgmtSpace,
+		APIAddresses: map[string]network.SpaceHostPorts{
+			"0": hostPorts,
+		},
+	}
+	return w.cfg.ControllerNodeService.SetAPIAddresses(ctx, args)
 }
 
 // We filter the collection of API addresses based on the configured
@@ -359,7 +468,8 @@ func (w *bootstrapWorker) initAPIHostPorts(ctx context.Context, controllerConfig
 // to zero elements, just use the unfiltered slice for safety - we do not
 // want to cut off communication to the controller based on erroneous config.
 func (w *bootstrapWorker) filterHostPortsForManagementSpace(
-	mgmtSpace string,
+	ctx context.Context,
+	mgmtSpace network.SpaceName,
 	apiHostPorts []network.SpaceHostPorts,
 	allSpaces network.SpaceInfos,
 ) []network.SpaceHostPorts {
@@ -378,7 +488,7 @@ func (w *bootstrapWorker) filterHostPortsForManagementSpace(
 			if addrsIsInSpace {
 				hostPortsForAgents[i] = filtered
 			} else {
-				w.logger.Warningf("API addresses %v not in the management space %s", apiHostPort, mgmtSpace)
+				w.logger.Warningf(ctx, "API addresses %v not in the management space %s", apiHostPort, mgmtSpace)
 				hostPortsForAgents[i] = apiHostPort
 			}
 		}
@@ -391,19 +501,28 @@ func (w *bootstrapWorker) filterHostPortsForManagementSpace(
 // It returns a cancellable context that is cancelled when the action has
 // completed.
 func (w *bootstrapWorker) scopedContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	return w.tomb.Context(ctx), cancel
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }
 
 func (w *bootstrapWorker) seedAgentBinary(ctx context.Context, dataDir string) (func(), error) {
-	objectStore, err := w.cfg.ObjectStoreGetter.GetObjectStore(ctx, w.cfg.SystemState.ControllerModelUUID())
+	objectStore, err := w.cfg.ObjectStoreGetter.GetObjectStore(
+		ctx,
+		w.cfg.ControllerModel.UUID.String(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object store: %w", err)
 	}
 
 	// Agent binary seeder will populate the tools for the agent.
-	agentStorage := agentStorageShim{State: w.cfg.SystemState}
-	cleanup, err := w.cfg.AgentBinaryUploader(ctx, dataDir, agentStorage, objectStore, w.cfg.Logger.Child("agentbinary"))
+	// TODO (tlm) agentStore is a temprorary hook back into Mongo that will be
+	// removed soon.
+	cleanup, err := w.cfg.AgentBinaryUploader(
+		ctx,
+		dataDir,
+		w.cfg.ControllerAgentBinaryStore,
+		objectStore,
+		w.cfg.Logger.Child("agentbinary"),
+	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -411,30 +530,43 @@ func (w *bootstrapWorker) seedAgentBinary(ctx context.Context, dataDir string) (
 	return cleanup, nil
 }
 
-func (w *bootstrapWorker) seedControllerCharm(ctx context.Context, dataDir string, bootstrapArgs instancecfg.StateInitializationParams) error {
+func (w *bootstrapWorker) seedControllerCharm(
+	ctx context.Context,
+	dataDir string,
+	bootstrapArgs instancecfg.StateInitializationParams,
+	bootstrapAddresses network.ProviderAddresses,
+) error {
 	controllerConfig, err := w.cfg.ControllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	objectStore, err := w.cfg.ObjectStoreGetter.GetObjectStore(ctx, w.cfg.SystemState.ControllerModelUUID())
+	objectStore, err := w.cfg.ObjectStoreGetter.GetObjectStore(
+		ctx,
+		w.cfg.ControllerModel.UUID.String(),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to get object store: %w", err)
 	}
 
 	// Controller charm seeder will populate the charm for the controller.
-	deployer, err := w.cfg.ControllerCharmDeployer(ControllerCharmDeployerConfig{
-		StateBackend:                w.cfg.SystemState,
+	deployer, err := w.cfg.ControllerCharmDeployer(ctx, ControllerCharmDeployerConfig{
+		AgentPasswordService:        w.cfg.AgentPasswordService,
 		ApplicationService:          w.cfg.ApplicationService,
+		Model:                       w.cfg.ControllerModel,
+		ModelConfigService:          w.cfg.ModelConfigService,
 		ObjectStore:                 objectStore,
 		ControllerConfig:            controllerConfig,
 		DataDir:                     dataDir,
 		BootstrapMachineConstraints: bootstrapArgs.BootstrapMachineConstraints,
+		BootstrapAddresses:          bootstrapAddresses,
 		ControllerCharmName:         bootstrapArgs.ControllerCharmPath,
 		ControllerCharmChannel:      bootstrapArgs.ControllerCharmChannel,
 		CharmhubHTTPClient:          w.cfg.CharmhubHTTPClient,
 		UnitPassword:                w.cfg.UnitPassword,
+		ServiceManagerGetter:        w.cfg.ServiceManagerGetter,
 		Logger:                      w.cfg.Logger,
+		Clock:                       w.cfg.Clock,
 	})
 	if err != nil {
 		return errors.Trace(err)
@@ -456,15 +588,9 @@ func (w *bootstrapWorker) bootstrapParams(ctx context.Context, dataDir string) (
 }
 
 // initialStoragePools extract any storage pools included with the bootstrap params.
-func initialStoragePools(registry storage.ProviderRegistry, poolParams map[string]storage.Attrs) ([]*storage.Config, error) {
+func initialStoragePools(poolParams map[string]storage.Attrs) ([]*storage.Config, error) {
 	var result []*storage.Config
-	defaultStoragePools, err := domainstorage.DefaultStoragePools(registry)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	for _, p := range defaultStoragePools {
-		result = append(result, p)
-	}
+
 	for name, attrs := range poolParams {
 		pType, _ := attrs[domainstorage.StorageProviderType].(string)
 		if pType == "" {
@@ -481,13 +607,6 @@ func initialStoragePools(registry storage.ProviderRegistry, poolParams map[strin
 	return result, nil
 }
 
-type agentStorageShim struct {
-	State SystemState
-}
-
-// AgentBinaryStorage returns the interface for the BinaryAgentStorage.
-// This is currently a shim wrapper around the tools storage. That will be
-// renamed once we re-implement the tools storage in dqlite.
-func (s agentStorageShim) AgentBinaryStorage(objectStore objectstore.ObjectStore) (BinaryAgentStorage, error) {
-	return s.State.ToolsStorage(objectStore)
+func ptr[T any](v T) *T {
+	return &v
 }

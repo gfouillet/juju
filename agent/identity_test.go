@@ -6,21 +6,23 @@ package agent
 
 import (
 	"os"
+	stdtesting "testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/testing"
-	jujuversion "github.com/juju/juju/version"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/testing"
 )
 
 type identitySuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&identitySuite{})
+func TestIdentitySuite(t *stdtesting.T) {
+	tc.Run(t, &identitySuite{})
+}
 
 var attributeParams = AgentConfigParams{
 	Tag:               names.NewMachineTag("1"),
@@ -33,38 +35,36 @@ var attributeParams = AgentConfigParams{
 	Model:             testing.ModelTag,
 }
 
-var servingInfo = controller.StateServingInfo{
+var servingInfo = controller.ControllerAgentInfo{
 	Cert:           "old cert",
 	PrivateKey:     "old key",
 	CAPrivateKey:   "old ca key",
-	StatePort:      69,
 	APIPort:        47,
-	SharedSecret:   "shared",
 	SystemIdentity: "identity",
 }
 
-func (s *identitySuite) TestWriteSystemIdentityFile(c *gc.C) {
+func (s *identitySuite) TestWriteSystemIdentityFile(c *tc.C) {
 	params := attributeParams
 	params.Paths.DataDir = c.MkDir()
 	conf, err := NewStateMachineConfig(params, servingInfo)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = WriteSystemIdentityFile(conf)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	contents, err := os.ReadFile(conf.SystemIdentityPath())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(string(contents), gc.Equals, servingInfo.SystemIdentity)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(string(contents), tc.Equals, servingInfo.SystemIdentity)
 
 	fi, err := os.Stat(conf.SystemIdentityPath())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(fi.Mode().Perm(), gc.Equals, os.FileMode(0600))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(fi.Mode().Perm(), tc.Equals, os.FileMode(0600))
 	// ensure that file is deleted when SystemIdentity is empty
 	info := servingInfo
 	info.SystemIdentity = ""
 	conf, err = NewStateMachineConfig(params, info)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = WriteSystemIdentityFile(conf)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	_, err = os.Stat(conf.SystemIdentityPath())
-	c.Assert(err, jc.Satisfies, os.IsNotExist)
+	c.Assert(err, tc.Satisfies, os.IsNotExist)
 }

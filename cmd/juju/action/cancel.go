@@ -4,18 +4,19 @@
 package action
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewCancelCommand() cmd.Command {
@@ -37,12 +38,26 @@ func (c *cancelCommand) SetFlags(f *gnuflag.FlagSet) {
 const cancelDoc = `
 Cancel pending or running tasks matching given IDs or partial ID prefixes.`
 
+const cancelExamples = `
+To cancel a task by ID:
+
+    juju cancel-task 1
+
+To cancel multiple tasks by ID:
+
+    juju cancel-task 1 2 3
+`
+
 func (c *cancelCommand) Info() *cmd.Info {
 	info := &cmd.Info{
-		Name:    "cancel-task",
-		Args:    "(<task-id>|<task-id-prefix>) [...]",
-		Purpose: "Cancel pending or running tasks.",
-		Doc:     cancelDoc,
+		Name:     "cancel-task",
+		Args:     "(<task-id>|<task-id-prefix>) [...]",
+		Purpose:  "Cancel pending or running tasks.",
+		Doc:      cancelDoc,
+		Examples: cancelExamples,
+		SeeAlso: []string{
+			"show-task",
+		},
 	}
 	return jujucmd.Info(info)
 }
@@ -58,7 +73,7 @@ func (c *cancelCommand) Init(args []string) error {
 }
 
 func (c *cancelCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -68,7 +83,7 @@ func (c *cancelCommand) Run(ctx *cmd.Context) error {
 		return errors.Errorf("no task IDs specified")
 	}
 
-	actions, err := api.Cancel(c.requestedIDs)
+	actions, err := api.Cancel(ctx, c.requestedIDs)
 	if err != nil {
 		return err
 	}
@@ -103,7 +118,7 @@ func (c *cancelCommand) Run(ctx *cmd.Context) error {
 			message += fmt.Sprintf("task: %s, error: %s\n", a.ID, a.Result.Message)
 		}
 
-		logger.Warningf(message)
+		logger.Warningf(context.TODO(), message)
 	}
 
 	return err

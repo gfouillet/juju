@@ -9,15 +9,15 @@ import (
 	"strings"
 
 	"github.com/gosuri/uitable"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -102,7 +102,7 @@ func (c *MoveCommand) Run(ctx *cmd.Context) error {
 
 		// Name here is checked to be a valid space name in ParseNameAndCIDRs.
 		spaceTag := names.NewSpaceTag(c.Name)
-		moved, err := api.MoveSubnets(spaceTag, subnetTags, c.Force)
+		moved, err := api.MoveSubnets(ctx, spaceTag, subnetTags, c.Force)
 		if err != nil {
 			return errors.Annotatef(err, "cannot update space %q", spaceTag.Id())
 		}
@@ -118,7 +118,7 @@ func (c *MoveCommand) Run(ctx *cmd.Context) error {
 func (c *MoveCommand) getSubnetTags(ctx *cmd.Context, api SubnetAPI, cidrs set.Strings) ([]names.SubnetTag, error) {
 	sortedCIDRs := cidrs.SortedValues()
 
-	subnetResults, err := api.SubnetsByCIDR(sortedCIDRs)
+	subnetResults, err := api.SubnetsByCIDR(ctx, sortedCIDRs)
 	if err != nil {
 		return nil, errors.Annotatef(err, "failed to get subnets by CIDR")
 	}

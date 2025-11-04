@@ -100,7 +100,7 @@ func BootstrapDqlite(
 	}
 	defer func() {
 		if err := dqlite.Close(); err != nil {
-			logger.Errorf("closing Dqlite: %v", err)
+			logger.Errorf(ctx, "closing Dqlite: %v", err)
 		}
 	}()
 
@@ -160,7 +160,7 @@ func InsertControllerNodeID(ctx context.Context, runner coredatabase.TxnRunner, 
 -- Accordingly, the controller ID remains the ID of the machine, 
 -- but it should probably become a UUID once machines have one.
 -- While HA is not supported in K8s, this doesn't matter.
-INSERT INTO controller_node (controller_id, dqlite_node_id, bind_address)
+INSERT INTO controller_node (controller_id, dqlite_node_id, dqlite_bind_address)
 VALUES ('0', ?, '127.0.0.1');`
 	return runner.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, q, nodeID)
@@ -192,6 +192,10 @@ func (r *txnRunner) Txn(ctx context.Context, f func(context.Context, *sqlair.TX)
 
 func (r *txnRunner) StdTxn(ctx context.Context, f func(context.Context, *sql.Tx) error) error {
 	return errors.Trace(StdTxn(ctx, r.db, f))
+}
+
+func (r *txnRunner) Dying() <-chan struct{} {
+	return make(<-chan struct{})
 }
 
 // bootstrapInit is a type for describing a bootstrap operation that

@@ -5,101 +5,108 @@ package bootstrap
 
 import (
 	"context"
+	"testing"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/dependency"
 	dependencytesting "github.com/juju/worker/v4/dependency/testing"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/goleak"
 
-	"github.com/juju/juju/core/instance"
+	agent "github.com/juju/juju/agent"
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/domain/servicefactory/testing"
-	"github.com/juju/juju/environs"
+	"github.com/juju/juju/core/providertracker"
 	"github.com/juju/juju/internal/bootstrap"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 )
 
 type manifoldSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
 
+	cfg = s.getConfig()
 	cfg.AgentName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
-	cfg.StateName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
-
+	cfg = s.getConfig()
 	cfg.ObjectStoreName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
-	cfg.ServiceFactoryName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg = s.getConfig()
+	cfg.DomainServicesName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
+	cfg = s.getConfig()
 	cfg.BootstrapGateName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
-	cfg.CharmhubHTTPClientName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg = s.getConfig()
+	cfg.HTTPClientName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.Logger = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig()
+	cfg.Clock = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.RequiresBootstrap = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.AgentBinaryUploader = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg.ControllerCharmDeployer = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.PopulateControllerCharm = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.ControllerUnitPassword = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
-	cfg.NewEnviron = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg.BootstrapAddressFinderGetter = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
-	cfg.BootstrapAddresses = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
-
-	cfg = s.getConfig()
-	cfg.BootstrapAddressFinder = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg.AgentFinalizer = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
 func (s *manifoldSuite) getConfig() ManifoldConfig {
 	return ManifoldConfig{
-		AgentName:              "agent",
-		ObjectStoreName:        "object-store",
-		StateName:              "state",
-		BootstrapGateName:      "bootstrap-gate",
-		ServiceFactoryName:     "service-factory",
-		CharmhubHTTPClientName: "charmhub-http-client",
-		Logger:                 s.logger,
-		AgentBinaryUploader: func(context.Context, string, BinaryAgentStorageService, objectstore.ObjectStore, logger.Logger) (func(), error) {
+		AgentName:           "agent",
+		ObjectStoreName:     "object-store",
+		BootstrapGateName:   "bootstrap-gate",
+		DomainServicesName:  "domain-services",
+		ProviderFactoryName: "provider-factory",
+		HTTPClientName:      "http-client",
+		Logger:              s.logger,
+		Clock:               clock.WallClock,
+		AgentBinaryUploader: func(context.Context, string, AgentBinaryStore, objectstore.ObjectStore, logger.Logger) (func(), error) {
 			return func() {}, nil
 		},
-		ControllerCharmDeployer: func(ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
+		ControllerCharmDeployer: func(context.Context, ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error) {
 			return nil, nil
 		},
 		PopulateControllerCharm: func(context.Context, bootstrap.ControllerCharmDeployer) error {
@@ -108,43 +115,49 @@ func (s *manifoldSuite) getConfig() ManifoldConfig {
 		ControllerUnitPassword: func(context.Context) (string, error) {
 			return "", nil
 		},
+		BootstrapAddressFinderGetter: func(providerFactory providertracker.ProviderFactory, namespace string) BootstrapAddressFinderFunc {
+			return nil
+		},
 		RequiresBootstrap: func(context.Context, FlagService) (bool, error) {
 			return false, nil
 		},
-		NewEnviron: func(context.Context, environs.OpenParams) (environs.Environ, error) { return nil, nil },
-		BootstrapAddresses: func(context.Context, environs.Environ, instance.Id) (network.ProviderAddresses, error) {
-			return nil, nil
+		AgentFinalizer: func(ctx context.Context, aps AgentPasswordService, ms MachineService, sip instancecfg.StateInitializationParams, c agent.Config) error {
+			return nil
 		},
-		BootstrapAddressFinder: func(context.Context, BootstrapAddressesConfig) (network.ProviderAddresses, error) {
-			return nil, nil
-		},
+		StatusHistory: s.statusHistory,
 	}
 }
 
 func (s *manifoldSuite) newGetter() dependency.Getter {
 	resources := map[string]any{
-		"agent":                s.agent,
-		"state":                s.stateTracker,
-		"object-store":         s.objectStoreGetter,
-		"bootstrap-gate":       s.bootstrapUnlocker,
-		"charmhub-http-client": s.httpClient,
-		"service-factory":      testing.NewTestingServiceFactory(),
+		"agent":           s.agent,
+		"object-store":    s.objectStoreGetter,
+		"bootstrap-gate":  s.bootstrapUnlocker,
+		"http-client":     s.httpClientGetter,
+		"domain-services": s.domainServices,
 	}
 	return dependencytesting.StubGetter(resources)
 }
 
-var expectedInputs = []string{"agent", "state", "object-store", "bootstrap-gate", "service-factory", "charmhub-http-client"}
-
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(Manifold(s.getConfig()).Inputs, jc.SameContents, expectedInputs)
+var expectedInputs = []string{
+	"agent",
+	"object-store",
+	"bootstrap-gate",
+	"domain-services",
+	"http-client",
+	"provider-factory",
 }
 
-func (s *manifoldSuite) TestStartAlreadyBootstrapped(c *gc.C) {
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig()).Inputs, tc.SameContents, expectedInputs)
+}
+
+func (s *manifoldSuite) TestStartAlreadyBootstrapped(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectGateUnlock()
 	s.expectAgentConfig()
 
-	_, err := Manifold(s.getConfig()).Start(context.Background(), s.newGetter())
-	c.Assert(err, jc.ErrorIs, dependency.ErrUninstall)
+	_, err := Manifold(s.getConfig()).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIs, dependency.ErrUninstall)
 }

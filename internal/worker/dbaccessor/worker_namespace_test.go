@@ -6,37 +6,41 @@ package dbaccessor
 import (
 	"context"
 	"database/sql"
+	"testing"
 
 	"github.com/canonical/sqlair"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/database"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type namespaceSuite struct {
 	dbBaseSuite
 }
 
-var _ = gc.Suite(&namespaceSuite{})
+func TestNamespaceSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &namespaceSuite{})
+}
 
-func (s *namespaceSuite) TestEnsureNamespaceForController(c *gc.C) {
+func (s *namespaceSuite) TestEnsureNamespaceForController(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	w := &dbWorker{
 		dbApp: s.dbApp,
 	}
 
-	err := w.ensureNamespace(database.ControllerNS)
-	c.Assert(err, jc.ErrorIsNil)
+	err := w.ensureNamespace(c.Context(), database.ControllerNS)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *namespaceSuite) TestEnsureNamespaceForModelNotFound(c *gc.C) {
+func (s *namespaceSuite) TestEnsureNamespaceForModelNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -67,36 +71,13 @@ func (s *namespaceSuite) TestEnsureNamespaceForModelNotFound(c *gc.C) {
 	dbw := w.(*dbWorker)
 	ensureStartup(c, dbw)
 
-	err := dbw.ensureNamespace("foo")
-	c.Assert(err, jc.ErrorIs, database.ErrDBNotFound)
+	err := dbw.ensureNamespace(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIs, database.ErrDBNotFound)
 
 	workertest.CleanKill(c, w)
 }
-func (s *namespaceSuite) startWorker(c *gc.C, ctx context.Context) *dbWorker {
-	trackedWorkerDB := newWorkerTrackedDB(s.TxnRunner())
 
-	w := s.newWorkerWithDB(c, trackedWorkerDB)
-
-	err := s.TxnRunner().StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		stmt := "INSERT INTO namespace_list (namespace) VALUES (?);"
-		result, err := tx.ExecContext(ctx, stmt, "foo")
-		c.Assert(err, jc.ErrorIsNil)
-
-		num, err := result.RowsAffected()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(num, gc.Equals, int64(1))
-
-		return nil
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	dbw := w.(*dbWorker)
-	ensureStartup(c, dbw)
-
-	return dbw
-}
-
-func (s *namespaceSuite) TestEnsureNamespaceForModel(c *gc.C) {
+func (s *namespaceSuite) TestEnsureNamespaceForModel(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -119,19 +100,19 @@ func (s *namespaceSuite) TestEnsureNamespaceForModel(c *gc.C) {
 	s.expectNoConfigChanges()
 	s.clusterConfig.EXPECT().DBBindAddresses().Return(nil, errors.New("simulates absent config for initial check"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
 	dbw := s.startWorker(c, ctx)
 	defer workertest.DirtyKill(c, dbw)
 
-	err := dbw.ensureNamespace("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err := dbw.ensureNamespace(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
 	workertest.CleanKill(c, dbw)
 }
 
-func (s *namespaceSuite) TestEnsureNamespaceForModelLoopbackPreferred(c *gc.C) {
+func (s *namespaceSuite) TestEnsureNamespaceForModelLoopbackPreferred(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -154,19 +135,19 @@ func (s *namespaceSuite) TestEnsureNamespaceForModelLoopbackPreferred(c *gc.C) {
 	s.expectNoConfigChanges()
 	s.clusterConfig.EXPECT().DBBindAddresses().Return(nil, errors.New("simulates absent config for initial check"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
 	dbw := s.startWorker(c, ctx)
 	defer workertest.DirtyKill(c, dbw)
 
-	err := dbw.ensureNamespace("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err := dbw.ensureNamespace(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
 	workertest.CleanKill(c, dbw)
 }
 
-func (s *namespaceSuite) TestEnsureNamespaceForModelWithCache(c *gc.C) {
+func (s *namespaceSuite) TestEnsureNamespaceForModelWithCache(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -194,41 +175,48 @@ func (s *namespaceSuite) TestEnsureNamespaceForModelWithCache(c *gc.C) {
 	w := s.newWorkerWithDB(c, trackedWorkerDB)
 	defer workertest.DirtyKill(c, w)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
-	var attempt int
+	var (
+		attempt int
+		num     int64
+	)
 	err := s.TxnRunner().StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		attempt++
 
 		stmt := "INSERT INTO namespace_list (namespace) VALUES (?);"
 		result, err := tx.ExecContext(ctx, stmt, "foo")
-		c.Assert(err, jc.ErrorIsNil)
+		if err != nil {
+			return err
+		}
 
-		num, err := result.RowsAffected()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(num, gc.Equals, int64(1))
+		num, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
 
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(num, tc.Equals, int64(1))
 
 	dbw := w.(*dbWorker)
 	ensureStartup(c, dbw)
 
-	err = dbw.ensureNamespace("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err = dbw.ensureNamespace(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
 	// The second query will be cached.
-	err = dbw.ensureNamespace("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err = dbw.ensureNamespace(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(attempt, gc.Equals, 1)
+	c.Assert(attempt, tc.Equals, 1)
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *namespaceSuite) TestCloseDatabaseForController(c *gc.C) {
+func (s *namespaceSuite) TestCloseDatabaseForController(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -251,19 +239,19 @@ func (s *namespaceSuite) TestCloseDatabaseForController(c *gc.C) {
 	s.expectNoConfigChanges()
 	s.clusterConfig.EXPECT().DBBindAddresses().Return(nil, errors.New("simulates absent config for initial check"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
 	dbw := s.startWorker(c, ctx)
 	defer workertest.DirtyKill(c, dbw)
 
-	err := dbw.deleteDatabase(database.ControllerNS)
-	c.Assert(err, gc.ErrorMatches, "cannot delete controller database")
+	err := dbw.deleteDatabase(c.Context(), database.ControllerNS)
+	c.Assert(err, tc.ErrorMatches, "cannot delete controller database")
 
 	workertest.CleanKill(c, dbw)
 }
 
-func (s *namespaceSuite) TestCloseDatabaseForModel(c *gc.C) {
+func (s *namespaceSuite) TestCloseDatabaseForModel(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -286,26 +274,26 @@ func (s *namespaceSuite) TestCloseDatabaseForModel(c *gc.C) {
 	s.expectNoConfigChanges()
 	s.clusterConfig.EXPECT().DBBindAddresses().Return(nil, errors.New("simulates absent config for initial check"))
 
-	db, err := s.DBApp().Open(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
+	db, err := s.DBApp().Open(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 	s.dbApp.EXPECT().Open(gomock.Any(), "foo").Return(db, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
 	dbw := s.startWorker(c, ctx)
 	defer workertest.DirtyKill(c, dbw)
 
-	_, err = dbw.GetDB("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = dbw.GetDB(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = dbw.deleteDatabase("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err = dbw.deleteDatabase(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
 	workertest.CleanKill(c, dbw)
 }
 
-func (s *namespaceSuite) TestCloseDatabaseForModelLoopbackPreferred(c *gc.C) {
+func (s *namespaceSuite) TestCloseDatabaseForModelLoopbackPreferred(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -328,26 +316,26 @@ func (s *namespaceSuite) TestCloseDatabaseForModelLoopbackPreferred(c *gc.C) {
 	s.expectNoConfigChanges()
 	s.clusterConfig.EXPECT().DBBindAddresses().Return(nil, errors.New("simulates absent config for initial check"))
 
-	db, err := s.DBApp().Open(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
+	db, err := s.DBApp().Open(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 	s.dbApp.EXPECT().Open(gomock.Any(), "foo").Return(db, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testing.LongWait)
+	ctx, cancel := context.WithTimeout(c.Context(), testhelpers.LongWait)
 	defer cancel()
 
 	dbw := s.startWorker(c, ctx)
 	defer workertest.DirtyKill(c, dbw)
 
-	_, err = dbw.GetDB("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = dbw.GetDB(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = dbw.deleteDatabase("foo")
-	c.Assert(err, jc.ErrorIsNil)
+	err = dbw.deleteDatabase(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
 
 	workertest.CleanKill(c, dbw)
 }
 
-func (s *namespaceSuite) TestCloseDatabaseForUnknownModel(c *gc.C) {
+func (s *namespaceSuite) TestCloseDatabaseForUnknownModel(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectClock()
@@ -378,10 +366,39 @@ func (s *namespaceSuite) TestCloseDatabaseForUnknownModel(c *gc.C) {
 	dbw := w.(*dbWorker)
 	ensureStartup(c, dbw)
 
-	err := dbw.deleteDatabase("foo")
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err := dbw.deleteDatabase(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
 	workertest.CleanKill(c, w)
+}
+
+func (s *namespaceSuite) startWorker(c *tc.C, ctx context.Context) *dbWorker {
+	trackedWorkerDB := newWorkerTrackedDB(s.TxnRunner())
+
+	w := s.newWorkerWithDB(c, trackedWorkerDB)
+
+	var num int64
+	err := s.TxnRunner().StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		stmt := "INSERT INTO namespace_list (namespace) VALUES (?);"
+		result, err := tx.ExecContext(ctx, stmt, "foo")
+		if err != nil {
+			return err
+		}
+
+		num, err = result.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(num, tc.Equals, int64(1))
+
+	dbw := w.(*dbWorker)
+	ensureStartup(c, dbw)
+
+	return dbw
 }
 
 type workerTrackedDB struct {
@@ -420,4 +437,8 @@ func (w *workerTrackedDB) Txn(ctx context.Context, fn func(context.Context, *sql
 
 func (w *workerTrackedDB) StdTxn(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
 	return w.db.StdTxn(ctx, fn)
+}
+
+func (w *workerTrackedDB) Dying() <-chan struct{} {
+	return w.db.Dying()
 }

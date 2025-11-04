@@ -46,10 +46,10 @@ const (
 	// ProbeLiveness represents a liveness probe
 	ProbeLiveness = ProbeType("liveness")
 
-	// ProbeLiveness represents a readiness probe
+	// ProbeReadiness represents a readiness probe
 	ProbeReadiness = ProbeType("readiness")
 
-	// ProbeLiveness represents a startup probe
+	// ProbeStartup represents a startup probe
 	ProbeStartup = ProbeType("startup")
 )
 
@@ -64,10 +64,10 @@ var (
 	})
 
 	// NotImplemented is a convenience wrapper for supplying a probe that
-	// indiciates to it's caller that it's not implemented. Resulting error
-	// will be of type errors.NotImplemented
+	// indicates to its caller that it's not implemented. The resulting error
+	// will be of type errors.NotImplemented.
 	NotImplemented Prober = ProberFn(func() (bool, error) {
-		return false, errors.NotImplementedf("probe not implemented")
+		return false, errors.NotImplementedf("probe")
 	})
 
 	// Success is a convenience wrapper probe that always evaluates to success.
@@ -89,6 +89,14 @@ func LivenessProvider(probe Prober) ProbeProvider {
 func ReadinessProvider(probe Prober) ProbeProvider {
 	return Provider(SupportedProbes{
 		ProbeReadiness: probe,
+	})
+}
+
+// StartupProvider is a utility function for returning a ProbeProvider for the
+// provided startup probe.
+func StartupProvider(probe Prober) ProbeProvider {
+	return Provider(SupportedProbes{
+		ProbeStartup: probe,
 	})
 }
 

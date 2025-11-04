@@ -4,6 +4,8 @@
 package logger
 
 import (
+	"context"
+
 	"github.com/juju/juju/core/logger"
 )
 
@@ -16,39 +18,44 @@ func Noop() logger.Logger {
 	return noopLogger{}
 }
 
-// Critical logs a message at the critical level.
-func (c noopLogger) Criticalf(msg string, args ...any) {
+// Criticalf logs a message at the critical level.
+func (c noopLogger) Criticalf(ctx context.Context, msg string, args ...any) {
 }
 
-// Error logs a message at the error level.
-func (c noopLogger) Errorf(msg string, args ...any) {
+// Errorf logs a message at the error level.
+func (c noopLogger) Errorf(ctx context.Context, msg string, args ...any) {
 }
 
-// Warning logs a message at the warning level.
-func (c noopLogger) Warningf(msg string, args ...any) {
+// Warningf logs a message at the warning level.
+func (c noopLogger) Warningf(ctx context.Context, msg string, args ...any) {
 }
 
-// Info logs a message at the info level.
-func (c noopLogger) Infof(msg string, args ...any) {
+// Infof logs a message at the info level.
+func (c noopLogger) Infof(ctx context.Context, msg string, args ...any) {
 }
 
-// Debug logs a message at the debug level.
-func (c noopLogger) Debugf(msg string, args ...any) {
+// Debugf logs a message at the debug level.
+func (c noopLogger) Debugf(ctx context.Context, msg string, args ...any) {
 }
 
-// Trace logs a message at the trace level.
-func (c noopLogger) Tracef(msg string, args ...any) {
+// Tracef logs a message at the trace level.
+func (c noopLogger) Tracef(ctx context.Context, msg string, args ...any) {
 }
 
-// Log logs some information into the test error output.
+// Logf logs some information into the test error output.
 // The provided arguments are assembled together into a string with
 // fmt.Sprintf.
-func (c noopLogger) Logf(level logger.Level, msg string, args ...any) {
+func (c noopLogger) Logf(ctx context.Context, level logger.Level, labels logger.Labels, msg string, args ...any) {
 }
 
 // IsLevelEnabled returns true if the given level is enabled for the logger.
 func (c noopLogger) IsLevelEnabled(level logger.Level) bool {
 	return false
+}
+
+// Helper marks the caller as a helper function and will skip it when capturing
+// the callsite location.
+func (c noopLogger) Helper() {
 }
 
 // Child returns a new logger with the given name.

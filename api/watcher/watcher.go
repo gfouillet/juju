@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 	"gopkg.in/tomb.v2"
 
@@ -113,7 +113,7 @@ func (w *commonWatcher) commonLoop() {
 		// give up and log the error as debug. This is indicative of a bad
 		// watcher, one that is not responding to the stop request.
 		if errors.Is(err, context.DeadlineExceeded) {
-			logger.Debugf("timeout stopping watcher: %v", err)
+			logger.Debugf(context.TODO(), "timeout stopping watcher: %v", err)
 			return
 		}
 
@@ -121,7 +121,7 @@ func (w *commonWatcher) commonLoop() {
 		// or if the entity being watched is already removed.
 		if !isAgentRestartError(err) &&
 			err.Error() != rpc.ErrShutdown.Error() && !params.IsCodeNotFound(err) {
-			logger.Errorf("error trying to stop watcher: %v", err)
+			logger.Errorf(context.TODO(), "error trying to stop watcher: %v", err)
 			return
 		}
 	}()
@@ -345,7 +345,7 @@ func (w *relationUnitsWatcher) loop(initialChanges params.RelationUnitsChange) e
 		// Send the initial event or subsequent change.
 		case w.out <- changes:
 			if w.logger.IsLevelEnabled(corelogger.TRACE) {
-				w.logger.Tracef("sent relation units changes %# v", pretty.Formatter(changes))
+				w.logger.Tracef(context.TODO(), "sent relation units changes %# v", pretty.Formatter(changes))
 			}
 		case <-w.tomb.Dying():
 			return nil
@@ -417,7 +417,7 @@ func (w *remoteRelationWatcher) loop(initialChange params.RemoteRelationChangeEv
 		// Send out the initial event or subsequent change.
 		case w.out <- change:
 			if w.logger.IsLevelEnabled(corelogger.TRACE) {
-				w.logger.Tracef("sent remote relation change %# v", pretty.Formatter(change))
+				w.logger.Tracef(context.TODO(), "sent remote relation change %# v", pretty.Formatter(change))
 			}
 		case <-w.tomb.Dying():
 			return nil
@@ -704,10 +704,10 @@ func NewOfferStatusWatcher(
 func (w *offerStatusWatcher) mergeChanges(current, new []watcher.OfferStatusChange) []watcher.OfferStatusChange {
 	chMap := make(map[string]watcher.OfferStatusChange)
 	for _, c := range current {
-		chMap[c.Name] = c
+		chMap[c.UUID] = c
 	}
 	for _, c := range new {
-		chMap[c.Name] = c
+		chMap[c.UUID] = c
 	}
 	var result []watcher.OfferStatusChange
 	for _, c := range chMap {
@@ -726,7 +726,7 @@ func (w *offerStatusWatcher) loop(initialChanges []params.OfferStatusChange) err
 		result := make([]watcher.OfferStatusChange, len(changes))
 		for i, ch := range changes {
 			result[i] = watcher.OfferStatusChange{
-				Name: ch.OfferName,
+				UUID: ch.OfferUUID,
 				Status: status.StatusInfo{
 					Status:  ch.Status.Status,
 					Message: ch.Status.Info,
@@ -823,7 +823,7 @@ func copyMachineStorageIds(src []params.MachineStorageId) []watcher.MachineStora
 
 func (w *machineAttachmentsWatcher) loop(facade string, initialChanges []params.MachineStorageId) error {
 	changes := copyMachineStorageIds(initialChanges)
-	w.newResult = func() interface{} { return new(params.MachineStorageIdsWatchResult) }
+	w.newResult = func() any { return new(params.MachineStorageIdsWatchResult) }
 	w.call = makeWatcherAPICaller(w.caller, facade, w.machineAttachmentsWatcherId)
 	w.commonWatcher.init()
 	go w.commonLoop()
@@ -978,7 +978,7 @@ func (w *secretsTriggerWatcher) loop(initialChanges []params.SecretTriggerChange
 		for i, ch := range changes {
 			uri, err := secrets.ParseURI(ch.URI)
 			if err != nil {
-				logger.Errorf("ignoring invalid secret URI: %q", ch.URI)
+				logger.Errorf(context.TODO(), "ignoring invalid secret URI: %q", ch.URI)
 				continue
 			}
 			result[i] = watcher.SecretTriggerChange{
@@ -1161,7 +1161,7 @@ func (w *SecretsRevisionWatcher) loop(initialChanges []params.SecretRevisionChan
 		for _, ch := range changes {
 			uri, err := secrets.ParseURI(ch.URI)
 			if err != nil {
-				logger.Warningf("invalid secret URI: %v", ch.URI)
+				logger.Warningf(context.TODO(), "invalid secret URI: %v", ch.URI)
 				continue
 			}
 			result = append(result, watcher.SecretRevisionChange{

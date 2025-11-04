@@ -4,13 +4,13 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/version/v2"
-
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/storage"
 	coretools "github.com/juju/juju/internal/tools"
 )
@@ -24,7 +24,7 @@ const (
 
 // StorageName returns the name that is used to store and retrieve the
 // given version of the juju tools.
-func StorageName(vers version.Binary, stream string) string {
+func StorageName(vers semversion.Binary, stream string) string {
 	return storagePrefix(stream) + vers.String() + toolSuffix
 }
 
@@ -36,11 +36,11 @@ func storagePrefix(stream string) string {
 // If minorVersion = -1, then only majorVersion is considered.
 // If majorVersion is -1, then all tools tarballs are used.
 // If store contains no such tools, it returns ErrNoMatches.
-func ReadList(stor storage.StorageReader, toolsDir string, majorVersion, minorVersion int) (coretools.List, error) {
+func ReadList(ctx context.Context, stor storage.StorageReader, toolsDir string, majorVersion, minorVersion int) (coretools.List, error) {
 	if minorVersion >= 0 {
-		logger.Debugf("reading v%d.%d agent binaries", majorVersion, minorVersion)
+		logger.Debugf(ctx, "reading v%d.%d agent binaries", majorVersion, minorVersion)
 	} else {
-		logger.Debugf("reading v%d.* agent binaries", majorVersion)
+		logger.Debugf(ctx, "reading v%d.* agent binaries", majorVersion)
 	}
 	storagePrefix := storagePrefix(toolsDir)
 	names, err := storage.List(stor, storagePrefix)
@@ -56,8 +56,8 @@ func ReadList(stor storage.StorageReader, toolsDir string, majorVersion, minorVe
 		}
 		var t coretools.Tools
 		vers := name[len(storagePrefix) : len(name)-len(toolSuffix)]
-		if t.Version, err = version.ParseBinary(vers); err != nil {
-			logger.Debugf("failed to parse version %q: %v", vers, err)
+		if t.Version, err = semversion.ParseBinary(vers); err != nil {
+			logger.Debugf(ctx, "failed to parse version %q: %v", vers, err)
 			continue
 		}
 		foundAnyTools = true
@@ -69,7 +69,7 @@ func ReadList(stor storage.StorageReader, toolsDir string, majorVersion, minorVe
 		if minorVersion >= 0 && t.Version.Minor != minorVersion {
 			continue
 		}
-		logger.Debugf("found %s", vers)
+		logger.Debugf(ctx, "found %s", vers)
 		if t.URL, err = stor.URL(name); err != nil {
 			return nil, err
 		}

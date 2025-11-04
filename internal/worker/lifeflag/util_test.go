@@ -4,16 +4,18 @@
 package lifeflag_test
 
 import (
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
+	"context"
+
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/workertest"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-func newMockFacade(stub *testing.Stub, lifeResults ...life.Value) *mockFacade {
+func newMockFacade(stub *testhelpers.Stub, lifeResults ...func() life.Value) *mockFacade {
 	return &mockFacade{
 		stub:        stub,
 		lifeResults: lifeResults,
@@ -21,11 +23,11 @@ func newMockFacade(stub *testing.Stub, lifeResults ...life.Value) *mockFacade {
 }
 
 type mockFacade struct {
-	stub        *testing.Stub
-	lifeResults []life.Value
+	stub        *testhelpers.Stub
+	lifeResults []func() life.Value
 }
 
-func (mock *mockFacade) Life(entity names.Tag) (life.Value, error) {
+func (mock *mockFacade) Life(_ context.Context, entity names.Tag) (life.Value, error) {
 	mock.stub.AddCall("Life", entity)
 	if err := mock.stub.NextErr(); err != nil {
 		return "", err
@@ -36,10 +38,10 @@ func (mock *mockFacade) Life(entity names.Tag) (life.Value, error) {
 func (mock *mockFacade) nextLife() life.Value {
 	result := mock.lifeResults[0]
 	mock.lifeResults = mock.lifeResults[1:]
-	return result
+	return result()
 }
 
-func (mock *mockFacade) Watch(entity names.Tag) (watcher.NotifyWatcher, error) {
+func (mock *mockFacade) Watch(_ context.Context, entity names.Tag) (watcher.NotifyWatcher, error) {
 	mock.stub.AddCall("Watch", entity)
 	if err := mock.stub.NextErr(); err != nil {
 		return nil, err

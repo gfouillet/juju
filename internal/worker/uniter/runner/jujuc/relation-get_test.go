@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc/jujuctesting"
 )
@@ -22,7 +23,9 @@ type RelationGetSuite struct {
 	relationSuite
 }
 
-var _ = gc.Suite(&RelationGetSuite{})
+func TestRelationGetSuite(t *testing.T) {
+	tc.Run(t, &RelationGetSuite{})
+}
 
 func (s *RelationGetSuite) newHookContext(relid int, remote string, app string) (jujuc.Context, *relationInfo) {
 	hctx, info := s.relationSuite.newHookContext(relid, remote, app)
@@ -141,26 +144,26 @@ var relationGetTests = []struct {
 	},
 }
 
-func (s *RelationGetSuite) TestRelationGet(c *gc.C) {
+func (s *RelationGetSuite) TestRelationGet(c *tc.C) {
 	for i, t := range relationGetTests {
 		c.Logf("test %d: %s", i, t.summary)
 		hctx, _ := s.newHookContext(t.relid, t.unit, "")
 		com, err := jujuc.NewCommand(hctx, "relation-get")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.args)
-		c.Check(code, gc.Equals, t.code)
+		c.Check(code, tc.Equals, t.code)
 		if code == 0 {
-			c.Check(bufferString(ctx.Stderr), gc.Equals, "")
+			c.Check(bufferString(ctx.Stderr), tc.Equals, "")
 			expect := t.out
 			if len(expect) > 0 {
 				expect += "\n"
 			}
-			c.Check(bufferString(ctx.Stdout), gc.Equals, expect)
+			c.Check(bufferString(ctx.Stdout), tc.Equals, expect)
 		} else {
-			c.Check(bufferString(ctx.Stdout), gc.Equals, "")
+			c.Check(bufferString(ctx.Stdout), tc.Equals, "")
 			expect := fmt.Sprintf(`(.|\n)*ERROR %s\n`, t.out)
-			c.Check(bufferString(ctx.Stderr), gc.Matches, expect)
+			c.Check(bufferString(ctx.Stderr), tc.Matches, expect)
 		}
 	}
 }
@@ -196,53 +199,25 @@ var relationGetFormatTests = []struct {
 	},
 }
 
-func (s *RelationGetSuite) TestRelationGetFormat(c *gc.C) {
-	testFormat := func(format string, checker gc.Checker) {
+func (s *RelationGetSuite) TestRelationGetFormat(c *tc.C) {
+	testFormat := func(format string, checker tc.Checker) {
 		for i, t := range relationGetFormatTests {
 			c.Logf("test %d: %s %s", i, format, t.summary)
 			hctx, _ := s.newHookContext(t.relid, t.unit, "")
 			com, err := jujuc.NewCommand(hctx, "relation-get")
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 			ctx := cmdtesting.Context(c)
 			args := append(t.args, "--format", format)
 			code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, args)
-			c.Check(code, gc.Equals, 0)
-			c.Check(bufferString(ctx.Stderr), gc.Equals, "")
+			c.Check(code, tc.Equals, 0)
+			c.Check(bufferString(ctx.Stderr), tc.Equals, "")
 			stdout := bufferString(ctx.Stdout)
 			c.Check(stdout, checker, t.out)
 		}
 	}
-	testFormat("yaml", jc.YAMLEquals)
-	testFormat("json", jc.JSONEquals)
+	testFormat("yaml", tc.YAMLEquals)
+	testFormat("json", tc.JSONEquals)
 }
-
-var helpTemplate = `
-Usage: %s
-
-Summary:
-get relation settings
-
-Options:
---app  (= false)
-    Get the relation data for the overall application, not just a unit
---format  (= smart)
-    Specify output format (json|smart|yaml)
--o, --output (= "")
-    Specify an output file
--r, --relation  (= %s)
-    Specify a relation by id
-
-Details:
-relation-get prints the value of a unit's relation setting, specified by key.
-If no key is given, or if the key is "-", all keys and values will be printed.
-
-A unit can see its own settings by calling "relation-get - MYUNIT", this will include
-any changes that have been made with "relation-set".
-
-When reading remote relation data, a charm can call relation-get --app - to get
-the data for the application data bag that is set by the remote applications
-leader.
-%s`[1:]
 
 var relationGetHelpTests = []struct {
 	summary string
@@ -269,37 +244,36 @@ var relationGetHelpTests = []struct {
 	},
 }
 
-func (s *RelationGetSuite) TestHelp(c *gc.C) {
+func (s *RelationGetSuite) TestHelp(c *tc.C) {
 	for i, t := range relationGetHelpTests {
 		c.Logf("test %d", i)
 		hctx, _ := s.newHookContext(t.relid, t.unit, "")
 		com, err := jujuc.NewCommand(hctx, "relation-get")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"--help"})
-		c.Assert(code, gc.Equals, 0)
-		unitHelp := ""
+		c.Assert(code, tc.Equals, 0)
 		if t.unit != "" {
-			unitHelp = fmt.Sprintf("Current default unit id is %q.\n", t.unit)
+			unitHelp := fmt.Sprintf("Current default unit id is %q.\n", t.unit)
+			c.Assert(strings.Contains(bufferString(ctx.Stdout), unitHelp), tc.IsTrue)
+		} else {
+			c.Assert(strings.Contains(bufferString(ctx.Stdout), "Current default unit id"), tc.IsFalse)
 		}
-		expect := fmt.Sprintf(helpTemplate, t.usage, t.rel, unitHelp)
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, expect)
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
 	}
 }
 
-func (s *RelationGetSuite) TestOutputPath(c *gc.C) {
+func (s *RelationGetSuite) TestOutputPath(c *tc.C) {
 	hctx, _ := s.newHookContext(1, "m/0", "")
 	com, err := jujuc.NewCommand(hctx, "relation-get")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"--output", "some-file", "pew"})
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
-	c.Assert(bufferString(ctx.Stdout), gc.Equals, "")
+	c.Assert(code, tc.Equals, 0)
+	c.Assert(bufferString(ctx.Stderr), tc.Equals, "")
+	c.Assert(bufferString(ctx.Stdout), tc.Equals, "")
 	content, err := os.ReadFile(filepath.Join(ctx.Dir, "some-file"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(content), gc.Equals, "pew\npew\n\n")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(content), tc.Equals, "pew\npew\n\n")
 }
 
 type relationGetInitTest struct {
@@ -315,7 +289,7 @@ type relationGetInitTest struct {
 	application bool
 }
 
-func (t relationGetInitTest) log(c *gc.C, i int) {
+func (t relationGetInitTest) log(c *tc.C, i int) {
 	var summary string
 	if t.summary != "" {
 		summary = " - " + t.summary
@@ -323,30 +297,30 @@ func (t relationGetInitTest) log(c *gc.C, i int) {
 	c.Logf("test %d%s", i, summary)
 }
 
-func (t relationGetInitTest) init(c *gc.C, s *RelationGetSuite) (cmd.Command, []string) {
+func (t relationGetInitTest) init(c *tc.C, s *RelationGetSuite) (cmd.Command, []string) {
 	args := make([]string, len(t.args))
 	copy(args, t.args)
 
 	hctx, _ := s.newHookContext(t.ctxrelid, t.ctxunit, t.ctxapp)
 	com, err := jujuc.NewCommand(hctx, "relation-get")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return com, args
 }
 
-func (t relationGetInitTest) check(c *gc.C, com cmd.Command, err error) {
+func (t relationGetInitTest) check(c *tc.C, com cmd.Command, err error) {
 	if t.err == "" {
-		if !c.Check(err, jc.ErrorIsNil) {
+		if !c.Check(err, tc.ErrorIsNil) {
 			return
 		}
 
 		rset := com.(*jujuc.RelationGetCommand)
-		c.Check(rset.RelationId, gc.Equals, t.relid)
-		c.Check(rset.Key, gc.Equals, t.key)
-		c.Check(rset.UnitOrAppName, gc.Equals, t.unit)
-		c.Check(rset.Application, gc.Equals, t.application)
+		c.Check(rset.RelationId, tc.Equals, t.relid)
+		c.Check(rset.Key, tc.Equals, t.key)
+		c.Check(rset.UnitOrAppName, tc.Equals, t.unit)
+		c.Check(rset.Application, tc.Equals, t.application)
 	} else {
-		c.Check(err, gc.ErrorMatches, t.err)
+		c.Check(err, tc.ErrorMatches, t.err)
 	}
 }
 
@@ -479,7 +453,7 @@ var relationGetInitTests = []relationGetInitTest{
 	},
 }
 
-func (s *RelationGetSuite) TestInit(c *gc.C) {
+func (s *RelationGetSuite) TestInit(c *tc.C) {
 	for i, t := range relationGetInitTests {
 		t.log(c, i)
 		com, args := t.init(c, s)

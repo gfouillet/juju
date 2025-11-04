@@ -4,31 +4,32 @@
 package common_test
 
 import (
-	"context"
+	"testing"
 	"time"
 
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	apimocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/common"
 	corenetwork "github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
 )
 
 type apiaddresserSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&apiaddresserSuite{})
+func TestApiaddresserSuite(t *testing.T) {
+	tc.Run(t, &apiaddresserSuite{})
+}
 
-func (s *apiaddresserSuite) SetUpTest(c *gc.C) {
+func (s *apiaddresserSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 }
 
-func (s *apiaddresserSuite) TestAPIAddresses(c *gc.C) {
+func (s *apiaddresserSuite) TestAPIAddresses(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -39,12 +40,12 @@ func (s *apiaddresserSuite) TestAPIAddresses(c *gc.C) {
 	facade.EXPECT().FacadeCall(gomock.Any(), "APIAddresses", nil, gomock.Any()).SetArg(3, result).Return(nil)
 
 	client := common.NewAPIAddresser(facade)
-	addresses, err := client.APIAddresses(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(addresses, gc.DeepEquals, []string{"0.1.2.3:1234"})
+	addresses, err := client.APIAddresses(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(addresses, tc.DeepEquals, []string{"0.1.2.3:1234"})
 }
 
-func (s *apiaddresserSuite) TestAPIHostPorts(c *gc.C) {
+func (s *apiaddresserSuite) TestAPIHostPorts(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	facade := apimocks.NewMockFacadeCaller(ctrl)
@@ -82,12 +83,12 @@ func (s *apiaddresserSuite) TestAPIHostPorts(c *gc.C) {
 		{corenetwork.ProviderHostPort{ProviderAddress: corenetwork.NewMachineAddress("3.4.5.6").AsProviderAddress(), NetPort: 3456}},
 	}
 
-	serverAddrs, err := client.APIHostPorts(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(serverAddrs, gc.DeepEquals, expectServerAddrs)
+	serverAddrs, err := client.APIHostPorts(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(serverAddrs, tc.DeepEquals, expectServerAddrs)
 }
 
-func (s *apiaddresserSuite) TestWatchAPIHostPorts(c *gc.C) {
+func (s *apiaddresserSuite) TestWatchAPIHostPorts(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	facade := apimocks.NewMockFacadeCaller(ctrl)
@@ -101,14 +102,14 @@ func (s *apiaddresserSuite) TestWatchAPIHostPorts(c *gc.C) {
 	facade.EXPECT().RawAPICaller().Return(caller)
 
 	client := common.NewAPIAddresser(facade)
-	w, err := client.WatchAPIHostPorts(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := client.WatchAPIHostPorts(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// watch for the changes
 	for i := 0; i < 2; i++ {
 		select {
 		case <-w.Changes():
-		case <-time.After(jujutesting.LongWait):
+		case <-time.After(testhelpers.LongWait):
 			c.Fail()
 		}
 	}

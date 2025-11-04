@@ -5,31 +5,37 @@ package providertracker
 
 import (
 	"context"
-	"time"
+	stdtesting "testing"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/goleak"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/credential"
+	corelife "github.com/juju/juju/core/life"
 	coremodel "github.com/juju/juju/core/model"
 	modeltesting "github.com/juju/juju/core/model/testing"
+	usertesting "github.com/juju/juju/core/user/testing"
 	"github.com/juju/juju/core/watcher/watchertest"
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type trackerWorkerSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&trackerWorkerSuite{})
+func TestTrackerWorkerSuite(t *stdtesting.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &trackerWorkerSuite{})
+}
 
-func (s *trackerWorkerSuite) TestWorkerStartup(c *gc.C) {
+func (s *trackerWorkerSuite) TestWorkerStartup(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Ensure we can startup with a normal environ.
@@ -38,44 +44,127 @@ func (s *trackerWorkerSuite) TestWorkerStartup(c *gc.C) {
 	cfg := s.newCloudSpec(c)
 	s.expectCloudSpec(c, cfg)
 	s.expectConfigWatcher(c)
+	s.expectModelWatcher(c)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
 
 	// Create the worker.
 
 	w, err := s.newWorker(c, s.environ)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	s.ensureStartup(c)
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *trackerWorkerSuite) TestWorkerStartupWithCloudSpec(c *gc.C) {
+func (s *trackerWorkerSuite) TestWorkerStartupModelDeath(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	// Ensure we can startup with the cloud spec setter and environ.
+	// Ensure we can startup with a normal environ.
 
 	s.expectModel(c)
 	cfg := s.newCloudSpec(c)
 	s.expectCloudSpec(c, cfg)
 	s.expectConfigWatcher(c)
+	ch := s.expectModelWatcher(c)
+
+	s.modelService.EXPECT().Model(gomock.Any()).Return(coremodel.ModelInfo{
+		Life: corelife.Dead,
+	}, nil)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
+
+	// Create the worker.
+
+	w, err := s.newWorker(c, s.environ)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	s.ensureStartup(c)
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out sending model")
+	}
+
+	err = workertest.CheckKilled(c, w)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *trackerWorkerSuite) TestWorkerStartupModelNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Ensure we can startup with a normal environ.
+
+	s.expectModel(c)
+	cfg := s.newCloudSpec(c)
+	s.expectCloudSpec(c, cfg)
+	s.expectConfigWatcher(c)
+	ch := s.expectModelWatcher(c)
+
+	s.modelService.EXPECT().Model(gomock.Any()).Return(coremodel.ModelInfo{}, modelerrors.NotFound)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
+
+	// Create the worker.
+
+	w, err := s.newWorker(c, s.environ)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	s.ensureStartup(c)
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out sending model")
+	}
+
+	err = workertest.CheckKilled(c, w)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *trackerWorkerSuite) TestWorkerStartupWithCloudSpec(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Ensure we can startup with the cloud spec setter and environ.
+
+	uuid := s.expectModel(c)
+	cfg := s.newCloudSpec(c)
+	s.expectCloudSpec(c, cfg)
+	s.expectConfigWatcher(c)
+	s.expectModelWatcher(c)
 
 	// Now we've got the cloud spec setter, we need to ensure we watch the
 	// cloud and credentials.
 
-	s.expectCloudWatcher(c)
-	s.expectCredentialWatcher(c)
+	s.expectModelCloudCredentialWatcher(c, uuid)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
 
 	// Create the worker.
 
 	w, err := s.newWorker(c, s.newCloudSpecEnviron())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	s.ensureStartup(c)
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *trackerWorkerSuite) TestWorkerModelConfigUpdatesEnviron(c *gc.C) {
+func (s *trackerWorkerSuite) TestWorkerModelConfigUpdatesEnviron(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Ensure we can startup with a normal environ.
@@ -85,11 +174,17 @@ func (s *trackerWorkerSuite) TestWorkerModelConfigUpdatesEnviron(c *gc.C) {
 	s.expectCloudSpec(c, cfg)
 	ch := s.expectConfigWatcher(c)
 	s.expectEnvironSetConfig(c, cfg)
+	s.expectModelWatcher(c)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
 
 	// Create the worker.
 
 	w, err := s.newWorker(c, s.environ)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	s.ensureStartup(c)
 
@@ -97,28 +192,32 @@ func (s *trackerWorkerSuite) TestWorkerModelConfigUpdatesEnviron(c *gc.C) {
 
 	select {
 	case ch <- []string{"foo"}:
-	case <-time.After(testing.ShortWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out sending config change")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *trackerWorkerSuite) TestWorkerCloudUpdatesEnviron(c *gc.C) {
+func (s *trackerWorkerSuite) TestWorkerCloudUpdatesEnviron(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Ensure we can startup with a normal environ.
 
-	s.expectModel(c)
+	uuid := s.expectModel(c)
 	cfg := s.newCloudSpec(c)
 	s.expectCloudSpec(c, cfg)
 	s.expectConfigWatcher(c)
+	s.expectModelWatcher(c)
 
 	// Now we've got the cloud spec setter, we need to ensure we watch the
 	// cloud and credentials.
 
-	ch := s.expectCloudWatcher(c)
-	s.expectCredentialWatcher(c)
+	ch := s.expectModelCloudCredentialWatcher(c, uuid)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
 
 	// This will cause the cloud spec to be updated.
 	s.expectEnvironSetSpecUpdate(c)
@@ -126,7 +225,8 @@ func (s *trackerWorkerSuite) TestWorkerCloudUpdatesEnviron(c *gc.C) {
 	// Create the worker.
 
 	w, err := s.newWorker(c, s.newCloudSpecEnviron())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	s.ensureStartup(c)
 
@@ -134,28 +234,32 @@ func (s *trackerWorkerSuite) TestWorkerCloudUpdatesEnviron(c *gc.C) {
 
 	select {
 	case ch <- struct{}{}:
-	case <-time.After(testing.ShortWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out sending config change")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *trackerWorkerSuite) TestWorkerCredentialUpdatesEnviron(c *gc.C) {
+func (s *trackerWorkerSuite) TestWorkerCredentialUpdatesEnviron(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Ensure we can startup with a normal environ.
 
-	s.expectModel(c)
+	uuid := s.expectModel(c)
 	cfg := s.newCloudSpec(c)
 	s.expectCloudSpec(c, cfg)
 	s.expectConfigWatcher(c)
+	s.expectModelWatcher(c)
 
 	// Now we've got the cloud spec setter, we need to ensure we watch the
 	// cloud and credentials.
 
-	s.expectCloudWatcher(c)
-	ch := s.expectCredentialWatcher(c)
+	ch := s.expectModelCloudCredentialWatcher(c, uuid)
+
+	// We call InvalidateCredential in the mock setup
+	// to ensure it's wired up.
+	s.expectInvalidateCredential(c)
 
 	// This will cause the cloud spec to be updated.
 	s.expectEnvironSetSpecUpdate(c)
@@ -163,7 +267,8 @@ func (s *trackerWorkerSuite) TestWorkerCredentialUpdatesEnviron(c *gc.C) {
 	// Create the worker.
 
 	w, err := s.newWorker(c, s.newCloudSpecEnviron())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	s.ensureStartup(c)
 
@@ -171,24 +276,29 @@ func (s *trackerWorkerSuite) TestWorkerCredentialUpdatesEnviron(c *gc.C) {
 
 	select {
 	case ch <- struct{}{}:
-	case <-time.After(testing.ShortWait):
+	case <-c.Context().Done():
 		c.Fatalf("timed out sending config change")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *trackerWorkerSuite) getConfig(c *gc.C, environ environs.Environ) TrackerConfig {
+func (s *trackerWorkerSuite) getConfig(c *tc.C, environ environs.Environ) TrackerConfig {
 	return TrackerConfig{
 		ModelService:      s.modelService,
 		CloudService:      s.cloudService,
 		ConfigService:     s.configService,
 		CredentialService: s.credentialService,
 		GetProviderForType: getProviderForType(
-			IAASGetProvider(func(ctx context.Context, args environs.OpenParams) (environs.Environ, error) {
+			IAASGetProvider(func(_ context.Context, _ environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+				c.Assert(invalidator, tc.Not(tc.IsNil))
+				err := invalidator.InvalidateCredentials(c.Context(), "bad")
+				if err != nil {
+					return nil, err
+				}
 				return environ, nil
 			}),
-			CAASGetProvider(func(ctx context.Context, args environs.OpenParams) (caas.Broker, error) {
+			CAASGetProvider(func(_ context.Context, _ environs.OpenParams, _ environs.CredentialInvalidator) (caas.Broker, error) {
 				c.Fatal("unexpected call")
 				return nil, nil
 			}),
@@ -197,50 +307,58 @@ func (s *trackerWorkerSuite) getConfig(c *gc.C, environ environs.Environ) Tracke
 	}
 }
 
-func (s *trackerWorkerSuite) expectModel(c *gc.C) coremodel.UUID {
+func (s *trackerWorkerSuite) expectModel(c *tc.C) coremodel.UUID {
 	id := modeltesting.GenModelUUID(c)
 
-	s.modelService.EXPECT().Model(gomock.Any()).Return(coremodel.ReadOnlyModel{
+	s.modelService.EXPECT().Model(gomock.Any()).Return(coremodel.ModelInfo{
 		UUID:            id,
 		Name:            "model",
 		Type:            coremodel.IAAS,
 		Cloud:           "cloud",
-		CredentialOwner: "owner",
+		CredentialOwner: usertesting.GenNewName(c, "owner"),
 		CredentialName:  "name",
 	}, nil)
 
 	return id
 }
 
-func (s *trackerWorkerSuite) newCloudSpec(c *gc.C) *config.Config {
+func (s *trackerWorkerSuite) newCloudSpec(c *tc.C) *config.Config {
 	cfg, err := config.New(config.NoDefaults, testing.FakeConfig())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.configService.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil)
 	s.cloudService.EXPECT().Cloud(gomock.Any(), "cloud").Return(&cloud.Cloud{}, nil)
 	s.credentialService.EXPECT().CloudCredential(gomock.Any(), credential.Key{
 		Cloud: "cloud",
-		Owner: "owner",
+		Owner: usertesting.GenNewName(c, "owner"),
 		Name:  "name",
 	}).Return(cloud.Credential{}, nil)
 
 	return cfg
 }
 
-func (s *trackerWorkerSuite) expectCloudSpec(c *gc.C, cfg *config.Config) {
+func (s *trackerWorkerSuite) expectInvalidateCredential(c *tc.C) {
+	s.credentialService.EXPECT().InvalidateCredential(gomock.Any(), credential.Key{
+		Cloud: "cloud",
+		Owner: usertesting.GenNewName(c, "owner"),
+		Name:  "name",
+	}, "bad")
+}
+
+func (s *trackerWorkerSuite) expectCloudSpec(c *tc.C, cfg *config.Config) {
 	s.environ.EXPECT().Config().Return(cfg)
 }
 
-func (s *trackerWorkerSuite) expectEnvironSetConfig(c *gc.C, cfg *config.Config) {
+func (s *trackerWorkerSuite) expectEnvironSetConfig(c *tc.C, cfg *config.Config) {
 	s.configService.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil)
 	s.environ.EXPECT().SetConfig(gomock.Any(), cfg)
 }
 
-func (s *trackerWorkerSuite) expectEnvironSetSpecUpdate(c *gc.C) {
+func (s *trackerWorkerSuite) expectEnvironSetSpecUpdate(c *tc.C) {
 	s.cloudService.EXPECT().Cloud(gomock.Any(), "cloud").Return(&cloud.Cloud{}, nil)
 	s.credentialService.EXPECT().CloudCredential(gomock.Any(), credential.Key{
 		Cloud: "cloud",
-		Owner: "owner",
+		Owner: usertesting.GenNewName(c, "owner"),
 		Name:  "name",
 	}).Return(cloud.Credential{
 		Revoked: true,
@@ -248,66 +366,47 @@ func (s *trackerWorkerSuite) expectEnvironSetSpecUpdate(c *gc.C) {
 	s.cloudSpecSetter.EXPECT().SetCloudSpec(gomock.Any(), gomock.Any()).Return(nil)
 }
 
-func (s *trackerWorkerSuite) expectConfigWatcher(c *gc.C) chan []string {
+func (s *trackerWorkerSuite) expectConfigWatcher(c *tc.C) chan []string {
 	ch := make(chan []string)
-	// Seed the initial event.
 	go func() {
-		select {
-		case ch <- []string{}:
-		case <-time.After(testing.LongWait):
-			c.Fatalf("timed out seeding initial event")
-		}
+		ch <- []string{}
 	}()
 
 	watcher := watchertest.NewMockStringsWatcher(ch)
 
-	s.configService.EXPECT().Watch().Return(watcher, nil)
+	s.configService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
 	return ch
 }
 
-func (s *trackerWorkerSuite) expectCloudWatcher(c *gc.C) chan struct{} {
+func (s *trackerWorkerSuite) expectModelWatcher(c *tc.C) chan struct{} {
 	ch := make(chan struct{})
-	// Seed the initial event.
 	go func() {
-		select {
-		case ch <- struct{}{}:
-		case <-time.After(testing.LongWait):
-			c.Fatalf("timed out seeding initial event")
-		}
+		ch <- struct{}{}
 	}()
 
 	watcher := watchertest.NewMockNotifyWatcher(ch)
 
-	s.cloudService.EXPECT().WatchCloud(gomock.Any(), "cloud").Return(watcher, nil)
+	s.modelService.EXPECT().WatchModel(gomock.Any()).Return(watcher, nil)
 
 	return ch
 }
 
-func (s *trackerWorkerSuite) expectCredentialWatcher(c *gc.C) chan struct{} {
+func (s *trackerWorkerSuite) expectModelCloudCredentialWatcher(c *tc.C, uuid coremodel.UUID) chan struct{} {
 	ch := make(chan struct{})
-	// Seed the initial event.
 	go func() {
-		select {
-		case ch <- struct{}{}:
-		case <-time.After(testing.LongWait):
-			c.Fatalf("timed out seeding initial event")
-		}
+		ch <- struct{}{}
 	}()
 
 	watcher := watchertest.NewMockNotifyWatcher(ch)
 
-	s.credentialService.EXPECT().WatchCredential(gomock.Any(), credential.Key{
-		Cloud: "cloud",
-		Owner: "owner",
-		Name:  "name",
-	}).Return(watcher, nil)
+	s.modelService.EXPECT().WatchModelCloudCredential(gomock.Any(), uuid).Return(watcher, nil)
 
 	return ch
 }
 
-func (s *trackerWorkerSuite) newWorker(c *gc.C, environ environs.Environ) (*trackerWorker, error) {
-	return newTrackerWorker(context.Background(), s.getConfig(c, environ), s.states)
+func (s *trackerWorkerSuite) newWorker(c *tc.C, environ environs.Environ) (*trackerWorker, error) {
+	return newTrackerWorker(c.Context(), s.getConfig(c, environ), s.states)
 }
 
 func (s *trackerWorkerSuite) newCloudSpecEnviron() *cloudSpecEnviron {

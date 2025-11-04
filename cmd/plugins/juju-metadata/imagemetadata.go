@@ -4,34 +4,35 @@
 package main
 
 import (
+	stdcontext "context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/filestorage"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/storage"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/version"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func prepare(ctx *cmd.Context, controllerName string, store jujuclient.ClientStore) (environs.Environ, error) {
 	// NOTE(axw) this is a work-around for the TODO below. This
 	// means that the command will only work if you've bootstrapped
 	// the specified environment.
-	bootstrapConfig, params, err := modelcmd.NewGetBootstrapConfigParamsFunc(
+	bootstrapConfig, spec, cfg, err := modelcmd.NewGetBootstrapConfigParamsFunc(
 		ctx, store, environs.GlobalProviderRegistry(),
 	)(controllerName)
 	if err != nil {
@@ -44,10 +45,6 @@ func prepare(ctx *cmd.Context, controllerName string, store jujuclient.ClientSto
 	if _, ok := provider.(caas.ContainerEnvironProvider); ok {
 		return nil, errors.NotSupportedf("preparing environ for CAAS")
 	}
-	cfg, err := provider.PrepareConfig(ctx, *params)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	// TODO(axw) we'll need to revise the metadata commands to work
 	// without preparing an environment. They should take the same
 	// format as bootstrap, i.e. cloud/region, and we'll use that to
@@ -55,9 +52,10 @@ func prepare(ctx *cmd.Context, controllerName string, store jujuclient.ClientSto
 	// we'll do about simplestreams.MetadataValidator yet. Probably
 	// move it to the EnvironProvider interface.
 	return environs.New(ctx, environs.OpenParams{
-		Cloud:  params.Cloud,
-		Config: cfg,
-	})
+		ControllerUUID: bootstrapConfig.ControllerConfig.ControllerUUID(),
+		Cloud:          *spec,
+		Config:         cfg,
+	}, environs.NoopCredentialInvalidator())
 }
 
 func newImageMetadataCommand() cmd.Command {
@@ -93,6 +91,9 @@ may also be changed.
 Selecting an image for a specific base can be done via --base. --base can be 
 specified using the OS name and the version of the OS, separated by @. For 
 example, --base ubuntu@22.04.
+
+Valid values for --stream are released, testing, proposed and devel. The image
+stream used by Juju can be configured with 'juju model-config'.
 `
 
 func (c *imageMetadataCommand) Info() *cmd.Info {
@@ -100,6 +101,12 @@ func (c *imageMetadataCommand) Info() *cmd.Info {
 		Name:    "generate-image",
 		Purpose: "generate simplestreams image metadata",
 		Doc:     imageMetadataDoc,
+		SeeAlso: []string{
+			"bootstrap",
+			"model-config",
+			"sign",
+			"validate-images",
+		},
 	})
 }
 
@@ -133,7 +140,7 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 	var environ environs.Environ
 	if err == nil {
 		if environ, err := prepare(context, controllerName, c.ClientStore()); err == nil {
-			logger.Infof("creating image metadata for model %q", environ.Config().Name())
+			logger.Infof(stdcontext.TODO(), "creating image metadata for model %q", environ.Config().Name())
 			// If the user has not specified region and endpoint, try and get it from the environment.
 			if c.Region == "" || c.Endpoint == "" {
 				var cloudSpec simplestreams.CloudSpec
@@ -155,18 +162,22 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 					c.Endpoint = cloudSpec.Endpoint
 				}
 			}
-			cfg := environ.Config()
 
-			// If we have a base, overwrite that from the environment.
-			if b := config.PreferredBase(cfg); !b.Empty() {
-				base = b
+			// If we don't have a base set, then look up the one from the
+			// environment configuration.
+			if c.Base == "" {
+				cfg := environ.Config()
+
+				if b := config.PreferredBase(cfg); !b.Empty() {
+					base = b
+				}
 			}
 		} else {
-			logger.Warningf("bootstrap parameters could not be opened: %v", err)
+			logger.Warningf(stdcontext.TODO(), "bootstrap parameters could not be opened: %v", err)
 		}
 	}
 	if environ == nil {
-		logger.Infof("no model found, creating image metadata using user supplied data")
+		logger.Infof(stdcontext.TODO(), "no model found, creating image metadata using user supplied data")
 	}
 	if c.ImageId == "" {
 		return base, errors.Errorf("image id must be specified")
@@ -178,7 +189,7 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 		return base, errors.Errorf("cloud endpoint URL must be specified")
 	}
 	if c.Dir == "" {
-		logger.Infof("no destination directory specified, using current directory")
+		logger.Infof(stdcontext.TODO(), "no destination directory specified, using current directory")
 		var err error
 		if c.Dir, err = os.Getwd(); err != nil {
 			return base, err

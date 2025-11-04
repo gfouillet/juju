@@ -3,18 +3,15 @@
 
 package changestream
 
-import (
-	"fmt"
-)
+import "github.com/juju/worker/v4"
 
 // Subscription describes the ability to receive events
 // from the event queue and unsubscribe from the queue.
 type Subscription interface {
+	worker.Worker
+
 	// Changes returns the channel that the subscription will receive events on.
 	Changes() <-chan []ChangeEvent
-
-	// Unsubscribe removes the subscription from the event queue.
-	Unsubscribe()
 
 	// Done provides a way to know from the consumer side if the underlying
 	// subscription has been terminated. This is useful to know if the
@@ -47,9 +44,6 @@ func (o SubscriptionOption) Filter() func(ChangeEvent) bool {
 // Namespace returns a SubscriptionOption that will subscribe to the given
 // namespace.
 func Namespace(namespace string, changeMask ChangeType) SubscriptionOption {
-	if changeMask == 0 {
-		panic(fmt.Errorf("unexpected changeMask value: 0"))
-	}
 	return SubscriptionOption{
 		namespace:  namespace,
 		changeMask: changeMask,

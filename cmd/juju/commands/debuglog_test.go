@@ -4,28 +4,31 @@
 package commands
 
 import (
+	"context"
 	"strings"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/cmd/v4/cmdtesting"
 	"github.com/juju/loggo/v2"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/api/client/highavailability"
 	"github.com/juju/juju/api/common"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 )
 
 type DebugLogSuite struct {
 	testing.FakeJujuXDGDataHomeSuite
 }
 
-var _ = gc.Suite(&DebugLogSuite{})
+func TestDebugLogSuite(t *stdtesting.T) {
+	tc.Run(t, &DebugLogSuite{})
+}
 
-func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
+func (s *DebugLogSuite) TestArgParsing(c *tc.C) {
 	for i, test := range []struct {
 		args     []string
 		expected common.DebugLogParams
@@ -59,11 +62,11 @@ func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
 				"-i", "foo/3",
 				"--include", "bar"},
 			expected: common.DebugLogParams{
+				Backlog: 10,
 				IncludeEntity: []string{
 					"machine-1", "machine-2",
 					"unit-foo-2", "unit-foo-3",
 					"unit-bar-*"},
-				Backlog: 10,
 			},
 		}, {
 			args: []string{
@@ -73,23 +76,23 @@ func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
 				"-x", "foo/3",
 				"--exclude", "bar"},
 			expected: common.DebugLogParams{
+				Backlog: 10,
 				ExcludeEntity: []string{
 					"machine-1", "machine-2",
 					"unit-foo-2", "unit-foo-3",
 					"unit-bar-*"},
-				Backlog: 10,
 			},
 		}, {
 			args: []string{"--include-module", "juju.foo", "--include-module", "unit"},
 			expected: common.DebugLogParams{
-				IncludeModule: []string{"juju.foo", "unit"},
 				Backlog:       10,
+				IncludeModule: []string{"juju.foo", "unit"},
 			},
 		}, {
 			args: []string{"--exclude-module", "juju.foo", "--exclude-module", "unit"},
 			expected: common.DebugLogParams{
-				ExcludeModule: []string{"juju.foo", "unit"},
 				Backlog:       10,
+				ExcludeModule: []string{"juju.foo", "unit"},
 			},
 		}, {
 			args: []string{"--include-labels", "logger-tags=http,apiserver"},
@@ -106,8 +109,7 @@ func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
 		}, {
 			args: []string{"--replay"},
 			expected: common.DebugLogParams{
-				Backlog: 10,
-				Replay:  true,
+				Replay: true,
 			},
 		}, {
 			args: []string{"--firehose"},
@@ -124,12 +126,56 @@ func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
 		}, {
 			args: []string{"--limit", "100"},
 			expected: common.DebugLogParams{
-				Backlog: 10,
-				Limit:   100,
+				Limit: 100,
 			},
 		}, {
 			args:     []string{"--retry-delay", "-1s"},
 			errMatch: `negative retry delay not valid`,
+		}, {
+			args:     []string{"--no-tail", "--tail"},
+			errMatch: `setting --tail and --no-tail not valid`,
+		}, {
+			args:     []string{"--limit", "20", "--tail"},
+			errMatch: `setting --tail and --limit not valid`,
+		}, {
+			args:     []string{"--limit", "0", "--tail"},
+			errMatch: `setting --tail and --limit not valid`,
+		}, {
+			args:     []string{"--lines", "30", "--no-tail"},
+			errMatch: `setting --no-tail and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "0", "--no-tail"},
+			errMatch: `setting --no-tail and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "30", "--limit", "50"},
+			errMatch: `setting --limit and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "0", "--limit", "50"},
+			errMatch: `setting --limit and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "30", "--limit", "0"},
+			errMatch: `setting --limit and --lines not valid`,
+		}, {
+			args:     []string{"--replay", "--lines", "40"},
+			errMatch: `setting --replay and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "40", "--replay"},
+			errMatch: `setting --replay and --lines not valid`,
+		}, {
+			args:     []string{"--replay", "--lines", "0"},
+			errMatch: `setting --replay and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "30", "--include-module", "unit", "--limit", "50"},
+			errMatch: `setting --limit and --lines not valid`,
+		}, {
+			args:     []string{"--replay", "-l", "INFO", "--lines", "40"},
+			errMatch: `setting --replay and --lines not valid`,
+		}, {
+			args:     []string{"--no-tail", "-l", "ERROR", "--exclude", "http", "--lines", "40"},
+			errMatch: `setting --no-tail and --lines not valid`,
+		}, {
+			args:     []string{"--lines", "30", "--no-tail", "--limit", "50"},
+			errMatch: `setting --no-tail and --lines not valid`,
 		},
 	} {
 		c.Logf("test %v", i)
@@ -137,42 +183,48 @@ func (s *DebugLogSuite) TestArgParsing(c *gc.C) {
 		command.SetClientStore(jujuclienttesting.MinimalStore())
 		err := cmdtesting.InitCommand(modelcmd.Wrap(command), test.args)
 		if test.errMatch == "" {
-			c.Check(err, jc.ErrorIsNil)
-			c.Check(command.params, jc.DeepEquals, test.expected)
+			c.Check(err, tc.ErrorIsNil)
+			c.Check(command.params, tc.DeepEquals, test.expected)
 		} else {
-			c.Check(err, gc.ErrorMatches, test.errMatch)
+			c.Check(err, tc.ErrorMatches, test.errMatch)
 		}
 	}
 }
 
-func (s *DebugLogSuite) TestParamsPassed(c *gc.C) {
+func (s *DebugLogSuite) TestParamsPassed(c *tc.C) {
 	fake := &fakeDebugLogAPI{}
-	s.PatchValue(&getDebugLogAPI, func(_ *debugLogCommand, _ []string) (DebugLogAPI, error) {
+	s.PatchValue(&getDebugLogAPI, func(ctx context.Context, _ *debugLogCommand, _ []string) (DebugLogAPI, error) {
 		return fake, nil
 	})
-	_, err := cmdtesting.RunCommand(c, newDebugLogCommand(jujuclienttesting.MinimalStore()),
+
+	store := jujuclienttesting.MinimalStore()
+	store.Controllers = map[string]jujuclient.ControllerDetails{
+		"arthur": {
+			APIEndpoints: []string{"address-666"},
+		},
+	}
+
+	_, err := cmdtesting.RunCommand(c, newDebugLogCommand(store),
 		"-i", "machine-1*", "-x", "machine-1-lxd-1",
 		"--include-module=juju.provisioner",
 		"--lines=500",
 		"--level=WARNING",
-		"--no-tail",
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fake.params, gc.DeepEquals, common.DebugLogParams{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fake.params, tc.DeepEquals, common.DebugLogParams{
 		IncludeEntity: []string{"machine-1*"},
 		IncludeModule: []string{"juju.provisioner"},
 		ExcludeEntity: []string{"machine-1-lxd-1"},
 		Backlog:       500,
 		Level:         loggo.WARNING,
-		NoTail:        true,
 	})
 }
 
-func (s *DebugLogSuite) TestLogOutput(c *gc.C) {
+func (s *DebugLogSuite) TestLogOutput(c *tc.C) {
 	// test timezone is 6 hours east of UTC
 	tz := time.FixedZone("test", 6*60*60)
-	s.PatchValue(&getDebugLogAPI, func(_ *debugLogCommand, _ []string) (DebugLogAPI, error) {
-		return &fakeDebugLogAPI{log: []common.LogMessage{
+	debugStreams := map[string]DebugLogAPI{
+		"address-666": &fakeDebugLogAPI{log: []common.LogMessage{
 			{
 				ModelUUID: "model-uuid",
 				Entity:    "machine-0",
@@ -182,14 +234,28 @@ func (s *DebugLogSuite) TestLogOutput(c *gc.C) {
 				Location:  "somefile.go:123",
 				Message:   "this is the log output",
 			},
-		}}, nil
+		}},
+	}
+	s.PatchValue(&getDebugLogAPI, func(_ context.Context, _ *debugLogCommand, addr []string) (DebugLogAPI, error) {
+		c.Assert(addr, tc.HasLen, 1)
+		api, ok := debugStreams[addr[0]]
+		c.Assert(ok, tc.IsTrue)
+		return api, nil
 	})
+
+	store := jujuclienttesting.MinimalStore()
+	store.Controllers = map[string]jujuclient.ControllerDetails{
+		"arthur": {
+			APIEndpoints: []string{"address-666"},
+		},
+	}
+
 	checkOutput := func(args ...string) {
 		count := len(args)
 		args, expected := args[:count-1], args[count-1]
-		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(jujuclienttesting.MinimalStore(), tz), args...)
-		c.Check(err, jc.ErrorIsNil)
-		c.Check(cmdtesting.Stdout(ctx), gc.Equals, expected)
+		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(store, tz), args...)
+		c.Check(err, tc.ErrorIsNil)
+		c.Check(cmdtesting.Stdout(ctx), tc.Equals, expected)
 
 	}
 	checkOutput(
@@ -214,47 +280,7 @@ func (s *DebugLogSuite) TestLogOutput(c *gc.C) {
 		`{"model-uuid":"model-uuid","timestamp":"2016-10-09T08:15:23.345Z","entity":"machine-0","level":"INFO","module":"test.module","location":"somefile.go:123","message":"this is the log output"}`+"\n")
 }
 
-func (s *DebugLogSuite) TestSpecifiedController(c *gc.C) {
-	// test timezone is 6 hours east of UTC
-	tz := time.FixedZone("test", 6*60*60)
-	s.PatchValue(&getDebugLogAPI, func(_ *debugLogCommand, addr []string) (DebugLogAPI, error) {
-		c.Assert(addr, jc.SameContents, []string{"address-666"})
-		return &fakeDebugLogAPI{log: []common.LogMessage{
-			{
-				Entity:    "machine-0",
-				Timestamp: time.Date(2016, 10, 9, 8, 15, 23, 345000000, time.UTC),
-				Severity:  "INFO",
-				Module:    "test.module",
-				Location:  "somefile.go:123",
-				Message:   "this is the log output",
-			},
-		}}, nil
-	})
-	s.PatchValue(&getControllerDetailsClient, func(_ *debugLogCommand) (ControllerDetailsAPI, error) {
-		return &fakeControllerDetailsAPI{}, nil
-	})
-	checkOutput := func(args ...string) {
-		count := len(args)
-		args, expected := args[:count-1], args[count-1]
-		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(jujuclienttesting.MinimalStore(), tz), args...)
-		c.Check(err, jc.ErrorIsNil)
-		c.Check(cmdtesting.Stdout(ctx), gc.Equals, expected)
-
-	}
-	checkOutput(
-		"--controller", "666",
-		"machine-0: 14:15:23 INFO test.module this is the log output\n")
-}
-
-func (s *DebugLogSuite) TestSpecifiedControllerNotFound(c *gc.C) {
-	s.PatchValue(&getControllerDetailsClient, func(_ *debugLogCommand) (ControllerDetailsAPI, error) {
-		return &fakeControllerDetailsAPI{}, nil
-	})
-	_, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(jujuclienttesting.MinimalStore(), time.UTC), "--controller", "999")
-	c.Check(err, gc.ErrorMatches, `controller "999" not found`)
-}
-
-func (s *DebugLogSuite) TestAllControllers(c *gc.C) {
+func (s *DebugLogSuite) TestAllControllers(c *tc.C) {
 	// test timezone is 6 hours east of UTC
 	tz := time.FixedZone("test", 6*60*60)
 	debugStreams := map[string]DebugLogAPI{
@@ -279,40 +305,44 @@ func (s *DebugLogSuite) TestAllControllers(c *gc.C) {
 			},
 		}},
 	}
-	s.PatchValue(&getDebugLogAPI, func(_ *debugLogCommand, addr []string) (DebugLogAPI, error) {
-		c.Assert(addr, gc.HasLen, 1)
+	s.PatchValue(&getDebugLogAPI, func(_ context.Context, _ *debugLogCommand, addr []string) (DebugLogAPI, error) {
+		c.Assert(addr, tc.HasLen, 1)
 		api, ok := debugStreams[addr[0]]
-		c.Assert(ok, jc.IsTrue)
+		c.Assert(ok, tc.IsTrue)
 		return api, nil
 	})
-	s.PatchValue(&getControllerDetailsClient, func(_ *debugLogCommand) (ControllerDetailsAPI, error) {
-		return &fakeControllerDetailsAPI{}, nil
-	})
+
+	store := jujuclienttesting.MinimalStore()
+	store.Controllers = map[string]jujuclient.ControllerDetails{
+		"arthur": {
+			APIEndpoints: []string{"address-666", "address-668"},
+		},
+	}
+
 	checkOutput := func(args ...string) {
 		count := len(args)
 		args, expected := args[:count-1], args[count-1]
-		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(jujuclienttesting.MinimalStore(), tz), args...)
-		c.Check(err, jc.ErrorIsNil)
+		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(store, tz), args...)
+		c.Check(err, tc.ErrorIsNil)
 		out := cmdtesting.Stdout(ctx)
 		lines := strings.Split(out, "\n")
-		c.Assert(lines, gc.Not(gc.HasLen), 0)
+		c.Assert(lines, tc.Not(tc.HasLen), 0)
 		expectedLines := strings.Split(expected, "\n")
-		c.Check(lines[0], gc.Equals, expectedLines[0])
+		c.Check(lines[0], tc.Equals, expectedLines[0])
 		// Depending on the exact moment the log stream was stopped, we may miss the last line.
 		if len(lines) > 1 && lines[1] != "" {
-			c.Check(lines[1], gc.Equals, expectedLines[1])
+			c.Check(lines[1], tc.Equals, expectedLines[1])
 		}
 	}
 	checkOutput(
-		"--controller", "all",
 		"machine-1: 14:15:20 INFO test.module this is the log output for 1\nmachine-0: 14:15:23 INFO test.module this is the log output for 0\n")
 }
 
-func (s *DebugLogSuite) TestLogOutputWithLogs(c *gc.C) {
+func (s *DebugLogSuite) TestLogOutputWithLogs(c *tc.C) {
 	// test timezone is 6 hours east of UTC
 	tz := time.FixedZone("test", 6*60*60)
-	s.PatchValue(&getDebugLogAPI, func(_ *debugLogCommand, _ []string) (DebugLogAPI, error) {
-		return &fakeDebugLogAPI{log: []common.LogMessage{
+	debugStreams := map[string]DebugLogAPI{
+		"address-666": &fakeDebugLogAPI{log: []common.LogMessage{
 			{
 				Entity:    "machine-0",
 				Timestamp: time.Date(2016, 10, 9, 8, 15, 23, 345000000, time.UTC),
@@ -322,14 +352,28 @@ func (s *DebugLogSuite) TestLogOutputWithLogs(c *gc.C) {
 				Message:   "this is the log output",
 				Labels:    map[string]string{"logger-tags": "http,foo"},
 			},
-		}}, nil
+		}},
+	}
+	s.PatchValue(&getDebugLogAPI, func(_ context.Context, _ *debugLogCommand, addr []string) (DebugLogAPI, error) {
+		c.Assert(addr, tc.HasLen, 1)
+		api, ok := debugStreams[addr[0]]
+		c.Assert(ok, tc.IsTrue)
+		return api, nil
 	})
+
+	store := jujuclienttesting.MinimalStore()
+	store.Controllers = map[string]jujuclient.ControllerDetails{
+		"arthur": {
+			APIEndpoints: []string{"address-666"},
+		},
+	}
+
 	checkOutput := func(args ...string) {
 		count := len(args)
 		args, expected := args[:count-1], args[count-1]
-		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(jujuclienttesting.MinimalStore(), tz), args...)
-		c.Check(err, jc.ErrorIsNil)
-		c.Check(cmdtesting.Stdout(ctx), gc.Equals, expected)
+		ctx, err := cmdtesting.RunCommand(c, newDebugLogCommandTZ(store, tz), args...)
+		c.Check(err, tc.ErrorIsNil)
+		c.Check(cmdtesting.Stdout(ctx), tc.Equals, expected)
 
 	}
 	checkOutput(
@@ -357,7 +401,7 @@ type fakeDebugLogAPI struct {
 	err    error
 }
 
-func (fake *fakeDebugLogAPI) WatchDebugLog(params common.DebugLogParams) (<-chan common.LogMessage, error) {
+func (fake *fakeDebugLogAPI) WatchDebugLog(ctx context.Context, params common.DebugLogParams) (<-chan common.LogMessage, error) {
 	if fake.err != nil {
 		return nil, fake.err
 	}
@@ -373,28 +417,5 @@ func (fake *fakeDebugLogAPI) WatchDebugLog(params common.DebugLogParams) (<-chan
 }
 
 func (fake *fakeDebugLogAPI) Close() error {
-	return nil
-}
-
-type fakeControllerDetailsAPI struct{}
-
-func (*fakeControllerDetailsAPI) BestAPIVersion() int {
-	return 3
-}
-
-func (fake *fakeControllerDetailsAPI) ControllerDetails() (map[string]highavailability.ControllerDetails, error) {
-	return map[string]highavailability.ControllerDetails{
-		"666": {
-			ControllerID: "666",
-			APIEndpoints: []string{"address-666"},
-		},
-		"668": {
-			ControllerID: "668",
-			APIEndpoints: []string{"address-668"},
-		},
-	}, nil
-}
-
-func (fake *fakeControllerDetailsAPI) Close() error {
 	return nil
 }

@@ -5,16 +5,13 @@ package httpserver
 
 import (
 	"context"
-	stdcontext "context"
 	"crypto/tls"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/pubsub/v2"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
-	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
@@ -22,34 +19,29 @@ import (
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/pki"
 	pkitls "github.com/juju/juju/internal/pki/tls"
-	"github.com/juju/juju/internal/servicefactory"
-	"github.com/juju/juju/internal/worker/common"
-	workerstate "github.com/juju/juju/internal/worker/state"
+	"github.com/juju/juju/internal/services"
 )
 
 // ManifoldConfig holds the information necessary to run an HTTP server
 // in a dependency.Engine.
 type ManifoldConfig struct {
 	AuthorityName      string
-	HubName            string
 	MuxName            string
-	StateName          string
-	ServiceFactoryName string
+	DomainServicesName string
 
 	// We don't use these in the worker, but we want to prevent the
 	// httpserver from starting until they're running so that all of
 	// their handlers are registered.
 	APIServerName string
 
-	AgentName            string
-	Clock                clock.Clock
-	MuxShutdownWait      time.Duration
-	LogDir               string
-	PrometheusRegisterer prometheus.Registerer
+	AgentName       string
+	Clock           clock.Clock
+	MuxShutdownWait time.Duration
+	LogDir          string
 
 	Logger logger.Logger
 
-	GetControllerConfig func(stdcontext.Context, ControllerConfigGetter) (controller.Config, error)
+	GetControllerConfig func(context.Context, ControllerConfigGetter) (controller.Config, error)
 	NewTLSConfig        func(string, string, autocert.Cache, SNIGetterFunc, logger.Logger) *tls.Config
 	NewWorker           func(Config) (worker.Worker, error)
 }
@@ -59,14 +51,8 @@ func (config ManifoldConfig) Validate() error {
 	if config.AuthorityName == "" {
 		return errors.NotValidf("empty AuthorityName")
 	}
-	if config.HubName == "" {
-		return errors.NotValidf("empty HubName")
-	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
-	}
-	if config.ServiceFactoryName == "" {
-		return errors.NotValidf("empty ServiceFactoryName")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.MuxName == "" {
 		return errors.NotValidf("empty MuxName")
@@ -79,9 +65,6 @@ func (config ManifoldConfig) Validate() error {
 	}
 	if config.Clock == nil {
 		return errors.NotValidf("nil Clock")
-	}
-	if config.PrometheusRegisterer == nil {
-		return errors.NotValidf("nil PrometheusRegisterer")
 	}
 	if config.GetControllerConfig == nil {
 		return errors.NotValidf("nil GetControllerConfig")
@@ -111,9 +94,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
 			config.AuthorityName,
-			config.HubName,
-			config.StateName,
-			config.ServiceFactoryName,
+			config.DomainServicesName,
 			config.MuxName,
 			config.APIServerName,
 		},
@@ -132,11 +113,6 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	var hub *pubsub.StructuredHub
-	if err := getter.Get(config.HubName, &hub); err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	var mux *apiserverhttp.Mux
 	if err := getter.Get(config.MuxName, &mux); err != nil {
 		return nil, errors.Trace(err)
@@ -148,49 +124,35 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	var controllerServiceFactory servicefactory.ControllerServiceFactory
-	if err := getter.Get(config.ServiceFactoryName, &controllerServiceFactory); err != nil {
+	var controllerDomainServices services.ControllerDomainServices
+	if err := getter.Get(config.DomainServicesName, &controllerDomainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := getter.Get(config.StateName, &stTracker); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	newCtx, cancel := stdcontext.WithCancel(ctx)
+	newCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	controllerConfig, err := config.GetControllerConfig(newCtx, controllerServiceFactory.ControllerConfig())
+	controllerConfig, err := config.GetControllerConfig(newCtx, controllerDomainServices.ControllerConfig())
 	if err != nil {
-		_ = stTracker.Done()
 		return nil, errors.Annotate(err, "unable to get controller config")
 	}
 	tlsConfig := config.NewTLSConfig(
 		controllerConfig.AutocertDNSName(),
 		controllerConfig.AutocertURL(),
-		controllerServiceFactory.AutocertCache(),
+		controllerDomainServices.AutocertCache(),
 		pkitls.AuthoritySNITLSGetter(authority, config.Logger),
 		config.Logger,
 	)
 
 	w, err := config.NewWorker(Config{
-		AgentName:            config.AgentName,
-		Clock:                config.Clock,
-		PrometheusRegisterer: config.PrometheusRegisterer,
-		Hub:                  hub,
-		TLSConfig:            tlsConfig,
-		Mux:                  mux,
-		MuxShutdownWait:      config.MuxShutdownWait,
-		LogDir:               config.LogDir,
-		Logger:               config.Logger,
-		APIPort:              controllerConfig.APIPort(),
-		APIPortOpenDelay:     controllerConfig.APIPortOpenDelay(),
-		ControllerAPIPort:    controllerConfig.ControllerAPIPort(),
+		AgentName:       config.AgentName,
+		Clock:           config.Clock,
+		TLSConfig:       tlsConfig,
+		Mux:             mux,
+		MuxShutdownWait: config.MuxShutdownWait,
+		LogDir:          config.LogDir,
+		Logger:          config.Logger,
+		APIPort:         controllerConfig.APIPort(),
 	})
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-	return common.NewCleanupWorker(w, func() { _ = stTracker.Done() }), nil
+	return w, errors.Trace(err)
 }

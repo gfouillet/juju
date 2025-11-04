@@ -4,24 +4,27 @@
 package blockdevice_test
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/blockdevice"
 )
 
 type BlockDevicePathSuite struct{}
 
-var _ = gc.Suite(&BlockDevicePathSuite{})
+func TestBlockDevicePathSuite(t *testing.T) {
+	tc.Run(t, &BlockDevicePathSuite{})
+}
 
-func (s *BlockDevicePathSuite) TestBlockDevicePathSerial(c *gc.C) {
+func (s *BlockDevicePathSuite) TestBlockDevicePathSerial(c *tc.C) {
 	testBlockDevicePath(c, blockdevice.BlockDevice{
 		HardwareId: "SPR_OSUM_123",
 		DeviceName: "name",
 	}, "/dev/disk/by-id/SPR_OSUM_123")
 }
 
-func (s *BlockDevicePathSuite) TestBlockDevicePathWWN(c *gc.C) {
+func (s *BlockDevicePathSuite) TestBlockDevicePathWWN(c *tc.C) {
 	testBlockDevicePath(c, blockdevice.BlockDevice{
 		HardwareId: "SPR_OSUM_123",
 		WWN:        "rr!",
@@ -29,26 +32,26 @@ func (s *BlockDevicePathSuite) TestBlockDevicePathWWN(c *gc.C) {
 	}, "/dev/disk/by-id/wwn-rr!")
 }
 
-func (s *BlockDevicePathSuite) TestBlockDevicePathUUID(c *gc.C) {
+func (s *BlockDevicePathSuite) TestBlockDevicePathUUID(c *tc.C) {
 	testBlockDevicePath(c, blockdevice.BlockDevice{
-		UUID:       "deadbeaf",
-		DeviceName: "name",
+		FilesystemUUID: "deadbeaf",
+		DeviceName:     "name",
 	}, "/dev/disk/by-uuid/deadbeaf")
 }
 
-func (s *BlockDevicePathSuite) TestBlockDevicePathDeviceName(c *gc.C) {
+func (s *BlockDevicePathSuite) TestBlockDevicePathDeviceName(c *tc.C) {
 	testBlockDevicePath(c, blockdevice.BlockDevice{
 		DeviceName: "name",
 	}, "/dev/name")
 }
 
-func (s *BlockDevicePathSuite) TestBlockDevicePathError(c *gc.C) {
+func (s *BlockDevicePathSuite) TestBlockDevicePathError(c *tc.C) {
 	_, err := blockdevice.BlockDevicePath(blockdevice.BlockDevice{})
-	c.Assert(err, gc.ErrorMatches, `could not determine path for block device`)
+	c.Assert(err, tc.ErrorMatches, `could not determine path for block device`)
 }
 
-func testBlockDevicePath(c *gc.C, dev blockdevice.BlockDevice, expect string) {
+func testBlockDevicePath(c *tc.C, dev blockdevice.BlockDevice, expect string) {
 	path, err := blockdevice.BlockDevicePath(dev)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(path, jc.SamePath, expect)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(path, tc.SamePath, expect)
 }

@@ -4,18 +4,19 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
 )
@@ -23,59 +24,67 @@ import (
 // NewAddCommand returns a command used to add unit storage.
 func NewAddCommand() cmd.Command {
 	cmd := &addCommand{}
-	cmd.newAPIFunc = func() (StorageAddAPI, error) {
-		return cmd.NewStorageAPI()
+	cmd.newAPIFunc = func(ctx context.Context) (StorageAddAPI, error) {
+		return cmd.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(cmd)
 }
 
 const (
 	addCommandDoc = `
-Add storage to a pre-existing unit within a model. Storage is allocated from 
-a storage pool, using parameters provided within a "storage directive". (Use 
-'juju deploy --storage=<storage-name>=<storage-directive>' to provision storage during the 
+Add storage to a pre-existing unit within a model.
+
+Storage is allocated from
+a storage pool, using parameters provided within a "storage directive". (Use
+` + "`juju deploy --storage=<storage-name>=<storage-directive>` " + `to provision storage during the
 deployment process).
 
 	juju add-storage <unit> <storage-name>=<storage-directive>
 
-<unit> is the ID of a unit that is already in the model. 
+` + "`<unit>` " + `is the ID of a unit that is already in the model.
 
-<storage-name> is defined in the charm's metadata.yaml file.   
+` + "`<storage-directive>` " + `describes to the charm how to refer to the storage,
+and where to provision it from. ` + "`<storage-directive>` " + `takes the following form:
 
-<storage-directive> is a description of how Juju should provision storage 
-instances for the unit. They are made up of up to three parts: <storage-pool>,
-<count>, and <size>. They can be provided in any order, but we recommend the
+    <storage-name>[=<storage-configuration>]
+
+` + "`<storage-name>` " + `is defined in the charm's ` + "`metadata.yaml` " + `file.
+
+` + "`<storage-configuration>` " + `is a description of how Juju should provision storage
+instances for the unit. They are made up of up to three parts: ` + "`<pool>`" + `,
+` + "`<count>`" + `, and ` + "`<size>`" + `. They can be provided in any order, but we recommend the
 following:
 
-    <storage-pool>,<count>,<size>
+    <pool>,<count>,<size>
 
 Each parameter is optional, so long as at least one is present. So the following
 storage directives are also valid:
 
-   <storage-pool>,<size>
-   <count>,<size>
-   <size>
+    <pool>,<size>
+    <count>,<size>
+    <size>
 
-<storage-pool> is the storage pool to provision storage instances from. Must 
-be a name from 'juju storage-pools'.  The default pool is available via 
-executing 'juju model-config storage-default-block-source'.
+` + "`<pool>` " + `is the storage pool to provision storage instances from. Must
+be a name from ` + "`juju storage-pools`" + `.  The default pool is available via
+executing ` + "`juju model-config storage-default-block-source`" + ` or ` + "`storage-default-filesystem-source`" + `.
 
-<count> is the number of storage instances to provision from <storage-pool> of
-<size>. Must be a positive integer. The default count is "1". May be restricted
+` + "`<count>` " + `is the number of storage instances to provision from ` + "`<storage-pool>` " + `of
+` + "`<size>`" + `. Must be a positive integer. The default count is ` + "`1`" + `. May be restricted
 by the charm, which can specify a maximum number of storage instances per unit.
 
-<size> is the number of bytes to provision per storage instance. Must be a 
+` + "`<size>` " + `is the number of bytes to provision per storage instance. Must be a
 positive number, followed by a size suffix.  Valid suffixes include M, G, T,
-and P.  Defaults to "1024M", or the which can specify a minimum size required 
+and P.  Defaults to "1024M", or the which can specify a minimum size required
 by the charm.
 `
 
 	addCommandExamples = `
-Add a 100MiB tmpfs storage instance for "pgdata" storage to unit postgresql/0:
+Add a 100MiB tmpfs storage instance for ` + "`pgdata`" + ` storage to unit ` + "`postgresql/0:`" + `
 
     juju add-storage postgresql/0 pgdata=tmpfs,100M
 
-Add 10 1TiB storage instances to "osd-devices" storage to unit ceph-osd/0 from the model's default storage pool:
+Add 10 1TiB storage instances to ` + "`osd-devices`" + ` storage to unit ` + "`ceph-osd/0`" + ` from
+the model's default storage pool:
 
     juju add-storage ceph-osd/0 osd-devices=1T,10
 
@@ -83,10 +92,11 @@ Add a storage instance from the (AWS-specific) ebs-ssd storage pool for "brick" 
 
     juju add-storage gluster/0 brick=ebs-ssd
 
+Deploy PostgreSQL with one instance (count) of 100GiB, via the charm's ` + "`pgdata`" + ` storage label,
+using the default count (` + "`1`" + `) and storage pool
+(e.g., on AWS, the ` + "`ebs`" + ` pool; equivalent to spelling out ` + "`pgdata=ebs,100G,1`)" + `:
 
-Further reading:
-
-https://juju.is/docs/storage
+    juju deploy postgresql --storage pgdata=100G
 `
 
 	addCommandAgs = `<unit> <storage-directive>`
@@ -101,7 +111,7 @@ type addCommand struct {
 	// storageDirectives is a map of storage directives, keyed on the storage name
 	// defined in charm storage metadata.
 	storageDirectives map[string]storage.Directive
-	newAPIFunc        func() (StorageAddAPI, error)
+	newAPIFunc        func(ctx context.Context) (StorageAddAPI, error)
 }
 
 // Init implements Command.Init.
@@ -138,14 +148,14 @@ func (c *addCommand) Info() *cmd.Info {
 
 // Run implements Command.Run.
 func (c *addCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	storages := c.createStorageAddParams()
-	results, err := api.AddToUnit(storages)
+	results, err := api.AddToUnit(ctx, storages)
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "add storage")
@@ -198,7 +208,7 @@ func (c *addCommand) Run(ctx *cmd.Context) (err error) {
 // StorageAddAPI defines the API methods that the storage commands use.
 type StorageAddAPI interface {
 	Close() error
-	AddToUnit(storages []params.StorageAddParams) ([]params.AddStorageResult, error)
+	AddToUnit(ctx context.Context, storages []params.StorageAddParams) ([]params.AddStorageResult, error)
 }
 
 func (c *addCommand) createStorageAddParams() []params.StorageAddParams {
@@ -209,9 +219,9 @@ func (c *addCommand) createStorageAddParams() []params.StorageAddParams {
 			UnitTag:     c.unitTag.String(),
 			StorageName: one,
 			Directives: params.StorageDirectives{
-				Pool:  d.Pool,
-				Size:  &d.Size,
-				Count: &d.Count,
+				Pool:    d.Pool,
+				SizeMiB: &d.Size,
+				Count:   &d.Count,
 			},
 		})
 	}

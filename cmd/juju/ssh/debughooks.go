@@ -4,14 +4,14 @@
 package ssh
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 
 	"github.com/juju/juju/api/client/application"
@@ -19,29 +19,13 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/relation"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/network/ssh"
 	unitdebug "github.com/juju/juju/internal/worker/uniter/runner/debug"
 )
-
-const usageDebugHooksExamples = `
-Debug all hooks and actions of unit '0':
-
-    juju debug-hooks mysql/0
-
-Debug all hooks and actions of the leader:
-
-    juju debug-hooks mysql/leader
-
-Debug the 'config-changed' hook of unit '1':
-
-    juju debug-hooks mysql/1 config-changed
-
-Debug the 'pull-site' action and 'update-status' hook of unit '0':
-
-    juju debug-hooks hello-kubecon/0 pull-site update-status
-`
 
 func NewDebugHooksCommand(hostChecker ssh.ReachableChecker, retryStrategy retry.CallArgs, publicKeyRetryStrategy retry.CallArgs) cmd.Command {
 	c := new(debugHooksCommand)
@@ -58,26 +42,43 @@ type debugHooksCommand struct {
 }
 
 const debugHooksDoc = `
-The command launches a tmux session that will intercept matching hooks and/or 
-actions. 
+The command launches a ` + "`tmux`" + ` session that will intercept matching hooks and/or
+actions.
 
-Initially, the tmux session will take you to '/var/lib/juju' or '/home/ubuntu'.
-As soon as a matching hook or action is fired, the tmux session will 
-automatically navigate you to '/var/lib/juju/agents/<unit-id>/charm' with a 
-properly configured environment. Unlike the 'juju debug-code' command, 
-the fired hooks and/or actions are not executed directly; instead, the user 
+Initially, the ` + "`tmux`" + ` session will take you to ` + "`/var/lib/juju`" + ` or ` + "`/home/ubuntu`" + `.
+As soon as a matching hook or action is fired, the ` + "`tmux`" + ` session will
+automatically navigate you to ` + "`/var/lib/juju/agents/<unit-id>/charm`" + `with a
+properly configured environment. Unlike the ` + "`juju debug-code`" + ` command,
+the fired hooks and/or actions are not executed directly; instead, the user
 needs to manually run the dispatch script inside the charm's directory.
 
-For more details on debugging charm code, see the charm SDK documentation.
-
 Valid unit identifiers are:
-  a standard unit ID, such as mysql/0 or;
-  leader syntax of the form <application>/leader, such as mysql/leader.
+- a standard unit ID, such as ` + "`mysql/0`" + ` or;
+- leader syntax of the form ` + "`<application>/leader`" + `, such as ` + "`mysql/leader`" + `.
 
 If no hook or action is specified, all hooks and actions will be intercepted.
 
-See the "juju help ssh" for information about SSH related options
-accepted by the debug-hooks command.
+See ` + "`juju help ssh`" + ` for information about SSH related options
+accepted by the ` + "`debug-hooks`" + ` command.
+
+`
+
+const usageDebugHooksExamples = `
+Debug all hooks and actions of unit ` + "`mysql/0`" + `:
+
+    juju debug-hooks mysql/0
+
+Debug all hooks and actions of unit ` + "`mysql/0`" + `:
+
+    juju debug-hooks mysql/leader
+
+Debug the ` + "`config-changed`" + `hook of unit ` + "`mysql/0`" + `:
+
+    juju debug-hooks mysql/1 config-changed
+
+Debug the ` + "`pull-site`" + `action and ` + "`update-status`" + ` hook of unit ` + "`hello-kubecon/0`" + `:
+
+    juju debug-hooks hello-kubecon/0 pull-site update-status
 `
 
 func (c *debugHooksCommand) Info() *cmd.Info {
@@ -88,6 +89,10 @@ func (c *debugHooksCommand) Info() *cmd.Info {
 		Doc:      debugHooksDoc,
 		Examples: usageDebugHooksExamples,
 		Aliases:  []string{"debug-hook"},
+		SeeAlso: []string{
+			"ssh",
+			"debug-code",
+		},
 	})
 }
 
@@ -115,16 +120,16 @@ func (c *debugHooksCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *debugHooksCommand) initAPIs() (err error) {
+func (c *debugHooksCommand) initAPIs(ctx context.Context) (err error) {
 	defer func() {
-		c.provider.setLeaderAPI(c.applicationAPI)
+		c.provider.setLeaderAPI(ctx, c.applicationAPI)
 	}()
 
 	if c.charmAPI != nil && c.applicationAPI != nil {
 		return nil
 	}
 
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -149,7 +154,7 @@ func (c *debugHooksCommand) closeAPIs() {
 	}
 }
 
-func (c *debugHooksCommand) validateHooksOrActions() error {
+func (c *debugHooksCommand) validateHooksOrActions(ctx context.Context) error {
 	if len(c.hooks) == 0 {
 		return nil
 	}
@@ -172,12 +177,12 @@ func (c *debugHooksCommand) validateHooksOrActions() error {
 		return err
 	}
 
-	curl, _, err := c.applicationAPI.GetCharmURLOrigin("", appName)
+	curl, _, err := c.applicationAPI.GetCharmURLOrigin(ctx, appName)
 	if err != nil {
 		return err
 	}
 
-	charmInfo, err := c.charmAPI.CharmInfo(curl.String())
+	charmInfo, err := c.charmAPI.CharmInfo(ctx, curl.String())
 	if err != nil {
 		return err
 	}
@@ -221,7 +226,7 @@ func (c *debugHooksCommand) getValidActions(actions *charm.Actions) (set.Strings
 func (c *debugHooksCommand) getValidHooks(meta *charm.Meta) (set.Strings, error) {
 	validHooks := set.NewStrings()
 	for _, hook := range hooks.RelationHooks() {
-		hook := fmt.Sprintf("juju-info-%s", hook)
+		hook := fmt.Sprintf("%s-%s", relation.JujuInfo, hook)
 		validHooks.Add(hook)
 	}
 	return validHooks.Union(meta.Hooks()), nil
@@ -241,14 +246,14 @@ func (c *debugHooksCommand) commonRun(
 	hooks []string,
 	debugAt string,
 ) (err error) {
-	err = c.validateHooksOrActions()
+	err = c.validateHooksOrActions(ctx)
 	if err != nil {
 		return err
 	}
 
 	// If the unit/leader syntax is used, we first need to resolve it into
 	// the unit name that corresponds to the current leader.
-	resolvedTargetName, err := c.provider.maybeResolveLeaderUnit(target)
+	resolvedTargetName, err := c.provider.maybeResolveLeaderUnit(ctx, target)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -266,7 +271,7 @@ func (c *debugHooksCommand) commonRun(
 // and connects to it via SSH to execute the debug-hooks
 // script.
 func (c *debugHooksCommand) Run(ctx *cmd.Context) error {
-	if err := c.initAPIs(); err != nil {
+	if err := c.initAPIs(ctx); err != nil {
 		return err
 	}
 	defer c.closeAPIs()

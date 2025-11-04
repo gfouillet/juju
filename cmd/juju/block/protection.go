@@ -4,6 +4,7 @@
 package block
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
@@ -51,12 +52,12 @@ func operationFromType(blockType string) string {
 }
 
 type newAPIRoot interface {
-	NewAPIRoot() (api.Connection, error)
+	NewAPIRoot(ctx context.Context) (api.Connection, error)
 }
 
 // getBlockAPI returns a block api for block manipulation.
-func getBlockAPI(c newAPIRoot) (*apiblock.Client, error) {
-	root, err := c.NewAPIRoot()
+func getBlockAPI(ctx context.Context, c newAPIRoot) (*apiblock.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,16 +87,21 @@ var blockedMessages = map[Block]string{
 	BlockChange:  changeMsg,
 }
 
-// ProcessBlockedError ensures that correct and user-friendly message is
-// displayed to the user based on the block type.
+// ProcessBlockedError handles the error returned by the API server, which
+// may indicate that the operation is blocked.
+// Processing of blocked commands is done by the API server based on the
+// user configuration via `disable-command` command. The user can
+// `enable-command` the operation by enabling the block type.
+// When an operation is blocked the API server returns a blocked error code
+// that returns a user-friendly message to the client.
 func ProcessBlockedError(err error, block Block) error {
 	if err == nil {
 		return nil
 	}
 	if params.IsCodeOperationBlocked(err) {
 		msg := fmt.Sprintf("%v\n%v", err, blockedMessages[block])
-		logger.Infof(msg)
-		return errors.Errorf(msg)
+		logger.Infof(context.TODO(), msg)
+		return errors.New(msg)
 	}
 	return err
 }

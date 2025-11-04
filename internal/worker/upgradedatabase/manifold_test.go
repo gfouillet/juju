@@ -4,73 +4,98 @@
 package upgradedatabase
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	dependencytesting "github.com/juju/worker/v4/dependency/testing"
 	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	controllernodeservice "github.com/juju/juju/domain/controllernode/service"
-	modelservice "github.com/juju/juju/domain/model/service"
+	"github.com/juju/juju/core/semversion"
 	upgradeservice "github.com/juju/juju/domain/upgrade/service"
 )
 
 type manifoldSuite struct {
 	baseSuite
 
-	worker *MockWorker
+	upgradeServices       *MockUpgradeServices
+	upgradeServicesGetter *MockUpgradeServicesGetter
+	worker                *MockWorker
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
+func (s *manifoldSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := s.baseSuite.setupMocks(c)
+
+	s.upgradeServicesGetter = NewMockUpgradeServicesGetter(ctrl)
+	s.upgradeServices = NewMockUpgradeServices(ctrl)
+	s.worker = NewMockWorker(ctrl)
+
+	s.agent.EXPECT().CurrentConfig().Return(s.agentConfig).AnyTimes()
+	s.agentConfig.EXPECT().Tag().Return(names.NewMachineTag("0")).AnyTimes()
+	s.agentConfig.EXPECT().UpgradedToVersion().Return(semversion.MustParse("1.0.0")).AnyTimes()
+	s.upgradeServices.EXPECT().Upgrade().Return(
+		&upgradeservice.WatchableService{},
+	).AnyTimes()
+	s.upgradeServicesGetter.EXPECT().ServicesForController().Return(
+		s.upgradeServices,
+	).AnyTimes()
+
+	c.Cleanup(func() {
+		s.upgradeServices = nil
+		s.worker = nil
+	})
+	return ctrl
+}
+
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
 
 	cfg = s.getConfig()
 	cfg.AgentName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.UpgradeDBGateName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
-	cfg.ServiceFactoryName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg.UpgradeServicesName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.DBAccessorName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.Logger = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig()
 	cfg.Clock = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
 func (s *manifoldSuite) getConfig() ManifoldConfig {
 	return ManifoldConfig{
-		AgentName:          "agent",
-		UpgradeDBGateName:  "upgrade-database-lock",
-		ServiceFactoryName: "service-factory",
-		DBAccessorName:     "db-accessor",
-		Logger:             s.logger,
-		Clock:              clock.WallClock,
-		NewWorker:          func(Config) (worker.Worker, error) { return s.worker, nil },
+		AgentName:           "agent",
+		UpgradeDBGateName:   "upgrade-database-lock",
+		UpgradeServicesName: "upgrade-services",
+		DBAccessorName:      "db-accessor",
+		Logger:              s.logger,
+		Clock:               clock.WallClock,
+		NewWorker:           func(Config) (worker.Worker, error) { return s.worker, nil },
 	}
 }
 
@@ -78,42 +103,28 @@ func (s *manifoldSuite) newGetter() dependency.Getter {
 	resources := map[string]any{
 		"agent":                 s.agent,
 		"upgrade-database-lock": s.lock,
-		"service-factory":       s.serviceFactory,
+		"upgrade-services":      s.upgradeServicesGetter,
 		"db-accessor":           s.dbGetter,
 	}
 	return dependencytesting.StubGetter(resources)
 }
 
-var expectedInputs = []string{"agent", "upgrade-database-lock", "service-factory", "db-accessor"}
-
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(Manifold(s.getConfig()).Inputs, jc.SameContents, expectedInputs)
+var expectedInputs = []string{
+	"agent", "upgrade-database-lock", "upgrade-services", "db-accessor",
 }
 
-func (s *manifoldSuite) TestStart(c *gc.C) {
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig()).Inputs, tc.SameContents, expectedInputs)
+}
+
+func (s *manifoldSuite) TestStart(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectWorker()
 
-	w, err := Manifold(s.getConfig()).Start(context.Background(), s.newGetter())
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := Manifold(s.getConfig()).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CleanKill(c, w)
-}
-
-func (s *manifoldSuite) setupMocks(c *gc.C) *gomock.Controller {
-	ctrl := s.baseSuite.setupMocks(c)
-
-	s.worker = NewMockWorker(ctrl)
-
-	s.agent.EXPECT().CurrentConfig().Return(s.agentConfig).AnyTimes()
-	s.agentConfig.EXPECT().Tag().Return(names.NewMachineTag("0")).AnyTimes()
-	s.agentConfig.EXPECT().UpgradedToVersion().Return(version.MustParse("1.0.0")).AnyTimes()
-
-	s.serviceFactory.EXPECT().Upgrade().Return(&upgradeservice.WatchableService{}).AnyTimes()
-	s.serviceFactory.EXPECT().Model().Return(&modelservice.Service{}).AnyTimes()
-	s.serviceFactory.EXPECT().ControllerNode().Return(&controllernodeservice.Service{}).AnyTimes()
-
-	return ctrl
 }
 
 func (s *manifoldSuite) expectWorker() {

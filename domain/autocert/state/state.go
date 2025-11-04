@@ -8,10 +8,11 @@ import (
 	"database/sql"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
 
 	coreDB "github.com/juju/juju/core/database"
 	"github.com/juju/juju/domain"
+	autocerterrors "github.com/juju/juju/domain/autocert/errors"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/uuid"
 )
 
@@ -29,14 +30,14 @@ func NewState(factory coreDB.TxnRunnerFactory) *State {
 
 // Put implements autocert.Cache.Put.
 func (st *State) Put(ctx context.Context, name string, data []byte) error {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	autocert := dbAutocert{
@@ -51,23 +52,23 @@ INSERT INTO autocert_cache (*)
 VALUES ($dbAutocert.*)
   ON CONFLICT(name) DO UPDATE SET data=excluded.data`, autocert)
 	if err != nil {
-		return errors.Annotatef(err, "preparing insert autocert into cache")
+		return errors.Errorf("preparing insert autocert into cache: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		if err := tx.Query(ctx, q, autocert).Run(); err != nil {
-			return errors.Trace(domain.CoerceError(err))
+			return errors.Capture(err)
 		}
 		return nil
 	})
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 // Get implements autocert.Cache.Get.
 func (st *State) Get(ctx context.Context, name string) ([]byte, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	autocert := dbAutocert{Name: name}
@@ -78,16 +79,18 @@ FROM   autocert_cache
 WHERE  name = $dbAutocert.name`
 	s, err := st.Prepare(q, autocert)
 	if err != nil {
-		return nil, errors.Annotatef(err, "preparing autocert select statement")
+		return nil, errors.Errorf("preparing autocert select statement: %w", err)
 	}
 
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		return errors.Trace(tx.Query(ctx, s, autocert).Get(&autocert))
-	}); err != nil {
+		err := tx.Query(ctx, s, autocert).Get(&autocert)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.Annotatef(errors.NotFound, "autocert %s", name)
+			return errors.Errorf("autocert %s: %w", name, autocerterrors.NotFound)
 		}
-		return nil, errors.Annotate(domain.CoerceError(err), "querying autocert cache")
+		return errors.Capture(err)
+	}); err != nil {
+
+		return nil, errors.Errorf("querying autocert cache: %w", err)
 	}
 
 	return []byte(autocert.Data), nil
@@ -95,23 +98,41 @@ WHERE  name = $dbAutocert.name`
 
 // Delete implements autocert.Cache.Delete.
 func (st *State) Delete(ctx context.Context, name string) error {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
-	certToDelete := dbAutocert{Name: name}
-	stmt, err := st.Prepare(`DELETE FROM autocert_cache WHERE name = $dbAutocert.name`, certToDelete)
+	autocert := dbAutocert{Name: name}
+
+	q := `
+SELECT (name) AS (&dbAutocert.*)
+FROM   autocert_cache 
+WHERE  name = $dbAutocert.name`
+	s, err := st.Prepare(q, autocert)
 	if err != nil {
-		return errors.Annotatef(err, "preparing autocert cache delete statement")
+		return errors.Errorf("preparing autocert select statement: %w", err)
+	}
+
+	stmt, err := st.Prepare(`DELETE FROM autocert_cache WHERE name = $dbAutocert.name`, autocert)
+	if err != nil {
+		return errors.Errorf("preparing autocert cache delete statement: %w", err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if err := tx.Query(ctx, stmt, certToDelete).Run(); err != nil {
-			return errors.Trace(domain.CoerceError(err))
+		// First check if the autocert exists.
+		err := tx.Query(ctx, s, autocert).Get(&autocert)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Errorf("autocert %s: %w", name, autocerterrors.NotFound)
+		} else if err != nil {
+			return errors.Capture(err)
+		}
+
+		if err := tx.Query(ctx, stmt, autocert).Run(); err != nil {
+			return errors.Capture(err)
 		}
 		return nil
 	})
 
-	return errors.Trace(err)
+	return errors.Capture(err)
 }

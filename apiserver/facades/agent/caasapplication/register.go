@@ -7,11 +7,8 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
 // Register is called to expose a package of facades onto a given registry.
@@ -24,33 +21,22 @@ func Register(registry facade.FacadeRegistry) {
 // newStateFacade provides the signature required for facade registration.
 func newStateFacade(ctx facade.ModelContext) (*Facade, error) {
 	authorizer := ctx.Auth()
-	resources := ctx.Resources()
-	st := ctx.State()
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
+	if !authorizer.AuthApplicationAgent() && !authorizer.AuthUnitAgent() {
+		return nil, apiservererrors.ErrPerm
 	}
 
-	serviceFactory := ctx.ServiceFactory()
+	domainServices := ctx.DomainServices()
 
-	broker, err := stateenvirons.GetNewCAASBrokerFunc(caas.New)(model, serviceFactory.Cloud(), serviceFactory.Credential())
-	if err != nil {
-		return nil, errors.Annotate(err, "getting caas client")
-	}
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	registry := stateenvirons.NewStorageProviderRegistry(broker)
+	applicationService := domainServices.Application()
+
 	return NewFacade(
-		resources,
 		authorizer,
-		systemState,
-		&stateShim{State: st},
-		serviceFactory.ControllerConfig(),
-		serviceFactory.Application(registry),
-		broker,
-		ctx.StatePool().Clock(),
+		ctx.ControllerUUID(),
+		ctx.ModelUUID(),
+		domainServices.ControllerConfig(),
+		domainServices.ControllerNode(),
+		applicationService,
+		domainServices.Agent(),
 		ctx.Logger().Child("caasapplication"),
-	)
+	), nil
 }

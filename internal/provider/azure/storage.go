@@ -4,19 +4,20 @@
 package azure
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v2"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
 
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
+	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/storage"
 )
 
@@ -33,17 +34,44 @@ const (
 	volumeSizeMaxGiB = 1023
 )
 
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned. The
+// azure provider recommends that for block and filesystem storage the "azure"
+// pool is used.
+//
+// Implements [storage.ProviderRegistry] interface.
+func (*azureEnviron) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	switch kind {
+	case storage.StorageKindBlock, storage.StorageKindFilesystem:
+		defaultPool, _ := storage.NewConfig(
+			azureStorageProviderType,
+			azureStorageProviderType,
+			storage.Attrs{},
+		)
+		return defaultPool
+	default:
+		return common.GetCommonRecommendedIAASPoolForKind(kind)
+	}
+}
+
 // StorageProviderTypes implements storage.ProviderRegistry.
-func (env *azureEnviron) StorageProviderTypes() ([]storage.ProviderType, error) {
-	return []storage.ProviderType{azureStorageProviderType}, nil
+func (*azureEnviron) StorageProviderTypes() ([]storage.ProviderType, error) {
+	return append(
+		common.CommonIAASStorageProviderTypes(),
+		azureStorageProviderType,
+	), nil
 }
 
 // StorageProvider implements storage.ProviderRegistry.
 func (env *azureEnviron) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	if t == azureStorageProviderType {
+	switch t {
+	case azureStorageProviderType:
 		return &azureStorageProvider{env}, nil
+	default:
+		return common.GetCommonIAASStorageProvider(t)
 	}
-	return nil, errors.NotFoundf("storage provider %q", t)
 }
 
 // azureStorageProvider is a storage provider for Azure disks.
@@ -119,10 +147,20 @@ func (e *azureStorageProvider) Releasable() bool {
 
 // DefaultPools is part of the Provider interface.
 func (e *azureStorageProvider) DefaultPools() []*storage.Config {
-	premiumPool, _ := storage.NewConfig("azure-premium", azureStorageProviderType, map[string]interface{}{
-		accountTypeAttr: accountTypePremiumLRS,
-	})
-	return []*storage.Config{premiumPool}
+	defaultPool, _ := storage.NewConfig(
+		azureStorageProviderType,
+		azureStorageProviderType,
+		storage.Attrs{},
+	)
+
+	premiumPool, _ := storage.NewConfig(
+		"azure-premium",
+		azureStorageProviderType,
+		storage.Attrs{
+			accountTypeAttr: accountTypePremiumLRS,
+		})
+
+	return []*storage.Config{defaultPool, premiumPool}
 }
 
 // VolumeSource is part of the Provider interface.
@@ -140,7 +178,7 @@ type azureVolumeSource struct {
 }
 
 // CreateVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) CreateVolumes(ctx envcontext.ProviderCallContext, params []storage.VolumeParams) (_ []storage.CreateVolumesResult, err error) {
+func (v *azureVolumeSource) CreateVolumes(ctx context.Context, params []storage.VolumeParams) (_ []storage.CreateVolumesResult, err error) {
 	results := make([]storage.CreateVolumesResult, len(params))
 	for i, p := range params {
 		if err := v.ValidateVolumeParams(p); err != nil {
@@ -153,7 +191,7 @@ func (v *azureVolumeSource) CreateVolumes(ctx envcontext.ProviderCallContext, pa
 }
 
 // createManagedDiskVolumes creates volumes with associated managed disks.
-func (v *azureVolumeSource) createManagedDiskVolumes(ctx envcontext.ProviderCallContext, params []storage.VolumeParams, results []storage.CreateVolumesResult) {
+func (v *azureVolumeSource) createManagedDiskVolumes(ctx context.Context, params []storage.VolumeParams, results []storage.CreateVolumesResult) {
 	for i, p := range params {
 		if results[i].Error != nil {
 			continue
@@ -168,7 +206,7 @@ func (v *azureVolumeSource) createManagedDiskVolumes(ctx envcontext.ProviderCall
 }
 
 // createManagedDiskVolume creates a managed disk.
-func (v *azureVolumeSource) createManagedDiskVolume(ctx envcontext.ProviderCallContext, p storage.VolumeParams) (*storage.Volume, error) {
+func (v *azureVolumeSource) createManagedDiskVolume(ctx context.Context, p storage.VolumeParams) (*storage.Volume, error) {
 	cfg, err := newAzureStorageConfig(p.Attributes)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -198,17 +236,18 @@ func (v *azureVolumeSource) createManagedDiskVolume(ctx envcontext.ProviderCallC
 		return nil, errors.Trace(err)
 	}
 	var result armcompute.DisksClientCreateOrUpdateResponse
+	// makes a call to the azure API to create disk
 	poller, err := disks.BeginCreateOrUpdate(ctx, v.env.resourceGroup, diskName, diskModel, nil)
 	if err == nil {
 		result, err = poller.PollUntilDone(ctx, nil)
 	}
 	if err != nil || result.Properties == nil {
-		return nil, errorutils.HandleCredentialError(errors.Annotatef(err, "creating disk for volume %q", p.Tag.Id()), ctx)
+		return nil, v.env.HandleCredentialError(ctx, errors.Annotatef(err, "creating disk for volume %q", p.Tag.Id()))
 	}
 
 	volume := storage.Volume{
-		p.Tag,
-		storage.VolumeInfo{
+		Tag: p.Tag,
+		VolumeInfo: storage.VolumeInfo{
 			VolumeId:   diskName,
 			Size:       gibToMib(uint64(toValue(result.Properties.DiskSizeGB))),
 			Persistent: true,
@@ -218,11 +257,11 @@ func (v *azureVolumeSource) createManagedDiskVolume(ctx envcontext.ProviderCallC
 }
 
 // ListVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) ListVolumes(ctx envcontext.ProviderCallContext) ([]string, error) {
+func (v *azureVolumeSource) ListVolumes(ctx context.Context) ([]string, error) {
 	return v.listManagedDiskVolumes(ctx)
 }
 
-func (v *azureVolumeSource) listManagedDiskVolumes(ctx envcontext.ProviderCallContext) ([]string, error) {
+func (v *azureVolumeSource) listManagedDiskVolumes(ctx context.Context) ([]string, error) {
 	disks, err := v.env.disksClient()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -232,7 +271,7 @@ func (v *azureVolumeSource) listManagedDiskVolumes(ctx envcontext.ProviderCallCo
 	for pager.More() {
 		next, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, errorutils.HandleCredentialError(errors.Annotate(err, "listing disks"), ctx)
+			return nil, v.env.HandleCredentialError(ctx, errors.Annotatef(err, "listing disks"))
 		}
 		for _, d := range next.Value {
 			diskName := toValue(d.Name)
@@ -246,11 +285,11 @@ func (v *azureVolumeSource) listManagedDiskVolumes(ctx envcontext.ProviderCallCo
 }
 
 // DescribeVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) DescribeVolumes(ctx envcontext.ProviderCallContext, volumeIds []string) ([]storage.DescribeVolumesResult, error) {
+func (v *azureVolumeSource) DescribeVolumes(ctx context.Context, volumeIds []string) ([]storage.DescribeVolumesResult, error) {
 	return v.describeManagedDiskVolumes(ctx, volumeIds)
 }
 
-func (v *azureVolumeSource) describeManagedDiskVolumes(ctx envcontext.ProviderCallContext, volumeIds []string) ([]storage.DescribeVolumesResult, error) {
+func (v *azureVolumeSource) describeManagedDiskVolumes(ctx context.Context, volumeIds []string) ([]storage.DescribeVolumesResult, error) {
 	results := make([]storage.DescribeVolumesResult, len(volumeIds))
 	var wg sync.WaitGroup
 	for i, volumeId := range volumeIds {
@@ -263,11 +302,11 @@ func (v *azureVolumeSource) describeManagedDiskVolumes(ctx envcontext.ProviderCa
 				return
 			}
 			disk, err := disks.Get(ctx, v.env.resourceGroup, volumeId, nil)
-			if err != nil {
-				if errorutils.IsNotFoundError(err) {
-					err = errors.NotFoundf("disk %s", volumeId)
-				}
-				results[i].Error = errorutils.HandleCredentialError(err, ctx)
+			if errorutils.IsNotFoundError(err) {
+				results[i].Error = errors.NotFoundf("disk %s", volumeId)
+				return
+			} else if err != nil {
+				results[i].Error = v.env.HandleCredentialError(ctx, err)
 				return
 			}
 			results[i].VolumeInfo = &storage.VolumeInfo{
@@ -282,11 +321,11 @@ func (v *azureVolumeSource) describeManagedDiskVolumes(ctx envcontext.ProviderCa
 }
 
 // DestroyVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) DestroyVolumes(ctx envcontext.ProviderCallContext, volumeIds []string) ([]error, error) {
+func (v *azureVolumeSource) DestroyVolumes(ctx context.Context, volumeIds []string) ([]error, error) {
 	return v.destroyManagedDiskVolumes(ctx, volumeIds)
 }
 
-func (v *azureVolumeSource) destroyManagedDiskVolumes(ctx envcontext.ProviderCallContext, volumeIds []string) ([]error, error) {
+func (v *azureVolumeSource) destroyManagedDiskVolumes(ctx context.Context, volumeIds []string) ([]error, error) {
 	return foreachVolume(volumeIds, func(volumeId string) error {
 		disks, err := v.env.disksClient()
 		if err != nil {
@@ -298,7 +337,7 @@ func (v *azureVolumeSource) destroyManagedDiskVolumes(ctx envcontext.ProviderCal
 		}
 		if err != nil {
 			if !errorutils.IsNotFoundError(err) {
-				return errorutils.HandleCredentialError(errors.Annotatef(err, "deleting disk %q", volumeId), ctx)
+				return v.env.HandleCredentialError(ctx, errors.Annotatef(err, "deleting disk %q", volumeId))
 			}
 		}
 		return nil
@@ -320,7 +359,7 @@ func foreachVolume(volumeIds []string, f func(string) error) []error {
 }
 
 // ReleaseVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) ReleaseVolumes(ctx envcontext.ProviderCallContext, volumeIds []string) ([]error, error) {
+func (v *azureVolumeSource) ReleaseVolumes(ctx context.Context, volumeIds []string) ([]error, error) {
 	// Releasing volumes is not supported, see azureStorageProvider.Releasable.
 	//
 	// When managed disks can be moved between resource groups, we may want to
@@ -342,7 +381,7 @@ func (v *azureVolumeSource) ValidateVolumeParams(params storage.VolumeParams) er
 }
 
 // AttachVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, attachParams []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
+func (v *azureVolumeSource) AttachVolumes(ctx context.Context, attachParams []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
 	results := make([]storage.AttachVolumesResult, len(attachParams))
 	instanceIds := make([]instance.Id, len(attachParams))
 	for i, p := range attachParams {
@@ -397,13 +436,29 @@ func (v *azureVolumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, at
 		if results[i].Error != nil || err == nil {
 			continue
 		}
-		results[i].Error = err
+		results[i].Error = errorutils.SimpleError(err)
 		results[i].VolumeAttachment = nil
 	}
 	return results, nil
 }
 
-const azureDiskDeviceLink = "/dev/disk/azure/scsi1/lun%d"
+const (
+	azureDiskDeviceLink = "/dev/disk/azure/scsi1/lun%d"
+	nvmeDiskDeviceName  = "nvme0n%d" // +2 to actual lun
+	nvmeDiskLunOffset   = 2
+)
+
+func (v *azureVolumeSource) volumeAttachmentInfo(controllerType armcompute.DiskControllerTypes, lun int32) storage.VolumeAttachmentInfo {
+	if controllerType == armcompute.DiskControllerTypesNVMe {
+		return storage.VolumeAttachmentInfo{
+			DeviceName: fmt.Sprintf(nvmeDiskDeviceName, lun+nvmeDiskLunOffset),
+		}
+	}
+
+	return storage.VolumeAttachmentInfo{
+		DeviceLink: fmt.Sprintf(azureDiskDeviceLink, lun),
+	}
+}
 
 func (v *azureVolumeSource) attachVolume(
 	vm *armcompute.VirtualMachine,
@@ -411,8 +466,14 @@ func (v *azureVolumeSource) attachVolume(
 ) (_ *storage.VolumeAttachment, updated bool, _ error) {
 
 	var dataDisks []*armcompute.DataDisk
-	if vm.Properties != nil && vm.Properties.StorageProfile.DataDisks != nil {
-		dataDisks = vm.Properties.StorageProfile.DataDisks
+	var diskControllerType armcompute.DiskControllerTypes
+	if vm.Properties != nil && vm.Properties.StorageProfile != nil {
+		if vm.Properties.StorageProfile.DataDisks != nil {
+			dataDisks = vm.Properties.StorageProfile.DataDisks
+		}
+		if vm.Properties.StorageProfile.DiskControllerType != nil {
+			diskControllerType = *vm.Properties.StorageProfile.DiskControllerType
+		}
 	}
 
 	diskName := p.VolumeId
@@ -420,18 +481,18 @@ func (v *azureVolumeSource) attachVolume(
 		if toValue(disk.Name) != diskName {
 			continue
 		}
+
 		// Disk is already attached.
 		volumeAttachment := &storage.VolumeAttachment{
-			Volume:  p.Volume,
-			Machine: p.Machine,
-			VolumeAttachmentInfo: storage.VolumeAttachmentInfo{
-				DeviceLink: fmt.Sprintf(azureDiskDeviceLink, toValue(disk.Lun)),
-			},
+			Volume:               p.Volume,
+			Machine:              p.Machine,
+			VolumeAttachmentInfo: v.volumeAttachmentInfo(diskControllerType, toValue(disk.Lun)),
 		}
+
 		return volumeAttachment, false, nil
 	}
 
-	volumeAttachment, err := v.addDataDisk(vm, diskName, p.Volume, p.Machine, armcompute.DiskCreateOptionTypesAttach, nil)
+	volumeAttachment, err := v.addDataDisk(vm, diskName, p.Volume, p.Machine, armcompute.DiskCreateOptionTypesAttach, nil, diskControllerType)
 	if err != nil {
 		return nil, false, errors.Trace(err)
 	}
@@ -445,6 +506,7 @@ func (v *azureVolumeSource) addDataDisk(
 	machineTag names.Tag,
 	createOption armcompute.DiskCreateOptionTypes,
 	diskSizeGB *int32,
+	diskControllerType armcompute.DiskControllerTypes,
 ) (*storage.VolumeAttachment, error) {
 
 	lun, err := nextAvailableLUN(vm)
@@ -466,7 +528,7 @@ func (v *azureVolumeSource) addDataDisk(
 
 	if vm.Properties != nil {
 		var dataDisks []*armcompute.DataDisk
-		if vm.Properties.StorageProfile.DataDisks != nil {
+		if vm.Properties.StorageProfile != nil && vm.Properties.StorageProfile.DataDisks != nil {
 			dataDisks = vm.Properties.StorageProfile.DataDisks
 		}
 		dataDisks = append(dataDisks, dataDisk)
@@ -474,16 +536,14 @@ func (v *azureVolumeSource) addDataDisk(
 	}
 
 	return &storage.VolumeAttachment{
-		Volume:  volumeTag,
-		Machine: machineTag,
-		VolumeAttachmentInfo: storage.VolumeAttachmentInfo{
-			DeviceLink: fmt.Sprintf(azureDiskDeviceLink, lun),
-		},
+		Volume:               volumeTag,
+		Machine:              machineTag,
+		VolumeAttachmentInfo: v.volumeAttachmentInfo(diskControllerType, lun),
 	}, nil
 }
 
 // DetachVolumes is specified on the storage.VolumeSource interface.
-func (v *azureVolumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
+func (v *azureVolumeSource) DetachVolumes(ctx context.Context, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
 	results := make([]error, len(attachParams))
 	instanceIds := make([]instance.Id, len(attachParams))
 	for i, p := range attachParams {
@@ -581,7 +641,7 @@ type maybeVirtualMachine struct {
 
 // virtualMachines returns a mapping of instance IDs to VirtualMachines and
 // errors, for each of the specified instance IDs.
-func (v *azureVolumeSource) virtualMachines(ctx envcontext.ProviderCallContext, instanceIds []instance.Id) (map[instance.Id]*maybeVirtualMachine, error) {
+func (v *azureVolumeSource) virtualMachines(ctx context.Context, instanceIds []instance.Id) (map[instance.Id]*maybeVirtualMachine, error) {
 	compute, err := v.env.computeClient()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -591,7 +651,7 @@ func (v *azureVolumeSource) virtualMachines(ctx envcontext.ProviderCallContext, 
 	for pager.More() {
 		next, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, errorutils.HandleCredentialError(errors.Annotate(err, "listing virtual machines"), ctx)
+			return nil, v.env.HandleCredentialError(ctx, errors.Annotate(err, "listing virtual machines"))
 		}
 		for _, vm := range next.Value {
 			vmCopy := *vm
@@ -613,7 +673,7 @@ func (v *azureVolumeSource) virtualMachines(ctx envcontext.ProviderCallContext, 
 // through the list of instance IDs in order, and updating each corresponding
 // virtual machine at most once.
 func (v *azureVolumeSource) updateVirtualMachines(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	virtualMachines map[instance.Id]*maybeVirtualMachine, instanceIds []instance.Id,
 ) ([]error, error) {
 	compute, err := v.env.computeClient()
@@ -639,8 +699,8 @@ func (v *azureVolumeSource) updateVirtualMachines(
 			_, err = poller.PollUntilDone(ctx, nil)
 		}
 		if err != nil {
-			if errorutils.MaybeInvalidateCredential(err, ctx) {
-				return nil, errors.Trace(err)
+			if invalidated, _ := v.env.MaybeInvalidateCredentialError(ctx, err); invalidated {
+				return nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
 			}
 			results[i] = err
 			vm.err = err
@@ -649,6 +709,7 @@ func (v *azureVolumeSource) updateVirtualMachines(
 		// successfully updated, don't update again
 		delete(virtualMachines, instanceId)
 	}
+
 	return results, nil
 }
 
@@ -660,7 +721,7 @@ func nextAvailableLUN(vm *armcompute.VirtualMachine) (int32, error) {
 		for _, disk := range vm.Properties.StorageProfile.DataDisks {
 			lun := toValue(disk.Lun)
 			if lun < 0 || lun > 31 {
-				logger.Debugf("ignore disk with invalid LUN: %+v", disk)
+				logger.Debugf(context.TODO(), "ignore disk with invalid LUN: %+v", disk)
 				continue
 			}
 			inUse[lun] = true

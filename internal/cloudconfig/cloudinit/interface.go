@@ -12,7 +12,6 @@ import (
 
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/os/ostype"
-	jujupackaging "github.com/juju/juju/internal/packaging"
 	"github.com/juju/juju/internal/packaging/commands"
 	"github.com/juju/juju/internal/packaging/config"
 	"github.com/juju/juju/internal/packaging/source"
@@ -328,7 +327,7 @@ type RenderConfig interface {
 	RenderYAML() ([]byte, error)
 
 	// Renders a script that will execute the cloud config
-	// It is used over ssh for bootstrapping with the manual provider.
+	// It is used over ssh for bootstrapping with the unmanaged provider.
 	RenderScript() (string, error)
 
 	// ShellRenderer returns the shell renderer of this particular instance.
@@ -359,10 +358,6 @@ type AdvancedPackagingConfig interface {
 		addUpdateScripts bool,
 		addUpgradeScripts bool,
 	) error
-
-	// getPackagingConfigurer returns the PackagingConfigurer of the CloudConfig
-	// for the specified package manager.
-	getPackagingConfigurer(jujupackaging.PackageManagerName) config.PackagingConfigurer
 
 	// addRequiredPackages is a helper to add packages that juju requires in
 	// order to operate.
@@ -447,13 +442,9 @@ func New(osname string, opts ...func(*cloudConfig)) (CloudConfig, error) {
 
 	switch osType {
 	case ostype.Ubuntu:
-		cfg.paccmder = map[jujupackaging.PackageManagerName]commands.PackageCommander{
-			jujupackaging.AptPackageManager:  commands.NewAptPackageCommander(),
-			jujupackaging.SnapPackageManager: commands.NewSnapPackageCommander(),
-		}
-		cfg.pacconfer = map[jujupackaging.PackageManagerName]config.PackagingConfigurer{
-			jujupackaging.AptPackageManager: config.NewAptPackagingConfigurer(),
-		}
+		cfg.aptCommander = commands.NewAptPackageCommander()
+		cfg.snapCommander = commands.NewSnapPackageCommander()
+		cfg.aptConfigurer = config.NewAptPackagingConfigurer()
 		return &ubuntuCloudConfig{cfg}, nil
 	default:
 		return nil, errors.NotFoundf("cloudconfig for os %q", osname)

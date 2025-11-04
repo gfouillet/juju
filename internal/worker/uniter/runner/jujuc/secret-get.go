@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretGetCommand struct {
@@ -41,8 +41,8 @@ Using --refresh will fetch the latest revision and continue to
 return the same revision next time unless --peek or --refresh is used.
 
 Either the ID or label can be used to identify the secret.
-
-Examples
+`
+	examples := `
     secret-get secret:9m4e2mr0ui3e8a215n4g
     secret-get secret:9m4e2mr0ui3e8a215n4g token
     secret-get secret:9m4e2mr0ui3e8a215n4g token#base64
@@ -52,10 +52,11 @@ Examples
     secret-get secret:9m4e2mr0ui3e8a215n4g --label db-password
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-get",
-		Args:    "<ID> [key[#base64]]",
-		Purpose: "get the content of a secret",
-		Doc:     doc,
+		Name:     "secret-get",
+		Args:     "<ID> [key[#base64]]",
+		Purpose:  "Get the content of a secret.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -98,7 +99,7 @@ func (c *secretGetCommand) Init(args []string) (err error) {
 
 // Run implements cmd.Command.
 func (c *secretGetCommand) Run(ctx *cmd.Context) error {
-	value, err := c.ctx.GetSecret(c.secretUri, c.label, c.refresh, c.peek)
+	value, err := c.ctx.GetSecret(ctx, c.secretUri, c.label, c.refresh, c.peek)
 	if err != nil {
 		return err
 	}

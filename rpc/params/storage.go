@@ -22,7 +22,7 @@ type BlockDevice struct {
 	HardwareId     string   `json:"HardwareId"`
 	WWN            string   `json:"WWN"`
 	BusAddress     string   `json:"BusAddress"`
-	Size           uint64   `json:"Size"`
+	SizeMiB        uint64   `json:"Size"`
 	FilesystemType string   `json:"FilesystemType"`
 	InUse          bool     `json:"InUse"`
 	MountPoint     string   `json:"MountPoint"`
@@ -208,7 +208,7 @@ type Volume struct {
 
 // VolumeInfo describes a storage volume in the model.
 type VolumeInfo struct {
-	VolumeId   string `json:"volume-id"`
+	ProviderId string `json:"volume-id"`
 	HardwareId string `json:"hardware-id,omitempty"`
 	WWN        string `json:"wwn,omitempty"`
 	// Pool is the name of the storage pool used to
@@ -216,8 +216,8 @@ type VolumeInfo struct {
 	// than 2.2 do not populate this field, so it may
 	// be omitted.
 	Pool string `json:"pool,omitempty"`
-	// Size is the size of the volume in MiB.
-	Size       uint64 `json:"size"`
+	// SizeMiB is the size of the volume in MiB.
+	SizeMiB    uint64 `json:"size"`
 	Persistent bool   `json:"persistent"`
 }
 
@@ -242,7 +242,7 @@ type VolumeAttachmentPlan struct {
 	// BlockDevice should only be set by machine agents after
 	// the AttachVolume() function is called. It represents the machines
 	// view of the block device represented by the plan.
-	BlockDevice BlockDevice `json:"block-device,omitempty"`
+	BlockDevice *BlockDevice `json:"block-device,omitempty"`
 }
 
 type VolumeAttachmentPlans struct {
@@ -273,7 +273,7 @@ type VolumeAttachments struct {
 // VolumeParams holds the parameters for creating a storage volume.
 type VolumeParams struct {
 	VolumeTag  string                  `json:"volume-tag"`
-	Size       uint64                  `json:"size"`
+	SizeMiB    uint64                  `json:"size"`
 	Provider   string                  `json:"provider"`
 	Attributes map[string]interface{}  `json:"attributes,omitempty"`
 	Tags       map[string]string       `json:"tags,omitempty"`
@@ -286,8 +286,9 @@ type RemoveVolumeParams struct {
 	// Provider is the storage provider that manages the volume.
 	Provider string `json:"provider"`
 
-	// VolumeId is the storage provider's unique ID for the volume.
-	VolumeId string `json:"volume-id"`
+	// ProviderId is the storage provider's unique ID for the volume.
+	// It is named volume-id for legacy reasons.
+	ProviderId string `json:"volume-id"`
 
 	// Destroy controls whether the volume should be completely
 	// destroyed, or otherwise merely released from Juju's management.
@@ -299,7 +300,9 @@ type RemoveVolumeParams struct {
 type VolumeAttachmentParams struct {
 	VolumeTag  string `json:"volume-tag"`
 	MachineTag string `json:"machine-tag"`
-	VolumeId   string `json:"volume-id,omitempty"`
+	// ProviderId is the storage provider's unique ID for the volume.
+	// It is named volume-id for legacy reasons.
+	ProviderId string `json:"volume-id,omitempty"`
 	InstanceId string `json:"instance-id,omitempty"`
 	Provider   string `json:"provider"`
 	ReadOnly   bool   `json:"read-only,omitempty"`
@@ -397,14 +400,15 @@ type Filesystem struct {
 
 // FilesystemInfo describes a storage filesystem in the model.
 type FilesystemInfo struct {
-	FilesystemId string `json:"filesystem-id"`
+	// ProviderId is called the filesystem-id over the wire.
+	ProviderId string `json:"filesystem-id"`
 	// Pool is the name of the storage pool used to
 	// allocate the filesystem. Juju controllers older
 	// than 2.2 do not populate this field, so it may
 	// be omitted.
 	Pool string `json:"pool"`
-	// Size is the size of the filesystem in MiB.
-	Size uint64 `json:"size"`
+	// SizeMiB is the size of the filesystem in MiB.
+	SizeMiB uint64 `json:"size"`
 }
 
 // Filesystems describes a set of storage filesystems in the model.
@@ -434,7 +438,7 @@ type FilesystemAttachments struct {
 type FilesystemParams struct {
 	FilesystemTag string                      `json:"filesystem-tag"`
 	VolumeTag     string                      `json:"volume-tag,omitempty"`
-	Size          uint64                      `json:"size"`
+	SizeMiB       uint64                      `json:"size"`
 	Provider      string                      `json:"provider"`
 	Attributes    map[string]interface{}      `json:"attributes,omitempty"`
 	Tags          map[string]string           `json:"tags,omitempty"`
@@ -447,8 +451,9 @@ type RemoveFilesystemParams struct {
 	// Provider is the storage provider that manages the filesystem.
 	Provider string `json:"provider"`
 
-	// FilesystemId is the storage provider's unique ID for the filesystem.
-	FilesystemId string `json:"filesystem-id"`
+	// ProviderId is the storage provider's unique ID for the filesystem.
+	// It is named filesystem-id for legacy reasons.
+	ProviderId string `json:"filesystem-id"`
 
 	// Destroy controls whether the filesystem should be completely
 	// destroyed, or otherwise merely released from Juju's management.
@@ -460,11 +465,13 @@ type RemoveFilesystemParams struct {
 type FilesystemAttachmentParams struct {
 	FilesystemTag string `json:"filesystem-tag"`
 	MachineTag    string `json:"machine-tag"`
-	FilesystemId  string `json:"filesystem-id,omitempty"`
-	InstanceId    string `json:"instance-id,omitempty"`
-	Provider      string `json:"provider"`
-	MountPoint    string `json:"mount-point,omitempty"`
-	ReadOnly      bool   `json:"read-only,omitempty"`
+	// ProviderId is the storage provider's unique ID for the filesystem.
+	// It is named filesystem-id for legacy reasons.
+	ProviderId string `json:"filesystem-id,omitempty"`
+	InstanceId string `json:"instance-id,omitempty"`
+	Provider   string `json:"provider"`
+	MountPoint string `json:"mount-point,omitempty"`
+	ReadOnly   bool   `json:"read-only,omitempty"`
 }
 
 // FilesystemAttachmentResult holds the details of a single filesystem attachment,
@@ -857,8 +864,8 @@ type StorageDirectives struct {
 	// storage instance.
 	Pool string `json:"pool,omitempty"`
 
-	// Size is the required size of the storage instance, in MiB.
-	Size *uint64 `json:"size,omitempty"`
+	// SizeMiB is the required size of the storage instance, in MiB.
+	SizeMiB *uint64 `json:"size,omitempty"`
 
 	// Count is the required number of storage instances.
 	Count *uint64 `json:"count,omitempty"`
@@ -917,7 +924,14 @@ type BulkImportStorageParams struct {
 	Storage []ImportStorageParams `json:"storage"`
 }
 
+// BulkImportStorageParamsV2 contains the parameters for importing a collection
+// of storage entities with force option support.
+type BulkImportStorageParamsV2 struct {
+	Storage []ImportStorageParamsV2 `json:"storage"`
+}
+
 // ImportStorageParams contains the parameters for importing a storage entity.
+// This struct is used by Storage API v6 and does not support force import.
 type ImportStorageParams struct {
 	// Kind is the kind of the storage entity to import.
 	Kind StorageKind `json:"kind"`
@@ -932,6 +946,29 @@ type ImportStorageParams struct {
 
 	// StorageName is the name of the storage to assign to the entity.
 	StorageName string `json:"storage-name"`
+}
+
+// ImportStorageParamsV2 contains the parameters for importing a storage entity.
+// This struct is used by Storage API v7 and extends ImportStorageParams with
+// force import capability to handle conflicting storage resources.
+type ImportStorageParamsV2 struct {
+	// Kind is the kind of the storage entity to import.
+	Kind StorageKind `json:"kind"`
+
+	// Pool is the name of the storage pool into which the storage is to
+	// be imported.
+	Pool string `json:"pool"`
+
+	// ProviderId is the storage provider's unique ID for the storage,
+	// e.g. the EBS volume ID.
+	ProviderId string `json:"provider-id"`
+
+	// StorageName is the name of the storage to assign to the entity.
+	StorageName string `json:"storage-name"`
+
+	// Force indicates whether to force the import operation when there are
+	// conflicting storage resources that would otherwise prevent the import.
+	Force bool `json:"force,omitempty"`
 }
 
 // ImportStorageResults contains the results of importing a collection of

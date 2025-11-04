@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -13,11 +14,12 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/exec"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/debug/coveruploader"
 	"github.com/juju/juju/internal/featureflag"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
@@ -32,10 +34,10 @@ func init() {
 }
 
 const (
-	// exit_err is the value that is returned when the user has run juju in an invalid way.
-	exit_err = 2
-	// exit_panic is the value that is returned when we exit due to an unhandled panic.
-	exit_panic = 3
+	// ExitStatusCodeErr is the value that is returned when the user has run juju in an invalid way.
+	ExitStatusCodeErr = 2
+	// ExitStatusCodePanic is the value that is returned when we exit due to an unhandled panic.
+	ExitStatusCodePanic = 3
 )
 
 func getenv(name string) (string, error) {
@@ -169,6 +171,7 @@ func hookToolMain(commandName string, ctx *cmd.Context, args []string) (code int
 }
 
 func main() {
+	coveruploader.Enable()
 	os.Exit(Main(os.Args))
 }
 
@@ -179,15 +182,15 @@ func Main(args []string) int {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			buf = buf[:runtime.Stack(buf, false)]
-			logger.Criticalf("Unhandled panic: \n%v\n%s", r, buf)
-			os.Exit(exit_panic)
+			logger.Criticalf(context.TODO(), "Unhandled panic: \n%v\n%s", r, buf)
+			os.Exit(ExitStatusCodePanic)
 		}
 	}()
 
 	ctx, err := cmd.DefaultContext()
 	if err != nil {
 		cmd.WriteError(os.Stderr, err)
-		os.Exit(exit_err)
+		os.Exit(ExitStatusCodeErr)
 	}
 
 	var code int

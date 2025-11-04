@@ -4,51 +4,54 @@
 package crossmodelsecrets_test
 
 import (
-	"context"
+	stdtesting "testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/api/controller/crossmodelsecrets"
+	"github.com/juju/juju/core/application"
+	relationtesting "github.com/juju/juju/core/relation/testing"
 	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/secrets"
 	secretsprovider "github.com/juju/juju/internal/secrets/provider"
+	coretesting "github.com/juju/juju/internal/testing"
 	jujujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&CrossControllerSuite{})
+func TestCrossControllerSuite(t *stdtesting.T) {
+	tc.Run(t, &CrossControllerSuite{})
+}
 
 type CrossControllerSuite struct {
 	coretesting.BaseSuite
 }
 
-func (s *CrossControllerSuite) TestNewClient(c *gc.C) {
+func (s *CrossControllerSuite) TestNewClient(c *tc.C) {
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		return nil
 	})
 	client := crossmodelsecrets.NewClient(apiCaller)
-	c.Assert(client, gc.NotNil)
+	c.Assert(client, tc.NotNil)
 }
 
 func ptr[T any](v T) *T {
 	return &v
 }
 
-func (s *CrossControllerSuite) TestGetRemoteSecretContentInfo(c *gc.C) {
+func (s *CrossControllerSuite) TestGetRemoteSecretContentInfo(c *tc.C) {
 	uri := coresecrets.NewURI()
 	macs := macaroon.Slice{jujujutesting.MustNewMacaroon("test")}
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "CrossModelSecrets")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "GetSecretContentInfo")
-		c.Check(arg, jc.DeepEquals, params.GetRemoteSecretContentArgs{
+		c.Check(objType, tc.Equals, "CrossModelSecrets")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "GetSecretContentInfo")
+		c.Check(arg, tc.DeepEquals, params.GetRemoteSecretContentArgs{
 			Args: []params.GetRemoteSecretContentArg{{
 				SourceControllerUUID: coretesting.ControllerTag.Id(),
 				ApplicationToken:     "token",
@@ -61,9 +64,9 @@ func (s *CrossControllerSuite) TestGetRemoteSecretContentInfo(c *gc.C) {
 				Peek:                 true,
 			}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.SecretContentResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.SecretContentResults{})
 		*(result.(*params.SecretContentResults)) = params.SecretContentResults{
-			[]params.SecretContentResult{{
+			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{
 					ValueRef: &params.SecretValueRef{
 						BackendID:  "backend-id",
@@ -86,17 +89,17 @@ func (s *CrossControllerSuite) TestGetRemoteSecretContentInfo(c *gc.C) {
 		return nil
 	})
 	client := crossmodelsecrets.NewClient(apiCaller)
-	content, backend, latestRevision, draining, err := client.GetRemoteSecretContentInfo(context.Background(), uri, 665, true, true, coretesting.ControllerTag.Id(), "token", 666, macs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(latestRevision, gc.Equals, 666)
-	c.Assert(draining, jc.IsTrue)
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{
+	content, backend, latestRevision, draining, err := client.GetRemoteSecretContentInfo(c.Context(), uri, 665, true, true, coretesting.ControllerTag.Id(), "token", 666, macs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(latestRevision, tc.Equals, 666)
+	c.Assert(draining, tc.IsTrue)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{
 		ValueRef: &coresecrets.ValueRef{
 			BackendID:  "backend-id",
 			RevisionID: "rev-id",
 		},
 	})
-	c.Assert(backend, jc.DeepEquals, &secretsprovider.ModelBackendConfig{
+	c.Assert(backend, tc.DeepEquals, &secretsprovider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
 		ModelUUID:      coretesting.ModelTag.Id(),
 		ModelName:      "fred",
@@ -107,50 +110,52 @@ func (s *CrossControllerSuite) TestGetRemoteSecretContentInfo(c *gc.C) {
 	})
 }
 
-func (s *CrossControllerSuite) TestControllerInfoError(c *gc.C) {
+func (s *CrossControllerSuite) TestControllerInfoError(c *tc.C) {
 	s.PatchValue(&crossmodelsecrets.Clock, testclock.NewDilatedWallClock(time.Millisecond))
 	attemptCount := 0
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		attemptCount++
 		*(result.(*params.SecretContentResults)) = params.SecretContentResults{
-			[]params.SecretContentResult{{
+			Results: []params.SecretContentResult{{
 				Error: &params.Error{Message: "boom"},
 			}},
 		}
 		return nil
 	})
 	client := crossmodelsecrets.NewClient(apiCaller)
-	content, backend, _, _, err := client.GetRemoteSecretContentInfo(context.Background(), coresecrets.NewURI(), 665, false, false, coretesting.ControllerTag.Id(), "token", 666, nil)
-	c.Assert(err, gc.ErrorMatches, "attempt count exceeded: boom")
-	c.Assert(content, gc.IsNil)
-	c.Assert(backend, gc.IsNil)
-	c.Assert(attemptCount, gc.Equals, 3)
+	content, backend, _, _, err := client.GetRemoteSecretContentInfo(c.Context(), coresecrets.NewURI(), 665, false, false, coretesting.ControllerTag.Id(), "token", 666, nil)
+	c.Assert(err, tc.ErrorMatches, "attempt count exceeded: boom")
+	c.Assert(content, tc.IsNil)
+	c.Assert(backend, tc.IsNil)
+	c.Assert(attemptCount, tc.Equals, 3)
 }
 
-func (s *CrossControllerSuite) TestGetSecretAccessScope(c *gc.C) {
+func (s *CrossControllerSuite) TestGetSecretAccessScope(c *tc.C) {
 	uri := coresecrets.NewURI()
+	appUUID := tc.Must(c, application.NewUUID)
+	relUUID := relationtesting.GenRelationUUID(c)
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "CrossModelSecrets")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "GetSecretAccessScope")
-		c.Check(arg, jc.DeepEquals, params.GetRemoteSecretAccessArgs{
+		c.Check(objType, tc.Equals, "CrossModelSecrets")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "GetSecretAccessScope")
+		c.Check(arg, tc.DeepEquals, params.GetRemoteSecretAccessArgs{
 			Args: []params.GetRemoteSecretAccessArg{{
-				ApplicationToken: "app-token",
+				ApplicationToken: appUUID.String(),
 				UnitId:           666,
 				URI:              uri.String(),
 			}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.StringResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.StringResults{})
 		*(result.(*params.StringResults)) = params.StringResults{
-			[]params.StringResult{{
-				Result: "scope-token",
+			Results: []params.StringResult{{
+				Result: relUUID.String(),
 			}},
 		}
 		return nil
 	})
 	client := crossmodelsecrets.NewClient(apiCaller)
-	scope, err := client.GetSecretAccessScope(uri, "app-token", 666)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(scope, gc.Equals, "scope-token")
+	scope, err := client.GetSecretAccessScope(c.Context(), uri, appUUID, 666)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(scope, tc.Equals, relUUID)
 }

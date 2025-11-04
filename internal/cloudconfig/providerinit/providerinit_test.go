@@ -6,12 +6,11 @@ package providerinit_test
 
 import (
 	"path"
+	stdtesting "testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/utils/v4"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
 	goyaml "gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/agent"
@@ -20,27 +19,29 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/cloudconfig/cloudinit"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 	"github.com/juju/juju/internal/cloudconfig/providerinit"
 	"github.com/juju/juju/internal/provider/openstack"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/tools"
-	"github.com/juju/juju/testing"
 )
 
 type CloudInitSuite struct {
 	testing.FakeJujuXDGDataHomeSuite
 }
 
-var _ = gc.Suite(&CloudInitSuite{})
+func TestCloudInitSuite(t *stdtesting.T) {
+	tc.Run(t, &CloudInitSuite{})
+}
 
-func (s *CloudInitSuite) TestFinishInstanceConfig(c *gc.C) {
+func (s *CloudInitSuite) TestFinishInstanceConfig(c *tc.C) {
 
 	userTag := names.NewLocalUserTag("not-touched")
 
 	expectedMcfg := &instancecfg.InstanceConfig{
-		AuthorizedKeys: "we-are-the-keys",
 		AgentEnvironment: map[string]string{
 			agent.ProviderType:  "dummy",
 			agent.ContainerType: "",
@@ -56,46 +57,43 @@ func (s *CloudInitSuite) TestFinishInstanceConfig(c *gc.C) {
 		"authorized-keys":    "we-are-the-keys",
 		"cloudinit-userdata": validCloudInitUserData,
 	}))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	icfg := &instancecfg.InstanceConfig{
 		APIInfo: &api.Info{Tag: userTag},
 	}
 	err = instancecfg.FinishInstanceConfig(icfg, cfg)
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(icfg, jc.DeepEquals, expectedMcfg)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(icfg, tc.DeepEquals, expectedMcfg)
 
 	// Test when updates/upgrades are set to false.
 	cfg, err = config.New(config.NoDefaults, testing.FakeConfig().Merge(testing.Attrs{
-		"authorized-keys":          "we-are-the-keys",
 		"enable-os-refresh-update": false,
 		"enable-os-upgrade":        false,
 	}))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = instancecfg.FinishInstanceConfig(icfg, cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	expectedMcfg.EnableOSRefreshUpdate = false
 	expectedMcfg.EnableOSUpgrade = false
 	expectedMcfg.CloudInitUserData = nil
-	c.Assert(icfg, jc.DeepEquals, expectedMcfg)
+	c.Assert(icfg, tc.DeepEquals, expectedMcfg)
 }
 
-func (s *CloudInitSuite) TestFinishInstanceConfigNonDefault(c *gc.C) {
+func (s *CloudInitSuite) TestFinishInstanceConfigNonDefault(c *tc.C) {
 	userTag := names.NewLocalUserTag("not-touched")
 	attrs := testing.FakeConfig().Merge(testing.Attrs{
-		"authorized-keys":           "we-are-the-keys",
 		"ssl-hostname-verification": false,
 	})
 	cfg, err := config.New(config.NoDefaults, attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	icfg := &instancecfg.InstanceConfig{
 		APIInfo: &api.Info{Tag: userTag},
 	}
 	err = instancecfg.FinishInstanceConfig(icfg, cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(icfg, jc.DeepEquals, &instancecfg.InstanceConfig{
-		AuthorizedKeys: "we-are-the-keys",
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(icfg, tc.DeepEquals, &instancecfg.InstanceConfig{
 		AgentEnvironment: map[string]string{
 			agent.ProviderType:  "dummy",
 			agent.ContainerType: "",
@@ -107,15 +105,15 @@ func (s *CloudInitSuite) TestFinishInstanceConfigNonDefault(c *gc.C) {
 	})
 }
 
-func (s *CloudInitSuite) TestUserData(c *gc.C) {
+func (s *CloudInitSuite) TestUserData(c *tc.C) {
 	s.testUserData(c, corebase.MakeDefaultBase("ubuntu", "22.04"), false)
 }
 
-func (s *CloudInitSuite) TestControllerUserData(c *gc.C) {
+func (s *CloudInitSuite) TestControllerUserData(c *tc.C) {
 	s.testUserData(c, corebase.MakeDefaultBase("ubuntu", "22.04"), true)
 }
 
-func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool) {
+func (*CloudInitSuite) testUserData(c *tc.C, base corebase.Base, bootstrap bool) {
 	// Use actual series paths instead of local defaults
 	logDir := paths.LogDir(paths.OSType(base.OS))
 	metricsSpoolDir := paths.MetricsSpoolDir(paths.OSType(base.OS))
@@ -123,11 +121,11 @@ func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool)
 	toolsList := tools.List{
 		&tools.Tools{
 			URL:     "http://tools.testing/tools/released/juju.tgz",
-			Version: version.Binary{version.MustParse("1.2.3"), "jammy", "amd64"},
+			Version: semversion.Binary{Number: semversion.MustParse("1.2.3"), Release: "jammy", Arch: "amd64"},
 		},
 	}
 	envConfig, err := config.New(config.NoDefaults, testing.FakeConfig())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	allJobs := []model.MachineJob{
 		model.JobManageModel,
@@ -157,7 +155,7 @@ func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool)
 		CloudInitUserData:       cloudInitUserDataMap,
 	}
 	err = cfg.SetTools(toolsList)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	if bootstrap {
 		controllerCfg := testing.FakeControllerConfig()
 		cfg.Bootstrap = &instancecfg.BootstrapConfig{
@@ -165,8 +163,7 @@ func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool)
 				ControllerConfig:      controllerCfg,
 				ControllerModelConfig: envConfig,
 			},
-			StateServingInfo: controller.StateServingInfo{
-				StatePort:    controllerCfg.StatePort(),
+			ControllerAgentInfo: controller.ControllerAgentInfo{
 				APIPort:      controllerCfg.APIPort(),
 				Cert:         testing.ServerCert,
 				PrivateKey:   testing.ServerKey,
@@ -177,18 +174,18 @@ func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool)
 	script1 := "script1"
 	script2 := "script2"
 	cloudcfg, err := cloudinit.New(base.OS)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	cloudcfg.AddRunCmd(script1)
 	cloudcfg.AddRunCmd(script2)
 	result, err := providerinit.ComposeUserData(cfg, cloudcfg, &openstack.OpenstackRenderer{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	unzipped, err := utils.Gunzip(result)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	config := make(map[interface{}]interface{})
 	err = goyaml.Unmarshal(unzipped, &config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	if bootstrap {
 		// The cloudinit config should have nothing but the basics:
@@ -225,19 +222,19 @@ func (*CloudInitSuite) testUserData(c *gc.C, base corebase.Base, bootstrap bool)
 				},
 			},
 		}
-		c.Check(config, jc.DeepEquals, expected)
+		c.Check(config, tc.DeepEquals, expected)
 	} else {
 		// Just check that the cloudinit config looks good,
 		// and that there are more runcmds than the additional
 		// ones we passed into ComposeUserData.
-		c.Check(config["package_upgrade"], jc.IsFalse)
+		c.Check(config["package_upgrade"], tc.IsFalse)
 		runCmd := config["runcmd"].([]interface{})
-		c.Assert(runCmd[:4], gc.DeepEquals, []interface{}{
+		c.Assert(runCmd[:4], tc.DeepEquals, []interface{}{
 			`mkdir /tmp/preruncmd`,
 			`mkdir /tmp/preruncmd2`,
 			script1, script2,
 		})
-		c.Assert(runCmd[len(runCmd)-2:], gc.DeepEquals, []interface{}{
+		c.Assert(runCmd[len(runCmd)-2:], tc.DeepEquals, []interface{}{
 			`mkdir /tmp/postruncmd`,
 			`mkdir /tmp/postruncmd2`,
 		})

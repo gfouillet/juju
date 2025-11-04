@@ -5,10 +5,13 @@ package credential
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/uuid"
 )
 
@@ -19,9 +22,9 @@ type Key struct {
 	Cloud string
 
 	// Owner is the owner of the credential. Key is valid when this value is set.
-	Owner string
+	Owner user.Name
 
-	// Name is the name of the credential. Is is valid when this value is set.
+	// Name is the name of the credential. It is valid when this value is set.
 	Name string
 }
 
@@ -35,12 +38,12 @@ func KeyFromTag(tag names.CloudCredentialTag) Key {
 
 	return Key{
 		Cloud: tag.Cloud().Id(),
-		Owner: tag.Owner().Name(),
+		Owner: user.NameFromTag(tag.Owner()),
 		Name:  tag.Name(),
 	}
 }
 
-// IsZero returns true if the [Key] struct is it's zero value with no values set.
+// IsZero returns true if the [Key] struct is its zero value with no values set.
 func (k Key) IsZero() bool {
 	return k == Key{}
 }
@@ -57,9 +60,20 @@ func (k Key) Tag() (names.CloudCredentialTag, error) {
 	if k.IsZero() {
 		return names.CloudCredentialTag{}, nil
 	}
-	return names.ParseCloudCredentialTag(
-		fmt.Sprintf("%s-%s_%s_%s", names.CloudCredentialTagKind, k.Cloud, k.Owner, k.Name),
+
+	// sepEscape is taken from the names package.
+	sepEscape := func(in string) string {
+		return strings.Replace(in, "_", `%5f`, -1)
+	}
+	strTag := fmt.Sprintf(
+		"%s-%s_%s_%s",
+		names.CloudCredentialTagKind,
+		sepEscape(k.Cloud),
+		sepEscape(k.Owner.String()),
+		sepEscape(k.Name),
 	)
+
+	return names.ParseCloudCredentialTag(strTag)
 }
 
 // Validate is responsible for checking all of the fields of Key are in a set
@@ -67,44 +81,44 @@ func (k Key) Tag() (names.CloudCredentialTag, error) {
 // currently set to it's zero value.
 func (k Key) Validate() error {
 	if k.Cloud == "" {
-		return fmt.Errorf("%w cloud cannot be empty", errors.NotValid)
+		return errors.Errorf("cloud cannot be empty").Add(coreerrors.NotValid)
 	}
 	if k.Name == "" {
-		return fmt.Errorf("%w name cannot be empty", errors.NotValid)
+		return errors.Errorf("name cannot be empty").Add(coreerrors.NotValid)
 	}
-	if k.Owner == "" {
-		return fmt.Errorf("%w owner cannot be empty", errors.NotValid)
+	if k.Owner.IsZero() {
+		return errors.Errorf("owner cannot be empty").Add(coreerrors.NotValid)
 	}
 	return nil
 }
 
-// ID represents a unique id within the juju controller for a cloud credential.
-type ID string
+// UUID represents a unique id within the juju controller for a cloud credential.
+type UUID string
 
-// NewID generates a new credential [ID]
-func NewID() (ID, error) {
+// NewUUID generates a new credential [UUID]
+func NewUUID() (UUID, error) {
 	uuid, err := uuid.NewUUID()
 	if err != nil {
-		return ID(""), fmt.Errorf("creating new credential id: %w", err)
+		return UUID(""), errors.Errorf("creating new credential id: %w", err)
 	}
-	return ID(uuid.String()), nil
+	return UUID(uuid.String()), nil
 }
 
 // String implements the stringer interface returning a string representation of
-// the credential ID.
-func (i ID) String() string {
-	return string(i)
+// the credential UUID.
+func (u UUID) String() string {
+	return string(u)
 }
 
-// Validate ensures the consistency of the id. If the [ID] is invalid an error
-// satisfying [errors.NotValid] will be returned.
-func (i ID) Validate() error {
-	if i == "" {
-		return fmt.Errorf("credential id cannot be empty%w", errors.Hide(errors.NotValid))
+// Validate ensures the consistency of the uuid. If the [UUID] is invalid an
+// error satisfying [errors.NotValid] will be returned.
+func (u UUID) Validate() error {
+	if u == "" {
+		return errors.Errorf("credential uuid cannot be empty").Add(coreerrors.NotValid)
 	}
 
-	if !uuid.IsValidUUIDString(string(i)) {
-		return fmt.Errorf("credential id %q %w", i, errors.NotValid)
+	if !uuid.IsValidUUIDString(string(u)) {
+		return errors.Errorf("credential uuid %q %w", u, coreerrors.NotValid)
 	}
 	return nil
 }

@@ -13,7 +13,6 @@ import (
 	context "context"
 	reflect "reflect"
 
-	model "github.com/juju/juju/core/model"
 	charm "github.com/juju/juju/internal/worker/uniter/charm"
 	hook "github.com/juju/juju/internal/worker/uniter/hook"
 	operation "github.com/juju/juju/internal/worker/uniter/operation"
@@ -530,58 +529,19 @@ func (c *MockFactoryNewInstallCall) DoAndReturn(f func(string) (operation.Operat
 	return c
 }
 
-// NewNoOpFinishUpgradeSeries mocks base method.
-func (m *MockFactory) NewNoOpFinishUpgradeSeries() (operation.Operation, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NewNoOpFinishUpgradeSeries")
-	ret0, _ := ret[0].(operation.Operation)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// NewNoOpFinishUpgradeSeries indicates an expected call of NewNoOpFinishUpgradeSeries.
-func (mr *MockFactoryMockRecorder) NewNoOpFinishUpgradeSeries() *MockFactoryNewNoOpFinishUpgradeSeriesCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNoOpFinishUpgradeSeries", reflect.TypeOf((*MockFactory)(nil).NewNoOpFinishUpgradeSeries))
-	return &MockFactoryNewNoOpFinishUpgradeSeriesCall{Call: call}
-}
-
-// MockFactoryNewNoOpFinishUpgradeSeriesCall wrap *gomock.Call
-type MockFactoryNewNoOpFinishUpgradeSeriesCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockFactoryNewNoOpFinishUpgradeSeriesCall) Return(arg0 operation.Operation, arg1 error) *MockFactoryNewNoOpFinishUpgradeSeriesCall {
-	c.Call = c.Call.Return(arg0, arg1)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockFactoryNewNoOpFinishUpgradeSeriesCall) Do(f func() (operation.Operation, error)) *MockFactoryNewNoOpFinishUpgradeSeriesCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockFactoryNewNoOpFinishUpgradeSeriesCall) DoAndReturn(f func() (operation.Operation, error)) *MockFactoryNewNoOpFinishUpgradeSeriesCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // NewNoOpSecretsRemoved mocks base method.
-func (m *MockFactory) NewNoOpSecretsRemoved(arg0 []string) (operation.Operation, error) {
+func (m *MockFactory) NewNoOpSecretsRemoved(arg0, arg1 map[string][]int) (operation.Operation, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NewNoOpSecretsRemoved", arg0)
+	ret := m.ctrl.Call(m, "NewNoOpSecretsRemoved", arg0, arg1)
 	ret0, _ := ret[0].(operation.Operation)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // NewNoOpSecretsRemoved indicates an expected call of NewNoOpSecretsRemoved.
-func (mr *MockFactoryMockRecorder) NewNoOpSecretsRemoved(arg0 any) *MockFactoryNewNoOpSecretsRemovedCall {
+func (mr *MockFactoryMockRecorder) NewNoOpSecretsRemoved(arg0, arg1 any) *MockFactoryNewNoOpSecretsRemovedCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNoOpSecretsRemoved", reflect.TypeOf((*MockFactory)(nil).NewNoOpSecretsRemoved), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewNoOpSecretsRemoved", reflect.TypeOf((*MockFactory)(nil).NewNoOpSecretsRemoved), arg0, arg1)
 	return &MockFactoryNewNoOpSecretsRemovedCall{Call: call}
 }
 
@@ -597,52 +557,13 @@ func (c *MockFactoryNewNoOpSecretsRemovedCall) Return(arg0 operation.Operation, 
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockFactoryNewNoOpSecretsRemovedCall) Do(f func([]string) (operation.Operation, error)) *MockFactoryNewNoOpSecretsRemovedCall {
+func (c *MockFactoryNewNoOpSecretsRemovedCall) Do(f func(map[string][]int, map[string][]int) (operation.Operation, error)) *MockFactoryNewNoOpSecretsRemovedCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockFactoryNewNoOpSecretsRemovedCall) DoAndReturn(f func([]string) (operation.Operation, error)) *MockFactoryNewNoOpSecretsRemovedCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// NewRemoteInit mocks base method.
-func (m *MockFactory) NewRemoteInit(arg0 remotestate.ContainerRunningStatus) (operation.Operation, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NewRemoteInit", arg0)
-	ret0, _ := ret[0].(operation.Operation)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// NewRemoteInit indicates an expected call of NewRemoteInit.
-func (mr *MockFactoryMockRecorder) NewRemoteInit(arg0 any) *MockFactoryNewRemoteInitCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewRemoteInit", reflect.TypeOf((*MockFactory)(nil).NewRemoteInit), arg0)
-	return &MockFactoryNewRemoteInitCall{Call: call}
-}
-
-// MockFactoryNewRemoteInitCall wrap *gomock.Call
-type MockFactoryNewRemoteInitCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockFactoryNewRemoteInitCall) Return(arg0 operation.Operation, arg1 error) *MockFactoryNewRemoteInitCall {
-	c.Call = c.Call.Return(arg0, arg1)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockFactoryNewRemoteInitCall) Do(f func(remotestate.ContainerRunningStatus) (operation.Operation, error)) *MockFactoryNewRemoteInitCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockFactoryNewRemoteInitCall) DoAndReturn(f func(remotestate.ContainerRunningStatus) (operation.Operation, error)) *MockFactoryNewRemoteInitCall {
+func (c *MockFactoryNewNoOpSecretsRemovedCall) DoAndReturn(f func(map[string][]int, map[string][]int) (operation.Operation, error)) *MockFactoryNewNoOpSecretsRemovedCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -842,45 +763,6 @@ func (c *MockFactoryNewSkipHookCall) DoAndReturn(f func(hook.Info) (operation.Op
 	return c
 }
 
-// NewSkipRemoteInit mocks base method.
-func (m *MockFactory) NewSkipRemoteInit(arg0 bool) (operation.Operation, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NewSkipRemoteInit", arg0)
-	ret0, _ := ret[0].(operation.Operation)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// NewSkipRemoteInit indicates an expected call of NewSkipRemoteInit.
-func (mr *MockFactoryMockRecorder) NewSkipRemoteInit(arg0 any) *MockFactoryNewSkipRemoteInitCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewSkipRemoteInit", reflect.TypeOf((*MockFactory)(nil).NewSkipRemoteInit), arg0)
-	return &MockFactoryNewSkipRemoteInitCall{Call: call}
-}
-
-// MockFactoryNewSkipRemoteInitCall wrap *gomock.Call
-type MockFactoryNewSkipRemoteInitCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockFactoryNewSkipRemoteInitCall) Return(arg0 operation.Operation, arg1 error) *MockFactoryNewSkipRemoteInitCall {
-	c.Call = c.Call.Return(arg0, arg1)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockFactoryNewSkipRemoteInitCall) Do(f func(bool) (operation.Operation, error)) *MockFactoryNewSkipRemoteInitCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockFactoryNewSkipRemoteInitCall) DoAndReturn(f func(bool) (operation.Operation, error)) *MockFactoryNewSkipRemoteInitCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // NewUpgrade mocks base method.
 func (m *MockFactory) NewUpgrade(arg0 string) (operation.Operation, error) {
 	m.ctrl.T.Helper()
@@ -1016,6 +898,44 @@ func (c *MockCallbacksCommitHookCall) Do(f func(context.Context, hook.Info) erro
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockCallbacksCommitHookCall) DoAndReturn(f func(context.Context, hook.Info) error) *MockCallbacksCommitHookCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// ErrorAction mocks base method.
+func (m *MockCallbacks) ErrorAction(arg0 context.Context, arg1, arg2 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ErrorAction", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ErrorAction indicates an expected call of ErrorAction.
+func (mr *MockCallbacksMockRecorder) ErrorAction(arg0, arg1, arg2 any) *MockCallbacksErrorActionCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ErrorAction", reflect.TypeOf((*MockCallbacks)(nil).ErrorAction), arg0, arg1, arg2)
+	return &MockCallbacksErrorActionCall{Call: call}
+}
+
+// MockCallbacksErrorActionCall wrap *gomock.Call
+type MockCallbacksErrorActionCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockCallbacksErrorActionCall) Return(arg0 error) *MockCallbacksErrorActionCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockCallbacksErrorActionCall) Do(f func(context.Context, string, string) error) *MockCallbacksErrorActionCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockCallbacksErrorActionCall) DoAndReturn(f func(context.Context, string, string) error) *MockCallbacksErrorActionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1208,56 +1128,18 @@ func (c *MockCallbacksPrepareHookCall) DoAndReturn(f func(context.Context, hook.
 	return c
 }
 
-// RemoteInit mocks base method.
-func (m *MockCallbacks) RemoteInit(arg0 remotestate.ContainerRunningStatus, arg1 <-chan struct{}) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RemoteInit", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// RemoteInit indicates an expected call of RemoteInit.
-func (mr *MockCallbacksMockRecorder) RemoteInit(arg0, arg1 any) *MockCallbacksRemoteInitCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoteInit", reflect.TypeOf((*MockCallbacks)(nil).RemoteInit), arg0, arg1)
-	return &MockCallbacksRemoteInitCall{Call: call}
-}
-
-// MockCallbacksRemoteInitCall wrap *gomock.Call
-type MockCallbacksRemoteInitCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockCallbacksRemoteInitCall) Return(arg0 error) *MockCallbacksRemoteInitCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockCallbacksRemoteInitCall) Do(f func(remotestate.ContainerRunningStatus, <-chan struct{}) error) *MockCallbacksRemoteInitCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksRemoteInitCall) DoAndReturn(f func(remotestate.ContainerRunningStatus, <-chan struct{}) error) *MockCallbacksRemoteInitCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // SecretsRemoved mocks base method.
-func (m *MockCallbacks) SecretsRemoved(arg0 context.Context, arg1 []string) error {
+func (m *MockCallbacks) SecretsRemoved(arg0 context.Context, arg1, arg2 map[string][]int) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SecretsRemoved", arg0, arg1)
+	ret := m.ctrl.Call(m, "SecretsRemoved", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SecretsRemoved indicates an expected call of SecretsRemoved.
-func (mr *MockCallbacksMockRecorder) SecretsRemoved(arg0, arg1 any) *MockCallbacksSecretsRemovedCall {
+func (mr *MockCallbacksMockRecorder) SecretsRemoved(arg0, arg1, arg2 any) *MockCallbacksSecretsRemovedCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SecretsRemoved", reflect.TypeOf((*MockCallbacks)(nil).SecretsRemoved), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SecretsRemoved", reflect.TypeOf((*MockCallbacks)(nil).SecretsRemoved), arg0, arg1, arg2)
 	return &MockCallbacksSecretsRemovedCall{Call: call}
 }
 
@@ -1273,29 +1155,29 @@ func (c *MockCallbacksSecretsRemovedCall) Return(arg0 error) *MockCallbacksSecre
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCallbacksSecretsRemovedCall) Do(f func(context.Context, []string) error) *MockCallbacksSecretsRemovedCall {
+func (c *MockCallbacksSecretsRemovedCall) Do(f func(context.Context, map[string][]int, map[string][]int) error) *MockCallbacksSecretsRemovedCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksSecretsRemovedCall) DoAndReturn(f func(context.Context, []string) error) *MockCallbacksSecretsRemovedCall {
+func (c *MockCallbacksSecretsRemovedCall) DoAndReturn(f func(context.Context, map[string][]int, map[string][]int) error) *MockCallbacksSecretsRemovedCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // SetCurrentCharm mocks base method.
-func (m *MockCallbacks) SetCurrentCharm(arg0 string) error {
+func (m *MockCallbacks) SetCurrentCharm(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetCurrentCharm", arg0)
+	ret := m.ctrl.Call(m, "SetCurrentCharm", arg0, arg1)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SetCurrentCharm indicates an expected call of SetCurrentCharm.
-func (mr *MockCallbacksMockRecorder) SetCurrentCharm(arg0 any) *MockCallbacksSetCurrentCharmCall {
+func (mr *MockCallbacksMockRecorder) SetCurrentCharm(arg0, arg1 any) *MockCallbacksSetCurrentCharmCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetCurrentCharm", reflect.TypeOf((*MockCallbacks)(nil).SetCurrentCharm), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetCurrentCharm", reflect.TypeOf((*MockCallbacks)(nil).SetCurrentCharm), arg0, arg1)
 	return &MockCallbacksSetCurrentCharmCall{Call: call}
 }
 
@@ -1311,29 +1193,29 @@ func (c *MockCallbacksSetCurrentCharmCall) Return(arg0 error) *MockCallbacksSetC
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCallbacksSetCurrentCharmCall) Do(f func(string) error) *MockCallbacksSetCurrentCharmCall {
+func (c *MockCallbacksSetCurrentCharmCall) Do(f func(context.Context, string) error) *MockCallbacksSetCurrentCharmCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksSetCurrentCharmCall) DoAndReturn(f func(string) error) *MockCallbacksSetCurrentCharmCall {
+func (c *MockCallbacksSetCurrentCharmCall) DoAndReturn(f func(context.Context, string) error) *MockCallbacksSetCurrentCharmCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // SetExecutingStatus mocks base method.
-func (m *MockCallbacks) SetExecutingStatus(arg0 string) error {
+func (m *MockCallbacks) SetExecutingStatus(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetExecutingStatus", arg0)
+	ret := m.ctrl.Call(m, "SetExecutingStatus", arg0, arg1)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SetExecutingStatus indicates an expected call of SetExecutingStatus.
-func (mr *MockCallbacksMockRecorder) SetExecutingStatus(arg0 any) *MockCallbacksSetExecutingStatusCall {
+func (mr *MockCallbacksMockRecorder) SetExecutingStatus(arg0, arg1 any) *MockCallbacksSetExecutingStatusCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetExecutingStatus", reflect.TypeOf((*MockCallbacks)(nil).SetExecutingStatus), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetExecutingStatus", reflect.TypeOf((*MockCallbacks)(nil).SetExecutingStatus), arg0, arg1)
 	return &MockCallbacksSetExecutingStatusCall{Call: call}
 }
 
@@ -1349,29 +1231,29 @@ func (c *MockCallbacksSetExecutingStatusCall) Return(arg0 error) *MockCallbacksS
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCallbacksSetExecutingStatusCall) Do(f func(string) error) *MockCallbacksSetExecutingStatusCall {
+func (c *MockCallbacksSetExecutingStatusCall) Do(f func(context.Context, string) error) *MockCallbacksSetExecutingStatusCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksSetExecutingStatusCall) DoAndReturn(f func(string) error) *MockCallbacksSetExecutingStatusCall {
+func (c *MockCallbacksSetExecutingStatusCall) DoAndReturn(f func(context.Context, string) error) *MockCallbacksSetExecutingStatusCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // SetSecretRotated mocks base method.
-func (m *MockCallbacks) SetSecretRotated(arg0 string, arg1 int) error {
+func (m *MockCallbacks) SetSecretRotated(arg0 context.Context, arg1 string, arg2 int) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetSecretRotated", arg0, arg1)
+	ret := m.ctrl.Call(m, "SetSecretRotated", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SetSecretRotated indicates an expected call of SetSecretRotated.
-func (mr *MockCallbacksMockRecorder) SetSecretRotated(arg0, arg1 any) *MockCallbacksSetSecretRotatedCall {
+func (mr *MockCallbacksMockRecorder) SetSecretRotated(arg0, arg1, arg2 any) *MockCallbacksSetSecretRotatedCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSecretRotated", reflect.TypeOf((*MockCallbacks)(nil).SetSecretRotated), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSecretRotated", reflect.TypeOf((*MockCallbacks)(nil).SetSecretRotated), arg0, arg1, arg2)
 	return &MockCallbacksSetSecretRotatedCall{Call: call}
 }
 
@@ -1387,51 +1269,13 @@ func (c *MockCallbacksSetSecretRotatedCall) Return(arg0 error) *MockCallbacksSet
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCallbacksSetSecretRotatedCall) Do(f func(string, int) error) *MockCallbacksSetSecretRotatedCall {
+func (c *MockCallbacksSetSecretRotatedCall) Do(f func(context.Context, string, int) error) *MockCallbacksSetSecretRotatedCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksSetSecretRotatedCall) DoAndReturn(f func(string, int) error) *MockCallbacksSetSecretRotatedCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// SetUpgradeSeriesStatus mocks base method.
-func (m *MockCallbacks) SetUpgradeSeriesStatus(arg0 context.Context, arg1 model.UpgradeSeriesStatus, arg2 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetUpgradeSeriesStatus", arg0, arg1, arg2)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SetUpgradeSeriesStatus indicates an expected call of SetUpgradeSeriesStatus.
-func (mr *MockCallbacksMockRecorder) SetUpgradeSeriesStatus(arg0, arg1, arg2 any) *MockCallbacksSetUpgradeSeriesStatusCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetUpgradeSeriesStatus", reflect.TypeOf((*MockCallbacks)(nil).SetUpgradeSeriesStatus), arg0, arg1, arg2)
-	return &MockCallbacksSetUpgradeSeriesStatusCall{Call: call}
-}
-
-// MockCallbacksSetUpgradeSeriesStatusCall wrap *gomock.Call
-type MockCallbacksSetUpgradeSeriesStatusCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockCallbacksSetUpgradeSeriesStatusCall) Return(arg0 error) *MockCallbacksSetUpgradeSeriesStatusCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockCallbacksSetUpgradeSeriesStatusCall) Do(f func(context.Context, model.UpgradeSeriesStatus, string) error) *MockCallbacksSetUpgradeSeriesStatusCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCallbacksSetUpgradeSeriesStatusCall) DoAndReturn(f func(context.Context, model.UpgradeSeriesStatus, string) error) *MockCallbacksSetUpgradeSeriesStatusCall {
+func (c *MockCallbacksSetSecretRotatedCall) DoAndReturn(f func(context.Context, string, int) error) *MockCallbacksSetSecretRotatedCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

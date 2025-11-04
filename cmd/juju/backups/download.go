@@ -8,19 +8,23 @@ import (
 	"io"
 	"path/filepath"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const downloadDoc = `
-download-backup retrieves a backup archive file.
+Retrieves a backup archive file.
 
-If --filename is not used, the archive is downloaded to a temporary
+If ` + "`--filename`" + ` is not used, the archive is downloaded to a temporary
 location and the filename is printed to stdout.
+`
+
+const examples = `
+    juju download-backup /full/path/to/backup/on/controller
 `
 
 // NewDownloadCommand returns a commant used to download backups.
@@ -40,10 +44,14 @@ type downloadCommand struct {
 // Info implements Command.Info.
 func (c *downloadCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "download-backup",
-		Args:    "/full/path/to/backup/on/controller",
-		Purpose: "Download a backup archive file.",
-		Doc:     downloadDoc,
+		Name:     "download-backup",
+		Args:     "/full/path/to/backup/on/controller",
+		Purpose:  "Download a backup archive file.",
+		Doc:      downloadDoc,
+		Examples: examples,
+		SeeAlso: []string{
+			"create-backup",
+		},
 	})
 }
 
@@ -68,10 +76,10 @@ func (c *downloadCommand) Init(args []string) error {
 
 // Run implements Command.Run.
 func (c *downloadCommand) Run(ctx *cmd.Context) error {
-	if err := c.validateIaasController(c.Info().Name); err != nil {
+	if err := c.validateIaasController(ctx, c.Info().Name); err != nil {
 		return errors.Trace(err)
 	}
-	client, err := c.NewAPIClient()
+	client, err := c.NewAPIClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -80,9 +88,13 @@ func (c *downloadCommand) Run(ctx *cmd.Context) error {
 	// Download the archive.
 	resultArchive, err := client.Download(ctx, c.RemoteFilename)
 	if err != nil {
+		if errors.Is(err, errors.NotFound) {
+			ctx.Errorf("Download of backup archive files is not supported by this controller.")
+			return nil
+		}
 		return errors.Trace(err)
 	}
-	defer resultArchive.Close()
+	defer func() { _ = resultArchive.Close() }()
 
 	// Prepare the local archive.
 	filename := c.ResolveFilename()
@@ -90,7 +102,7 @@ func (c *downloadCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Annotate(err, "while creating local archive file")
 	}
-	defer archive.Close()
+	defer func() { _ = archive.Close() }()
 
 	// Write out the archive.
 	_, err = io.Copy(archive, resultArchive)

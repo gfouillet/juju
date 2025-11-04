@@ -5,6 +5,7 @@ package trace
 
 import (
 	"context"
+	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
@@ -30,6 +31,7 @@ type TracerWorkerFunc func(
 	insecureSkipVerify bool,
 	showStackTraces bool,
 	sampleRatio float64,
+	tailSamplingThreshold time.Duration,
 	logger logger.Logger,
 	newClient NewClientFunc,
 ) (TrackedTracer, error)
@@ -87,24 +89,25 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			// bounce the world and this will be re-evaluated.
 			// This will be evaluated via the agent config worker.
 			if !currentConfig.OpenTelemetryEnabled() {
-				config.Logger.Infof("OpenTelemetry disabled, not starting trace worker")
+				config.Logger.Infof(ctx, "OpenTelemetry disabled, not starting trace worker")
 				return NewNoopWorker(), nil
 			}
 
 			endpoint := currentConfig.OpenTelemetryEndpoint()
 
-			config.Logger.Infof("OpenTelemetry enabled, starting trace worker using endpoint %q", endpoint)
+			config.Logger.Infof(ctx, "OpenTelemetry enabled, starting trace worker using endpoint %q", endpoint)
 
 			w, err := NewWorker(WorkerConfig{
-				Clock:              config.Clock,
-				Logger:             config.Logger,
-				NewTracerWorker:    config.NewTracerWorker,
-				Tag:                currentConfig.Tag(),
-				Kind:               config.Kind,
-				Endpoint:           endpoint,
-				InsecureSkipVerify: currentConfig.OpenTelemetryInsecure(),
-				StackTracesEnabled: currentConfig.OpenTelemetryStackTraces(),
-				SampleRatio:        currentConfig.OpenTelemetrySampleRatio(),
+				Clock:                 config.Clock,
+				Logger:                config.Logger,
+				NewTracerWorker:       config.NewTracerWorker,
+				Tag:                   currentConfig.Tag(),
+				Kind:                  config.Kind,
+				Endpoint:              endpoint,
+				InsecureSkipVerify:    currentConfig.OpenTelemetryInsecure(),
+				StackTracesEnabled:    currentConfig.OpenTelemetryStackTraces(),
+				SampleRatio:           currentConfig.OpenTelemetrySampleRatio(),
+				TailSamplingThreshold: currentConfig.OpenTelemetryTailSamplingThreshold(),
 			})
 			if err != nil {
 				return nil, errors.Trace(err)

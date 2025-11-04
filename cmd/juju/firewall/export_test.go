@@ -4,17 +4,18 @@
 package firewall
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
 
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewListRulesCommandForTest(
 	api ListFirewallRulesAPI,
 ) cmd.Command {
 	aCmd := &listFirewallRulesCommand{
-		newAPIFunc: func() (ListFirewallRulesAPI, error) {
+		newAPIFunc: func(ctx context.Context) (ListFirewallRulesAPI, error) {
 			return api, nil
 		},
 	}
@@ -26,7 +27,7 @@ func NewSetRulesCommandForTest(
 	api SetFirewallRuleAPI,
 ) cmd.Command {
 	aCmd := &setFirewallRuleCommand{
-		newAPIFunc: func() (SetFirewallRuleAPI, error) {
+		newAPIFunc: func(ctx context.Context) (SetFirewallRuleAPI, error) {
 			return api, nil
 		},
 	}

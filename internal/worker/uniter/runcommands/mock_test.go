@@ -6,9 +6,9 @@ package runcommands_test
 import (
 	"context"
 
-	"github.com/juju/testing"
 	"github.com/juju/utils/v4/exec"
 
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	runnercontext "github.com/juju/juju/internal/worker/uniter/runner/context"
@@ -25,15 +25,15 @@ func (f *mockRunnerFactory) NewCommandRunner(_ context.Context, info runnerconte
 
 type mockRunner struct {
 	runner.Runner
-	runCommands func(string, runner.RunLocation) (*exec.ExecResponse, error)
+	runCommands func(string) (*exec.ExecResponse, error)
 }
 
 func (r *mockRunner) Context() runnercontext.Context {
 	return &mockRunnerContext{}
 }
 
-func (r *mockRunner) RunCommands(ctx context.Context, commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-	return r.runCommands(commands, runLocation)
+func (r *mockRunner) RunCommands(ctx context.Context, commands string) (*exec.ExecResponse, error) {
+	return r.runCommands(commands)
 }
 
 type mockRunnerContext struct {
@@ -45,11 +45,11 @@ func (*mockRunnerContext) Prepare(context.Context) error {
 }
 
 type mockCallbacks struct {
-	testing.Stub
+	testhelpers.Stub
 	operation.Callbacks
 }
 
-func (c *mockCallbacks) SetExecutingStatus(status string) error {
+func (c *mockCallbacks) SetExecutingStatus(_ context.Context, status string) error {
 	c.MethodCall(c, "SetExecutingStatus", status)
 	return c.NextErr()
 }

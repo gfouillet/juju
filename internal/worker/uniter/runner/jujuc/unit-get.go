@@ -6,11 +6,11 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -27,10 +27,24 @@ func NewUnitGetCommand(ctx Context) (cmd.Command, error) {
 }
 
 func (c *UnitGetCommand) Info() *cmd.Info {
+	doc := `
+Further details:
+unit-get returns the IP address of the unit.
+
+It accepts a single argument, which must be
+private-address or public-address. It is not
+affected by context.
+
+Note that if a unit has been deployed with
+--bind space then the address returned from
+unit-get private-address will get the address
+from this space, not the ‘default’ space.
+`
 	return jujucmd.Info(&cmd.Info{
 		Name:    "unit-get",
 		Args:    "<setting>",
-		Purpose: "print public-address or private-address",
+		Purpose: "Print public-address or private-address.",
+		Doc:     doc,
 	})
 }
 
@@ -54,7 +68,7 @@ func (c *UnitGetCommand) Run(ctx *cmd.Context) error {
 	var err error
 	if c.Key == "private-address" {
 		var networkInfos map[string]params.NetworkInfoResult
-		networkInfos, err = c.ctx.NetworkInfo([]string{""}, -1)
+		networkInfos, err = c.ctx.NetworkInfo(ctx, []string{""}, -1)
 		if err == nil {
 			if networkInfos[""].Error != nil {
 				err = errors.Trace(networkInfos[""].Error)
@@ -77,7 +91,7 @@ func (c *UnitGetCommand) Run(ctx *cmd.Context) error {
 			}
 		}
 	} else {
-		value, err = c.ctx.PublicAddress()
+		value, err = c.ctx.PublicAddress(ctx)
 	}
 	if err != nil {
 		return errors.Trace(err)

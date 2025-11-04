@@ -9,27 +9,29 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/httprequest.v1"
 
 	"github.com/juju/juju/api/client/modelupgrader"
 	"github.com/juju/juju/api/client/modelupgrader/mocks"
+	"github.com/juju/juju/core/semversion"
+	coretesting "github.com/juju/juju/internal/testing"
 	coretools "github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type UpgradeModelSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&UpgradeModelSuite{})
+func TestUpgradeModelSuite(t *testing.T) {
+	tc.Run(t, &UpgradeModelSuite{})
+}
 
-func (s *UpgradeModelSuite) TestAbortModelUpgrade(c *gc.C) {
+func (s *UpgradeModelSuite) TestAbortModelUpgrade(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	apiCaller := mocks.NewMockAPICallCloser(ctrl)
@@ -44,11 +46,11 @@ func (s *UpgradeModelSuite) TestAbortModelUpgrade(c *gc.C) {
 	).Return(nil)
 
 	client := modelupgrader.NewClient(apiCaller)
-	err := client.AbortModelUpgrade(coretesting.ModelTag.Id())
-	c.Assert(err, jc.ErrorIsNil)
+	err := client.AbortModelUpgrade(c.Context(), coretesting.ModelTag.Id())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *UpgradeModelSuite) TestUpgradeModel(c *gc.C) {
+func (s *UpgradeModelSuite) TestUpgradeModel(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	apiCaller := mocks.NewMockAPICallCloser(ctrl)
@@ -59,41 +61,42 @@ func (s *UpgradeModelSuite) TestUpgradeModel(c *gc.C) {
 		"ModelUpgrader", 1, "", "UpgradeModel",
 		params.UpgradeModelParams{
 			ModelTag:            coretesting.ModelTag.String(),
-			TargetVersion:       version.MustParse("2.9.1"),
+			TargetVersion:       semversion.MustParse("2.9.1"),
 			IgnoreAgentVersions: true,
 			DryRun:              true,
 		}, &params.UpgradeModelResult{},
 	).DoAndReturn(func(ctx context.Context, objType string, facadeVersion int, id, request string, args, result interface{}) error {
 		out := result.(*params.UpgradeModelResult)
-		out.ChosenVersion = version.MustParse("2.9.99")
+		out.ChosenVersion = semversion.MustParse("2.9.99")
 		return nil
 	})
 
 	client := modelupgrader.NewClient(apiCaller)
 	chosenVersion, err := client.UpgradeModel(
+		c.Context(),
 		coretesting.ModelTag.Id(),
-		version.MustParse("2.9.1"),
+		semversion.MustParse("2.9.1"),
 		"", true, true,
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(chosenVersion, gc.DeepEquals, version.MustParse("2.9.99"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(chosenVersion, tc.DeepEquals, semversion.MustParse("2.9.99"))
 }
 
-func (s *UpgradeModelSuite) TestUploadTools(c *gc.C) {
+func (s *UpgradeModelSuite) TestUploadTools(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	apiCaller := mocks.NewMockAPICallCloser(ctrl)
 	doer := mocks.NewMockDoer(ctrl)
-	ctx := context.Background()
+	ctx := c.Context()
 
 	req, err := http.NewRequest(
 		"POST",
 		fmt.Sprintf(
 			"/tools?binaryVersion=%s",
-			version.MustParseBinary("2.9.100-ubuntu-amd64"),
+			semversion.MustParseBinary("2.9.100-ubuntu-amd64"),
 		), nil,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	req.Header.Set("Content-Type", "application/x-tar-gz")
 	req = req.WithContext(ctx)
 
@@ -112,11 +115,11 @@ func (s *UpgradeModelSuite) TestUploadTools(c *gc.C) {
 	client := modelupgrader.NewClient(apiCaller)
 
 	result, err := client.UploadTools(
-		context.Background(),
-		nil, version.MustParseBinary("2.9.100-ubuntu-amd64"),
+		c.Context(),
+		nil, semversion.MustParseBinary("2.9.100-ubuntu-amd64"),
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, coretools.List{
-		{Version: version.MustParseBinary("2.9.100-ubuntu-amd64")},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, coretools.List{
+		{Version: semversion.MustParseBinary("2.9.100-ubuntu-amd64")},
 	})
 }

@@ -11,13 +11,12 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/life"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/payloads"
 	"github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/charm"
@@ -47,7 +46,6 @@ type HookContext interface {
 	ContextLeadership
 	ContextStorage
 	ContextResources
-	ContextPayloads
 	ContextRelations
 	ContextVersion
 	ContextSecrets
@@ -106,7 +104,7 @@ type actionHookContext interface {
 	SetActionFailed() error
 
 	// LogActionMessage records a progress message for the Action.
-	LogActionMessage(string) error
+	LogActionMessage(context.Context, string) error
 }
 
 // WorkloadHookContext is the context for a workload hook.
@@ -143,7 +141,7 @@ type ContextUnit interface {
 
 	// ConfigSettings returns the current application
 	// configuration of the executing unit.
-	ConfigSettings() (charm.Settings, error)
+	ConfigSettings(context.Context) (charm.Config, error)
 
 	// GoalState returns the goal state for the current unit.
 	GoalState(context.Context) (*application.GoalState, error)
@@ -189,33 +187,33 @@ type SecretMetadata struct {
 	RotatePolicy     secrets.RotatePolicy
 	LatestRevision   int
 	LatestExpireTime *time.Time
+	LatestChecksum   string
 	NextRotateTime   *time.Time
-	Revisions        []int
 	Access           []secrets.AccessInfo
 }
 
 // ContextSecrets is the part of a hook context related to secrets.
 type ContextSecrets interface {
 	// GetSecret returns the value of the specified secret.
-	GetSecret(*secrets.URI, string, bool, bool) (secrets.SecretValue, error)
+	GetSecret(context.Context, *secrets.URI, string, bool, bool) (secrets.SecretValue, error)
 
 	// CreateSecret creates a secret with the specified data.
-	CreateSecret(*SecretCreateArgs) (*secrets.URI, error)
+	CreateSecret(context.Context, *SecretCreateArgs) (*secrets.URI, error)
 
 	// UpdateSecret creates a secret with the specified data.
-	UpdateSecret(*secrets.URI, *SecretUpdateArgs) error
+	UpdateSecret(context.Context, *secrets.URI, *SecretUpdateArgs) error
 
 	// RemoveSecret removes a secret with the specified uri.
-	RemoveSecret(*secrets.URI, *int) error
+	RemoveSecret(context.Context, *secrets.URI, *int) error
 
 	// GrantSecret grants access to the specified secret.
-	GrantSecret(*secrets.URI, *SecretGrantRevokeArgs) error
+	GrantSecret(context.Context, *secrets.URI, *SecretGrantRevokeArgs) error
 
 	// RevokeSecret revokes access to the specified secret.
-	RevokeSecret(*secrets.URI, *SecretGrantRevokeArgs) error
+	RevokeSecret(context.Context, *secrets.URI, *SecretGrantRevokeArgs) error
 
 	// SecretMetadata gets the secret metadata for secrets created by the charm.
-	SecretMetadata() (map[string]SecretMetadata, error)
+	SecretMetadata(context.Context) (map[string]SecretMetadata, error)
 }
 
 // ContextStatus is the part of a hook context related to the unit's status.
@@ -252,7 +250,7 @@ type ContextInstance interface {
 type ContextNetworking interface {
 	// PublicAddress returns the executing unit's public address or an
 	// error if it is not available.
-	PublicAddress() (string, error)
+	PublicAddress(context.Context) (string, error)
 
 	// PrivateAddress returns the executing unit's private address or an
 	// error if it is not available.
@@ -271,7 +269,7 @@ type ContextNetworking interface {
 	OpenedPortRanges() network.GroupedPortRanges
 
 	// NetworkInfo returns the network info for the given bindings on the given relation.
-	NetworkInfo(bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error)
+	NetworkInfo(ctx context.Context, bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error)
 }
 
 // ContextLeadership is the part of a hook context related to the
@@ -280,15 +278,6 @@ type ContextLeadership interface {
 	// IsLeader returns true if the local unit is known to be leader for at
 	// least the next 30s.
 	IsLeader() (bool, error)
-
-	// LeaderSettings returns the current leader settings. Once leader settings
-	// have been read in a given context, they will not be updated other than
-	// via successful calls to WriteLeaderSettings.
-	LeaderSettings() (map[string]string, error)
-
-	// WriteLeaderSettings writes the supplied settings directly to state, or
-	// fails if the local unit is not the application's leader.
-	WriteLeaderSettings(map[string]string) error
 }
 
 // ContextStorage is the part of a hook context related to storage
@@ -296,17 +285,17 @@ type ContextLeadership interface {
 type ContextStorage interface {
 	// StorageTags returns a list of tags for storage instances
 	// attached to the unit or an error if they are not available.
-	StorageTags() ([]names.StorageTag, error)
+	StorageTags(context.Context) ([]names.StorageTag, error)
 
 	// Storage returns the ContextStorageAttachment with the supplied
 	// tag if it was found, and an error if it was not found or is not
 	// available to the context.
-	Storage(names.StorageTag) (ContextStorageAttachment, error)
+	Storage(context.Context, names.StorageTag) (ContextStorageAttachment, error)
 
 	// HookStorage returns the storage attachment associated
 	// the executing hook if it was found, and an error if it
 	// was not found or is not available.
-	HookStorage() (ContextStorageAttachment, error)
+	HookStorage(context.Context) (ContextStorageAttachment, error)
 
 	// AddUnitStorage saves storage directives in the context.
 	AddUnitStorage(map[string]params.StorageDirectives) error
@@ -318,23 +307,6 @@ type ContextResources interface {
 	// DownloadResource downloads the named resource and returns
 	// the path to which it was downloaded.
 	DownloadResource(ctx context.Context, name string) (filePath string, _ error)
-}
-
-// ContextPayloads exposes the functionality needed by the
-// "payload-*" hook commands.
-type ContextPayloads interface {
-	// GetPayload returns the payload info corresponding to the given ID.
-	GetPayload(class, id string) (*payloads.Payload, error)
-	// TrackPayload records the payload info in the hook context.
-	TrackPayload(payload payloads.Payload) error
-	// UntrackPayload removes the payload from our list of payloads to track.
-	UntrackPayload(class, id string) error
-	// SetPayloadStatus sets the status of the payload.
-	SetPayloadStatus(class, id, status string) error
-	// ListPayloads returns the list of registered payload IDs.
-	ListPayloads() ([]string, error)
-	// FlushPayloads pushes the hook context data out to state.
-	FlushPayloads() error
 }
 
 // ContextRelations exposes the relations associated with the unit.
@@ -370,20 +342,20 @@ type ContextRelation interface {
 
 	// Settings allows read/write access to the local unit's settings in
 	// this relation.
-	Settings() (Settings, error)
+	Settings(context.Context) (Settings, error)
 
 	// ApplicationSettings allows read/write access to the application settings in
 	// this relation, but only if the current unit is leader.
-	ApplicationSettings() (Settings, error)
+	ApplicationSettings(context.Context) (Settings, error)
 
 	// UnitNames returns a list of the remote units in the relation.
 	UnitNames() []string
 
 	// ReadSettings returns the settings of any remote unit in the relation.
-	ReadSettings(unit string) (params.Settings, error)
+	ReadSettings(ctx context.Context, unit string) (params.Settings, error)
 
 	// ReadApplicationSettings returns the application settings of any remote unit in the relation.
-	ReadApplicationSettings(app string) (params.Settings, error)
+	ReadApplicationSettings(ctx context.Context, app string) (params.Settings, error)
 
 	// Suspended returns true if the relation is suspended.
 	Suspended() bool
@@ -394,6 +366,10 @@ type ContextRelation interface {
 	// RemoteApplicationName returns the application on the other end of
 	// the relation from the perspective of this unit.
 	RemoteApplicationName() string
+
+	// RemoteModelUUID returns the uuid of the model hosting the
+	// application on the other end of the relation.
+	RemoteModelUUID() string
 
 	// Life returns the relation's current life state.
 	Life() life.Value

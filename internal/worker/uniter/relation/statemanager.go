@@ -5,13 +5,12 @@ package relation
 
 import (
 	"context"
-	stdcontext "context"
 	"fmt"
 	"sync"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 	"gopkg.in/yaml.v2"
 
@@ -20,9 +19,10 @@ import (
 )
 
 // NewStateManager creates a new StateManager instance.
-func NewStateManager(ctx stdcontext.Context, rw UnitStateReadWriter, logger logger.Logger) (StateManager, error) {
+func NewStateManager(ctx context.Context, rw UnitStateReadWriter, logger logger.Logger) (StateManager, error) {
 	mgr := &stateManager{unitStateRW: rw, logger: logger}
-	return mgr, mgr.initialize(ctx)
+	err := mgr.initialize(ctx)
+	return mgr, err
 }
 
 type stateManager struct {
@@ -68,7 +68,7 @@ func (m *stateManager) RemoveRelation(ctx context.Context, id int, unitGetter Un
 			knownUnits[unitName] = unitExists
 		}
 		if !unitExists {
-			m.logger.Warningf("unit %v in relation %d no longer exists", unitName, id)
+			m.logger.Warningf(ctx, "unit %v in relation %d no longer exists", unitName, id)
 			continue
 		}
 		knownMembers.Add(unitName)
@@ -102,7 +102,7 @@ func (m *stateManager) KnownIDs() []int {
 // SetRelation persists the given state, overwriting the previous
 // state for a given id or creating state at a new id. The change to
 // the manager is only made when the data is successfully saved.
-func (m *stateManager) SetRelation(ctx stdcontext.Context, st *State) error {
+func (m *stateManager) SetRelation(ctx context.Context, st *State) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.write(ctx, st); err != nil {
@@ -122,14 +122,14 @@ func (m *stateManager) RelationFound(id int) bool {
 }
 
 // initialize loads the current state into the manager.
-func (m *stateManager) initialize(ctx stdcontext.Context) error {
+func (m *stateManager) initialize(ctx context.Context) error {
 	unitState, err := m.unitStateRW.State(ctx)
 	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	m.relationState = make(map[int]State, len(unitState.RelationState))
 	if m.logger.IsLevelEnabled(logger.TRACE) {
-		m.logger.Tracef("initialising state manager: %# v", pretty.Formatter(unitState.RelationState))
+		m.logger.Tracef(ctx, "initialising state manager: %# v", pretty.Formatter(unitState.RelationState))
 	}
 	for k, v := range unitState.RelationState {
 		var state State
@@ -141,7 +141,7 @@ func (m *stateManager) initialize(ctx stdcontext.Context) error {
 	return nil
 }
 
-func (m *stateManager) write(ctx stdcontext.Context, st *State) error {
+func (m *stateManager) write(ctx context.Context, st *State) error {
 	newSt, err := m.stateToPersist()
 	if err != nil {
 		return errors.Trace(err)
@@ -154,7 +154,7 @@ func (m *stateManager) write(ctx stdcontext.Context, st *State) error {
 	return m.unitStateRW.SetState(ctx, params.SetUnitStateArg{RelationState: &newSt})
 }
 
-func (m *stateManager) remove(ctx stdcontext.Context, id int) error {
+func (m *stateManager) remove(ctx context.Context, id int) error {
 	newSt, err := m.stateToPersist()
 	if err != nil {
 		return errors.Trace(err)

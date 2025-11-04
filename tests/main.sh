@@ -1,12 +1,14 @@
-#!/bin/bash -e
+#!/usr/bin/env -S bash -e
 [ -n "${GOPATH:-}" ] && export "PATH=${PATH}:${GOPATH}/bin"
 
+export SKIP_DESTROY="${SKIP_DESTROY:-}"
+
 # Always ignore SC2230 ('which' is non-standard. Use builtin 'command -v' instead.)
-export SHELLCHECK_OPTS="-e SC2230 -e SC2039 -e SC2028 -e SC2002 -e SC2005 -e SC2001 -e SC2263 -e SC2043"
+export SHELLCHECK_OPTS="-e SC2230 -e SC2039 -e SC2028 -e SC2002 -e SC2005 -e SC2001 -e SC2263 -e SC2043 -e SC2038"
 export BOOTSTRAP_REUSE_LOCAL="${BOOTSTRAP_REUSE_LOCAL:-}"
 export BOOTSTRAP_REUSE="${BOOTSTRAP_REUSE:-false}"
 export BOOTSTRAP_PROVIDER="${BOOTSTRAP_PROVIDER:-lxd}"
-export BOOTSTRAP_CLOUD="${BOOTSTRAP_CLOUD:-localhost}"
+export BOOTSTRAP_CLOUD="${BOOTSTRAP_CLOUD:-}"
 export BOOTSTRAP_BASE="${BOOTSTRAP_BASE:-}"
 export BOOTSTRAP_ARCH="${BOOTSTRAP_ARCH:-}"
 export BUILD_ARCH="${BUILD_ARCH:-}"
@@ -14,6 +16,7 @@ export MODEL_ARCH="${MODEL_ARCH:-}"
 export BUILD_AGENT="${BUILD_AGENT:-false}"
 export RUN_SUBTEST="${RUN_SUBTEST:-}"
 export CURRENT_LTS="ubuntu@22.04"
+export DESTROY_TIMEOUT="${DESTROY_TIMEOUT:-15m}"
 
 current_pwd=$(pwd)
 export CURRENT_DIR="${current_pwd}"
@@ -42,9 +45,8 @@ import_subdir_files includes
 TEST_NAMES="actions \
             agents \
             appdata \
-            backup \
+            authorized_keys \
             bootstrap \
-            branches \
             caasadmission \
             charmhub \
             cli \
@@ -54,6 +56,7 @@ TEST_NAMES="actions \
             coslite \
             credential \
             ck \
+            dashboard \
             deploy \
             deploy_aks \
             deploy_caas \
@@ -62,7 +65,6 @@ TEST_NAMES="actions \
             hooktools \
             kubeflow \
             machine \
-            magma \
             manual \
             model \
             network \
@@ -77,7 +79,8 @@ TEST_NAMES="actions \
             spaces_ec2 \
             static_analysis \
             storage \
-            unit \
+            storage_k8s \
+            unmanaged \
             upgrade \
             user"
 
@@ -111,17 +114,18 @@ show_help() {
 	echo "¯¯¯¯¯¯"
 	echo "Flags should appear $(red 'before') arguments."
 	echo ""
-	echo "cmd [-h] [-v] [-A] [-s test] [-a file] [-x file] [-r] [-l controller] [-p provider type <lxd|aws|google|azure|manual|microk8s|vsphere|maas>]"
+	echo "cmd [-h] [-v] [-A] [-s test] [-a file] [-x file] [-r] [-l controller] [-p provider type <lxd|aws|google|azure|manual|unmanaged|microk8s|vsphere|maas>]"
 	echo ""
 	echo "    $(green './main.sh -h')        Display this help message"
 	echo "    $(green './main.sh -v')        Verbose and debug messages"
+	echo "    $(green './main.sh -V')        Verbose and debug messages with all commands printed"
 	echo "    $(green './main.sh -A')        Run all the test suites"
 	echo "    $(green './main.sh -s')        Skip tests using a comma seperated list"
 	echo "    $(green './main.sh -a')        Create an artifact file"
 	echo "    $(green './main.sh -x')        Output file from streaming the output"
 	echo "    $(green './main.sh -r')        Reuse bootstrapped controller between testing suites"
 	echo "    $(green './main.sh -l')        Local bootstrapped controller name to reuse"
-	echo "    $(green './main.sh -p')        Bootstrap provider to use when bootstrapping <lxd|aws|google|azure|manual|k8s|openstack|vsphere|maas>"
+	echo "    $(green './main.sh -p')        Bootstrap provider to use when bootstrapping <lxd|aws|google|azure|manual|unmanaged|k8s|openstack|vsphere|maas>"
 	echo "                                     vsphere assumes juju boston vsphere for image metadata generation"
 	echo "                                     openstack assumes providing image data directly is not required"
 	echo "    $(green './main.sh -c')        Cloud name to use when bootstrapping, must be one of provider types listed above"
@@ -161,7 +165,7 @@ show_help() {
 	exit 1
 }
 
-while getopts "hH?vAs:a:x:rl:p:c:R:B:" opt; do
+while getopts "hH?vAs:a:x:rl:p:c:R:B:V" opt; do
 	case "${opt}" in
 	h | \?)
 		show_help
@@ -171,6 +175,11 @@ while getopts "hH?vAs:a:x:rl:p:c:R:B:" opt; do
 		;;
 	v)
 		VERBOSE=2
+		# shellcheck disable=SC2262
+		alias juju="juju --debug"
+		;;
+	V)
+		VERBOSE=11
 		# shellcheck disable=SC2262
 		alias juju="juju --debug"
 		;;
@@ -239,7 +248,7 @@ fi
 echo ""
 
 echo "==> Checking for dependencies"
-check_dependencies curl jq yq shellcheck expect
+check_dependencies curl jq yq shellcheck
 
 if [[ ${USER:-'root'} == "root" ]]; then
 	echo "The testsuite must not be run as root." >&2

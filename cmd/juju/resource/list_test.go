@@ -4,88 +4,91 @@
 package resource_test
 
 import (
+	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	resourcecmd "github.com/juju/juju/cmd/juju/resource"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	coreunit "github.com/juju/juju/core/unit"
 	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-var _ = gc.Suite(&ShowApplicationSuite{})
+func TestShowApplicationSuite(t *testing.T) {
+	tc.Run(t, &ShowApplicationSuite{})
+}
 
 type ShowApplicationSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	stubDeps *stubShowApplicationDeps
 }
 
-func (s *ShowApplicationSuite) SetUpTest(c *gc.C) {
+func (s *ShowApplicationSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
-	stub := &testing.Stub{}
+	stub := &testhelpers.Stub{}
 	s.stubDeps = &stubShowApplicationDeps{
 		stub:   stub,
 		client: &stubResourceClient{stub: stub},
 	}
 }
 
-func (*ShowApplicationSuite) TestInitEmpty(c *gc.C) {
+func (*ShowApplicationSuite) TestInitEmpty(c *tc.C) {
 	s := resourcecmd.NewListCommandForTest(nil)
 
 	err := s.Init([]string{})
-	c.Assert(err, jc.ErrorIs, errors.BadRequest)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
 }
 
-func (*ShowApplicationSuite) TestInitGood(c *gc.C) {
+func (*ShowApplicationSuite) TestInitGood(c *tc.C) {
 	s := resourcecmd.NewListCommandForTest(nil)
 	err := s.Init([]string{"foo"})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(resourcecmd.ListCommandTarget(s), gc.Equals, "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(resourcecmd.ListCommandTarget(s), tc.Equals, "foo")
 }
 
-func (*ShowApplicationSuite) TestInitTooManyArgs(c *gc.C) {
+func (*ShowApplicationSuite) TestInitTooManyArgs(c *tc.C) {
 	s := resourcecmd.NewListCommandForTest(nil)
 
 	err := s.Init([]string{"foo", "bar"})
-	c.Assert(err, jc.ErrorIs, errors.BadRequest)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
 }
 
-func (s *ShowApplicationSuite) TestInfo(c *gc.C) {
+func (s *ShowApplicationSuite) TestInfo(c *tc.C) {
 	var command resourcecmd.ListCommand
 	info := command.Info()
 
 	// Verify that Info is wired up. Without verifying exact text.
-	c.Check(info.Name, gc.Equals, "resources")
-	c.Check(info.Args, gc.Not(gc.Equals), "")
-	c.Check(info.Purpose, gc.Not(gc.Equals), "")
-	c.Check(info.Doc, gc.Not(gc.Equals), "")
-	c.Check(info.FlagKnownAs, gc.Not(gc.Equals), "")
-	c.Check(len(info.ShowSuperFlags), jc.GreaterThan, 2)
+	c.Check(info.Name, tc.Equals, "resources")
+	c.Check(info.Args, tc.Not(tc.Equals), "")
+	c.Check(info.Purpose, tc.Not(tc.Equals), "")
+	c.Check(info.Doc, tc.Not(tc.Equals), "")
+	c.Check(info.FlagKnownAs, tc.Not(tc.Equals), "")
+	c.Check(len(info.ShowSuperFlags), tc.GreaterThan, 2)
 }
 
-func (s *ShowApplicationSuite) TestRunNoResourcesForApplication(c *gc.C) {
-	data := []resources.ApplicationResources{{}}
+func (s *ShowApplicationSuite) TestRunNoResourcesForApplication(c *tc.C) {
+	data := []resource.ApplicationResources{{}}
 	s.stubDeps.client.ReturnResources = data
 
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc")
-	c.Check(code, gc.Equals, 0)
-	c.Check(stderr, gc.Equals, "No resources to display.\n")
-	c.Check(stdout, gc.Equals, "")
+	c.Check(code, tc.Equals, 0)
+	c.Check(stderr, tc.Equals, "No resources to display.\n")
+	c.Check(stdout, tc.Equals, "")
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRun(c *gc.C) {
-	data := []resources.ApplicationResources{
+func (s *ShowApplicationSuite) TestRun(c *tc.C) {
+	data := []resource.ApplicationResources{
 		{
-			Resources: []resources.Resource{
+			Resources: []resource.Resource{
 				{
 					Resource: charmresource.Resource{
 						Meta: charmresource.Meta{
@@ -124,11 +127,11 @@ func (s *ShowApplicationSuite) TestRun(c *gc.C) {
 						},
 						Origin: charmresource.OriginUpload,
 					},
-					Username:  "Bill User",
-					Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+					RetrievedBy: "Bill User",
+					Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 				},
 			},
-			CharmStoreResources: []charmresource.Resource{
+			RepositoryResources: []charmresource.Resource{
 				{
 					// This resource has a higher revision than the corresponding one
 					// above.
@@ -175,10 +178,10 @@ func (s *ShowApplicationSuite) TestRun(c *gc.C) {
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc")
-	c.Check(code, gc.Equals, 0)
-	c.Check(stderr, gc.Equals, "")
+	c.Check(code, tc.Equals, 0)
+	c.Check(stderr, tc.Equals, "")
 
-	c.Check(stdout, gc.Equals, `
+	c.Check(stdout, tc.Equals, `
 Resource  Supplied by  Revision
 openjdk   store        7
 rsc1234   store        15
@@ -193,24 +196,24 @@ openjdk   10
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRunNoResourcesForUnit(c *gc.C) {
-	data := []resources.ApplicationResources{{}}
+func (s *ShowApplicationSuite) TestRunNoResourcesForUnit(c *tc.C) {
+	data := []resource.ApplicationResources{{}}
 	s.stubDeps.client.ReturnResources = data
 
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc/0")
-	c.Assert(code, gc.Equals, 0)
-	c.Check(stderr, gc.Equals, "No resources to display.\n")
-	c.Check(stdout, gc.Equals, "")
+	c.Assert(code, tc.Equals, 0)
+	c.Check(stderr, tc.Equals, "No resources to display.\n")
+	c.Check(stdout, tc.Equals, "")
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRunResourcesForAppButNoResourcesForUnit(c *gc.C) {
+func (s *ShowApplicationSuite) TestRunResourcesForAppButNoResourcesForUnit(c *tc.C) {
 	unitName := "svc/0"
 
-	data := []resources.ApplicationResources{{
-		Resources: []resources.Resource{
+	data := []resource.ApplicationResources{{
+		Resources: []resource.Resource{
 			{
 				Resource: charmresource.Resource{
 					Meta: charmresource.Meta{
@@ -222,7 +225,7 @@ func (s *ShowApplicationSuite) TestRunResourcesForAppButNoResourcesForUnit(c *gc
 				},
 			},
 		},
-		CharmStoreResources: []charmresource.Resource{
+		RepositoryResources: []charmresource.Resource{
 			{
 				// This resource has a higher revision than the corresponding one
 				// above.
@@ -236,9 +239,9 @@ func (s *ShowApplicationSuite) TestRunResourcesForAppButNoResourcesForUnit(c *gc
 				Origin:   charmresource.OriginStore,
 			},
 		},
-		UnitResources: []resources.UnitResources{
+		UnitResources: []resource.UnitResources{
 			{
-				Tag: names.NewUnitTag(unitName),
+				Name: coreunit.Name(unitName),
 			},
 		},
 	}}
@@ -247,19 +250,19 @@ func (s *ShowApplicationSuite) TestRunResourcesForAppButNoResourcesForUnit(c *gc
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, unitName)
-	c.Assert(code, gc.Equals, 0)
-	c.Check(stdout, gc.Equals, `
+	c.Assert(code, tc.Equals, 0)
+	c.Check(stdout, tc.Equals, `
 Resource  Revision
 openjdk   -
 `[1:])
-	c.Check(stderr, gc.Equals, "")
+	c.Check(stderr, tc.Equals, "")
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
-	data := []resources.ApplicationResources{
+func (s *ShowApplicationSuite) TestRunUnit(c *tc.C) {
+	data := []resource.ApplicationResources{
 		{
-			Resources: []resources.Resource{
+			Resources: []resource.Resource{
 				{
 					Resource: charmresource.Resource{
 						Meta: charmresource.Meta{
@@ -270,7 +273,7 @@ func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
 						Revision: 20,
 					},
 					Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
-					ID:        "one",
+					UUID:      "one",
 				},
 				{
 					Resource: charmresource.Resource{
@@ -281,14 +284,14 @@ func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
 						Origin: charmresource.OriginUpload,
 						Size:   15,
 					},
-					Username:  "Bill User",
-					Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
-					ID:        "two",
+					RetrievedBy: "Bill User",
+					Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+					UUID:        "two",
 				},
 			},
-			UnitResources: []resources.UnitResources{{
-				Tag: names.NewUnitTag("svc/0"),
-				Resources: []resources.Resource{
+			UnitResources: []resource.UnitResources{{
+				Name: coreunit.Name("svc/0"),
+				Resources: []resource.Resource{
 					{
 						Resource: charmresource.Resource{
 							Meta: charmresource.Meta{
@@ -299,7 +302,7 @@ func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
 							Revision: 15, // Note revision is different to the application resource
 						},
 						Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
-						ID:        "one",
+						UUID:      "one",
 					},
 					{
 						Resource: charmresource.Resource{
@@ -310,13 +313,10 @@ func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
 							Origin: charmresource.OriginUpload,
 							Size:   15,
 						},
-						Username:  "Bill User",
-						ID:        "two",
-						Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+						RetrievedBy: "Bill User",
+						UUID:        "two",
+						Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 					},
-				},
-				DownloadProgress: map[string]int64{
-					"website2": 12,
 				},
 			}},
 		}}
@@ -325,10 +325,10 @@ func (s *ShowApplicationSuite) TestRunUnit(c *gc.C) {
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc/0")
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(stderr, gc.Equals, "")
+	c.Assert(code, tc.Equals, 0)
+	c.Assert(stderr, tc.Equals, "")
 
-	c.Check(stdout, gc.Equals, `
+	c.Check(stdout, tc.Equals, `
 Resource  Revision
 rsc1234   15
 website2  2012-12-12T12:12
@@ -337,9 +337,9 @@ website2  2012-12-12T12:12
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
-	data := []resources.ApplicationResources{{
-		Resources: []resources.Resource{
+func (s *ShowApplicationSuite) TestRunDetails(c *tc.C) {
+	data := []resource.ApplicationResources{{
+		Resources: []resource.Resource{
 			{
 				Resource: charmresource.Resource{
 					Meta: charmresource.Meta{
@@ -361,8 +361,8 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 					Origin: charmresource.OriginUpload,
 					Size:   9835617,
 				},
-				Username:  "Bill User",
-				Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+				RetrievedBy: "Bill User",
+				Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 			},
 			{
 				Resource: charmresource.Resource{
@@ -372,11 +372,11 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 					},
 					Origin: charmresource.OriginUpload,
 				},
-				Username:  "Bill User",
-				Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+				RetrievedBy: "Bill User",
+				Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 			},
 		},
-		CharmStoreResources: []charmresource.Resource{
+		RepositoryResources: []charmresource.Resource{
 			{
 				Meta: charmresource.Meta{
 					Name:        "alpha",
@@ -400,10 +400,10 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 				Origin: charmresource.OriginUpload,
 			},
 		},
-		UnitResources: []resources.UnitResources{
+		UnitResources: []resource.UnitResources{
 			{
-				Tag: names.NewUnitTag("svc/10"),
-				Resources: []resources.Resource{
+				Name: coreunit.Name("svc/10"),
+				Resources: []resource.Resource{
 					{
 						Resource: charmresource.Resource{
 							Meta: charmresource.Meta{
@@ -423,20 +423,16 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username: "Bill User",
+						RetrievedBy: "Bill User",
 						// note the different time
 						Timestamp: time.Date(2011, 11, 11, 11, 11, 11, 0, time.UTC),
 					},
 					// note we're missing the beta resource for this unit
 				},
-				DownloadProgress: map[string]int64{
-					"alpha":   17,
-					"charlie": 899937,
-				},
 			},
 			{
-				Tag: names.NewUnitTag("svc/5"),
-				Resources: []resources.Resource{
+				Name: coreunit.Name("svc/5"),
+				Resources: []resource.Resource{
 					{
 						Resource: charmresource.Resource{
 							Meta: charmresource.Meta{
@@ -456,7 +452,7 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username: "Bill User",
+						RetrievedBy: "Bill User",
 						// note the different time
 						Timestamp: time.Date(2011, 11, 11, 11, 11, 11, 0, time.UTC),
 					},
@@ -468,12 +464,9 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username:  "Bill User",
-						Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+						RetrievedBy: "Bill User",
+						Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 					},
-				},
-				DownloadProgress: map[string]int64{
-					"charlie": 177331,
 				},
 			},
 		},
@@ -483,25 +476,25 @@ func (s *ShowApplicationSuite) TestRunDetails(c *gc.C) {
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc", "--details")
-	c.Check(code, gc.Equals, 0)
-	c.Check(stderr, gc.Equals, "")
+	c.Check(code, tc.Equals, 0)
+	c.Check(stderr, tc.Equals, "")
 
-	c.Check(stdout, gc.Equals, `
+	c.Check(stdout, tc.Equals, `
 Unit    Resource  Revision          Expected
 svc/5   alpha     10                15
 svc/5   beta      2012-12-12T12:12  2012-12-12T12:12
-svc/5   charlie   2011-11-11T11:11  2012-12-12T12:12 (fetching: 2%)
-svc/10  alpha     10                15 (fetching: 15%)
+svc/5   charlie   2011-11-11T11:11  2012-12-12T12:12
+svc/10  alpha     10                15
 svc/10  beta      -                 2012-12-12T12:12
-svc/10  charlie   2011-11-11T11:11  2012-12-12T12:12 (fetching: 9%)
+svc/10  charlie   2011-11-11T11:11  2012-12-12T12:12
 `[1:])
 
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
-func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
-	data := []resources.ApplicationResources{{
-		Resources: []resources.Resource{
+func (s *ShowApplicationSuite) TestRunUnitDetails(c *tc.C) {
+	data := []resource.ApplicationResources{{
+		Resources: []resource.Resource{
 			{
 				Resource: charmresource.Resource{
 					Meta: charmresource.Meta{
@@ -523,8 +516,8 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 					Origin: charmresource.OriginUpload,
 					Size:   9835617,
 				},
-				Username:  "Bill User",
-				Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+				RetrievedBy: "Bill User",
+				Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 			},
 			{
 				Resource: charmresource.Resource{
@@ -534,14 +527,14 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 					},
 					Origin: charmresource.OriginUpload,
 				},
-				Username:  "Bill User",
-				Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+				RetrievedBy: "Bill User",
+				Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 			},
 		},
-		UnitResources: []resources.UnitResources{
+		UnitResources: []resource.UnitResources{
 			{
-				Tag: names.NewUnitTag("svc/10"),
-				Resources: []resources.Resource{
+				Name: coreunit.Name("svc/10"),
+				Resources: []resource.Resource{
 					{
 						Resource: charmresource.Resource{
 							Meta: charmresource.Meta{
@@ -561,19 +554,16 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username: "Bill User",
+						RetrievedBy: "Bill User",
 						// note the different time
 						Timestamp: time.Date(2011, 11, 11, 11, 11, 11, 0, time.UTC),
 					},
 					// note we're missing the beta resource for this unit
 				},
-				DownloadProgress: map[string]int64{
-					"charlie": 17,
-				},
 			},
 			{
-				Tag: names.NewUnitTag("svc/5"),
-				Resources: []resources.Resource{
+				Name: coreunit.Name("svc/5"),
+				Resources: []resource.Resource{
 					{
 						Resource: charmresource.Resource{
 							Meta: charmresource.Meta{
@@ -593,7 +583,7 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username: "Bill User",
+						RetrievedBy: "Bill User",
 						// note the different time
 						Timestamp: time.Date(2011, 11, 11, 11, 11, 11, 0, time.UTC),
 					},
@@ -605,8 +595,8 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 							},
 							Origin: charmresource.OriginUpload,
 						},
-						Username:  "Bill User",
-						Timestamp: time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
+						RetrievedBy: "Bill User",
+						Timestamp:   time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC),
 					},
 				},
 			},
@@ -617,25 +607,25 @@ func (s *ShowApplicationSuite) TestRunUnitDetails(c *gc.C) {
 	cmd := resourcecmd.NewListCommandForTest(s.stubDeps.NewClient)
 
 	code, stdout, stderr := runCmd(c, cmd, "svc/10", "--details")
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(stderr, gc.Equals, "")
+	c.Assert(code, tc.Equals, 0)
+	c.Assert(stderr, tc.Equals, "")
 
-	c.Check(stdout, gc.Equals, `
+	c.Check(stdout, tc.Equals, `
 Resource  Revision          Expected
 alpha     10                15
 beta      -                 2012-12-12T12:12
-charlie   2011-11-11T11:11  2012-12-12T12:12 (fetching: 0%)
+charlie   2011-11-11T11:11  2012-12-12T12:12
 `[1:])
 
 	s.stubDeps.stub.CheckCall(c, 1, "ListResources", []string{"svc"})
 }
 
 type stubShowApplicationDeps struct {
-	stub   *testing.Stub
+	stub   *testhelpers.Stub
 	client *stubResourceClient
 }
 
-func (s *stubShowApplicationDeps) NewClient() (resourcecmd.ListClient, error) {
+func (s *stubShowApplicationDeps) NewClient(ctx context.Context) (resourcecmd.ListClient, error) {
 	s.stub.AddCall("NewClient")
 	if err := s.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -645,11 +635,11 @@ func (s *stubShowApplicationDeps) NewClient() (resourcecmd.ListClient, error) {
 }
 
 type stubResourceClient struct {
-	stub            *testing.Stub
-	ReturnResources []resources.ApplicationResources
+	stub            *testhelpers.Stub
+	ReturnResources []resource.ApplicationResources
 }
 
-func (s *stubResourceClient) ListResources(applications []string) ([]resources.ApplicationResources, error) {
+func (s *stubResourceClient) ListResources(ctx context.Context, applications []string) ([]resource.ApplicationResources, error) {
 	s.stub.AddCall("ListResources", applications)
 	if err := s.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)

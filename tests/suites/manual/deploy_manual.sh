@@ -43,7 +43,7 @@ manual_deploy() {
 	juju add-machine ssh:ubuntu@"${addr_m1}" 2>&1 | tee "${TEST_DIR}/add-machine-1.log"
 	juju add-machine ssh:ubuntu@"${addr_m2}" 2>&1 | tee "${TEST_DIR}/add-machine-2.log"
 
-	juju enable-ha --to "1,2" 2>&1 | tee "${TEST_DIR}/enable-ha.log"
+	juju add-unit -m controller controller -n 2 --to "1,2" 2>&1 | tee "${TEST_DIR}/enable-ha.log"
 	wait_for "controller" "$(active_condition "controller" 0)"
 
 	machine_base=$(juju machines --format=json | jq -r '.machines | .["0"] | (.base.name+"@"+.base.channel)')
@@ -55,7 +55,7 @@ manual_deploy() {
 
 	juju deploy ubuntu --to=0 --base="${machine_base}"
 
-	wait_for "ubuntu" "$(idle_condition "ubuntu" 1)"
+	wait_for "ubuntu" "$(idle_condition "ubuntu")"
 
 	juju remove-application ubuntu
 

@@ -5,99 +5,239 @@ package authentication
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/unit"
+	agentpassworderrors "github.com/juju/juju/domain/agentpassword/errors"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	controllernodeerrors "github.com/juju/juju/domain/controllernode/errors"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
 )
 
-// AgentAuthenticatorFactory is a factory for creating authenticators, which
+// AgentPasswordService defines the methods required to set an agent password
+// hash.
+type AgentPasswordService interface {
+	// MatchesUnitPasswordHash checks if the password is valid or not.
+	MatchesUnitPasswordHash(context.Context, unit.Name, string) (bool, error)
+
+	// MatchesMachinePasswordHashWithNonce checks if the password with a nonce
+	// is valid or not.
+	MatchesMachinePasswordHashWithNonce(context.Context, machine.Name, string, string) (bool, error)
+
+	// MatchesControllerNodePasswordHash checks if the password is valid or
+	// not against the password hash stored in the database for the controller
+	// node.
+	MatchesControllerNodePasswordHash(context.Context, string, string) (bool, error)
+
+	// IsMachineController checks if the machine is a controller.
+	IsMachineController(context.Context, machine.Name) (bool, error)
+
+	// MatchesApplicationPasswordHash checks if the password is valid or not.
+	MatchesApplicationPasswordHash(context.Context, string, string) (bool, error)
+
+	// MatchModelPassword checks if the password hash is valid or not against the
+	// password hash stored for the model's agent.
+	MatchesModelPasswordHash(ctx context.Context, hash string) (bool, error)
+}
+
+// AgentAuthenticatorGetter is a factory for creating authenticators, which
 // can create authenticators for a given state.
-type AgentAuthenticatorFactory struct {
-	legacyState *state.State
-	logger      corelogger.Logger
+type AgentAuthenticatorGetter struct {
+	agentPasswordService AgentPasswordService
+	logger               corelogger.Logger
 }
 
-// NewAgentAuthenticatorFactory returns a new agent authenticator factory, for
+// NewAgentAuthenticatorGetter returns a new agent authenticator factory, for
 // a known state.
-func NewAgentAuthenticatorFactory(legacyState *state.State, logger corelogger.Logger) AgentAuthenticatorFactory {
-	return AgentAuthenticatorFactory{
-		legacyState: legacyState,
-		logger:      logger,
+func NewAgentAuthenticatorGetter(agentPasswordService AgentPasswordService, logger corelogger.Logger) AgentAuthenticatorGetter {
+	return AgentAuthenticatorGetter{
+		agentPasswordService: agentPasswordService,
+		logger:               logger,
 	}
 }
 
-// Authenticator returns an authenticator using the factory's state.
-func (f AgentAuthenticatorFactory) Authenticator() EntityAuthenticator {
-	return agentAuthenticator{
-		state:  f.legacyState,
-		logger: f.logger,
-	}
+// Authenticator returns an authenticator using the factory's controller model.
+func (f AgentAuthenticatorGetter) Authenticator() EntityAuthenticator {
+	return agentAuthenticator(f)
 }
 
-// AuthenticatorForState returns an authenticator for the given state.
-func (f AgentAuthenticatorFactory) AuthenticatorForState(st *state.State) EntityAuthenticator {
+// AuthenticatorForModel returns an authenticator for the given model.
+func (f AgentAuthenticatorGetter) AuthenticatorForModel(agentPasswordService AgentPasswordService) EntityAuthenticator {
 	return agentAuthenticator{
-		state:  st,
-		logger: f.logger,
+		agentPasswordService: agentPasswordService,
+		logger:               f.logger,
 	}
 }
 
 type agentAuthenticator struct {
-	state  *state.State
-	logger corelogger.Logger
-}
-
-type taggedAuthenticator interface {
-	state.Entity
-	state.Authenticator
+	agentPasswordService AgentPasswordService
+	logger               corelogger.Logger
 }
 
 // Authenticate authenticates the provided entity.
 // It takes an entityfinder and the tag used to find the entity that requires authentication.
-func (a agentAuthenticator) Authenticate(ctx context.Context, authParams AuthParams) (state.Entity, error) {
+func (a agentAuthenticator) Authenticate(ctx context.Context, authParams AuthParams) (names.Tag, error) {
 	switch authParams.AuthTag.Kind() {
 	case names.UserTagKind:
-		return nil, errors.Trace(apiservererrors.ErrBadRequest)
-	default:
-		return a.fallbackAuth(ctx, authParams)
+		return nil, errors.Trace(fmt.Errorf("user authentication: %w", apiservererrors.ErrBadRequest))
+
+	case names.UnitTagKind:
+		return a.authenticateUnit(ctx, authParams.AuthTag.(names.UnitTag), authParams.Credentials)
+
+	case names.MachineTagKind:
+		return a.authenticateMachine(ctx, authParams.AuthTag.(names.MachineTag), authParams.Credentials, authParams.Nonce)
+
+	case names.ControllerAgentTagKind:
+		return a.authenticateControllerAgent(ctx, authParams.AuthTag.(names.ControllerAgentTag), authParams.Credentials)
+
+	case names.ApplicationTagKind:
+		return a.authenticateApplication(ctx, authParams.AuthTag.(names.ApplicationTag), authParams.Credentials)
+
+	case names.ModelTagKind:
+		return a.authenticateModel(ctx, authParams.AuthTag.(names.ModelTag), authParams.Credentials)
 	}
+	return nil, apiservererrors.ErrBadRequest
 }
 
-func (a *agentAuthenticator) fallbackAuth(ctx context.Context, authParams AuthParams) (state.Entity, error) {
-	entity, err := a.state.FindEntity(authParams.AuthTag)
-	if errors.Is(err, errors.NotFound) {
-		logger.Debugf("cannot authenticate unknown entity: %v", authParams.AuthTag)
+func (a *agentAuthenticator) authenticateUnit(ctx context.Context, tag names.UnitTag, credentials string) (names.Tag, error) {
+	unitName := unit.Name(tag.Id())
+
+	// Check if the password is correct.
+	// - If the password is empty, then we consider that a bad request
+	//   (incorrect payload).
+	// - If the password is invalid, then we consider that unauthorized.
+	// - If the unit is not found, then we consider that unauthorized. Prevent
+	//   the knowing about which unit the password didn't match (rainbow attack)
+	// - If the password isn't valid for the unit, then we consider that
+	//   unauthorized.
+	// - Any other error, is considered an internal server error.
+
+	valid, err := a.agentPasswordService.MatchesUnitPasswordHash(ctx, unitName, credentials)
+	if errors.Is(err, agentpassworderrors.EmptyPassword) {
+		return nil, errors.Trace(fmt.Errorf("unit authentication: %w", apiservererrors.ErrBadRequest))
+	} else if errors.Is(err, agentpassworderrors.InvalidPassword) || errors.Is(err, applicationerrors.UnitNotFound) {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	} else if err != nil {
+		return nil, errors.Trace(err)
+	} else if !valid {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	}
+
+	return tag, nil
+}
+
+func (a *agentAuthenticator) authenticateMachine(ctx context.Context, tag names.MachineTag, credentials, nonce string) (names.Tag, error) {
+	machineName := machine.Name(tag.Id())
+
+	// Check if the password is correct.
+	// - If the password or nonce is empty, then we consider that a bad request
+	//   (incorrect payload).
+	// - If the password is invalid, then we consider that unauthorized.
+	// - If the machine is not found, then we consider that unauthorized.
+	// - If the password isn't valid for the machine, then we consider that
+	//   unauthorized.
+	// - If the machine is not provisioned, then we consider that the machine
+	//   is not provisioned (the password must match first before undertaking
+	//   the provisioning).
+	// - Any other error is considered an internal server error.
+
+	valid, err := a.agentPasswordService.MatchesMachinePasswordHashWithNonce(ctx, machineName, credentials, nonce)
+	if errors.Is(err, agentpassworderrors.EmptyPassword) || errors.Is(err, agentpassworderrors.EmptyNonce) {
+		return nil, errors.Trace(fmt.Errorf("machine authentication: %w", apiservererrors.ErrBadRequest))
+	} else if errors.Is(err, agentpassworderrors.InvalidPassword) || errors.Is(err, applicationerrors.MachineNotFound) {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	} else if errors.Is(err, machineerrors.NotProvisioned) {
+		return nil, errors.NotProvisionedf("machine %v", tag.Id())
+	} else if err != nil {
+		return nil, errors.Trace(err)
+	} else if !valid {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	}
+
+	return tag, nil
+}
+
+func (a *agentAuthenticator) authenticateControllerAgent(ctx context.Context, tag names.ControllerAgentTag, credentials string) (names.Tag, error) {
+	// Check if the password is correct.
+	// - If the password is empty, then we consider that a bad request
+	//   (incorrect payload).
+	// - If the password is invalid, then we consider that unauthorized.
+	// - If the controller node is not found, then we consider that unauthorized.
+	// - If the password isn't valid for the controller node, then we consider
+	//   that unauthorized.
+	// - Any other error, is considered an internal server error.
+
+	valid, err := a.agentPasswordService.MatchesControllerNodePasswordHash(ctx, tag.Id(), credentials)
+	if errors.Is(err, agentpassworderrors.EmptyPassword) {
+		return nil, errors.Trace(fmt.Errorf("controller node authentication: %w", apiservererrors.ErrBadRequest))
+	} else if errors.Is(err, agentpassworderrors.InvalidPassword) || errors.Is(err, controllernodeerrors.NotFound) {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	} else if err != nil {
+		return nil, errors.Trace(err)
+	} else if !valid {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	}
+
+	return tag, nil
+}
+
+func (a *agentAuthenticator) authenticateApplication(ctx context.Context, tag names.ApplicationTag, credentials string) (names.Tag, error) {
+	appName := tag.Id()
+
+	// Check if the password is correct.
+	// - If the password is empty, then we consider that a bad request
+	//   (incorrect payload).
+	// - If the password is invalid, then we consider that unauthorized.
+	// - If the application is not found, then we consider that unauthorized.
+	//   Prevent the knowing about which application the password didn't match
+	//   (rainbow attack).
+	// - If the password isn't valid for the application, then we consider that
+	//   unauthorized.
+	// - Any other error, is considered an internal server error.
+
+	valid, err := a.agentPasswordService.MatchesApplicationPasswordHash(ctx, appName, credentials)
+	if errors.Is(err, agentpassworderrors.EmptyPassword) {
+		return nil, errors.Trace(fmt.Errorf("application authentication: %w", apiservererrors.ErrBadRequest))
+	} else if errors.Is(err, agentpassworderrors.InvalidPassword) || errors.Is(err, applicationerrors.ApplicationNotFound) {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	} else if err != nil {
+		return nil, errors.Trace(err)
+	} else if !valid {
+		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
+	}
+
+	return tag, nil
+}
+
+// authenticateModel authenticates a model using the provided credentials (password).
+// The model tag is not passed down to the service because the state which the credentials
+// are checked against is already tied to a specific model.
+func (a *agentAuthenticator) authenticateModel(ctx context.Context, modelTag names.ModelTag, credentials string) (names.Tag, error) {
+	// Check if the password is correct.
+	// - If the password is empty, then we consider that a bad request
+	//   (incorrect payload).
+	// - If the password is invalid, then we consider that unauthorized.
+	// - Any other error, is considered an internal server error.
+
+	valid, err := a.agentPasswordService.MatchesModelPasswordHash(ctx, credentials)
+	if errors.Is(err, agentpassworderrors.EmptyPassword) {
+		return nil, errors.Trace(fmt.Errorf("model authentication: %w", apiservererrors.ErrBadRequest))
+	}
+	if errors.Is(err, agentpassworderrors.InvalidPassword) {
 		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	authenticator, ok := entity.(taggedAuthenticator)
-	if !ok {
-		return nil, errors.Trace(apiservererrors.ErrBadRequest)
-	}
-	if !authenticator.PasswordValid(authParams.Credentials) {
+	if !valid {
 		return nil, errors.Trace(apiservererrors.ErrUnauthorized)
 	}
 
-	// If this is a machine agent connecting, we need to check the
-	// nonce matches, otherwise the wrong agent might be trying to
-	// connect.
-	//
-	// NOTE(axw) with the current implementation of Login, it is
-	// important that we check the password before checking the
-	// nonce, or an unprovisioned machine in a hosted model will
-	// prevent a controller machine from logging into the hosted
-	// model.
-	if machine, ok := authenticator.(*state.Machine); ok {
-		if !machine.CheckProvisioned(authParams.Nonce) {
-			return nil, errors.NotProvisionedf("machine %v", machine.Id())
-		}
-	}
-
-	return entity, nil
+	return modelTag, nil
 }

@@ -1,7 +1,7 @@
--- The cloud and accompanying tables drive the provider tracker. It is not safe 
+-- The cloud and accompanying tables drive the provider tracker. It is not safe
 -- to modify the cloud or other tables in a patch/build release. Only make 
 -- changes to this table during a major/minor release. Changes to the cloud
--- table will cause undefined behavior in the provider tracker.
+-- table will cause undefined behaviour in the provider tracker.
 CREATE TABLE cloud_type (
     id INT PRIMARY KEY,
     type TEXT NOT NULL
@@ -17,14 +17,13 @@ INSERT INTO cloud_type VALUES
 (0, 'kubernetes'),
 (1, 'lxd'),
 (2, 'maas'),
-(3, 'manual'),
+(3, 'unmanaged'),
 (4, 'azure'),
 (5, 'ec2'),
-(6, 'equinix'),
-(7, 'gce'),
-(8, 'oci'),
-(9, 'openstack'),
-(10, 'vsphere');
+(6, 'gce'),
+(7, 'oci'),
+(8, 'openstack'),
+(9, 'vsphere');
 
 CREATE TABLE auth_type (
     id INT PRIMARY KEY,
@@ -47,7 +46,9 @@ INSERT INTO auth_type VALUES
 (9, 'empty'),
 (10, 'certificate'),
 (11, 'oauth2withcert'),
-(12, 'service-principal-secret');
+(12, 'service-principal-secret'),
+(13, 'managed-identity'),
+(14, 'service-account');
 
 CREATE TABLE cloud (
     uuid TEXT NOT NULL PRIMARY KEY,
@@ -62,58 +63,6 @@ CREATE TABLE cloud (
     FOREIGN KEY (cloud_type_id)
     REFERENCES cloud_type (id)
 );
-
--- v_cloud is used to fetch well constructed information about a cloud. This
--- view also includes information on whether the cloud is the controller
--- model's cloud.
-CREATE VIEW v_cloud
-AS
--- This selects the controller model's cloud uuid. We use this when loading
--- clouds to know if the cloud is the controllers cloud.
-WITH
-controllers AS (
-    SELECT m.cloud_uuid
-    FROM model AS m
-    INNER JOIN user AS u ON m.owner_uuid = u.uuid
-    WHERE
-        m.name = 'controller'
-        AND u.name = 'admin'
-        AND m.activated = true
-)
-
-SELECT
-    c.uuid,
-    c.name,
-    c.cloud_type_id,
-    ct.type AS cloud_type,
-    c.endpoint,
-    c.identity_endpoint,
-    c.storage_endpoint,
-    c.skip_tls_verify,
-    IIF(controllers.cloud_uuid IS null, false, true) AS is_controller_cloud
-FROM cloud AS c
-INNER JOIN cloud_type AS ct ON c.cloud_type_id = ct.id
-LEFT JOIN controllers ON c.uuid = controllers.cloud_uuid;
-
--- v_cloud_auth is a connivance view similar to v_cloud but includes a row for
--- each cloud and auth type pair.
-CREATE VIEW v_cloud_auth
-AS
-SELECT
-    c.uuid,
-    c.name,
-    c.cloud_type_id,
-    c.cloud_type,
-    c.endpoint,
-    c.identity_endpoint,
-    c.storage_endpoint,
-    c.skip_tls_verify,
-    c.is_controller_cloud,
-    at.id AS auth_type_id,
-    at.type AS auth_type
-FROM v_cloud AS c
-LEFT JOIN cloud_auth_type AS cat ON c.uuid = cat.cloud_uuid
-INNER JOIN auth_type AS at ON cat.auth_type_id = at.id;
 
 CREATE TABLE cloud_defaults (
     cloud_uuid TEXT NOT NULL,
@@ -206,9 +155,9 @@ CREATE TABLE cloud_credential (
 CREATE UNIQUE INDEX idx_cloud_credential_cloud_uuid_owner_uuid
 ON cloud_credential (cloud_uuid, owner_uuid, name);
 
--- view_cloud_credential provides a convenience view for accessing a
--- credentials uuid baseD on the natural key used to display the credential to
--- users.
+-- view_cloud_credential is a convenience view for accessing a
+-- credential UUID based on the natural key used to display the
+-- credential to users.
 CREATE VIEW v_cloud_credential
 AS
 SELECT
@@ -224,11 +173,11 @@ SELECT
     cc.invalid_reason,
     u.name AS owner_name
 FROM cloud_credential AS cc
-INNER JOIN cloud AS c ON cc.cloud_uuid = c.uuid
-INNER JOIN user AS u ON cc.owner_uuid = u.uuid
-INNER JOIN auth_type AS at ON cc.auth_type_id = at.id;
+JOIN cloud AS c ON cc.cloud_uuid = c.uuid
+JOIN user AS u ON cc.owner_uuid = u.uuid
+JOIN auth_type AS at ON cc.auth_type_id = at.id;
 
-CREATE TABLE cloud_credential_attributes (
+CREATE TABLE cloud_credential_attribute (
     cloud_credential_uuid TEXT NOT NULL,
     "key" TEXT NOT NULL,
     value TEXT,
@@ -239,9 +188,9 @@ CREATE TABLE cloud_credential_attributes (
     REFERENCES cloud_credential (uuid)
 );
 
--- v_cloud_credential_attributes is responsible for return a view of all cloud
--- credentials and their attributes repeated for every attribute.
-CREATE VIEW v_cloud_credential_attributes
+-- v_cloud_credential_attribute returns a view of all cloud credentials
+-- and their attributes repeated for every attribute.
+CREATE VIEW v_cloud_credential_attribute
 AS
 SELECT
     cc.uuid,
@@ -258,6 +207,4 @@ SELECT
     cca."key" AS attribute_key,
     cca.value AS attribute_value
 FROM v_cloud_credential AS cc
-INNER JOIN
-    cloud_credential_attributes AS cca
-    ON cc.uuid = cca.cloud_credential_uuid;
+JOIN cloud_credential_attribute AS cca ON cc.uuid = cca.cloud_credential_uuid;

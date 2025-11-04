@@ -4,15 +4,14 @@
 package modelmigration
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/description/v10"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/blockdevice"
+	"github.com/juju/juju/core/machine"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
@@ -21,9 +20,11 @@ type importSuite struct {
 	service     *MockImportService
 }
 
-var _ = gc.Suite(&importSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &importSuite{})
+}
 
-func (s *importSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *importSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.coordinator = NewMockCoordinator(ctrl)
@@ -38,7 +39,7 @@ func (s *importSuite) newImportOperation() *importOperation {
 	}
 }
 
-func (s *importSuite) TestRegisterImport(c *gc.C) {
+func (s *importSuite) TestRegisterImport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.coordinator.EXPECT().Add(gomock.Any())
@@ -46,29 +47,27 @@ func (s *importSuite) TestRegisterImport(c *gc.C) {
 	RegisterImport(s.coordinator, loggertesting.WrapCheckLog(c))
 }
 
-func (s *importSuite) TestNoBlockDevices(c *gc.C) {
+func (s *importSuite) TestNoBlockDevices(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	// Empty model.
 	model := description.NewModel(description.ModelArgs{})
 
 	op := s.newImportOperation()
-	err := op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIsNil)
-	// No import executed.
-	s.service.EXPECT().UpdateBlockDevices(gomock.All(), gomock.Any(), gomock.Any()).Times(0)
+	err := op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *importSuite) TestImport(c *gc.C) {
+func (s *importSuite) TestImport(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	model := description.NewModel(description.ModelArgs{})
 	model.AddMachine(description.MachineArgs{
-		Id: names.NewMachineTag("666"),
+		Id: "666",
 	})
 	// And also a machine with no block devices.
 	model.AddMachine(description.MachineArgs{
-		Id: names.NewMachineTag("668"),
+		Id: "667",
 	})
 	err := model.AddBlockDevice("666", description.BlockDeviceArgs{
 		Name:           "foo",
@@ -84,23 +83,26 @@ func (s *importSuite) TestImport(c *gc.C) {
 		InUse:          true,
 		MountPoint:     "/path/to/here",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	s.service.EXPECT().UpdateBlockDevices(gomock.Any(), "666", blockdevice.BlockDevice{
-		DeviceName:     "foo",
-		DeviceLinks:    []string{"a-link"},
-		Label:          "label",
-		UUID:           "device-uuid",
-		HardwareId:     "hardware-id",
-		WWN:            "wwn",
-		BusAddress:     "bus-address",
-		SerialId:       "serial-id",
-		SizeMiB:        100,
-		FilesystemType: "ext4",
-		InUse:          true,
-		MountPoint:     "/path/to/here",
-	}).Times(1)
+	c.Assert(err, tc.ErrorIsNil)
+
+	expectedBlockDevices := []blockdevice.BlockDevice{{
+		DeviceName:      "foo",
+		DeviceLinks:     []string{"a-link"},
+		FilesystemLabel: "label",
+		FilesystemUUID:  "device-uuid",
+		HardwareId:      "hardware-id",
+		WWN:             "wwn",
+		BusAddress:      "bus-address",
+		SerialId:        "serial-id",
+		SizeMiB:         100,
+		FilesystemType:  "ext4",
+		InUse:           true,
+		MountPoint:      "/path/to/here",
+	}}
+	s.service.EXPECT().SetBlockDevicesForMachineByName(
+		gomock.Any(), machine.Name("666"), expectedBlockDevices).Return(nil)
 
 	op := s.newImportOperation()
-	err = op.Execute(context.Background(), model)
-	c.Assert(err, jc.ErrorIsNil)
+	err = op.Execute(c.Context(), model)
+	c.Assert(err, tc.ErrorIsNil)
 }

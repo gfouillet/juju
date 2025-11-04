@@ -7,21 +7,18 @@ import (
 	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
 
 type importSuite struct{}
 
-var _ = gc.Suite(&importSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &importSuite{})
+}
 
-func (*importSuite) TestImports(c *gc.C) {
+func (*importSuite) TestImports(c *tc.C) {
 	// TODO(sidecar) - improve test performance
 	c.Skip("test times out on Jenkins")
 	found := set.NewStrings(
@@ -42,7 +39,6 @@ func (*importSuite) TestImports(c *gc.C) {
 		"api/agent/proxyupdater",
 		"api/agent/reboot",
 		"api/agent/retrystrategy",
-		"api/agent/unitassigner",
 		"api/agent/uniter",
 		"api/agent/upgrader",
 		"api/authentication",
@@ -60,15 +56,6 @@ func (*importSuite) TestImports(c *gc.C) {
 		"apiserver/errors",
 		"caas",
 		"caas/kubernetes/clientconfig",
-		"caas/kubernetes/provider",
-		"caas/kubernetes/provider/application",
-		"caas/kubernetes/provider/constants",
-		"caas/kubernetes/provider/proxy",
-		"caas/kubernetes/provider/resources",
-		"caas/kubernetes/provider/specs",
-		"caas/kubernetes/provider/storage",
-		"caas/kubernetes/provider/utils",
-		"caas/kubernetes/provider/watcher",
 		"caas/specs",
 		"cloud",
 		"cloudconfig",
@@ -107,11 +94,10 @@ func (*importSuite) TestImports(c *gc.C) {
 		"core/paths",
 		"core/paths/transientfile",
 		"core/permission",
-		"core/presence",
 		"core/quota",
 		"core/raftlease",
 		"core/relation",
-		"core/resources",
+		"core/resource",
 		"core/secrets",
 		"core/snap",
 		"core/status",
@@ -123,7 +109,6 @@ func (*importSuite) TestImports(c *gc.C) {
 		"environs/cloudspec",
 		"environs/config",
 		"environs/dashboard",
-		"environs/envcontext",
 		"environs/filestorage",
 		"environs/imagemetadata",
 		"environs/instances",
@@ -138,12 +123,20 @@ func (*importSuite) TestImports(c *gc.C) {
 		"internal/charmhub/path",
 		"internal/charmhub/transport",
 		"internal/network",
-		"internal/network/debinterfaces",
 		"internal/network/netplan",
 		"internal/packaging",
 		"internal/packaging/dependency",
 		"internal/pki",
 		"internal/pki/tls",
+		"internal/provider/kubernetes",
+		"internal/provider/kubernetes/application",
+		"internal/provider/kubernetes/constants",
+		"internal/provider/kubernetes/proxy",
+		"internal/provider/kubernetes/resources",
+		"internal/provider/kubernetes/specs",
+		"internal/provider/kubernetes/storage",
+		"internal/provider/kubernetes/utils",
+		"internal/provider/kubernetes/watcher",
 		"internal/provider/lxd/lxdnames",
 		"internal/proxy",
 		"internal/proxy/config",
@@ -213,9 +206,9 @@ func (*importSuite) TestImports(c *gc.C) {
 	// TODO: review if there are any un-expected imports!
 	// Show the values rather than just checking the length so a failing
 	// test shows them.
-	c.Check(unexpected.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unexpected.SortedValues(), tc.DeepEquals, []string{})
 	// If unneeded show any values this is good as we've reduced
 	// dependencies, and they should be removed from expected above.
 	unneeded := expected.Difference(found)
-	c.Check(unneeded.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unneeded.SortedValues(), tc.DeepEquals, []string{})
 }

@@ -4,10 +4,11 @@
 package applicationoffers_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/applicationoffers"
@@ -17,32 +18,34 @@ import (
 type accessSuite struct {
 }
 
-var _ = gc.Suite(&accessSuite{})
+func TestAccessSuite(t *testing.T) {
+	tc.Run(t, &accessSuite{})
+}
 
 const (
 	someOffer = "user/prod.hosted-mysql"
 )
 
-func accessCall(client *applicationoffers.Client, action params.OfferAction, user, access string, offerURLs ...string) error {
+func accessCall(c *tc.C, client *applicationoffers.Client, action params.OfferAction, user, access string, offerURLs ...string) error {
 	switch action {
 	case params.GrantOfferAccess:
-		return client.GrantOffer(user, access, offerURLs...)
+		return client.GrantOffer(c.Context(), user, access, offerURLs...)
 	case params.RevokeOfferAccess:
-		return client.RevokeOffer(user, access, offerURLs...)
+		return client.RevokeOffer(c.Context(), user, access, offerURLs...)
 	default:
 		panic(action)
 	}
 }
 
-func (s *accessSuite) TestGrantOfferReadOnlyUser(c *gc.C) {
+func (s *accessSuite) TestGrantOfferReadOnlyUser(c *tc.C) {
 	s.readOnlyUser(c, params.GrantOfferAccess)
 }
 
-func (s *accessSuite) TestRevokeOfferReadOnlyUser(c *gc.C) {
+func (s *accessSuite) TestRevokeOfferReadOnlyUser(c *tc.C) {
 	s.readOnlyUser(c, params.RevokeOfferAccess)
 }
 
-func (s *accessSuite) readOnlyUser(c *gc.C, action params.OfferAction) {
+func (s *accessSuite) readOnlyUser(c *tc.C, action params.OfferAction) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -64,19 +67,19 @@ func (s *accessSuite) readOnlyUser(c *gc.C, action params.OfferAction) {
 
 	client := applicationoffers.NewClientFromCaller(mockFacadeCaller)
 
-	err := accessCall(client, action, "bob", "read", someOffer)
-	c.Assert(err, jc.ErrorIsNil)
+	err := accessCall(c, client, action, "bob", "read", someOffer)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *accessSuite) TestGrantOfferAdminUser(c *gc.C) {
+func (s *accessSuite) TestGrantOfferAdminUser(c *tc.C) {
 	s.adminUser(c, params.GrantOfferAccess)
 }
 
-func (s *accessSuite) TestRevokeOfferAdminUser(c *gc.C) {
+func (s *accessSuite) TestRevokeOfferAdminUser(c *tc.C) {
 	s.adminUser(c, params.RevokeOfferAccess)
 }
 
-func (s *accessSuite) adminUser(c *gc.C, action params.OfferAction) {
+func (s *accessSuite) adminUser(c *tc.C, action params.OfferAction) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -97,19 +100,19 @@ func (s *accessSuite) adminUser(c *gc.C, action params.OfferAction) {
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ModifyOfferAccess", args, res).SetArg(3, ress).Return(nil)
 
 	client := applicationoffers.NewClientFromCaller(mockFacadeCaller)
-	err := accessCall(client, action, "bob", "consume", someOffer)
-	c.Assert(err, jc.ErrorIsNil)
+	err := accessCall(c, client, action, "bob", "consume", someOffer)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *accessSuite) TestGrantThreeOffers(c *gc.C) {
+func (s *accessSuite) TestGrantThreeOffers(c *tc.C) {
 	s.threeOffers(c, params.GrantOfferAccess)
 }
 
-func (s *accessSuite) TestRevokeThreeOffers(c *gc.C) {
+func (s *accessSuite) TestRevokeThreeOffers(c *tc.C) {
 	s.threeOffers(c, params.RevokeOfferAccess)
 }
 
-func (s *accessSuite) threeOffers(c *gc.C, action params.OfferAction) {
+func (s *accessSuite) threeOffers(c *tc.C, action params.OfferAction) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -142,19 +145,19 @@ func (s *accessSuite) threeOffers(c *gc.C, action params.OfferAction) {
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ModifyOfferAccess", args, res).SetArg(3, ress).Return(nil)
 
 	client := applicationoffers.NewClientFromCaller(mockFacadeCaller)
-	err := accessCall(client, action, "carol", "read", someOffer, someOffer, someOffer)
-	c.Assert(err, jc.ErrorIsNil)
+	err := accessCall(c, client, action, "carol", "read", someOffer, someOffer, someOffer)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *accessSuite) TestGrantErrorResult(c *gc.C) {
+func (s *accessSuite) TestGrantErrorResult(c *tc.C) {
 	s.errorResult(c, params.GrantOfferAccess)
 }
 
-func (s *accessSuite) TestRevokeErrorResult(c *gc.C) {
+func (s *accessSuite) TestRevokeErrorResult(c *tc.C) {
 	s.errorResult(c, params.RevokeOfferAccess)
 }
 
-func (s *accessSuite) errorResult(c *gc.C, action params.OfferAction) {
+func (s *accessSuite) errorResult(c *tc.C, action params.OfferAction) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -176,11 +179,11 @@ func (s *accessSuite) errorResult(c *gc.C, action params.OfferAction) {
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ModifyOfferAccess", args, res).SetArg(3, ress).Return(nil)
 	client := applicationoffers.NewClientFromCaller(mockFacadeCaller)
 
-	err := accessCall(client, action, "aaa", "consume", someOffer)
-	c.Assert(err, gc.ErrorMatches, "unfortunate mishap")
+	err := accessCall(c, client, action, "aaa", "consume", someOffer)
+	c.Assert(err, tc.ErrorMatches, "unfortunate mishap")
 }
 
-func (s *accessSuite) TestInvalidResultCount(c *gc.C) {
+func (s *accessSuite) TestInvalidResultCount(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -207,6 +210,6 @@ func (s *accessSuite) TestInvalidResultCount(c *gc.C) {
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ModifyOfferAccess", args, res).SetArg(3, ress).Return(nil)
 	client := applicationoffers.NewClientFromCaller(mockFacadeCaller)
 
-	err := client.GrantOffer("bob", "consume", someOffer, someOffer)
-	c.Assert(err, gc.ErrorMatches, "expected 2 results, got 0")
+	err := client.GrantOffer(c.Context(), "bob", "consume", someOffer, someOffer)
+	c.Assert(err, tc.ErrorMatches, "expected 2 results, got 0")
 }

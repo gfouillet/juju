@@ -12,12 +12,12 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
 	"github.com/juju/utils/v4"
-	"github.com/juju/version/v2"
 	"gopkg.in/yaml.v2"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/charm/assumes"
 	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/charm/resource"
@@ -57,45 +57,45 @@ type Storage struct {
 	// Name is the name of the store.
 	//
 	// Name has no default, and must be specified.
-	Name string `bson:"name"`
+	Name string
 
 	// Description is a description of the store.
 	//
 	// Description has no default, and is optional.
-	Description string `bson:"description"`
+	Description string
 
 	// Type is the storage type: filesystem or block-device.
 	//
 	// Type has no default, and must be specified.
-	Type StorageType `bson:"type"`
+	Type StorageType
 
 	// Shared indicates that the storage is shared between all units of
 	// an application deployed from the charm. It is an error to attempt to
 	// assign non-shareable storage to a "shared" storage requirement.
 	//
 	// Shared defaults to false.
-	Shared bool `bson:"shared"`
+	Shared bool
 
 	// ReadOnly indicates that the storage should be made read-only if
 	// possible. If the storage cannot be made read-only, Juju will warn
 	// the user.
 	//
 	// ReadOnly defaults to false.
-	ReadOnly bool `bson:"read-only"`
+	ReadOnly bool
 
 	// CountMin is the number of storage instances that must be attached
 	// to the charm for it to be useful; the charm will not install until
 	// this number has been satisfied. This must be a non-negative number.
 	//
 	// CountMin defaults to 1 for singleton stores.
-	CountMin int `bson:"countmin"`
+	CountMin int
 
 	// CountMax is the largest number of storage instances that can be
 	// attached to the charm. If CountMax is -1, then there is no upper
 	// bound.
 	//
 	// CountMax defaults to 1 for singleton stores.
-	CountMax int `bson:"countmax"`
+	CountMax int
 
 	// MinimumSize is the minimum size of store that the charm needs to
 	// work at all. This is not a recommended size or a comfortable size
@@ -105,14 +105,14 @@ type Storage struct {
 	//
 	// There is no default MinimumSize; if left unspecified, a provider
 	// specific default will be used, typically 1GB for block storage.
-	MinimumSize uint64 `bson:"minimum-size"`
+	MinimumSize uint64
 
 	// Location is the mount location for filesystem stores. For multi-
 	// stores, the location acts as the parent directory for each mounted
 	// store.
 	//
 	// Location has no default, and is optional.
-	Location string `bson:"location,omitempty"`
+	Location string
 
 	// Properties allow the charm author to characterise the relative storage
 	// performance requirements and sensitivities for each store.
@@ -120,7 +120,7 @@ type Storage struct {
 	// such as tmpfs or ephemeral instance disks.
 	//
 	// Properties has no default, and is optional.
-	Properties []string `bson:"properties,omitempty"`
+	Properties []string
 }
 
 // DeviceType defines a device type.
@@ -129,49 +129,49 @@ type DeviceType string
 // Device represents a charm's device requirement (GPU for example).
 type Device struct {
 	// Name is the name of the device.
-	Name string `bson:"name"`
+	Name string
 
 	// Description is a description of the device.
-	Description string `bson:"description"`
+	Description string
 
 	// Type is the device type.
 	// currently supported types are
 	// - gpu
 	// - nvidia.com/gpu
 	// - amd.com/gpu
-	Type DeviceType `bson:"type"`
+	Type DeviceType
 
 	// CountMin is the min number of devices that the charm requires.
-	CountMin int64 `bson:"countmin"`
+	CountMin int64
 
 	// CountMax is the max number of devices that the charm requires.
-	CountMax int64 `bson:"countmax"`
+	CountMax int64
 }
 
 // Relation represents a single relation defined in the charm
 // metadata.yaml file.
 type Relation struct {
-	Name      string        `bson:"name"`
-	Role      RelationRole  `bson:"role"`
-	Interface string        `bson:"interface"`
-	Optional  bool          `bson:"optional"`
-	Limit     int           `bson:"limit"`
-	Scope     RelationScope `bson:"scope"`
+	Name      string
+	Role      RelationRole
+	Interface string
+	Optional  bool
+	Limit     int
+	Scope     RelationScope
 }
 
 // ImplementedBy returns whether the relation is implemented by the supplied charm.
-func (r Relation) ImplementedBy(ch Charm) bool {
+func (r Relation) ImplementedBy(meta *Meta) bool {
 	if r.IsImplicit() {
 		return true
 	}
 	var m map[string]Relation
 	switch r.Role {
 	case RoleProvider:
-		m = ch.Meta().Provides
+		m = meta.Provides
 	case RoleRequirer:
-		m = ch.Meta().Requires
+		m = meta.Requires
 	case RolePeer:
-		m = ch.Meta().Peers
+		m = meta.Peers
 	default:
 		panic(errors.Errorf("unknown relation role %q", r.Role))
 	}
@@ -213,41 +213,40 @@ const (
 // Meta represents all the known content that may be defined
 // within a charm's metadata.yaml file.
 type Meta struct {
-	Name           string                   `bson:"name" json:"Name"`
-	Summary        string                   `bson:"summary" json:"Summary"`
-	Description    string                   `bson:"description" json:"Description"`
-	Subordinate    bool                     `bson:"subordinate" json:"Subordinate"`
-	Provides       map[string]Relation      `bson:"provides,omitempty" json:"Provides,omitempty"`
-	Requires       map[string]Relation      `bson:"requires,omitempty" json:"Requires,omitempty"`
-	Peers          map[string]Relation      `bson:"peers,omitempty" json:"Peers,omitempty"`
-	ExtraBindings  map[string]ExtraBinding  `bson:"extra-bindings,omitempty" json:"ExtraBindings,omitempty"`
-	Categories     []string                 `bson:"categories,omitempty" json:"Categories,omitempty"`
-	Tags           []string                 `bson:"tags,omitempty" json:"Tags,omitempty"`
-	Storage        map[string]Storage       `bson:"storage,omitempty" json:"Storage,omitempty"`
-	Devices        map[string]Device        `bson:"devices,omitempty" json:"Devices,omitempty"`
-	PayloadClasses map[string]PayloadClass  `bson:"payloadclasses,omitempty" json:"PayloadClasses,omitempty"`
-	Resources      map[string]resource.Meta `bson:"resources,omitempty" json:"Resources,omitempty"`
-	Terms          []string                 `bson:"terms,omitempty" json:"Terms,omitempty"`
-	MinJujuVersion version.Number           `bson:"min-juju-version,omitempty" json:"min-juju-version,omitempty"`
+	Name           string                   `json:"Name"`
+	Summary        string                   `json:"Summary"`
+	Description    string                   `json:"Description"`
+	Subordinate    bool                     `json:"Subordinate"`
+	Provides       map[string]Relation      `json:"Provides,omitempty"`
+	Requires       map[string]Relation      `json:"Requires,omitempty"`
+	Peers          map[string]Relation      `json:"Peers,omitempty"`
+	ExtraBindings  map[string]ExtraBinding  `json:"ExtraBindings,omitempty"`
+	Categories     []string                 `json:"Categories,omitempty"`
+	Tags           []string                 `json:"Tags,omitempty"`
+	Storage        map[string]Storage       `json:"Storage,omitempty"`
+	Devices        map[string]Device        `json:"Devices,omitempty"`
+	Resources      map[string]resource.Meta `json:"Resources,omitempty"`
+	Terms          []string                 `json:"Terms,omitempty"`
+	MinJujuVersion semversion.Number        `json:"min-juju-version,omitempty"`
 
 	// v2
-	Containers map[string]Container    `bson:"containers,omitempty" json:"containers,omitempty" yaml:"containers,omitempty"`
-	Assumes    *assumes.ExpressionTree `bson:"assumes,omitempty" json:"assumes,omitempty" yaml:"assumes,omitempty"`
-	CharmUser  RunAs                   `bson:"charm-user,omitempty" json:"charm-user,omitempty" yaml:"charm-user,omitempty"`
+	Containers map[string]Container    `json:"containers,omitempty" yaml:"containers,omitempty"`
+	Assumes    *assumes.ExpressionTree `json:"assumes,omitempty" yaml:"assumes,omitempty"`
+	CharmUser  RunAs                   `json:"charm-user,omitempty" yaml:"charm-user,omitempty"`
 }
 
 // Container specifies the possible systems it supports and mounts it wants.
 type Container struct {
-	Resource string  `bson:"resource,omitempty" json:"resource,omitempty" yaml:"resource,omitempty"`
-	Mounts   []Mount `bson:"mounts,omitempty" json:"mounts,omitempty" yaml:"mounts,omitempty"`
-	Uid      *int    `bson:"uid,omitempty" json:"uid,omitempty" yaml:"uid,omitempty"`
-	Gid      *int    `bson:"gid,omitempty" json:"gid,omitempty" yaml:"gid,omitempty"`
+	Resource string  `json:"resource,omitempty" yaml:"resource,omitempty"`
+	Mounts   []Mount `json:"mounts,omitempty" yaml:"mounts,omitempty"`
+	Uid      *int    `json:"uid,omitempty" yaml:"uid,omitempty"`
+	Gid      *int    `json:"gid,omitempty" yaml:"gid,omitempty"`
 }
 
 // Mount allows a container to mount a storage filesystem from the storage top-level directive.
 type Mount struct {
-	Storage  string `bson:"storage,omitempty" json:"storage,omitempty" yaml:"storage,omitempty"`
-	Location string `bson:"location,omitempty" json:"location,omitempty" yaml:"location,omitempty"`
+	Storage  string `json:"storage,omitempty" yaml:"storage,omitempty"`
+	Location string `json:"location,omitempty" yaml:"location,omitempty"`
 }
 
 func generateRelationHooks(relName string, allHooks map[string]bool) {
@@ -514,7 +513,6 @@ func parseMeta(m map[string]interface{}) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
-	meta.PayloadClasses = parsePayloadClasses(m["payloads"])
 	meta.MinJujuVersion, err = parseMinJujuVersion(m["min-juju-version"])
 	if err != nil {
 		return nil, err
@@ -543,7 +541,7 @@ func parseMeta(m map[string]interface{}) (*Meta, error) {
 // otherwise you make get metadata which is not v1 nor v2 format.
 func (m Meta) MarshalYAML() (interface{}, error) {
 	var minver string
-	if m.MinJujuVersion != version.Zero {
+	if m.MinJujuVersion != semversion.Zero {
 		minver = m.MinJujuVersion.String()
 	}
 
@@ -695,45 +693,6 @@ func (m Meta) Check(format Format, reasons ...FormatSelectionReason) error {
 		return errors.Errorf("unknown format %v", format)
 	}
 
-	// Check for duplicate or forbidden relation names or interfaces.
-	names := make(map[string]bool)
-	checkRelations := func(src map[string]Relation, role RelationRole) error {
-		for name, rel := range src {
-			if rel.Name != name {
-				return errors.Errorf("charm %q has mismatched relation name %q; expected %q", m.Name, rel.Name, name)
-			}
-			if rel.Role != role {
-				return errors.Errorf("charm %q has mismatched role %q; expected %q", m.Name, rel.Role, role)
-			}
-			// Container-scoped require relations on subordinates are allowed
-			// to use the otherwise-reserved juju-* namespace.
-			if !m.Subordinate || role != RoleRequirer || rel.Scope != ScopeContainer {
-				if reserved, _ := reservedName(m.Name, name); reserved {
-					return errors.Errorf("charm %q using a reserved relation name: %q", m.Name, name)
-				}
-			}
-			if role != RoleRequirer {
-				if reserved, _ := reservedName(m.Name, rel.Interface); reserved {
-					return errors.Errorf("charm %q relation %q using a reserved interface: %q", m.Name, name, rel.Interface)
-				}
-			}
-			if names[name] {
-				return errors.Errorf("charm %q using a duplicated relation name: %q", m.Name, name)
-			}
-			names[name] = true
-		}
-		return nil
-	}
-	if err := checkRelations(m.Provides, RoleProvider); err != nil {
-		return err
-	}
-	if err := checkRelations(m.Requires, RoleRequirer); err != nil {
-		return err
-	}
-	if err := checkRelations(m.Peers, RolePeer); err != nil {
-		return err
-	}
-
 	if err := validateMetaExtraBindings(m); err != nil {
 		return errors.Errorf("charm %q has invalid extra bindings: %v", m.Name, err)
 	}
@@ -756,7 +715,7 @@ func (m Meta) Check(format Format, reasons ...FormatSelectionReason) error {
 		}
 	}
 
-	names = make(map[string]bool)
+	names := make(map[string]bool)
 	for name, store := range m.Storage {
 		if store.Location != "" && store.Type != StorageFilesystem {
 			return errors.Errorf(`charm %q storage %q: location may not be specified for "type: %s"`, m.Name, name, store.Type)
@@ -792,15 +751,6 @@ func (m Meta) Check(format Format, reasons ...FormatSelectionReason) error {
 		names[name] = true
 	}
 
-	for name, payloadClass := range m.PayloadClasses {
-		if payloadClass.Name != name {
-			return errors.Errorf("mismatch on payload class name (%q != %q)", payloadClass.Name, name)
-		}
-		if err := payloadClass.Validate(); err != nil {
-			return err
-		}
-	}
-
 	if err := validateMetaResources(m.Resources); err != nil {
 		return err
 	}
@@ -818,7 +768,7 @@ func (m Meta) checkV2(reasons []FormatSelectionReason) error {
 	if len(reasons) == 0 {
 		return errors.NotValidf("metadata v2 without manifest.yaml")
 	}
-	if m.MinJujuVersion != version.Zero {
+	if m.MinJujuVersion != semversion.Zero {
 		return errors.NotValidf("min-juju-version in metadata v2")
 	}
 	return nil
@@ -1095,13 +1045,13 @@ func parseMounts(input interface{}, storage map[string]Storage) ([]Mount, error)
 	return mounts, nil
 }
 
-func parseMinJujuVersion(value any) (version.Number, error) {
+func parseMinJujuVersion(value any) (semversion.Number, error) {
 	if value == nil {
-		return version.Zero, nil
+		return semversion.Zero, nil
 	}
-	ver, err := version.Parse(value.(string))
+	ver, err := semversion.Parse(value.(string))
 	if err != nil {
-		return version.Zero, errors.Annotate(err, "invalid min-juju-version")
+		return semversion.Zero, errors.Annotate(err, "invalid min-juju-version")
 	}
 	return ver, nil
 }
@@ -1267,7 +1217,6 @@ var charmSchema = schema.FieldMap(
 		"tags":             schema.List(schema.String()),
 		"storage":          schema.StringMap(storageSchema),
 		"devices":          schema.StringMap(deviceSchema),
-		"payloads":         schema.StringMap(payloadClassSchema),
 		"resources":        schema.StringMap(resourceSchema),
 		"terms":            schema.List(schema.String()),
 		"min-juju-version": schema.String(),
@@ -1287,7 +1236,6 @@ var charmSchema = schema.FieldMap(
 		"tags":             schema.Omit,
 		"storage":          schema.Omit,
 		"devices":          schema.Omit,
-		"payloads":         schema.Omit,
 		"resources":        schema.Omit,
 		"terms":            schema.Omit,
 		"min-juju-version": schema.Omit,

@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/pubsub/v2"
 	"github.com/juju/utils/v4/voyeur"
-	"github.com/juju/version/v2"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -24,6 +22,7 @@ import (
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	coretrace "github.com/juju/juju/core/trace"
 	internallogger "github.com/juju/juju/internal/logger"
@@ -36,8 +35,8 @@ import (
 	"github.com/juju/juju/internal/worker/apiaddressupdater"
 	"github.com/juju/juju/internal/worker/apicaller"
 	"github.com/juju/juju/internal/worker/apiconfigwatcher"
+	"github.com/juju/juju/internal/worker/caasprobebinder"
 	"github.com/juju/juju/internal/worker/caasprober"
-	"github.com/juju/juju/internal/worker/caasunitsmanager"
 	"github.com/juju/juju/internal/worker/caasunitterminationworker"
 	"github.com/juju/juju/internal/worker/caasupgrader"
 	"github.com/juju/juju/internal/worker/fortress"
@@ -82,7 +81,7 @@ type manifoldsConfig struct {
 
 	// PreviousAgentVersion passes through the version the unit
 	// agent was running before the current restart.
-	PreviousAgentVersion version.Number
+	PreviousAgentVersion semversion.Number
 
 	// UpgradeStepsLock is passed to the upgrade steps gate to
 	// coordinate workers that shouldn't do anything until the
@@ -129,11 +128,6 @@ type manifoldsConfig struct {
 
 	// ContainerNames this unit is running with.
 	ContainerNames []string
-
-	// LocalHub is a simple pubsub that is used for internal agent
-	// messaging only. This is used for interactions between workers
-	// and the introspection worker.
-	LocalHub *pubsub.SimpleHub
 
 	// ColocatedWithController is true when the unit agent is running on
 	// the same machine/pod as a Juju controller, where they share the same
@@ -333,15 +327,17 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 
 		// Kubernetes probe handler responsible for reporting status for
 		// Kubernetes probes
-		caasProberName: ifNotDead(caasprober.Manifold(caasprober.ManifoldConfig{
+		caasProberName: caasprober.Manifold(caasprober.ManifoldConfig{
 			MuxName: probeHTTPServerName,
-			Providers: []string{
-				uniterName,
-			},
+		}),
+
+		caasUniterProberBinderName: ifNotDead(caasprobebinder.Manifold(caasprobebinder.ManifoldConfig{
+			ProberName:         caasProberName,
+			ProbeProviderNames: []string{uniterName},
 		})),
 
-		caasZombieProberName: ifDead(caasprober.Manifold(caasprober.ManifoldConfig{
-			MuxName: probeHTTPServerName,
+		caasZombieProberBinderName: ifDead(caasprobebinder.Manifold(caasprobebinder.ManifoldConfig{
+			ProberName: caasProberName,
 			DefaultProviders: map[string]probe.ProbeProvider{
 				"zombie-readiness": probe.ReadinessProvider(probe.Failure),
 			},
@@ -413,19 +409,11 @@ func Manifolds(config manifoldsConfig) dependency.Manifolds {
 			UniterName:    uniterName,
 		}))),
 
-		// The CAAS units manager worker runs on CAAS agent and subscribes and handles unit topics on the localhub.
-		caasUnitsManager: ifNotDead(caasunitsmanager.Manifold(caasunitsmanager.ManifoldConfig{
-			AgentName:     agentName,
-			APICallerName: apiCallerName,
-			Clock:         config.Clock,
-			Logger:        internallogger.GetLogger("juju.worker.caasunitsmanager"),
-			Hub:           config.LocalHub,
-		})),
-
 		// The secretDrainWorker is the worker that drains secrets from the inactive backend to the current active backend.
 		secretDrainWorker: ifNotMigrating(secretsdrainworker.Manifold(secretsdrainworker.ManifoldConfig{
 			APICallerName:         apiCallerName,
 			Logger:                internallogger.GetLogger("juju.worker.secretsdrainworker"),
+			LeadershipTrackerName: leadershipTrackerName,
 			NewSecretsDrainFacade: secretsdrainworker.NewSecretsDrainFacadeForAgent,
 			NewWorker:             secretsdrainworker.NewWorker,
 			NewBackendsClient:     secretsdrainworker.NewSecretBackendsClientForAgent,
@@ -479,16 +467,16 @@ const (
 	migrationInactiveFlagName = "migration-inactive-flag"
 	migrationMinionName       = "migration-minion"
 
-	caasProberName       = "caas-prober"
-	caasZombieProberName = "caas-zombie-prober"
-	probeHTTPServerName  = "probe-http-server"
+	caasProberName             = "caas-prober"
+	caasZombieProberBinderName = "caas-zombie-prober-binder"
+	caasUniterProberBinderName = "caas-unit-prober-binder"
+	probeHTTPServerName        = "probe-http-server"
 
 	proxyConfigUpdaterName   = "proxy-config-updater"
 	loggingConfigUpdaterName = "logging-config-updater"
 	apiAddressUpdaterName    = "api-address-updater"
 
 	caasUnitTerminationWorker = "caas-unit-termination-worker"
-	caasUnitsManager          = "caas-units-manager"
 
 	secretDrainWorker = "secret-drain-worker"
 
@@ -500,6 +488,6 @@ const (
 
 type noopStatusSetter struct{}
 
-func (noopStatusSetter) SetStatus(setableStatus status.Status, info string, data map[string]any) error {
+func (noopStatusSetter) SetStatus(ctx context.Context, setableStatus status.Status, info string, data map[string]any) error {
 	return nil
 }

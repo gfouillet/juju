@@ -6,13 +6,13 @@ package controller
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewUnregisterCommand returns a command to allow the user to unregister a controller.
@@ -34,9 +34,10 @@ type unregisterCommand struct {
 }
 
 var usageUnregisterDetails = `
-Removes local connection information for the specified controller.  This
-command does not destroy the controller.  In order to regain access to an
-unregistered controller, it will need to be added again using the juju register
+Removes local connection information for the specified controller.
+
+This command does not destroy the controller.  In order to regain access to an
+unregistered controller, it will need to be added again using the ` + "`juju register`" + `
 command.
 
 `
@@ -92,8 +93,8 @@ func (c *unregisterCommand) Init(args []string) error {
 
 var unregisterMsg = `
 This command will remove connection information for controller %q.
-Doing so will prevent you from accessing this controller until
-you register it again.
+The controller will not be destroyed but you must register it again
+if you want to access it.
 `[1:]
 
 func (c *unregisterCommand) Run(ctx *cmd.Context) error {

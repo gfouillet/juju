@@ -25,6 +25,7 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
@@ -122,14 +123,14 @@ func (d *factory) GetDeployer(ctx context.Context, cfg DeployerConfig, deployAPI
 		// Go for local charm (if it's not set by the localBundleDeployer above)
 		if dk == nil {
 			var localCharmErr error
-			if dk, localCharmErr = d.localCharmDeployer(deployAPI); localCharmErr != nil {
+			if dk, localCharmErr = d.localCharmDeployer(ctx, deployAPI); localCharmErr != nil {
 				return nil, errors.Trace(localCharmErr)
 			}
 		}
 	} else if isLocalSchema(d.charmOrBundle) {
 		// Go for local pre-deployed charm
 		var localPreDeployedCharmErr error
-		if dk, localPreDeployedCharmErr = d.localPreDeployedCharmDeployer(deployAPI); localPreDeployedCharmErr != nil {
+		if dk, localPreDeployedCharmErr = d.localPreDeployedCharmDeployer(ctx, deployAPI); localPreDeployedCharmErr != nil {
 			return nil, errors.Trace(localPreDeployedCharmErr)
 		}
 	} else {
@@ -156,7 +157,7 @@ func (d *factory) GetDeployer(ctx context.Context, cfg DeployerConfig, deployAPI
 
 		// Go for repository bundle
 		var bundleErr error
-		if dk, bundleErr = d.repoBundleDeployer(userCharmURL, origin, resolver, charmHubSchemaCheck); bundleErr != nil && !errors.Is(bundleErr, errors.NotValid) {
+		if dk, bundleErr = d.repoBundleDeployer(ctx, userCharmURL, origin, resolver, charmHubSchemaCheck); bundleErr != nil && !errors.Is(bundleErr, errors.NotValid) {
 			// If the error is NotValid, then the URL is resolved alright, but not to a bundle, so no need to raise
 			return nil, errors.Trace(bundleErr)
 		}
@@ -186,7 +187,7 @@ func (d *factory) repoCharmDeployer(userCharmURL *charm.URL, origin commoncharm.
 	return &repositoryCharmDeployerKind{deployCharm, userCharmURL}, nil
 }
 
-func (d *factory) repoBundleDeployer(userCharmURL *charm.URL, origin commoncharm.Origin, resolver Resolver, charmHubSchemaCheck bool) (DeployerKind, error) {
+func (d *factory) repoBundleDeployer(ctx context.Context, userCharmURL *charm.URL, origin commoncharm.Origin, resolver Resolver, charmHubSchemaCheck bool) (DeployerKind, error) {
 	// TODO (cderici): check the validity of the comment below
 	// Resolve the bundle URL using the channel supplied via the channel
 	// supplied. All charms within this bundle unless pinned via a channel are
@@ -195,7 +196,7 @@ func (d *factory) repoBundleDeployer(userCharmURL *charm.URL, origin commoncharm
 	// has it's own channel supplied via a bundle, if no is supplied then the
 	// channel is worked out via the resolving what is available.
 	// See: LP:1677404 and LP:1832873
-	bundleURL, bundleOrigin, bundleResolveErr := resolver.ResolveBundleURL(userCharmURL, origin)
+	bundleURL, bundleOrigin, bundleResolveErr := resolver.ResolveBundleURL(ctx, userCharmURL, origin)
 	if corecharm.IsUnsupportedBaseError(errors.Cause(bundleResolveErr)) {
 		return nil, errors.Errorf("%v. Use --force to deploy the charm anyway.", bundleResolveErr)
 	}
@@ -229,7 +230,7 @@ func (d *factory) localBundleDeployer() (DeployerKind, error) {
 	}
 }
 
-func (d *factory) localCharmDeployer(getter ModelConfigGetter) (DeployerKind, error) {
+func (d *factory) localCharmDeployer(ctx context.Context, getter ModelConfigGetter) (DeployerKind, error) {
 	// Charm may have been supplied via a path reference.
 	ch, curl, err := d.charmReader.NewCharmAtPath(d.charmOrBundle)
 
@@ -245,7 +246,7 @@ func (d *factory) localCharmDeployer(getter ModelConfigGetter) (DeployerKind, er
 	} else if errors.Is(err, errors.NotFound) {
 		return nil, errors.Wrap(err, errors.NotFoundf("charm or bundle at %q", d.charmOrBundle))
 	} else if errors.Is(err, os.ErrNotExist) {
-		logger.Debugf("cannot interpret as local charm: %v", err)
+		logger.Debugf(context.TODO(), "cannot interpret as local charm: %v", err)
 		return nil, nil
 	} else if err != nil {
 		// If we get a "not exists" error then we attempt to interpret
@@ -254,7 +255,7 @@ func (d *factory) localCharmDeployer(getter ModelConfigGetter) (DeployerKind, er
 		return nil, errors.Annotatef(err, "attempting to deploy %q", d.charmOrBundle)
 	}
 
-	base, imageStream, err := d.determineBaseForCharm(ch, getter)
+	base, imageStream, err := d.determineBaseForCharm(ctx, ch, getter)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -262,7 +263,7 @@ func (d *factory) localCharmDeployer(getter ModelConfigGetter) (DeployerKind, er
 	return &localCharmDeployerKind{base, imageStream, ch, curl}, nil
 }
 
-func (d *factory) localPreDeployedCharmDeployer(deployAPI CharmDeployAPI) (DeployerKind, error) {
+func (d *factory) localPreDeployedCharmDeployer(ctx context.Context, deployAPI CharmDeployAPI) (DeployerKind, error) {
 	// If the charm's schema is local, we should definitively attempt
 	// to deploy a charm that's already deployed in the
 	// environment.
@@ -274,13 +275,13 @@ func (d *factory) localPreDeployedCharmDeployer(deployAPI CharmDeployAPI) (Deplo
 		return nil, errors.Errorf("cannot interpret as a redeployment of a local charm from the controller")
 	}
 
-	charmInfo, err := deployAPI.CharmInfo(userCharmURL.String())
+	charmInfo, err := deployAPI.CharmInfo(ctx, userCharmURL.String())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	ch := charmInfo.Charm()
 
-	base, _, err := d.determineBaseForCharm(ch, deployAPI)
+	base, _, err := d.determineBaseForCharm(ctx, ch, deployAPI)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -288,11 +289,11 @@ func (d *factory) localPreDeployedCharmDeployer(deployAPI CharmDeployAPI) (Deplo
 	return &localPreDeployerKind{base: base, userCharmURL: userCharmURL, ch: ch}, nil
 }
 
-func (d *factory) determineBaseForCharm(ch charm.Charm, getter ModelConfigGetter) (corebase.Base, string, error) {
+func (d *factory) determineBaseForCharm(ctx context.Context, ch charm.Charm, getter ModelConfigGetter) (corebase.Base, string, error) {
 	var (
 		selectedBase corebase.Base
 	)
-	modelCfg, err := getModelConfig(getter)
+	modelCfg, err := getModelConfig(ctx, getter)
 	if err != nil {
 		return corebase.Base{}, "", errors.Trace(err)
 	}
@@ -387,7 +388,7 @@ type DeployerDependencies struct {
 	Model                ModelCommand
 	FileSystem           modelcmd.Filesystem
 	CharmReader          CharmReader
-	NewConsumeDetailsAPI func(url *charm.OfferURL) (ConsumeDetails, error)
+	NewConsumeDetailsAPI func(ctx context.Context, url crossmodel.OfferURL) (ConsumeDetails, error)
 	DeployKind           DeployerFactory
 }
 
@@ -417,7 +418,7 @@ type DeployerConfig struct {
 	DryRun               bool
 	FlagSet              *gnuflag.FlagSet
 	Force                bool
-	NewConsumeDetailsAPI func(url *charm.OfferURL) (ConsumeDetails, error)
+	NewConsumeDetailsAPI func(url *crossmodel.OfferURL) (ConsumeDetails, error)
 	NumUnits             int
 	PlacementSpec        string
 	Placement            []*instance.Placement
@@ -433,7 +434,7 @@ type factory struct {
 	// DeployerDependencies
 	model                ModelCommand
 	deployResources      DeployResourcesFunc
-	newConsumeDetailsAPI func(url *charm.OfferURL) (ConsumeDetails, error)
+	newConsumeDetailsAPI func(ctx context.Context, url crossmodel.OfferURL) (ConsumeDetails, error)
 	fileSystem           modelcmd.Filesystem
 	charmReader          CharmReader
 
@@ -543,8 +544,8 @@ func (d *factory) newDeployBundle(_ charm.Schema, ds charm.BundleDataSource) dep
 	}
 }
 
-func (dk *localPreDeployerKind) CreateDeployer(_ context.Context, d factory) (Deployer, error) {
-	if err := d.validateResourcesNeededForLocalDeploy(dk.ch.Meta()); err != nil {
+func (dk *localPreDeployerKind) CreateDeployer(ctx context.Context, d factory) (Deployer, error) {
+	if err := d.validateResourcesNeededForLocalDeploy(ctx, dk.ch.Meta()); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return &predeployedLocalCharm{
@@ -554,11 +555,11 @@ func (dk *localPreDeployerKind) CreateDeployer(_ context.Context, d factory) (De
 	}, nil
 }
 
-func (dk *localCharmDeployerKind) CreateDeployer(_ context.Context, d factory) (Deployer, error) {
+func (dk *localCharmDeployerKind) CreateDeployer(ctx context.Context, d factory) (Deployer, error) {
 	// Avoid deploying charm if the charm base is not correct for the
 	// available image streams.
 	var err error
-	if err := d.validateResourcesNeededForLocalDeploy(dk.ch.Meta()); err != nil {
+	if err := d.validateResourcesNeededForLocalDeploy(ctx, dk.ch.Meta()); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -641,9 +642,9 @@ func appsRequiringTrust(appSpecList map[string]*charm.ApplicationSpec) []string 
 	return tl
 }
 
-var getModelConfig = func(api ModelConfigGetter) (*config.Config, error) {
+var getModelConfig = func(ctx context.Context, api ModelConfigGetter) (*config.Config, error) {
 	// Separated into a variable for easy overrides
-	attrs, err := api.ModelGet()
+	attrs, err := api.ModelGet(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, errors.New("cannot fetch model settings"))
 	}
@@ -661,8 +662,8 @@ func charmValidationError(name string, err error) error {
 	return errors.Trace(err)
 }
 
-func (d *factory) validateResourcesNeededForLocalDeploy(charmMeta *charm.Meta) error {
-	modelType, err := d.model.ModelType()
+func (d *factory) validateResourcesNeededForLocalDeploy(ctx context.Context, charmMeta *charm.Meta) error {
+	modelType, err := d.model.ModelType(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}

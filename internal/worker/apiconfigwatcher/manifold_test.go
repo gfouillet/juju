@@ -4,25 +4,24 @@
 package apiconfigwatcher_test
 
 import (
-	"context"
 	"sync"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/utils/v4/voyeur"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	dt "github.com/juju/worker/v4/dependency/testing"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/apiconfigwatcher"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	manifold           dependency.Manifold
 	getter             dependency.Getter
@@ -30,9 +29,11 @@ type ManifoldSuite struct {
 	agentConfigChanged *voyeur.Value
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	s.agent = new(mockAgent)
@@ -47,32 +48,32 @@ func (s *ManifoldSuite) SetUpTest(c *gc.C) {
 	})
 }
 
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(s.manifold.Inputs, jc.SameContents, []string{"agent"})
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(s.manifold.Inputs, tc.SameContents, []string{"agent"})
 }
 
-func (s *ManifoldSuite) TestNilAgentConfigChanged(c *gc.C) {
+func (s *ManifoldSuite) TestNilAgentConfigChanged(c *tc.C) {
 	manifold := apiconfigwatcher.Manifold(apiconfigwatcher.ManifoldConfig{
 		AgentName: "agent",
 	})
-	_, err := manifold.Start(context.Background(), s.getter)
-	c.Assert(err, gc.ErrorMatches, "nil AgentConfigChanged .+")
+	_, err := manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorMatches, "nil AgentConfigChanged .+")
 }
 
-func (s *ManifoldSuite) TestNoAgent(c *gc.C) {
+func (s *ManifoldSuite) TestNoAgent(c *tc.C) {
 	getter := dt.StubGetter(map[string]interface{}{
 		"agent": dependency.ErrMissing,
 	})
-	_, err := s.manifold.Start(context.Background(), getter)
-	c.Assert(err, gc.Equals, dependency.ErrMissing)
+	_, err := s.manifold.Start(c.Context(), getter)
+	c.Assert(err, tc.Equals, dependency.ErrMissing)
 }
 
-func (s *ManifoldSuite) TestStart(c *gc.C) {
+func (s *ManifoldSuite) TestStart(c *tc.C) {
 	w := s.startWorkerClean(c)
 	workertest.CleanKill(c, w)
 }
 
-func (s *ManifoldSuite) TestBounceOnChange(c *gc.C) {
+func (s *ManifoldSuite) TestBounceOnChange(c *tc.C) {
 	s.agent.conf.setAddresses("1.1.1.1:1")
 	w := s.startWorkerClean(c)
 
@@ -80,7 +81,7 @@ func (s *ManifoldSuite) TestBounceOnChange(c *gc.C) {
 	s.agent.conf.setAddresses("2.2.2.2:2")
 	s.agentConfigChanged.Set(0)
 	err := workertest.CheckKilled(c, w)
-	c.Assert(err, gc.Equals, dependency.ErrBounce)
+	c.Assert(err, tc.Equals, dependency.ErrBounce)
 
 	// Restart the worker - worker should stay up.
 	w = s.startWorkerClean(c)
@@ -89,10 +90,10 @@ func (s *ManifoldSuite) TestBounceOnChange(c *gc.C) {
 	s.agent.conf.setAddresses("2.2.2.2:2", "3.3.3.3:3")
 	s.agentConfigChanged.Set(0)
 	err = workertest.CheckKilled(c, w)
-	c.Assert(err, gc.Equals, dependency.ErrBounce)
+	c.Assert(err, tc.Equals, dependency.ErrBounce)
 }
 
-func (s *ManifoldSuite) TestConfigChangeWithNoAddrChange(c *gc.C) {
+func (s *ManifoldSuite) TestConfigChangeWithNoAddrChange(c *tc.C) {
 	s.agent.conf.setAddresses("1.1.1.1:1")
 	w := s.startWorkerClean(c)
 
@@ -102,7 +103,7 @@ func (s *ManifoldSuite) TestConfigChangeWithNoAddrChange(c *gc.C) {
 	workertest.CheckAlive(c, w)
 }
 
-func (s *ManifoldSuite) TestConfigChangeWithAddrReordering(c *gc.C) {
+func (s *ManifoldSuite) TestConfigChangeWithAddrReordering(c *tc.C) {
 	s.agent.conf.setAddresses("1.1.1.1:1", "2.2.2.2:2")
 	w := s.startWorkerClean(c)
 
@@ -112,16 +113,16 @@ func (s *ManifoldSuite) TestConfigChangeWithAddrReordering(c *gc.C) {
 	workertest.CheckAlive(c, w)
 }
 
-func (s *ManifoldSuite) TestClosedVoyeur(c *gc.C) {
+func (s *ManifoldSuite) TestClosedVoyeur(c *tc.C) {
 	w := s.startWorkerClean(c)
 	s.agentConfigChanged.Close()
 	err := workertest.CheckKilled(c, w)
-	c.Assert(err, gc.ErrorMatches, "config changed value closed")
+	c.Assert(err, tc.ErrorMatches, "config changed value closed")
 }
 
-func (s *ManifoldSuite) startWorkerClean(c *gc.C) worker.Worker {
-	w, err := s.manifold.Start(context.Background(), s.getter)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *ManifoldSuite) startWorkerClean(c *tc.C) worker.Worker {
+	w, err := s.manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CheckAlive(c, w)
 	return w
 }

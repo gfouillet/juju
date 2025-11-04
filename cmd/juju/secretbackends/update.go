@@ -4,22 +4,23 @@
 package secretbackends
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/secretbackends"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	_ "github.com/juju/juju/internal/secrets/provider/all"
 )
 
 type updateSecretBackendCommand struct {
 	modelcmd.ControllerCommandBase
 
-	UpdateSecretBackendsAPIFunc func() (UpdateSecretBackendsAPI, error)
+	UpdateSecretBackendsAPIFunc func(ctx context.Context) (UpdateSecretBackendsAPI, error)
 
 	Name  string
 	Force bool
@@ -39,11 +40,11 @@ followed by any necessary backend specific config values.
 Config may be specified as key values ot read from a file.
 Any key values override file content if both are specified.
 
-Config attributes may be reset back to the default value using --reset.
+Config attributes may be reset back to the default value using ` + "`--reset`" + `.
 
 To rotate the backend access credential/token (if specified), use
-the "token-rotate" config and supply a duration. To reset any existing
-token rotation period, supply a value of 0.
+the ` + "`token-rotate`" + ` config and supply a duration. To reset any existing
+token rotation period, supply a value of ` + "`0`" + `.
 
 `
 
@@ -58,7 +59,7 @@ const updateSecretBackendsExamples = `
 
 // UpdateSecretBackendsAPI is the secrets client API.
 type UpdateSecretBackendsAPI interface {
-	UpdateSecretBackend(secretbackends.UpdateSecretBackend, bool) error
+	UpdateSecretBackend(context.Context, secretbackends.UpdateSecretBackend, bool) error
 	Close() error
 }
 
@@ -70,8 +71,8 @@ func NewUpdateSecretBackendCommand() cmd.Command {
 	return modelcmd.WrapController(c)
 }
 
-func (c *updateSecretBackendCommand) secretBackendsAPI() (UpdateSecretBackendsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *updateSecretBackendCommand) secretBackendsAPI(ctx context.Context) (UpdateSecretBackendsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -98,10 +99,10 @@ func (c *updateSecretBackendCommand) Info() *cmd.Info {
 
 // SetFlags implements cmd.SetFlags.
 func (c *updateSecretBackendCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.Var(&c.ConfigFile, "config", "path to yaml-formatted configuration file")
+	f.Var(&c.ConfigFile, "config", "Path to yaml-formatted configuration file")
 	f.Var(cmd.NewAppendStringsValue(&c.Reset), "reset",
 		"Reset the provided comma delimited config keys")
-	f.BoolVar(&c.Force, "force", false, "force update even if the backend is unreachable")
+	f.BoolVar(&c.Force, "force", false, "Force update even if the backend is unreachable")
 }
 
 func (c *updateSecretBackendCommand) Init(args []string) error {
@@ -154,12 +155,12 @@ func (c *updateSecretBackendCommand) Run(ctxt *cmd.Context) error {
 		backend.NameChange = &nameChange
 	}
 
-	api, err := c.UpdateSecretBackendsAPIFunc()
+	api, err := c.UpdateSecretBackendsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	err = api.UpdateSecretBackend(backend, c.Force)
+	err = api.UpdateSecretBackend(ctxt, backend, c.Force)
 	return errors.Trace(err)
 }

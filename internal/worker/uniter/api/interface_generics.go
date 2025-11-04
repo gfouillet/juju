@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/api/types"
@@ -30,8 +30,6 @@ type UniterClient interface {
 	RelationById(context.Context, int) (Relation, error)
 	Model(context.Context) (*types.Model, error)
 	ModelConfig(context.Context) (*config.Config, error)
-	UnitStorageAttachments(unitTag names.UnitTag) ([]params.StorageAttachmentId, error)
-	StorageAttachment(storageTag names.StorageTag, unitTag names.UnitTag) (params.StorageAttachment, error)
 	GoalState(context.Context) (application.GoalState, error)
 	CloudSpec(context.Context) (*params.CloudSpec, error)
 	ActionBegin(ctx context.Context, tag names.ActionTag) error
@@ -40,12 +38,11 @@ type UniterClient interface {
 	SetUnitWorkloadVersion(ctx context.Context, tag names.UnitTag, version string) error
 	OpenedMachinePortRangesByEndpoint(ctx context.Context, machineTag names.MachineTag) (map[names.UnitTag]network.GroupedPortRanges, error)
 	OpenedPortRangesByEndpoint(ctx context.Context) (map[names.UnitTag]network.GroupedPortRanges, error)
-	LeadershipSettings() uniter.LeadershipSettingsAccessor
 	CloudAPIVersion(context.Context) (string, error)
 	APIAddresses(context.Context) ([]string, error)
 	WatchRelationUnits(context.Context, names.RelationTag, names.UnitTag) (watcher.RelationUnitsWatcher, error)
-	WatchStorageAttachment(names.StorageTag, names.UnitTag) (watcher.NotifyWatcher, error)
+	WatchStorageAttachment(context.Context, names.StorageTag, names.UnitTag) (watcher.NotifyWatcher, error)
 	WatchUpdateStatusHookInterval(context.Context) (watcher.NotifyWatcher, error)
 	UpdateStatusHookInterval(context.Context) (time.Duration, error)
-	StorageAttachmentLife([]params.StorageAttachmentId) ([]params.LifeResult, error)
+	StorageAttachmentLife(context.Context, []params.StorageAttachmentId) ([]params.LifeResult, error)
 }

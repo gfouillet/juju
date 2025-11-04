@@ -4,24 +4,25 @@
 package azure
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/azure/internal/armtemplates"
+	"github.com/juju/juju/internal/provider/azure/internal/azureauth"
 )
 
 // SupportsInstanceRoles indicates if Instance Roles are supported by this
 // environ.
-func (env *azureEnviron) SupportsInstanceRoles(_ envcontext.ProviderCallContext) bool {
+func (env *azureEnviron) SupportsInstanceRoles(_ context.Context) bool {
 	return true
 }
 
@@ -30,13 +31,16 @@ func (env *azureEnviron) SupportsInstanceRoles(_ envcontext.ProviderCallContext)
 // For Azure, this means creating a managed identity with the correct role definition
 // assigned to it.
 func (env *azureEnviron) CreateAutoInstanceRole(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	args environs.BootstrapParams,
 ) (string, error) {
 	controllerUUID := args.ControllerConfig.ControllerUUID()
-	err := env.initResourceGroup(ctx, controllerUUID, env.config.resourceGroupName != "", true)
-	if err != nil {
-		return "", errors.Annotate(err, "creating resource group for managed identity")
+	needResourceGroup := env.config.resourceGroupName == ""
+	if needResourceGroup {
+		resourceTags := env.resourceTags(controllerUUID)
+		if err := env.createResourceGroup(ctx, resourceTags); err != nil {
+			return "", errors.Annotate(err, "creating resource group  for managed identity")
+		}
 	}
 
 	instProfileName, err := env.ensureControllerManagedIdentity(
@@ -49,7 +53,7 @@ func (env *azureEnviron) CreateAutoInstanceRole(
 }
 
 func (env *azureEnviron) ensureControllerManagedIdentity(
-	callCtx envcontext.ProviderCallContext,
+	ctx context.Context,
 	controllerUUID string,
 ) (*string, error) {
 	envTags := tags.ResourceTags(
@@ -91,7 +95,7 @@ func (env *azureEnviron) ensureControllerManagedIdentity(
 	}}
 	template := armtemplates.Template{Resources: res}
 	if err := env.createDeployment(
-		callCtx,
+		ctx,
 		env.resourceGroup,
 		identityName,
 		template,
@@ -114,14 +118,7 @@ func (env *azureEnviron) ensureControllerManagedIdentity(
 			"description": "roles for juju controller",
 			"type":        "customRole",
 			"permissions": []map[string]any{{
-				"actions": []string{
-					"Microsoft.Compute/*",
-					"Microsoft.KeyVault/*",
-					"Microsoft.Network/*",
-					"Microsoft.Resources/*",
-					"Microsoft.Storage/*",
-					"Microsoft.ManagedIdentity/userAssignedIdentities/*",
-				},
+				"actions": azureauth.JujuActions,
 			}},
 			"assignableScopes": []string{
 				"[subscription().id]",
@@ -165,9 +162,9 @@ func (env *azureEnviron) ensureControllerManagedIdentity(
 		Resources: res,
 	}
 
-	logger.Debugf("running deployment to create managed identity role assignment %s", identityName)
+	logger.Debugf(ctx, "running deployment to create managed identity role assignment %s", identityName)
 	if err := env.createSubscriptionDeployment(
-		callCtx,
+		ctx,
 		env.location,
 		identityName, // deployment name
 		params,
@@ -176,12 +173,12 @@ func (env *azureEnviron) ensureControllerManagedIdentity(
 		// First cancel any in-progress deployment.
 		var wg sync.WaitGroup
 		var cancelResult error
-		logger.Debugf("canceling deployment for managed identity")
+		logger.Debugf(ctx, "canceling deployment for managed identity")
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			cancelResult = errors.Annotatef(
-				env.cancelDeployment(callCtx, id),
+				env.cancelDeployment(ctx, id),
 				"canceling deployment %q", id,
 			)
 		}(identityName)
@@ -191,8 +188,8 @@ func (env *azureEnviron) ensureControllerManagedIdentity(
 		}
 
 		// Then cleanup the resource group.
-		if err := env.Destroy(callCtx); err != nil {
-			logger.Errorf("failed to destroy controller: %v", err)
+		if err := env.Destroy(ctx); err != nil {
+			logger.Errorf(ctx, "failed to destroy controller: %v", err)
 		}
 		return nil, errors.Trace(err)
 	}
@@ -257,7 +254,7 @@ func (env *azureEnviron) FinaliseBootstrapCredential(
 	if len(strings.Split(*args.BootstrapConstraints.InstanceRole, "/")) > 3 {
 		return nil, errors.NotValidf("managaed identity %q", *args.BootstrapConstraints.InstanceRole)
 	}
-	newCred := cloud.NewCredential(cloud.InstanceRoleAuthType, map[string]string{
+	newCred := cloud.NewCredential(cloud.ManagedIdentityAuthType, map[string]string{
 		credManagedIdentity:    *args.BootstrapConstraints.InstanceRole,
 		credAttrSubscriptionId: env.subscriptionId,
 	})

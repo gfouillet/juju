@@ -4,27 +4,27 @@
 package storageprovisioner
 
 import (
-	stdcontext "context"
+	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/status"
-	environscontext "github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/wrench"
 	"github.com/juju/juju/rpc/params"
 )
 
 // createVolumes creates volumes with the specified parameters.
-func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error {
+func createVolumes(ctx context.Context, deps *dependencies, ops map[names.VolumeTag]*createVolumeOp) error {
+	deps.config.Logger.Tracef(ctx, "createVolumes: %#v", ops)
 	volumeParams := make([]storage.VolumeParams, 0, len(ops))
 	for _, op := range ops {
 		volumeParams = append(volumeParams, op.args)
 	}
 	paramsBySource, volumeSources, err := volumeParamsBySource(
-		ctx.config.StorageDir, volumeParams, ctx.config.Registry,
+		deps.config.StorageDir, volumeParams, deps.config.Registry,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -34,7 +34,7 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 	var volumeAttachments []storage.VolumeAttachment
 	var statuses []params.EntityStatusArgs
 	for sourceName, volumeParams := range paramsBySource {
-		ctx.config.Logger.Debugf("creating volumes: %v", volumeParams)
+		deps.config.Logger.Debugf(ctx, "creating volumes: %v", volumeParams)
 		volumeSource := volumeSources[sourceName]
 		validVolumeParams, validationErrors := validateVolumeParams(volumeSource, volumeParams)
 		for i, err := range validationErrors {
@@ -46,7 +46,7 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 				Status: status.Error.String(),
 				Info:   err.Error(),
 			})
-			ctx.config.Logger.Debugf(
+			deps.config.Logger.Debugf(ctx,
 				"failed to validate parameters for %s: %v",
 				names.ReadableString(volumeParams[i].Tag), err,
 			)
@@ -55,7 +55,7 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 		if len(volumeParams) == 0 {
 			continue
 		}
-		results, err := volumeSource.CreateVolumes(ctx.config.CloudCallContextFunc(stdcontext.Background()), volumeParams)
+		results, err := volumeSource.CreateVolumes(ctx, volumeParams)
 		if err != nil {
 			return errors.Annotatef(err, "creating volumes from source %q", sourceName)
 		}
@@ -75,7 +75,7 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 				// status to "error" for permanent errors.
 				entityStatus.Status = status.Pending.String()
 				entityStatus.Info = result.Error.Error()
-				ctx.config.Logger.Debugf(
+				deps.config.Logger.Debugf(ctx,
 					"failed to create %s: %v",
 					names.ReadableString(volumeParams[i].Tag),
 					result.Error,
@@ -89,8 +89,8 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 			}
 		}
 	}
-	scheduleOperations(ctx, reschedule...)
-	setStatus(ctx, statuses)
+	scheduleOperations(deps, reschedule...)
+	setStatus(ctx, deps, statuses)
 	if len(volumes) == 0 {
 		return nil
 	}
@@ -98,13 +98,13 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 	// by environment, so that we can "harvest" them if they're
 	// unknown. This will take care of killing volumes that we fail
 	// to record in state.
-	errorResults, err := ctx.config.Volumes.SetVolumeInfo(volumesFromStorage(volumes))
+	errorResults, err := deps.config.Volumes.SetVolumeInfo(ctx, volumesFromStorage(volumes))
 	if err != nil {
 		return errors.Annotate(err, "publishing volumes to state")
 	}
 	for i, result := range errorResults {
 		if result.Error != nil {
-			ctx.config.Logger.Errorf(
+			deps.config.Logger.Errorf(ctx,
 				"publishing volume %s to state: %v",
 				volumes[i].Tag.Id(),
 				result.Error,
@@ -112,14 +112,14 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 		}
 	}
 	for _, v := range volumes {
-		updateVolume(ctx, v)
+		updateVolume(ctx, deps, v)
 	}
 	// Note: the storage provisioner that creates a volume is also
 	// responsible for creating the volume attachment. It is therefore
 	// safe to set the volume attachment info after the volume info,
 	// without leading to the possibility of concurrent, duplicate
 	// attachments.
-	err = setVolumeAttachmentInfo(ctx, volumeAttachments)
+	err = setVolumeAttachmentInfo(ctx, deps, volumeAttachments)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -127,13 +127,14 @@ func createVolumes(ctx *context, ops map[names.VolumeTag]*createVolumeOp) error 
 }
 
 // attachVolumes creates volume attachments with the specified parameters.
-func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp) error {
+func attachVolumes(ctx context.Context, deps *dependencies, ops map[params.MachineStorageId]*attachVolumeOp) error {
+	deps.config.Logger.Tracef(ctx, "attachVolumes: %#v", ops)
 	volumeAttachmentParams := make([]storage.VolumeAttachmentParams, 0, len(ops))
 	for _, op := range ops {
 		volumeAttachmentParams = append(volumeAttachmentParams, op.args)
 	}
 	paramsBySource, volumeSources, err := volumeAttachmentParamsBySource(
-		ctx.config.StorageDir, volumeAttachmentParams, ctx.config.Registry,
+		deps.config.StorageDir, volumeAttachmentParams, deps.config.Registry,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -142,7 +143,7 @@ func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp
 	var volumeAttachments []storage.VolumeAttachment
 	var statuses []params.EntityStatusArgs
 	for sourceName, volumeAttachmentParams := range paramsBySource {
-		ctx.config.Logger.Debugf("attaching volumes: %+v", volumeAttachmentParams)
+		deps.config.Logger.Debugf(ctx, "attaching volumes: %+v", volumeAttachmentParams)
 		volumeSource := volumeSources[sourceName]
 		if volumeSource == nil {
 			// The storage provider does not support dynamic
@@ -150,7 +151,7 @@ func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp
 			// to do here.
 			continue
 		}
-		results, err := volumeSource.AttachVolumes(ctx.config.CloudCallContextFunc(stdcontext.Background()), volumeAttachmentParams)
+		results, err := volumeSource.AttachVolumes(ctx, volumeAttachmentParams)
 		if err != nil {
 			return errors.Annotatef(err, "attaching volumes from source %q", sourceName)
 		}
@@ -176,7 +177,7 @@ func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp
 				// set the status to "error" for permanent errors.
 				entityStatus.Status = status.Attaching.String()
 				entityStatus.Info = result.Error.Error()
-				ctx.config.Logger.Warningf(
+				deps.config.Logger.Warningf(ctx,
 					"failed to attach %s to %s: %v",
 					names.ReadableString(p.Volume),
 					names.ReadableString(p.Machine),
@@ -187,12 +188,12 @@ func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp
 			volumeAttachments = append(volumeAttachments, *result.VolumeAttachment)
 		}
 	}
-	scheduleOperations(ctx, reschedule...)
-	setStatus(ctx, statuses)
-	if err := createVolumeAttachmentPlans(ctx, volumeAttachments); err != nil {
+	scheduleOperations(deps, reschedule...)
+	setStatus(ctx, deps, statuses)
+	if err := createVolumeAttachmentPlans(ctx, deps, volumeAttachments); err != nil {
 		return errors.Trace(err)
 	}
-	if err := setVolumeAttachmentInfo(ctx, volumeAttachments); err != nil {
+	if err := setVolumeAttachmentInfo(ctx, deps, volumeAttachments); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -201,7 +202,8 @@ func attachVolumes(ctx *context, ops map[params.MachineStorageId]*attachVolumeOp
 
 // createVolumeAttachmentPlans creates a volume info plan in state, which notifies the machine
 // agent of the target instance that something has been attached to it.
-func createVolumeAttachmentPlans(ctx *context, volumeAttachments []storage.VolumeAttachment) error {
+func createVolumeAttachmentPlans(ctx context.Context, deps *dependencies, volumeAttachments []storage.VolumeAttachment) error {
+	deps.config.Logger.Tracef(ctx, "createVolumeAttachmentPlans: %#v", volumeAttachments)
 	// NOTE(gsamfira): should we merge this with setVolumeInfo?
 	if len(volumeAttachments) == 0 {
 		return nil
@@ -212,7 +214,7 @@ func createVolumeAttachmentPlans(ctx *context, volumeAttachments []storage.Volum
 		volumeAttachmentPlans[i] = volumeAttachmentPlanFromAttachment(val)
 	}
 
-	errorResults, err := ctx.config.Volumes.CreateVolumeAttachmentPlans(volumeAttachmentPlans)
+	errorResults, err := deps.config.Volumes.CreateVolumeAttachmentPlans(ctx, volumeAttachmentPlans)
 	if err != nil {
 		return errors.Annotatef(err, "creating volume plans")
 	}
@@ -229,8 +231,8 @@ func createVolumeAttachmentPlans(ctx *context, volumeAttachments []storage.Volum
 			MachineTag:    volumeAttachmentPlans[i].MachineTag,
 			AttachmentTag: volumeAttachmentPlans[i].VolumeTag,
 		}
-		ctx.volumeAttachments[id] = volumeAttachments[i]
-		// removePendingVolumeAttachment(ctx, id)
+		deps.volumeAttachments[id] = volumeAttachments[i]
+		// removePendingVolumeAttachment(deps, id)
 	}
 	return nil
 }
@@ -252,12 +254,13 @@ func volumeAttachmentPlanFromAttachment(attachment storage.VolumeAttachment) par
 }
 
 // removeVolumes destroys or releases volumes with the specified parameters.
-func removeVolumes(ctx *context, ops map[names.VolumeTag]*removeVolumeOp) error {
+func removeVolumes(ctx context.Context, deps *dependencies, ops map[names.VolumeTag]*removeVolumeOp) error {
+	deps.config.Logger.Tracef(ctx, "removeVolumes: %#v", ops)
 	tags := make([]names.VolumeTag, 0, len(ops))
 	for tag := range ops {
 		tags = append(tags, tag)
 	}
-	removeVolumeParams, err := removeVolumeParams(ctx, tags)
+	removeVolumeParams, err := removeVolumeParams(ctx, deps, tags)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -271,7 +274,7 @@ func removeVolumes(ctx *context, ops map[names.VolumeTag]*removeVolumeOp) error 
 		}
 	}
 	paramsBySource, volumeSources, err := volumeParamsBySource(
-		ctx.config.StorageDir, volumeParams, ctx.config.Registry,
+		deps.config.StorageDir, volumeParams, deps.config.Registry,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -279,11 +282,11 @@ func removeVolumes(ctx *context, ops map[names.VolumeTag]*removeVolumeOp) error 
 	var remove []names.Tag
 	var reschedule []scheduleOp
 	var statuses []params.EntityStatusArgs
-	removeVolumes := func(tags []names.VolumeTag, ids []string, f func(environscontext.ProviderCallContext, []string) ([]error, error)) error {
+	removeVolumes := func(tags []names.VolumeTag, ids []string, f func(context.Context, []string) ([]error, error)) error {
 		if len(ids) == 0 {
 			return nil
 		}
-		errs, err := f(ctx.config.CloudCallContextFunc(stdcontext.Background()), ids)
+		errs, err := f(ctx, ids)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -307,7 +310,7 @@ func removeVolumes(ctx *context, ops map[names.VolumeTag]*removeVolumeOp) error 
 		return nil
 	}
 	for sourceName, volumeParams := range paramsBySource {
-		ctx.config.Logger.Debugf("removing volumes from %q: %v", sourceName, volumeParams)
+		deps.config.Logger.Debugf(ctx, "removing volumes from %q: %v", sourceName, volumeParams)
 		volumeSource := volumeSources[sourceName]
 		removeTags := make([]names.VolumeTag, len(volumeParams))
 		removeParams := make([]params.RemoveVolumeParams, len(volumeParams))
@@ -323,9 +326,9 @@ func removeVolumes(ctx *context, ops map[names.VolumeTag]*removeVolumeOp) error 
 			return errors.Trace(err)
 		}
 	}
-	scheduleOperations(ctx, reschedule...)
-	setStatus(ctx, statuses)
-	if err := removeEntities(ctx, remove); err != nil {
+	scheduleOperations(deps, reschedule...)
+	setStatus(ctx, deps, statuses)
+	if err := removeEntities(ctx, deps, remove); err != nil {
 		return errors.Annotate(err, "removing volumes from state")
 	}
 	return nil
@@ -343,23 +346,24 @@ func partitionRemoveVolumeParams(removeTags []names.VolumeTag, removeParams []pa
 		tag := removeTags[i]
 		if args.Destroy {
 			destroyTags = append(destroyTags, tag)
-			destroyIds = append(destroyIds, args.VolumeId)
+			destroyIds = append(destroyIds, args.ProviderId)
 		} else {
 			releaseTags = append(releaseTags, tag)
-			releaseIds = append(releaseIds, args.VolumeId)
+			releaseIds = append(releaseIds, args.ProviderId)
 		}
 	}
 	return
 }
 
 // detachVolumes destroys volume attachments with the specified parameters.
-func detachVolumes(ctx *context, ops map[params.MachineStorageId]*detachVolumeOp) error {
+func detachVolumes(ctx context.Context, deps *dependencies, ops map[params.MachineStorageId]*detachVolumeOp) error {
+	deps.config.Logger.Tracef(ctx, "detachVolumes: %#v", ops)
 	volumeAttachmentParams := make([]storage.VolumeAttachmentParams, 0, len(ops))
 	for _, op := range ops {
 		volumeAttachmentParams = append(volumeAttachmentParams, op.args)
 	}
 	paramsBySource, volumeSources, err := volumeAttachmentParamsBySource(
-		ctx.config.StorageDir, volumeAttachmentParams, ctx.config.Registry,
+		deps.config.StorageDir, volumeAttachmentParams, deps.config.Registry,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -368,7 +372,7 @@ func detachVolumes(ctx *context, ops map[params.MachineStorageId]*detachVolumeOp
 	var statuses []params.EntityStatusArgs
 	var remove []params.MachineStorageId
 	for sourceName, volumeAttachmentParams := range paramsBySource {
-		ctx.config.Logger.Debugf("detaching volumes: %+v", volumeAttachmentParams)
+		deps.config.Logger.Debugf(ctx, "detaching volumes: %+v", volumeAttachmentParams)
 		volumeSource := volumeSources[sourceName]
 		if volumeSource == nil {
 			// The storage provider does not support dynamic
@@ -376,7 +380,7 @@ func detachVolumes(ctx *context, ops map[params.MachineStorageId]*detachVolumeOp
 			// to do here.
 			continue
 		}
-		errs, err := volumeSource.DetachVolumes(ctx.config.CloudCallContextFunc(stdcontext.Background()), volumeAttachmentParams)
+		errs, err := volumeSource.DetachVolumes(ctx, volumeAttachmentParams)
 		if err != nil {
 			return errors.Annotatef(err, "detaching volumes from source %q", sourceName)
 		}
@@ -402,7 +406,7 @@ func detachVolumes(ctx *context, ops map[params.MachineStorageId]*detachVolumeOp
 				reschedule = append(reschedule, ops[id])
 				entityStatus.Status = status.Detaching.String()
 				entityStatus.Info = err.Error()
-				ctx.config.Logger.Debugf(
+				deps.config.Logger.Debugf(ctx,
 					"failed to detach %s from %s: %v",
 					names.ReadableString(p.Volume),
 					names.ReadableString(p.Machine),
@@ -413,13 +417,13 @@ func detachVolumes(ctx *context, ops map[params.MachineStorageId]*detachVolumeOp
 			remove = append(remove, id)
 		}
 	}
-	scheduleOperations(ctx, reschedule...)
-	setStatus(ctx, statuses)
-	if err := removeAttachments(ctx, remove); err != nil {
+	scheduleOperations(deps, reschedule...)
+	setStatus(ctx, deps, statuses)
+	if err := removeAttachments(ctx, deps, remove); err != nil {
 		return errors.Annotate(err, "removing attachments from state")
 	}
 	for _, id := range remove {
-		delete(ctx.volumeAttachments, id)
+		delete(deps.volumeAttachments, id)
 	}
 	return nil
 }
@@ -511,7 +515,8 @@ func volumeAttachmentParamsBySource(
 	return paramsBySource, volumeSources, nil
 }
 
-func setVolumeAttachmentInfo(ctx *context, volumeAttachments []storage.VolumeAttachment) error {
+func setVolumeAttachmentInfo(ctx context.Context, deps *dependencies, volumeAttachments []storage.VolumeAttachment) error {
+	deps.config.Logger.Tracef(ctx, "setVolumeAttachmentInfo: %#v", volumeAttachments)
 	if len(volumeAttachments) == 0 {
 		return nil
 	}
@@ -519,7 +524,8 @@ func setVolumeAttachmentInfo(ctx *context, volumeAttachments []storage.VolumeAtt
 	// provider, by environment, so that we can "harvest" them if they're
 	// unknown. This will take care of killing volumes that we fail to
 	// record in state.
-	errorResults, err := ctx.config.Volumes.SetVolumeAttachmentInfo(
+	errorResults, err := deps.config.Volumes.SetVolumeAttachmentInfo(
+		ctx,
 		volumeAttachmentsFromStorage(volumeAttachments),
 	)
 	if err != nil {
@@ -538,8 +544,8 @@ func setVolumeAttachmentInfo(ctx *context, volumeAttachments []storage.VolumeAtt
 			MachineTag:    volumeAttachments[i].Machine.String(),
 			AttachmentTag: volumeAttachments[i].Volume.String(),
 		}
-		ctx.volumeAttachments[id] = volumeAttachments[i]
-		removePendingVolumeAttachment(ctx, id)
+		deps.volumeAttachments[id] = volumeAttachments[i]
+		removePendingVolumeAttachment(ctx, deps, id)
 	}
 	return nil
 }

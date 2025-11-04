@@ -10,11 +10,11 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
 const (
@@ -37,20 +37,20 @@ const (
 	resourceNameLengthMax = 80
 )
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	configAttrLoadBalancerSkuName: {
 		Description: "mirrors the LoadBalancerSkuName type in the Azure SDK",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 		Mandatory:   true,
 	},
 	configAttrResourceGroupName: {
 		Description: "If set, use the specified resource group for all model artefacts instead of creating one based on the model UUID.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 		Immutable:   true,
 	},
 	configAttrNetwork: {
 		Description: "If set, use the specified virtual network for all model machines instead of creating one.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 		Immutable:   true,
 	},
 }
@@ -62,7 +62,7 @@ var configDefaults = schema.Defaults{
 }
 
 // Schema returns the configuration schema for an environment.
-func (azureEnvironProvider) Schema() environschema.Fields {
+func (azureEnvironProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -80,6 +80,12 @@ func (p azureEnvironProvider) ConfigSchema() schema.Fields {
 // provider specific config attributes.
 func (p azureEnvironProvider) ConfigDefaults() schema.Defaults {
 	return configDefaults
+}
+
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (prov *azureEnvironProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
 }
 
 var configFields = func() schema.Fields {
@@ -197,7 +203,7 @@ Please choose a model name of no more than %d characters.`,
 		loadBalancerSkuNameTitle := strings.Title(loadBalancerSkuName)
 		if loadBalancerSkuName != loadBalancerSkuNameTitle {
 			loadBalancerSkuName = loadBalancerSkuNameTitle
-			logger.Infof("using %q for config parameter %s", loadBalancerSkuName, configAttrLoadBalancerSkuName)
+			logger.Infof(ctx, "using %q for config parameter %s", loadBalancerSkuName, configAttrLoadBalancerSkuName)
 		}
 		if !isKnownLoadBalancerSkuName(loadBalancerSkuName) {
 			return nil, errors.Errorf(

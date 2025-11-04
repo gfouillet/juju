@@ -6,20 +6,21 @@ package status_test
 import (
 	"testing"
 
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func Test(t *testing.T) {
-	gc.TestingT(t)
-}
 
 type ImportTest struct{}
 
-var _ = gc.Suite(&ImportTest{})
+func TestImportTest(t *testing.T) {
+	tc.Run(t, &ImportTest{})
+}
 
-func (*ImportTest) TestImports(c *gc.C) {
+func (*ImportTest) TestImports(c *tc.C) {
 	found := coretesting.FindJujuCoreImports(c, "github.com/juju/juju/core/status")
-	c.Assert(found, gc.HasLen, 0)
+	c.Check(found, tc.SameContents, []string{
+		"core/errors",
+		"internal/errors",
+	})
 }

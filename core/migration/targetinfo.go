@@ -4,11 +4,12 @@
 package migration
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/errors"
 )
 
 // TargetInfo holds the details required to connect to a
@@ -19,8 +20,8 @@ import (
 // api.Info to live under the core package is too big a project to be
 // done right now.
 type TargetInfo struct {
-	// ControllerTag holds tag for the target controller.
-	ControllerTag names.ControllerTag
+	// ControllerUUID holds the uuid for the target controller.
+	ControllerUUID string
 
 	// ControllerAlias holds an optional alias for the target controller.
 	ControllerAlias string
@@ -33,41 +34,51 @@ type TargetInfo struct {
 	// the target API server's certificate, in PEM format.
 	CACert string
 
-	// AuthTag holds the user tag to authenticate with to the target
+	// User holds the user name to authenticate with to the target
 	// controller.
-	AuthTag names.UserTag
+	User string
 
-	// Password holds the password to use with AuthTag.
+	// Password holds the password to use with User.
 	Password string
 
-	// Macaroons holds macaroons to use with AuthTag. At least one of
+	// Macaroons holds macaroons to use with User. At least one of
 	// Password or Macaroons must be set.
 	Macaroons []macaroon.Slice
+
+	// Token holds an optional token string to use for authentication
+	// specifically with a JIMM controller.
+	Token string
+
+	// SkipUserChecks indicates whether pre-check validation should
+	// skip checks for the existence of users on the target controller.
+	// This is useful for migrations to a JIMM controller, where
+	// no local users will exist.
+	SkipUserChecks bool
 }
 
 // Validate returns an error if the TargetInfo contains bad data. Nil
 // is returned otherwise.
 func (info *TargetInfo) Validate() error {
-	if !names.IsValidModel(info.ControllerTag.Id()) {
-		return errors.NotValidf("ControllerTag")
+	if !names.IsValidModel(info.ControllerUUID) {
+		return errors.Errorf("ControllerTag %w", coreerrors.NotValid)
 	}
 
 	if len(info.Addrs) < 1 {
-		return errors.NotValidf("empty Addrs")
+		return errors.Errorf("empty Addrs %w", coreerrors.NotValid)
 	}
 	for _, addr := range info.Addrs {
 		_, err := network.ParseMachineHostPort(addr)
 		if err != nil {
-			return errors.NotValidf("%q in Addrs", addr)
+			return errors.Errorf("%q in Addrs %w", addr, coreerrors.NotValid)
 		}
 	}
 
-	if info.AuthTag.Id() == "" && len(info.Macaroons) == 0 {
-		return errors.NotValidf("empty AuthTag")
+	if info.User == "" && len(info.Macaroons) == 0 {
+		return errors.Errorf("empty User %w", coreerrors.NotValid)
 	}
 
-	if info.Password == "" && len(info.Macaroons) == 0 {
-		return errors.NotValidf("missing Password & Macaroons")
+	if info.Password == "" && len(info.Macaroons) == 0 && info.Token == "" {
+		return errors.Errorf("missing Password, Macaroons or Token %w", coreerrors.NotValid)
 	}
 
 	return nil

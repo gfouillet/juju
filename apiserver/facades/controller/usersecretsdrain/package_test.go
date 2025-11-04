@@ -4,20 +4,13 @@
 package usersecretsdrain
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/core/model"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/service_mock.go github.com/juju/juju/apiserver/facades/controller/usersecretsdrain SecretService,SecretBackendService
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
 
 var NewUserSecretsDrainAPI = newUserSecretsDrainAPI
 
@@ -30,7 +23,7 @@ func NewTestAPI(
 		return nil, apiservererrors.ErrPerm
 	}
 	return &SecretsDrainAPI{
-		modelUUID:            coretesting.ModelTag.Id(),
+		modelUUID:            model.UUID(coretesting.ModelTag.Id()),
 		secretService:        secretService,
 		secretBackendService: secretBackendService,
 	}, nil

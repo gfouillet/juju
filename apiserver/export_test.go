@@ -8,37 +8,28 @@ import (
 	"sync"
 
 	"github.com/juju/clock"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
-	jc "github.com/juju/testing/checkers"
-	"github.com/lestrrat-go/jwx/v2/jwt"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
-	authjwt "github.com/juju/juju/apiserver/authentication/jwt"
-	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/apiserver/stateauthenticator"
-	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/permission"
 	coretrace "github.com/juju/juju/core/trace"
-	loggertesting "github.com/juju/juju/internal/logger/testing"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/trace"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 	"github.com/juju/juju/rpc"
-	"github.com/juju/juju/state"
 )
 
 var (
 	MaxClientPingInterval = maxClientPingInterval
-	SetResource           = setResource
 )
 
-func APIHandlerWithEntity(entity state.Entity) *apiHandler {
+func APIHandlerWithEntity(tag names.Tag) *apiHandler {
 	return &apiHandler{
 		authInfo: authentication.AuthInfo{
-			Entity: entity,
+			Tag: tag,
 		},
 	}
 }
@@ -49,20 +40,20 @@ func NewErrRoot(err error) *errRoot {
 
 type testingAPIRootHandler struct{}
 
-func (testingAPIRootHandler) State() *state.State {
+func (testingAPIRootHandler) DomainServices() services.DomainServices {
 	return nil
 }
 
-func (testingAPIRootHandler) ServiceFactory() servicefactory.ServiceFactory {
-	return nil
-}
-
-func (testingAPIRootHandler) ServiceFactoryGetter() servicefactory.ServiceFactoryGetter {
+func (testingAPIRootHandler) DomainServicesGetter() services.DomainServicesGetter {
 	return nil
 }
 
 func (testingAPIRootHandler) Tracer() coretrace.Tracer {
 	return nil
+}
+
+func (testingAPIRootHandler) FlightRecorder() flightrecorder.FlightRecorder {
+	return flightrecorder.NoopRecorder{}
 }
 
 func (testingAPIRootHandler) ObjectStore() objectstore.ObjectStore {
@@ -85,13 +76,16 @@ func (testingAPIRootHandler) Authorizer() facade.Authorizer {
 	return nil
 }
 
-// Deprecated: Resources are deprecated. Use WatcherRegistry instead.
-func (testingAPIRootHandler) Resources() *common.Resources {
-	return common.NewResources()
+func (testingAPIRootHandler) ModelUUID() model.UUID {
+	return ""
+}
+
+func (testingAPIRootHandler) CrossModelAuthContext() facade.CrossModelAuthContext {
+	return nil
 }
 
 // WatcherRegistry returns a new WatcherRegistry.
-func (testingAPIRootHandler) WatcherRegistry() facade.WatcherRegistry {
+func (testingAPIRootHandler) WatcherRegistry() watcherregistry.WatcherRegistry {
 	return nil
 }
 
@@ -110,46 +104,16 @@ func TestingAPIRoot(facades *facade.Registry) rpc.Root {
 	return root
 }
 
-// TestingAPIHandler gives you an APIHandler that isn't connected to
-// anything real. It's enough to let test some basic functionality though.
-func TestingAPIHandler(c *gc.C, pool *state.StatePool, st *state.State, sf servicefactory.ServiceFactory) (*apiHandler, *common.Resources) {
-	agentAuthFactory := authentication.NewAgentAuthenticatorFactory(st, loggertesting.WrapCheckLog(c))
+type StubDomainServicesGetter struct{}
 
-	authenticator, err := stateauthenticator.NewAuthenticator(
-		context.Background(),
-		pool,
-		st,
-		sf.ControllerConfig(),
-		sf.Access(),
-		sf.Macaroon(),
-		agentAuthFactory,
-		clock.WallClock,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	offerAuthCtxt, err := newOfferAuthContext(context.Background(), pool, sf.ControllerConfig(), sf.Macaroon())
-	c.Assert(err, jc.ErrorIsNil)
-
-	srv := &Server{
-		httpAuthenticators:  []authentication.HTTPAuthenticator{authenticator},
-		loginAuthenticators: []authentication.LoginAuthenticator{authenticator},
-		offerAuthCtxt:       offerAuthCtxt,
-		shared: &sharedServerContext{
-			statePool:            pool,
-			serviceFactoryGetter: &StubServiceFactoryGetter{},
-		},
-		tag: names.NewMachineTag("0"),
-	}
-	h, err := newAPIHandler(context.Background(), srv, st, nil, sf, nil, coretrace.NoopTracer{}, nil, nil, nil, st.ModelUUID(), 6543, "testing.invalid:1234")
-	c.Assert(err, jc.ErrorIsNil)
-
-	return h, h.Resources()
+func (s *StubDomainServicesGetter) ServicesForModel(context.Context, model.UUID) (services.DomainServices, error) {
+	return nil, nil
 }
 
-type StubServiceFactoryGetter struct{}
+type StubWatcherRegistryGetter struct{}
 
-func (s *StubServiceFactoryGetter) FactoryForModel(string) servicefactory.ServiceFactory {
-	return nil
+func (s *StubWatcherRegistryGetter) GetWatcherRegistry(context.Context, uint64) (watcherregistry.WatcherRegistry, error) {
+	return nil, nil
 }
 
 type StubTracerGetter struct {
@@ -158,41 +122,6 @@ type StubTracerGetter struct {
 
 type StubObjectStoreGetter struct {
 	objectstore.ObjectStoreGetter
-}
-
-// TestingAPIHandlerWithEntity gives you the sane kind of APIHandler as
-// TestingAPIHandler but sets the passed entity as the apiHandler
-// entity.
-func TestingAPIHandlerWithEntity(
-	c *gc.C,
-	pool *state.StatePool,
-	st *state.State,
-	sf servicefactory.ServiceFactory,
-	entity state.Entity,
-) (*apiHandler, *common.Resources) {
-	h, hr := TestingAPIHandler(c, pool, st, sf)
-	h.authInfo.Entity = entity
-	h.authInfo.Delegator = &stateauthenticator.PermissionDelegator{AccessService: sf.Access()}
-	return h, hr
-}
-
-// TestingAPIHandlerWithToken gives you the sane kind of APIHandler as
-// TestingAPIHandler but sets the passed token as the apiHandler
-// login token.
-func TestingAPIHandlerWithToken(
-	c *gc.C,
-	pool *state.StatePool,
-	st *state.State,
-	sf servicefactory.ServiceFactory,
-	jwt jwt.Token,
-	delegator authentication.PermissionDelegator,
-) (*apiHandler, *common.Resources) {
-	h, hr := TestingAPIHandler(c, pool, st, sf)
-	user, err := names.ParseUserTag(jwt.Subject())
-	c.Assert(err, jc.ErrorIsNil)
-	h.authInfo.Entity = authjwt.TokenEntity{User: user}
-	h.authInfo.Delegator = delegator
-	return h, hr
 }
 
 // TestingUpgradingRoot returns a resricted srvRoot in an upgrade
@@ -243,25 +172,6 @@ func TestingRestrictedRoot(check func(string, string) error) rpc.Root {
 	return restrictRoot(r, check)
 }
 
-// PatchGetMigrationBackend overrides the getMigrationBackend function
-// to support testing.
-func PatchGetMigrationBackend(p Patcher, ctrlSt controllerBackend, st migrationBackend) {
-	p.PatchValue(&getMigrationBackend, func(*state.State) migrationBackend {
-		return st
-	})
-	p.PatchValue(&getControllerBackend, func(pool *state.StatePool) (controllerBackend, error) {
-		return ctrlSt, nil
-	})
-}
-
-// PatchGetControllerCACert overrides the getControllerCACert function
-// to support testing.
-func PatchGetControllerCACert(p Patcher, cert string) {
-	p.PatchValue(&getControllerCACert, func(controller.Config) (string, error) {
-		return cert, nil
-	})
-}
-
 // ServerWaitGroup exposes the underlying wait group used to track running API calls
 // to allow tests to hold a server open.
 func ServerWaitGroup(server *Server) *sync.WaitGroup {
@@ -273,33 +183,8 @@ func SetAllowModelAccess(server *Server, allow bool) {
 	server.allowModelAccess = allow
 }
 
-// DataDir exposes the server data dir.
-func DataDir(server *Server) string {
-	return server.dataDir
-}
-
-// CentralHub exposes the server central hub.
-func CentralHub(server *Server) *pubsub.StructuredHub {
-	return server.shared.centralHub.(*pubsub.StructuredHub)
-}
-
 // Patcher defines an interface that matches the PatchValue method on
 // CleanupSuite
 type Patcher interface {
 	PatchValue(ptr, value interface{})
-}
-
-func AssertHasPermission(c *gc.C, handler *apiHandler, access permission.Access, tag names.Tag, expect bool) {
-	err := handler.HasPermission(access, tag)
-	c.Assert(err == nil, gc.Equals, expect)
-	if expect {
-		c.Assert(err, jc.ErrorIsNil)
-	}
-}
-
-// TODO (stickupkid): This purely used for testing and should be removed.
-func (c *sharedServerContext) featureEnabled(flag string) bool {
-	c.configMutex.RLock()
-	defer c.configMutex.RUnlock()
-	return c.features.Contains(flag)
 }

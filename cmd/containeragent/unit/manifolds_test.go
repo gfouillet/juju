@@ -4,135 +4,122 @@
 package unit_test
 
 import (
+	stdtesting "testing"
+
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/agent/agenttest"
 	"github.com/juju/juju/cmd/containeragent/unit"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type ManifoldsSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&ManifoldsSuite{})
+func TestManifoldsSuite(t *stdtesting.T) {
+	tc.Run(t, &ManifoldsSuite{})
+}
 
-func (s *ManifoldsSuite) TestStartFuncs(c *gc.C) {
+func (s *ManifoldsSuite) TestStartFuncs(c *tc.C) {
 	manifolds := unit.Manifolds(unit.ManifoldsConfig{
 		Agent: fakeAgent{},
 	})
 
 	for name, manifold := range manifolds {
 		c.Logf("checking %q manifold", name)
-		c.Check(manifold.Start, gc.NotNil)
+		c.Check(manifold.Start, tc.NotNil)
 	}
 }
 
-func (s *ManifoldsSuite) TestManifoldNames(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldNames(c *tc.C) {
 	config := unit.ManifoldsConfig{}
 	manifolds := unit.Manifolds(config)
 	expectedKeys := []string{
 		"agent",
-		"api-config-watcher",
+		"api-address-updater",
 		"api-caller",
-		"s3-caller",
-		"uniter",
-		"log-sender",
-
+		"api-config-watcher",
+		"caas-prober",
+		"caas-unit-termination-worker",
+		"caas-unit-prober-binder",
+		"caas-zombie-prober-binder",
 		"charm-dir",
-		"leadership-tracker",
+		"dead-flag",
 		"hook-retry-strategy",
-
+		"leadership-tracker",
+		"log-sender",
+		"logging-config-updater",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"migration-minion",
-
-		"proxy-config-updater",
-		"logging-config-updater",
-		"api-address-updater",
-
-		"caas-prober",
-		"probe-http-server",
-
-		"upgrader",
-		"upgrade-steps-runner",
-		"upgrade-steps-gate",
-		"upgrade-steps-flag",
-
-		"caas-unit-termination-worker",
-		"caas-units-manager",
-		"secret-drain-worker",
-
-		"caas-zombie-prober",
-
-		"dead-flag",
 		"not-dead-flag",
-
+		"probe-http-server",
+		"proxy-config-updater",
+		"s3-caller",
+		"secret-drain-worker",
 		"signal-handler",
 
 		"trace",
+		"uniter",
+		"upgrade-steps-flag",
+		"upgrade-steps-gate",
+		"upgrade-steps-runner",
+		"upgrader",
 	}
 	keys := make([]string, 0, len(manifolds))
 	for k := range manifolds {
 		keys = append(keys, k)
 	}
-	c.Assert(keys, jc.SameContents, expectedKeys)
+	c.Assert(keys, tc.SameContents, expectedKeys)
 }
 
-func (s *ManifoldsSuite) TestManifoldNamesColocatedController(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldNamesColocatedController(c *tc.C) {
 	config := unit.ManifoldsConfig{
 		ColocatedWithController: true,
 	}
 	manifolds := unit.Manifolds(config)
 	expectedKeys := []string{
 		"agent",
-		"api-config-watcher",
 		"api-caller",
-		"s3-caller",
+		"api-config-watcher",
 		"caas-prober",
-		"probe-http-server",
-		"uniter",
-		"log-sender",
-
+		"caas-unit-prober-binder",
+		"caas-unit-termination-worker",
+		"caas-zombie-prober-binder",
 		"charm-dir",
-		"leadership-tracker",
+		"dead-flag",
 		"hook-retry-strategy",
-
+		"leadership-tracker",
+		"log-sender",
+		"logging-config-updater",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"migration-minion",
-
-		"proxy-config-updater",
-		"logging-config-updater",
-
-		"upgrader",
-		"upgrade-steps-runner",
-		"upgrade-steps-gate",
-		"upgrade-steps-flag",
-
-		"caas-unit-termination-worker",
-		"caas-units-manager",
-		"secret-drain-worker",
-		"caas-zombie-prober",
-
-		"dead-flag",
 		"not-dead-flag",
-
+		"probe-http-server",
+		"proxy-config-updater",
+		"s3-caller",
+		"secret-drain-worker",
 		"signal-handler",
 
 		"trace",
+		"uniter",
+		"upgrade-steps-flag",
+		"upgrade-steps-gate",
+		"upgrade-steps-runner",
+		"upgrader",
 	}
 	keys := make([]string, 0, len(manifolds))
 	for k := range manifolds {
 		keys = append(keys, k)
 	}
-	c.Assert(keys, jc.SameContents, expectedKeys)
+	c.Assert(keys, tc.SameContents, expectedKeys)
 }
 
-func (*ManifoldsSuite) TestMigrationGuards(c *gc.C) {
+func (*ManifoldsSuite) TestMigrationGuards(c *tc.C) {
 	exempt := set.NewStrings(
 		"agent",
 		"api-config-watcher",
@@ -140,6 +127,7 @@ func (*ManifoldsSuite) TestMigrationGuards(c *gc.C) {
 		"s3-caller",
 		"caas-prober",
 		"probe-http-server",
+		"caas-unit-prober-binder",
 		"log-sender",
 
 		"migration-fortress",
@@ -151,12 +139,12 @@ func (*ManifoldsSuite) TestMigrationGuards(c *gc.C) {
 		"upgrade-steps-gate",
 
 		"upgrade-steps-flag",
-		"caas-units-manager",
 
 		"dead-flag",
 		"not-dead-flag",
 		"signal-handler",
 		"caas-zombie-prober",
+		"caas-zombie-prober-binder",
 
 		"trace",
 	)
@@ -171,7 +159,7 @@ func (*ManifoldsSuite) TestMigrationGuards(c *gc.C) {
 	}
 }
 
-func (s *ManifoldsSuite) TestManifoldsDependencies(c *gc.C) {
+func (s *ManifoldsSuite) TestManifoldsDependencies(c *tc.C) {
 	agenttest.AssertManifoldsDependencies(c,
 		unit.Manifolds(unit.ManifoldsConfig{
 			Agent: fakeAgent{},
@@ -180,7 +168,7 @@ func (s *ManifoldsSuite) TestManifoldsDependencies(c *gc.C) {
 	)
 }
 
-func checkContains(c *gc.C, names []string, seek string) {
+func checkContains(c *tc.C, names []string, seek string) {
 	for _, name := range names {
 		if name == seek {
 			return
@@ -289,19 +277,7 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 	},
 	"probe-http-server": {},
 	"caas-prober": {
-		"agent",
-		"api-caller",
-		"api-config-watcher",
-		"charm-dir",
-		"hook-retry-strategy",
-		"leadership-tracker",
-		"migration-fortress",
-		"migration-inactive-flag",
 		"probe-http-server",
-		"s3-caller",
-		"uniter",
-		"not-dead-flag",
-		"trace",
 	},
 	"upgrade-steps-flag": {
 		"upgrade-steps-gate",
@@ -336,16 +312,27 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 		"not-dead-flag",
 		"trace",
 	},
-	"caas-units-manager": {
+	"caas-unit-prober-binder": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"caas-prober",
+		"charm-dir",
+		"hook-retry-strategy",
+		"leadership-tracker",
+		"migration-fortress",
+		"migration-inactive-flag",
 		"not-dead-flag",
+		"probe-http-server",
+		"s3-caller",
+		"trace",
+		"uniter",
 	},
-	"caas-zombie-prober": {
+	"caas-zombie-prober-binder": {
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"caas-prober",
 		"dead-flag",
 		"probe-http-server",
 	},
@@ -371,6 +358,7 @@ var expectedUnitManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"leadership-tracker",
 		"migration-fortress",
 		"migration-inactive-flag",
 	},

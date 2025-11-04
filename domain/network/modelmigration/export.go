@@ -6,14 +6,14 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/description/v10"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/domain/network/service"
 	"github.com/juju/juju/domain/network/state"
+	"github.com/juju/juju/internal/errors"
 )
 
 // RegisterExport registers the export operations with the given coordinator.
@@ -57,7 +57,7 @@ func (e *exportOperation) Setup(scope modelmigration.Scope) error {
 func (e *exportOperation) Execute(ctx context.Context, model description.Model) error {
 	spaces, err := e.exportService.GetAllSpaces(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	for _, space := range spaces {
 		// We do not export the alpha space because it is created by default
@@ -68,8 +68,8 @@ func (e *exportOperation) Execute(ctx context.Context, model description.Model) 
 		}
 
 		model.AddSpace(description.SpaceArgs{
-			UUID:       space.ID,
-			Name:       string(space.Name),
+			UUID:       space.ID.String(),
+			Name:       space.Name.String(),
 			ProviderID: string(space.ProviderId),
 		})
 	}
@@ -77,7 +77,7 @@ func (e *exportOperation) Execute(ctx context.Context, model description.Model) 
 	// Export subnets.
 	subnets, err := e.exportService.GetAllSubnets(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	for _, subnet := range subnets {
 		args := description.SubnetArgs{
@@ -87,8 +87,8 @@ func (e *exportOperation) Execute(ctx context.Context, model description.Model) 
 			ProviderSpaceId:   string(subnet.ProviderSpaceId),
 			ProviderNetworkId: string(subnet.ProviderNetworkId),
 			VLANTag:           subnet.VLANTag,
-			SpaceID:           subnet.SpaceID,
-			SpaceName:         subnet.SpaceName,
+			SpaceID:           subnet.SpaceID.String(),
+			SpaceName:         subnet.SpaceName.String(),
 			AvailabilityZones: subnet.AvailabilityZones,
 		}
 		model.AddSubnet(args)

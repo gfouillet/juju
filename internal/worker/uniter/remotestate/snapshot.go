@@ -4,10 +4,9 @@
 package remotestate
 
 import (
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/rpc/params"
 )
@@ -66,10 +65,6 @@ type Snapshot struct {
 	// elected leader.
 	Leader bool
 
-	// LeaderSettingsVersion is the last published
-	// version of the leader settings for the application.
-	LeaderSettingsVersion int
-
 	// UpdateStatusVersion increments each time an
 	// update-status hook is supposed to run.
 	UpdateStatusVersion int
@@ -81,10 +76,6 @@ type Snapshot struct {
 	// ActionChanged contains a monotonically incrementing
 	// integer to signify changes in the Action's remote state.
 	ActionChanged map[string]int
-
-	// ActionsBlocked is true on CAAS when actions cannot be run due to
-	// pod initialization.
-	ActionsBlocked bool
 
 	// Commands is the list of IDs of commands to be
 	// executed by this unit.
@@ -105,21 +96,10 @@ type Snapshot struct {
 	// revisions for secrets owned by this unit.
 	ObsoleteSecretRevisions map[string][]int
 
-	// DeletedSecrets is a list of deleted secret
-	// URIs owned by this unit.
-	DeletedSecrets []string
-
-	// UpgradeMachineStatus is the preparation status of
-	// any currently running machine upgrade.
-	UpgradeMachineStatus model.UpgradeSeriesStatus
-
-	// UpgradeMachineTarget is the OS base that an in-flight
-	// machine upgrade is transitioning to.
-	UpgradeMachineTarget string
-
-	// ContainerRunningStatus is set on CAAS models
-	// for remote init/upgrade of charm.
-	ContainerRunningStatus *ContainerRunningStatus
+	// DeletedSecretRevisions is a list of the deleted
+	// revisions for secrets owned by this unit.
+	// If empty, the entire secret has been deleted.
+	DeletedSecretRevisions map[string][]int
 
 	// LXDProfileName is the name of the lxd profile applied to the unit's
 	// machine for the current charm version.

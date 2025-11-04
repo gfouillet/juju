@@ -5,23 +5,26 @@ package firewaller
 
 import (
 	"context"
-	stdcontext "context"
 	"io"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/controller/firewaller"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/domain/application"
+	domainrelation "github.com/juju/juju/domain/relation"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/models"
 	"github.com/juju/juju/rpc/params"
@@ -29,28 +32,32 @@ import (
 
 // FirewallerAPI exposes functionality off the firewaller API facade to a worker.
 type FirewallerAPI interface {
-	WatchModelMachines() (watcher.StringsWatcher, error)
-	WatchOpenedPorts() (watcher.StringsWatcher, error)
-	WatchModelFirewallRules() (watcher.NotifyWatcher, error)
-	ModelFirewallRules() (firewall.IngressRules, error)
-	ModelConfig(stdcontext.Context) (*config.Config, error)
-	Machine(ctx stdcontext.Context, tag names.MachineTag) (Machine, error)
-	Unit(ctx stdcontext.Context, tag names.UnitTag) (Unit, error)
-	Relation(ctx stdcontext.Context, tag names.RelationTag) (*firewaller.Relation, error)
-	WatchEgressAddressesForRelation(tag names.RelationTag) (watcher.StringsWatcher, error)
-	WatchIngressAddressesForRelation(tag names.RelationTag) (watcher.StringsWatcher, error)
-	ControllerAPIInfoForModel(modelUUID string) (*api.Info, error)
-	MacaroonForRelation(relationKey string) (*macaroon.Macaroon, error)
-	SetRelationStatus(relationKey string, status relation.Status, message string) error
-	AllSpaceInfos() (network.SpaceInfos, error)
-	WatchSubnets() (watcher.StringsWatcher, error)
+	WatchModelMachines(context.Context) (watcher.StringsWatcher, error)
+	WatchModelFirewallRules(context.Context) (watcher.NotifyWatcher, error)
+	ModelFirewallRules(context.Context) (firewall.IngressRules, error)
+	ModelConfig(context.Context) (*config.Config, error)
+	Machine(ctx context.Context, tag names.MachineTag) (Machine, error)
+	Unit(ctx context.Context, tag names.UnitTag) (Unit, error)
+	Relation(ctx context.Context, tag names.RelationTag) (*firewaller.Relation, error)
+	ControllerAPIInfoForModel(ctx context.Context, modelUUID string) (*api.Info, error)
+	SetRelationStatus(ctx context.Context, relationKey string, status relation.Status, message string) error
+	AllSpaceInfos(ctx context.Context) (network.SpaceInfos, error)
+	WatchSubnets(ctx context.Context) (watcher.StringsWatcher, error)
 }
 
 // CrossModelFirewallerFacade exposes firewaller functionality on the
 // remote offering model to a worker.
 type CrossModelFirewallerFacade interface {
-	PublishIngressNetworkChange(stdcontext.Context, params.IngressNetworksChangeEvent) error
-	WatchEgressAddressesForRelation(ctx stdcontext.Context, details params.RemoteEntityArg) (watcher.StringsWatcher, error)
+	// PublishIngressNetworkChange publishes changes to the required
+	// ingress addresses to the model hosting the offer in the relation.
+	PublishIngressNetworkChange(context.Context, params.IngressNetworksChangeEvent) error
+
+	// WatchEgressAddressesForRelation creates a watcher that notifies when
+	// addresses, from which connections will originate for the relation,
+	// change.
+	// Each event contains the entire set of addresses which are required for
+	// ingress for the relation.
+	WatchEgressAddressesForRelation(ctx context.Context, details params.RemoteEntityArg) (watcher.StringsWatcher, error)
 }
 
 // CrossModelFirewallerFacadeCloser implements CrossModelFirewallerFacade
@@ -60,12 +67,127 @@ type CrossModelFirewallerFacadeCloser interface {
 	CrossModelFirewallerFacade
 }
 
-// RemoteRelationsAPI provides the remote relations facade.
-type RemoteRelationsAPI interface {
-	GetToken(names.Tag) (string, error)
-	Relations(keys []string) ([]params.RemoteRelationResult, error)
-	RemoteApplications(names []string) ([]params.RemoteApplicationResult, error)
-	WatchRemoteRelations() (watcher.StringsWatcher, error)
+// CrossModelRelationService provides access to cross-model relations.
+type CrossModelRelationService interface {
+	// GetOffererModelUUID returns the offering model UUID, based on a given
+	// application.
+	GetOffererModelUUID(ctx context.Context, appName string) (coremodel.UUID, error)
+
+	// GetMacaroonForRelation gets the macaroon for the specified remote relation,
+	// returning an error satisfying [crossmodelrelationerrors.MacaroonNotFound]
+	// if the macaroon is not found.
+	GetMacaroonForRelation(ctx context.Context, relationUUID relation.UUID) (*macaroon.Macaroon, error)
+
+	// GetRelationNetworkIngress retrieves all ingress network CIDRs for the
+	// specified relation.
+	GetRelationNetworkIngress(ctx context.Context, relationUUID relation.UUID) ([]string, error)
+
+	// IsApplicationSynthetic checks if the given application exists in the model
+	// and is a synthetic application.
+	IsApplicationSynthetic(ctx context.Context, appName string) (bool, error)
+
+	// WatchConsumerRelations watches the changes to (remote) relations on the
+	// consuming model and notifies the worker of any changes.
+	WatchConsumerRelations(ctx context.Context) (watcher.StringsWatcher, error)
+
+	// WatchOffererRelations watches the changes to (remote) relations on the
+	// offering model and notifies the worker of any changes.
+	WatchOffererRelations(ctx context.Context) (watcher.StringsWatcher, error)
+
+	// WatchRelationEgressNetworks watches for changes to the egress networks
+	// for the specified relation UUID. It watches changes on the relation-specific
+	// egress networks, model config (egress-subnets), and unit addresses.
+	//
+	// The priority order for egress CIDRs is:
+	// 1. Relation-specific egress CIDRs (from relation_network_egress table)
+	// 2. Model config egress-subnets
+	// 3. Unit addresses (converted to CIDRs)
+	//
+	// Note: CIDRs are only returned if there are units in the relation.
+	WatchRelationEgressNetworks(ctx context.Context, relationUUID relation.UUID) (watcher.StringsWatcher, error)
+
+	// WatchRelationIngressNetworks watches for changes to the ingress networks
+	// for the specified relation UUID. It returns a NotifyWatcher that emits
+	// events when there are insertions or deletions in the relation_network_ingress
+	// table.
+	WatchRelationIngressNetworks(ctx context.Context, relationUUID relation.UUID) (watcher.NotifyWatcher, error)
+}
+
+// RelationService provides access to relations.
+type RelationService interface {
+	// GetRelationUUIDByKey returns a relation UUID for the given Key.
+	GetRelationUUIDByKey(ctx context.Context, relationKey relation.Key) (relation.UUID, error)
+
+	// GetRelationDetails returns RelationDetails for the given relation UUID.
+	GetRelationDetails(ctx context.Context, relationUUID relation.UUID) (domainrelation.RelationDetails, error)
+
+	// SetRelationErrorStatus sets the relation status to Error. This method only
+	// allows updating to error the status of cross-model relations.
+	SetRelationErrorStatus(ctx context.Context, relationUUID relation.UUID, message string) error
+}
+
+// PortService provides methods to query opened ports for machines
+type PortService interface {
+	// WatchMachineOpenedPorts returns a strings watcher for opened ports. This watcher
+	// emits events for changes to the opened ports table. Each emitted event
+	// contains the machine name which is associated with the changed port range.
+	WatchMachineOpenedPorts(ctx context.Context) (watcher.StringsWatcher, error)
+
+	// GetMachineOpenedPorts returns the opened ports for all endpoints, for all the
+	// units on the machine. Opened ports are grouped first by unit name and then by
+	// endpoint.
+	GetMachineOpenedPorts(ctx context.Context, machineUUID string) (map[unit.Name]network.GroupedPortRanges, error)
+}
+
+// MachineService provides methods to query machines.
+type MachineService interface {
+	// GetMachineUUID returns the UUID of a machine identified by its name.
+	// It returns a MachineNotFound if the machine does not exist.
+	GetMachineUUID(ctx context.Context, name machine.Name) (machine.UUID, error)
+}
+
+// ApplicationService provides methods to query applications.
+type ApplicationService interface {
+	// WatchApplicationExposed watches for changes to the specified application's
+	// exposed endpoints.
+	// This notifies on any changes to the application's exposed endpoints. It is up
+	// to the caller to determine if the exposed endpoints they're interested in has
+	// changed.
+	//
+	// If the application does not exist an error satisfying
+	// [applicationerrors.NotFound] will be returned.
+	WatchApplicationExposed(ctx context.Context, name string) (watcher.NotifyWatcher, error)
+
+	// WatchUnitAddRemoveOnMachine returns a watcher that observes changes to the
+	// units on a specified machine, emitting the names of the units. That is, we
+	// emit unit names only when a unit is create or deleted on the specified machine.
+	// The following errors may be returned:
+	// - [applicationerrors.MachineNotFound] if the machine does not exist
+	WatchUnitAddRemoveOnMachine(context.Context, machine.Name) (watcher.StringsWatcher, error)
+
+	// IsApplicationExposed returns whether the provided application is exposed or not.
+	//
+	// If no application is found, an error satisfying
+	// [applicationerrors.ApplicationNotFound] is returned.
+	IsApplicationExposed(ctx context.Context, appName string) (bool, error)
+
+	// GetExposedEndpoints returns map where keys are endpoint names (or the ""
+	// value which represents all endpoints) and values are ExposedEndpoint
+	// instances that specify which sources (spaces or CIDRs) can access the
+	// opened ports for each endpoint once the application is exposed.
+	//
+	// If no application is found, an error satisfying
+	// [applicationerrors.ApplicationNotFound] is returned.
+	GetExposedEndpoints(ctx context.Context, appName string) (map[string]application.ExposedEndpoint, error)
+
+	// GetUnitMachineName gets the name of the unit's machine.
+	//
+	// The following errors may be returned:
+	//   - [applicationerrors.UnitMachineNotAssigned] if the unit does not have a
+	//     machine assigned.
+	//   - [applicationerrors.UnitNotFound] if the unit cannot be found.
+	//   - [applicationerrors.UnitIsDead] if the unit is dead.
+	GetUnitMachineName(context.Context, unit.Name) (machine.Name, error)
 }
 
 // EnvironFirewaller defines methods to allow the worker to perform
@@ -83,7 +205,7 @@ type EnvironModelFirewaller interface {
 // EnvironInstances defines methods to allow the worker to perform
 // operations on instances in a Juju cloud environment.
 type EnvironInstances interface {
-	Instances(ctx envcontext.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error)
+	Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error)
 }
 
 // EnvironInstance represents an instance with firewall apis.
@@ -95,27 +217,21 @@ type EnvironInstance interface {
 // Machine represents a model machine.
 type Machine interface {
 	Tag() names.MachineTag
-	WatchUnits() (watcher.StringsWatcher, error)
-	InstanceId() (instance.Id, error)
+	InstanceId(context.Context) (instance.Id, error)
 	Life() life.Value
-	IsManual() (bool, error)
-	OpenedMachinePortRanges() (byUnitAndCIDR map[names.UnitTag]network.GroupedPortRanges, byUnitAndEndpoint map[names.UnitTag]network.GroupedPortRanges, err error)
+	IsManual(context.Context) (bool, error)
 }
 
 // Unit represents a model unit.
 type Unit interface {
 	Name() string
-	Tag() names.UnitTag
 	Life() life.Value
-	Refresh(ctx stdcontext.Context) error
+	Refresh(ctx context.Context) error
 	Application() (Application, error)
-	AssignedMachine() (names.MachineTag, error)
 }
 
 // Application represents a model application.
 type Application interface {
 	Name() string
 	Tag() names.ApplicationTag
-	Watch(context.Context) (watcher.NotifyWatcher, error)
-	ExposeInfo() (bool, map[string]params.ExposedEndpoint, error)
 }

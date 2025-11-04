@@ -5,32 +5,27 @@ package secretsmanager
 
 import (
 	"context"
-	"testing"
 
 	"github.com/juju/clock"
-	"github.com/juju/names/v5"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/leadership"
-	coresecrets "github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/core/secrets"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secrets.go -source service.go
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/crossmodel.go github.com/juju/juju/apiserver/facades/agent/secretsmanager CrossModelSecretsClient
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secretsriggerwatcher.go github.com/juju/juju/core/watcher SecretTriggerWatcher
-//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/crossmodel.go github.com/juju/juju/apiserver/facades/agent/secretsmanager CrossModelState,CrossModelSecretsClient
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secretswatcher.go github.com/juju/juju/core/watcher StringsWatcher
 //go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/leadershipchecker.go github.com/juju/juju/core/leadership Checker,Token
 
 func NewTestAPI(
-	c *gc.C,
+	c *tc.C,
 	authorizer facade.Authorizer,
 	watcherRegistry facade.WatcherRegistry,
 	leadership leadership.Checker,
@@ -38,8 +33,9 @@ func NewTestAPI(
 	consumer SecretsConsumer,
 	secretTriggers SecretTriggers,
 	secretBackendService SecretBackendService,
-	remoteClientGetter func(ctx context.Context, uri *coresecrets.URI) (CrossModelSecretsClient, error),
-	crossModelState CrossModelState,
+	applicationService ApplicationService,
+	crossModelRelationService CrossModelRelationService,
+	remoteClient CrossModelSecretsClient,
 	authTag names.Tag,
 	clock clock.Clock,
 ) (*SecretsManagerAPI, error) {
@@ -48,19 +44,22 @@ func NewTestAPI(
 	}
 
 	return &SecretsManagerAPI{
-		authTag:              authTag,
-		watcherRegistry:      watcherRegistry,
-		authorizer:           authorizer,
-		leadershipChecker:    leadership,
-		secretBackendService: secretBackendService,
-		secretService:        secretService,
-		secretsConsumer:      consumer,
-		secretsTriggers:      secretTriggers,
-		remoteClientGetter:   remoteClientGetter,
-		crossModelState:      crossModelState,
-		clock:                clock,
-		controllerUUID:       coretesting.ControllerTag.Id(),
-		modelUUID:            coretesting.ModelTag.Id(),
-		logger:               loggertesting.WrapCheckLog(c),
+		authTag:                   authTag,
+		watcherRegistry:           watcherRegistry,
+		authorizer:                authorizer,
+		leadershipChecker:         leadership,
+		secretBackendService:      secretBackendService,
+		secretService:             secretService,
+		secretsConsumer:           consumer,
+		secretsTriggers:           secretTriggers,
+		applicationService:        applicationService,
+		crossModelRelationService: crossModelRelationService,
+		remoteClientGetter: func(ctx context.Context, uri *secrets.URI) (CrossModelSecretsClient, error) {
+			return remoteClient, nil
+		},
+		clock:          clock,
+		controllerUUID: coretesting.ControllerTag.Id(),
+		modelUUID:      coretesting.ModelTag.Id(),
+		logger:         loggertesting.WrapCheckLog(c),
 	}, nil
 }

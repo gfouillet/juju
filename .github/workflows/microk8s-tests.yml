@@ -5,7 +5,7 @@ name: Test Kubeflow
 on: workflow_dispatch
 
 env:
-  DOCKER_USERNAME: docker.io/jujuqabot
+  OCI_REGISTRY_USERNAME: docker.io/jujuqabot
   JUJU_BUILD_NUMBER: 888
 
 permissions:
@@ -23,10 +23,10 @@ jobs:
 
     steps:
     - name: Checking out repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.mod'
         cache: true
@@ -44,7 +44,7 @@ jobs:
         sudo systemctl restart docker
         docker system info
 
-    - uses: balchua/microk8s-actions@e99a1ffcd3bb2682d941104cf6c1a215c657903f
+    - uses: balchua/microk8s-actions@13f73436011eb4925c22526f64fb3ecdd81289a9
       with:
         channel: '${{ matrix.microk8s }}'
         # enable now to give microk8s more time to settle down.
@@ -66,7 +66,7 @@ jobs:
       run: |
         sg microk8s <<EOF
           set -eux
-          JUJU_BUILD_NUMBER=$JUJU_BUILD_NUMBER DOCKER_USERNAME=$DOCKER_USERNAME make microk8s-operator-update
+          JUJU_BUILD_NUMBER=$JUJU_BUILD_NUMBER OCI_REGISTRY_USERNAME=$OCI_REGISTRY_USERNAME make microk8s-operator-update
           microk8s.ctr images list | grep juju
           juju version --all
 
@@ -81,7 +81,7 @@ jobs:
           set -eux
 
           microk8s kubectl wait --for=condition=available -nkube-system deployment/coredns deployment/hostpath-provisioner --timeout=10m
-          juju bootstrap microk8s --debug uk8s --config=caas-image-repo=$DOCKER_USERNAME --config test-mode=true --model-default test-mode=true
+          juju bootstrap microk8s --debug uk8s --config=caas-image-repo=$OCI_REGISTRY_USERNAME --config test-mode=true --model-default test-mode=true
 
           juju add-model kubeflow microk8s --config logging-config="<root>=DEBUG;unit=DEBUG"
           juju deploy kubeflow-lite --trust --revision 60
@@ -130,7 +130,7 @@ jobs:
       if: ${{ failure() }}
 
     - name: Upload debug log
-      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v2
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v2
       with:
         name: juju-debug-actions
         path: juju-debug.log
@@ -158,7 +158,7 @@ jobs:
       if: ${{ failure() }}
 
     - name: Upload inspect tarball
-      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v2
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v2
       with:
         name: inspection-report-actions
         path: ./inspection-report-${{ strategy.job-index }}.tar.gz
@@ -174,7 +174,7 @@ jobs:
       if: ${{ failure() }}
 
     - name: Upload kubectl describe
-      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v2
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v2
       with:
         name: kubectl-describe-actions
         path: describe/*.describe
@@ -192,7 +192,7 @@ jobs:
       if: ${{ failure() }}
 
     - name: Upload kubeflow pod logs
-      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v2
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v2
       with:
         name: kubectl-stdout-actions
         path: stdout/*.log

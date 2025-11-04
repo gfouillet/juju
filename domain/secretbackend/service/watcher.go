@@ -6,12 +6,12 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/errors"
 )
 
 type secretBackendRotateWatcher struct {
@@ -35,20 +35,23 @@ func newSecretBackendRotateWatcher(
 		out:            make(chan []watcher.SecretBackendRotateChange),
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "secret-backend-rotate-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{sourceWatcher},
 	})
-	return w, errors.Trace(err)
+	return w, errors.Capture(err)
 }
 
 func (w *secretBackendRotateWatcher) scopedContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	return w.catacomb.Context(ctx), cancel
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }
 
 func (w *secretBackendRotateWatcher) loop() (err error) {
 	defer close(w.out)
+
+	ctx, cancel := w.scopedContext()
+	defer cancel()
 
 	// To allow the initial event to be sent.
 	out := w.out
@@ -61,14 +64,12 @@ func (w *secretBackendRotateWatcher) loop() (err error) {
 			if !ok {
 				return errors.Errorf("event watcher closed")
 			}
-			w.logger.Debugf("received secret backend rotation changes: %v", backendIDs)
+			w.logger.Debugf(ctx, "received secret backend rotation changes: %v", backendIDs)
 
-			ctx, cancel := w.scopedContext()
 			var err error
 			changes, err = w.processChanges(ctx, backendIDs...)
-			cancel()
 			if err != nil {
-				return errors.Trace(err)
+				return errors.Capture(err)
 			}
 			if len(changes) > 0 {
 				out = w.out

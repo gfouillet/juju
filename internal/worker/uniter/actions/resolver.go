@@ -46,27 +46,6 @@ func (r *actionsResolver) NextOp(
 	remoteState remotestate.Snapshot,
 	opFactory operation.Factory,
 ) (op operation.Operation, err error) {
-	// During CAAS unit initialization action operations are
-	// deferred until the unit is running. If the remote charm needs
-	// updating, hold off on action running.
-	if remoteState.ActionsBlocked || localState.OutdatedRemoteCharm {
-		r.logger.Debugf("actions are blocked=%v; outdated remote charm=%v - have pending actions: %v", remoteState.ActionsBlocked, localState.OutdatedRemoteCharm, remoteState.ActionsPending)
-		if localState.ActionId == nil {
-			r.logger.Debugf("actions are blocked, no in flight actions")
-			return nil, resolver.ErrNoOperation
-		}
-		// If we were somehow running an action during remote container changes/restart
-		// we need to fail it and move on.
-		r.logger.Infof("incomplete action %v is blocked", *localState.ActionId)
-		if localState.Kind == operation.RunAction {
-			if localState.Hook != nil {
-				r.logger.Infof("recommitting prior %q hook", localState.Hook.Kind)
-				return opFactory.NewSkipHook(*localState.Hook)
-			}
-			return opFactory.NewFailAction(*localState.ActionId)
-		}
-		return nil, resolver.ErrNoOperation
-	}
 	// If there are no operation left to be run, then we cannot return the
 	// error signaling such here, we must first check to see if an action is
 	// already running (that has been interrupted) before we declare that
@@ -76,16 +55,16 @@ func (r *actionsResolver) NextOp(
 		return nil, err
 	}
 	if nextActionId == "" {
-		r.logger.Debugf("no next action from pending=%v; completed=%v", remoteState.ActionsPending, localState.CompletedActions)
+		r.logger.Debugf(ctx, "no next action from pending=%v; completed=%v", remoteState.ActionsPending, localState.CompletedActions)
 	}
 
 	defer func() {
 		if errors.Cause(err) == charmrunner.ErrActionNotAvailable {
 			if localState.Step == operation.Pending && localState.ActionId != nil {
-				r.logger.Infof("found missing not yet started action %v; running fail action", *localState.ActionId)
+				r.logger.Infof(ctx, "found missing not yet started action %v; running fail action", *localState.ActionId)
 				op, err = opFactory.NewFailAction(*localState.ActionId)
 			} else if nextActionId != "" {
-				r.logger.Infof("found missing incomplete action %v; running fail action", nextActionId)
+				r.logger.Infof(ctx, "found missing incomplete action %v; running fail action", nextActionId)
 				op, err = opFactory.NewFailAction(nextActionId)
 			} else {
 				err = resolver.ErrNoOperation
@@ -101,12 +80,12 @@ func (r *actionsResolver) NextOp(
 		}
 	case operation.RunAction:
 		if localState.Hook != nil {
-			r.logger.Infof("found incomplete action %v; ignoring", localState.ActionId)
-			r.logger.Infof("recommitting prior %q hook", localState.Hook.Kind)
+			r.logger.Infof(ctx, "found incomplete action %v; ignoring", localState.ActionId)
+			r.logger.Infof(ctx, "recommitting prior %q hook", localState.Hook.Kind)
 			return opFactory.NewSkipHook(*localState.Hook)
 		}
 
-		r.logger.Infof("%q hook is nil, so running action %v", operation.RunAction, nextActionId)
+		r.logger.Infof(ctx, "%q hook is nil, so running action %v", operation.RunAction, nextActionId)
 		// If the next action is the same as what the uniter is
 		// currently running then this means that the uniter was
 		// some how interrupted (killed) when running the action
@@ -115,7 +94,7 @@ func (r *actionsResolver) NextOp(
 		// is fail the action, since rerunning an arbitrary
 		// command can potentially be hazardous.
 		if nextActionId == *localState.ActionId {
-			r.logger.Debugf("unit agent was interrupted while running action %v", *localState.ActionId)
+			r.logger.Debugf(ctx, "unit agent was interrupted while running action %v", *localState.ActionId)
 			return opFactory.NewFailAction(*localState.ActionId)
 		}
 

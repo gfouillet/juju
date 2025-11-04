@@ -4,19 +4,20 @@
 package application
 
 import (
+	"context"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/spaces"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -36,8 +37,8 @@ func NewBindCommand() cmd.Command {
 // ApplicationBindClient defines a subset of the application facade that deals with
 // querying and updating application bindings.
 type ApplicationBindClient interface {
-	Get(string, string) (*params.ApplicationGetResults, error)
-	MergeBindings(req params.ApplicationMergeBindingsArgs) error
+	Get(context.Context, string) (*params.ApplicationGetResults, error)
+	MergeBindings(ctx context.Context, req params.ApplicationMergeBindingsArgs) error
 }
 
 // Bind is responsible for changing the bindings for an application.
@@ -84,6 +85,11 @@ func (c *bindCommand) Info() *cmd.Info {
 		Purpose:  "Change bindings for a deployed application.",
 		Doc:      bindCmdDoc,
 		Examples: bindCmdExamples,
+		SeeAlso: []string{
+			"spaces",
+			"show-space",
+			"show-application",
+		},
 	})
 }
 
@@ -109,13 +115,13 @@ func (c *bindCommand) Init(args []string) error {
 // Run connects to the specified environment and applies the requested binding
 // changes.
 func (c *bindCommand) Run(ctx *cmd.Context) error {
-	apiRoot, err := c.NewAPIRoot()
+	apiRoot, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer func() { _ = apiRoot.Close() }()
 
-	if err = c.parseBindExpression(apiRoot); err != nil && errors.Is(err, errors.NotSupported) {
+	if err = c.parseBindExpression(ctx, apiRoot); err != nil && errors.Is(err, errors.NotSupported) {
 		ctx.Infof("Spaces not supported by this model's cloud, nothing to do.")
 		return nil
 	} else if err != nil {
@@ -126,13 +132,8 @@ func (c *bindCommand) Run(ctx *cmd.Context) error {
 		return errors.New("no bindings specified")
 	}
 
-	generation, err := c.ActiveBranch()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
 	applicationClient := c.NewApplicationClient(apiRoot)
-	applicationInfo, err := applicationClient.Get(generation, c.ApplicationName)
+	applicationInfo, err := applicationClient.Get(ctx, c.ApplicationName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -154,10 +155,12 @@ func (c *bindCommand) Run(ctx *cmd.Context) error {
 
 	appDefaultSpace := curBindings[""]
 
+	// TODO(jack-w-shaw): merging is handled server-side by the service layer.
+	// Stop merging here
 	var bindingsChangelog []string
 	c.Bindings, bindingsChangelog = mergeBindings(curCharmEndpoints, curBindings, c.Bindings, appDefaultSpace)
 
-	err = applicationClient.MergeBindings(params.ApplicationMergeBindingsArgs{
+	err = applicationClient.MergeBindings(ctx, params.ApplicationMergeBindingsArgs{
 		Args: []params.ApplicationMergeBindings{
 			{
 				ApplicationTag: names.NewApplicationTag(c.ApplicationName).String(),
@@ -172,7 +175,7 @@ func (c *bindCommand) Run(ctx *cmd.Context) error {
 
 	// Emit binding changelog after a successful call to MergeBindings.
 	for _, change := range bindingsChangelog {
-		ctx.Infof(change)
+		ctx.Infof("%s", change)
 	}
 	return nil
 }
@@ -190,13 +193,13 @@ func (c *bindCommand) validateEndpointNames(newCharmEndpoints set.Strings, oldEn
 	return nil
 }
 
-func (c *bindCommand) parseBindExpression(apiRoot base.APICallCloser) error {
+func (c *bindCommand) parseBindExpression(ctx context.Context, apiRoot base.APICallCloser) error {
 	if c.BindExpression == "" {
 		return nil
 	}
 
 	// Fetch known spaces from server
-	knownSpaces, err := c.NewSpacesClient(apiRoot).ListSpaces()
+	knownSpaces, err := c.NewSpacesClient(apiRoot).ListSpaces(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}

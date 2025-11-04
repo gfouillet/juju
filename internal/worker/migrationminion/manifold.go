@@ -25,7 +25,7 @@ type ManifoldConfig struct {
 	APICallerName     string
 	FortressName      string
 	Clock             clock.Clock
-	APIOpen           func(*api.Info, api.DialOpts) (api.Connection, error)
+	APIOpen           func(context.Context, *api.Info, api.DialOpts) (api.Connection, error)
 	ValidateMigration func(context.Context, base.APICaller) error
 
 	NewFacade func(base.APICaller) (Facade, error)
@@ -96,6 +96,7 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 		ValidateMigration: config.ValidateMigration,
 		NewFacade:         config.NewFacade,
 		Logger:            config.Logger,
+		ApplyJitter:       true,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)

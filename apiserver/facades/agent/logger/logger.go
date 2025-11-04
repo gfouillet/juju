@@ -6,7 +6,7 @@ package logger
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -71,7 +71,7 @@ func (api *LoggerAPI) WatchLoggingConfig(ctx context.Context, arg params.Entitie
 		}
 
 		// TODO(wallyworld) - only trigger on logging change
-		watch, err := api.modelConfigService.Watch()
+		watch, err := api.modelConfigService.Watch(ctx)
 		if err != nil {
 			result[i].Error = apiservererrors.ServerError(err)
 			continue

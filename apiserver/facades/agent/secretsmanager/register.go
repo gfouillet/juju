@@ -6,9 +6,8 @@ package secretsmanager
 import (
 	"reflect"
 
-	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/net/context"
 
 	"github.com/juju/juju/api"
@@ -17,46 +16,37 @@ import (
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	corelogger "github.com/juju/juju/core/logger"
-	coremodel "github.com/juju/juju/core/model"
 	coresecrets "github.com/juju/juju/core/secrets"
-	"github.com/juju/juju/internal/secrets/provider"
 	"github.com/juju/juju/internal/worker/apicaller"
 	"github.com/juju/juju/rpc/params"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("SecretsManager", 2, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+	registry.MustRegister("SecretsManager", 4, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
 		return NewSecretManagerAPI(stdCtx, ctx)
 	}, reflect.TypeOf((*SecretsManagerAPI)(nil)))
 }
 
 // NewSecretManagerAPI creates a SecretsManagerAPI.
-func NewSecretManagerAPI(stdCtx context.Context, ctx facade.ModelContext) (*SecretsManagerAPI, error) {
+func NewSecretManagerAPI(_ context.Context, ctx facade.ModelContext) (*SecretsManagerAPI, error) {
 	if !ctx.Auth().AuthUnitAgent() {
 		return nil, apiservererrors.ErrPerm
 	}
-	model, err := ctx.State().Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	serviceFactory := ctx.ServiceFactory()
-
+	domainServices := ctx.DomainServices()
 	leadershipChecker, err := ctx.LeadershipChecker()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	backendService := serviceFactory.SecretBackend()
-	secretBackendAdminConfigGetter := func(stdCtx context.Context) (*provider.ModelBackendConfigInfo, error) {
-		return backendService.GetSecretBackendConfigForAdmin(stdCtx, coremodel.UUID(model.UUID()))
-	}
-	secretService := serviceFactory.Secret(secretBackendAdminConfigGetter)
+	backendService := domainServices.SecretBackend()
+	secretService := domainServices.Secret()
 
 	controllerAPI := common.NewControllerConfigAPI(
-		ctx.State(),
-		serviceFactory.ControllerConfig(),
-		serviceFactory.ExternalController(),
+		domainServices.ControllerConfig(),
+		domainServices.ControllerNode(),
+		domainServices.ExternalController(),
+		domainServices.Model(),
 	)
 	remoteClientGetter := func(stdCtx context.Context, uri *coresecrets.URI) (CrossModelSecretsClient, error) {
 		info, err := controllerAPI.ControllerAPIInfoForModels(stdCtx, params.Entities{Entities: []params.Entity{{
@@ -77,7 +67,7 @@ func NewSecretManagerAPI(stdCtx context.Context, ctx facade.ModelContext) (*Secr
 			ModelTag: names.NewModelTag(uri.SourceUUID),
 		}
 		apiInfo.Tag = names.NewUserTag(api.AnonymousUsername)
-		conn, err := apicaller.NewExternalControllerConnection(&apiInfo)
+		conn, err := apicaller.NewExternalControllerConnection(stdCtx, &apiInfo)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -85,19 +75,20 @@ func NewSecretManagerAPI(stdCtx context.Context, ctx facade.ModelContext) (*Secr
 	}
 
 	return &SecretsManagerAPI{
-		authTag:              ctx.Auth().GetAuthTag(),
-		authorizer:           ctx.Auth(),
-		leadershipChecker:    leadershipChecker,
-		watcherRegistry:      ctx.WatcherRegistry(),
-		secretBackendService: backendService,
-		secretService:        secretService,
-		secretsTriggers:      secretService,
-		secretsConsumer:      secretService,
-		clock:                clock.WallClock,
-		controllerUUID:       ctx.ControllerUUID(),
-		modelUUID:            ctx.State().ModelUUID(),
-		remoteClientGetter:   remoteClientGetter,
-		crossModelState:      ctx.State().RemoteEntities(),
-		logger:               ctx.Logger().Child("secretsmanager", corelogger.SECRETS),
+		authTag:                   ctx.Auth().GetAuthTag(),
+		authorizer:                ctx.Auth(),
+		leadershipChecker:         leadershipChecker,
+		watcherRegistry:           ctx.WatcherRegistry(),
+		secretBackendService:      backendService,
+		secretService:             secretService,
+		secretsTriggers:           secretService,
+		secretsConsumer:           secretService,
+		applicationService:        domainServices.Application(),
+		crossModelRelationService: domainServices.CrossModelRelation(),
+		clock:                     ctx.Clock(),
+		controllerUUID:            ctx.ControllerUUID(),
+		modelUUID:                 ctx.ModelUUID().String(),
+		remoteClientGetter:        remoteClientGetter,
+		logger:                    ctx.Logger().Child("secretsmanager", corelogger.SECRETS),
 	}, nil
 }

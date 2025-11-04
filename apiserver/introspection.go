@@ -8,11 +8,11 @@ import (
 	"net/http"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/permission"
+	coreuser "github.com/juju/juju/core/user"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -27,7 +27,7 @@ type introspectionHandler struct {
 func (h introspectionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := h.checkAuth(r); err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Debugf("%v", err)
+			logger.Debugf(r.Context(), "%v", err)
 		}
 		return
 	}
@@ -35,45 +35,40 @@ func (h introspectionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h introspectionHandler) checkAuth(r *http.Request) error {
-	st, entity, err := h.ctx.stateAndEntityForRequestAuthenticatedUser(r)
+	authTag, err := h.ctx.authenticatedUserFromRequest(r)
 	if err != nil {
 		return err
 	}
-	defer st.Release()
 
 	// Users with "superuser" access on the controller,
 	// or "read" access on the controller model, can
 	// access these endpoints.
 
-	accessService := h.ctx.srv.shared.serviceFactoryGetter.FactoryForModel(database.ControllerNS).Access()
+	svc, err := h.ctx.srv.shared.domainServicesGetter.ServicesForModel(r.Context(), h.ctx.srv.shared.controllerModelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	accessService := svc.Access()
 
-	userPermission := func(subject names.UserTag, target names.Tag) (permission.Access, error) {
-		var pID permission.ID
-		switch target.Kind() {
-		case names.ModelTagKind:
-			pID = permission.ID{
-				ObjectType: permission.Model,
-				Key:        target.Id(),
-			}
-		case names.ControllerTagKind:
-			pID = permission.ID{
-				ObjectType: permission.Model,
-				// TODO (manadart 2024-06-28): This needs to work on the controller UUID.
-				Key: "controller",
-			}
-		default:
-			return "", errors.NotValidf("%q as a target", target.Kind())
+	userPermission := func(ctx context.Context, userName coreuser.Name, target permission.ID) (permission.Access, error) {
+		if objectType := target.ObjectType; !(objectType == permission.Controller || objectType == permission.Model) {
+			return "", errors.NotValidf("%q as a target", target.ObjectType)
 		}
 
-		access, err := accessService.ReadUserAccessForTarget(context.TODO(), subject.Id(), pID)
-		return access.Access, errors.Trace(err)
+		access, err := accessService.ReadUserAccessLevelForTarget(ctx, userName, target)
+		return access, errors.Trace(err)
 	}
 
+	modelInfo, err := svc.ModelInfo().GetModelInfo(r.Context())
+	if err != nil {
+		return err
+	}
 	ok, err := common.HasPermission(
+		r.Context(),
 		userPermission,
-		entity.Tag(),
+		authTag,
 		permission.SuperuserAccess,
-		st.ControllerTag(),
+		names.NewControllerTag(modelInfo.ControllerUUID.String()),
 	)
 	if err != nil {
 		return err
@@ -82,11 +77,16 @@ func (h introspectionHandler) checkAuth(r *http.Request) error {
 		return nil
 	}
 
+	controllerModelUUID, err := svc.Controller().ControllerModelUUID(r.Context())
+	if err != nil {
+		return err
+	}
 	ok, err = common.HasPermission(
+		r.Context(),
 		userPermission,
-		entity.Tag(),
+		authTag,
 		permission.ReadAccess,
-		names.NewModelTag(st.ControllerModelUUID()),
+		names.NewModelTag(controllerModelUUID.String()),
 	)
 	if err != nil {
 		return err

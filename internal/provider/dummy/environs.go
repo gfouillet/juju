@@ -5,7 +5,6 @@ package dummy
 
 import (
 	"context"
-	stdcontext "context"
 	"fmt"
 	"os"
 	"runtime"
@@ -15,10 +14,8 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
-	"github.com/juju/version/v2"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/cloud"
@@ -29,13 +26,14 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/lxdprofile"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/configschema"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/storage"
 	dummystorage "github.com/juju/juju/internal/storage/provider/dummy"
@@ -98,6 +96,8 @@ type environState struct {
 // environ represents a client's connection to a given environment's
 // state.
 type environ struct {
+	environs.NoContainerAddressesEnviron
+
 	storage.ProviderRegistry
 	name         string
 	modelUUID    string
@@ -107,25 +107,16 @@ type environ struct {
 }
 
 var _ environs.Environ = (*environ)(nil)
-var _ environs.Networking = (*environ)(nil)
 
-// discardOperations discards all Operations written to it.
-var discardOperations = make(chan Operation)
+var _ environs.Networking = (*environ)(nil)
 
 func init() {
 	environs.RegisterProvider("dummy", &dummy)
-
-	// Prime the first ops channel, so that naive clients can use
-	// the testing environment by simply importing it.
-	go func() {
-		for range discardOperations {
-		}
-	}()
 }
 
 // dummy is the dummy environmentProvider singleton.
 var dummy = environProvider{
-	ops:                    discardOperations,
+	ops:                    nil,
 	state:                  make(map[string]*environState),
 	supportsSpaces:         true,
 	supportsSpaceDiscovery: false,
@@ -168,9 +159,6 @@ func SetSupportsSpaceDiscovery(supports bool) bool {
 func Listen(c chan<- Operation) {
 	dummy.mu.Lock()
 	defer dummy.mu.Unlock()
-	if c == nil {
-		c = discardOperations
-	}
 	dummy.ops = c
 	for _, st := range dummy.state {
 		st.mu.Lock()
@@ -179,18 +167,18 @@ func Listen(c chan<- Operation) {
 	}
 }
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	"somebool": {
 		Description: "Used to test config validation",
-		Type:        environschema.Tbool,
+		Type:        configschema.Tbool,
 	},
 	"broken": {
 		Description: "Whitespace-separated Environ methods that should return an error when called",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 	"secret": {
 		Description: "A secret",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 }
 
@@ -225,7 +213,7 @@ func (p *environProvider) newConfig(ctx context.Context, cfg *config.Config) (*e
 	return &environConfig{valid, valid.UnknownAttrs()}, nil
 }
 
-func (p *environProvider) Schema() environschema.Fields {
+func (p *environProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -303,7 +291,7 @@ func (*environProvider) Version() int {
 	return 0
 }
 
-func (p *environProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
+func (p *environProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ecfg, err := p.newConfig(ctx, args.Config)
@@ -330,16 +318,19 @@ func (p *environProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p *environProvider) Ping(ctx envcontext.ProviderCallContext, endpoint string) error {
+func (p *environProvider) Ping(_ context.Context, _ string) error {
 	return errors.NotImplementedf("Ping")
 }
 
-// PrepareConfig is specified in the EnvironProvider interface.
-func (p *environProvider) PrepareConfig(ctx context.Context, args environs.PrepareConfigParams) (*config.Config, error) {
-	if _, err := dummy.newConfig(ctx, args.Config); err != nil {
-		return nil, err
-	}
-	return args.Config, nil
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p *environProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return nil, nil
+}
+
+// ValidateCloud is specified in the EnvironProvider interface.
+func (p *environProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return nil
 }
 
 func (e *environ) ecfg() *environConfig {
@@ -359,15 +350,20 @@ func (e *environ) checkBroken(method string) error {
 }
 
 // PrecheckInstance is specified in the environs.InstancePrechecker interface.
-func (*environ) PrecheckInstance(ctx envcontext.ProviderCallContext, args environs.PrecheckInstanceParams) error {
+func (*environ) PrecheckInstance(ctx context.Context, args environs.PrecheckInstanceParams) error {
 	if args.Placement != "" && args.Placement != "valid" {
 		return fmt.Errorf("%s placement is invalid", args.Placement)
 	}
 	return nil
 }
 
-// Create is part of the Environ interface.
-func (e *environ) Create(ctx envcontext.ProviderCallContext, args environs.CreateParams) error {
+// ValidateProviderForNewModel is part of the [environs.ModelResources] interface.
+func (e *environ) ValidateProviderForNewModel(ctx context.Context) error {
+	return nil
+}
+
+// CreateModelResources is part of the [environs.ModelResources] interface.
+func (e *environ) CreateModelResources(ctx context.Context, args environs.CreateParams) error {
 	dummy.mu.Lock()
 	defer dummy.mu.Unlock()
 	dummy.state[e.modelUUID] = newState(e.name, dummy.ops)
@@ -388,7 +384,7 @@ func (e *environ) PrepareForBootstrap(ctx environs.BootstrapContext, controllerN
 	return nil
 }
 
-func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.ProviderCallContext, args environs.BootstrapParams) (*environs.BootstrapResult, error) {
+func (e *environ) Bootstrap(ctx environs.BootstrapContext, args environs.BootstrapParams) (*environs.BootstrapResult, error) {
 	availableTools, err := args.AvailableTools.Match(coretools.Filter{OSType: "ubuntu"})
 	if err != nil {
 		return nil, err
@@ -406,7 +402,7 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.Pr
 		return nil, errors.New("no CA certificate in controller configuration")
 	}
 
-	logger.Infof("would pick agent binaries from %s", availableTools)
+	logger.Infof(ctx, "would pick agent binaries from %s", availableTools)
 
 	estate, err := e.state()
 	if err != nil {
@@ -416,7 +412,7 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.Pr
 	defer estate.mu.Unlock()
 
 	// Create an instance for the bootstrap node.
-	logger.Infof("creating bootstrap instance")
+	logger.Infof(ctx, "creating bootstrap instance")
 	i := &dummyInstance{
 		id:           BootstrapInstanceId,
 		addresses:    network.NewMachineAddresses([]string{"localhost"}).AsProviderAddresses(),
@@ -426,7 +422,9 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.Pr
 		controller:   true,
 	}
 	estate.insts[i.id] = i
-	estate.ops <- OpBootstrap{Context: ctx, Env: e.name, Args: args}
+	if estate.ops != nil {
+		estate.ops <- OpBootstrap{Context: ctx, Env: e.name, Args: args}
+	}
 
 	finalize := func(ctx environs.BootstrapContext, icfg *instancecfg.InstanceConfig, _ environs.BootstrapDialOpts) (err error) {
 		icfg.Bootstrap.BootstrapMachineInstanceId = BootstrapInstanceId
@@ -453,7 +451,9 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.Pr
 		if icfg.Bootstrap.ControllerCloudCredential != nil && icfg.Bootstrap.ControllerCloudCredentialName != "" {
 			cloudCredentials[cloudCredentialTag] = *icfg.Bootstrap.ControllerCloudCredential
 		}
-		estate.ops <- OpFinalizeBootstrap{Context: ctx, Env: e.name, InstanceConfig: icfg}
+		if estate.ops != nil {
+			estate.ops <- OpFinalizeBootstrap{Context: ctx, Env: e.name, InstanceConfig: icfg}
+		}
 		return nil
 	}
 
@@ -465,7 +465,7 @@ func (e *environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.Pr
 	return bsResult, nil
 }
 
-func (e *environ) ControllerInstances(envcontext.ProviderCallContext, string) ([]instance.Id, error) {
+func (e *environ) ControllerInstances(context.Context, string) ([]instance.Id, error) {
 	estate, err := e.state()
 	if err != nil {
 		return nil, err
@@ -503,12 +503,12 @@ func (e *environ) SetConfig(ctx context.Context, cfg *config.Config) error {
 }
 
 // AdoptResources is part of the Environ interface.
-func (e *environ) AdoptResources(envcontext.ProviderCallContext, string, version.Number) error {
+func (e *environ) AdoptResources(context.Context, string, semversion.Number) error {
 	// This provider doesn't track instance -> controller.
 	return nil
 }
 
-func (e *environ) Destroy(envcontext.ProviderCallContext) (res error) {
+func (e *environ) Destroy(context.Context) (res error) {
 	defer delay()
 	estate, err := e.state()
 	if err != nil {
@@ -527,11 +527,13 @@ func (e *environ) Destroy(envcontext.ProviderCallContext) (res error) {
 		name := estate.name
 		delete(dummy.state, e.modelUUID)
 		estate.mu.Unlock()
-		ops <- OpDestroy{
-			Env:         name,
-			Cloud:       e.cloud.Name,
-			CloudRegion: e.cloud.Region,
-			Error:       res,
+		if ops != nil {
+			ops <- OpDestroy{
+				Env:         name,
+				Cloud:       e.cloud.Name,
+				CloudRegion: e.cloud.Region,
+				Error:       res,
+			}
 		}
 	}()
 	if err := e.checkBroken("Destroy"); err != nil {
@@ -540,7 +542,7 @@ func (e *environ) Destroy(envcontext.ProviderCallContext) (res error) {
 	return nil
 }
 
-func (e *environ) DestroyController(ctx envcontext.ProviderCallContext, _ string) error {
+func (e *environ) DestroyController(ctx context.Context, _ string) error {
 	if err := e.Destroy(ctx); err != nil {
 		return err
 	}
@@ -554,7 +556,7 @@ var unsupportedConstraints = []string{
 }
 
 // ConstraintsValidator is defined on the Environs interface.
-func (e *environ) ConstraintsValidator(envcontext.ProviderCallContext) (constraints.Validator, error) {
+func (e *environ) ConstraintsValidator(context.Context) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
 	validator.RegisterUnsupported(unsupportedConstraints)
 	validator.RegisterConflicts([]string{constraints.InstanceType}, []string{constraints.Mem})
@@ -563,10 +565,10 @@ func (e *environ) ConstraintsValidator(envcontext.ProviderCallContext) (constrai
 }
 
 // StartInstance is specified in the InstanceBroker interface.
-func (e *environ) StartInstance(_ envcontext.ProviderCallContext, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
+func (e *environ) StartInstance(ctx context.Context, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
 	defer delay()
 	machineId := args.InstanceConfig.MachineId
-	logger.Infof("dummy startinstance, machine %s", machineId)
+	logger.Infof(ctx, "dummy startinstance, machine %s", machineId)
 	if err := e.checkBroken("StartInstance"); err != nil {
 		return nil, err
 	}
@@ -595,13 +597,13 @@ func (e *environ) StartInstance(_ envcontext.ProviderCallContext, args environs.
 	if args.InstanceConfig.APIInfo.Tag != names.NewMachineTag(machineId) {
 		return nil, errors.New("entity tag must match started machine")
 	}
-	logger.Infof("would pick agent binaries from %s", args.Tools)
+	logger.Infof(ctx, "would pick agent binaries from %s", args.Tools)
 
 	idString := fmt.Sprintf("%s-%d", e.name, estate.maxId)
 	// Add the addresses we want to see in the machine doc. This means both
 	// IPv4 and IPv6 loopback, as well as the DNS name.
 	addrs := network.NewMachineAddresses([]string{idString + ".dns", "127.0.0.1", "::1"}).AsProviderAddresses()
-	logger.Debugf("StartInstance addresses: %v", addrs)
+	logger.Debugf(ctx, "StartInstance addresses: %v", addrs)
 	i := &dummyInstance{
 		id:           instance.Id(idString),
 		addresses:    addrs,
@@ -630,13 +632,15 @@ func (e *environ) StartInstance(_ envcontext.ProviderCallContext, args environs.
 		// We will just assume the instance hardware characteristics exactly matches
 		// the supplied constraints (if specified).
 		hc = &instance.HardwareCharacteristics{
-			Arch:             args.Constraints.Arch,
-			Mem:              args.Constraints.Mem,
-			RootDisk:         args.Constraints.RootDisk,
-			CpuCores:         args.Constraints.CpuCores,
-			CpuPower:         args.Constraints.CpuPower,
-			Tags:             args.Constraints.Tags,
-			AvailabilityZone: &zone,
+			Arch:     args.Constraints.Arch,
+			Mem:      args.Constraints.Mem,
+			RootDisk: args.Constraints.RootDisk,
+			CpuCores: args.Constraints.CpuCores,
+			CpuPower: args.Constraints.CpuPower,
+			Tags:     args.Constraints.Tags,
+		}
+		if zone != "" {
+			hc.AvailabilityZone = &zone
 		}
 		// Fill in some expected instance hardware characteristics if constraints not specified.
 		if hc.Arch == nil {
@@ -702,7 +706,7 @@ func (e *environ) StartInstance(_ envcontext.ProviderCallContext, args environs.
 	}, nil
 }
 
-func (e *environ) StopInstances(_ envcontext.ProviderCallContext, ids ...instance.Id) error {
+func (e *environ) StopInstances(_ context.Context, ids ...instance.Id) error {
 	defer delay()
 	if err := e.checkBroken("StopInstance"); err != nil {
 		return err
@@ -719,7 +723,7 @@ func (e *environ) StopInstances(_ envcontext.ProviderCallContext, ids ...instanc
 	return nil
 }
 
-func (e *environ) Instances(_ envcontext.ProviderCallContext, ids []instance.Id) (insts []instances.Instance, err error) {
+func (e *environ) Instances(_ context.Context, ids []instance.Id) (insts []instances.Instance, err error) {
 	defer delay()
 	if err := e.checkBroken("Instances"); err != nil {
 		return nil, err
@@ -751,17 +755,17 @@ func (e *environ) Instances(_ envcontext.ProviderCallContext, ids []instance.Id)
 }
 
 // SupportsSpaces is specified on environs.Networking.
-func (env *environ) SupportsSpaces(_ envcontext.ProviderCallContext) (bool, error) {
+func (env *environ) SupportsSpaces() (bool, error) {
 	dummy.mu.Lock()
 	defer dummy.mu.Unlock()
 	if !dummy.supportsSpaces {
-		return false, errors.NotSupportedf("spaces")
+		return false, nil
 	}
 	return true, nil
 }
 
 // SupportsSpaceDiscovery is specified on environs.Networking.
-func (env *environ) SupportsSpaceDiscovery(_ envcontext.ProviderCallContext) (bool, error) {
+func (env *environ) SupportsSpaceDiscovery() (bool, error) {
 	if err := env.checkBroken("SupportsSpaceDiscovery"); err != nil {
 		return false, err
 	}
@@ -773,13 +777,8 @@ func (env *environ) SupportsSpaceDiscovery(_ envcontext.ProviderCallContext) (bo
 	return true, nil
 }
 
-// SupportsContainerAddresses is specified on environs.Networking.
-func (env *environ) SupportsContainerAddresses(_ envcontext.ProviderCallContext) (bool, error) {
-	return false, errors.NotSupportedf("container addresses")
-}
-
 // Spaces is specified on environs.Networking.
-func (env *environ) Spaces(_ envcontext.ProviderCallContext) (network.SpaceInfos, error) {
+func (env *environ) Spaces(_ context.Context) (network.SpaceInfos, error) {
 	if err := env.checkBroken("Spaces"); err != nil {
 		return []network.SpaceInfo{}, err
 	}
@@ -814,7 +813,7 @@ func (env *environ) Spaces(_ envcontext.ProviderCallContext) (network.SpaceInfos
 }
 
 // NetworkInterfaces implements Environ.NetworkInterfaces().
-func (env *environ) NetworkInterfaces(_ envcontext.ProviderCallContext, ids []instance.Id) ([]network.InterfaceInfos, error) {
+func (env *environ) NetworkInterfaces(_ context.Context, ids []instance.Id) ([]network.InterfaceInfos, error) {
 	if err := env.checkBroken("NetworkInterfaces"); err != nil {
 		return nil, err
 	}
@@ -833,23 +832,24 @@ func (env *environ) NetworkInterfaces(_ envcontext.ProviderCallContext, ids []in
 		infos[idIndex] = make(network.InterfaceInfos, 3)
 		for i, netName := range []string{"private", "public", "disabled"} {
 			infos[idIndex][i] = network.InterfaceInfo{
-				DeviceIndex:      i,
-				ProviderId:       network.Id(fmt.Sprintf("dummy-eth%d", i)),
-				ProviderSubnetId: network.Id("dummy-" + netName),
-				InterfaceType:    network.EthernetDevice,
-				InterfaceName:    fmt.Sprintf("eth%d", i),
-				VLANTag:          i,
-				MACAddress:       fmt.Sprintf("aa:bb:cc:dd:ee:f%d", i),
-				Disabled:         i == 2,
-				NoAutoStart:      i%2 != 0,
+				DeviceIndex:   i,
+				ProviderId:    network.Id(fmt.Sprintf("dummy-eth%d", i)),
+				InterfaceType: network.EthernetDevice,
+				InterfaceName: fmt.Sprintf("eth%d", i),
+				VLANTag:       i,
+				MACAddress:    fmt.Sprintf("aa:bb:cc:dd:ee:f%d", i),
+				Disabled:      i == 2,
+				NoAutoStart:   i%2 != 0,
 				Addresses: network.ProviderAddresses{
 					network.NewMachineAddress(
 						fmt.Sprintf("0.%d.0.%d", (i+1)*10+idIndex, estate.maxAddr+2),
 						network.WithCIDR(fmt.Sprintf("0.%d.0.0/24", (i+1)*10)),
 						network.WithConfigType(network.ConfigDHCP),
-					).AsProviderAddress(),
+					).AsProviderAddress(
+						network.WithProviderSubnetID(network.Id("dummy-" + netName)),
+					),
 				},
-				DNSServers: network.NewMachineAddresses([]string{"ns1.dummy", "ns2.dummy"}).AsProviderAddresses(),
+				DNSServers: []string{"ns1.dummy", "ns2.dummy"},
 				GatewayAddress: network.NewMachineAddress(
 					fmt.Sprintf("0.%d.0.1", (i+1)*10+idIndex),
 				).AsProviderAddress(),
@@ -875,7 +875,7 @@ func (az azShim) Available() bool {
 }
 
 // AvailabilityZones implements environs.ZonedEnviron.
-func (env *environ) AvailabilityZones(envcontext.ProviderCallContext) (network.AvailabilityZones, error) {
+func (env *environ) AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error) {
 	return network.AvailabilityZones{
 		azShim{"zone1", true},
 		azShim{"zone2", false},
@@ -885,7 +885,7 @@ func (env *environ) AvailabilityZones(envcontext.ProviderCallContext) (network.A
 }
 
 // InstanceAvailabilityZoneNames implements environs.ZonedEnviron.
-func (env *environ) InstanceAvailabilityZoneNames(ctx envcontext.ProviderCallContext, ids []instance.Id) (map[instance.Id]string, error) {
+func (env *environ) InstanceAvailabilityZoneNames(ctx context.Context, ids []instance.Id) (map[instance.Id]string, error) {
 	if err := env.checkBroken("InstanceAvailabilityZoneNames"); err != nil {
 		return nil, errors.NotSupportedf("instance availability zones")
 	}
@@ -914,14 +914,12 @@ func (env *environ) InstanceAvailabilityZoneNames(ctx envcontext.ProviderCallCon
 }
 
 // DeriveAvailabilityZones is part of the common.ZonedEnviron interface.
-func (env *environ) DeriveAvailabilityZones(envcontext.ProviderCallContext, environs.StartInstanceParams) ([]string, error) {
+func (env *environ) DeriveAvailabilityZones(context.Context, environs.StartInstanceParams) ([]string, error) {
 	return nil, nil
 }
 
 // Subnets implements environs.Environ.Subnets.
-func (env *environ) Subnets(
-	ctx envcontext.ProviderCallContext, instId instance.Id, subnetIds []network.Id,
-) ([]network.SubnetInfo, error) {
+func (env *environ) Subnets(ctx context.Context, subnetIds []network.Id) ([]network.SubnetInfo, error) {
 	if err := env.checkBroken("Subnets"); err != nil {
 		return nil, err
 	}
@@ -933,7 +931,7 @@ func (env *environ) Subnets(
 	estate.mu.Lock()
 	defer estate.mu.Unlock()
 
-	if ok, _ := env.SupportsSpaceDiscovery(ctx); ok {
+	if ok, _ := env.SupportsSpaceDiscovery(); ok {
 		// Space discovery needs more subnets to work with.
 		return env.subnetsForSpaceDiscovery(estate)
 	}
@@ -989,15 +987,15 @@ func (env *environ) subnetsForSpaceDiscovery(estate *environState) ([]network.Su
 	return result, nil
 }
 
-func (e *environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (e *environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	return e.instancesForMethod(ctx, "AllInstances")
 }
 
-func (e *environ) AllRunningInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (e *environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
 	return e.instancesForMethod(ctx, "AllRunningInstances")
 }
 
-func (e *environ) instancesForMethod(_ envcontext.ProviderCallContext, method string) ([]instances.Instance, error) {
+func (e *environ) instancesForMethod(_ context.Context, method string) ([]instances.Instance, error) {
 	defer delay()
 	if err := e.checkBroken(method); err != nil {
 		return nil, err
@@ -1036,7 +1034,7 @@ func (inst *dummyInstance) Id() instance.Id {
 	return inst.id
 }
 
-func (inst *dummyInstance) Status(envcontext.ProviderCallContext) instance.Status {
+func (inst *dummyInstance) Status(context.Context) instance.Status {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	// TODO(perrito666) add a provider status -> juju status mapping.
@@ -1061,7 +1059,7 @@ func SetInstanceAddresses(inst instances.Instance, addrs []network.ProviderAddre
 	inst0 := inst.(*dummyInstance)
 	inst0.mu.Lock()
 	inst0.addresses = append(inst0.addresses[:0], addrs...)
-	logger.Debugf("setting instance %q addresses to %v", inst0.Id(), addrs)
+	logger.Debugf(context.TODO(), "setting instance %q addresses to %v", inst0.Id(), addrs)
 	inst0.mu.Unlock()
 }
 
@@ -1083,7 +1081,7 @@ func (inst *dummyInstance) checkBroken(method string) error {
 	return nil
 }
 
-func (inst *dummyInstance) Addresses(envcontext.ProviderCallContext) (network.ProviderAddresses, error) {
+func (inst *dummyInstance) Addresses(context.Context) (network.ProviderAddresses, error) {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	if err := inst.checkBroken("Addresses"); err != nil {
@@ -1100,21 +1098,13 @@ var providerDelay, _ = time.ParseDuration(os.Getenv("JUJU_DUMMY_DELAY")) // pars
 // pause execution to simulate the latency of a real provider
 func delay() {
 	if providerDelay > 0 {
-		logger.Infof("pausing for %v", providerDelay)
+		logger.Infof(context.TODO(), "pausing for %v", providerDelay)
 		<-time.After(providerDelay)
 	}
 }
 
-func (e *environ) AllocateContainerAddresses(envcontext.ProviderCallContext, instance.Id, names.MachineTag, network.InterfaceInfos) (network.InterfaceInfos, error) {
-	return nil, errors.NotSupportedf("container address allocation")
-}
-
-func (e *environ) ReleaseContainerAddresses(envcontext.ProviderCallContext, []network.ProviderInterfaceInfo) error {
-	return errors.NotSupportedf("container address allocation")
-}
-
 // ProviderSpaceInfo implements NetworkingEnviron.
-func (*environ) ProviderSpaceInfo(envcontext.ProviderCallContext, *network.SpaceInfo) (*environs.ProviderSpaceInfo, error) {
+func (*environ) ProviderSpaceInfo(context.Context, *network.SpaceInfo) (*environs.ProviderSpaceInfo, error) {
 	return nil, errors.NotSupportedf("provider space info")
 }
 

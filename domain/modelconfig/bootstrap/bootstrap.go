@@ -5,17 +5,16 @@ package bootstrap
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 
 	"github.com/canonical/sqlair"
 
 	"github.com/juju/juju/core/database"
 	coremodel "github.com/juju/juju/core/model"
-	modelstate "github.com/juju/juju/domain/model/state"
+	statecontroller "github.com/juju/juju/domain/model/state/controller"
 	"github.com/juju/juju/domain/modelconfig/service"
 	"github.com/juju/juju/environs/config"
 	internaldatabase "github.com/juju/juju/internal/database"
+	"github.com/juju/juju/internal/errors"
 )
 
 // SetModelConfig will remove any existing model config for the model and
@@ -32,7 +31,7 @@ func SetModelConfig(
 		}
 		defaults, err := defaultsProvider.ModelDefaults(ctx)
 		if err != nil {
-			return fmt.Errorf("getting model defaults: %w", err)
+			return errors.Errorf("getting model defaults: %w", err)
 		}
 
 		for k, v := range defaults {
@@ -43,51 +42,52 @@ func SetModelConfig(
 		}
 
 		var m coremodel.Model
-		err = controller.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		err = controller.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 			var err error
-			m, err = modelstate.GetModel(ctx, tx, modelID)
+			m, err = statecontroller.GetModel(ctx, tx, modelID)
 			return err
 		})
 
 		if err != nil {
-			return fmt.Errorf("setting model %q config: %w", modelID, err)
+			return errors.Errorf("setting model %q config: %w", modelID, err)
 		}
 
 		attrs[config.UUIDKey] = m.UUID
 		attrs[config.TypeKey] = m.ModelType
 		attrs[config.NameKey] = m.Name
 
-		// TODO (tlm): Currently the Juju client passes agent version to a
-		// bootstrap controller via model config. Yep very very very silly.
-		// This needs a bit more modelling in DQlite before to change the flow.
-		// To make it more digestible of the bootstrap code we are throwing it
-		// away here.
+		// TODO(tlm): Currently the Juju client passes agent version and stream
+		// to a bootstrapped controller via model config. We want to move away
+		// from this pattern over time but until the client can be refactored we
+		// remove the values from model config as they get set as first class
+		// values in the model database.
 		//
 		// What needs to happen:
-		// - model agent version in the model database correctly.
 		// - change any client code that is passing the value via config.
-		// - add migration logic to get rid of agent version out of config.
+		// - add migration logic to get rid of agent version and stream out of
+		// config.
 		delete(attrs, config.AgentVersionKey)
+		delete(attrs, config.AgentStreamKey)
 
 		cfg, err := config.New(config.NoDefaults, attrs)
 		if err != nil {
-			return fmt.Errorf("constructing new model config with model defaults: %w", err)
+			return errors.Errorf("constructing new model config with model defaults: %w", err)
 		}
 
 		_, err = config.ModelValidator().Validate(ctx, cfg, nil)
 		if err != nil {
-			return fmt.Errorf("validating model config to set for model: %w", err)
+			return errors.Errorf("validating model config to set for model: %w", err)
 		}
 
 		insert, err := service.CoerceConfigForStorage(cfg.AllAttrs())
 		if err != nil {
-			return fmt.Errorf("coercing model config for storage: %w", err)
+			return errors.Errorf("coercing model config for storage: %w", err)
 		}
 
 		insertQuery := `INSERT INTO model_config (*) VALUES ($dbKeyValue.*)`
 		insertStmt, err := sqlair.Prepare(insertQuery, dbKeyValue{})
 		if err != nil {
-			return fmt.Errorf("preparing insert query: %w", err)
+			return errors.Errorf("preparing insert query: %w", err)
 		}
 
 		return model.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -96,7 +96,7 @@ func SetModelConfig(
 				insertKV = append(insertKV, dbKeyValue{Key: k, Value: v})
 			}
 			if err := tx.Query(ctx, insertStmt, insertKV).Run(); err != nil {
-				return fmt.Errorf("inserting model config values: %w", err)
+				return errors.Errorf("inserting model config values: %w", err)
 			}
 			return nil
 		})

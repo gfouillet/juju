@@ -13,10 +13,9 @@ import (
 	"time"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 	"github.com/kr/pretty"
 	"gopkg.in/yaml.v2"
@@ -42,6 +41,7 @@ import (
 	bundlechanges "github.com/juju/juju/internal/bundle/changes"
 	"github.com/juju/juju/internal/charm"
 	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
 )
@@ -64,7 +64,7 @@ type bundleDeploySpec struct {
 
 	deployAPI            DeployerAPI
 	bundleResolver       Resolver
-	getConsumeDetailsAPI func(*charm.OfferURL) (ConsumeDetails, error)
+	getConsumeDetailsAPI func(crossmodel.OfferURL) (ConsumeDetails, error)
 	deployResources      DeployResourcesFunc
 	charmReader          CharmReader
 
@@ -90,13 +90,13 @@ type bundleDeploySpec struct {
 func bundleDeploy(ctx context.Context, defaultCharmSchema charm.Schema, bundleData *charm.BundleData, spec bundleDeploySpec) error {
 	// TODO: move bundle parsing and checking into the handler.
 	h := makeBundleHandler(defaultCharmSchema, bundleData, spec)
-	if err := h.makeModel(spec.useExistingMachines, spec.bundleMachines); err != nil {
+	if err := h.makeModel(ctx, spec.useExistingMachines, spec.bundleMachines); err != nil {
 		return errors.Trace(err)
 	}
-	if err := h.resolveCharmsAndEndpoints(); err != nil {
+	if err := h.resolveCharmsAndEndpoints(ctx); err != nil {
 		return errors.Trace(err)
 	}
-	if err := h.getChanges(); err != nil {
+	if err := h.getChanges(ctx); err != nil {
 		return errors.Trace(err)
 	}
 	if err := h.handleChanges(ctx); err != nil {
@@ -143,7 +143,7 @@ type bundleHandler struct {
 	// deployAPI is used to interact with the environment.
 	deployAPI            DeployerAPI
 	bundleResolver       Resolver
-	getConsumeDetailsAPI func(*charm.OfferURL) (ConsumeDetails, error)
+	getConsumeDetailsAPI func(crossmodel.OfferURL) (ConsumeDetails, error)
 	deployResources      DeployResourcesFunc
 	charmReader          CharmReader
 
@@ -246,20 +246,21 @@ func makeBundleHandler(defaultCharmSchema charm.Schema, bundleData *charm.Bundle
 }
 
 func (h *bundleHandler) makeModel(
+	ctx context.Context,
 	useExistingMachines bool,
 	bundleMachines map[string]string,
 ) error {
 	// Initialize the unit status.
-	status, err := h.deployAPI.Status(nil)
+	status, err := h.deployAPI.Status(ctx, nil)
 	if err != nil {
 		return errors.Annotate(err, "cannot get model status")
 	}
 
-	h.model, err = appbundle.BuildModelRepresentation(status, h.deployAPI, useExistingMachines, bundleMachines)
+	h.model, err = appbundle.BuildModelRepresentation(ctx, status, h.deployAPI, useExistingMachines, bundleMachines)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logger.Debugf("model: %s", pretty.Sprint(h.model))
+	logger.Debugf(ctx, "model: %s", pretty.Sprint(h.model))
 
 	for _, appData := range status.Applications {
 		for unit, unitData := range appData.Units {
@@ -267,7 +268,7 @@ func (h *bundleHandler) makeModel(
 		}
 	}
 
-	h.modelConfig, err = getModelConfig(h.deployAPI)
+	h.modelConfig, err = getModelConfig(ctx, h.deployAPI)
 	return err
 }
 
@@ -284,7 +285,7 @@ func (h *bundleHandler) makeModel(
 //   - check all endpoints, and if any of them have implicit endpoints,
 //     and if they do, resolve the implicitness in order to compare
 //     with relations in the model.
-func (h *bundleHandler) resolveCharmsAndEndpoints() error {
+func (h *bundleHandler) resolveCharmsAndEndpoints(ctx context.Context) error {
 	deployedApps := set.NewStrings()
 
 	for _, name := range h.applications.SortedValues() {
@@ -296,7 +297,7 @@ func (h *bundleHandler) resolveCharmsAndEndpoints() error {
 			deployedApps.Add(name)
 
 			if h.isLocalCharm(spec.Charm) {
-				logger.Debugf("%s exists in model uses a local charm, replacing with %q", name, app.Charm)
+				logger.Debugf(ctx, "%s exists in model uses a local charm, replacing with %q", name, app.Charm)
 				// Replace with charm from model
 				spec.Charm = app.Charm
 				continue
@@ -352,7 +353,7 @@ func (h *bundleHandler) resolveCharmsAndEndpoints() error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		url, origin, _, err := h.bundleResolver.ResolveCharm(ch, origin, false) // no --switch possible.
+		url, origin, _, err := h.bundleResolver.ResolveCharm(ctx, ch, origin, false) // no --switch possible.
 		if err != nil {
 			return errors.Annotatef(err, "cannot resolve charm or bundle %q", ch.Name)
 		}
@@ -368,7 +369,7 @@ func (h *bundleHandler) resolveCharmsAndEndpoints() error {
 			origin = origin.WithBase(nil)
 		}
 
-		h.ctx.Infof(formatLocatedText(ch, origin))
+		h.ctx.Infof("%s", formatLocatedText(ch, origin))
 		if origin.Type == "bundle" {
 			return errors.Errorf("expected charm, got bundle %q", ch.Name)
 		}
@@ -390,7 +391,7 @@ func (h *bundleHandler) resolveCharmsAndEndpoints() error {
 	return nil
 }
 
-func (h *bundleHandler) resolveCharmChannelAndRevision(charmURL string, charmBase corebase.Base, charmChannel, arch string, revision int) (string, int, error) {
+func (h *bundleHandler) resolveCharmChannelAndRevision(ctx context.Context, charmURL string, charmBase corebase.Base, charmChannel, arch string, revision int) (string, int, error) {
 	if h.isLocalCharm(charmURL) {
 		return charmChannel, -1, nil
 	}
@@ -422,7 +423,7 @@ func (h *bundleHandler) resolveCharmChannelAndRevision(charmURL string, charmBas
 	if err != nil {
 		return "", -1, errors.Trace(err)
 	}
-	_, origin, _, err = h.bundleResolver.ResolveCharm(ch, origin, false) // no --switch possible.
+	_, origin, _, err = h.bundleResolver.ResolveCharm(ctx, ch, origin, false) // no --switch possible.
 	if err != nil {
 		return "", -1, errors.Annotatef(err, "cannot resolve charm or bundle %q", ch.Name)
 	}
@@ -454,7 +455,7 @@ func (h *bundleHandler) constructChannelAndOrigin(schema charm.Schema, revision 
 	return channel, origin, nil
 }
 
-func (h *bundleHandler) getChanges() error {
+func (h *bundleHandler) getChanges(ctx context.Context) error {
 	bundleURL := ""
 	if h.bundleURL != nil {
 		bundleURL = h.bundleURL.String()
@@ -480,16 +481,16 @@ func (h *bundleHandler) getChanges() error {
 		Force:            h.force,
 	}
 	if logger.IsLevelEnabled(corelogger.TRACE) {
-		logger.Tracef("bundlechanges.ChangesConfig.Bundle %s", pretty.Sprint(cfg.Bundle))
-		logger.Tracef("bundlechanges.ChangesConfig.BundleURL %s", pretty.Sprint(cfg.BundleURL))
-		logger.Tracef("bundlechanges.ChangesConfig.Model %s", pretty.Sprint(cfg.Model))
+		logger.Tracef(ctx, "bundlechanges.ChangesConfig.Bundle %s", pretty.Sprint(cfg.Bundle))
+		logger.Tracef(ctx, "bundlechanges.ChangesConfig.BundleURL %s", pretty.Sprint(cfg.BundleURL))
+		logger.Tracef(ctx, "bundlechanges.ChangesConfig.Model %s", pretty.Sprint(cfg.Model))
 	}
-	changes, err := bundlechanges.FromData(cfg)
+	changes, err := bundlechanges.FromData(ctx, cfg)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if logger.IsLevelEnabled(corelogger.TRACE) {
-		logger.Tracef("changes %s", pretty.Sprint(changes))
+		logger.Tracef(ctx, "changes %s", pretty.Sprint(changes))
 	}
 	h.changes = changes
 	return nil
@@ -511,39 +512,39 @@ func (h *bundleHandler) handleChanges(ctx context.Context) error {
 	for i, change := range h.changes {
 		fmt.Fprint(h.ctx.Stdout, fmtChange(change))
 		if logger.IsLevelEnabled(corelogger.TRACE) {
-			logger.Tracef("%d: change %s", i, pretty.Sprint(change))
+			logger.Tracef(ctx, "%d: change %s", i, pretty.Sprint(change))
 		}
 
 		var err error
 		switch change := change.(type) {
 		case *bundlechanges.AddCharmChange:
-			err = h.addCharm(change)
+			err = h.addCharm(ctx, change)
 		case *bundlechanges.AddMachineChange:
-			err = h.addMachine(change)
+			err = h.addMachine(ctx, change)
 		case *bundlechanges.AddRelationChange:
-			err = h.addRelation(change)
+			err = h.addRelation(ctx, change)
 		case *bundlechanges.AddApplicationChange:
 			err = h.addApplication(ctx, change)
 		case *bundlechanges.ScaleChange:
-			err = h.scaleApplication(change)
+			err = h.scaleApplication(ctx, change)
 		case *bundlechanges.AddUnitChange:
-			err = h.addUnit(change)
+			err = h.addUnit(ctx, change)
 		case *bundlechanges.ExposeChange:
-			err = h.exposeApplication(change)
+			err = h.exposeApplication(ctx, change)
 		case *bundlechanges.SetAnnotationsChange:
-			err = h.setAnnotations(change)
+			err = h.setAnnotations(ctx, change)
 		case *bundlechanges.UpgradeCharmChange:
 			err = h.upgradeCharm(ctx, change)
 		case *bundlechanges.SetOptionsChange:
-			err = h.setOptions(change)
+			err = h.setOptions(ctx, change)
 		case *bundlechanges.SetConstraintsChange:
-			err = h.setConstraints(change)
+			err = h.setConstraints(ctx, change)
 		case *bundlechanges.CreateOfferChange:
-			err = h.createOffer(change)
+			err = h.createOffer(ctx, change)
 		case *bundlechanges.ConsumeOfferChange:
-			err = h.consumeOffer(change)
+			err = h.consumeOffer(ctx, change)
 		case *bundlechanges.GrantOfferAccessChange:
-			err = h.grantOfferAccess(change)
+			err = h.grantOfferAccess(ctx, change)
 		default:
 			return errors.Errorf("unknown change type: %T", change)
 		}
@@ -572,7 +573,7 @@ func (h *bundleHandler) isLocalCharm(name string) bool {
 }
 
 // addCharm adds a charm to the environment.
-func (h *bundleHandler) addCharm(change *bundlechanges.AddCharmChange) error {
+func (h *bundleHandler) addCharm(ctx context.Context, change *bundlechanges.AddCharmChange) error {
 	if h.dryRun {
 		return nil
 	}
@@ -592,7 +593,7 @@ func (h *bundleHandler) addCharm(change *bundlechanges.AddCharmChange) error {
 
 	// First attempt to interpret as a local path.
 	if h.isLocalCharm(chParams.Charm) {
-		return h.addLocalCharm(chParams, id)
+		return h.addLocalCharm(ctx, chParams, id)
 	}
 
 	// Not a local charm, so grab from the store.
@@ -630,7 +631,7 @@ func (h *bundleHandler) addCharm(change *bundlechanges.AddCharmChange) error {
 		return errors.Trace(err)
 	}
 
-	url, resolvedOrigin, supportedBases, err := h.bundleResolver.ResolveCharm(ch, origin, false) // no --switch possible.
+	url, resolvedOrigin, supportedBases, err := h.bundleResolver.ResolveCharm(ctx, ch, origin, false) // no --switch possible.
 	if err != nil {
 		return errors.Annotatef(err, "cannot resolve %q", ch.Name)
 	}
@@ -654,24 +655,24 @@ func (h *bundleHandler) addCharm(change *bundlechanges.AddCharmChange) error {
 		return errors.Trace(err)
 	}
 	resolvedOrigin.Base = selectedBase
-	logger.Tracef("Using channel %s from %v to deploy %v", resolvedOrigin.Base, supportedBases, url)
+	logger.Tracef(ctx, "Using channel %s from %v to deploy %v", resolvedOrigin.Base, supportedBases, url)
 
 	var charmOrigin commoncharm.Origin
-	charmOrigin, err = h.deployAPI.AddCharm(url, resolvedOrigin, h.force)
+	charmOrigin, err = h.deployAPI.AddCharm(ctx, url, resolvedOrigin, h.force)
 	if err != nil {
 		return errors.Annotatef(err, "cannot add charm %q", ch.Name)
 	} else if url == nil {
 		return errors.Errorf("unexpected charm URL %q", ch.Name)
 	}
 
-	logger.Debugf("added charm %s for channel %s", url, channel)
+	logger.Debugf(ctx, "added charm %s for channel %s", url, channel)
 	charmAlias := url.String()
 	h.results[id] = charmAlias
 	h.addOrigin(*url, channel, charmOrigin)
 	return nil
 }
 
-func (h *bundleHandler) addLocalCharm(chParams bundlechanges.AddCharmParams, id string) error {
+func (h *bundleHandler) addLocalCharm(ctx context.Context, chParams bundlechanges.AddCharmParams, id string) error {
 	// The charm path could contain the local schema prefix. If that's the
 	// case we should remove that before attempting to join with the bundle
 	// directory.
@@ -697,10 +698,10 @@ func (h *bundleHandler) addLocalCharm(chParams bundlechanges.AddCharmParams, id 
 	}); err != nil && !h.force {
 		return errors.Annotatef(err, "cannot deploy local charm at %q", charmPath)
 	}
-	if curl, err = h.deployAPI.AddLocalCharm(curl, ch, h.force); err != nil {
+	if curl, err = h.deployAPI.AddLocalCharm(ctx, curl, ch, h.force); err != nil {
 		return err
 	}
-	logger.Debugf("added charm %s", curl)
+	logger.Debugf(ctx, "added charm %s", curl)
 	h.results[id] = curl.String()
 	// We know we're a local charm and local charms don't require an
 	// explicit tailored origin. Instead we can just use a placeholder
@@ -766,7 +767,7 @@ func (h *bundleHandler) addApplication(ctx context.Context, change *bundlechange
 	}
 	origin, ok := h.getOrigin(*curl, channel)
 	if !ok {
-		return errors.Errorf("unexpected charm %q, charm not found for application %q", curl.Name, p.Application)
+		return errors.Errorf("unexpected charm %q, charm not found for application %q", curl, p.Application)
 	}
 
 	// Handle application constraints.
@@ -820,7 +821,7 @@ func (h *bundleHandler) addApplication(ctx context.Context, change *bundlechange
 		return errors.Trace(err)
 	}
 
-	charmInfo, err := h.deployAPI.CharmInfo(chID.URL)
+	charmInfo, err := h.deployAPI.CharmInfo(ctx, chID.URL)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -897,7 +898,7 @@ func (h *bundleHandler) addApplication(ctx context.Context, change *bundlechange
 		Force:            h.force,
 	}
 	// Deploy the application.
-	if err := h.deployAPI.Deploy(args); err != nil {
+	if err := h.deployAPI.Deploy(ctx, args); err != nil {
 		return errors.Annotatef(err, "cannot deploy application %q", p.Application)
 	}
 	h.writeAddedResources(resNames2IDs)
@@ -981,14 +982,14 @@ func (h *bundleHandler) selectedBase(ch charm.CharmMeta, chBase corebase.Base) (
 }
 
 // scaleApplication updates the number of units for an application.
-func (h *bundleHandler) scaleApplication(change *bundlechanges.ScaleChange) error {
+func (h *bundleHandler) scaleApplication(ctx context.Context, change *bundlechanges.ScaleChange) error {
 	if h.dryRun {
 		return nil
 	}
 
 	p := change.Params
 
-	result, err := h.deployAPI.ScaleApplication(application.ScaleApplicationParams{
+	result, err := h.deployAPI.ScaleApplication(ctx, application.ScaleApplicationParams{
 		ApplicationName: p.Application,
 		Scale:           p.Scale,
 	})
@@ -1002,7 +1003,7 @@ func (h *bundleHandler) scaleApplication(change *bundlechanges.ScaleChange) erro
 }
 
 // addMachine creates a new top-level machine or container in the environment.
-func (h *bundleHandler) addMachine(change *bundlechanges.AddMachineChange) error {
+func (h *bundleHandler) addMachine(ctx context.Context, change *bundlechanges.AddMachineChange) error {
 	p := change.Params
 	var (
 		verbose []string
@@ -1069,8 +1070,8 @@ func (h *bundleHandler) addMachine(change *bundlechanges.AddMachineChange) error
 		}
 		machineParams.ContainerType = containerType
 		if p.ParentId != "" {
-			logger.Debugf("p.ParentId: %q", p.ParentId)
-			id, err := h.resolveMachine(p.ParentId)
+			logger.Debugf(ctx, "p.ParentId: %q", p.ParentId)
+			id, err := h.resolveMachine(ctx, p.ParentId)
 			if err != nil {
 				return errors.Annotatef(err, "cannot retrieve parent placement for %s", deployedApps())
 			}
@@ -1078,8 +1079,8 @@ func (h *bundleHandler) addMachine(change *bundlechanges.AddMachineChange) error
 			machineParams.ParentId = h.topLevelMachine(id)
 		}
 	}
-	logger.Debugf("machineParams: %s", pretty.Sprint(machineParams))
-	r, err := h.deployAPI.AddMachines([]params.AddMachineParams{machineParams})
+	logger.Debugf(ctx, "machineParams: %s", pretty.Sprint(machineParams))
+	r, err := h.deployAPI.AddMachines(ctx, []params.AddMachineParams{machineParams})
 	if err != nil {
 		return errors.Annotatef(err, "cannot create machine for holding %s", deployedApps())
 	}
@@ -1090,11 +1091,11 @@ func (h *bundleHandler) addMachine(change *bundlechanges.AddMachineChange) error
 	if logger.IsLevelEnabled(corelogger.DEBUG) {
 		// Only do the work in for deployedApps, if debugging is enabled.
 		if p.ContainerType == "" {
-			logger.Debugf("created new machine %s for holding %s", machine, deployedApps())
+			logger.Debugf(ctx, "created new machine %s for holding %s", machine, deployedApps())
 		} else if p.ParentId == "" {
-			logger.Debugf("created %s container in new machine for holding %s", machine, deployedApps())
+			logger.Debugf(ctx, "created %s container in new machine for holding %s", machine, deployedApps())
 		} else {
-			logger.Debugf("created %s container in machine %s for holding %s", machine, machineParams.ParentId, deployedApps())
+			logger.Debugf(ctx, "created %s container in machine %s for holding %s", machine, machineParams.ParentId, deployedApps())
 		}
 	}
 	h.results[change.Id()] = machine
@@ -1102,7 +1103,7 @@ func (h *bundleHandler) addMachine(change *bundlechanges.AddMachineChange) error
 }
 
 // addRelation creates a relationship between two applications.
-func (h *bundleHandler) addRelation(change *bundlechanges.AddRelationChange) error {
+func (h *bundleHandler) addRelation(ctx context.Context, change *bundlechanges.AddRelationChange) error {
 	if h.dryRun {
 		return nil
 	}
@@ -1116,7 +1117,7 @@ func (h *bundleHandler) addRelation(change *bundlechanges.AddRelationChange) err
 		return errors.Errorf("attempting to apply %s without prerequisites", p.Endpoint2)
 	}
 	// TODO(wallyworld) - CMR support in bundles
-	_, err = h.deployAPI.AddRelation([]string{ep1, ep2}, nil)
+	_, err = h.deployAPI.AddRelation(ctx, []string{ep1, ep2}, nil)
 	if err != nil {
 		// TODO(thumper): remove this error check when we add resolving
 		// implicit relations.
@@ -1129,7 +1130,7 @@ func (h *bundleHandler) addRelation(change *bundlechanges.AddRelationChange) err
 }
 
 // addUnit adds a single unit to an application already present in the environment.
-func (h *bundleHandler) addUnit(change *bundlechanges.AddUnitChange) error {
+func (h *bundleHandler) addUnit(ctx context.Context, change *bundlechanges.AddUnitChange) error {
 	if h.dryRun {
 		return nil
 	}
@@ -1144,14 +1145,14 @@ func (h *bundleHandler) addUnit(change *bundlechanges.AddUnitChange) error {
 	var placementArg []*instance.Placement
 	targetMachine := p.To
 	if targetMachine != "" {
-		logger.Debugf("addUnit: placement %q", targetMachine)
+		logger.Debugf(ctx, "addUnit: placement %q", targetMachine)
 		// The placement maybe "container:machine"
 		container := ""
 		if parts := strings.Split(targetMachine, ":"); len(parts) > 1 {
 			container = parts[0]
 			targetMachine = parts[1]
 		}
-		targetMachine, err = h.resolveMachine(targetMachine)
+		targetMachine, err = h.resolveMachine(ctx, targetMachine)
 		if err != nil {
 			// Should never happen.
 			return errors.Annotatef(err, "cannot retrieve placement for %q unit", applicationName)
@@ -1164,10 +1165,10 @@ func (h *bundleHandler) addUnit(change *bundlechanges.AddUnitChange) error {
 		if err != nil {
 			return errors.Errorf("invalid --to parameter %q", directive)
 		}
-		logger.Debugf("  resolved: placement %q", directive)
+		logger.Debugf(ctx, "  resolved: placement %q", directive)
 		placementArg = append(placementArg, placement)
 	}
-	r, err := h.deployAPI.AddUnits(application.AddUnitsParams{
+	r, err := h.deployAPI.AddUnits(ctx, application.AddUnitsParams{
 		ApplicationName: applicationName,
 		NumUnits:        1,
 		Placement:       placementArg,
@@ -1177,13 +1178,13 @@ func (h *bundleHandler) addUnit(change *bundlechanges.AddUnitChange) error {
 	}
 	unit := r[0]
 	if targetMachine == "" {
-		logger.Debugf("added %s unit to new machine", unit)
+		logger.Debugf(ctx, "added %s unit to new machine", unit)
 		// In this case, the unit name is stored in results instead of the
 		// machine id, which is lazily evaluated later only if required.
 		// This way we avoid waiting for watcher updates.
 		h.results[change.Id()] = unit
 	} else {
-		logger.Debugf("added %s unit to new machine", unit)
+		logger.Debugf(ctx, "added %s unit to new machine", unit)
 		h.results[change.Id()] = targetMachine
 	}
 
@@ -1243,7 +1244,7 @@ func (h *bundleHandler) upgradeCharm(ctx context.Context, change *bundlechanges.
 		Force:           h.force,
 	}
 	// Bundles only ever deal with the current generation.
-	if err := h.deployAPI.SetCharm(model.GenerationMaster, cfg); err != nil {
+	if err := h.deployAPI.SetCharm(ctx, cfg); err != nil {
 		return errors.Trace(err)
 	}
 	h.writeAddedResources(resNames2IDs)
@@ -1252,7 +1253,7 @@ func (h *bundleHandler) upgradeCharm(ctx context.Context, change *bundlechanges.
 }
 
 func (h *bundleHandler) upgradeCharmResources(ctx context.Context, chID application.CharmID, param bundlechanges.UpgradeCharmParams) (map[string]string, error) {
-	meta, err := utils.GetMetaResources(chID.URL, h.deployAPI)
+	meta, err := utils.GetMetaResources(ctx, chID.URL, h.deployAPI)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1262,7 +1263,7 @@ func (h *bundleHandler) upgradeCharmResources(ctx context.Context, chID applicat
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	filtered, err := utils.GetUpgradeResources(chID, charms.NewClient(h.deployAPI), resourceLister, param.Application, resMap, meta)
+	filtered, err := utils.GetUpgradeResources(ctx, chID, charms.NewClient(h.deployAPI), resourceLister, param.Application, resMap, meta)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1288,7 +1289,7 @@ func (h *bundleHandler) upgradeCharmResources(ctx context.Context, chID applicat
 }
 
 // setOptions updates application configuration settings.
-func (h *bundleHandler) setOptions(change *bundlechanges.SetOptionsChange) error {
+func (h *bundleHandler) setOptions(ctx context.Context, change *bundlechanges.SetOptionsChange) error {
 	p := change.Params
 	h.ctx.Verbosef("  setting options:")
 	for key, value := range p.Options {
@@ -1309,19 +1310,19 @@ func (h *bundleHandler) setOptions(change *bundlechanges.SetOptionsChange) error
 		return errors.Annotatef(err, "cannot marshal options for application %q", p.Application)
 	}
 
-	err = h.deployAPI.SetConfig(model.GenerationMaster, p.Application, string(cfg), nil)
+	err = h.deployAPI.SetConfig(ctx, p.Application, string(cfg), nil)
 	return errors.Annotatef(err, "cannot update options for application %q", p.Application)
 }
 
 // setConstraints updates application constraints.
-func (h *bundleHandler) setConstraints(change *bundlechanges.SetConstraintsChange) error {
+func (h *bundleHandler) setConstraints(ctx context.Context, change *bundlechanges.SetConstraintsChange) error {
 	if h.dryRun {
 		return nil
 	}
 	p := change.Params
 	// We know that p.constraints is a valid constraints type due to the validation.
 	cons, _ := constraints.Parse(p.Constraints)
-	if err := h.deployAPI.SetConstraints(p.Application, cons); err != nil {
+	if err := h.deployAPI.SetConstraints(ctx, p.Application, cons); err != nil {
 		// This should never happen, as the bundle is already verified.
 		return errors.Annotatef(err, "cannot update constraints for application %q", p.Application)
 	}
@@ -1330,7 +1331,7 @@ func (h *bundleHandler) setConstraints(change *bundlechanges.SetConstraintsChang
 }
 
 // exposeApplication exposes an application.
-func (h *bundleHandler) exposeApplication(change *bundlechanges.ExposeChange) error {
+func (h *bundleHandler) exposeApplication(ctx context.Context, change *bundlechanges.ExposeChange) error {
 	if h.dryRun {
 		return nil
 	}
@@ -1348,14 +1349,14 @@ func (h *bundleHandler) exposeApplication(change *bundlechanges.ExposeChange) er
 		}
 	}
 
-	if err := h.deployAPI.Expose(application, exposedEndpoints); err != nil {
+	if err := h.deployAPI.Expose(ctx, application, exposedEndpoints); err != nil {
 		return errors.Annotatef(err, "cannot expose application %s", application)
 	}
 	return nil
 }
 
 // setAnnotations sets annotations for an application or a machine.
-func (h *bundleHandler) setAnnotations(change *bundlechanges.SetAnnotationsChange) error {
+func (h *bundleHandler) setAnnotations(ctx context.Context, change *bundlechanges.SetAnnotationsChange) error {
 	p := change.Params
 	h.ctx.Verbosef("  setting annotations:")
 	for key, value := range p.Annotations {
@@ -1378,7 +1379,7 @@ func (h *bundleHandler) setAnnotations(change *bundlechanges.SetAnnotationsChang
 	default:
 		return errors.Errorf("unexpected annotation entity type %q", p.EntityType)
 	}
-	result, err := h.deployAPI.SetAnnotation(map[string]map[string]string{tag: p.Annotations})
+	result, err := h.deployAPI.SetAnnotation(ctx, map[string]map[string]string{tag: p.Annotations})
 	if err == nil && len(result) > 0 {
 		err = result[0].Error
 	}
@@ -1389,13 +1390,13 @@ func (h *bundleHandler) setAnnotations(change *bundlechanges.SetAnnotationsChang
 }
 
 // createOffer creates an offer targeting one or more application endpoints.
-func (h *bundleHandler) createOffer(change *bundlechanges.CreateOfferChange) error {
+func (h *bundleHandler) createOffer(ctx context.Context, change *bundlechanges.CreateOfferChange) error {
 	if h.dryRun {
 		return nil
 	}
 
 	p := change.Params
-	result, err := h.deployAPI.Offer(h.targetModelUUID, p.Application, p.Endpoints, h.accountUser, p.OfferName, "")
+	result, err := h.deployAPI.Offer(ctx, h.targetModelUUID, p.Application, p.Endpoints, h.accountUser, p.OfferName, "")
 	if err == nil && len(result) > 0 && result[0].Error != nil {
 		err = result[0].Error
 	}
@@ -1403,21 +1404,21 @@ func (h *bundleHandler) createOffer(change *bundlechanges.CreateOfferChange) err
 }
 
 // consumeOffer consumes an existing offer
-func (h *bundleHandler) consumeOffer(change *bundlechanges.ConsumeOfferChange) error {
+func (h *bundleHandler) consumeOffer(ctx context.Context, change *bundlechanges.ConsumeOfferChange) error {
 	if h.dryRun {
 		return nil
 	}
 
 	p := change.Params
-	url, err := charm.ParseOfferURL(p.URL)
+	url, err := crossmodel.ParseOfferURL(p.URL)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if url.HasEndpoint() {
 		return errors.Errorf("saas offer %q shouldn't include endpoint", p.URL)
 	}
-	if url.User == "" {
-		url.User = h.accountUser
+	if url.ModelQualifier == "" {
+		url.ModelQualifier = h.accountUser
 	}
 	if url.Source == "" {
 		url.Source = h.controllerName
@@ -1435,13 +1436,13 @@ func (h *bundleHandler) consumeOffer(change *bundlechanges.ConsumeOfferChange) e
 	// target) controller, as the names of controllers might not match and we
 	// end up with an error stating that the controller doesn't exist, even
 	// though it's correct.
-	consumeDetails, err := controllerOfferAPI.GetConsumeDetails(url.AsLocal().String())
+	consumeDetails, err := controllerOfferAPI.GetConsumeDetails(ctx, url.AsLocal().String())
 	if err != nil {
 		return errors.Trace(err)
 	}
 	// Parse the offer details URL and add the source controller so
 	// things like status can show the original source of the offer.
-	offerURL, err := charm.ParseOfferURL(consumeDetails.Offer.OfferURL)
+	offerURL, err := crossmodel.ParseOfferURL(consumeDetails.Offer.OfferURL)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1460,13 +1461,13 @@ func (h *bundleHandler) consumeOffer(change *bundlechanges.ConsumeOfferChange) e
 			return errors.Trace(err)
 		}
 		arg.ControllerInfo = &crossmodel.ControllerInfo{
-			ControllerTag: controllerTag,
-			Alias:         consumeDetails.ControllerInfo.Alias,
-			Addrs:         consumeDetails.ControllerInfo.Addrs,
-			CACert:        consumeDetails.ControllerInfo.CACert,
+			ControllerUUID: controllerTag.Id(),
+			Alias:          consumeDetails.ControllerInfo.Alias,
+			Addrs:          consumeDetails.ControllerInfo.Addrs,
+			CACert:         consumeDetails.ControllerInfo.CACert,
 		}
 	}
-	localName, err := h.deployAPI.Consume(arg)
+	localName, err := h.deployAPI.Consume(ctx, arg)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1476,7 +1477,7 @@ func (h *bundleHandler) consumeOffer(change *bundlechanges.ConsumeOfferChange) e
 }
 
 // grantOfferAccess grants access to an offer.
-func (h *bundleHandler) grantOfferAccess(change *bundlechanges.GrantOfferAccessChange) error {
+func (h *bundleHandler) grantOfferAccess(ctx context.Context, change *bundlechanges.GrantOfferAccessChange) error {
 	if h.dryRun {
 		return nil
 	}
@@ -1484,7 +1485,7 @@ func (h *bundleHandler) grantOfferAccess(change *bundlechanges.GrantOfferAccessC
 	p := change.Params
 
 	offerURL := fmt.Sprintf("%s.%s", h.targetModelName, p.Offer)
-	if err := h.deployAPI.GrantOffer(p.User, p.Access, offerURL); err != nil && !isUserAlreadyHasAccessErr(err) {
+	if err := h.deployAPI.GrantOffer(ctx, p.User, p.Access, offerURL); err != nil && !isUserAlreadyHasAccessErr(err) {
 
 		return errors.Annotatef(err, "cannot grant %s access to user %s on offer %s", p.Access, p.User, offerURL)
 	}
@@ -1523,8 +1524,8 @@ func (h *bundleHandler) applicationsForMachineChange(change *bundlechanges.AddMa
 
 // resolveMachine returns the machine id resolving the given unit or machine
 // placeholder.
-func (h *bundleHandler) resolveMachine(placeholder string) (string, error) {
-	logger.Debugf("resolveMachine(%q)", placeholder)
+func (h *bundleHandler) resolveMachine(ctx context.Context, placeholder string) (string, error) {
+	logger.Debugf(ctx, "resolveMachine(%q)", placeholder)
 	machineOrUnit, ok := resolve(placeholder, h.results)
 	if !ok {
 		// programming error
@@ -1544,7 +1545,7 @@ func (h *bundleHandler) resolveMachine(placeholder string) (string, error) {
 	var result string
 	err := retry.Call(retry.CallArgs{
 		Func: func() error {
-			status, err := h.deployAPI.Status(nil)
+			status, err := h.deployAPI.Status(ctx, nil)
 			if err != nil {
 				return errors.Annotate(err, "cannot get model status")
 			}
@@ -1637,7 +1638,7 @@ func resolveRelation(e string, results map[string]string) (string, error) {
 // entity from the model, and in these situations the placeholder value doesn't
 // start with the '$'.
 func resolve(placeholder string, results map[string]string) (string, bool) {
-	logger.Debugf("resolve %q from %s", placeholder, pretty.Sprint(results))
+	logger.Debugf(context.TODO(), "resolve %q from %s", placeholder, pretty.Sprint(results))
 	if !strings.HasPrefix(placeholder, "$") {
 		return placeholder, true
 	}
@@ -1681,7 +1682,7 @@ func (b bundleArchConstraint) Arch() (string, error) {
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	return constraints.ArchOrDefault(cons, &b.defaultConstraints), nil
+	return constraints.ArchOrDefault(cons, b.defaultConstraints), nil
 }
 
 func verifyEndpointBindings(endpointBindings map[string]string, knownSpaceNames set.Strings) error {

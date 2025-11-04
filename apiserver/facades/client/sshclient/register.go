@@ -4,50 +4,51 @@
 package sshclient
 
 import (
-	stdcontext "context"
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("SSHClient", 4, func(stdCtx stdcontext.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newFacade(ctx)
-	}, reflect.TypeOf((*Facade)(nil)))
+	registry.MustRegister("SSHClient", 4, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV4(ctx)
+	}, reflect.TypeOf((*FacadeV4)(nil)))
+	registry.MustRegister("SSHClient", 5, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV5(ctx)
+	}, reflect.TypeOf((*FacadeV5)(nil)))
 }
 
-func newFacade(ctx facade.ModelContext) (*Facade, error) {
-	st := ctx.State()
-	m, err := st.Model()
+func newFacadeV5(ctx facade.ModelContext) (*FacadeV5, error) {
+	facade, err := newFacadeBase(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	leadershipReader, err := ctx.LeadershipReader()
+	return &FacadeV5{Facade: facade}, nil
+}
+
+func newFacadeV4(ctx facade.ModelContext) (*FacadeV4, error) {
+	facade, err := newFacadeV5(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	facadeBackend := backend{
-		State:          st,
-		networkService: ctx.ServiceFactory().Network(),
-		EnvironConfigGetter: stateenvirons.EnvironConfigGetter{
-			Model: m, CloudService: ctx.ServiceFactory().Cloud(), CredentialService: ctx.ServiceFactory().Credential()},
-		controllerTag: m.ControllerTag(),
-		modelTag:      m.ModelTag(),
-	}
+	return &FacadeV4{FacadeV5: facade}, nil
+}
+
+func newFacadeBase(ctx facade.ModelContext) (*Facade, error) {
+	domainServices := ctx.DomainServices()
 	return internalFacade(
-		&facadeBackend,
-		ctx.ServiceFactory().Config(),
-		ctx.ControllerUUID(),
-		leadershipReader,
+		names.NewControllerTag(ctx.ControllerUUID()),
+		names.NewModelTag(ctx.ModelUUID().String()),
+		domainServices.Application(),
+		domainServices.Machine(),
+		domainServices.Network(),
+		domainServices.Config(),
+		domainServices.ModelProvider(),
 		ctx.Auth(),
-		func(ctx stdcontext.Context, args environs.OpenParams) (Broker, error) {
-			return caas.New(ctx, args)
-		},
 	)
 }

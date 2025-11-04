@@ -4,62 +4,72 @@
 package commands_test
 
 import (
+	"testing"
+
 	"github.com/juju/proxy"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/internal/packaging/commands"
 )
 
-var _ = gc.Suite(&SnapSuite{})
+func TestSnapSuite(t *testing.T) {
+	tc.Run(t, &SnapSuite{})
+}
 
 type SnapSuite struct {
-	paccmder commands.PackageCommander
+	snapCommander commands.SnapPackageCommander
 }
 
-func (s *SnapSuite) SetUpSuite(c *gc.C) {
-	s.paccmder = commands.NewSnapPackageCommander()
+func (s *SnapSuite) SetUpSuite(c *tc.C) {
+	s.snapCommander = commands.NewSnapPackageCommander()
 }
 
-func (s *SnapSuite) TestProxyConfigContentsEmpty(c *gc.C) {
-	out := s.paccmder.ProxyConfigContents(proxy.Settings{})
-	c.Assert(out, gc.Equals, "")
+func (s *SnapSuite) TestSetProxyCommandsEmpty(c *tc.C) {
+	out, err := s.snapCommander.SetProxyCmds(proxy.Settings{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(out, tc.HasLen, 0)
 }
 
-func (s *SnapSuite) TestProxyConfigContentsPartial(c *gc.C) {
+func (s *SnapSuite) TestSetProxyCommandsPartial(c *tc.C) {
 	sets := proxy.Settings{
 		Http: "dat-proxy.zone:8080",
 	}
 
-	output := s.paccmder.ProxyConfigContents(sets)
-	c.Assert(output, gc.Equals, `proxy.http="dat-proxy.zone:8080"`)
+	output, err := s.snapCommander.SetProxyCmds(sets)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(output, tc.HasLen, 1)
+	c.Assert(output[0], tc.Equals, `snap set system proxy.http="dat-proxy.zone:8080"`)
 }
 
-func (s *SnapSuite) TestProxyConfigContentsFull(c *gc.C) {
+func (s *SnapSuite) TestProxyConfigContentsFull(c *tc.C) {
 	sets := proxy.Settings{
 		Http:  "dat-proxy.zone:8080",
 		Https: "https://much-security.com",
-		Ftp:   "gimme-files.zone",
 	}
-	expected := `proxy.http="dat-proxy.zone:8080"
-proxy.https="https://much-security.com"
-proxy.ftp="gimme-files.zone"`
 
-	output := s.paccmder.ProxyConfigContents(sets)
-	c.Assert(output, gc.Equals, expected)
+	output, err := s.snapCommander.SetProxyCmds(sets)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(output, tc.HasLen, 2)
+	c.Assert(output[0], tc.Equals, `snap set system proxy.http="dat-proxy.zone:8080"`)
+	c.Assert(output[1], tc.Equals, `snap set system proxy.https="https://much-security.com"`)
 }
 
-func (s *SnapSuite) TestSetProxyCommands(c *gc.C) {
+func (s *SnapSuite) TestSetProxyCommandsUnsupported(c *tc.C) {
 	sets := proxy.Settings{
-		Http:  "dat-proxy.zone:8080",
-		Https: "https://much-security.com",
-		Ftp:   "gimme-files.zone",
+		Ftp: "gimme-files.zone",
 	}
-	expected := []string{
-		`snap set system proxy.http="dat-proxy.zone:8080"`,
-		`snap set system proxy.https="https://much-security.com"`,
-		`snap set system proxy.ftp="gimme-files.zone"`,
-	}
+	_, err := s.snapCommander.SetProxyCmds(sets)
+	c.Assert(err, tc.ErrorIs, commands.ErrProxySettingNotSupported)
 
-	output := s.paccmder.SetProxyCmds(sets)
-	c.Assert(output, gc.DeepEquals, expected)
+	sets = proxy.Settings{
+		NoProxy: "local1,local2",
+	}
+	_, err = s.snapCommander.SetProxyCmds(sets)
+	c.Assert(err, tc.ErrorIs, commands.ErrProxySettingNotSupported)
+
+	sets = proxy.Settings{
+		AutoNoProxy: "local1,local2",
+	}
+	_, err = s.snapCommander.SetProxyCmds(sets)
+	c.Assert(err, tc.ErrorIs, commands.ErrProxySettingNotSupported)
 }

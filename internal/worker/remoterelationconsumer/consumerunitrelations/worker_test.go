@@ -1,0 +1,377 @@
+// Copyright 2025 Canonical Ltd.
+// Licensed under the AGPLv3, see LICENCE file for details.
+
+package consumerunitrelations
+
+import (
+	context "context"
+	"testing"
+	"time"
+
+	"github.com/juju/clock"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
+	"go.uber.org/mock/gomock"
+	"gopkg.in/macaroon.v2"
+
+	coreapplication "github.com/juju/juju/core/application"
+	"github.com/juju/juju/core/errors"
+	corerelation "github.com/juju/juju/core/relation"
+	watcher "github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/watchertest"
+	relation "github.com/juju/juju/domain/relation"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+)
+
+type localUnitRelationsWorker struct {
+	service *MockService
+
+	consumerRelationUUID    corerelation.UUID
+	consumerApplicationUUID coreapplication.UUID
+
+	macaroon *macaroon.Macaroon
+
+	changes chan RelationUnitChange
+}
+
+func TestLocalUnitRelationsWorker(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &localUnitRelationsWorker{})
+}
+
+func (s *localUnitRelationsWorker) SetUpTest(c *tc.C) {
+	s.consumerRelationUUID = tc.Must(c, corerelation.NewUUID)
+	s.consumerApplicationUUID = tc.Must(c, coreapplication.NewUUID)
+
+	s.changes = make(chan RelationUnitChange, 1)
+	s.macaroon = newMacaroon(c, "test")
+}
+
+func (s *localUnitRelationsWorker) TestValidate(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	cfg := s.newConfig(c)
+	err := cfg.Validate()
+	c.Check(err, tc.ErrorIsNil)
+
+	cfg = s.newConfig(c)
+	cfg.Service = nil
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.ConsumerApplicationUUID = ""
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.ConsumerRelationUUID = ""
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.Macaroon = nil
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.Changes = nil
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.Clock = nil
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+
+	cfg = s.newConfig(c)
+	cfg.Logger = nil
+	err = cfg.Validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+}
+
+func (s *localUnitRelationsWorker) TestStart(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	done := make(chan struct{})
+	s.service.EXPECT().WatchRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).DoAndReturn(
+		func(context.Context, corerelation.UUID, coreapplication.UUID) (watcher.NotifyWatcher, error) {
+			defer close(done)
+			return watchertest.NewMockNotifyWatcher(make(<-chan struct{})), nil
+		})
+
+	w := s.newWorker(c, s.newConfig(c))
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-done:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for WatchRelationUnits to be called")
+	}
+
+	workertest.CleanKill(c, w)
+}
+
+func (s *localUnitRelationsWorker) TestChangeEvent(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	ch := make(chan struct{})
+
+	sync := make(chan struct{})
+	s.service.EXPECT().WatchRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		DoAndReturn(func(context.Context, corerelation.UUID, coreapplication.UUID) (watcher.NotifyWatcher, error) {
+			defer close(sync)
+			return watchertest.NewMockNotifyWatcher(ch), nil
+		})
+	s.service.EXPECT().GetRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		Return(relation.RelationUnitChange{
+			UnitsSettings: []relation.UnitSettings{{
+				UnitID: 0,
+				Settings: map[string]string{
+					"foo": "baz",
+				},
+			}},
+			AllUnits: []int{
+				0, 1, 2, 4,
+			},
+			InScopeUnits: []int{
+				0, 1, 2,
+			},
+			ApplicationSettings: map[string]string{
+				"foo": "bar",
+			},
+		}, nil)
+
+	w := s.newWorker(c, s.newConfig(c))
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-sync:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for WatchRelationUnits to be called")
+	}
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting to send change event")
+	}
+
+	var change RelationUnitChange
+	select {
+	case change = <-s.changes:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for changes to be sent")
+	}
+
+	c.Assert(change, tc.DeepEquals, RelationUnitChange{
+		RelationUnitChange: relation.RelationUnitChange{
+			UnitsSettings: []relation.UnitSettings{{
+				UnitID: 0,
+				Settings: map[string]string{
+					"foo": "baz",
+				},
+			}},
+			AllUnits:     []int{0, 1, 2, 4},
+			InScopeUnits: []int{0, 1, 2},
+			ApplicationSettings: map[string]string{
+				"foo": "bar",
+			},
+		},
+		Macaroon: s.macaroon,
+	})
+
+	workertest.CleanKill(c, w)
+}
+
+func (s *localUnitRelationsWorker) TestChangeEventIsEmpty(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	ch := make(chan struct{})
+
+	sync := make(chan struct{})
+	s.service.EXPECT().WatchRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		DoAndReturn(func(context.Context, corerelation.UUID, coreapplication.UUID) (watcher.NotifyWatcher, error) {
+			defer close(sync)
+			return watchertest.NewMockNotifyWatcher(ch), nil
+		})
+	s.service.EXPECT().GetRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		Return(relation.RelationUnitChange{}, nil)
+
+	w := s.newWorker(c, s.newConfig(c))
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-sync:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for WatchRelationUnits to be called")
+	}
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting to send change event")
+	}
+
+	select {
+	case <-s.changes:
+		c.Fatalf("unexpected change received")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	workertest.CleanKill(c, w)
+}
+
+func (s *localUnitRelationsWorker) TestGetRelationUnitsError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	ch := make(chan struct{})
+
+	done := make(chan struct{})
+	sync := make(chan struct{})
+	s.service.EXPECT().WatchRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		DoAndReturn(func(context.Context, corerelation.UUID, coreapplication.UUID) (watcher.NotifyWatcher, error) {
+			defer close(sync)
+			return watchertest.NewMockNotifyWatcher(ch), nil
+		})
+	s.service.EXPECT().GetRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		DoAndReturn(func(ctx context.Context, _ corerelation.UUID, _ coreapplication.UUID) (relation.RelationUnitChange, error) {
+			defer close(done)
+			return relation.RelationUnitChange{}, errors.NotFound
+		})
+
+	w := s.newWorker(c, s.newConfig(c))
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-sync:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for WatchRelationUnits to be called")
+	}
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting to send change event")
+	}
+
+	select {
+	case <-done:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for GetRelationUnits to be called")
+	}
+
+	err := workertest.CheckKilled(c, w)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
+}
+
+func (s *localUnitRelationsWorker) TestReport(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	ch := make(chan struct{})
+
+	sync := make(chan struct{})
+	s.service.EXPECT().WatchRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		DoAndReturn(func(context.Context, corerelation.UUID, coreapplication.UUID) (watcher.NotifyWatcher, error) {
+			defer close(sync)
+			return watchertest.NewMockNotifyWatcher(ch), nil
+		})
+	s.service.EXPECT().GetRelationUnits(gomock.Any(), s.consumerRelationUUID, s.consumerApplicationUUID).
+		Return(relation.RelationUnitChange{
+			UnitsSettings: []relation.UnitSettings{{
+				UnitID: 0,
+				Settings: map[string]string{
+					"foo": "baz",
+				},
+			}},
+			AllUnits: []int{
+				0, 1, 2, 4,
+			},
+			InScopeUnits: []int{
+				0, 1, 2,
+			},
+			ApplicationSettings: map[string]string{
+				"foo": "bar",
+			},
+		}, nil)
+
+	w := s.newWorker(c, s.newConfig(c))
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-sync:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for WatchRelationUnits to be called")
+	}
+
+	c.Assert(w.Report(), tc.DeepEquals, map[string]any{
+		"consumer-application-uuid": s.consumerApplicationUUID.String(),
+		"consumer-relation-uuid":    s.consumerRelationUUID.String(),
+		"changed-units":             []relation.UnitSettings(nil),
+		"all-units":                 []int(nil),
+		"in-scope-units":            []int(nil),
+		"settings":                  map[string]string(nil),
+	})
+
+	select {
+	case ch <- struct{}{}:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting to send change event")
+	}
+
+	select {
+	case <-s.changes:
+	case <-c.Context().Done():
+		c.Fatalf("timed out waiting for changes to be sent")
+	}
+
+	c.Assert(w.Report(), tc.DeepEquals, map[string]any{
+		"consumer-application-uuid": s.consumerApplicationUUID.String(),
+		"consumer-relation-uuid":    s.consumerRelationUUID.String(),
+		"changed-units": []relation.UnitSettings{{
+			UnitID: 0,
+			Settings: map[string]string{
+				"foo": "baz",
+			},
+		}},
+		"all-units":      []int{0, 1, 2, 4},
+		"in-scope-units": []int{0, 1, 2},
+		"settings": map[string]string{
+			"foo": "bar",
+		},
+	})
+
+	workertest.CleanKill(c, w)
+}
+
+func (s *localUnitRelationsWorker) newConfig(c *tc.C) Config {
+	return Config{
+		Service:                 s.service,
+		ConsumerApplicationUUID: s.consumerApplicationUUID,
+		ConsumerRelationUUID:    s.consumerRelationUUID,
+		Macaroon:                s.macaroon,
+		Changes:                 s.changes,
+		Clock:                   clock.WallClock,
+		Logger:                  loggertesting.WrapCheckLog(c),
+	}
+}
+
+func (s *localUnitRelationsWorker) newWorker(c *tc.C, cfg Config) *localWorker {
+	w, err := NewWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+
+	return w.(*localWorker)
+}
+
+func (s *localUnitRelationsWorker) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.service = NewMockService(ctrl)
+
+	c.Cleanup(func() {
+		s.service = nil
+	})
+
+	return ctrl
+}

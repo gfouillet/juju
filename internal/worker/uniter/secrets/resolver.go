@@ -28,13 +28,13 @@ type secretsResolver struct {
 	secretsTracker   SecretStateTracker
 	rotatedSecrets   func(url string)
 	expiredRevisions func(rev string)
-	deletedSecrets   func(uris []string)
+	deletedSecrets   func(revisions map[string][]int)
 }
 
 // NewSecretsResolver returns a new Resolver that returns operations
 // to rotate, expire, or run other secret related hooks.
 func NewSecretsResolver(logger logger.Logger, secretsTracker SecretStateTracker,
-	rotatedSecrets func(string), expiredRevisions func(string), deletedSecrets func([]string),
+	rotatedSecrets func(string), expiredRevisions func(string), deletedSecrets func(map[string][]int),
 ) resolver.Resolver {
 	return &secretsResolver{logger: logger, secretsTracker: secretsTracker,
 		rotatedSecrets: rotatedSecrets, expiredRevisions: expiredRevisions, deletedSecrets: deletedSecrets}
@@ -65,7 +65,7 @@ func (s *secretsResolver) NextOp(
 	}
 	for uri, info := range remoteState.ConsumedSecretInfo {
 		existing := s.secretsTracker.ConsumedSecretRevision(uri)
-		s.logger.Debugf("%s: current=%d, new=%d", uri, existing, info.LatestRevision)
+		s.logger.Debugf(ctx, "%s: current=%d, new=%d", uri, existing, info.LatestRevision)
 		if existing != info.LatestRevision {
 			op, err := opFactory.NewRunHook(hook.Info{
 				Kind:           hooks.SecretChanged,
@@ -76,18 +76,24 @@ func (s *secretsResolver) NextOp(
 			return op, err
 		}
 	}
-	if len(remoteState.DeletedSecrets) > 0 {
-		op, err := opFactory.NewNoOpSecretsRemoved(remoteState.DeletedSecrets)
+
+	deletedObsoleteRevisions := s.secretsTracker.CollectRemovedSecretObsoleteRevisions(
+		remoteState.ObsoleteSecretRevisions)
+	if len(remoteState.DeletedSecretRevisions) > 0 ||
+		len(deletedObsoleteRevisions) > 0 {
+		op, err := opFactory.NewNoOpSecretsRemoved(
+			remoteState.DeletedSecretRevisions, deletedObsoleteRevisions)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		opCompleted := func() {
-			s.deletedSecrets(remoteState.DeletedSecrets)
+			s.deletedSecrets(remoteState.DeletedSecretRevisions)
 		}
 		return &secretCompleter{op, opCompleted}, nil
 	}
+
 	for uri, revs := range remoteState.ObsoleteSecretRevisions {
-		s.logger.Debugf("%s: resolving obsolete %v", uri, revs)
+		s.logger.Debugf(ctx, "%s: resolving obsolete %v", uri, revs)
 		alreadyProcessed := set.NewInts(s.secretsTracker.SecretObsoleteRevisions(uri)...)
 		for _, rev := range revs {
 			if alreadyProcessed.Contains(rev) {
@@ -148,7 +154,7 @@ func (s *secretsResolver) expireOp(
 	revSpec := remoteState.ExpiredSecretRevisions[0]
 	uri, rev := splitSecretChange(revSpec)
 	if rev == 0 {
-		s.logger.Warningf("ignoring invalid secret revision %q", revSpec)
+		s.logger.Warningf(context.TODO(), "ignoring invalid secret revision %q", revSpec)
 		return nil, resolver.ErrNoOperation
 	}
 

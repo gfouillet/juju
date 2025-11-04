@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"gopkg.in/yaml.v2"
@@ -33,6 +32,7 @@ import (
 	bundlechanges "github.com/juju/juju/internal/bundle/changes"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -43,12 +43,12 @@ const (
 
 // ModelConfigGetter defines an interface for getting model configuration.
 type ModelConfigGetter interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 }
 
 // ModelConstraintsGetter defines an interface for getting model constraints.
 type ModelConstraintsGetter interface {
-	GetModelConstraints() (constraints.Value, error)
+	GetModelConstraints(ctx context.Context) (constraints.Value, error)
 }
 
 // ModelConfigClient represents a model config client for requesting model
@@ -70,14 +70,13 @@ Bundle can be a local bundle file or the name of a bundle in
 Charmhub. The bundle can also be combined with overlays (in the
 same way as the deploy command) before comparing with the model.
 
-The map-machines option works similarly as for the deploy command, but
+The ` + "`map-machines`" + ` option works similarly as for the ` + "`deploy`" + ` command, but
 existing is always assumed, so it doesn't need to be specified.
 
-Config values for comparison are always source from the "current" model
-generation.
+Config values for comparison are always sourced from the current model.
 
 Specifying a base will retrieve the bundle for the relevant store for
-the give base.
+the given base.
 `
 
 const bundleDiffExamples = `
@@ -96,14 +95,14 @@ func NewDiffBundleCommand() cmd.Command {
 		arches: arch.AllArches(),
 	}
 	command.charmAdaptorFn = command.charmAdaptor
-	command.newAPIRootFn = func() (base.APICallCloser, error) {
-		return command.NewAPIRoot()
+	command.newAPIRootFn = func(ctx context.Context) (base.APICallCloser, error) {
+		return command.NewAPIRoot(ctx)
 	}
 	command.modelConfigClientFunc = func(api base.APICallCloser) ModelConfigClient {
 		return modelconfig.NewClient(api)
 	}
-	command.modelConstraintsClientFunc = func() (ModelConstraintsClient, error) {
-		root, err := command.NewAPIRoot()
+	command.modelConstraintsClientFunc = func(ctx context.Context) (ModelConstraintsClient, error) {
+		root, err := command.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -129,9 +128,9 @@ type diffBundleCommand struct {
 	machineMap     string
 
 	charmAdaptorFn             func(base.APICallCloser, *charm.URL) (BundleResolver, error)
-	newAPIRootFn               func() (base.APICallCloser, error)
+	newAPIRootFn               func(ctx context.Context) (base.APICallCloser, error)
 	modelConfigClientFunc      func(base.APICallCloser) ModelConfigClient
-	modelConstraintsClientFunc func() (ModelConstraintsClient, error)
+	modelConstraintsClientFunc func(ctx context.Context) (ModelConstraintsClient, error)
 }
 
 // IsSuperCommand is part of cmd.Command.
@@ -145,7 +144,7 @@ func (c *diffBundleCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:     "diff-bundle",
 		Args:     "<bundle file or name>",
-		Purpose:  "Compare a bundle with a model and report any differences.",
+		Purpose:  "Compares a bundle with a model and reports any differences.",
 		Doc:      bundleDiffDoc,
 		Examples: bundleDiffExamples,
 		SeeAlso: []string{
@@ -159,7 +158,7 @@ func (c *diffBundleCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 
 	f.StringVar(&c.arch, "arch", "", fmt.Sprintf("specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.base, "base", "", "specify a base")
+	f.StringVar(&c.base, "base", "", "Specify a base")
 	f.StringVar(&c.channelStr, "channel", "", "Channel to use when getting the bundle from Charmhub")
 	f.Var(cmd.NewAppendStringsValue(&c.bundleOverlays), "overlay", "Bundles to overlay on the primary bundle, applied in order")
 	f.StringVar(&c.machineMap, "map-machines", "", "Indicates how existing machines correspond to bundle machines")
@@ -203,7 +202,7 @@ func (c *diffBundleCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	apiRoot, err := c.newAPIRootFn()
+	apiRoot, err := c.newAPIRootFn(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -266,7 +265,7 @@ func (c *diffBundleCommand) warnForMissingRelationEndpoints(ctx *cmd.Context, bu
 		return nil
 	}
 
-	logger.Warningf(
+	logger.Warningf(context.TODO(),
 		"The provided bundle includes relations without explicit endpoints, which may appear as extra entries in the diff output.\nTo avoid this in the future, update the endpoints for the following bundle relations:\n - %s",
 		strings.Join(missing, "\n - "),
 	)
@@ -295,7 +294,7 @@ func (c *diffBundleCommand) bundleDataSource(ctx *cmd.Context, apiRoot base.APIC
 		return ds, nil
 	}
 
-	modelConstraints, err := c.getModelConstraints()
+	modelConstraints, err := c.getModelConstraints(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -317,7 +316,7 @@ func (c *diffBundleCommand) bundleDataSource(ctx *cmd.Context, apiRoot base.APIC
 		return nil, errors.Trace(err)
 	}
 
-	bundleURL, bundleOrigin, err := charmAdaptor.ResolveBundleURL(bURL, origin)
+	bundleURL, bundleOrigin, err := charmAdaptor.ResolveBundleURL(ctx, bURL, origin)
 	if err != nil {
 		if errors.Is(err, errors.NotValid) {
 			ctx.Verbosef("%q can not be found or is not a valid bundle", c.bundle)
@@ -345,13 +344,13 @@ func (c *diffBundleCommand) bundleDataSource(ctx *cmd.Context, apiRoot base.APIC
 }
 
 func (c *diffBundleCommand) charmAdaptor(apiRoot base.APICallCloser, curl *charm.URL) (BundleResolver, error) {
-	downloadClient := func() (store.DownloadBundleClient, error) {
-		apiRoot, err := c.newAPIRootFn()
+	downloadClient := func(ctx context.Context) (store.DownloadBundleClient, error) {
+		apiRoot, err := c.newAPIRootFn(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
-		url, err := c.getCharmHubURL(apiRoot)
+		url, err := c.getCharmHubURL(ctx, apiRoot)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -369,7 +368,7 @@ func (c *diffBundleCommand) readModel(ctx context.Context, apiRoot base.APICallC
 	if err != nil {
 		return nil, errors.Annotate(err, "getting model status")
 	}
-	model, err := appbundle.BuildModelRepresentation(status, c.makeModelExtractor(apiRoot), true, c.bundleMachines)
+	model, err := appbundle.BuildModelRepresentation(ctx, status, c.makeModelExtractor(apiRoot), true, c.bundleMachines)
 	return model, errors.Trace(err)
 }
 
@@ -398,11 +397,11 @@ func (c *diffBundleCommand) archArgumentList() string {
 	return fmt.Sprintf("%s|%s", ArchAll, archList)
 }
 
-func (c *diffBundleCommand) getCharmHubURL(apiRoot base.APICallCloser) (string, error) {
+func (c *diffBundleCommand) getCharmHubURL(ctx context.Context, apiRoot base.APICallCloser) (string, error) {
 	modelConfigClient := c.modelConfigClientFunc(apiRoot)
 	defer func() { _ = modelConfigClient.Close() }()
 
-	attrs, err := modelConfigClient.ModelGet()
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -416,13 +415,13 @@ func (c *diffBundleCommand) getCharmHubURL(apiRoot base.APICallCloser) (string, 
 	return charmHubURL, nil
 }
 
-func (c *diffBundleCommand) getModelConstraints() (constraints.Value, error) {
-	modelConsClient, err := c.modelConstraintsClientFunc()
+func (c *diffBundleCommand) getModelConstraints(ctx context.Context) (constraints.Value, error) {
+	modelConsClient, err := c.modelConstraintsClientFunc(ctx)
 	if err != nil {
 		return constraints.Value{}, errors.Trace(err)
 	}
 	defer func() { _ = modelConsClient.Close() }()
-	return modelConsClient.GetModelConstraints()
+	return modelConsClient.GetModelConstraints(ctx)
 }
 
 type extractorImpl struct {
@@ -432,28 +431,28 @@ type extractorImpl struct {
 }
 
 // GetAnnotations is part of ModelExtractor.
-func (e *extractorImpl) GetAnnotations(tags []string) ([]params.AnnotationsGetResult, error) {
-	return e.annotations.Get(tags)
+func (e *extractorImpl) GetAnnotations(ctx context.Context, tags []string) ([]params.AnnotationsGetResult, error) {
+	return e.annotations.Get(ctx, tags)
 }
 
 // GetConstraints is part of ModelExtractor.
-func (e *extractorImpl) GetConstraints(applications ...string) ([]constraints.Value, error) {
-	return e.application.GetConstraints(applications...)
+func (e *extractorImpl) GetConstraints(ctx context.Context, applications ...string) ([]constraints.Value, error) {
+	return e.application.GetConstraints(ctx, applications...)
 }
 
 // GetConfig is part of ModelExtractor.
-func (e *extractorImpl) GetConfig(branchName string, applications ...string) ([]map[string]interface{}, error) {
-	return e.application.GetConfig(branchName, applications...)
+func (e *extractorImpl) GetConfig(ctx context.Context, applications ...string) ([]map[string]interface{}, error) {
+	return e.application.GetConfig(ctx, applications...)
 }
 
 // Sequences is part of ModelExtractor.
-func (e *extractorImpl) Sequences() (map[string]int, error) {
-	return e.modelConfig.Sequences()
+func (e *extractorImpl) Sequences(ctx context.Context) (map[string]int, error) {
+	return e.modelConfig.Sequences(ctx)
 }
 
 // BundleResolver defines what we need from a charm store to resolve a
 // bundle and read the bundle data.
 type BundleResolver interface {
-	ResolveBundleURL(*charm.URL, commoncharm.Origin) (*charm.URL, commoncharm.Origin, error)
+	ResolveBundleURL(context.Context, *charm.URL, commoncharm.Origin) (*charm.URL, commoncharm.Origin, error)
 	GetBundle(context.Context, *charm.URL, commoncharm.Origin, string) (charm.Bundle, error)
 }

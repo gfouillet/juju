@@ -14,12 +14,13 @@ import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4"
-	"gopkg.in/juju/environschema.v1"
 	"gopkg.in/yaml.v2"
 
+	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/internal/configschema"
 	"github.com/juju/juju/internal/pki"
 )
 
@@ -34,13 +35,6 @@ const (
 const (
 	// APIPort is the port used for api connections.
 	APIPort = "api-port"
-
-	// ControllerAPIPort is an optional port that may be set for controllers
-	// that have a very heavy load. If this port is set, this port is used by
-	// the controllers to talk to each other - used for the local API connection
-	// as well as the pubsub forwarders. If this value is set, the api-port
-	// isn't opened until the controllers have started properly.
-	ControllerAPIPort = "controller-api-port"
 
 	// ControllerName is the canonical name for the controller.
 	ControllerName = "controller-name"
@@ -57,18 +51,12 @@ const (
 	ControllerResourceDownloadLimit = "controller-resource-download-limit"
 
 	// AgentRateLimitMax is the maximum size of the token bucket used to
-	// ratelimit the agent connections.
+	// ratelimit the agent connections to the API server.
 	AgentRateLimitMax = "agent-ratelimit-max"
 
-	// AgentRateLimitRate is the time taken to add a new token to the bucket.
-	// This effectively says that we can have a new agent connect per duration specified.
+	// AgentRateLimitRate is the interval at which a new token is added to
+	// the token bucket, in milliseconds (ms).
 	AgentRateLimitRate = "agent-ratelimit-rate"
-
-	// APIPortOpenDelay is a duration that the controller will wait
-	// between when the controller has been deemed to be ready to open
-	// the api-port and when the api-port is actually opened. This value
-	// is only used when a controller-api-port value is set.
-	APIPortOpenDelay = "api-port-open-delay"
 
 	// AuditingEnabled determines whether the controller will record
 	// auditing information.
@@ -100,9 +88,6 @@ const (
 	// write time) so any changes to the set of read-only methods in
 	// new versions of Juju will be honoured.
 	ReadOnlyMethodsWildcard = "ReadOnlyMethods"
-
-	// StatePort is the port used for mongo connections.
-	StatePort = "state-port"
 
 	// CACertKey is the key for the controller's CA certificate attribute.
 	CACertKey = "ca-cert"
@@ -149,15 +134,6 @@ const (
 	// they don't have any access rights to the controller itself.
 	AllowModelAccessKey = "allow-model-access"
 
-	// MongoMemoryProfile sets the memory profile for MongoDB. Valid values are:
-	// - "low": use the least possible memory
-	// - "default": use the default memory profile
-	MongoMemoryProfile = "mongo-memory-profile"
-
-	// JujuDBSnapChannel selects the channel to use when installing Mongo
-	// snaps for focal or later. The value is ignored for older releases.
-	JujuDBSnapChannel = "juju-db-snap-channel"
-
 	// MaxDebugLogDuration is used to provide a backstop to the execution of a
 	// debug-log command. If someone starts a debug-log session in a remote
 	// screen for example, it is very easy to disconnect from the screen while
@@ -166,12 +142,12 @@ const (
 	// which should be more than enough time for a debugging session.
 	MaxDebugLogDuration = "max-debug-log-duration"
 
-	// AgentLogfileMaxSize is the maximum file size in MB of each
-	// agent/controller log file.
+	// AgentLogfileMaxSize is the maximum file size of each agent log file,
+	// in MB.
 	AgentLogfileMaxSize = "agent-logfile-max-size"
 
-	// AgentLogfileMaxBackups is the number of old agent/controller log files
-	// to keep (compressed).
+	// AgentLogfileMaxBackups is the maximum number of old agent log files
+	// to keep (compressed; saved on each unit, synced to the controller).
 	AgentLogfileMaxBackups = "agent-logfile-max-backups"
 
 	// ModelLogfileMaxSize is the maximum size of the log file written out by the
@@ -228,10 +204,6 @@ const (
 	// executing a model migration.
 	MigrationMinionWaitMax = "migration-agent-wait-time"
 
-	// JujuHASpace is the network space within which the MongoDB replica-set
-	// should communicate.
-	JujuHASpace = "juju-ha-space"
-
 	// JujuManagementSpace is the network space that agents should use to
 	// communicate with controllers.
 	JujuManagementSpace = "juju-mgmt-space"
@@ -279,6 +251,10 @@ const (
 	// OpenTelemetrySampleRatio returns the sample ratio for open telemetry.
 	OpenTelemetrySampleRatio = "open-telemetry-sample-ratio"
 
+	// OpenTelemetryTailSamplingThreshold returns the tail sampling threshold
+	// for open telemetry as a duration.
+	OpenTelemetryTailSamplingThreshold = "open-telemetry-tail-sampling-threshold"
+
 	// ObjectStoreType is the type of object store to use for storing blobs.
 	// This isn't currently allowed to be changed dynamically, that will come
 	// when we support multiple object store types (not including state).
@@ -306,10 +282,24 @@ const (
 	// Can be set to "legacy", "snapstore", "local" or "local-dangerous".
 	// Cannot be changed.
 	JujudControllerSnapSource = "jujud-controller-snap-source"
+
+	// SSHServerPort is the port used for the embedded SSH server.
+	SSHServerPort = "ssh-server-port"
+
+	// SSHMaxConcurrentConnections is the maximum number of concurrent SSH
+	// connections to the controller.
+	SSHMaxConcurrentConnections = "ssh-max-concurrent-connections"
 )
 
 // Attribute Defaults
 const (
+	// DefaultSSHMaxConcurrentConnections is the default maximum number of
+	// concurrent SSH connections to the controller.
+	DefaultSSHMaxConcurrentConnections = 100
+
+	// DefaultSSHServerPort is the default port used for the embedded SSH server.
+	DefaultSSHServerPort = 17022
+
 	// DefaultApplicationResourceDownloadLimit allows unlimited
 	// resource download requests initiated by a unit agent per application.
 	DefaultApplicationResourceDownloadLimit = 0
@@ -354,13 +344,6 @@ const (
 
 	// DefaultAPIPortOpenDelay is the default value for api-port-open-delay.
 	DefaultAPIPortOpenDelay = 2 * time.Second
-
-	// DefaultMongoMemoryProfile is the default profile used by mongo.
-	DefaultMongoMemoryProfile = MongoProfDefault
-
-	// DefaultJujuDBSnapChannel is the default snap channel for installing
-	// mongo in focal or later.
-	DefaultJujuDBSnapChannel = "4.4/stable"
 
 	// DefaultMaxDebugLogDuration is the default duration that debug-log
 	// commands can run before being terminated by the API server.
@@ -450,6 +433,10 @@ const (
 	// By default we only want to trace 10% of the requests.
 	DefaultOpenTelemetrySampleRatio = 0.1
 
+	// DefaultOpenTelemetryTailSamplingThreshold is the default value for the
+	// tail sampling threshold for open telemetry.
+	DefaultOpenTelemetryTailSamplingThreshold = 1 * time.Millisecond
+
 	// JujudControllerSnapSource is the default value for the jujud controller
 	// snap source, which is the snapstore.
 	// TODO(jujud-controller-snap): change this to "snapstore" once it is implemented.
@@ -468,20 +455,15 @@ var (
 		AgentRateLimitMax,
 		AgentRateLimitRate,
 		APIPort,
-		APIPortOpenDelay,
 		AutocertDNSNameKey,
 		AutocertURLKey,
 		CACertKey,
-		ControllerAPIPort,
 		ControllerName,
 		ControllerUUIDKey,
 		LoginTokenRefreshURL,
 		IdentityPublicKey,
 		IdentityURL,
 		SetNUMAControlPolicyKey,
-		StatePort,
-		MongoMemoryProfile,
-		JujuDBSnapChannel,
 		MaxDebugLogDuration,
 		MaxTxnLogSize,
 		MaxPruneTxnBatchSize,
@@ -493,7 +475,6 @@ var (
 		PruneTxnQueryCount,
 		PruneTxnSleepTime,
 		PublicDNSAddress,
-		JujuHASpace,
 		JujuManagementSpace,
 		AuditingEnabled,
 		AuditLogCaptureArgs,
@@ -515,6 +496,7 @@ var (
 		OpenTelemetryInsecure,
 		OpenTelemetryStackTraces,
 		OpenTelemetrySampleRatio,
+		OpenTelemetryTailSamplingThreshold,
 		ObjectStoreType,
 		ObjectStoreS3Endpoint,
 		ObjectStoreS3StaticKey,
@@ -522,6 +504,8 @@ var (
 		ObjectStoreS3StaticSession,
 		SystemSSHKeys,
 		JujudControllerSnapSource,
+		SSHMaxConcurrentConnections,
+		SSHServerPort,
 	}
 
 	// For backwards compatibility, we must include "anything", "juju-apiserver"
@@ -544,7 +528,6 @@ var (
 		AgentLogfileMaxSize,
 		AgentRateLimitMax,
 		AgentRateLimitRate,
-		APIPortOpenDelay,
 		ApplicationResourceDownloadLimit,
 		AuditingEnabled,
 		AuditLogCaptureArgs,
@@ -552,10 +535,8 @@ var (
 		AuditLogMaxBackups,
 		AuditLogMaxSize,
 		CAASImageRepo,
-		ControllerName,
 		ControllerResourceDownloadLimit,
 		Features,
-		JujuHASpace,
 		JujuManagementSpace,
 		MaxAgentStateSize,
 		MaxCharmStateSize,
@@ -565,12 +546,12 @@ var (
 		MigrationMinionWaitMax,
 		ModelLogfileMaxBackups,
 		ModelLogfileMaxSize,
-		MongoMemoryProfile,
 		OpenTelemetryEnabled,
 		OpenTelemetryEndpoint,
 		OpenTelemetryInsecure,
 		OpenTelemetryStackTraces,
 		OpenTelemetrySampleRatio,
+		OpenTelemetryTailSamplingThreshold,
 		PruneTxnQueryCount,
 		PruneTxnSleepTime,
 		PublicDNSAddress,
@@ -581,6 +562,7 @@ var (
 		ObjectStoreS3StaticKey,
 		ObjectStoreS3StaticSecret,
 		ObjectStoreS3StaticSession,
+		SSHMaxConcurrentConnections,
 	)
 
 	methodNameRE = regexp.MustCompile(`[[:alpha:]][[:alnum:]]*\.[[:alpha:]][[:alnum:]]*`)
@@ -615,7 +597,7 @@ func NewConfig(controllerUUID, caCert string, attrs map[string]interface{}) (Con
 	// TODO(wallyworld) - use core/config when it supports duration types
 	for k, v := range attrs {
 		field, ok := ConfigSchema[k]
-		if !ok || field.Type != environschema.Tlist {
+		if !ok || field.Type != configschema.Tlist {
 			continue
 		}
 		str, ok := v.(string)
@@ -714,34 +696,9 @@ func (c Config) durationOrDefault(name string, defaultVal time.Duration) time.Du
 	return defaultVal
 }
 
-// StatePort returns the mongo server port for the environment.
-func (c Config) StatePort() int {
-	return c.mustInt(StatePort)
-}
-
 // APIPort returns the API server port for the environment.
 func (c Config) APIPort() int {
 	return c.mustInt(APIPort)
-}
-
-// APIPortOpenDelay returns the duration to wait before opening
-// the APIPort once the controller has started up. Only used when
-// the ControllerAPIPort is non-zero.
-func (c Config) APIPortOpenDelay() time.Duration {
-	return c.durationOrDefault(APIPortOpenDelay, DefaultAPIPortOpenDelay)
-}
-
-// ControllerAPIPort returns the optional API port to be used for
-// the controllers to talk to each other. A zero value means that
-// it is not set.
-func (c Config) ControllerAPIPort() int {
-	if value, ok := c[ControllerAPIPort].(float64); ok {
-		return int(value)
-	}
-	// If the value isn't an int, this conversion will fail and value
-	// will be 0, which is what we want here.
-	value, _ := c[ControllerAPIPort].(int)
-	return value
 }
 
 // ApplicationResourceDownloadLimit limits the number of concurrent resource download
@@ -904,19 +861,6 @@ func (c Config) LoginTokenRefreshURL() string {
 	return c.asString(LoginTokenRefreshURL)
 }
 
-// MongoMemoryProfile returns the selected profile or low.
-func (c Config) MongoMemoryProfile() string {
-	if profile, ok := c[MongoMemoryProfile]; ok {
-		return profile.(string)
-	}
-	return DefaultMongoMemoryProfile
-}
-
-// JujuDBSnapChannel returns the channel for installing mongo snaps.
-func (c Config) JujuDBSnapChannel() string {
-	return c.asString(JujuDBSnapChannel)
-}
-
 // JujudControllerSnapSource returns the source of the jujud-controller snap.
 func (c Config) JujudControllerSnapSource() string {
 	if src, ok := c[JujudControllerSnapSource]; ok {
@@ -1000,12 +944,6 @@ func (c Config) PublicDNSAddress() string {
 	return c.asString(PublicDNSAddress)
 }
 
-// JujuHASpace is the network space within which the MongoDB replica-set
-// should communicate.
-func (c Config) JujuHASpace() string {
-	return c.asString(JujuHASpace)
-}
-
 // SystemSSHKeys returns the trusted ssh keys that agents of this controller
 // should trust.
 func (c Config) SystemSSHKeys() string {
@@ -1014,8 +952,8 @@ func (c Config) SystemSSHKeys() string {
 
 // JujuManagementSpace is the network space that agents should use to
 // communicate with controllers.
-func (c Config) JujuManagementSpace() string {
-	return c.asString(JujuManagementSpace)
+func (c Config) JujuManagementSpace() network.SpaceName {
+	return network.SpaceName(c.asString(JujuManagementSpace))
 }
 
 // CAASOperatorImagePath sets the URL of the docker image
@@ -1095,6 +1033,12 @@ func (c Config) OpenTelemetrySampleRatio() float64 {
 	return DefaultOpenTelemetrySampleRatio
 }
 
+// OpenTelemetryTailSamplingThreshold returns the tail sampling threshold
+// for open telemetry tracing spans.
+func (c Config) OpenTelemetryTailSamplingThreshold() time.Duration {
+	return c.durationOrDefault(OpenTelemetryTailSamplingThreshold, DefaultOpenTelemetryTailSamplingThreshold)
+}
+
 // ObjectStoreType returns the type of object store to use for storing blobs.
 func (c Config) ObjectStoreType() objectstore.BackendType {
 	return objectstore.BackendType(c.asString(ObjectStoreType))
@@ -1120,6 +1064,17 @@ func (c Config) ObjectStoreS3StaticSecret() string {
 // object stores.
 func (c Config) ObjectStoreS3StaticSession() string {
 	return c.asString(ObjectStoreS3StaticSession)
+}
+
+// SSHServerPort returns the port the SSH server listens on.
+func (c Config) SSHServerPort() int {
+	return c.intOrDefault(SSHServerPort, DefaultSSHServerPort)
+}
+
+// SSHMaxConcurrentConnections returns the maximum number of concurrent
+// SSH connections that the controller will allow.
+func (c Config) SSHMaxConcurrentConnections() int {
+	return c.intOrDefault(SSHMaxConcurrentConnections, DefaultSSHMaxConcurrentConnections)
 }
 
 // Validate ensures that config is a valid configuration.
@@ -1199,12 +1154,6 @@ func Validate(c Config) error {
 		}
 	}
 
-	if mgoMemProfile, ok := c[MongoMemoryProfile].(string); ok {
-		if mgoMemProfile != MongoProfLow && mgoMemProfile != MongoProfDefault {
-			return errors.Errorf("mongo-memory-profile: expected one of %q or %q got string(%q)", MongoProfLow, MongoProfDefault, mgoMemProfile)
-		}
-	}
-
 	if v, err := parseDuration(c, MaxDebugLogDuration); err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	} else if err == nil {
@@ -1255,10 +1204,6 @@ func Validate(c Config) error {
 		}
 	}
 
-	if err := c.validateSpaceConfig(JujuHASpace, "juju HA"); err != nil {
-		return errors.Trace(err)
-	}
-
 	if err := c.validateSpaceConfig(JujuManagementSpace, "juju mgmt"); err != nil {
 		return errors.Trace(err)
 	}
@@ -1298,30 +1243,9 @@ func Validate(c Config) error {
 		}
 	}
 
-	if v, ok := c[ControllerAPIPort].(int); ok {
-		// TODO: change the validation so 0 is invalid and --reset is used.
-		// However that doesn't exist yet.
-		if v < 0 {
-			return errors.NotValidf("non-positive integer for controller-api-port")
-		}
-		if v == c.APIPort() {
-			return errors.NotValidf("controller-api-port matching api-port")
-		}
-		if v == c.StatePort() {
-			return errors.NotValidf("controller-api-port matching state-port")
-		}
-	}
-
 	if v, ok := c[ControllerName].(string); ok {
 		if !names.IsValidControllerName(v) {
 			return errors.Errorf("%s value must be a valid controller name (lowercase or digit with non-leading hyphen), got %q", ControllerName, v)
-		}
-	}
-
-	if v, ok := c[APIPortOpenDelay].(string); ok {
-		_, err := time.ParseDuration(v)
-		if err != nil {
-			return errors.Errorf("%s value %q must be a valid duration", APIPortOpenDelay, v)
 		}
 	}
 
@@ -1374,6 +1298,14 @@ func Validate(c Config) error {
 		}
 	}
 
+	if v, err := parseDuration(c, OpenTelemetryTailSamplingThreshold); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Trace(err)
+	} else if err == nil {
+		if v < 0 {
+			return errors.Errorf("%s value %q must be a positive duration", OpenTelemetryTailSamplingThreshold, v)
+		}
+	}
+
 	if v, ok := c[ObjectStoreType].(string); ok {
 		if v == "" {
 			return errors.NotValidf("empty object store type")
@@ -1392,6 +1324,21 @@ func Validate(c Config) error {
 		}
 	}
 
+	if v, ok := c[SSHServerPort].(int); ok {
+		if v <= 0 {
+			return errors.NotValidf("non-positive integer for ssh-server-port")
+		}
+		if v == c.APIPort() {
+			return errors.NotValidf("ssh-server-port matching api-port")
+		}
+	}
+
+	if v, ok := c[SSHMaxConcurrentConnections].(int); ok {
+		if v <= 0 {
+			return errors.NotValidf("non-positive integer for ssh-max-concurrent-connections")
+		}
+	}
+
 	return nil
 }
 
@@ -1401,7 +1348,11 @@ func (c Config) validateSpaceConfig(key, topic string) error {
 		return nil
 	}
 	if v, ok := val.(string); ok {
-		if !names.IsValidSpace(v) {
+		// NOTE(nvinuesa): We also check for the case where the passed
+		// value is the empty string, this is needed to un-set the
+		// controller config value and not added in the regexp to
+		// validate the space.
+		if !names.IsValidSpace(v) && v != "" {
 			return errors.NotValidf("%s space name %q", topic, val)
 		}
 	} else {
@@ -1425,7 +1376,7 @@ func (c Config) AsSpaceConstraints(spaces *[]string) *[]string {
 		}
 	}
 
-	for _, c := range []string{c.JujuManagementSpace(), c.JujuHASpace()} {
+	for _, c := range []string{c.JujuManagementSpace().String()} {
 		// NOTE (hml) 2019-10-30
 		// This can cause issues in deployment and/or enabling HA if
 		// c == AlphaSpaceName as the provisioner expects any space

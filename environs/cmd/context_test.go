@@ -4,28 +4,29 @@
 package cmd_test
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	environscmd "github.com/juju/juju/environs/cmd"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type contextSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&contextSuite{})
-
-func (s *contextSuite) TestBootstrapContext(c *gc.C) {
-	ctx := environscmd.BootstrapContext(context.Background(), &cmd.Context{})
-	c.Assert(ctx.ShouldVerifyCredentials(), jc.IsTrue)
+func TestContextSuite(t *testing.T) {
+	tc.Run(t, &contextSuite{})
 }
 
-func (s *contextSuite) TestBootstrapContextNoVerify(c *gc.C) {
-	ctx := environscmd.BootstrapContextNoVerify(context.Background(), &cmd.Context{})
-	c.Assert(ctx.ShouldVerifyCredentials(), jc.IsFalse)
+func (s *contextSuite) TestBootstrapContext(c *tc.C) {
+	ctx := environscmd.BootstrapContext(c.Context(), &cmd.Context{})
+	c.Assert(ctx.ShouldVerifyCredentials(), tc.IsTrue)
+}
+
+func (s *contextSuite) TestBootstrapContextNoVerify(c *tc.C) {
+	ctx := environscmd.BootstrapContextNoVerify(c.Context(), &cmd.Context{})
+	c.Assert(ctx.ShouldVerifyCredentials(), tc.IsFalse)
 }

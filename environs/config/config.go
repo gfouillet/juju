@@ -6,6 +6,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -16,21 +17,21 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 	"github.com/juju/schema"
 	"github.com/juju/utils/v4"
-	"github.com/juju/version/v2"
 	"gopkg.in/yaml.v2"
 
 	corebase "github.com/juju/juju/core/base"
-	"github.com/juju/juju/core/network"
+	coremodelconfig "github.com/juju/juju/core/modelconfig"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/charmhub"
 	"github.com/juju/juju/internal/featureflag"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var logger = internallogger.GetLogger("juju.environs.config")
@@ -79,9 +80,6 @@ const (
 
 	// AuthorizedKeysKey is the key for the authorized-keys attribute.
 	AuthorizedKeysKey = "authorized-keys"
-
-	// ProvisionerHarvestModeKey stores the key for this setting.
-	ProvisionerHarvestModeKey = "provisioner-harvest-mode"
 
 	// NumProvisionWorkersKey is the key for number of model provisioner
 	// workers.
@@ -194,9 +192,9 @@ const (
 	// the network for containers.
 	NetBondReconfigureDelayKey = "net-bond-reconfigure-delay"
 
-	// ContainerNetworkingMethod is the key for setting up
-	// networking method for containers.
-	ContainerNetworkingMethod = "container-networking-method"
+	// ContainerNetworkingMethodKey is the key for setting up networking method
+	// for containers.
+	ContainerNetworkingMethodKey = "container-networking-method"
 
 	// StorageDefaultBlockSourceKey is the key for the default block storage source.
 	StorageDefaultBlockSourceKey = "storage-default-block-source"
@@ -212,6 +210,21 @@ const (
 	// automatically retry a hook that has failed
 	AutomaticallyRetryHooks = "automatically-retry-hooks"
 
+	// EnableOSRefreshUpdateKey determines whether newly provisioned instances
+	// should run their respective OS's update capability.
+	EnableOSRefreshUpdateKey = "enable-os-refresh-update"
+
+	// EnableOSUpgradeKey determines whether newly provisioned instances
+	// should run their respective OS's upgrade capability.
+	EnableOSUpgradeKey = "enable-os-upgrade"
+
+	// DevelopmentKey determines whether the model is in development mode.
+	DevelopmentKey = "development"
+
+	// SSLHostnameVerificationKey determines whether the environment has
+	// SSL hostname verification enabled.
+	SSLHostnameVerificationKey = "ssl-hostname-verification"
+
 	// TransmitVendorMetricsKey is the key for whether the controller sends
 	// metrics collected in this model for anonymized aggregate analytics.
 	TransmitVendorMetricsKey = "transmit-vendor-metrics"
@@ -219,14 +232,6 @@ const (
 	// ExtraInfoKey is the key for arbitrary user specified string data that
 	// is stored against the model.
 	ExtraInfoKey = "extra-info"
-
-	// MaxStatusHistoryAge is the maximum age of status history values
-	// to keep when pruning, eg "72h"
-	MaxStatusHistoryAge = "max-status-history-age"
-
-	// MaxStatusHistorySize is the maximum size the status history
-	// collection can grow to before it is pruned, eg "5M"
-	MaxStatusHistorySize = "max-status-history-size"
 
 	// MaxActionResultsAge is the maximum age of actions to keep when pruning, eg
 	// "72h"
@@ -242,9 +247,6 @@ const (
 	// EgressSubnets are the source addresses from which traffic from this model
 	// originates if the model is deployed such that NAT or similar is in use.
 	EgressSubnets = "egress-subnets"
-
-	// FanConfig defines the configuration for FAN network running in the model.
-	FanConfig = "fan-config"
 
 	// CloudInitUserDataKey is the key to specify cloud-init yaml the user
 	// wants to add into the cloud-config data produced by Juju when
@@ -304,76 +306,9 @@ const (
 	// explicitly use for charms unless otherwise provided.
 	DefaultBaseKey = "default-base"
 
-	// SecretBackendKey is used to specify the secret backend.
-	SecretBackendKey = "secret-backend"
-
 	// LoggingConfigKey is used to specify the logging backend configuration.
 	LoggingConfigKey = "logging-config"
 )
-
-// ParseHarvestMode parses description of harvesting method and
-// returns the representation.
-func ParseHarvestMode(description string) (HarvestMode, error) {
-	description = strings.ToLower(description)
-	for method, descr := range harvestingMethodToFlag {
-		if description == descr {
-			return method, nil
-		}
-	}
-	return 0, fmt.Errorf("unknown harvesting method: %s", description)
-}
-
-// HarvestMode is a bit field which is used to store the harvesting
-// behavior for Juju.
-type HarvestMode uint32
-
-const (
-	// HarvestNone signifies that Juju should not harvest any
-	// machines.
-	HarvestNone HarvestMode = 1 << iota
-	// HarvestUnknown signifies that Juju should only harvest machines
-	// which exist, but we don't know about.
-	HarvestUnknown
-	// HarvestDestroyed signifies that Juju should only harvest
-	// machines which have been explicitly released by the user
-	// through a destroy of an application/model/unit.
-	HarvestDestroyed
-	// HarvestAll signifies that Juju should harvest both unknown and
-	// destroyed instances. ♫ Don't fear the reaper. ♫
-	HarvestAll = HarvestUnknown | HarvestDestroyed
-)
-
-// A mapping from method to description. Going this way will be the
-// more common operation, so we want this type of lookup to be O(1).
-var harvestingMethodToFlag = map[HarvestMode]string{
-	HarvestAll:       "all",
-	HarvestNone:      "none",
-	HarvestUnknown:   "unknown",
-	HarvestDestroyed: "destroyed",
-}
-
-// String returns the description of the harvesting mode.
-func (method HarvestMode) String() string {
-	if description, ok := harvestingMethodToFlag[method]; ok {
-		return description
-	}
-	panic("Unknown harvesting method.")
-}
-
-// HarvestNone returns whether or not the None harvesting flag is set.
-func (method HarvestMode) HarvestNone() bool {
-	return method&HarvestNone != 0
-}
-
-// HarvestDestroyed returns whether or not the Destroyed harvesting flag is set.
-func (method HarvestMode) HarvestDestroyed() bool {
-	return method&HarvestDestroyed != 0
-}
-
-// HarvestUnknown returns whether or not the Unknown harvesting flag is set.
-func (method HarvestMode) HarvestUnknown() bool {
-	return method&HarvestUnknown != 0
-}
 
 // GetDefaultSupportedLTSBase returns the DefaultSupportedLTSBase.
 // This is exposed for one reason and one reason only; testing!
@@ -438,12 +373,8 @@ const (
 //
 // The attrs map can not be nil, otherwise a panic is raised.
 func New(withDefaults Defaulting, attrs map[string]any) (*Config, error) {
-	initSchema.Do(func() {
-		allFields = fields()
-		defaultsWhenParsing = allDefaults()
-		withDefaultsChecker = schema.FieldMap(allFields, defaultsWhenParsing)
-		noDefaultsChecker = schema.FieldMap(allFields, alwaysOptional)
-	})
+	ensureSchema()
+
 	checker := noDefaultsChecker
 	if withDefaults {
 		checker = withDefaultsChecker
@@ -480,7 +411,7 @@ func New(withDefaults Defaulting, attrs map[string]any) (*Config, error) {
 	}
 
 	// no old config to compare against
-	if err := Validate(context.TODO(), c, nil); err != nil {
+	if err := Validate(context.Background(), c, nil); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// Copy unknown attributes onto the type-specific map.
@@ -493,12 +424,6 @@ func New(withDefaults Defaulting, attrs map[string]any) (*Config, error) {
 }
 
 const (
-	// DefaultStatusHistoryAge is the default value for MaxStatusHistoryAge.
-	DefaultStatusHistoryAge = "336h" // 2 weeks
-
-	// DefaultStatusHistorySize is the default value for MaxStatusHistorySize.
-	DefaultStatusHistorySize = "5G"
-
 	// DefaultUpdateStatusHookInterval is the default value for
 	// UpdateStatusHookInterval
 	DefaultUpdateStatusHookInterval = "5m"
@@ -522,7 +447,7 @@ var defaultConfigValues = map[string]any{
 	"firewall-mode":              FwInstance,
 	"disable-network-management": false,
 	IgnoreMachineAddresses:       false,
-	"ssl-hostname-verification":  true,
+	SSLHostnameVerificationKey:   true,
 	"proxy-ssh":                  false,
 	DefaultSpaceKey:              "",
 	// Why is net-bond-reconfigure-delay set to 17 seconds?
@@ -542,27 +467,25 @@ var defaultConfigValues = map[string]any{
 	// This value can be further tweaked via:
 	//
 	// $ juju model-config net-bond-reconfigure-delay=30
-	NetBondReconfigureDelayKey: 17,
-	ContainerNetworkingMethod:  "",
+	NetBondReconfigureDelayKey:   17,
+	ContainerNetworkingMethodKey: "",
 
 	DefaultBaseKey: "",
 
-	ProvisionerHarvestModeKey:       HarvestDestroyed.String(),
 	NumProvisionWorkersKey:          16,
 	NumContainerProvisionWorkersKey: 4,
 	ResourceTagsKey:                 "",
 	LoggingConfigKey:                "",
 	AutomaticallyRetryHooks:         true,
-	"enable-os-refresh-update":      true,
-	"enable-os-upgrade":             true,
-	"development":                   false,
+	EnableOSRefreshUpdateKey:        true,
+	EnableOSUpgradeKey:              true,
+	DevelopmentKey:                  false,
 	TestModeKey:                     false,
 	ModeKey:                         RequiresPromptsMode,
 	DisableTelemetryKey:             false,
 	TransmitVendorMetricsKey:        true,
 	UpdateStatusHookInterval:        DefaultUpdateStatusHookInterval,
 	EgressSubnets:                   "",
-	FanConfig:                       "",
 	CloudInitUserDataKey:            "",
 	ContainerInheritPropertiesKey:   "",
 	BackupDirKey:                    "",
@@ -574,7 +497,6 @@ var defaultConfigValues = map[string]any{
 	ImageStreamKey:                            "released",
 	ImageMetadataURLKey:                       "",
 	ImageMetadataDefaultsDisabledKey:          false,
-	AgentStreamKey:                            "released",
 	AgentMetadataURLKey:                       "",
 	ContainerImageStreamKey:                   "released",
 	ContainerImageMetadataURLKey:              "",
@@ -603,13 +525,8 @@ var defaultConfigValues = map[string]any{
 	SnapStoreProxyURLKey:   "",
 
 	// Status history settings
-	MaxStatusHistoryAge:  DefaultStatusHistoryAge,
-	MaxStatusHistorySize: DefaultStatusHistorySize,
 	MaxActionResultsAge:  DefaultActionResultsAge,
 	MaxActionResultsSize: DefaultActionResultsSize,
-
-	// Secret settings.
-	SecretBackendKey: DefaultSecretBackend,
 
 	// Model firewall settings
 	SSHAllowKey:         "0.0.0.0/0,::/0",
@@ -651,23 +568,63 @@ func (c *Config) setLoggingFromEnviron() error {
 }
 
 // CoerceForStorage transforms attributes prior to being saved in a persistent store.
-func CoerceForStorage(attrs map[string]any) map[string]any {
+func CoerceForStorage(attrs map[string]any) (map[string]any, error) {
+	ensureSchema()
+
 	coercedAttrs := make(map[string]any, len(attrs))
-	for attrName, attrValue := range attrs {
-		if attrName == ResourceTagsKey {
-			// Resource Tags are specified by the user as a string but transformed
-			// to a map when config is parsed. We want to store as a string.
-			var tagsSlice []string
-			if tags, ok := attrValue.(map[string]string); ok {
-				for resKey, resValue := range tags {
-					tagsSlice = append(tagsSlice, fmt.Sprintf("%v=%v", resKey, resValue))
-				}
-				attrValue = strings.Join(tagsSlice, " ")
-			}
+	// Only coerce the fields we have values for.
+	for k, v := range attrs {
+		checker, ok := allFields[k]
+		if !ok {
+			// Preserve unknown attributes.
+			coercedAttrs[k] = v
+			continue
 		}
-		coercedAttrs[attrName] = attrValue
+		coercedValue, err := checker.Coerce(v, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", k, err)
+		}
+		coercedAttrs[k] = coercedValue
 	}
-	return coercedAttrs
+
+	if v, ok := coercedAttrs[ResourceTagsKey]; ok {
+		// Resource Tags are specified by the user as a string but transformed
+		// to a map when config is parsed. We want to store as a string.
+		if tags, ok := v.(map[string]string); ok {
+			var tagsSlice []string
+			for resKey, resValue := range tags {
+				tagsSlice = append(tagsSlice, fmt.Sprintf("%v=%v", resKey, resValue))
+			}
+			coercedAttrs[ResourceTagsKey] = strings.Join(tagsSlice, " ")
+		}
+	}
+
+	return coercedAttrs, nil
+}
+
+func initSchemas() {
+	allFields = fields()
+	defaultsWhenParsing = allDefaults()
+	withDefaultsChecker = schema.FieldMap(allFields, defaultsWhenParsing)
+	noDefaultsChecker = schema.FieldMap(allFields, alwaysOptional)
+
+	coerceOptional := schema.Defaults{}
+	maps.Copy(coerceOptional, alwaysOptional)
+	coerceOptional[UUIDKey] = schema.Omit
+	coerceOptional[NameKey] = schema.Omit
+	coerceOptional[TypeKey] = schema.Omit
+	coerceChecker = schema.FieldMap(allFields, coerceOptional)
+}
+
+// Coerce transforms the attributes from strings to their typed values.
+func Coerce(attrs map[string]string) (map[string]any, error) {
+	initSchema.Do(initSchemas)
+
+	result, err := coerceChecker.Coerce(attrs, nil)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return result.(map[string]any), nil
 }
 
 // Validate ensures that config is a valid configuration.  If old is not nil,
@@ -696,7 +653,7 @@ func Validate(_ctx context.Context, cfg, old *Config) error {
 	// Check that the agent version parses ok if set explicitly; otherwise leave
 	// it alone.
 	if v, ok := cfg.defined[AgentVersionKey].(string); ok {
-		if _, err := version.Parse(v); err != nil {
+		if _, err := semversion.Parse(v); err != nil {
 			return fmt.Errorf("invalid agent version in model configuration: %q", v)
 		}
 	}
@@ -715,18 +672,6 @@ func Validate(_ctx context.Context, cfg, old *Config) error {
 	// Ensure the resource tags have the expected k=v format.
 	if _, err := cfg.resourceTags(); err != nil {
 		return errors.Annotate(err, "validating resource tags")
-	}
-
-	if v, ok := cfg.defined[MaxStatusHistoryAge].(string); ok {
-		if _, err := time.ParseDuration(v); err != nil {
-			return errors.Annotate(err, "invalid max status history age in model configuration")
-		}
-	}
-
-	if v, ok := cfg.defined[MaxStatusHistorySize].(string); ok {
-		if _, err := utils.ParseSize(v); err != nil {
-			return errors.Annotate(err, "invalid max status history size in model configuration")
-		}
 	}
 
 	if v, ok := cfg.defined[MaxActionResultsAge].(string); ok {
@@ -763,27 +708,6 @@ func Validate(_ctx context.Context, cfg, old *Config) error {
 			if cidr == "0.0.0.0/0" {
 				return errors.Errorf("CIDR %q not allowed", cidr)
 			}
-		}
-	}
-
-	if v, ok := cfg.defined[FanConfig].(string); ok && v != "" {
-		_, err := network.ParseFanConfig(v)
-		if err != nil {
-			return err
-		}
-	}
-
-	if v, ok := cfg.defined[ContainerNetworkingMethod].(string); ok {
-		switch v {
-		case "fan":
-			if cfg, err := cfg.FanConfig(); err != nil || cfg == nil {
-				return errors.New("container-networking-method cannot be set to 'fan' without fan-config set")
-			}
-		case "provider": // TODO(wpk) FIXME we should check that the provider supports this setting!
-		case "local":
-		case "": // We'll try to autoconfigure it
-		default:
-			return fmt.Errorf("Invalid value for container-networking-method - %v", v)
 		}
 	}
 
@@ -1004,7 +928,7 @@ func (c *Config) validateDefaultBase() error {
 	}
 
 	supported := corebase.WorkloadBases()
-	logger.Tracef("supported bases %s", supported)
+	logger.Tracef(context.TODO(), "supported bases %s", supported)
 	var found bool
 	for _, supportedBase := range supported {
 		if parsedBase.IsCompatible(supportedBase) {
@@ -1029,15 +953,9 @@ func (c *Config) DefaultBase() (string, bool) {
 	case string:
 		return s, s != ""
 	default:
-		logger.Errorf("invalid default-base: %q", s)
+		logger.Errorf(context.TODO(), "invalid default-base: %q", s)
 		return "", false
 	}
-}
-
-// SecretBackend returns the secret backend name.
-func (c *Config) SecretBackend() string {
-	value, _ := c.defined[SecretBackendKey].(string)
-	return value
 }
 
 // AuthorizedKeys returns the content for ssh's authorized_keys file.
@@ -1062,8 +980,8 @@ func (c *Config) NetBondReconfigureDelay() int {
 
 // ContainerNetworkingMethod returns the method with which
 // containers network should be set up.
-func (c *Config) ContainerNetworkingMethod() string {
-	return c.asString(ContainerNetworkingMethod)
+func (c *Config) ContainerNetworkingMethod() coremodelconfig.ContainerNetworkingMethod {
+	return coremodelconfig.ContainerNetworkingMethod(c.asString(ContainerNetworkingMethodKey))
 }
 
 // LegacyProxySettings returns all four proxy settings; http, https, ftp, and no
@@ -1256,15 +1174,15 @@ func (c *Config) FirewallMode() string {
 // AgentVersion returns the proposed version number for the agent tools,
 // and whether it has been set. Once an environment is bootstrapped, this
 // must always be valid.
-func (c *Config) AgentVersion() (version.Number, bool) {
+func (c *Config) AgentVersion() (semversion.Number, bool) {
 	if v, ok := c.defined[AgentVersionKey].(string); ok {
-		n, err := version.Parse(v)
+		n, err := semversion.Parse(v)
 		if err != nil {
 			panic(err) // We should have checked it earlier.
 		}
 		return n, true
 	}
-	return version.Zero, false
+	return semversion.Zero, false
 }
 
 // AgentMetadataURL returns the URL that locates the agent tarballs and metadata,
@@ -1318,14 +1236,14 @@ func (c *Config) ContainerImageMetadataDefaultsDisabled() bool {
 
 // Development returns whether the environment is in development mode.
 func (c *Config) Development() bool {
-	value, _ := c.defined["development"].(bool)
+	value, _ := c.defined[DevelopmentKey].(bool)
 	return value
 }
 
 // EnableOSRefreshUpdate returns whether or not newly provisioned
 // instances should run their respective OS's update capability.
 func (c *Config) EnableOSRefreshUpdate() bool {
-	val, ok := c.defined["enable-os-refresh-update"].(bool)
+	val, ok := c.defined[EnableOSRefreshUpdateKey].(bool)
 	if !ok {
 		return true
 	}
@@ -1335,17 +1253,21 @@ func (c *Config) EnableOSRefreshUpdate() bool {
 // EnableOSUpgrade returns whether or not newly provisioned instances
 // should run their respective OS's upgrade capability.
 func (c *Config) EnableOSUpgrade() bool {
-	val, ok := c.defined["enable-os-upgrade"].(bool)
+	val, ok := c.defined[EnableOSUpgradeKey].(bool)
 	if !ok {
 		return true
 	}
 	return val
 }
 
-// SSLHostnameVerification returns weather the environment has requested
+// SSLHostnameVerification returns whether the environment has requested
 // SSL hostname verification to be enabled.
 func (c *Config) SSLHostnameVerification() bool {
-	return c.defined["ssl-hostname-verification"].(bool)
+	val, ok := c.defined["ssl-hostname-verification"].(bool)
+	if !ok {
+		return true
+	}
+	return val
 }
 
 // LoggingConfig returns the configuration string for the loggers.
@@ -1377,22 +1299,6 @@ func (c *Config) TransmitVendorMetrics() bool {
 		return true
 	}
 	return val
-}
-
-// ProvisionerHarvestMode reports the harvesting methodology the
-// provisioner should take.
-func (c *Config) ProvisionerHarvestMode() HarvestMode {
-	if v, ok := c.defined[ProvisionerHarvestModeKey].(string); ok {
-		if method, err := ParseHarvestMode(v); err != nil {
-			// This setting should have already been validated. Don't
-			// burden the caller with handling any errors.
-			panic(err)
-		} else {
-			return method
-		}
-	} else {
-		return HarvestDestroyed
-	}
 }
 
 // NumProvisionWorkers returns the number of provisioner workers to use.
@@ -1455,10 +1361,7 @@ func (c *Config) ImageStream() string {
 // bootstrapping or upgrading an environment.
 func (c *Config) AgentStream() string {
 	v, _ := c.defined[AgentStreamKey].(string)
-	if v != "" {
-		return v
-	}
-	return "released"
+	return v
 }
 
 // ContainerImageStream returns the simplestreams stream used to identify which
@@ -1627,22 +1530,6 @@ func (c *Config) resourceTags() (map[string]string, error) {
 	return v, nil
 }
 
-// MaxStatusHistoryAge is the maximum age of status history entries
-// before being pruned.
-func (c *Config) MaxStatusHistoryAge() time.Duration {
-	// Value has already been validated.
-	val, _ := time.ParseDuration(c.mustString(MaxStatusHistoryAge))
-	return val
-}
-
-// MaxStatusHistorySizeMB is the maximum size in MiB which the status history
-// collection can grow to before being pruned.
-func (c *Config) MaxStatusHistorySizeMB() uint {
-	// Value has already been validated.
-	val, _ := utils.ParseSize(c.mustString(MaxStatusHistorySize))
-	return uint(val)
-}
-
 func (c *Config) MaxActionResultsAge() time.Duration {
 	// Value has already been validated.
 	val, _ := time.ParseDuration(c.mustString(MaxActionResultsAge))
@@ -1677,12 +1564,6 @@ func (c *Config) EgressSubnets() []string {
 		result[i] = strings.TrimSpace(addr)
 	}
 	return result
-}
-
-// FanConfig is the configuration of FAN network running in the model.
-func (c *Config) FanConfig() (network.FanConfig, error) {
-	// At this point we are sure that the line is valid.
-	return network.ParseFanConfig(c.asString(FanConfig))
 }
 
 // CloudInitUserData returns a copy of the raw user data attributes
@@ -1789,7 +1670,6 @@ var alwaysOptional = schema.Defaults{
 	SAASIngressAllowKey: schema.Omit,
 
 	"logging-config":                schema.Omit,
-	ProvisionerHarvestModeKey:       schema.Omit,
 	NumProvisionWorkersKey:          schema.Omit,
 	NumContainerProvisionWorkersKey: schema.Omit,
 	HTTPProxyKey:                    schema.Omit,
@@ -1813,11 +1693,11 @@ var alwaysOptional = schema.Defaults{
 	AgentStreamKey:                  schema.Omit,
 	ResourceTagsKey:                 schema.Omit,
 	"cloudimg-base-url":             schema.Omit,
-	"enable-os-refresh-update":      schema.Omit,
-	"enable-os-upgrade":             schema.Omit,
+	EnableOSRefreshUpdateKey:        schema.Omit,
+	EnableOSUpgradeKey:              schema.Omit,
 	DefaultBaseKey:                  schema.Omit,
-	"development":                   schema.Omit,
-	"ssl-hostname-verification":     schema.Omit,
+	DevelopmentKey:                  schema.Omit,
+	SSLHostnameVerificationKey:      schema.Omit,
 	"proxy-ssh":                     schema.Omit,
 	"disable-network-management":    schema.Omit,
 	IgnoreMachineAddresses:          schema.Omit,
@@ -1827,14 +1707,11 @@ var alwaysOptional = schema.Defaults{
 	ModeKey:                         schema.Omit,
 	TransmitVendorMetricsKey:        schema.Omit,
 	NetBondReconfigureDelayKey:      schema.Omit,
-	ContainerNetworkingMethod:       schema.Omit,
-	MaxStatusHistoryAge:             schema.Omit,
-	MaxStatusHistorySize:            schema.Omit,
+	ContainerNetworkingMethodKey:    schema.Omit,
 	MaxActionResultsAge:             schema.Omit,
 	MaxActionResultsSize:            schema.Omit,
 	UpdateStatusHookInterval:        schema.Omit,
 	EgressSubnets:                   schema.Omit,
-	FanConfig:                       schema.Omit,
 	CloudInitUserDataKey:            schema.Omit,
 	ContainerInheritPropertiesKey:   schema.Omit,
 	BackupDirKey:                    schema.Omit,
@@ -1892,7 +1769,12 @@ var (
 	defaultsWhenParsing schema.Defaults
 	withDefaultsChecker schema.Checker
 	noDefaultsChecker   schema.Checker
+	coerceChecker       schema.Checker
 )
+
+func ensureSchema() {
+	initSchema.Do(initSchemas)
+}
 
 // ValidateUnknownAttrs checks the unknown attributes of the config against
 // the supplied fields and defaults, and returns an error if any fails to
@@ -1906,7 +1788,7 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 	checker := schema.FieldMap(extrafields, defaults)
 	coerced, err := checker.Coerce(attrs, nil)
 	if err != nil {
-		logger.Debugf("coercion failed attributes: %#v, checker: %#v, %v", attrs, checker, err)
+		logger.Debugf(context.TODO(), "coercion failed attributes: %#v, checker: %#v, %v", attrs, checker, err)
 		return nil, err
 	}
 	result := coerced.(map[string]any)
@@ -1920,9 +1802,9 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 				// only warn about attributes with non-empty string values
 				altName := strings.Replace(name, "_", "-", -1)
 				if extrafields[altName] != nil || allFields[altName] != nil {
-					logger.Warningf("unknown config field %q, did you mean %q?", name, altName)
+					logger.Warningf(context.TODO(), "unknown config field %q, did you mean %q?", name, altName)
 				} else {
-					logger.Warningf("unknown config field %q", name)
+					logger.Warningf(context.TODO(), "unknown config field %q", name)
 				}
 			}
 			result[name] = value

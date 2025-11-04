@@ -19,5 +19,13 @@ func Register(registry facade.FacadeRegistry) {
 
 // newFacade is for API registration.
 func newFacade(ctx facade.ModelContext) (*Facade, error) {
-	return NewFacade(ctx.State(), ctx.Resources(), ctx.Auth())
+	domainServices := ctx.DomainServices()
+
+	return NewFacade(
+		domainServices.Application(),
+		domainServices.Machine(),
+		ctx.WatcherRegistry(),
+		ctx.Auth(),
+		ctx.Logger(),
+	)
 }

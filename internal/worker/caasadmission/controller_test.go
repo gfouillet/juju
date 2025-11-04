@@ -7,17 +7,22 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/provider/kubernetes/constants"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/internal/worker/caasadmission"
 	rbacmappertest "github.com/juju/juju/internal/worker/caasrbacmapper/test"
 )
 
 type ControllerSuite struct {
+	controllerUUID string
+	modelUUID      string
+	modelName      string
 }
 
 type dummyMux struct {
@@ -25,7 +30,9 @@ type dummyMux struct {
 	RemoveHandlerFunc func(string, string)
 }
 
-var _ = gc.Suite(&ControllerSuite{})
+func TestControllerSuite(t *testing.T) {
+	tc.Run(t, &ControllerSuite{})
+}
 
 func (d *dummyMux) AddHandler(i, j string, h http.Handler) error {
 	if d.AddHandlerFunc == nil {
@@ -40,7 +47,7 @@ func (d *dummyMux) RemoveHandler(i, j string) {
 	}
 }
 
-func (s *ControllerSuite) TestControllerStartup(c *gc.C) {
+func (s *ControllerSuite) TestControllerStartup(c *tc.C) {
 	var (
 		logger     = loggertesting.WrapCheckLog(c)
 		rbacMapper = &rbacmappertest.Mapper{}
@@ -51,8 +58,8 @@ func (s *ControllerSuite) TestControllerStartup(c *gc.C) {
 	waitGroup.Add(2)
 	mux := &dummyMux{
 		AddHandlerFunc: func(m, p string, _ http.Handler) error {
-			c.Assert(m, jc.DeepEquals, http.MethodPost)
-			c.Assert(p, jc.DeepEquals, path)
+			c.Assert(m, tc.DeepEquals, http.MethodPost)
+			c.Assert(p, tc.DeepEquals, path)
 			waitGroup.Done()
 			return nil
 		},
@@ -67,8 +74,18 @@ func (s *ControllerSuite) TestControllerStartup(c *gc.C) {
 		},
 	}
 
-	ctrl, err := caasadmission.NewController(logger, mux, path, false, creator, rbacMapper)
-	c.Assert(err, jc.ErrorIsNil)
+	controllerUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
+	s.controllerUUID = controllerUUID.String()
+
+	modelUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
+	s.modelUUID = modelUUID.String()
+
+	s.modelName = "test-model"
+
+	ctrl, err := caasadmission.NewController(logger, mux, path, constants.LabelVersion1, creator, rbacMapper, s.controllerUUID, s.modelUUID, s.modelName)
+	c.Assert(err, tc.ErrorIsNil)
 
 	waitGroup.Wait()
 	waitGroup.Add(2)
@@ -77,10 +94,10 @@ func (s *ControllerSuite) TestControllerStartup(c *gc.C) {
 	// Cleanup function counter
 	waitGroup.Wait()
 	err = ctrl.Wait()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *ControllerSuite) TestControllerStartupMuxError(c *gc.C) {
+func (s *ControllerSuite) TestControllerStartupMuxError(c *tc.C) {
 	var (
 		logger     = loggertesting.WrapCheckLog(c)
 		rbacMapper = &rbacmappertest.Mapper{}
@@ -92,23 +109,23 @@ func (s *ControllerSuite) TestControllerStartupMuxError(c *gc.C) {
 	mux := &dummyMux{
 		AddHandlerFunc: func(m, p string, _ http.Handler) error {
 			waitGroup.Done()
-			c.Assert(m, jc.DeepEquals, http.MethodPost)
-			c.Assert(p, jc.DeepEquals, path)
+			c.Assert(m, tc.DeepEquals, http.MethodPost)
+			c.Assert(p, tc.DeepEquals, path)
 			return errors.NewNotValid(nil, "not valid")
 		},
 	}
 	creator := &dummyAdmissionCreator{}
 
-	ctrl, err := caasadmission.NewController(logger, mux, path, false, creator, rbacMapper)
-	c.Assert(err, jc.ErrorIsNil)
+	ctrl, err := caasadmission.NewController(logger, mux, path, constants.LabelVersion1, creator, rbacMapper, s.controllerUUID, s.modelUUID, s.modelName)
+	c.Assert(err, tc.ErrorIsNil)
 
 	waitGroup.Wait()
 	ctrl.Kill()
 	err = ctrl.Wait()
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *ControllerSuite) TestControllerStartupAdmissionError(c *gc.C) {
+func (s *ControllerSuite) TestControllerStartupAdmissionError(c *tc.C) {
 	var (
 		logger     = loggertesting.WrapCheckLog(c)
 		rbacMapper = &rbacmappertest.Mapper{}
@@ -125,11 +142,11 @@ func (s *ControllerSuite) TestControllerStartupAdmissionError(c *gc.C) {
 		},
 	}
 
-	ctrl, err := caasadmission.NewController(logger, mux, path, false, creator, rbacMapper)
-	c.Assert(err, jc.ErrorIsNil)
+	ctrl, err := caasadmission.NewController(logger, mux, path, constants.LabelVersion1, creator, rbacMapper, s.controllerUUID, s.modelUUID, s.modelName)
+	c.Assert(err, tc.ErrorIsNil)
 
 	waitGroup.Wait()
 	ctrl.Kill()
 	err = ctrl.Wait()
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
 }

@@ -7,11 +7,7 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/cloudspec"
-	"github.com/juju/juju/apiserver/common/firewall"
 	"github.com/juju/juju/apiserver/facade"
 )
 
@@ -24,37 +20,24 @@ func Register(registry facade.FacadeRegistry) {
 
 // newFirewallerAPIV7 creates a new server-side FirewallerAPIv7 facade.
 func newFirewallerAPIV7(ctx facade.ModelContext) (*FirewallerAPI, error) {
-	st := ctx.State()
-	m, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	serviceFactory := ctx.ServiceFactory()
-	cloudSpecAPI := cloudspec.NewCloudSpecV2(
-		ctx.Resources(),
-		cloudspec.MakeCloudSpecGetterForModel(st, serviceFactory.Cloud(), serviceFactory.Credential()),
-		cloudspec.MakeCloudSpecWatcherForModel(st, serviceFactory.Cloud()),
-		cloudspec.MakeCloudSpecCredentialWatcherForModel(st),
-		cloudspec.MakeCloudSpecCredentialContentWatcherForModel(st, serviceFactory.Credential()),
-		common.AuthFuncForTag(m.ModelTag()),
-	)
+	domainServices := ctx.DomainServices()
 	controllerConfigAPI := common.NewControllerConfigAPI(
-		st,
-		serviceFactory.ControllerConfig(),
-		serviceFactory.ExternalController(),
+		domainServices.ControllerConfig(),
+		domainServices.ControllerNode(),
+		domainServices.ExternalController(),
+		domainServices.Model(),
 	)
 
-	stShim := stateShim{st: st, State: firewall.StateShim(st, m)}
 	return NewStateFirewallerAPI(
-		stShim,
-		serviceFactory.Network(),
-		ctx.Resources(),
+		domainServices.Network(),
 		ctx.WatcherRegistry(),
 		ctx.Auth(),
-		cloudSpecAPI,
 		controllerConfigAPI,
-		serviceFactory.ControllerConfig(),
-		serviceFactory.Config(),
+		domainServices.ControllerConfig(),
+		domainServices.Config(),
+		domainServices.Application(),
+		domainServices.Machine(),
+		domainServices.ModelInfo(),
 		ctx.Logger().Child("firewaller"),
 	)
 }

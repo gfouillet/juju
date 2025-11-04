@@ -10,9 +10,24 @@ run_model_migration() {
 	juju model-config -m controller "logging-config=#migration=DEBUG"
 	juju model-config -m model-migration "logging-config=#migration=DEBUG"
 
-	juju deploy jameinel-ubuntu-lite ubuntu
+	juju deploy ubuntu-lite ubuntu
 
 	wait_for "ubuntu" "$(idle_condition "ubuntu")"
+
+	# create user secrets.
+	user_secret_uri=$(juju --show-log add-secret mysecret owned-by="model" --info "this is a user secret")
+	user_secret_short_uri=${user_secret_uri##*:}
+	check_contains "$(juju --show-log show-secret mysecret --revisions | yq ".${user_secret_short_uri}.description")" 'this is a user secret'
+	juju --show-log grant-secret mysecret "ubuntu"
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $user_secret_short_uri)" "owned-by: model"
+
+	# create charm-owned secret.
+	unit_owned_secret_uri=$(juju exec --unit ubuntu/0 -- secret-add --owner unit owned-by=ubuntu/0)
+	unit_owned_secret_short_uri=${unit_owned_secret_uri##*:}
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $unit_owned_secret_short_uri)" "owned-by: ubuntu/0"
+	app_owned_secret_uri=$(juju exec --unit ubuntu/0 -- secret-add owned-by=ubuntu)
+	app_owned_secret_short_uri=${app_owned_secret_uri##*:}
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $app_owned_secret_short_uri)" "owned-by: ubuntu"
 
 	# Capture logs to ensure they are migrated
 	old_logs="$(juju debug-log --no-tail -l DEBUG)"
@@ -29,16 +44,30 @@ run_model_migration() {
 
 	wait_for "ubuntu" "$(idle_condition "ubuntu")"
 
+	# Check that the secrets are still present and accessible.
+	check_contains "$(juju --show-log show-secret mysecret --revisions | yq ".${user_secret_short_uri}.description")" 'this is a user secret'
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $user_secret_short_uri)" "owned-by: model"
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $unit_owned_secret_short_uri)" "owned-by: ubuntu/0"
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $app_owned_secret_short_uri)" "owned-by: ubuntu"
+
+	# check we can still create new secrets.
+	user_secret_uri1=$(juju --show-log add-secret mysecret1 owned-by="model-as-well" --info "this is another user secret")
+	user_secret_short_uri1=${user_secret_uri1##*:}
+	check_contains "$(juju --show-log show-secret mysecret1 --revisions | yq ".${user_secret_short_uri1}.description")" 'this is another user secret'
+	unit_owned_secret_uri1=$(juju exec --unit ubuntu/0 -- secret-add --owner unit owned-by=ubuntu/0)
+	unit_owned_secret_short_uri1=${unit_owned_secret_uri1##*:}
+	check_contains "$(juju exec --unit "ubuntu/0" -- secret-get $unit_owned_secret_short_uri1)" "owned-by: ubuntu/0"
+
 	# Add a unit to ubuntu to ensure the model is functional
 	juju add-unit ubuntu
-	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 1)"
+	wait_for "ubuntu" "$(idle_condition "ubuntu" 1)"
 
 	# Clean up.
 	destroy_controller "alt-model-migration"
 
 	# Add a unit to ubuntu to ensure the model is functional
 	juju add-unit ubuntu
-	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 2)"
+	wait_for "ubuntu" "$(idle_condition "ubuntu" 2)"
 
 	# Assert old logs have been transfered over
 	new_logs="$(juju debug-log --no-tail --replay -l DEBUG)"
@@ -66,6 +95,9 @@ run_model_migration_version() {
 	export JUJU_VERSION=$juju_version_without_build_number
 	major_minor=$(echo "$JUJU_VERSION" | cut -d'-' -f1 | cut -d'.' -f1,2)
 
+	# This test is slow sometimes to operate with the charmhub. So, we need to enlarge the timeout for wait_for.
+	wait_for_timeout=1800
+
 	# test against 3.0/stable channel for 3.0 and develop branch.
 	channel="$major_minor/stable"
 
@@ -87,16 +119,16 @@ run_model_migration_version() {
 	juju --show-log integrate etcd easyrsa
 	juju --show-log add-unit -n 2 etcd
 
-	wait_for "active" '.applications["easyrsa"] | ."application-status".current'
-	wait_for "easyrsa" "$(idle_condition "easyrsa" 0)"
-	wait_for "active" '.applications["etcd"] | ."application-status".current' 900
-	wait_for "etcd" "$(idle_condition "etcd" 1 0)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 1)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 2)"
+	wait_for "active" '.applications["easyrsa"] | ."application-status".current' $wait_for_timeout
+	wait_for "easyrsa" "$(idle_condition "easyrsa")" $wait_for_timeout
+	wait_for "active" '.applications["etcd"] | ."application-status".current' $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 0)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 1)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 2)" $wait_for_timeout
 
-	wait_for "active" "$(workload_status "etcd" 0).current"
-	wait_for "active" "$(workload_status "etcd" 1).current"
-	wait_for "active" "$(workload_status "etcd" 2).current"
+	wait_for "active" "$(workload_status "etcd" 0).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 1).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 2).current" $wait_for_timeout
 
 	juju --show-log run etcd/0 etcd/1 etcd/2 --wait=5m health
 
@@ -109,24 +141,24 @@ run_model_migration_version() {
 	# Once the model has appeared, switch to it.
 	juju --show-log switch "${BOOTSTRAPPED_JUJU_CTRL_NAME}:model-migration-version-stable"
 
-	wait_for "easyrsa" "$(idle_condition "easyrsa" 0)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 0)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 1)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 2)"
+	wait_for "easyrsa" "$(idle_condition "easyrsa")" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 0)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 1)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 2)" $wait_for_timeout
 
 	# Add a unit to etcd to ensure the model is functional
 	juju add-unit -n 2 etcd
-	wait_for "etcd" "$(idle_condition "etcd" 1 0)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 1)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 2)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 3)"
-	wait_for "etcd" "$(idle_condition "etcd" 1 4)"
+	wait_for "etcd" "$(idle_condition "etcd" 0)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 1)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 2)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 3)" $wait_for_timeout
+	wait_for "etcd" "$(idle_condition "etcd" 4)" $wait_for_timeout
 
-	wait_for "active" "$(workload_status "etcd" 0).current"
-	wait_for "active" "$(workload_status "etcd" 1).current"
-	wait_for "active" "$(workload_status "etcd" 2).current"
-	wait_for "active" "$(workload_status "etcd" 3).current"
-	wait_for "active" "$(workload_status "etcd" 4).current"
+	wait_for "active" "$(workload_status "etcd" 0).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 1).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 2).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 3).current" $wait_for_timeout
+	wait_for "active" "$(workload_status "etcd" 4).current" $wait_for_timeout
 
 	juju --show-log run etcd/0 etcd/1 etcd/2 etcd/3 etcd/4 --wait=10m health
 

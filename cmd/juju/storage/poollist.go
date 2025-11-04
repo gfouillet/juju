@@ -4,11 +4,13 @@
 package storage
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -47,11 +49,25 @@ Both pool types and names must be valid.
 Valid pool types are pool types that are registered for Juju model.
 `
 
+const poolListCommandExample = `
+List all storage pools:
+
+    juju storage-pools
+
+List only pools of type kubernetes, azure, ebs:
+
+    juju storage-pools --provider kubernetes,azure,ebs
+
+List only pools named pool1 and pool2:
+
+    juju storage-pools --name pool1,pool2
+`
+
 // NewPoolListCommand returns a command that lists storage pools on a model
 func NewPoolListCommand() cmd.Command {
 	cmd := &poolListCommand{}
-	cmd.newAPIFunc = func() (PoolListAPI, error) {
-		return cmd.NewStorageAPI()
+	cmd.newAPIFunc = func(ctx context.Context) (PoolListAPI, error) {
+		return cmd.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(cmd)
 }
@@ -59,7 +75,7 @@ func NewPoolListCommand() cmd.Command {
 // poolListCommand lists storage pools.
 type poolListCommand struct {
 	PoolCommandBase
-	newAPIFunc func() (PoolListAPI, error)
+	newAPIFunc func(ctx context.Context) (PoolListAPI, error)
 	Providers  []string
 	Names      []string
 	out        cmd.Output
@@ -73,10 +89,15 @@ func (c *poolListCommand) Init(args []string) (err error) {
 // Info implements Command.Info.
 func (c *poolListCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "storage-pools",
-		Purpose: "List storage pools.",
-		Doc:     poolListCommandDoc,
-		Aliases: []string{"list-storage-pools"},
+		Name:     "storage-pools",
+		Purpose:  "List storage pools.",
+		Doc:      poolListCommandDoc,
+		Aliases:  []string{"list-storage-pools"},
+		Examples: poolListCommandExample,
+		SeeAlso: []string{
+			"create-storage-pool",
+			"remove-storage-pool",
+		},
 	})
 }
 
@@ -95,12 +116,12 @@ func (c *poolListCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Run implements Command.Run.
 func (c *poolListCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
-	result, err := api.ListPools(c.Providers, c.Names)
+	result, err := api.ListPools(ctx, c.Providers, c.Names)
 	if err != nil {
 		return err
 	}
@@ -115,5 +136,5 @@ func (c *poolListCommand) Run(ctx *cmd.Context) (err error) {
 // PoolListAPI defines the API methods that the storage commands use.
 type PoolListAPI interface {
 	Close() error
-	ListPools(providers, names []string) ([]params.StoragePool, error)
+	ListPools(ctx context.Context, providers, names []string) ([]params.StoragePool, error)
 }

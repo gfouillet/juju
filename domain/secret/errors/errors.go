@@ -3,9 +3,7 @@
 
 package errors
 
-import (
-	"github.com/juju/errors"
-)
+import "github.com/juju/juju/internal/errors"
 
 const (
 	// PermissionDenied describes an error that occurs when the secret being operated on
@@ -40,4 +38,7 @@ const (
 	// SecretAccessScopeNotFound describes an error that occurs when the secret access scope
 	// being operated on does not exist.
 	SecretAccessScopeNotFound = errors.ConstError("secret access scope not found")
+
+	// MissingSecretBackendID describes an error that occurs when importing a secret and the backend doesn't exist.
+	MissingSecretBackendID = errors.ConstError("missing secret backend id")
 )

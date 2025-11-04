@@ -4,27 +4,22 @@
 package service
 
 import (
-	"testing"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	jujutesting "github.com/juju/testing"
-	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 //go:generate go run go.uber.org/mock/mockgen -typed -package service -destination package_mock_test.go github.com/juju/juju/domain/cloud/service State,WatcherFactory
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
 type baseSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 
 	state          *MockState
 	watcherFactory *MockWatcherFactory
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.state = NewMockState(ctrl)
 	s.watcherFactory = NewMockWatcherFactory(ctrl)

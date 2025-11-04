@@ -11,12 +11,12 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/tools"
@@ -123,10 +123,8 @@ type ModelCreateArgs struct {
 	// Name is the name for the new model.
 	Name string `json:"name"`
 
-	// OwnerTag represents the user that will own the new model.
-	// The OwnerTag must be a valid user tag.  If the user tag represents
-	// a local user, that user must exist.
-	OwnerTag string `json:"owner-tag"`
+	// Qualifier disambiguates the name of the model.
+	Qualifier string `json:"qualifier"`
 
 	// Config defines the model config, which includes the name of the
 	// model. A model UUID is allocated by the API server during the
@@ -155,10 +153,10 @@ type ModelCreateArgs struct {
 // Model holds the result of an API call returning a name and UUID
 // for a model and the tag of the server in which it is running.
 type Model struct {
-	Name     string `json:"name"`
-	UUID     string `json:"uuid"`
-	Type     string `json:"type"`
-	OwnerTag string `json:"owner-tag"`
+	Name      string `json:"name"`
+	Qualifier string `json:"qualifier"`
+	UUID      string `json:"uuid"`
+	Type      string `json:"type"`
 }
 
 // UserModel holds information about a model and the last
@@ -399,6 +397,13 @@ type RelationUnitsSettings struct {
 	RelationUnits []RelationUnitSettings `json:"relation-units"`
 }
 
+// RelatedApplicationDetails holds information about
+// an application related to a unit.
+type RelatedApplicationDetails struct {
+	ModelUUID       string `json:"model-uuid"`
+	ApplicationName string `json:"application"`
+}
+
 // RelationResults holds the result of an API call that returns
 // information about multiple relations.
 type RelationResults struct {
@@ -436,6 +441,24 @@ type RelationResult struct {
 	Key              string     `json:"key"`
 	Endpoint         Endpoint   `json:"endpoint"`
 	OtherApplication string     `json:"other-application,omitempty"`
+}
+
+// RelationResultsV2 holds the result of an API call that returns
+// information about multiple relations.
+type RelationResultsV2 struct {
+	Results []RelationResultV2 `json:"results"`
+}
+
+// RelationResultV2 returns information about a single relation,
+// or an error.
+type RelationResultV2 struct {
+	Error            *Error                    `json:"error,omitempty"`
+	Life             life.Value                `json:"life"`
+	Suspended        bool                      `json:"bool,omitempty"`
+	Id               int                       `json:"id"`
+	Key              string                    `json:"key"`
+	Endpoint         Endpoint                  `json:"endpoint"`
+	OtherApplication RelatedApplicationDetails `json:"other-application,omitempty"`
 }
 
 // EntityCharmURL holds an entity's tag and a charm URL.
@@ -562,30 +585,13 @@ type AgentGetEntitiesResult struct {
 // VersionResult holds the version and possibly error for a given
 // DesiredVersion() API call.
 type VersionResult struct {
-	Version *version.Number `json:"version,omitempty"`
-	Error   *Error          `json:"error,omitempty"`
+	Version *semversion.Number `json:"version,omitempty"`
+	Error   *Error             `json:"error,omitempty"`
 }
 
 // VersionResults is a list of versions for the requested entities.
 type VersionResults struct {
 	Results []VersionResult `json:"results"`
-}
-
-// SetModelEnvironVersions holds the tags and associated environ versions
-// of a collection of models.
-type SetModelEnvironVersions struct {
-	Models []SetModelEnvironVersion `json:"models,omitempty"`
-}
-
-// SetModelEnvironVersion holds the tag and associated environ version
-// of a model.
-type SetModelEnvironVersion struct {
-	// ModelTag is the string representation of a model tag, which
-	// should be parsable using names.ParseModelTag.
-	ModelTag string `json:"model-tag"`
-
-	// Version is the environ version to set for the model.
-	Version int `json:"version"`
 }
 
 // ToolsResult holds the tools and possibly error for a given
@@ -602,7 +608,7 @@ type ToolsResults struct {
 
 // Version holds a specific binary version.
 type Version struct {
-	Version version.Binary `json:"version"`
+	Version semversion.Binary `json:"version"`
 }
 
 // EntityVersion specifies the tools version to be set for an entity
@@ -771,10 +777,6 @@ type RunParams struct {
 	Units          []string      `json:"units,omitempty"`
 	Parallel       *bool         `json:"parallel,omitempty"`
 	ExecutionGroup *string       `json:"execution-group,omitempty"`
-
-	// WorkloadContext for CAAS is true when the Commands should be run on
-	// the workload not the operator.
-	WorkloadContext bool `json:"workload-context,omitempty"`
 }
 
 // RunResult contains the result from an individual run call on a machine.
@@ -798,7 +800,7 @@ type RunResults struct {
 // AgentVersionResult is used to return the current version number of the
 // agent running the API server.
 type AgentVersionResult struct {
-	Version version.Number `json:"version"`
+	Version semversion.Number `json:"version"`
 }
 
 // RetryProvisioningArgs holds args for retrying machine provisioning.

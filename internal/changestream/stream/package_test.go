@@ -4,12 +4,10 @@
 package stream
 
 import (
-	"testing"
 	time "time"
 
-	"go.uber.org/goleak"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/domain/schema"
 	domaintesting "github.com/juju/juju/domain/schema/testing"
@@ -19,12 +17,6 @@ import (
 //go:generate go run go.uber.org/mock/mockgen -typed -package stream -destination stream_mock_test.go github.com/juju/juju/internal/changestream/stream FileNotifier
 //go:generate go run go.uber.org/mock/mockgen -typed -package stream -destination metrics_mock_test.go github.com/juju/juju/internal/changestream/stream MetricsCollector
 //go:generate go run go.uber.org/mock/mockgen -typed -package stream -destination clock_mock_test.go github.com/juju/clock Clock,Timer
-
-func TestPackage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
 
 type baseSuite struct {
 	databasetesting.DqliteSuite
@@ -37,7 +29,7 @@ type baseSuite struct {
 
 // SetUpTest is responsible for setting up a testing database suite initialised
 // with the controller schema.
-func (s *baseSuite) SetUpTest(c *gc.C) {
+func (s *baseSuite) SetUpTest(c *tc.C) {
 	s.DqliteSuite.SetUpTest(c)
 	s.DqliteSuite.ApplyDDL(c, &domaintesting.SchemaApplier{
 		Schema:  schema.ControllerDDL(),
@@ -45,7 +37,7 @@ func (s *baseSuite) SetUpTest(c *gc.C) {
 	})
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.clock = NewMockClock(ctrl)
@@ -74,8 +66,22 @@ func (s *baseSuite) expectAfter() chan<- time.Time {
 	return ch
 }
 
-func (s *baseSuite) expectAfterAnyTimes() {
+func (s *baseSuite) expectTermAfterAnyTimes() {
 	s.clock.EXPECT().After(defaultWaitTermTimeout).Return(make(chan time.Time)).AnyTimes()
+}
+
+func (s *baseSuite) expectAfterWithoutTermTimeout() {
+	s.clock.EXPECT().After(gomock.Any()).DoAndReturn(func(d time.Duration) <-chan time.Time {
+		if d == defaultWaitTermTimeout {
+			// Never timeout a term.
+			return make(chan time.Time)
+		}
+		return time.After(d)
+	}).AnyTimes()
+}
+
+func (s *baseSuite) expectAnyAfterAnyTimes() {
+	s.clock.EXPECT().After(gomock.Any()).Return(make(chan time.Time)).AnyTimes()
 }
 
 func (s *baseSuite) expectBackoffAnyTimes(done chan struct{}) {
@@ -83,7 +89,7 @@ func (s *baseSuite) expectBackoffAnyTimes(done chan struct{}) {
 		ch := make(chan time.Time)
 		go func() {
 			select {
-			case ch <- time.Now():
+			case ch <- time.Now().UTC():
 			case <-done:
 				return
 			}
@@ -106,5 +112,5 @@ func (s *baseSuite) expectMetrics() {
 }
 
 func (s *baseSuite) expectClock() {
-	s.clock.EXPECT().Now().AnyTimes()
+	s.clock.EXPECT().Now().Return(time.Now().UTC()).AnyTimes()
 }

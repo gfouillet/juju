@@ -5,7 +5,7 @@ package jujuc
 
 import (
 	"bytes"
-	stdcontext "context"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -15,11 +15,11 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/utils/v4/exec"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/sockets"
 )
@@ -44,6 +44,7 @@ var baseCommands = map[string]creator{
 	"relation-get":            NewRelationGetCommand,
 	"relation-ids":            NewRelationIdsCommand,
 	"relation-list":           NewRelationListCommand,
+	"relation-model-get":      NewRelationModelGetCommand,
 	"relation-set":            NewRelationSetCommand,
 	"unit-get":                NewUnitGetCommand,
 	"juju-reboot":             NewJujuRebootCommand,
@@ -54,11 +55,6 @@ var baseCommands = map[string]creator{
 
 	"goal-state":     NewGoalStateCommand,
 	"credential-get": NewCredentialGetCommand,
-
-	"action-get":  NewActionGetCommand,
-	"action-set":  NewActionSetCommand,
-	"action-fail": NewActionFailCommand,
-	"action-log":  NewActionLogCommand,
 
 	"state-get":    NewStateGetCommand,
 	"state-delete": NewStateDeleteCommand,
@@ -83,19 +79,18 @@ var storageCommands = map[string]creator{
 }
 
 var leaderCommands = map[string]creator{
-	"is-leader":  NewIsLeaderCommand,
-	"leader-get": NewLeaderGetCommand,
-	"leader-set": NewLeaderSetCommand,
+	"is-leader": NewIsLeaderCommand,
 }
 
 var resourceCommands = map[string]creator{
 	"resource-get": NewResourceGetCmd,
 }
 
-var payloadCommands = map[string]creator{
-	"payload-register":   NewPayloadRegisterCmd,
-	"payload-unregister": NewPayloadUnregisterCmd,
-	"payload-status-set": NewPayloadStatusSetCmd,
+var actionCommands = map[string]creator{
+	"action-get":  NewActionGetCommand,
+	"action-set":  NewActionSetCommand,
+	"action-fail": NewActionFailCommand,
+	"action-log":  NewActionLogCommand,
 }
 
 func allEnabledCommands() map[string]creator {
@@ -109,8 +104,35 @@ func allEnabledCommands() map[string]creator {
 	add(storageCommands)
 	add(leaderCommands)
 	add(resourceCommands)
-	add(payloadCommands)
 	add(secretCommands)
+	add(actionCommands)
+	return all
+}
+
+func allHookCommands() map[string]creator {
+	all := map[string]creator{}
+	add := func(m map[string]creator) {
+		for k, v := range m {
+			all[k] = v
+		}
+	}
+	add(baseCommands)
+	add(storageCommands)
+	add(leaderCommands)
+	add(resourceCommands)
+	add(secretCommands)
+	return all
+}
+
+func allActionCommands() map[string]creator {
+	all := map[string]creator{}
+	add := func(m map[string]creator) {
+		for k, v := range m {
+			all[k] = v
+		}
+	}
+
+	add(actionCommands)
 	return all
 }
 
@@ -123,7 +145,56 @@ func CommandNames() (names []string) {
 	return
 }
 
-// NewCommand returns an instance of the named Command, initialized to execute
+// ActionCommandNames returns the names of all jujuc action commands.
+func ActionCommandNames() (names []string) {
+	for name := range actionCommands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return
+}
+
+// HookCommandNames returns the names of all jujuc hook commands.
+func HookCommandNames() (names []string) {
+	for name := range allEnabledCommands() {
+		if _, exists := actionCommands[name]; exists {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return
+}
+
+// NewHookCommandForHelp returns an instance of the named hook Command, only
+// for generating help.
+func NewHookCommandForHelp(ctx Context, name string) (cmd.Command, error) {
+	f := allHookCommands()[name]
+	if f == nil {
+		return nil, errors.Errorf("unknown hook command: %s", name)
+	}
+	command, err := f(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return command, nil
+}
+
+// NewActionCommandForHelp returns an instance of the named action Command, only
+// for generating help.
+func NewActionCommandForHelp(ctx Context, name string) (cmd.Command, error) {
+	f := allActionCommands()[name]
+	if f == nil {
+		return nil, errors.Errorf("unknown action command: %s", name)
+	}
+	command, err := f(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return command, nil
+}
+
+// NewCommand returns an instance of the named action Command, initialized to execute
 // against the supplied Context.
 func NewCommand(ctx Context, name string) (cmd.Command, error) {
 	f := allEnabledCommands()[name]
@@ -149,8 +220,6 @@ type Request struct {
 	// is empty.
 	StdinSet bool
 	Stdin    []byte
-
-	Token string
 }
 
 // CmdGetter looks up a Command implementation connected to a particular Context.
@@ -160,7 +229,6 @@ type CmdGetter func(contextId, cmdName string) (cmd.Command, error)
 type Jujuc struct {
 	mu     sync.Mutex
 	getCmd CmdGetter
-	token  string
 }
 
 // badReqErrorf returns an error indicating a bad Request.
@@ -171,9 +239,6 @@ func badReqErrorf(format string, v ...interface{}) error {
 // Main runs the Command specified by req, and fills in resp. A single command
 // is run at a time.
 func (j *Jujuc) Main(req Request, resp *exec.ExecResponse) error {
-	if req.Token != j.token {
-		return badReqErrorf("token does not match")
-	}
 	if req.CommandName == "" {
 		return badReqErrorf("command not specified")
 	}
@@ -196,7 +261,7 @@ func (j *Jujuc) Main(req Request, resp *exec.ExecResponse) error {
 	// TODO(wallyworld) - We should not allow direct construction of cmd.Context
 	// since this can result in the embedded context.Context being nil.
 	ctx := &cmd.Context{
-		Context: stdcontext.Background(),
+		Context: context.Background(),
 		Dir:     req.Dir,
 		Stdin:   stdin,
 		Stdout:  &stdout,
@@ -206,9 +271,9 @@ func (j *Jujuc) Main(req Request, resp *exec.ExecResponse) error {
 	defer j.mu.Unlock()
 	// Beware, reducing the log level of the following line will lead
 	// to passwords leaking if passed as args.
-	logger.Tracef("running hook tool %q %q", req.CommandName)
-	logger.Debugf("running hook tool %q for %s", req.CommandName, req.ContextId)
-	logger.Tracef("hook context id %q; dir %q", req.ContextId, req.Dir)
+	logger.Tracef(ctx, "running hook tool %q %q", req.CommandName)
+	logger.Debugf(ctx, "running hook tool %q for %s", req.CommandName, req.ContextId)
+	logger.Tracef(ctx, "hook context id %q; dir %q", req.ContextId, req.Dir)
 	wrapper := &cmdWrapper{c, nil}
 	resp.Code = cmd.Main(wrapper, ctx, req.Args)
 	if errors.Cause(wrapper.err) == ErrNoStdin {
@@ -233,9 +298,9 @@ type Server struct {
 // NewServer creates an RPC server bound to socketPath, which can execute
 // remote command invocations against an appropriate Context. It will not
 // actually do so until Run is called.
-func NewServer(getCmd CmdGetter, socket sockets.Socket, token string) (*Server, error) {
+func NewServer(getCmd CmdGetter, socket sockets.Socket) (*Server, error) {
 	server := rpc.NewServer()
-	if err := server.Register(&Jujuc{getCmd: getCmd, token: token}); err != nil {
+	if err := server.Register(&Jujuc{getCmd: getCmd}); err != nil {
 		return nil, err
 	}
 	listener, err := sockets.Listen(socket)

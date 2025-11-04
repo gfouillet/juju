@@ -23,7 +23,7 @@ import (
 // There are exceptions, slices of strings and tables.  These
 // are transformed into strings.
 
-func makeInfoWriter(w io.Writer, warningLog Log, config bool, unicodeMode string, baseMode baseMode, in *InfoResponse) Printer {
+func makeInfoWriter(w io.Writer, warningLog Log, config bool, unicodeMode string, baseMode baseMode, in *InfoResponse, revision int) Printer {
 	iw := infoWriter{
 		w:             w,
 		warningf:      warningLog,
@@ -31,6 +31,7 @@ func makeInfoWriter(w io.Writer, warningLog Log, config bool, unicodeMode string
 		displayConfig: config,
 		unicodeMode:   unicodeMode,
 		baseMode:      baseMode,
+		hasRevision:   revision != -1,
 	}
 	if iw.in.Type == "charm" {
 		return charmInfoWriter{infoWriter: iw}
@@ -45,6 +46,7 @@ type infoWriter struct {
 	displayConfig bool
 	unicodeMode   string
 	baseMode      baseMode
+	hasRevision   bool
 }
 
 type baseMode int
@@ -83,7 +85,7 @@ func (iw infoWriter) channels() string {
 			if !ok {
 				w.Printf("%s/%s:", track, risk)
 				c := UnicodeDash // dash means no revision available
-				if shown {
+				if shown && !iw.hasRevision {
 					c = UnicodeUpArrow // points up to revision on previous line
 				}
 				_, _ = w.PrintlnUnicode(c)
@@ -169,6 +171,7 @@ type bundleInfoOutput struct {
 	Charms      string `yaml:"charms,omitempty"`
 	Channels    string `yaml:"channels,omitempty"`
 	Installed   string `yaml:"installed,omitempty"`
+	Message     string `yaml:"message,omitempty"`
 }
 
 type bundleInfoWriter struct {
@@ -185,6 +188,11 @@ func (b bundleInfoWriter) Print() error {
 		Tags:        strings.Join(b.in.Tags, ", "),
 		Channels:    b.channels(),
 	}
+
+	if len(b.in.Tracks) == 0 && len(b.in.Channels) == 0 {
+		out.Message = "No charms have been published with the specified criteria."
+	}
+
 	return b.print(out)
 }
 
@@ -202,6 +210,7 @@ type charmInfoOutput struct {
 	Channels    string                 `yaml:"channels,omitempty"`
 	Installed   string                 `yaml:"installed,omitempty"`
 	Config      map[string]interface{} `yaml:"config,omitempty"`
+	Message     string                 `yaml:"message,omitempty"`
 }
 
 type relationOutput struct {
@@ -225,6 +234,11 @@ func (c charmInfoWriter) Print() error {
 		Channels:    c.channels(),
 		Tags:        strings.Join(c.in.Tags, ", "),
 	}
+
+	if len(c.in.Tracks) == 0 && len(c.in.Channels) == 0 {
+		out.Message = "No charms have been published with the specified criteria."
+	}
+
 	if c.in.Charm != nil {
 		out.Subordinate = c.in.Charm.Subordinate
 		if c.displayConfig && c.in.Charm.Config != nil {

@@ -4,45 +4,79 @@
 package action
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/facade"
 	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/core/leadership"
-	"github.com/juju/juju/state"
+	modeltesting "github.com/juju/juju/core/model/testing"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/action State,Model
-//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination state_mock_test.go github.com/juju/juju/state Action,ActionReceiver
+//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/action ApplicationService,ModelInfoService,OperationService
 //go:generate go run go.uber.org/mock/mockgen -typed -package action -destination leader_mock_test.go github.com/juju/juju/core/leadership Reader
+//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination blockservices_mock_test.go github.com/juju/juju/apiserver/common BlockCommandService
+//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination watcherregistry_mock_test.go github.com/juju/juju/internal/worker/watcherregistry WatcherRegistry
+//go:generate go run go.uber.org/mock/mockgen -typed -package action -destination watcher_mock_test.go github.com/juju/juju/core/watcher StringsWatcher
 
 type MockBaseSuite struct {
-	State          *MockState
-	Authorizer     *facademocks.MockAuthorizer
-	ActionReceiver *MockActionReceiver
-	Leadership     *MockReader
+	Authorizer      *facademocks.MockAuthorizer
+	Leadership      *MockReader
+	watcherRegistry *MockWatcherRegistry
+
+	BlockCommandService *MockBlockCommandService
+	ApplicationService  *MockApplicationService
+	ModelInfoService    *MockModelInfoService
+	OperationService    *MockOperationService
 }
 
-func (s *MockBaseSuite) NewActionAPI(c *gc.C) *ActionAPI {
-	api, err := newActionAPI(s.State, nil, s.Authorizer, LeaderFactory(s.Leadership))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *MockBaseSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
 
-	api.tagToActionReceiverFn = s.tagToActionReceiverFn
+	s.BlockCommandService = NewMockBlockCommandService(ctrl)
+	s.ApplicationService = NewMockApplicationService(ctrl)
+	s.ModelInfoService = NewMockModelInfoService(ctrl)
+	s.OperationService = NewMockOperationService(ctrl)
+	s.Leadership = NewMockReader(ctrl)
+	s.Authorizer = facademocks.NewMockAuthorizer(ctrl)
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+
+	c.Cleanup(func() {
+		s.BlockCommandService = nil
+		s.ApplicationService = nil
+		s.ModelInfoService = nil
+		s.OperationService = nil
+		s.Leadership = nil
+		s.Authorizer = nil
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
+}
+
+func (s *MockBaseSuite) newActionAPI(c *tc.C) *ActionAPI {
+	s.Authorizer.EXPECT().AuthClient().Return(true)
+	s.Authorizer.EXPECT().HasPermission(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+
+	return s.newActionAPIWithAuthorizer(c, s.Authorizer)
+}
+
+func (s *MockBaseSuite) newActionAPIWithAuthorizer(c *tc.C, authorizer facade.Authorizer) *ActionAPI {
+	modelUUID := modeltesting.GenModelUUID(c)
+
+	api, err := newActionAPI(
+		authorizer,
+		LeaderFactory(s.Leadership),
+		s.ApplicationService,
+		s.BlockCommandService,
+		s.ModelInfoService,
+		s.OperationService,
+		modelUUID,
+		s.watcherRegistry,
+	)
+	c.Assert(err, tc.ErrorIsNil)
+
 	return api
-}
-
-func (s *MockBaseSuite) tagToActionReceiverFn(
-	func(names.Tag) (state.Entity, error),
-) func(tag string) (state.ActionReceiver, error) {
-	return func(tag string) (state.ActionReceiver, error) { return s.ActionReceiver, nil }
-}
-
-func NewActionAPI(
-	st *state.State, resources facade.Resources, authorizer facade.Authorizer, leadership leadership.Reader,
-) (*ActionAPI, error) {
-	return newActionAPI(&stateShim{st: st}, resources, authorizer, LeaderFactory(leadership))
 }
 
 type FakeLeadership struct {

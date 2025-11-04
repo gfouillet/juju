@@ -4,27 +4,28 @@
 package service
 
 import (
-	"context"
+	"testing"
 	"time"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type serviceSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	state *MockState
 }
 
-var _ = gc.Suite(&serviceSuite{})
+func TestServiceSuite(t *testing.T) {
+	tc.Run(t, &serviceSuite{})
+}
 
-func (s *serviceSuite) TestLeases(c *gc.C) {
+func (s *serviceSuite) TestLeases(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	expected := map[lease.Key]lease.Info{
@@ -36,12 +37,12 @@ func (s *serviceSuite) TestLeases(c *gc.C) {
 	s.state.EXPECT().Leases(gomock.Any()).Return(expected, nil)
 
 	service := NewService(s.state)
-	val, err := service.Leases(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(val, gc.DeepEquals, expected)
+	val, err := service.Leases(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(val, tc.DeepEquals, expected)
 }
 
-func (s *serviceSuite) TestLeasesWithKey(c *gc.C) {
+func (s *serviceSuite) TestLeasesWithKey(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -54,20 +55,20 @@ func (s *serviceSuite) TestLeasesWithKey(c *gc.C) {
 	s.state.EXPECT().Leases(gomock.Any(), key).Return(expected, nil)
 
 	service := NewService(s.state)
-	val, err := service.Leases(context.Background(), key)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(val, gc.DeepEquals, expected)
+	val, err := service.Leases(c.Context(), key)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(val, tc.DeepEquals, expected)
 }
 
-func (s *serviceSuite) TestLeasesWithMultipleKeys(c *gc.C) {
+func (s *serviceSuite) TestLeasesWithMultipleKeys(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	service := NewService(s.state)
-	_, err := service.Leases(context.Background(), fixedKey(), fixedKey())
-	c.Assert(err, gc.ErrorMatches, "filtering with more than one lease key not supported")
+	_, err := service.Leases(c.Context(), fixedKey(), fixedKey())
+	c.Assert(err, tc.ErrorMatches, "filtering with more than one lease key not supported")
 }
 
-func (s *serviceSuite) TestClaimLease(c *gc.C) {
+func (s *serviceSuite) TestClaimLease(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key, req := fixedKey(), lease.Request{
@@ -78,19 +79,19 @@ func (s *serviceSuite) TestClaimLease(c *gc.C) {
 	s.state.EXPECT().ClaimLease(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), key, req).Return(nil)
 
 	service := NewService(s.state)
-	err := service.ClaimLease(context.Background(), key, req)
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.ClaimLease(c.Context(), key, req)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestClaimLeaseValidation(c *gc.C) {
+func (s *serviceSuite) TestClaimLeaseValidation(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	service := NewService(s.state)
-	err := service.ClaimLease(context.Background(), fixedKey(), lease.Request{})
-	c.Assert(err, gc.ErrorMatches, "invalid holder: string is empty")
+	err := service.ClaimLease(c.Context(), fixedKey(), lease.Request{})
+	c.Assert(err, tc.ErrorMatches, "invalid holder: string is empty")
 }
 
-func (s *serviceSuite) TestExtendLease(c *gc.C) {
+func (s *serviceSuite) TestExtendLease(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key, req := fixedKey(), lease.Request{
@@ -101,19 +102,19 @@ func (s *serviceSuite) TestExtendLease(c *gc.C) {
 	s.state.EXPECT().ExtendLease(gomock.Any(), key, req).Return(nil)
 
 	service := NewService(s.state)
-	err := service.ExtendLease(context.Background(), key, req)
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.ExtendLease(c.Context(), key, req)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestExtendLeaseValidation(c *gc.C) {
+func (s *serviceSuite) TestExtendLeaseValidation(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	service := NewService(s.state)
-	err := service.ClaimLease(context.Background(), fixedKey(), lease.Request{})
-	c.Assert(err, gc.ErrorMatches, "invalid holder: string is empty")
+	err := service.ClaimLease(c.Context(), fixedKey(), lease.Request{})
+	c.Assert(err, tc.ErrorMatches, "invalid holder: string is empty")
 }
 
-func (s *serviceSuite) TestRevokeLease(c *gc.C) {
+func (s *serviceSuite) TestRevokeLease(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -121,11 +122,11 @@ func (s *serviceSuite) TestRevokeLease(c *gc.C) {
 	s.state.EXPECT().RevokeLease(gomock.Any(), key, "postgresql/0").Return(nil)
 
 	service := NewService(s.state)
-	err := service.RevokeLease(context.Background(), key, "postgresql/0")
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.RevokeLease(c.Context(), key, "postgresql/0")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestLeaseGroup(c *gc.C) {
+func (s *serviceSuite) TestLeaseGroup(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -138,12 +139,12 @@ func (s *serviceSuite) TestLeaseGroup(c *gc.C) {
 	s.state.EXPECT().LeaseGroup(gomock.Any(), "foo", "123").Return(expected, nil)
 
 	service := NewService(s.state)
-	got, err := service.LeaseGroup(context.Background(), "foo", "123")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(got, gc.DeepEquals, expected)
+	got, err := service.LeaseGroup(c.Context(), "foo", "123")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(got, tc.DeepEquals, expected)
 }
 
-func (s *serviceSuite) TestPinLease(c *gc.C) {
+func (s *serviceSuite) TestPinLease(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -151,11 +152,11 @@ func (s *serviceSuite) TestPinLease(c *gc.C) {
 	s.state.EXPECT().PinLease(gomock.Any(), key, "machine/6").Return(nil)
 
 	service := NewService(s.state)
-	err := service.PinLease(context.Background(), key, "machine/6")
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.PinLease(c.Context(), key, "machine/6")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestUnpinLease(c *gc.C) {
+func (s *serviceSuite) TestUnpinLease(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -163,11 +164,11 @@ func (s *serviceSuite) TestUnpinLease(c *gc.C) {
 	s.state.EXPECT().UnpinLease(gomock.Any(), key, "machine/6").Return(nil)
 
 	service := NewService(s.state)
-	err := service.UnpinLease(context.Background(), key, "machine/6")
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.UnpinLease(c.Context(), key, "machine/6")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestPinned(c *gc.C) {
+func (s *serviceSuite) TestPinned(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	key := fixedKey()
@@ -178,22 +179,22 @@ func (s *serviceSuite) TestPinned(c *gc.C) {
 	s.state.EXPECT().Pinned(gomock.Any()).Return(expected, nil)
 
 	service := NewService(s.state)
-	got, err := service.Pinned(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(got, gc.DeepEquals, expected)
+	got, err := service.Pinned(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(got, tc.DeepEquals, expected)
 }
 
-func (s *serviceSuite) TestExpireLeases(c *gc.C) {
+func (s *serviceSuite) TestExpireLeases(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().ExpireLeases(gomock.Any()).Return(nil)
 
 	service := NewService(s.state)
-	err := service.ExpireLeases(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.ExpireLeases(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *serviceSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.state = NewMockState(ctrl)

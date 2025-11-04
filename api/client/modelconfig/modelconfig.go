@@ -36,9 +36,9 @@ func NewClient(st base.APICallCloser, options ...Option) *Client {
 }
 
 // ModelGet returns all model settings.
-func (c *Client) ModelGet() (map[string]interface{}, error) {
+func (c *Client) ModelGet(ctx context.Context) (map[string]interface{}, error) {
 	result := params.ModelConfigResults{}
-	err := c.facade.FacadeCall(context.TODO(), "ModelGet", nil, &result)
+	err := c.facade.FacadeCall(ctx, "ModelGet", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -51,9 +51,9 @@ func (c *Client) ModelGet() (map[string]interface{}, error) {
 
 // ModelGetWithMetadata returns all model settings along with extra
 // metadata like the source of the setting value.
-func (c *Client) ModelGetWithMetadata() (config.ConfigValues, error) {
+func (c *Client) ModelGetWithMetadata(ctx context.Context) (config.ConfigValues, error) {
 	result := params.ModelConfigResults{}
-	err := c.facade.FacadeCall(context.TODO(), "ModelGet", nil, &result)
+	err := c.facade.FacadeCall(ctx, "ModelGet", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -68,38 +68,83 @@ func (c *Client) ModelGetWithMetadata() (config.ConfigValues, error) {
 }
 
 // ModelSet sets the given key-value pairs in the model.
-func (c *Client) ModelSet(config map[string]interface{}) error {
+func (c *Client) ModelSet(ctx context.Context, config map[string]interface{}) error {
 	args := params.ModelSet{Config: config}
-	return c.facade.FacadeCall(context.TODO(), "ModelSet", args, nil)
+	return c.facade.FacadeCall(ctx, "ModelSet", args, nil)
 }
 
 // ModelUnset sets the given key-value pairs in the model.
-func (c *Client) ModelUnset(keys ...string) error {
+func (c *Client) ModelUnset(ctx context.Context, keys ...string) error {
 	args := params.ModelUnset{Keys: keys}
-	return c.facade.FacadeCall(context.TODO(), "ModelUnset", args, nil)
+	return c.facade.FacadeCall(ctx, "ModelUnset", args, nil)
 }
 
 // GetModelConstraints returns the constraints for the model.
-func (c *Client) GetModelConstraints() (constraints.Value, error) {
+func (c *Client) GetModelConstraints(ctx context.Context) (constraints.Value, error) {
 	results := new(params.GetConstraintsResults)
-	err := c.facade.FacadeCall(context.TODO(), "GetModelConstraints", nil, results)
+	err := c.facade.FacadeCall(ctx, "GetModelConstraints", nil, results)
 	return results.Constraints, err
 }
 
 // SetModelConstraints specifies the constraints for the model.
-func (c *Client) SetModelConstraints(constraints constraints.Value) error {
+func (c *Client) SetModelConstraints(ctx context.Context, constraints constraints.Value) error {
 	params := params.SetConstraints{
 		Constraints: constraints,
 	}
-	return c.facade.FacadeCall(context.TODO(), "SetModelConstraints", params, nil)
+	return c.facade.FacadeCall(ctx, "SetModelConstraints", params, nil)
 }
 
 // Sequences returns all sequence names and next values.
-func (c *Client) Sequences() (map[string]int, error) {
+func (c *Client) Sequences(ctx context.Context) (map[string]int, error) {
 	var result params.ModelSequencesResult
-	err := c.facade.FacadeCall(context.TODO(), "Sequences", nil, &result)
+	err := c.facade.FacadeCall(ctx, "Sequences", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return result.Sequences, nil
+}
+
+// GetModelSecretBackend returns the secret backend name for the specified model,
+// returning an error satisfying [modelerrors.NotFound] if the model provided does not exist.
+func (c *Client) GetModelSecretBackend(ctx context.Context) (string, error) {
+	if c.facade.BestAPIVersion() < 4 {
+		return "", errors.NotSupportedf("getting model secret backend")
+	}
+
+	var result params.StringResult
+	err := c.facade.FacadeCall(ctx, "GetModelSecretBackend", nil, &result)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	if result.Error != nil {
+		return "", params.TranslateWellKnownError(result.Error)
+	}
+	return result.Result, nil
+}
+
+// SetModelSecretBackend sets the secret backend config for the specified model,
+// returning an error satisfying [secretbackenderrors.NotFound] if the backend provided does not exist,
+// returning an error satisfying [modelerrors.NotFound] if the model provided does not exist,
+// returning an error satisfying [secretbackenderrors.NotValid] if the backend name provided is not valid.
+func (c *Client) SetModelSecretBackend(ctx context.Context, secretBackendName string) error {
+	if c.facade.BestAPIVersion() < 4 {
+		return errors.NotSupportedf("setting model secret backend")
+	}
+
+	var result params.ErrorResult
+	err := c.facade.FacadeCall(ctx, "SetModelSecretBackend", params.SetModelSecretBackendArg{
+		SecretBackendName: secretBackendName,
+	}, &result)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if result.Error != nil {
+		return params.TranslateWellKnownError(result.Error)
+	}
+	return nil
+}
+
+// BestAPIVersion returns the best API version supported by the client.
+func (c *Client) BestAPIVersion() int {
+	return c.facade.BestAPIVersion()
 }

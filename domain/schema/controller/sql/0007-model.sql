@@ -36,7 +36,7 @@ CREATE TABLE model (
     model_type_id INT NOT NULL,
     life_id INT NOT NULL,
     name TEXT NOT NULL,
-    owner_uuid TEXT NOT NULL,
+    qualifier TEXT NOT NULL,
     CONSTRAINT fk_model_cloud
     FOREIGN KEY (cloud_uuid)
     REFERENCES cloud (uuid),
@@ -49,25 +49,24 @@ CREATE TABLE model (
     CONSTRAINT fk_model_model_type_id
     FOREIGN KEY (model_type_id)
     REFERENCES model_type (id),
-    CONSTRAINT fk_model_owner_uuid
-    FOREIGN KEY (owner_uuid)
-    REFERENCES user (uuid),
     CONSTRAINT fk_model_life_id
     FOREIGN KEY (life_id)
     REFERENCES life (id)
 );
 
--- idx_model_name_owner established an index that stops models being created
--- with the same name for a given owner.
-CREATE UNIQUE INDEX idx_model_name_owner ON model (name, owner_uuid);
+-- idx_model_qualified_name established an index that stops models being created
+-- with the same qualified name.
+CREATE UNIQUE INDEX idx_model_qualified_name ON model (name, qualifier);
 CREATE INDEX idx_model_activated ON model (activated);
 
---- v_model purpose is to provide an easy access mechanism for models in the
---- system. It will only show models that have been activated so the caller does
---- not have to worry about retrieving half complete models.
-CREATE VIEW v_model AS
+-- v_model_all is a view that provides a simple way to access models
+-- that have not been activated. This is useful for the model creation process
+-- where we need to access the model to update it but we do not want to show it
+-- to the user until it is ready.
+CREATE VIEW v_model_all AS
 SELECT
     m.uuid,
+    m.life_id,
     m.cloud_uuid,
     c.name AS cloud_name,
     ct.type AS cloud_type,
@@ -77,25 +76,124 @@ SELECT
     cr.name AS cloud_region_name,
     cc.uuid AS cloud_credential_uuid,
     cc.name AS cloud_credential_name,
+    cc.invalid AS cloud_credential_invalid,
     ccc.name AS cloud_credential_cloud_name,
     cco.uuid AS cloud_credential_owner_uuid,
     cco.name AS cloud_credential_owner_name,
     m.model_type_id,
     mt.type AS model_type,
+    m.qualifier,
     m.name,
-    m.owner_uuid,
-    o.name AS owner_name,
     l.value AS life,
-    ma.target_version AS target_agent_version
+    m.activated,
+    -- Don't rely on controller_uuid always being set to a value.
+    ctrli.uuid AS controller_uuid,
+    IIF(ctrlm.model_uuid IS NOT NULL, TRUE, FALSE) AS is_controller_model
 FROM model AS m
-INNER JOIN cloud AS c ON m.cloud_uuid = c.uuid
-INNER JOIN cloud_type AS ct ON c.cloud_type_id = ct.id
+JOIN cloud AS c ON m.cloud_uuid = c.uuid
+JOIN cloud_type AS ct ON c.cloud_type_id = ct.id
+JOIN model_type AS mt ON m.model_type_id = mt.id
+JOIN life AS l ON m.life_id = l.id
+LEFT JOIN controller AS ctrli
+LEFT JOIN controller AS ctrlm ON m.uuid = ctrlm.model_uuid
 LEFT JOIN cloud_region AS cr ON m.cloud_region_uuid = cr.uuid
 LEFT JOIN cloud_credential AS cc ON m.cloud_credential_uuid = cc.uuid
 LEFT JOIN cloud AS ccc ON cc.cloud_uuid = ccc.uuid
-LEFT JOIN user AS cco ON cc.owner_uuid = cco.uuid
-INNER JOIN model_type AS mt ON m.model_type_id = mt.id
-INNER JOIN user AS o ON m.owner_uuid = o.uuid
-INNER JOIN life AS l ON m.life_id = l.id
-INNER JOIN model_agent AS ma ON m.uuid = ma.model_uuid
+LEFT JOIN user AS cco ON cc.owner_uuid = cco.uuid;
+
+--- v_model purpose is to provide an easy access mechanism for models in the
+--- system. It will only show models that have been activated so the caller does
+--- not have to worry about retrieving half complete models.
+CREATE VIEW v_model AS
+SELECT
+    uuid,
+    cloud_uuid,
+    cloud_name,
+    cloud_type,
+    cloud_endpoint,
+    cloud_skip_tls_verify,
+    cloud_region_uuid,
+    cloud_region_name,
+    cloud_credential_uuid,
+    cloud_credential_name,
+    cloud_credential_invalid,
+    cloud_credential_cloud_name,
+    cloud_credential_owner_uuid,
+    cloud_credential_owner_name,
+    model_type_id,
+    model_type,
+    name,
+    qualifier,
+    life_id,
+    life,
+    activated,
+    controller_uuid,
+    is_controller_model
+FROM v_model_all
+WHERE activated = TRUE;
+
+-- v_model_state exists to provide a simple view over the states that are
+-- needed to calculate a model's status.
+CREATE VIEW v_model_state AS
+SELECT
+    -- TODO (tlm, JUJU-7230) Wire up the value of migrating when model migration
+    -- information is contained in the database.
+    FALSE AS migrating,
+    m.uuid,
+    cc.invalid AS cloud_credential_invalid,
+    cc.invalid_reason AS cloud_credential_invalid_reason,
+    IIF(l.id = 1, TRUE, FALSE) AS destroying
+FROM model AS m
+JOIN life AS l ON m.life_id = l.id
+LEFT JOIN cloud_credential AS cc ON m.cloud_credential_uuid = cc.uuid
 WHERE m.activated = TRUE;
+
+-- v_cloud is used to fetch well-constructed information about a cloud.
+-- This view also includes information on whether the cloud is the
+-- controller model's cloud.
+CREATE VIEW v_cloud
+AS
+-- This selects the controller model's cloud uuid. We use this when loading
+-- clouds to know if the cloud is the controller's cloud.
+WITH controllers AS (
+    SELECT m.cloud_uuid
+    FROM model AS m
+    WHERE
+        m.name = 'controller'
+        AND m.qualifier = 'admin'
+        AND m.activated = TRUE
+)
+
+SELECT
+    c.uuid,
+    c.name,
+    c.cloud_type_id,
+    ct.type AS cloud_type,
+    c.endpoint,
+    c.identity_endpoint,
+    c.storage_endpoint,
+    c.skip_tls_verify,
+    IIF(controllers.cloud_uuid IS NULL, FALSE, TRUE) AS is_controller_cloud
+FROM cloud AS c
+JOIN cloud_type AS ct ON c.cloud_type_id = ct.id
+LEFT JOIN controllers ON c.uuid = controllers.cloud_uuid;
+
+-- v_cloud_auth is a view similar to v_cloud but includes a row for
+-- each cloud and auth type pair.
+CREATE VIEW v_cloud_auth
+AS
+SELECT
+    c.uuid,
+    c.name,
+    c.cloud_type_id,
+    c.cloud_type,
+    c.endpoint,
+    c.identity_endpoint,
+    c.storage_endpoint,
+    c.skip_tls_verify,
+    c.is_controller_cloud,
+    at.id AS auth_type_id,
+    at.type AS auth_type
+FROM v_cloud AS c
+LEFT JOIN cloud_auth_type AS cat ON c.uuid = cat.cloud_uuid
+JOIN auth_type AS at ON cat.auth_type_id = at.id;

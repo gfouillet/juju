@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/gosuri/uitable"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListCommand returns a command used to list spaces.
@@ -34,9 +34,11 @@ type ListCommand struct {
 }
 
 const listCommandDoc = `
-Displays all defined spaces. By default both spaces and their subnets are displayed.
-Supplying the --short option will list just the space names.
-The --output argument allows the command's output to be redirected to a file. 
+Displays all defined spaces.
+
+By default both spaces and their subnets are displayed. Supplying the ` + "`--short`" + ` option will list just the space names.
+
+The ` + "`--output`" + ` argument allows the command's output to be redirected to a file.
 `
 
 const listCommandExamples = `
@@ -73,7 +75,7 @@ func (c *ListCommand) SetFlags(f *gnuflag.FlagSet) {
 		"json":    cmd.FormatJson,
 		"tabular": c.printTabular,
 	})
-	f.BoolVar(&c.Short, "short", false, "only display spaces.")
+	f.BoolVar(&c.Short, "short", false, "Only display spaces.")
 }
 
 // Init is defined on the cmd.Command interface. It checks the
@@ -90,7 +92,7 @@ func (c *ListCommand) Init(args []string) error {
 // Run implements Command.Run.
 func (c *ListCommand) Run(ctx *cmd.Context) error {
 	return c.RunWithSpaceAPI(ctx, func(api SpaceAPI, ctx *cmd.Context) error {
-		spaces, err := api.ListSpaces()
+		spaces, err := api.ListSpaces(ctx)
 		if err != nil {
 			if errors.Is(err, errors.NotSupported) {
 				ctx.Infof("cannot list spaces: %v", err)

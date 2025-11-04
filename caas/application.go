@@ -6,12 +6,12 @@ package caas
 import (
 	"context"
 
-	"github.com/juju/version/v2"
 	core "k8s.io/api/core/v1"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/internal/storage"
 )
@@ -45,6 +45,18 @@ type Application interface {
 
 	// Service returns the service associated with the application.
 	Service() (*Service, error)
+
+	// EnsurePVCs ensures that Persistent Volume Claims (PVCs) are created for the given
+	// filesystems, unit attachments, and storage unique ID. It creates PVCs
+	// based on the provided filesystem parameters and handles volume
+	// attachments for StatefulSet applications. Returns a cleanup function
+	// that can be used to delete the created PVCs if rollback is needed,
+	// and any error encountered during the process.
+	EnsurePVCs(
+		[]storage.KubernetesFilesystemParams,
+		map[string][]storage.KubernetesFilesystemUnitAttachmentParams,
+		string,
+	) error
 
 	ServiceInterface
 }
@@ -80,7 +92,7 @@ type ApplicationState struct {
 // ApplicationConfig is the config passed to the application units.
 type ApplicationConfig struct {
 	// AgentVersion is the Juju version of the agent image.
-	AgentVersion version.Number
+	AgentVersion semversion.Number
 
 	// AgentImagePath is the docker registry URL for the charm container.
 	AgentImagePath string
@@ -121,7 +133,7 @@ type ApplicationConfig struct {
 	ResourceTags map[string]string
 
 	// Constraints is a set of constraints on
-	// the pod to create.
+	// the workload containers.
 	Constraints constraints.Value
 
 	// Filesystems is a set of parameters for filesystems that should be created.
@@ -139,6 +151,9 @@ type ApplicationConfig struct {
 
 	// CharmUser controls what user the charm/unit agent runs as.
 	CharmUser RunAs
+
+	// StorageUniqueID is used to construct the PVC name for an application.
+	StorageUniqueID string
 }
 
 // ContainerConfig describes a container that is deployed alonside the uniter/charm container.
@@ -147,7 +162,7 @@ type ContainerConfig struct {
 	Name string
 
 	// Image used to create the container.
-	Image resources.DockerImageDetails
+	Image resource.DockerImageDetails
 
 	// Mounts to storage that are to be provided within this container.
 	Mounts []MountConfig

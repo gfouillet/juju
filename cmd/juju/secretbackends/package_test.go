@@ -4,23 +4,17 @@
 package secretbackends
 
 import (
-	stdtesting "testing"
+	"context"
 
-	gc "gopkg.in/check.v1"
-
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/api/jujuclient"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secretbackendsapi.go github.com/juju/juju/cmd/juju/secretbackends ListSecretBackendsAPI,AddSecretBackendsAPI,RemoveSecretBackendsAPI,UpdateSecretBackendsAPI
-
-func TestPackage(t *stdtesting.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package secretbackends -destination secretbackendsapi_mock_test.go github.com/juju/juju/cmd/juju/secretbackends ListSecretBackendsAPI,AddSecretBackendsAPI,RemoveSecretBackendsAPI,UpdateSecretBackendsAPI,ModelSecretBackendAPI
 
 // NewListCommandForTest returns a secret backends command for testing.
 func NewListCommandForTest(store jujuclient.ClientStore, listSecretsAPI ListSecretBackendsAPI) *listSecretBackendsCommand {
 	c := &listSecretBackendsCommand{
-		listSecretBackendsAPIFunc: func() (ListSecretBackendsAPI, error) { return listSecretsAPI, nil },
+		listSecretBackendsAPIFunc: func(ctx context.Context) (ListSecretBackendsAPI, error) { return listSecretsAPI, nil },
 	}
 	c.SetClientStore(store)
 	return c
@@ -29,7 +23,7 @@ func NewListCommandForTest(store jujuclient.ClientStore, listSecretsAPI ListSecr
 // NewShowCommandForTest returns a show secret backend command for testing.
 func NewShowCommandForTest(store jujuclient.ClientStore, showSecretsAPI ListSecretBackendsAPI) *showSecretBackendCommand {
 	c := &showSecretBackendCommand{
-		ShowSecretBackendsAPIFunc: func() (ShowSecretBackendsAPI, error) { return showSecretsAPI, nil },
+		ShowSecretBackendsAPIFunc: func(ctx context.Context) (ShowSecretBackendsAPI, error) { return showSecretsAPI, nil },
 	}
 	c.SetClientStore(store)
 	return c
@@ -38,7 +32,7 @@ func NewShowCommandForTest(store jujuclient.ClientStore, showSecretsAPI ListSecr
 // NewAddCommandForTest returns an add secret backends command for testing.
 func NewAddCommandForTest(store jujuclient.ClientStore, addSecretBackendsAPI AddSecretBackendsAPI) *addSecretBackendCommand {
 	c := &addSecretBackendCommand{
-		AddSecretBackendsAPIFunc: func() (AddSecretBackendsAPI, error) { return addSecretBackendsAPI, nil },
+		AddSecretBackendsAPIFunc: func(ctx context.Context) (AddSecretBackendsAPI, error) { return addSecretBackendsAPI, nil },
 	}
 	c.SetClientStore(store)
 	return c
@@ -47,7 +41,7 @@ func NewAddCommandForTest(store jujuclient.ClientStore, addSecretBackendsAPI Add
 // NewRemoveCommandForTest returns a remove secret backends command for testing.
 func NewRemoveCommandForTest(store jujuclient.ClientStore, removeSecretBackendsAPI RemoveSecretBackendsAPI) *removeSecretBackendCommand {
 	c := &removeSecretBackendCommand{
-		RemoveSecretBackendsAPIFunc: func() (RemoveSecretBackendsAPI, error) { return removeSecretBackendsAPI, nil },
+		RemoveSecretBackendsAPIFunc: func(ctx context.Context) (RemoveSecretBackendsAPI, error) { return removeSecretBackendsAPI, nil },
 	}
 	c.SetClientStore(store)
 	return c
@@ -56,7 +50,16 @@ func NewRemoveCommandForTest(store jujuclient.ClientStore, removeSecretBackendsA
 // NewUpdateCommandForTest returns a remove secret backends command for testing.
 func NewUpdateCommandForTest(store jujuclient.ClientStore, updateSecretBackendsAPI UpdateSecretBackendsAPI) *updateSecretBackendCommand {
 	c := &updateSecretBackendCommand{
-		UpdateSecretBackendsAPIFunc: func() (UpdateSecretBackendsAPI, error) { return updateSecretBackendsAPI, nil },
+		UpdateSecretBackendsAPIFunc: func(ctx context.Context) (UpdateSecretBackendsAPI, error) { return updateSecretBackendsAPI, nil },
+	}
+	c.SetClientStore(store)
+	return c
+}
+
+// NewModelCredentialCommandForTest returns a model secret backend command for testing.
+func NewModelCredentialCommandForTest(store jujuclient.ClientStore, api ModelSecretBackendAPI) *modelSecretBackendCommand {
+	c := &modelSecretBackendCommand{
+		getAPIFunc: func(ctx context.Context) (ModelSecretBackendAPI, error) { return api, nil },
 	}
 	c.SetClientStore(store)
 	return c

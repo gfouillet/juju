@@ -5,6 +5,7 @@ package charmhub
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,7 +21,7 @@ import (
 	"github.com/juju/juju/internal/charmhub/transport"
 )
 
-func convertInfoResponse(info transport.InfoResponse, arch string, base corebase.Base) (InfoResponse, error) {
+func convertInfoResponse(info transport.InfoResponse, arch string, risk charm.Risk, revision int, track string, base corebase.Base) (InfoResponse, error) {
 	ir := InfoResponse{
 		Type:        string(info.Type),
 		ID:          info.ID,
@@ -51,10 +52,17 @@ func convertInfoResponse(info transport.InfoResponse, arch string, base corebase
 	}
 
 	var err error
-	ir.Tracks, ir.Channels, err = filterChannels(info.ChannelMap, arch, base)
+	ir.Tracks, ir.Channels, err = filterChannels(info.ChannelMap, arch, risk, revision, track, base)
 	if err != nil {
 		return ir, errors.Trace(err)
 	}
+
+	if len(ir.Tracks) == 0 && len(ir.Channels) == 0 {
+		if ir.Charm != nil {
+			ir.Charm.Relations = nil
+		}
+	}
+
 	return ir, nil
 }
 
@@ -102,7 +110,7 @@ func convertCharm(info transport.InfoResponse) *Charm {
 		ch.Relations = transformRelations(meta.Requires, meta.Provides)
 	}
 	if cfg := unmarshalCharmConfig(info.DefaultRelease.Revision.ConfigYAML); cfg != nil {
-		ch.Config = &charm.Config{
+		ch.Config = &charm.ConfigSpec{
 			Options: toCharmOptionMap(cfg),
 		}
 	}
@@ -217,7 +225,7 @@ func transformFindArchitectureSeries(channel transport.FindChannelMap) supported
 	}
 }
 
-func toCharmOptionMap(config *charm.Config) map[string]charm.Option {
+func toCharmOptionMap(config *charm.ConfigSpec) map[string]charm.Option {
 	if config == nil {
 		return nil
 	}
@@ -248,13 +256,13 @@ func unmarshalCharmMetadata(metadataYAML string) *charm.Meta {
 		// we were dealing with handwritten data for test, not
 		// the real deal.  Usually charms are validated before
 		// being uploaded to the store.
-		logger.Warningf(errors.Annotate(err, "cannot unmarshal charm metadata").Error())
+		logger.Warningf(context.TODO(), errors.Annotate(err, "cannot unmarshal charm metadata").Error())
 		return nil
 	}
 	return meta
 }
 
-func unmarshalCharmConfig(configYAML string) *charm.Config {
+func unmarshalCharmConfig(configYAML string) *charm.ConfigSpec {
 	if configYAML == "" || strings.TrimSpace(configYAML) == "{}" {
 		return nil
 	}
@@ -266,7 +274,7 @@ func unmarshalCharmConfig(configYAML string) *charm.Config {
 		// we were dealing with handwritten data for test, not
 		// the real deal.  Usually charms are validated before
 		// being uploaded to the store.
-		logger.Warningf(errors.Annotate(err, "cannot unmarshal charm config").Error())
+		logger.Warningf(context.TODO(), errors.Annotate(err, "cannot unmarshal charm config").Error())
 		return nil
 	}
 	return cfg
@@ -274,7 +282,7 @@ func unmarshalCharmConfig(configYAML string) *charm.Config {
 
 func transformRelations(requires, provides map[string]charm.Relation) map[string]map[string]string {
 	if len(requires) == 0 && len(provides) == 0 {
-		logger.Debugf("no relation data found in charm meta data")
+		logger.Debugf(context.TODO(), "no relation data found in charm meta data")
 		return nil
 	}
 	relations := make(map[string]map[string]string)
@@ -301,12 +309,15 @@ func formatRelationPart(r map[string]charm.Relation) (map[string]string, bool) {
 // filterChannels returns channel map data in a format that facilitates
 // determining track order and open vs closed channels for displaying channel
 // data. The result is filtered on base and arch.
-func filterChannels(channelMap []transport.InfoChannelMap, arch string, base corebase.Base) ([]string, RevisionsMap, error) {
+func filterChannels(channelMap []transport.InfoChannelMap, arch string, risk charm.Risk, revision int, track string, base corebase.Base) ([]string, RevisionsMap, error) {
 	var trackList []string
 
 	tracksSeen := set.NewStrings()
 	revisionsSeen := set.NewStrings()
 	channels := make(RevisionsMap)
+
+	riskExists := false
+	checkRisk := risk != ""
 
 	for _, cm := range channelMap {
 		ch := cm.Channel
@@ -314,6 +325,23 @@ func filterChannels(channelMap []transport.InfoChannelMap, arch string, base cor
 		if ch.Track == "" {
 			ch.Track = "latest"
 		}
+
+		if checkRisk && track == "" {
+			track = ch.Track
+		}
+
+		if track != "" && ch.Track != track {
+			continue
+		}
+
+		if revision != -1 && cm.Revision.Revision != revision {
+			continue
+		}
+
+		if checkRisk && ch.Risk == string(risk) {
+			riskExists = true
+		}
+
 		if !tracksSeen.Contains(ch.Track) {
 			tracksSeen.Add(ch.Track)
 			trackList = append(trackList, ch.Track)
@@ -330,7 +358,7 @@ func filterChannels(channelMap []transport.InfoChannelMap, arch string, base cor
 		}
 		revisionsSeen.Add(revisionKey)
 
-		revision := Revision{
+		channelRevision := Revision{
 			Track:      ch.Track,
 			Risk:       ch.Risk,
 			Version:    cm.Revision.Version,
@@ -344,7 +372,11 @@ func filterChannels(channelMap []transport.InfoChannelMap, arch string, base cor
 		if _, ok := channels[ch.Track]; !ok {
 			channels[ch.Track] = make(map[string][]Revision)
 		}
-		channels[ch.Track][ch.Risk] = append(channels[ch.Track][ch.Risk], revision)
+		channels[ch.Track][ch.Risk] = append(channels[ch.Track][ch.Risk], channelRevision)
+	}
+
+	if checkRisk && !riskExists {
+		return []string{}, make(RevisionsMap), nil
 	}
 
 	for _, risks := range channels {

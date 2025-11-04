@@ -4,33 +4,31 @@
 package upgradevalidation
 
 import (
-	"github.com/juju/version/v2"
-
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
+	"github.com/juju/juju/core/semversion"
 )
 
-// ValidatorsForControllerUpgrade returns a list of validators for controller
-// upgrade.
+// ValidatorsForControllerModelUpgrade returns a list of validators for the
+// controller model in a controller upgrade.
 // Note: the target version can never be lower than the current version.
-func ValidatorsForControllerUpgrade(
-	isControllerModel bool, targetVersion version.Number, cloudspec environscloudspec.CloudSpec,
+func ValidatorsForControllerModelUpgrade(
+	targetVersion semversion.Number,
 ) []Validator {
-	if isControllerModel {
-		validators := []Validator{
-			getCheckTargetVersionForControllerModel(targetVersion),
-			checkMongoStatusForControllerUpgrade,
-			checkMongoVersionForControllerModel,
-			checkForDeprecatedUbuntuSeriesForModel,
-			getCheckForLXDVersion(cloudspec),
-		}
-		return validators
+	validators := []Validator{
+		getCheckTargetVersionForControllerModel(targetVersion),
+		checkForDeprecatedUbuntuSeriesForModel,
 	}
+	return validators
+}
 
+// ModelValidatorsForControllerModelUpgrade returns a list of validators for
+// non-controller models in a controller upgrade.
+// Note: the target version can never be lower than the current version.
+func ModelValidatorsForControllerModelUpgrade(
+	targetVersion semversion.Number,
+) []Validator {
 	validators := []Validator{
 		getCheckTargetVersionForModel(targetVersion, UpgradeControllerAllowed),
-		checkModelMigrationModeForControllerUpgrade,
 		checkForDeprecatedUbuntuSeriesForModel,
-		getCheckForLXDVersion(cloudspec),
 	}
 	return validators
 }
@@ -38,12 +36,10 @@ func ValidatorsForControllerUpgrade(
 // ValidatorsForModelUpgrade returns a list of validators for model upgrade.
 // Note: the target version can never be lower than the current version.
 func ValidatorsForModelUpgrade(
-	force bool, targetVersion version.Number, cloudspec environscloudspec.CloudSpec,
+	force bool, targetVersion semversion.Number,
 ) []Validator {
 	validators := []Validator{
-		getCheckUpgradeSeriesLockForModel(force),
 		checkForDeprecatedUbuntuSeriesForModel,
-		getCheckForLXDVersion(cloudspec),
 	}
 	return validators
 }

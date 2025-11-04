@@ -4,11 +4,14 @@
 package leadership
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/juju/errors"
 	"github.com/juju/worker/v4"
+
+	"github.com/juju/juju/core/unit"
+	"github.com/juju/juju/internal/errors"
 )
 
 // TODO (manadart 2018-10-05) Add interfaces to the end of this line,
@@ -51,7 +54,7 @@ func IsNotLeaderError(err error) bool {
 	if err == nil {
 		return false
 	}
-	_, ok := errors.Cause(err).(*notLeaderError)
+	_, ok := err.(*notLeaderError)
 	return ok
 }
 
@@ -61,19 +64,19 @@ type Claimer interface {
 	// ClaimLeadership claims leadership of the named application on behalf of the
 	// named unit. If no error is returned, leadership will be guaranteed for
 	// at least the supplied duration from the point when the call was made.
-	ClaimLeadership(applicationId, unitId string, duration time.Duration) error
+	ClaimLeadership(ctx context.Context, applicationId, unitId string, duration time.Duration) error
 
 	// BlockUntilLeadershipReleased blocks until the named application is known
 	// to have no leader, in which case it returns no error; or until the
 	// manager is stopped, in which case it will fail.
-	BlockUntilLeadershipReleased(applicationId string, cancel <-chan struct{}) (err error)
+	BlockUntilLeadershipReleased(ctx context.Context, applicationId string) (err error)
 }
 
 // Revoker exposes leadership revocation capabilities.
 type Revoker interface {
 	// RevokeLeadership revokes leadership of the named application
 	// on behalf of the named unit.
-	RevokeLeadership(applicationId, unitId string) error
+	RevokeLeadership(applicationName string, unitName unit.Name) error
 }
 
 // Pinner describes methods used to manage suspension of application leadership
@@ -101,9 +104,8 @@ type Token interface {
 	Check() error
 }
 
-// Checker exposes leadership testing capabilities.
+// Checker exposes leadership checking capabilities.
 type Checker interface {
-
 	// LeadershipCheck returns a Token representing the supplied unit's
 	// application leadership. The existence of the token does not imply
 	// its accuracy; you need to Check() it.
@@ -112,6 +114,19 @@ type Checker interface {
 	// it will (on success) copy mgo/txn operations that can be used to
 	// verify the unit's continued leadership as part of another txn.
 	LeadershipCheck(applicationId, unitId string) Token
+}
+
+// Ensurer describes the ability to guarantee leadership
+// for the duration of some operation.
+type Ensurer interface {
+	Checker
+
+	// WithLeader ensures that the input unit holds leadership of the input
+	// application for the duration of execution of the input function.
+	//
+	// Returns an error satisfying [corelease.ErrNotHeld] if the unit is not
+	// the leader.
+	WithLeader(ctx context.Context, appName, unitName string, fn func(context.Context) error) error
 }
 
 // Ticket is used to communicate leadership status to Tracker clients.
@@ -155,10 +170,26 @@ type Tracker interface {
 	WaitMinion() Ticket
 }
 
+// ErrLeadershipChanged indicates the state of leadership has changed.
+const ErrLeadershipChanged = errors.ConstError("leadership changed")
+
+// ChangeTracker allows clients to run a function ensuring that leadership is
+// unchanged during the function execution.
+type ChangeTracker interface {
+	// WithStableLeadership executes the closure function so long as the state
+	// of leadership remains unchanged.
+	// As soon as that isn't the case, the context is cancelled and the function
+	// returns an error satisfying [ErrLeadershipChanged].
+	// The context must be passed to the closure function to ensure that the
+	// cancellation is propagated to the closure.
+	WithStableLeadership(ctx context.Context, fn func(context.Context) error) error
+}
+
 // TrackerWorker represents a leadership tracker worker.
 type TrackerWorker interface {
 	worker.Worker
 	Tracker
+	ChangeTracker
 }
 
 // Reader describes the capability to read the current state of leadership.

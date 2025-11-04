@@ -4,23 +4,22 @@
 package model
 
 import (
-	"fmt"
-
-	"github.com/juju/errors"
-	"github.com/juju/version/v2"
+	"time"
 
 	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
 	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	corestatus "github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/domain/agentbinary"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/uuid"
 )
 
-// ModelCreationArgs supplies the information required for instantiating a new
-// model.
-type ModelCreationArgs struct {
-	// AgentVersion is the target version for agents running under this model.
-	AgentVersion version.Number
-
+// GlobalModelCreationArgs supplies the information required for
+// recording details of a new model in the controller database.
+type GlobalModelCreationArgs struct {
 	// Cloud is the name of the cloud to associate with the model.
 	// Must not be empty for a valid struct.
 	Cloud string
@@ -34,12 +33,16 @@ type ModelCreationArgs struct {
 	// associated with the model.
 	Credential credential.Key
 
+	// AdminUsers are given admin permissions on the new model.
+	AdminUsers []user.UUID
+
 	// Name is the name of the model.
 	// Must not be empty for a valid struct.
 	Name string
 
-	// Owner is the uuid of the user that owns this model in the Juju controller.
-	Owner user.UUID
+	// Qualifier disambiguates the model name.
+	// Must not be empty for a valid struct.
+	Qualifier coremodel.Qualifier
 
 	// SecretBackend dictates the secret backend to be used for the newly
 	// created model. SecretBackend can be left empty and a default will be
@@ -47,64 +50,40 @@ type ModelCreationArgs struct {
 	SecretBackend string
 }
 
-// Validate is responsible for checking all of the fields of ModelCreationArgs
-// are in a set state that is valid for use. If a validation failure happens an
-// error satisfying [errors.NotValid] is returned.
-func (m ModelCreationArgs) Validate() error {
+// Validate is responsible for checking all of the fields of
+// GlobalModelCreationArgs are in a set state that is valid for use.
+// If a validation failure happens an error satisfying [errors.NotValid]
+// is returned.
+func (m GlobalModelCreationArgs) Validate() error {
 	if m.Cloud == "" {
-		return fmt.Errorf("%w cloud cannot be empty", errors.NotValid)
+		return errors.Errorf("%w cloud cannot be empty", coreerrors.NotValid)
 	}
 	if m.Name == "" {
-		return fmt.Errorf("%w name cannot be empty", errors.NotValid)
+		return errors.Errorf("name cannot be empty").Add(coreerrors.NotValid)
 	}
-	if err := m.Owner.Validate(); err != nil {
-		return fmt.Errorf("%w owner: %w", errors.NotValid, err)
+	if err := m.Qualifier.Validate(); err != nil {
+		return errors.Errorf("invalid model qualifier: %w", err).Add(coreerrors.NotValid)
+	}
+	for _, u := range m.AdminUsers {
+		if err := u.Validate(); err != nil {
+			return errors.Errorf("%w admin users: %w", coreerrors.NotValid, err)
+		}
 	}
 	if !m.Credential.IsZero() {
 		if err := m.Credential.Validate(); err != nil {
-			return fmt.Errorf("credential: %w", err)
+			return errors.Errorf("credential: %w", err)
 		}
 	}
 	return nil
 }
 
-// ModelImportArgs supplies the information needed for importing a model into a
-// Juju controller.
-type ModelImportArgs struct {
-	// ID represents the unique id of the model to import.
-	ID coremodel.UUID
-
-	// ModelCreationArgs supplies the information needed for importing the new
-	// model into Juju.
-	ModelCreationArgs
-}
-
-// Validate is responsible for checking all of the fields of [ModelImportArgs]
-// are in a set state valid for use. If a validation failure happens an error
-// satisfying [errors.NotValid] is returned.
-func (m ModelImportArgs) Validate() error {
-	if err := m.ModelCreationArgs.Validate(); err != nil {
-		return fmt.Errorf("ModelCreationArgs %w", err)
-	}
-
-	if err := m.ID.Validate(); err != nil {
-		return fmt.Errorf("validating model import args id: %w", err)
-	}
-
-	return nil
-}
-
-// ReadOnlyModelCreationArgs is a struct that is used to create a model
-// within the model database. This struct is used to create a model with all of
-// its associated metadata.
-type ReadOnlyModelCreationArgs struct {
+// ModelDetailArgs supplies the information required for
+// recording details of a new model in the model database.
+type ModelDetailArgs struct {
 	// UUID represents the unique id for the model when being created. This
 	// value is optional and if omitted will be generated for the caller. Use
 	// this value when you are trying to import a model during model migration.
 	UUID coremodel.UUID
-
-	// AgentVersion represents the current target agent version for the model.
-	AgentVersion version.Number
 
 	// ControllerUUID represents the unique id for the controller that the model
 	// is associated with.
@@ -113,6 +92,9 @@ type ReadOnlyModelCreationArgs struct {
 	// Name is the name of the model.
 	// Must not be empty for a valid struct.
 	Name string
+
+	// Qualifier disambiguates the model name.
+	Qualifier coremodel.Qualifier
 
 	// Type is the type of the model.
 	// Type must satisfy IsValid() for a valid struct.
@@ -132,12 +114,52 @@ type ReadOnlyModelCreationArgs struct {
 	// CredentialOwner is the name of the credential owner for this model in
 	// the Juju controller.
 	// Optional and can be empty.
-	CredentialOwner string
+	CredentialOwner user.Name
 
 	// CredentialName is the name of the credential to be associated with the
 	// model.
 	// Optional and can be empty.
 	CredentialName string
+
+	// IsControllerModel is a boolean value that indicates if the model is the
+	// controller model.
+	IsControllerModel bool
+
+	// AgentStream is the agent stream used when getting model agents for
+	// [ModelDetailArgs.AgentVersion].
+	AgentStream agentbinary.Stream
+
+	// AgentVersion is the target version for agents running in this model.
+	AgentVersion semversion.Number
+
+	// LatestAgentVersion is the latest know agent version for the model.
+	LatestAgentVersion semversion.Number
+}
+
+// ModelImportArgs supplies the information needed for importing a model into a
+// Juju controller.
+type ModelImportArgs struct {
+	// GlobalModelCreationArgs supplies the information needed for
+	// importing the new model into Juju.
+	GlobalModelCreationArgs
+
+	// UUID represents the unique uuid of the model to import.
+	UUID coremodel.UUID
+}
+
+// Validate is responsible for checking all of the fields of [ModelImportArgs]
+// are in a set state valid for use. If a validation failure happens an error
+// satisfying [errors.NotValid] is returned.
+func (m ModelImportArgs) Validate() error {
+	if err := m.GlobalModelCreationArgs.Validate(); err != nil {
+		return errors.Errorf("GlobalModelCreationArgs %w", err)
+	}
+
+	if err := m.UUID.Validate(); err != nil {
+		return errors.Errorf("validating model import args id: %w", err)
+	}
+
+	return nil
 }
 
 // DeleteModelOptions is a struct that is used to modify the behavior of the
@@ -172,4 +194,36 @@ func WithDeleteDB() DeleteModelOption {
 	return func(o *DeleteModelOptions) {
 		o.deleteDB = true
 	}
+}
+
+// StatusInfo represents the current status of a model.
+type StatusInfo struct {
+	// Status is the current status of the model.
+	Status corestatus.Status
+	// Message is a human-readable message that describes the current status of the model.
+	Message string
+	// Reason is a human-readable message that describes the reason for the current status of the model.
+	Reason string
+	// Since is the time when the model entered the current status.
+	Since time.Time
+}
+
+// ModelState describes the state of a model.
+type ModelState struct {
+	// Destroying is a boolean value that indicates if the model is being destroyed.
+	Destroying bool
+	// Migrating is a boolean value that indicates if the model is being migrated.
+	Migrating bool
+	// HasInvalidCloudCredential is a boolean value that indicates if the model's cloud credential is invalid.
+	HasInvalidCloudCredential bool
+	// InvalidCloudCredentialReason is a string that describes the reason for the model's cloud credential being invalid.
+	InvalidCloudCredentialReason string
+}
+
+// ModelRedirection is a placeholder type.
+type ModelRedirection struct {
+	Addresses       []string
+	CACert          string
+	ControllerUUID  string
+	ControllerAlias string
 }

@@ -4,8 +4,14 @@
 package permission
 
 import (
-	"github.com/juju/errors"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/internal/errors"
 )
+
+// EveryoneUserName represents a special user that is has the base permission
+// level of all external users.
+var EveryoneUserName, _ = user.NewName("everyone@external")
 
 // AccessSpec defines the attributes that can be set when adding a new
 // access.
@@ -50,7 +56,7 @@ func (a AccessSpec) RevokeAccess() Access {
 // user access.
 type UserAccessSpec struct {
 	AccessSpec
-	User string
+	User user.Name
 }
 
 // Validate validates that the access and target specified in the
@@ -58,28 +64,11 @@ type UserAccessSpec struct {
 // empty string. If any of these are untrue, a NotValid error is
 // returned.
 func (u UserAccessSpec) Validate() error {
-	if u.User == "" {
-		return errors.NotValidf("empty user")
+	if u.User.IsZero() {
+		return errors.Errorf("empty user %w", coreerrors.NotValid)
 	}
 	if err := u.AccessSpec.Validate(); err != nil {
 		return err
 	}
 	return nil
-}
-
-// ControllerForAccess is the access spec for the controller
-// login access.
-func ControllerForAccess(access Access) AccessSpec {
-	return AccessSpec{
-		Access: access,
-		Target: ID{
-			ObjectType: Controller,
-			// This should be controllerNS from the core/database package, but
-			// using that import will cause the whole of the core/database
-			// package into the api client package.
-			// For now I've created a test to ensure that the value is correct.
-			// TODO (stickupkid): Move controllerNS to a namespace package.
-			Key: "controller",
-		},
-	}
 }

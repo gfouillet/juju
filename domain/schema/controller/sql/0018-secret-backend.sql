@@ -8,7 +8,8 @@ CREATE TABLE secret_backend_type (
     CHECK (type != '')
 );
 
-CREATE UNIQUE INDEX idx_secret_backend_type_type ON secret_backend_type (type);
+CREATE UNIQUE INDEX idx_secret_backend_type_type
+ON secret_backend_type (type);
 
 INSERT INTO secret_backend_type VALUES
 (0, 'controller', 'the juju controller secret backend'),
@@ -27,7 +28,8 @@ CREATE TABLE secret_backend (
     REFERENCES secret_backend_type (id)
 );
 
-CREATE UNIQUE INDEX idx_secret_backend_name ON secret_backend (name);
+CREATE UNIQUE INDEX idx_secret_backend_name
+ON secret_backend (name);
 
 CREATE TABLE secret_backend_config (
     backend_uuid TEXT NOT NULL,
@@ -52,6 +54,20 @@ CREATE TABLE secret_backend_rotation (
     REFERENCES secret_backend (uuid)
 );
 
+CREATE TABLE secret_backend_reference (
+    secret_backend_uuid TEXT NOT NULL,
+    model_uuid TEXT NOT NULL,
+    secret_revision_uuid TEXT NOT NULL,
+    CONSTRAINT pk_secret_backend_reference
+    PRIMARY KEY (secret_backend_uuid, model_uuid, secret_revision_uuid),
+    CONSTRAINT fk_secret_backend_reference_model_uuid
+    FOREIGN KEY (model_uuid)
+    REFERENCES model (uuid),
+    CONSTRAINT fk_secret_backend_reference_secret_backend_uuid
+    FOREIGN KEY (secret_backend_uuid)
+    REFERENCES secret_backend (uuid)
+);
+
 CREATE TABLE model_secret_backend (
     model_uuid TEXT NOT NULL PRIMARY KEY,
     secret_backend_uuid TEXT NOT NULL,
@@ -69,7 +85,9 @@ SELECT
     m.name,
     mt.type AS model_type,
     msb.secret_backend_uuid,
+    sb.name AS secret_backend_name,
     (SELECT uuid FROM controller) AS controller_uuid
 FROM model_secret_backend AS msb
-INNER JOIN model AS m ON msb.model_uuid = m.uuid
-INNER JOIN model_type AS mt ON m.model_type_id = mt.id;
+JOIN secret_backend AS sb ON msb.secret_backend_uuid = sb.uuid
+JOIN model AS m ON msb.model_uuid = m.uuid
+JOIN model_type AS mt ON m.model_type_id = mt.id;

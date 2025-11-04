@@ -12,16 +12,16 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/apiserver/common"
-	coremacaroon "github.com/juju/juju/core/macaroon"
+	internalhttp "github.com/juju/juju/apiserver/internal/http"
+	coreuser "github.com/juju/juju/core/user"
 	usererrors "github.com/juju/juju/domain/access/errors"
-	"github.com/juju/juju/environs"
+	proxyerrors "github.com/juju/juju/domain/proxy/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internalmacaroon "github.com/juju/juju/internal/macaroon"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
 // registerUserHandler is an http.Handler for the "/register" endpoint. This is
@@ -36,33 +36,30 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	if req.Method != "POST" {
 		err := sendError(w, errors.MethodNotAllowedf("unsupported method: %q", req.Method))
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
-	st, err := h.ctxt.stateForRequestUnauthenticated(req)
-	if err != nil {
-		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
-		}
-		return
-	}
-	defer st.Release()
 
 	// TODO (stickupkid): Remove this nonsense, we should be able to get the
-	// service factory from the handler.
-	serviceFactory := h.ctxt.srv.shared.serviceFactoryGetter.FactoryForModel(st.ModelUUID())
+	// domain services from the handler.
+	domainServices, err := h.ctxt.srv.shared.domainServicesGetter.ServicesForModel(req.Context(), h.ctxt.srv.shared.controllerModelUUID)
+	if err != nil {
+		if err := sendError(w, err); err != nil {
+			logger.Errorf(req.Context(), "%v", err)
+		}
+		return
+	}
 	userTag, response, err := h.processPost(
 		req,
-		st.State,
-		serviceFactory.ControllerConfig(),
-		serviceFactory.Access(),
-		serviceFactory.Cloud(),
-		serviceFactory.Credential(),
+		domainServices.ModelInfo(),
+		domainServices.Proxy(),
+		domainServices.ControllerConfig(),
+		domainServices.Access(),
 	)
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
@@ -72,21 +69,21 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	m, err := h.ctxt.srv.localMacaroonAuthenticator.CreateLocalLoginMacaroon(req.Context(), userTag, httpbakery.RequestVersion(req))
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
-	cookie, err := httpbakery.NewCookie(coremacaroon.MacaroonNamespace, macaroon.Slice{m})
+	cookie, err := httpbakery.NewCookie(internalmacaroon.MacaroonNamespace, macaroon.Slice{m})
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
 	http.SetCookie(w, cookie)
 
-	if err := sendStatusAndJSON(w, http.StatusOK, response); err != nil {
-		logger.Errorf("%v", err)
+	if err := internalhttp.SendStatusAndJSON(w, http.StatusOK, response); err != nil {
+		logger.Errorf(req.Context(), "%v", err)
 	}
 }
 
@@ -110,10 +107,10 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 // be revealed.
 func (h *registerUserHandler) processPost(
 	req *http.Request,
-	st *state.State,
+	modelInfoService ModelInfoService,
+	proxyService ProxyService,
 	controllerConfigService ControllerConfigService,
 	userService UserService,
-	cloudService common.CloudService, credentialService common.CredentialService,
 ) (
 	names.UserTag, *params.SecretKeyLoginResponse, error,
 ) {
@@ -134,7 +131,7 @@ func (h *registerUserHandler) processPost(
 	}
 
 	// Decrypt the ciphertext with the user's activation key (if it has one).
-	sealer, err := userService.SetPasswordWithActivationKey(req.Context(), userTag.Name(), loginRequest.Nonce, loginRequest.PayloadCiphertext)
+	sealer, err := userService.SetPasswordWithActivationKey(req.Context(), coreuser.NameFromTag(userTag), loginRequest.Nonce, loginRequest.PayloadCiphertext)
 	if err != nil {
 		if errors.Is(err, usererrors.ActivationKeyNotValid) {
 			return names.UserTag{}, nil, errors.NotValidf("activation key")
@@ -146,7 +143,7 @@ func (h *registerUserHandler) processPost(
 
 	// Respond with the CA-cert and password, encrypted again with the
 	// activation key.
-	responsePayload, err := h.getSecretKeyLoginResponsePayload(req.Context(), st, controllerConfigService, cloudService, credentialService)
+	responsePayload, err := h.getSecretKeyLoginResponsePayload(req.Context(), modelInfoService, proxyService, controllerConfigService)
 	if err != nil {
 		return names.UserTag{}, nil, errors.Trace(err)
 	}
@@ -170,33 +167,20 @@ func (h *registerUserHandler) processPost(
 	return userTag, response, nil
 }
 
-func getConnectorInfoer(ctx context.Context, model stateenvirons.Model, cloudService common.CloudService, credentialService common.CredentialService) (environs.ConnectorInfo, error) {
-	configGetter := stateenvirons.EnvironConfigGetter{
-		Model: model, CloudService: cloudService, CredentialService: credentialService}
-	environ, err := common.EnvironFuncForModel(model, cloudService, credentialService, configGetter)(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if connInfo, ok := environ.(environs.ConnectorInfo); ok {
-		return connInfo, nil
-	}
-	return nil, errors.NotSupportedf("environ %q", environ.Config().Type())
-}
-
-// For testing.
-var GetConnectorInfoer = getConnectorInfoer
-
 // getSecretKeyLoginResponsePayload returns the information required by the
 // client to login to the controller securely.
 func (h *registerUserHandler) getSecretKeyLoginResponsePayload(
 	ctx context.Context,
-	st *state.State,
+	modelInfoService ModelInfoService,
+	proxyService ProxyService,
 	controllerConfigService ControllerConfigService,
-	cloudService common.CloudService,
-	credentialService common.CredentialService,
 ) (*params.SecretKeyLoginResponsePayload, error) {
-	if !st.IsController() {
-		return nil, errors.New("state is not for a controller")
+	modelInfo, err := modelInfoService.GetModelInfo(ctx)
+	if err != nil {
+		return nil, internalerrors.Capture(err)
+	}
+	if !modelInfo.IsControllerModel {
+		return nil, internalerrors.Capture(errors.New("model is not a controller"))
 	}
 	controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
@@ -208,24 +192,14 @@ func (h *registerUserHandler) getSecretKeyLoginResponsePayload(
 		ControllerUUID: controllerConfig.ControllerUUID(),
 	}
 
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	connInfo, err := GetConnectorInfoer(ctx, model, cloudService, credentialService)
-	if errors.Is(err, errors.NotSupported) { // Not all providers support this.
+	proxier, err := proxyService.GetConnectionProxyInfo(ctx)
+	if errors.Is(err, proxyerrors.ProxyInfoNotSupported) ||
+		errors.Is(err, proxyerrors.ProxyInfoNotFound) {
 		return &payload, nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return nil, errors.Trace(err)
 	}
-	proxier, err := connInfo.ConnectionProxyInfo(ctx)
-	if errors.Is(err, errors.NotFound) {
-		return &payload, nil
-	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+
 	if payload.ProxyConfig, err = params.NewProxy(proxier); err != nil {
 		return nil, errors.Trace(err)
 	}

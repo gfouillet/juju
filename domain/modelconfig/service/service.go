@@ -5,17 +5,17 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/juju/collections/transform"
-	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/domain/modelconfig/validators"
 	"github.com/juju/juju/domain/modeldefaults"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/errors"
 )
 
 // ModelDefaultsProvider is responsible for providing the default config values
@@ -32,10 +32,12 @@ type State interface {
 	ProviderState
 	SpaceValidatorState
 
-	// AgentVersion returns the current models agent version. If no agent
-	// version has been set for the current model then a error satisfying
-	// [errors.NotFound] is returned.
-	AgentVersion(context.Context) (string, error)
+	// GetModelAgentVersionAndStream returns the current model's set agent
+	// version and stream.
+	// The following errors can be expected:
+	// - [github.com/juju/juju/core/errors.NotFound] if no agent version or
+	// stream has been set.
+	GetModelAgentVersionAndStream(context.Context) (ver string, stream string, err error)
 
 	// ModelConfigHasAttributes returns the set of attributes that model config
 	// currently has set out of the list supplied.
@@ -49,6 +51,10 @@ type State interface {
 	// UpdateModelConfig is responsible for both inserting, updating and
 	// removing model config values for the current model.
 	UpdateModelConfig(context.Context, map[string]string, []string) error
+
+	// NamespaceForWatchModelConfig returns the namespace identifier used for
+	// watching model configuration changes.
+	NamespaceForWatchModelConfig() string
 }
 
 // SpaceValidatorState represents the state entity for validating space-related
@@ -60,9 +66,17 @@ type SpaceValidatorState interface {
 
 // WatcherFactory describes methods for creating watchers.
 type WatcherFactory interface {
-	// NewNamespaceWatcher returns a new namespace watcher
-	// for events based on the input change mask.
-	NewNamespaceWatcher(string, changestream.ChangeType, eventsource.NamespaceQuery) (watcher.StringsWatcher, error)
+	// NewNamespaceWatcher returns a new watcher that filters changes from the
+	// input base watcher's db/queue. Change-log events will be emitted only if
+	// the filter accepts them, and dispatching the notifications via the
+	// Changes channel. A filter option is required, though additional filter
+	// options can be provided.
+	NewNamespaceWatcher(
+		ctx context.Context,
+		initialQuery eventsource.NamespaceQuery,
+		summary string,
+		filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
+	) (watcher.StringsWatcher, error)
 }
 
 // Service defines the service for interacting with ModelConfig.
@@ -87,22 +101,27 @@ func NewService(
 
 // ModelConfig returns the current config for the model.
 func (s *Service) ModelConfig(ctx context.Context) (*config.Config, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	stConfig, err := s.st.ModelConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("getting model config from state: %w", err)
+		return nil, errors.Errorf("getting model config from state: %w", err)
 	}
 
-	agentVersion, err := s.st.AgentVersion(ctx)
+	agentVersion, agentStream, err := s.st.GetModelAgentVersionAndStream(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("getting model agent version for model config: %w", err)
+		return nil, errors.Errorf("getting agent version and stream for model config: %w", err)
 	}
 
 	altConfig := transform.Map(stConfig, func(k, v string) (string, any) { return k, v })
 
-	// We add the agent version to model config here. Over time we need to
-	// remove uses of agent version from model config. We prefer to augment
-	// config with this value on read rather then persisting on writing.
+	// We add the agent version and stream to model config here. Over time we need
+	// to remove uses of agent version and stream from model config. We prefer
+	// to augment config with this value on read rather then persisting on
+	// writing.
 	altConfig[config.AgentVersionKey] = agentVersion
+	altConfig[config.AgentStreamKey] = agentStream
 	return config.New(config.NoDefaults, altConfig)
 }
 
@@ -111,6 +130,9 @@ func (s *Service) ModelConfig(ctx context.Context) (*config.Config, error) {
 func (s *Service) ModelConfigValues(
 	ctx context.Context,
 ) (config.ConfigValues, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	cfg, err := s.ModelConfig(ctx)
 	if err != nil {
 		return config.ConfigValues{}, err
@@ -118,20 +140,20 @@ func (s *Service) ModelConfigValues(
 
 	defaults, err := s.defaultsProvider.ModelDefaults(ctx)
 	if err != nil {
-		return config.ConfigValues{}, fmt.Errorf("getting model defaults: %w", err)
+		return config.ConfigValues{}, errors.Errorf("getting model defaults: %w", err)
 	}
 
 	allAttrs := cfg.AllAttrs()
 	if len(allAttrs) == 0 {
 		allAttrs = map[string]any{}
 		for k, v := range defaults {
-			allAttrs[k] = v.Value
+			allAttrs[k] = v.Value()
 		}
 	}
 
 	result := make(config.ConfigValues, len(allAttrs))
 	for attr, val := range allAttrs {
-		isDefault, source := defaults[attr].Has(val)
+		isDefault, source := defaults[attr].ValueSource(val)
 		if !isDefault {
 			source = config.JujuModelConfigSource
 		}
@@ -159,12 +181,12 @@ func (s *Service) buildUpdatedModelConfig(
 
 	newConf, err := current.Remove(removeAttrs)
 	if err != nil {
-		return newConf, current, fmt.Errorf("building new model config with removed attributes: %w", err)
+		return newConf, current, errors.Errorf("building new model config with removed attributes: %w", err)
 	}
 
 	newConf, err = newConf.Apply(updates)
 	if err != nil {
-		return newConf, current, fmt.Errorf("building new model config with removed attributes: %w", err)
+		return newConf, current, errors.Errorf("building new model config with removed attributes: %w", err)
 	}
 
 	return newConf, current, nil
@@ -181,19 +203,23 @@ func (s *Service) reconcileRemovedAttributes(
 	ctx context.Context,
 	removeAttrs []string,
 ) (map[string]any, error) {
+	if len(removeAttrs) == 0 {
+		return map[string]any{}, nil
+	}
+
 	updates := map[string]any{}
 	hasAttrs, err := s.st.ModelConfigHasAttributes(ctx, removeAttrs)
 	if err != nil {
-		return updates, fmt.Errorf("determining model config has attributes: %w", err)
+		return updates, errors.Errorf("determining model config has attributes: %w", err)
 	}
 
 	defaults, err := s.defaultsProvider.ModelDefaults(ctx)
 	if err != nil {
-		return updates, fmt.Errorf("getting model defaults for config attribute removal: %w", err)
+		return updates, errors.Errorf("getting model defaults for config attribute removal: %w", err)
 	}
 
 	for _, attr := range hasAttrs {
-		if val := defaults[attr].Value; val != nil {
+		if val := defaults[attr].Value(); val != nil {
 			updates[attr] = val
 		}
 	}
@@ -208,9 +234,12 @@ func (s *Service) SetModelConfig(
 	ctx context.Context,
 	cfg map[string]any,
 ) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	defaults, err := s.defaultsProvider.ModelDefaults(ctx)
 	if err != nil {
-		return fmt.Errorf("getting model defaults: %w", err)
+		return errors.Errorf("getting model defaults: %w", err)
 	}
 
 	// We want to make a copy of cfg so that we don't modify the users input.
@@ -228,17 +257,17 @@ func (s *Service) SetModelConfig(
 
 	setCfg, err := config.New(config.NoDefaults, cfgCopy)
 	if err != nil {
-		return fmt.Errorf("constructing new model config with model defaults: %w", err)
+		return errors.Errorf("constructing new model config with model defaults: %w", err)
 	}
 
-	_, err = s.modelValidator.Validate(ctx, setCfg, nil)
+	_, err = s.validatorForSetModelConfig().Validate(ctx, setCfg, nil)
 	if err != nil {
-		return fmt.Errorf("validating model config to set for model: %w", err)
+		return errors.Errorf("validating model config to set for model: %w", err)
 	}
 
 	rawCfg, err := CoerceConfigForStorage(setCfg.AllAttrs())
 	if err != nil {
-		return fmt.Errorf("coercing model config for storage: %w", err)
+		return errors.Errorf("coercing model config for storage: %w", err)
 	}
 
 	return s.st.SetModelConfig(ctx, rawCfg)
@@ -254,16 +283,21 @@ func (s *Service) SetModelConfig(
 //
 // The following validations on model config are run by default:
 // - Agent version is not change between updates.
+// - Agent stream is not changed between updates.
 // - Charmhub url is not changed between updates.
 // - The networking space chosen is valid and can be used.
 // - The secret backend is valid and can be used.
 // - Authorized keys are not changed.
+// - Container networking method is not being changed.
 func (s *Service) UpdateModelConfig(
 	ctx context.Context,
 	updateAttrs map[string]any,
 	removeAttrs []string,
 	additionalValidators ...config.Validator,
 ) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	// noop with no updates or removals to perform.
 	if len(updateAttrs) == 0 && len(removeAttrs) == 0 {
 		return nil
@@ -271,7 +305,7 @@ func (s *Service) UpdateModelConfig(
 
 	updates, err := s.reconcileRemovedAttributes(ctx, removeAttrs)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	// It's important here that we apply the user updates over the top of the
@@ -283,35 +317,36 @@ func (s *Service) UpdateModelConfig(
 
 	newCfg, currCfg, err := s.buildUpdatedModelConfig(ctx, updates, removeAttrs)
 	if err != nil {
-		return fmt.Errorf("making updated model configuration: %w", err)
+		return errors.Errorf("making updated model configuration: %w", err)
 	}
 
-	_, err = s.updateModelConfigValidator().Validate(ctx, newCfg, currCfg)
+	validatedCfg, err := s.validatorForUpdateModelConfig().Validate(ctx, newCfg, currCfg)
 	if err != nil {
-		return fmt.Errorf("validating updated model configuration: %w", err)
+		return errors.Errorf("validating updated model configuration: %w", err)
 	}
 
-	rawCfg, err := CoerceConfigForStorage(updateAttrs)
-	if err != nil {
-		return fmt.Errorf("coercing new configuration for persistence: %w", err)
+	// We need to walk through all of the updates and potentially find any
+	// changes that were made by the validators.
+	validatedUpdates := make(map[string]any, len(updates))
+	validatedCfgAttrs := validatedCfg.AllAttrs()
+	for k := range updates {
+		validatedCfgVal, exists := validatedCfgAttrs[k]
+		if !exists {
+			continue
+		}
+		validatedUpdates[k] = validatedCfgVal
 	}
 
-	err = s.st.UpdateModelConfig(ctx, rawCfg, removeAttrs)
+	rawCfgUpdate, err := CoerceConfigForStorage(validatedUpdates)
 	if err != nil {
-		return fmt.Errorf("updating model config: %w", err)
+		return errors.Errorf("coercing new configuration for persistence: %w", err)
+	}
+
+	err = s.st.UpdateModelConfig(ctx, rawCfgUpdate, removeAttrs)
+	if err != nil {
+		return errors.Errorf("updating model config: %w", err)
 	}
 	return nil
-}
-
-// dummySecretsBackendProvider implements validators.SecretBackendProvider and
-// always returns true.
-// TODO (tlm): These needs to be swapped out with an actual checker when we have
-// secrets in dqlite
-type dummySecretsBackendProvider struct{}
-
-// HasSecretsBackend implements validators.SecretBackendProvider
-func (*dummySecretsBackendProvider) HasSecretsBackend(_ string) (bool, error) {
-	return true, nil
 }
 
 // spaceValidator implements validators.SpaceProvider.
@@ -322,28 +357,48 @@ type spaceValidator struct {
 // HasSpace implements validators.SpaceProvider. It checks whether the
 // given space exists.
 func (v *spaceValidator) HasSpace(ctx context.Context, spaceName string) (bool, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	return v.st.SpaceExists(ctx, spaceName)
 }
 
-// updateModelConfigValidator returns a config validator to use on model config
-// when it is being updated. The validator returned will check that:
-// - Agent version is not being changed.
-// - CharmhubURL is not being changed.
+// validatorForSetModelConfig returns a config validator to use on model config
+// when it is being set initially. The validator returned will check that:
 // - Network space exists.
 // - Secret backend exists.
-// - There is no changes to authorized keys.
-func (s *Service) updateModelConfigValidator(
+// - Container networking method is valid.
+func (s *Service) validatorForSetModelConfig(
 	additional ...config.Validator,
 ) config.Validator {
 	agg := &config.AggregateValidator{
 		Validators: []config.Validator{
+			validators.ContainerNetworkingMethodValue(),
+			s.modelValidator,
+		},
+	}
+	agg.Validators = append(agg.Validators, additional...)
+	return agg
+}
+
+// validatorForUpdateModelConfig returns a config validator to use on model config
+// when it is being updated. The validator returned will check that:
+// - Agent version is not being changed.
+// - CharmhubURL is not being changed.
+// - Network space exists.
+// - Container networking method is not being changed.
+func (s *Service) validatorForUpdateModelConfig(
+	additional ...config.Validator,
+) config.Validator {
+	agg := &config.AggregateValidator{
+		Validators: []config.Validator{
+			validators.AgentStreamChange(),
 			validators.AgentVersionChange(),
 			validators.CharmhubURLChange(),
 			validators.SpaceChecker(&spaceValidator{
 				st: s.st,
 			}),
-			validators.SecretBackendChecker(&dummySecretsBackendProvider{}),
-			validators.AuthorizedKeysChange(),
+			validators.ContainerNetworkingMethodChange(),
 			s.modelValidator,
 		},
 	}
@@ -378,9 +433,14 @@ func NewWatchableService(
 
 // Watch returns a watcher that returns keys for any changes to model
 // config.
-func (s *WatchableService) Watch() (watcher.StringsWatcher, error) {
+func (s *WatchableService) Watch(ctx context.Context) (watcher.StringsWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	return s.watcherFactory.NewNamespaceWatcher(
-		"model_config", changestream.All,
+		ctx,
 		eventsource.InitialNamespaceChanges(s.st.AllKeysQuery()),
+		"model config watcher",
+		eventsource.NamespaceFilter(s.st.NamespaceForWatchModelConfig(), changestream.All),
 	)
 }

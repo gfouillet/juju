@@ -4,156 +4,243 @@
 package storage
 
 import (
-	stdcontext "context"
+	"context"
 	"time"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/storagecommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
+	"github.com/juju/juju/core/blockdevice"
+	coreerrors "github.com/juju/juju/core/errors"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
+	coreunit "github.com/juju/juju/core/unit"
+	domainremoval "github.com/juju/juju/domain/removal"
 	domainstorage "github.com/juju/juju/domain/storage"
 	storageerrors "github.com/juju/juju/domain/storage/errors"
 	storageservice "github.com/juju/juju/domain/storage/service"
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/environs/tags"
+	domainstorageprovisioning "github.com/juju/juju/domain/storageprovisioning"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
+
+type BlockDeviceService interface {
+	GetBlockDevicesForMachine(
+		ctx context.Context, machineUUID machine.UUID,
+	) ([]blockdevice.BlockDevice, error)
+}
+
+// RemovalService defines the interface required for removing storage related
+// entities in the model on behalf of an API caller.
+type RemovalService interface {
+	// RemoveStorageAttachment is responsible for removing a storage attachment
+	// from a unit. If the unit is Alive then removing this storage attachment
+	// must not violate the storage requirements of the charm.
+	//
+	// The following errors may be returned:
+	// - [coreerrors.NotValid] if the storage attachment uuid is not valid.
+	// - [storageerrors.StorageAttachmentNotFound] if the storage attachment
+	// does not exist in the model.
+	// - [applicationerrors.UnitStorageMinViolation] if removing a storage
+	// attachment would violate the charm minimums required for the unit.
+	RemoveStorageAttachment(
+		ctx context.Context,
+		uuid domainstorageprovisioning.StorageAttachmentUUID,
+		force bool,
+		wait time.Duration,
+	) (domainremoval.UUID, error)
+
+	// RemoveStorageInstance ensures that the specified storage instance is no
+	// longer alive, scheduling removal jobs if needed and if specified, mark the
+	// volume and filesystems for obliteration.
+	RemoveStorageInstance(
+		ctx context.Context,
+		uuid domainstorage.StorageInstanceUUID,
+		force bool, wait time.Duration,
+		obliterate bool,
+	) error
+}
 
 // StorageService defines apis on the storage service.
 type StorageService interface {
-	CreateStoragePool(ctx stdcontext.Context, name string, providerType storage.ProviderType, attrs storageservice.PoolAttrs) error
-	DeleteStoragePool(ctx stdcontext.Context, name string) error
-	ReplaceStoragePool(ctx stdcontext.Context, name string, providerType storage.ProviderType, attrs storageservice.PoolAttrs) error
-	ListStoragePools(ctx stdcontext.Context, filter domainstorage.Names, providers domainstorage.Providers) ([]*storage.Config, error)
-	GetStoragePoolByName(ctx stdcontext.Context, name string) (*storage.Config, error)
+	// CreateStoragePool creates a storage pool with the specified configuration.
+	// The following errors can be expected:
+	// - [storageerrors.PoolAlreadyExists] if a pool with the same name already exists.
+	CreateStoragePool(
+		ctx context.Context, name string, providerType storage.ProviderType, attrs storageservice.PoolAttrs,
+	) error
+
+	// DeleteStoragePool deletes a storage pool with the specified name.
+	// The following errors can be expected:
+	// - [storageerrors.PoolNotFoundError] if a pool with the specified name does not exist.
+	DeleteStoragePool(ctx context.Context, name string) error
+
+	// GetStorageAttachmentUUIDForStorageInstanceAndUnit returns the
+	// [domainstorageprovisioning.StorageAttachmentUUID] associated with the
+	// given storage instance id and unit name.
+	//
+	// The following errors may be returned:
+	// - [github.com/juju/juju/domain/storage/errors.StorageNotFound] if the
+	// storage instance for the supplied uuid no longer exists.
+	// - [github.com/juju/juju/domain/application/errors.UnitNotFound] if the
+	// unit no longer exists for the supplied uuid.
+	GetStorageAttachmentUUIDForStorageInstanceAndUnit(
+		ctx context.Context,
+		uuid domainstorage.StorageInstanceUUID,
+		unitUUID coreunit.UUID,
+	) (domainstorageprovisioning.StorageAttachmentUUID, error)
+
+	// GetStorageInstanceAttachments returns the set of attachments a storage
+	// instance has. If the storage instance has no attachments then an empty
+	// slice is returned.
+	//
+	// The following errors may be returned:
+	// - [coreerrors.NotValid] when the supplied uuid did not pass validation.
+	// - [github.com/juju/juju/domain/storage/errors.StorageInstanceNotFound] if
+	// the storage instance for the supplied uuid does not exist.
+	GetStorageInstanceAttachments(
+		context.Context, domainstorage.StorageInstanceUUID,
+	) ([]domainstorageprovisioning.StorageAttachmentUUID, error)
+
+	// GetStorageInstanceUUIDForID returns the StorageInstanceUUID for the given
+	// storage ID.
+	//
+	// The following errors may be returned:
+	// - [github.com/juju/juju/domain/storage/errors.StorageNotFound] if no
+	// storage instance exists for the provided storage id.
+	GetStorageInstanceUUIDForID(
+		ctx context.Context,
+		storageID string,
+	) (domainstorage.StorageInstanceUUID, error)
+
+	// ReplaceStoragePool replaces an existing storage pool with the specified configuration.
+	// The following errors can be expected:
+	// - [storageerrors.PoolNotFoundError] if a pool with the specified name does not exist.
+	ReplaceStoragePool(
+		ctx context.Context, name string, providerType storage.ProviderType, attrs storageservice.PoolAttrs,
+	) error
+
+	// ListStoragePools returns all the storage pools.
+	ListStoragePools(ctx context.Context) ([]domainstorage.StoragePool, error)
+
+	// ListStoragePoolsByNamesAndProviders returns the storage pools matching the specified
+	// names and providers, including the default storage pools.
+	// If no names and providers are specified, an empty slice is returned without an error.
+	// If no storage pools match the criteria, an empty slice is returned without an error.
+	ListStoragePoolsByNamesAndProviders(
+		ctx context.Context, names domainstorage.Names, providers domainstorage.Providers,
+	) ([]domainstorage.StoragePool, error)
+
+	// ListStoragePoolsByNames returns the storage pools matching the specified names, including
+	// the default storage pools.
+	// If no names are specified, an empty slice is returned without an error.
+	// If no storage pools match the criteria, an empty slice is returned without an error.
+	ListStoragePoolsByNames(
+		ctx context.Context, names domainstorage.Names,
+	) ([]domainstorage.StoragePool, error)
+
+	// ListStoragePoolsByProviders returns the storage pools matching the specified
+	// providers, including the default storage pools.
+	// If no providers are specified, an empty slice is returned without an error.
+	// If no storage pools match the criteria, an empty slice is returned without an error.
+	ListStoragePoolsByProviders(
+		ctx context.Context, providers domainstorage.Providers,
+	) ([]domainstorage.StoragePool, error)
+
+	// GetStoragePoolByName returns the storage pool with the specified name.
+	// The following errors can be expected:
+	// - [storageerrors.PoolNotFoundError] if a pool with the specified name does not exist.
+	GetStoragePoolByName(ctx context.Context, name string) (domainstorage.StoragePool, error)
 }
 
-type storageMetadataFunc func() (StorageService, storage.ProviderRegistry, error)
+// ApplicationService defines apis on the application service.
+type ApplicationService interface {
+	GetUnitMachineName(ctx context.Context, unitName coreunit.Name) (machine.Name, error)
 
-// StorageAPI implements the latest version (v6) of the Storage API.
+	// GetUnitUUID returns the UUID for the named unit.
+	//
+	// The following errors may be returned:
+	// - [github.com/juju/juju/core/unit.InvalidUnitName] if the unit name is
+	// invalid.
+	// - [github.com/juju/juju/domain/application/errors.UnitNotFound] if the
+	// unit doesn't exist.
+	GetUnitUUID(context.Context, coreunit.Name) (coreunit.UUID, error)
+}
+
+// StorageAPIv6 provides the Storage API facade for version 6.
+type StorageAPIv6 struct {
+	*StorageAPI
+}
+
+// StorageAPI implements the latest version (v7) of the Storage API.
 type StorageAPI struct {
-	backend                     backend
-	storageAccess               storageAccess
-	blockDeviceGetter           blockDeviceGetter
-	storageMetadata             storageMetadataFunc
-	authorizer                  facade.Authorizer
-	credentialInvalidatorGetter envcontext.ModelCredentialInvalidatorGetter
-	modelType                   state.ModelType
+	applicationService ApplicationService
+	blockDeviceService BlockDeviceService
+	removalService     RemovalService
+	storageService     StorageService
+
+	authorizer     facade.Authorizer
+	controllerUUID string
+	modelUUID      coremodel.UUID
+	logger         corelogger.Logger
 }
 
 func NewStorageAPI(
-	backend backend,
-	modelType state.ModelType,
-	storageAccess storageAccess,
-	blockDeviceGetter blockDeviceGetter,
-	storageMetadata storageMetadataFunc,
+	controllerUUID string,
+	modelUUID coremodel.UUID,
 	authorizer facade.Authorizer,
-	credentialInvalidatorGetter envcontext.ModelCredentialInvalidatorGetter,
+	logger corelogger.Logger,
+	applicationService ApplicationService,
+	blockDeviceService BlockDeviceService,
+	removalService RemovalService,
+	storageService StorageService,
 ) *StorageAPI {
 	return &StorageAPI{
-		backend:                     backend,
-		modelType:                   modelType,
-		storageAccess:               storageAccess,
-		blockDeviceGetter:           blockDeviceGetter,
-		storageMetadata:             storageMetadata,
-		authorizer:                  authorizer,
-		credentialInvalidatorGetter: credentialInvalidatorGetter,
+		applicationService: applicationService,
+		blockDeviceService: blockDeviceService,
+		removalService:     removalService,
+		storageService:     storageService,
+
+		authorizer:     authorizer,
+		controllerUUID: controllerUUID,
+		modelUUID:      modelUUID,
+		logger:         logger,
 	}
 }
 
-func (a *StorageAPI) checkCanRead() error {
-	err := a.authorizer.HasPermission(permission.SuperuserAccess, a.backend.ControllerTag())
+func (a *StorageAPI) checkCanRead(ctx context.Context) error {
+	err := a.authorizer.HasPermission(ctx, permission.SuperuserAccess, names.NewControllerTag(a.controllerUUID))
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	if err == nil {
 		return nil
 	}
-	return a.authorizer.HasPermission(permission.ReadAccess, a.backend.ModelTag())
+	return a.authorizer.HasPermission(ctx, permission.ReadAccess, names.NewModelTag(a.modelUUID.String()))
 }
 
-func (a *StorageAPI) checkCanWrite() error {
-	return a.authorizer.HasPermission(permission.WriteAccess, a.backend.ModelTag())
+func (a *StorageAPI) checkCanWrite(ctx context.Context) error {
+	return a.authorizer.HasPermission(ctx, permission.WriteAccess, names.NewModelTag(a.modelUUID.String()))
 }
 
 // StorageDetails retrieves and returns detailed information about desired
 // storage identified by supplied tags. If specified storage cannot be
 // retrieved, individual error is returned instead of storage information.
-func (a *StorageAPI) StorageDetails(ctx stdcontext.Context, entities params.Entities) (params.StorageDetailsResults, error) {
-	if err := a.checkCanRead(); err != nil {
-		return params.StorageDetailsResults{}, errors.Trace(err)
-	}
+func (a *StorageAPI) StorageDetails(ctx context.Context, entities params.Entities) (params.StorageDetailsResults, error) {
 	results := make([]params.StorageDetailsResult, len(entities.Entities))
-	for i, entity := range entities.Entities {
-		storageTag, err := names.ParseStorageTag(entity.Tag)
-		if err != nil {
-			results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		storageInstance, err := a.storageAccess.StorageInstance(storageTag)
-		if err != nil {
-			results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		details, err := storagecommon.StorageDetails(ctx, a.storageAccess, a.blockDeviceGetter, a.unitAssignedMachine, storageInstance)
-		if err != nil {
-			results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results[i].Result = details
-	}
 	return params.StorageDetailsResults{Results: results}, nil
 }
 
 // ListStorageDetails returns storage matching a filter.
-func (a *StorageAPI) ListStorageDetails(ctx stdcontext.Context, filters params.StorageFilters) (params.StorageDetailsListResults, error) {
-	if err := a.checkCanRead(); err != nil {
-		return params.StorageDetailsListResults{}, errors.Trace(err)
-	}
+func (a *StorageAPI) ListStorageDetails(ctx context.Context, filters params.StorageFilters) (params.StorageDetailsListResults, error) {
 	results := params.StorageDetailsListResults{
 		Results: make([]params.StorageDetailsListResult, len(filters.Filters)),
-	}
-	for i, filter := range filters.Filters {
-		list, err := a.listStorageDetails(ctx, filter)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results.Results[i].Result = list
-	}
-	return results, nil
-}
-
-func (a *StorageAPI) listStorageDetails(ctx stdcontext.Context, filter params.StorageFilter) ([]params.StorageDetails, error) {
-	if filter != (params.StorageFilter{}) {
-		// StorageFilter has no fields at the time of writing, but
-		// check that no fields are set in case we forget to update
-		// this code.
-		return nil, errors.NotSupportedf("storage filters")
-	}
-	stateInstances, err := a.storageAccess.AllStorageInstances()
-	if err != nil {
-		return nil, apiservererrors.ServerError(err)
-	}
-	results := make([]params.StorageDetails, len(stateInstances))
-	for i, stateInstance := range stateInstances {
-		details, err := storagecommon.StorageDetails(ctx, a.storageAccess, a.blockDeviceGetter, a.unitAssignedMachine, stateInstance)
-		if err != nil {
-			return nil, errors.Annotatef(
-				err, "getting details for %s",
-				names.ReadableString(stateInstance.Tag()),
-			)
-		}
-		results[i] = *details
 	}
 	return results, nil
 }
@@ -167,18 +254,18 @@ func (a *StorageAPI) listStorageDetails(ctx stdcontext.Context, filter params.St
 // This method lists union of pools and environment provider types.
 // If no filter is provided, all pools are returned.
 func (a *StorageAPI) ListPools(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	filters params.StoragePoolFilters,
 ) (params.StoragePoolsResults, error) {
-	if err := a.checkCanRead(); err != nil {
-		return params.StoragePoolsResults{}, errors.Trace(err)
+	if err := a.checkCanRead(ctx); err != nil {
+		return params.StoragePoolsResults{}, errors.Capture(err)
 	}
 
 	results := params.StoragePoolsResults{
 		Results: make([]params.StoragePoolsResult, len(filters.Filters)),
 	}
 	for i, filter := range filters.Filters {
-		pools, err := a.listPools(ctx, a.ensureStoragePoolFilter(filter))
+		pools, err := a.listPools(ctx, filter)
 		if err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 			continue
@@ -188,45 +275,48 @@ func (a *StorageAPI) ListPools(
 	return results, nil
 }
 
-func (a *StorageAPI) ensureStoragePoolFilter(filter params.StoragePoolFilter) params.StoragePoolFilter {
-	if a.modelType == state.ModelTypeCAAS {
-		filter.Providers = append(filter.Providers, k8sconstants.CAASProviderType)
+func (a *StorageAPI) listPools(ctx context.Context, filter params.StoragePoolFilter) ([]params.StoragePool, error) {
+	var (
+		pools []domainstorage.StoragePool
+		err   error
+	)
+	if len(filter.Names) == 0 && len(filter.Providers) == 0 {
+		pools, err = a.storageService.ListStoragePools(ctx)
+	} else if len(filter.Names) != 0 && len(filter.Providers) != 0 {
+		pools, err = a.storageService.ListStoragePoolsByNamesAndProviders(ctx, filter.Names, filter.Providers)
+	} else if len(filter.Names) != 0 {
+		pools, err = a.storageService.ListStoragePoolsByNames(ctx, filter.Names)
+	} else {
+		pools, err = a.storageService.ListStoragePoolsByProviders(ctx, filter.Providers)
 	}
-	return filter
-}
-
-func (a *StorageAPI) listPools(ctx stdcontext.Context, filter params.StoragePoolFilter) ([]params.StoragePool, error) {
-	service, _, err := a.storageMetadata()
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	pools, err := service.ListStoragePools(ctx, filter.Names, filter.Providers)
-	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	results := make([]params.StoragePool, len(pools))
 	for i, p := range pools {
-		results[i] = params.StoragePool{
-			Name:     p.Name(),
-			Provider: string(p.Provider()),
-			Attrs:    p.Attrs(),
+		pool := params.StoragePool{
+			Name:     p.Name,
+			Provider: p.Provider,
 		}
+		if len(p.Attrs) > 0 {
+			pool.Attrs = make(map[string]any, len(p.Attrs))
+			for k, v := range p.Attrs {
+				pool.Attrs[k] = v
+			}
+		}
+		results[i] = pool
+
 	}
 	return results, nil
 }
 
 // CreatePool creates a new pool with specified parameters.
-func (a *StorageAPI) CreatePool(ctx stdcontext.Context, p params.StoragePoolArgs) (params.ErrorResults, error) {
+func (a *StorageAPI) CreatePool(ctx context.Context, p params.StoragePoolArgs) (params.ErrorResults, error) {
 	results := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(p.Pools)),
 	}
-	service, _, err := a.storageMetadata()
-	if err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
 	for i, pool := range p.Pools {
-		err := service.CreateStoragePool(
+		err := a.storageService.CreateStoragePool(
 			ctx,
 			pool.Name,
 			storage.ProviderType(pool.Provider),
@@ -239,102 +329,9 @@ func (a *StorageAPI) CreatePool(ctx stdcontext.Context, p params.StoragePoolArgs
 // ListVolumes lists volumes with the given filters. Each filter produces
 // an independent list of volumes, or an error if the filter is invalid
 // or the volumes could not be listed.
-func (a *StorageAPI) ListVolumes(ctx stdcontext.Context, filters params.VolumeFilters) (params.VolumeDetailsListResults, error) {
-	if err := a.checkCanRead(); err != nil {
-		return params.VolumeDetailsListResults{}, errors.Trace(err)
-	}
+func (a *StorageAPI) ListVolumes(ctx context.Context, filters params.VolumeFilters) (params.VolumeDetailsListResults, error) {
 	results := params.VolumeDetailsListResults{
 		Results: make([]params.VolumeDetailsListResult, len(filters.Filters)),
-	}
-	for i, filter := range filters.Filters {
-		volumes, volumeAttachments, err := filterVolumes(a.storageAccess, filter)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		details, err := a.createVolumeDetailsList(ctx, volumes, volumeAttachments)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results.Results[i].Result = details
-	}
-	return results, nil
-}
-
-func filterVolumes(
-	stVolume storageVolume,
-	f params.VolumeFilter,
-) ([]state.Volume, map[names.VolumeTag][]state.VolumeAttachment, error) {
-	// Exit early if there's no volume support.
-	if stVolume == nil {
-		return nil, nil, nil
-	}
-	if f.IsEmpty() {
-		// No filter was specified: get all volumes, and all attachments.
-		volumes, err := stVolume.AllVolumes()
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		volumeAttachments := make(map[names.VolumeTag][]state.VolumeAttachment)
-		for _, v := range volumes {
-			attachments, err := stVolume.VolumeAttachments(v.VolumeTag())
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
-			volumeAttachments[v.VolumeTag()] = attachments
-		}
-		return volumes, volumeAttachments, nil
-	}
-	volumesByTag := make(map[names.VolumeTag]state.Volume)
-	volumeAttachments := make(map[names.VolumeTag][]state.VolumeAttachment)
-	for _, machine := range f.Machines {
-		machineTag, err := names.ParseMachineTag(machine)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		attachments, err := stVolume.MachineVolumeAttachments(machineTag)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		for _, attachment := range attachments {
-			volumeTag := attachment.Volume()
-			volumesByTag[volumeTag] = nil
-			volumeAttachments[volumeTag] = append(volumeAttachments[volumeTag], attachment)
-		}
-	}
-	for volumeTag := range volumesByTag {
-		volume, err := stVolume.Volume(volumeTag)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		volumesByTag[volumeTag] = volume
-	}
-	volumes := make([]state.Volume, 0, len(volumesByTag))
-	for _, volume := range volumesByTag {
-		volumes = append(volumes, volume)
-	}
-	return volumes, volumeAttachments, nil
-}
-
-func (a *StorageAPI) createVolumeDetailsList(
-	ctx stdcontext.Context,
-	volumes []state.Volume,
-	attachments map[names.VolumeTag][]state.VolumeAttachment,
-) ([]params.VolumeDetails, error) {
-	if len(volumes) == 0 {
-		return nil, nil
-	}
-	results := make([]params.VolumeDetails, len(volumes))
-	for i, v := range volumes {
-		details, err := storagecommon.VolumeDetails(ctx, a.storageAccess, a.blockDeviceGetter, a.unitAssignedMachine, v, attachments[v.VolumeTag()])
-		if err != nil {
-			return nil, errors.Annotatef(
-				err, "getting details for %s",
-				names.ReadableString(v.VolumeTag()),
-			)
-		}
-		results[i] = *details
 	}
 	return results, nil
 }
@@ -342,153 +339,17 @@ func (a *StorageAPI) createVolumeDetailsList(
 // ListFilesystems returns a list of filesystems in the environment matching
 // the provided filter. Each result describes a filesystem in detail, including
 // the filesystem's attachments.
-func (a *StorageAPI) ListFilesystems(ctx stdcontext.Context, filters params.FilesystemFilters) (params.FilesystemDetailsListResults, error) {
+func (a *StorageAPI) ListFilesystems(ctx context.Context, filters params.FilesystemFilters) (params.FilesystemDetailsListResults, error) {
 	results := params.FilesystemDetailsListResults{
 		Results: make([]params.FilesystemDetailsListResult, len(filters.Filters)),
-	}
-	if err := a.checkCanRead(); err != nil {
-		return results, errors.Trace(err)
-	}
-
-	for i, filter := range filters.Filters {
-		filesystems, filesystemAttachments, err := filterFilesystems(a.storageAccess, filter)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		details, err := a.createFilesystemDetailsList(ctx, filesystems, filesystemAttachments)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results.Results[i].Result = details
-	}
-	return results, nil
-}
-
-func filterFilesystems(
-	stFile storageFile,
-	f params.FilesystemFilter,
-) ([]state.Filesystem, map[names.FilesystemTag][]state.FilesystemAttachment, error) {
-	if f.IsEmpty() {
-		// No filter was specified: get all filesystems, and all attachments.
-		filesystems, err := stFile.AllFilesystems()
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		filesystemAttachments := make(map[names.FilesystemTag][]state.FilesystemAttachment)
-		for _, f := range filesystems {
-			attachments, err := stFile.FilesystemAttachments(f.FilesystemTag())
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
-			filesystemAttachments[f.FilesystemTag()] = attachments
-		}
-		return filesystems, filesystemAttachments, nil
-	}
-	filesystemsByTag := make(map[names.FilesystemTag]state.Filesystem)
-	filesystemAttachments := make(map[names.FilesystemTag][]state.FilesystemAttachment)
-	for _, machine := range f.Machines {
-		machineTag, err := names.ParseMachineTag(machine)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		attachments, err := stFile.MachineFilesystemAttachments(machineTag)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		for _, attachment := range attachments {
-			filesystemTag := attachment.Filesystem()
-			filesystemsByTag[filesystemTag] = nil
-			filesystemAttachments[filesystemTag] = append(filesystemAttachments[filesystemTag], attachment)
-		}
-	}
-	for filesystemTag := range filesystemsByTag {
-		filesystem, err := stFile.Filesystem(filesystemTag)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
-		filesystemsByTag[filesystemTag] = filesystem
-	}
-	filesystems := make([]state.Filesystem, 0, len(filesystemsByTag))
-	for _, filesystem := range filesystemsByTag {
-		filesystems = append(filesystems, filesystem)
-	}
-	return filesystems, filesystemAttachments, nil
-}
-
-func (a *StorageAPI) createFilesystemDetailsList(
-	ctx stdcontext.Context,
-	filesystems []state.Filesystem,
-	attachments map[names.FilesystemTag][]state.FilesystemAttachment,
-) ([]params.FilesystemDetails, error) {
-	if len(filesystems) == 0 {
-		return nil, nil
-	}
-	results := make([]params.FilesystemDetails, len(filesystems))
-	for i, f := range filesystems {
-		details, err := storagecommon.FilesystemDetails(ctx, a.storageAccess, a.blockDeviceGetter, a.unitAssignedMachine, f, attachments[f.FilesystemTag()])
-		if err != nil {
-			return nil, errors.Annotatef(
-				err, "getting details for %s",
-				names.ReadableString(f.FilesystemTag()),
-			)
-		}
-		results[i] = *details
 	}
 	return results, nil
 }
 
 // AddToUnit validates and creates additional storage instances for units.
 // A "CHANGE" block can block this operation.
-func (a *StorageAPI) AddToUnit(ctx stdcontext.Context, args params.StoragesAddParams) (params.AddStorageResults, error) {
-	return a.addToUnit(ctx, args)
-}
-
-func (a *StorageAPI) addToUnit(ctx stdcontext.Context, args params.StoragesAddParams) (params.AddStorageResults, error) {
-	if err := a.checkCanWrite(); err != nil {
-		return params.AddStorageResults{}, errors.Trace(err)
-	}
-
-	// Check if changes are allowed and the operation may proceed.
-	blockChecker := common.NewBlockChecker(a.backend)
-	if err := blockChecker.ChangeAllowed(ctx); err != nil {
-		return params.AddStorageResults{}, errors.Trace(err)
-	}
-
-	paramsToState := func(p params.StorageDirectives) state.StorageConstraints {
-		s := state.StorageConstraints{Pool: p.Pool}
-		if p.Size != nil {
-			s.Size = *p.Size
-		}
-		if p.Count != nil {
-			s.Count = *p.Count
-		}
-		return s
-	}
-
+func (a *StorageAPI) AddToUnit(ctx context.Context, args params.StoragesAddParams) (params.AddStorageResults, error) {
 	result := make([]params.AddStorageResult, len(args.Storages))
-	for i, one := range args.Storages {
-		u, err := names.ParseUnitTag(one.UnitTag)
-		if err != nil {
-			result[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-
-		storageTags, err := a.storageAccess.AddStorageForUnit(
-			u, one.StorageName, paramsToState(one.Directives),
-		)
-		if err != nil {
-			result[i].Error = apiservererrors.ServerError(err)
-		}
-		tagStrings := make([]string, len(storageTags))
-		for i, tag := range storageTags {
-			tagStrings[i] = tag.String()
-		}
-		result[i].Result = &params.AddStorageDetails{
-			StorageTags: tagStrings,
-		}
-	}
 	return params.AddStorageResults{Results: result}, nil
 }
 
@@ -497,286 +358,142 @@ func (a *StorageAPI) addToUnit(ctx stdcontext.Context, args params.StoragesAddPa
 // from the model. If the arguments specify that the storage should be
 // destroyed, then the associated cloud storage will be destroyed first;
 // otherwise it will only be released from Juju's control.
-func (a *StorageAPI) Remove(ctx stdcontext.Context, args params.RemoveStorage) (params.ErrorResults, error) {
-	return a.remove(ctx, args)
-}
-
-func (a *StorageAPI) remove(ctx stdcontext.Context, args params.RemoveStorage) (params.ErrorResults, error) {
-	if err := a.checkCanWrite(); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
+func (a *StorageAPI) Remove(ctx context.Context, args params.RemoveStorage) (params.ErrorResults, error) {
+	if err := a.checkCanWrite(ctx); err != nil {
+		return params.ErrorResults{}, errors.Capture(err)
 	}
 
-	blockChecker := common.NewBlockChecker(a.backend)
-	if err := blockChecker.RemoveAllowed(ctx); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
-
-	result := make([]params.ErrorResult, len(args.Storage))
-	for i, arg := range args.Storage {
+	one := func(arg params.RemoveStorageInstance) error {
 		tag, err := names.ParseStorageTag(arg.Tag)
 		if err != nil {
-			result[i].Error = apiservererrors.ServerError(err)
-			continue
+			return errors.New("invalid storage tag").Add(coreerrors.NotValid)
 		}
-		remove := a.storageAccess.DestroyStorageInstance
-		if !arg.DestroyStorage {
-			remove = a.storageAccess.ReleaseStorageInstance
-		}
-		force := arg.Force != nil && *arg.Force
-		result[i].Error = apiservererrors.ServerError(remove(tag, arg.DestroyAttachments, force, common.MaxWait(arg.MaxWait)))
-	}
-	return params.ErrorResults{result}, nil
-}
-
-// DetachStorage sets the specified storage attachments to Dying, unless they are
-// already Dying or Dead. Any associated, persistent storage will remain
-// alive. This call can be forced.
-func (a *StorageAPI) DetachStorage(ctx stdcontext.Context, args params.StorageDetachmentParams) (params.ErrorResults, error) {
-	return a.internalDetach(ctx, args.StorageIds, args.Force, args.MaxWait)
-}
-
-func (a *StorageAPI) internalDetach(ctx stdcontext.Context, args params.StorageAttachmentIds, force *bool, maxWait *time.Duration) (params.ErrorResults, error) {
-	if err := a.checkCanWrite(); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
+		return a.removeStorageInstance(ctx, tag, arg)
 	}
 
-	blockChecker := common.NewBlockChecker(a.backend)
-	if err := blockChecker.ChangeAllowed(ctx); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
-
-	detachOne := func(arg params.StorageAttachmentId) error {
-		storageTag, err := names.ParseStorageTag(arg.StorageTag)
+	results := make([]params.ErrorResult, 0, len(args.Storage))
+	for _, v := range args.Storage {
+		var result params.ErrorResult
+		err := one(v)
 		if err != nil {
-			return err
+			result.Error = apiservererrors.ServerError(err)
 		}
-		var unitTag names.UnitTag
-		if arg.UnitTag != "" {
-			var err error
-			unitTag, err = names.ParseUnitTag(arg.UnitTag)
+		results = append(results, result)
+	}
+	return params.ErrorResults{Results: results}, nil
+}
+
+// removeStorageInstance performs the operations to remove a storage instance
+// for the corresponding Remove facade method.
+func (a *StorageAPI) removeStorageInstance(
+	ctx context.Context, tag names.StorageTag, arg params.RemoveStorageInstance,
+) error {
+	force := false
+	if arg.Force != nil {
+		force = *arg.Force
+	}
+	wait := time.Duration(0)
+	if arg.MaxWait != nil {
+		wait = *arg.MaxWait
+	}
+	if wait < 0 {
+		return errors.Errorf(
+			"max wait time cannot be a negative number",
+		).Add(coreerrors.NotValid)
+	}
+
+	uuid, err := a.storageService.GetStorageInstanceUUIDForID(ctx, tag.Id())
+	if errors.Is(err, storageerrors.StorageInstanceNotFound) {
+		return errors.Errorf("storage %q does not exist", tag.Id()).Add(
+			coreerrors.NotFound,
+		)
+	} else if err != nil {
+		return errors.Errorf(
+			"getting storage instance uuid for storage id %q: %w",
+			tag.Id(), err,
+		)
+	}
+
+	if arg.DestroyAttachments {
+		saUUIDs, err := a.storageService.GetStorageInstanceAttachments(
+			ctx, uuid)
+		if errors.Is(err, storageerrors.StorageInstanceNotFound) {
+			return errors.Errorf("storage %q does not exist", tag.Id()).Add(
+				coreerrors.NotFound,
+			)
+		} else if err != nil {
+			return errors.Errorf(
+				"getting attachments of storage instance %q: %w",
+				tag.Id(), err,
+			)
+		}
+		for _, saUUID := range saUUIDs {
+			err := a.detachStorageAttachment(ctx, saUUID, force, wait)
 			if err != nil {
-				return err
+				return errors.Errorf(
+					"removing storage attachment %q for storage %q:",
+					saUUID, tag.Id(),
+				)
 			}
 		}
-		return a.detachStorage(storageTag, unitTag, force, maxWait)
 	}
 
-	result := make([]params.ErrorResult, len(args.Ids))
-	for i, arg := range args.Ids {
-		result[i].Error = apiservererrors.ServerError(detachOne(arg))
+	obliterate := arg.DestroyStorage
+	err = a.removalService.RemoveStorageInstance(
+		ctx, uuid, force, wait, obliterate)
+	if errors.Is(err, storageerrors.StorageInstanceNotFound) {
+		return errors.Errorf("storage %q does not exist", tag.Id()).Add(
+			coreerrors.NotFound,
+		)
+	} else if err != nil {
+		return errors.Errorf("removing storage %q: %w", tag.Id(), err)
 	}
-	return params.ErrorResults{result}, nil
-}
 
-func (a *StorageAPI) detachStorage(storageTag names.StorageTag, unitTag names.UnitTag, force *bool, maxWait *time.Duration) error {
-	forcing := force != nil && *force
-	if unitTag != (names.UnitTag{}) {
-		// The caller has specified a unit explicitly. Do
-		// not filter out "not found" errors in this case.
-		return a.storageAccess.DetachStorage(storageTag, unitTag, forcing, common.MaxWait(maxWait))
-	}
-	attachments, err := a.storageAccess.StorageAttachments(storageTag)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if len(attachments) == 0 {
-		// No attachments: check if the storage exists at all.
-		if _, err := a.storageAccess.StorageInstance(storageTag); err != nil {
-			return errors.Trace(err)
-		}
-	}
-	for _, att := range attachments {
-		if att.Life() != state.Alive {
-			continue
-		}
-		err := a.storageAccess.DetachStorage(storageTag, att.Unit(), forcing, common.MaxWait(maxWait))
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			// We only care about NotFound errors if
-			// the user specified a unit explicitly.
-			return errors.Trace(err)
-		}
-	}
 	return nil
 }
 
 // Attach attaches existing storage instances to units.
 // A "CHANGE" block can block this operation.
-func (a *StorageAPI) Attach(ctx stdcontext.Context, args params.StorageAttachmentIds) (params.ErrorResults, error) {
-	if err := a.checkCanWrite(); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
-
-	blockChecker := common.NewBlockChecker(a.backend)
-	if err := blockChecker.ChangeAllowed(ctx); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
-
-	attachOne := func(arg params.StorageAttachmentId) error {
-		storageTag, err := names.ParseStorageTag(arg.StorageTag)
-		if err != nil {
-			return err
-		}
-		unitTag, err := names.ParseUnitTag(arg.UnitTag)
-		if err != nil {
-			return err
-		}
-		return a.storageAccess.AttachStorage(storageTag, unitTag)
-	}
-
+func (a *StorageAPI) Attach(ctx context.Context, args params.StorageAttachmentIds) (params.ErrorResults, error) {
 	result := make([]params.ErrorResult, len(args.Ids))
-	for i, arg := range args.Ids {
-		result[i].Error = apiservererrors.ServerError(attachOne(arg))
-	}
 	return params.ErrorResults{Results: result}, nil
 }
 
 // Import imports existing storage into the model.
 // A "CHANGE" block can block this operation.
-func (a *StorageAPI) Import(ctx stdcontext.Context, args params.BulkImportStorageParams) (params.ImportStorageResults, error) {
-	if err := a.checkCanWrite(); err != nil {
-		return params.ImportStorageResults{}, errors.Trace(err)
-	}
-
-	blockChecker := common.NewBlockChecker(a.backend)
-	if err := blockChecker.ChangeAllowed(ctx); err != nil {
-		return params.ImportStorageResults{}, errors.Trace(err)
-	}
-
+func (a *StorageAPI) Import(ctx context.Context, args params.BulkImportStorageParamsV2) (params.ImportStorageResults, error) {
 	results := make([]params.ImportStorageResult, len(args.Storage))
-	for i, arg := range args.Storage {
-		details, err := a.importStorage(ctx, arg)
-		if err != nil {
-			results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results[i].Result = details
-	}
 	return params.ImportStorageResults{Results: results}, nil
 }
 
-func (a *StorageAPI) importStorage(ctx stdcontext.Context, arg params.ImportStorageParams) (*params.ImportStorageDetails, error) {
-	if arg.Kind != params.StorageKindFilesystem {
-		// TODO(axw) implement support for volumes.
-		return nil, errors.NotSupportedf("storage kind %q", arg.Kind.String())
-	}
-	if !storage.IsValidPoolName(arg.Pool) {
-		return nil, errors.NotValidf("pool name %q", arg.Pool)
-	}
-
-	service, registry, err := a.storageMetadata()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	cfg, err := service.GetStoragePoolByName(ctx, arg.Pool)
-	if errors.Is(err, storageerrors.PoolNotFoundError) {
-		cfg, err = storage.NewConfig(
-			arg.Pool,
-			storage.ProviderType(arg.Pool),
-			map[string]interface{}{},
-		)
-		if err != nil {
-			return nil, errors.Trace(err)
+// Import imports existing storage into the model.
+// A "CHANGE" block can block this operation.
+func (a *StorageAPIv6) Import(ctx context.Context, args params.BulkImportStorageParams) (params.ImportStorageResults, error) {
+	v2Args := params.BulkImportStorageParamsV2{Storage: make([]params.ImportStorageParamsV2, len(args.Storage))}
+	for idx, param := range args.Storage {
+		v2Args.Storage[idx] = params.ImportStorageParamsV2{
+			Kind:        param.Kind,
+			Pool:        param.Pool,
+			ProviderId:  param.ProviderId,
+			StorageName: param.StorageName,
+			// Always false since force is not supported in v6.
+			Force: false,
 		}
-	} else if err != nil {
-		return nil, errors.Trace(err)
 	}
-	provider, err := registry.StorageProvider(cfg.Provider())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return a.importFilesystem(ctx, arg, provider, cfg)
-}
-
-func (a *StorageAPI) importFilesystem(
-	ctx stdcontext.Context,
-	arg params.ImportStorageParams,
-	provider storage.Provider,
-	cfg *storage.Config,
-) (*params.ImportStorageDetails, error) {
-	resourceTags := map[string]string{
-		tags.JujuModel:      a.backend.ModelTag().Id(),
-		tags.JujuController: a.backend.ControllerTag().Id(),
-	}
-	var volumeInfo *state.VolumeInfo
-	filesystemInfo := state.FilesystemInfo{Pool: arg.Pool}
-
-	// If the storage provider supports filesystems, import the filesystem,
-	// otherwise import a volume which will back a filesystem.
-	invalidatorFunc, err := a.credentialInvalidatorGetter()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	callCtx := envcontext.WithCredentialInvalidator(ctx, invalidatorFunc)
-	if provider.Supports(storage.StorageKindFilesystem) {
-		filesystemSource, err := provider.FilesystemSource(cfg)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		filesystemImporter, ok := filesystemSource.(storage.FilesystemImporter)
-		if !ok {
-			return nil, errors.NotSupportedf(
-				"importing filesystem with storage provider %q",
-				cfg.Provider(),
-			)
-		}
-		info, err := filesystemImporter.ImportFilesystem(callCtx, arg.ProviderId, resourceTags)
-		if err != nil {
-			return nil, errors.Annotate(err, "importing filesystem")
-		}
-		filesystemInfo.FilesystemId = arg.ProviderId
-		filesystemInfo.Size = info.Size
-	} else {
-		volumeSource, err := provider.VolumeSource(cfg)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		volumeImporter, ok := volumeSource.(storage.VolumeImporter)
-		if !ok {
-			return nil, errors.NotSupportedf(
-				"importing volume with storage provider %q",
-				cfg.Provider(),
-			)
-		}
-		info, err := volumeImporter.ImportVolume(callCtx, arg.ProviderId, resourceTags)
-		if err != nil {
-			return nil, errors.Annotate(err, "importing volume")
-		}
-		volumeInfo = &state.VolumeInfo{
-			HardwareId: info.HardwareId,
-			WWN:        info.WWN,
-			Size:       info.Size,
-			Pool:       arg.Pool,
-			VolumeId:   info.VolumeId,
-			Persistent: info.Persistent,
-		}
-		filesystemInfo.Size = info.Size
-	}
-
-	storageTag, err := a.storageAccess.AddExistingFilesystem(filesystemInfo, volumeInfo, arg.StorageName)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &params.ImportStorageDetails{
-		StorageTag: storageTag.String(),
-	}, nil
+	return a.StorageAPI.Import(ctx, v2Args)
 }
 
 // RemovePool deletes the named pool
-func (a *StorageAPI) RemovePool(ctx stdcontext.Context, p params.StoragePoolDeleteArgs) (params.ErrorResults, error) {
+func (a *StorageAPI) RemovePool(ctx context.Context, p params.StoragePoolDeleteArgs) (params.ErrorResults, error) {
 	results := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(p.Pools)),
 	}
-	if err := a.checkCanWrite(); err != nil {
-		return results, errors.Trace(err)
+	if err := a.checkCanWrite(ctx); err != nil {
+		return results, errors.Capture(err)
 	}
 
-	service, _, err := a.storageMetadata()
-	if err != nil {
-		return results, errors.Trace(err)
-	}
 	for i, pool := range p.Pools {
-		err := service.DeleteStoragePool(ctx, pool.Name)
+		err := a.storageService.DeleteStoragePool(ctx, pool.Name)
 		if err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 		}
@@ -785,38 +502,19 @@ func (a *StorageAPI) RemovePool(ctx stdcontext.Context, p params.StoragePoolDele
 }
 
 // UpdatePool deletes the named pool
-func (a *StorageAPI) UpdatePool(ctx stdcontext.Context, p params.StoragePoolArgs) (params.ErrorResults, error) {
+func (a *StorageAPI) UpdatePool(ctx context.Context, p params.StoragePoolArgs) (params.ErrorResults, error) {
 	results := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(p.Pools)),
 	}
-	if err := a.checkCanWrite(); err != nil {
-		return results, errors.Trace(err)
-	}
-	service, _, err := a.storageMetadata()
-	if err != nil {
-		return results, errors.Trace(err)
+	if err := a.checkCanWrite(ctx); err != nil {
+		return results, errors.Capture(err)
 	}
 
 	for i, pool := range p.Pools {
-		err := service.ReplaceStoragePool(ctx, pool.Name, storage.ProviderType(pool.Provider), pool.Attrs)
+		err := a.storageService.ReplaceStoragePool(ctx, pool.Name, storage.ProviderType(pool.Provider), pool.Attrs)
 		if err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 		}
 	}
 	return results, nil
-}
-
-// unitAssignedMachine returns the tag of the machine that the unit
-// is assigned to, or an error if the unit cannot be obtained or is
-// not assigned to a machine.
-func (a *StorageAPI) unitAssignedMachine(tag names.UnitTag) (names.MachineTag, error) {
-	unit, err := a.backend.Unit(tag.Id())
-	if err != nil {
-		return names.MachineTag{}, errors.Trace(err)
-	}
-	mid, err := unit.AssignedMachineId()
-	if err != nil {
-		return names.MachineTag{}, errors.Trace(err)
-	}
-	return names.NewMachineTag(mid), nil
 }

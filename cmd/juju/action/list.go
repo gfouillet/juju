@@ -10,15 +10,15 @@ import (
 	"io"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/naturalsort"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/naturalsort"
 )
 
 func NewListCommand() cmd.Command {
@@ -35,7 +35,7 @@ type listCommand struct {
 
 const listDoc = `
 List the actions available to run on the target application, with a short
-description.  To show the full schema for the actions, use --schema.
+description.
 `
 
 const listExamples = `
@@ -106,13 +106,13 @@ func (c *listCommand) Init(args []string) error {
 // Run grabs the Actions spec from the api.  It then sets up a sensible
 // output format for the map.
 func (c *listCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
-	actions, err := api.ApplicationCharmActions(c.appName)
+	actions, err := api.ApplicationCharmActions(ctx, c.appName)
 	if err != nil {
 		return err
 	}

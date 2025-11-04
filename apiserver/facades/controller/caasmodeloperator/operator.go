@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
@@ -32,41 +32,40 @@ type API struct {
 	*common.PasswordChanger
 
 	auth                    facade.Authorizer
-	ctrlState               CAASControllerState
 	controllerConfigService ControllerConfigService
+	controllerNodeService   ControllerNodeService
 	modelConfigService      ModelConfigService
 	logger                  corelogger.Logger
 
-	resources facade.Resources
-	modelUUID model.UUID
+	modelUUID       model.UUID
+	watcherRegistry facade.WatcherRegistry
 }
 
 // NewAPI is alternative means of constructing a controller model facade.
 func NewAPI(
 	authorizer facade.Authorizer,
-	resources facade.Resources,
-	ctrlSt CAASControllerState,
-	st CAASModelOperatorState,
+	agentPasswordService AgentPasswordService,
 	controllerConfigService ControllerConfigService,
+	controllerNodeService ControllerNodeService,
 	modelConfigService ModelConfigService,
 	logger corelogger.Logger,
 	modelUUID model.UUID,
+	watcherRegistry facade.WatcherRegistry,
 ) (*API, error) {
-
 	if !authorizer.AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
 
 	return &API{
 		auth:                    authorizer,
-		APIAddresser:            common.NewAPIAddresser(ctrlSt, resources),
-		PasswordChanger:         common.NewPasswordChanger(st, common.AuthFuncForTagKind(names.ModelTagKind)),
-		ctrlState:               ctrlSt,
+		APIAddresser:            common.NewAPIAddresser(controllerNodeService, watcherRegistry),
+		PasswordChanger:         common.NewPasswordChanger(agentPasswordService, common.AuthFuncForTagKind(names.ModelTagKind)),
 		controllerConfigService: controllerConfigService,
+		controllerNodeService:   controllerNodeService,
 		modelConfigService:      modelConfigService,
 		logger:                  logger,
-		resources:               resources,
 		modelUUID:               modelUUID,
+		watcherRegistry:         watcherRegistry,
 	}, nil
 }
 
@@ -75,7 +74,7 @@ func NewAPI(
 func (a *API) WatchModelOperatorProvisioningInfo(ctx context.Context) (params.NotifyWatchResult, error) {
 	result := params.NotifyWatchResult{}
 
-	controllerConfigWatcher, err := a.controllerConfigService.WatchControllerConfig()
+	controllerConfigWatcher, err := a.controllerConfigService.WatchControllerConfig(ctx)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -83,10 +82,11 @@ func (a *API) WatchModelOperatorProvisioningInfo(ctx context.Context) (params.No
 	if err != nil {
 		return result, errors.Trace(err)
 	}
-
-	controllerAPIHostPortsWatcher := a.ctrlState.WatchAPIHostPortsForAgents()
-
-	modelConfigWatcher, err := a.modelConfigService.Watch()
+	controllerAPIHostPortsWatcher, err := a.controllerNodeService.WatchControllerAPIAddresses(ctx)
+	if err != nil {
+		return result, errors.Trace(err)
+	}
+	modelConfigWatcher, err := a.modelConfigService.Watch(ctx)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -100,16 +100,15 @@ func (a *API) WatchModelOperatorProvisioningInfo(ctx context.Context) (params.No
 		controllerAPIHostPortsWatcher,
 		modelConfigNotifyWatcher,
 	)
-
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	if _, err := internal.FirstResult[struct{}](ctx, multiWatcher); err != nil {
+	result.NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(ctx, a.watcherRegistry, multiWatcher)
+	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	result.NotifyWatcherId = a.resources.Register(multiWatcher)
 	return result, nil
 }
 
@@ -142,7 +141,7 @@ func (a *API) ModelOperatorProvisioningInfo(ctx context.Context) (params.ModelOp
 		return result, errors.Annotate(err, "getting api addresses")
 	}
 
-	registryPath, err := podcfg.GetJujuOCIImagePath(controllerConfig, vers)
+	registryPath, err := podcfg.GetJujuOCIImagePathFromControllerCfg(controllerConfig, vers)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -152,7 +151,7 @@ func (a *API) ModelOperatorProvisioningInfo(ctx context.Context) (params.ModelOp
 		return result, errors.Annotatef(err, "parsing %s", controller.CAASImageRepo)
 	}
 	imageInfo := params.NewDockerImageInfo(docker.ConvertToResourceImageDetails(imageRepoDetails), registryPath)
-	a.logger.Tracef("image info %v", imageInfo)
+	a.logger.Tracef(ctx, "image info %v", imageInfo)
 
 	result = params.ModelOperatorInfo{
 		APIAddresses: apiAddresses.Result,
@@ -168,24 +167,4 @@ func (a *API) ModelOperatorProvisioningInfo(ctx context.Context) (params.ModelOp
 // It should be blanked when this facade version is next incremented.
 func (a *API) ModelUUID(ctx context.Context) params.StringResult {
 	return params.StringResult{Result: a.modelUUID.String()}
-}
-
-// APIHostPorts returns the API server addresses.
-func (u *API) APIHostPorts(ctx context.Context) (result params.APIHostPortsResult, err error) {
-	controllerConfig, err := u.controllerConfigService.ControllerConfig(ctx)
-	if err != nil {
-		return result, errors.Trace(err)
-	}
-
-	return u.APIAddresser.APIHostPorts(ctx, controllerConfig)
-}
-
-// APIAddresses returns the list of addresses used to connect to the API.
-func (u *API) APIAddresses(ctx context.Context) (result params.StringsResult, err error) {
-	controllerConfig, err := u.controllerConfigService.ControllerConfig(ctx)
-	if err != nil {
-		return result, errors.Trace(err)
-	}
-
-	return u.APIAddresser.APIAddresses(ctx, controllerConfig)
 }

@@ -4,12 +4,12 @@
 package api
 
 import (
-	"context"
 	"net/url"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/network"
 	jujuproxy "github.com/juju/juju/internal/proxy"
@@ -21,30 +21,23 @@ var (
 	SlideAddressToFront = slideAddressToFront
 	FacadeVersions      = &facadeVersions
 
+	LoginDeviceAPICall                = &loginDeviceAPICall
+	GetDeviceSessionTokenAPICall      = &getDeviceSessionTokenAPICall
+	LoginWithSessionTokenAPICall      = &loginWithSessionTokenAPICall
 	LoginWithClientCredentialsAPICall = &loginWithClientCredentialsAPICall
 )
 
-func DialAPI(info *Info, opts DialOpts) (jsoncodec.JSONConn, string, error) {
-	result, err := dialAPI(context.Background(), info, opts)
+func DialAPI(c *tc.C, info *Info, opts DialOpts) (jsoncodec.JSONConn, string, error) {
+	result, err := dialAPI(c.Context(), info, opts)
 	if err != nil {
 		return nil, "", err
 	}
-	// Replace the IP address in the URL with the
-	// host name so that tests can check it more
-	// easily.
-	u, _ := url.Parse(result.urlStr)
-	u.Host = result.addr
-	return result.conn, u.String(), nil
+	return result.conn, result.dialAddr.String(), nil
 }
 
 // CookieURL returns the cookie URL of the connection.
 func CookieURL(c Connection) *url.URL {
 	return c.(*conn).cookieURL
-}
-
-// ServerRoot is exported so that we can test the built URL.
-func ServerRoot(c Connection) string {
-	return c.(*conn).serverRoot()
 }
 
 // UnderlyingConn returns the underlying transport connection.
@@ -71,28 +64,34 @@ type TestingConnectionParams struct {
 }
 
 // NewTestingConnection creates an api.Connection object that can be used for testing.
-func NewTestingConnection(params TestingConnectionParams) Connection {
+func NewTestingConnection(c *tc.C, params TestingConnectionParams) Connection {
 	var modelTag names.ModelTag
 	if params.ModelTag != "" {
 		t, err := names.ParseModelTag(params.ModelTag)
-		if err != nil {
-			panic("invalid model tag")
-		}
+		c.Assert(err, tc.IsNil)
 		modelTag = t
 	}
-	c := &conn{
-		client:            params.RPCConnection,
-		clock:             params.Clock,
-		addr:              params.Address,
-		modelTag:          modelTag,
-		hostPorts:         params.APIHostPorts,
-		facadeVersions:    params.FacadeVersions,
-		serverScheme:      params.ServerScheme,
-		serverRootAddress: params.ServerRoot,
-		broken:            params.Broken,
-		closed:            params.Closed,
-		proxier:           params.Proxier,
-		bakeryClient:      httpbakery.NewClient(),
+	url := &url.URL{}
+	if params.Address != "" {
+		var err error
+		url, err = url.Parse(params.Address)
+		c.Assert(err, tc.IsNil)
+		c.Assert(url.Scheme, tc.Not(tc.Equals), "")
+		c.Assert(url.Host, tc.Not(tc.Equals), "")
+		c.Assert(url.Port(), tc.Not(tc.Equals), "")
 	}
-	return c
+	conn := &conn{
+		client:         params.RPCConnection,
+		clock:          params.Clock,
+		addr:           url,
+		modelTag:       modelTag,
+		hostPorts:      params.APIHostPorts,
+		facadeVersions: params.FacadeVersions,
+		serverScheme:   params.ServerScheme,
+		broken:         params.Broken,
+		closed:         params.Closed,
+		proxier:        params.Proxier,
+		bakeryClient:   httpbakery.NewClient(),
+	}
+	return conn
 }

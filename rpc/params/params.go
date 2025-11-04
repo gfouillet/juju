@@ -12,13 +12,12 @@ import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/errors"
 	"github.com/juju/proxy"
-	"github.com/juju/utils/v4/ssh"
-	"github.com/juju/version/v2"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/tools"
 )
@@ -273,18 +272,6 @@ type AddMachinesResult struct {
 	Error   *Error `json:"error,omitempty"`
 }
 
-// DestroyMachinesParamsV9 holds parameters for the v9 DestroyMachinesWithParams call.
-type DestroyMachinesParamsV9 struct {
-	MachineTags []string `json:"machine-tags"`
-	Force       bool     `json:"force,omitempty"`
-	Keep        bool     `json:"keep,omitempty"`
-
-	// MaxWait specifies the amount of time that each step in machine destroy process
-	// will wait before forcing the next step to kick-off. This parameter
-	// only makes sense in combination with 'force' set to 'true'.
-	MaxWait *time.Duration `json:"max-wait,omitempty"`
-}
-
 // DestroyMachinesParams holds parameters for the latest DestroyMachinesWithParams call.
 type DestroyMachinesParams struct {
 	MachineTags []string `json:"machine-tags"`
@@ -357,9 +344,9 @@ type ConfigResult struct {
 
 // ModelOperatorInfo holds infor needed for a model operator.
 type ModelOperatorInfo struct {
-	APIAddresses []string        `json:"api-addresses"`
-	ImageDetails DockerImageInfo `json:"image-details"`
-	Version      version.Number  `json:"version"`
+	APIAddresses []string          `json:"api-addresses"`
+	ImageDetails DockerImageInfo   `json:"image-details"`
+	Version      semversion.Number `json:"version"`
 }
 
 // IssueOperatorCertificateResult contains an x509 certificate
@@ -701,10 +688,25 @@ type AllWatcherId struct {
 	AllWatcherId string `json:"watcher-id"`
 }
 
+// SSHListMode describes the mode to use when list ssh keys. This value has been
+// brought over from [github.com/juju/utils/ssh].
+type SSHListMode bool
+
+const (
+	// SSHListModeFull is a [SSHListMode] that list ssh keys with their full raw
+	// value. This const comes from [github.com/juju/utils/ssh.FullKeys]
+	SSHListModeFull = SSHListMode(true)
+
+	// SSHListModeFingerprint is a [SSHListMode] that list ssh keys with just
+	// their fingerprint value. This const comes from
+	// [github.com/juju/utils/ssh.Fingerprints]
+	SSHListModeFingerprint = SSHListMode(false)
+)
+
 // ListSSHKeys stores parameters used for a KeyManager.ListKeys call.
 type ListSSHKeys struct {
 	Entities `json:"entities"`
-	Mode     ssh.ListMode `json:"mode"`
+	Mode     SSHListMode `json:"mode"`
 }
 
 // ModifyUserSSHKeys stores parameters used for a KeyManager.Add|Delete|Import call for a user.
@@ -716,9 +718,7 @@ type ModifyUserSSHKeys struct {
 // StateServingInfo holds information needed by a state
 // server.
 type StateServingInfo struct {
-	APIPort           int `json:"api-port"`
-	ControllerAPIPort int `json:"controller-api-port,omitempty"`
-	StatePort         int `json:"state-port"`
+	APIPort int `json:"api-port"`
 	// The controller cert and corresponding private key.
 	Cert       string `json:"cert"`
 	PrivateKey string `json:"private-key"`
@@ -726,7 +726,6 @@ type StateServingInfo struct {
 	// cert can be generated when needed.
 	CAPrivateKey string `json:"ca-private-key"`
 	// this will be passed as the KeyFile argument to MongoDB
-	SharedSecret   string `json:"shared-secret"`
 	SystemIdentity string `json:"system-identity"`
 }
 
@@ -804,10 +803,23 @@ type DeployerConnectionValues struct {
 	APIAddresses []string `json:"api-addresses"`
 }
 
+// IsControllerResult holds the result of an IsController call, which returns
+// whether a given machine is a controller machine.
+type IsControllerResult struct {
+	IsController bool   `json:"is-controller"`
+	Error        *Error `json:"error,omitempty"`
+}
+
+// IsControllerResults holds the result of a call to IsController
+type IsControllerResults struct {
+	Results []IsControllerResult `json:"results"`
+}
+
 // JobsResult holds the jobs for a machine that are returned by a call to Jobs.
+// Deprecated: Jobs is being deprecated. Use IsController instead.
 type JobsResult struct {
-	Jobs  []model.MachineJob `json:"jobs"`
-	Error *Error             `json:"error,omitempty"`
+	Jobs  []string `json:"jobs"`
+	Error *Error   `json:"error,omitempty"`
 }
 
 // JobsResults holds the result of a call to Jobs.
@@ -941,20 +953,6 @@ type ControllersSpecs struct {
 	Specs []ControllersSpec `json:"specs"`
 }
 
-// ControllersChangeResult contains the results
-// of a single EnableHA API call or
-// an error.
-type ControllersChangeResult struct {
-	Result ControllersChanges `json:"result"`
-	Error  *Error             `json:"error,omitempty"`
-}
-
-// ControllersChangeResults contains the results
-// of the EnableHA API call.
-type ControllersChangeResults struct {
-	Results []ControllersChangeResult `json:"results"`
-}
-
 // ControllerDetailsResults contains the results
 // of a call to fetch controller config details.
 type ControllerDetailsResults struct {
@@ -968,20 +966,10 @@ type ControllerDetails struct {
 	Error        *Error   `json:"error,omitempty"`
 }
 
-// ControllersChanges lists the servers
-// that have been added, removed or maintained in the
-// pool as a result of an enable-ha operation.
-type ControllersChanges struct {
-	Added      []string `json:"added,omitempty"`
-	Maintained []string `json:"maintained,omitempty"`
-	Removed    []string `json:"removed,omitempty"`
-	Converted  []string `json:"converted,omitempty"`
-}
-
 // FindToolsParams defines parameters for the FindTools method.
 type FindToolsParams struct {
 	// Number will be used to match tools versions exactly if non-zero.
-	Number version.Number `json:"number"`
+	Number semversion.Number `json:"number"`
 
 	// MajorVersion will be used to match the major version if non-zero.
 	// TODO(juju 3.1) - remove
@@ -1245,72 +1233,6 @@ type DumpModelRequest struct {
 	Simplified bool     `json:"simplified"`
 }
 
-// UpgradeSeriesStatusResult contains the upgrade series status result for an upgrading
-// machine or unit
-type UpgradeSeriesStatusResult struct {
-	Error  *Error                    `json:"error,omitempty"`
-	Status model.UpgradeSeriesStatus `json:"status,omitempty"`
-	Target string                    `json:"target,omitempty"`
-}
-
-// UpgradeSeriesStatusResults contains the upgrade series status results for
-// upgrading machines or units.
-type UpgradeSeriesStatusResults struct {
-	Results []UpgradeSeriesStatusResult `json:"results,omitempty"`
-}
-
-// UpgradeSeriesStatusParams contains the entities and desired statuses for
-// those entities.
-type UpgradeSeriesStatusParams struct {
-	Params []UpgradeSeriesStatusParam `json:"params"`
-}
-
-// UpgradeSeriesStatusParam contains the entity and desired status for that
-// entity along with a context message describing why the change to the status
-// is being requested.
-type UpgradeSeriesStatusParam struct {
-	Entity  Entity                    `json:"entity"`
-	Status  model.UpgradeSeriesStatus `json:"status"`
-	Message string                    `json:"message"`
-}
-
-// UpgradeSeriesStartUnitCompletionParam contains entities and a context message.
-type UpgradeSeriesStartUnitCompletionParam struct {
-	Entities []Entity `json:"entities"`
-	Message  string   `json:"message"`
-}
-
-type UpgradeSeriesNotificationParams struct {
-	Params []UpgradeSeriesNotificationParam `json:"params"`
-}
-
-type UpgradeSeriesNotificationParam struct {
-	Entity    Entity `json:"entity"`
-	WatcherId string `json:"watcher-id"`
-}
-
-// UpgradeSeriesUnitsResults contains the units affected by a series per
-// machine entity.
-type UpgradeSeriesUnitsResults struct {
-	Results []UpgradeSeriesUnitsResult
-}
-
-// UpgradeSeriesUnitsResult contains the units affected by a series for
-// a given machine.
-type UpgradeSeriesUnitsResult struct {
-	Error     *Error   `json:"error,omitempty"`
-	UnitNames []string `json:"unit-names"`
-}
-
-type UpgradeSeriesValidationErrorInfo struct {
-	Status string
-}
-
-// AsMap encodes the error info as a map that can be attached to an Error.
-func (e UpgradeSeriesValidationErrorInfo) AsMap() map[string]interface{} {
-	return serializeToMap(e)
-}
-
 type ProfileArg struct {
 	Entity   Entity `json:"entity"`
 	UnitName string `json:"unit-name"`
@@ -1489,4 +1411,11 @@ type CLICommandStatus struct {
 	Output []string `json:"output,omitempty"`
 	Done   bool     `json:"done,omitempty"`
 	Error  *Error   `json:"error,omitempty"`
+}
+
+// VirtualHostnameTargetArg holds the target tag and an optional container
+// name to resolve a virtual hostname.
+type VirtualHostnameTargetArg struct {
+	Tag       string  `json:"tag"`
+	Container *string `json:"container,omitempty"`
 }

@@ -6,11 +6,11 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
-
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
+	"github.com/juju/juju/internal/errors"
 )
 
 type ProviderState interface {
@@ -20,7 +20,12 @@ type ProviderState interface {
 	// WatchCloud returns a new NotifyWatcher watching for changes to the specified cloud.
 	WatchCloud(
 		ctx context.Context,
-		getWatcher func(string, string, changestream.ChangeType) (watcher.NotifyWatcher, error),
+		getWatcher func(
+			ctx context.Context,
+			summary string,
+			filter eventsource.FilterOption,
+			filterOpts ...eventsource.FilterOption,
+		) (watcher.NotifyWatcher, error),
 		name string,
 	) (watcher.NotifyWatcher, error)
 }
@@ -43,8 +48,11 @@ func NewProviderService(st ProviderState) *ProviderService {
 
 // Cloud returns the named cloud.
 func (s *ProviderService) Cloud(ctx context.Context, name string) (*cloud.Cloud, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	cloud, err := s.st.Cloud(ctx, name)
-	return cloud, errors.Trace(err)
+	return cloud, errors.Capture(err)
 }
 
 // WatchableProviderService returns a new provider service reference wrapping
@@ -67,5 +75,8 @@ func NewWatchableProviderService(st ProviderState, watcherFactory WatcherFactory
 
 // WatchCloud returns a watcher that observes changes to the specified cloud.
 func (s *WatchableProviderService) WatchCloud(ctx context.Context, name string) (watcher.NotifyWatcher, error) {
-	return s.st.WatchCloud(ctx, s.watcherFactory.NewValueWatcher, name)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	return s.st.WatchCloud(ctx, s.watcherFactory.NewNotifyWatcher, name)
 }

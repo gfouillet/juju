@@ -5,6 +5,8 @@
 package sshprovisioner
 
 import (
+	"context"
+
 	"github.com/juju/juju/environs/manual"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
@@ -16,16 +18,16 @@ var (
 
 // ProvisionMachine returns a new machineId and nil if the provision process is done successfully
 // The func will manual provision a linux machine using as it's default protocol SSH
-func ProvisionMachine(args manual.ProvisionMachineArgs) (machineId string, err error) {
+func ProvisionMachine(ctx context.Context, args manual.ProvisionMachineArgs) (machineId string, err error) {
 	defer func() {
 		if machineId != "" && err != nil {
-			logger.Errorf("provisioning failed, removing machine %v: %v", machineId, err)
-			results, cleanupErr := args.Client.DestroyMachinesWithParams(false, false, false, nil, machineId)
+			logger.Errorf(ctx, "provisioning failed, removing machine %v: %v", machineId, err)
+			results, cleanupErr := args.Client.DestroyMachinesWithParams(ctx, false, false, false, nil, machineId)
 			if cleanupErr == nil {
 				cleanupErr = results[0].Error
 			}
 			if cleanupErr != nil {
-				logger.Errorf("error cleaning up machine: %s", cleanupErr)
+				logger.Errorf(ctx, "error cleaning up machine: %s", cleanupErr)
 			}
 			machineId = ""
 		}
@@ -40,25 +42,25 @@ func ProvisionMachine(args manual.ProvisionMachineArgs) (machineId string, err e
 		return "", err
 	}
 
-	machineParams, err := gatherMachineParams(args.Host)
+	machineParams, err := gatherMachineParams(args.Host, "ubuntu")
 	if err != nil {
 		return "", err
 	}
 
 	// Inform Juju that the machine exists.
-	machineId, err = manual.RecordMachineInState(args.Client, *machineParams)
+	machineId, err = manual.RecordMachineInState(ctx, args.Client, *machineParams)
 	if err != nil {
 		return "", err
 	}
 
-	provisioningScript, err := args.Client.ProvisioningScript(params.ProvisioningScriptParams{
+	provisioningScript, err := args.Client.ProvisioningScript(ctx, params.ProvisioningScriptParams{
 		MachineId:              machineId,
 		Nonce:                  machineParams.Nonce,
 		DisablePackageCommands: !args.EnableOSRefreshUpdate && !args.EnableOSUpgrade,
 	})
 
 	if err != nil {
-		logger.Errorf("cannot obtain provisioning script")
+		logger.Errorf(ctx, "cannot obtain provisioning script")
 		return "", err
 	}
 
@@ -68,6 +70,6 @@ func ProvisionMachine(args manual.ProvisionMachineArgs) (machineId string, err e
 		return machineId, err
 	}
 
-	logger.Infof("Provisioned machine %v", machineId)
+	logger.Infof(ctx, "Provisioned machine %v", machineId)
 	return machineId, nil
 }

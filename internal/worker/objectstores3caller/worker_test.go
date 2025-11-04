@@ -4,21 +4,22 @@
 package objectstores3caller
 
 import (
-	context "context"
+	"context"
 	"sync/atomic"
+	stdtesting "testing"
 	time "time"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
 	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	controller "github.com/juju/juju/controller"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/internal/s3client"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type workerSuite struct {
@@ -27,9 +28,12 @@ type workerSuite struct {
 	sessionRefCount int64
 }
 
-var _ = gc.Suite(&workerSuite{})
+func TestWorkerSuite(t *stdtesting.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &workerSuite{})
+}
 
-func (s *workerSuite) TestCleanKill(c *gc.C) {
+func (s *workerSuite) TestCleanKill(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -47,7 +51,7 @@ func (s *workerSuite) TestCleanKill(c *gc.C) {
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) TestSessionExists(c *gc.C) {
+func (s *workerSuite) TestSessionExists(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -63,17 +67,17 @@ func (s *workerSuite) TestSessionExists(c *gc.C) {
 	s.ensureStartup(c)
 
 	var session objectstore.Session
-	err := worker.Session(context.Background(), func(context.Context, objectstore.Session) error {
+	err := worker.Session(c.Context(), func(context.Context, objectstore.Session) error {
 		session = s.session
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(session, gc.Equals, s.session)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(session, tc.Equals, s.session)
 
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) TestSessionIsRetried(c *gc.C) {
+func (s *workerSuite) TestSessionIsRetried(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -91,7 +95,7 @@ func (s *workerSuite) TestSessionIsRetried(c *gc.C) {
 
 	var attempt int
 	var session objectstore.Session
-	err := worker.Session(context.Background(), func(context.Context, objectstore.Session) error {
+	err := worker.Session(c.Context(), func(context.Context, objectstore.Session) error {
 		session = s.session
 
 		attempt++
@@ -100,14 +104,14 @@ func (s *workerSuite) TestSessionIsRetried(c *gc.C) {
 		}
 		return nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(session, gc.Equals, s.session)
-	c.Check(attempt, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(session, tc.Equals, s.session)
+	c.Check(attempt, tc.Equals, 2)
 
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) TestSessionIsNotRetried(c *gc.C) {
+func (s *workerSuite) TestSessionIsNotRetried(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -124,17 +128,17 @@ func (s *workerSuite) TestSessionIsNotRetried(c *gc.C) {
 	s.ensureStartup(c)
 
 	var attempt int
-	err := worker.Session(context.Background(), func(context.Context, objectstore.Session) error {
+	err := worker.Session(c.Context(), func(context.Context, objectstore.Session) error {
 		attempt++
 		return errors.Errorf("boom")
 	})
-	c.Assert(err, gc.ErrorMatches, `boom`)
-	c.Check(attempt, gc.Equals, 1)
+	c.Assert(err, tc.ErrorMatches, `boom`)
+	c.Check(attempt, tc.Equals, 1)
 
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) TestSessionIsChanged(c *gc.C) {
+func (s *workerSuite) TestSessionIsChanged(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -179,7 +183,7 @@ func (s *workerSuite) TestSessionIsChanged(c *gc.C) {
 	s.ensureStartup(c)
 
 	var attempt int
-	err := worker.Session(context.Background(), func(ctx context.Context, session objectstore.Session) error {
+	err := worker.Session(c.Context(), func(ctx context.Context, session objectstore.Session) error {
 		attempt++
 		if attempt == 1 {
 			triggerChange()
@@ -190,16 +194,16 @@ func (s *workerSuite) TestSessionIsChanged(c *gc.C) {
 
 	s.ensureClientUpdated(c)
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(attempt, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(attempt, tc.Equals, 2)
 
 	// Ensure we called new client twice.
-	c.Check(atomic.LoadInt64(&s.sessionRefCount), gc.Equals, int64(2))
+	c.Check(atomic.LoadInt64(&s.sessionRefCount), tc.Equals, int64(2))
 
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) TestSessionIsNotChanged(c *gc.C) {
+func (s *workerSuite) TestSessionIsNotChanged(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	config := testing.FakeControllerConfig()
@@ -250,7 +254,7 @@ func (s *workerSuite) TestSessionIsNotChanged(c *gc.C) {
 	done := make(chan struct{})
 
 	var attempt int
-	err := worker.Session(context.Background(), func(ctx context.Context, session objectstore.Session) error {
+	err := worker.Session(c.Context(), func(ctx context.Context, session objectstore.Session) error {
 		attempt++
 		if attempt == 1 {
 			triggerChange()
@@ -269,23 +273,23 @@ func (s *workerSuite) TestSessionIsNotChanged(c *gc.C) {
 		c.Fatalf("timed out waiting for controller config watcher to be added")
 	}
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(attempt, gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(attempt, tc.Equals, 2)
 
 	// The client wasn't refreshed, so we should still have the original client.
-	c.Check(atomic.LoadInt64(&s.sessionRefCount), gc.Equals, int64(1))
+	c.Check(atomic.LoadInt64(&s.sessionRefCount), tc.Equals, int64(1))
 
 	workertest.CleanKill(c, worker)
 }
 
-func (s *workerSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *workerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	atomic.StoreInt64(&s.sessionRefCount, 0)
 	return s.baseSuite.setupMocks(c)
 }
 
-func (s *workerSuite) newWorker(c *gc.C) *s3Worker {
+func (s *workerSuite) newWorker(c *tc.C) *s3Worker {
 	worker, err := newWorker(s.getConfig(), s.states)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return worker
 }
 
@@ -302,17 +306,17 @@ func (s *workerSuite) getConfig() workerConfig {
 	}
 }
 
-func (s *workerSuite) expectControllerConfigWithDone(c *gc.C, config controller.Config, done chan struct{}) {
+func (s *workerSuite) expectControllerConfigWithDone(c *tc.C, config controller.Config, done chan struct{}) {
 	s.controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).DoAndReturn(func(context.Context) (controller.Config, error) {
 		defer close(done)
 		return config, nil
 	})
 }
 
-func (s *workerSuite) ensureClientUpdated(c *gc.C) {
+func (s *workerSuite) ensureClientUpdated(c *tc.C) {
 	select {
 	case state := <-s.states:
-		c.Assert(state, gc.Equals, stateClientUpdated)
+		c.Assert(state, tc.Equals, stateClientUpdated)
 	case <-time.After(testing.ShortWait * 10):
 		c.Fatalf("timed out waiting for startup")
 	}

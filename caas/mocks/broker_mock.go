@@ -15,15 +15,15 @@ import (
 
 	caas "github.com/juju/juju/caas"
 	constraints "github.com/juju/juju/core/constraints"
-	secrets "github.com/juju/juju/core/secrets"
+	instance "github.com/juju/juju/core/instance"
+	network "github.com/juju/juju/core/network"
+	semversion "github.com/juju/juju/core/semversion"
 	environs "github.com/juju/juju/environs"
 	config "github.com/juju/juju/environs/config"
-	envcontext "github.com/juju/juju/environs/envcontext"
 	docker "github.com/juju/juju/internal/docker"
 	proxy "github.com/juju/juju/internal/proxy"
 	storage "github.com/juju/juju/internal/storage"
-	names "github.com/juju/names/v5"
-	version "github.com/juju/version/v2"
+	names "github.com/juju/names/v6"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -90,7 +90,7 @@ func (c *MockBrokerAPIVersionCall) DoAndReturn(f func() (string, error)) *MockBr
 }
 
 // AdoptResources mocks base method.
-func (m *MockBroker) AdoptResources(arg0 envcontext.ProviderCallContext, arg1 string, arg2 version.Number) error {
+func (m *MockBroker) AdoptResources(arg0 context.Context, arg1 string, arg2 semversion.Number) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "AdoptResources", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
@@ -116,13 +116,52 @@ func (c *MockBrokerAdoptResourcesCall) Return(arg0 error) *MockBrokerAdoptResour
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerAdoptResourcesCall) Do(f func(envcontext.ProviderCallContext, string, version.Number) error) *MockBrokerAdoptResourcesCall {
+func (c *MockBrokerAdoptResourcesCall) Do(f func(context.Context, string, semversion.Number) error) *MockBrokerAdoptResourcesCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerAdoptResourcesCall) DoAndReturn(f func(envcontext.ProviderCallContext, string, version.Number) error) *MockBrokerAdoptResourcesCall {
+func (c *MockBrokerAdoptResourcesCall) DoAndReturn(f func(context.Context, string, semversion.Number) error) *MockBrokerAdoptResourcesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// AllocateContainerAddresses mocks base method.
+func (m *MockBroker) AllocateContainerAddresses(arg0 context.Context, arg1 instance.Id, arg2 string, arg3 network.InterfaceInfos) (network.InterfaceInfos, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AllocateContainerAddresses", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(network.InterfaceInfos)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AllocateContainerAddresses indicates an expected call of AllocateContainerAddresses.
+func (mr *MockBrokerMockRecorder) AllocateContainerAddresses(arg0, arg1, arg2, arg3 any) *MockBrokerAllocateContainerAddressesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AllocateContainerAddresses", reflect.TypeOf((*MockBroker)(nil).AllocateContainerAddresses), arg0, arg1, arg2, arg3)
+	return &MockBrokerAllocateContainerAddressesCall{Call: call}
+}
+
+// MockBrokerAllocateContainerAddressesCall wrap *gomock.Call
+type MockBrokerAllocateContainerAddressesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerAllocateContainerAddressesCall) Return(arg0 network.InterfaceInfos, arg1 error) *MockBrokerAllocateContainerAddressesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerAllocateContainerAddressesCall) Do(f func(context.Context, instance.Id, string, network.InterfaceInfos) (network.InterfaceInfos, error)) *MockBrokerAllocateContainerAddressesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerAllocateContainerAddressesCall) DoAndReturn(f func(context.Context, instance.Id, string, network.InterfaceInfos) (network.InterfaceInfos, error)) *MockBrokerAllocateContainerAddressesCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -204,18 +243,18 @@ func (c *MockBrokerApplicationCall) DoAndReturn(f func(string, caas.DeploymentTy
 }
 
 // Bootstrap mocks base method.
-func (m *MockBroker) Bootstrap(arg0 environs.BootstrapContext, arg1 envcontext.ProviderCallContext, arg2 environs.BootstrapParams) (*environs.BootstrapResult, error) {
+func (m *MockBroker) Bootstrap(arg0 environs.BootstrapContext, arg1 environs.BootstrapParams) (*environs.BootstrapResult, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Bootstrap", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "Bootstrap", arg0, arg1)
 	ret0, _ := ret[0].(*environs.BootstrapResult)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Bootstrap indicates an expected call of Bootstrap.
-func (mr *MockBrokerMockRecorder) Bootstrap(arg0, arg1, arg2 any) *MockBrokerBootstrapCall {
+func (mr *MockBrokerMockRecorder) Bootstrap(arg0, arg1 any) *MockBrokerBootstrapCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Bootstrap", reflect.TypeOf((*MockBroker)(nil).Bootstrap), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Bootstrap", reflect.TypeOf((*MockBroker)(nil).Bootstrap), arg0, arg1)
 	return &MockBrokerBootstrapCall{Call: call}
 }
 
@@ -231,13 +270,13 @@ func (c *MockBrokerBootstrapCall) Return(arg0 *environs.BootstrapResult, arg1 er
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerBootstrapCall) Do(f func(environs.BootstrapContext, envcontext.ProviderCallContext, environs.BootstrapParams) (*environs.BootstrapResult, error)) *MockBrokerBootstrapCall {
+func (c *MockBrokerBootstrapCall) Do(f func(environs.BootstrapContext, environs.BootstrapParams) (*environs.BootstrapResult, error)) *MockBrokerBootstrapCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerBootstrapCall) DoAndReturn(f func(environs.BootstrapContext, envcontext.ProviderCallContext, environs.BootstrapParams) (*environs.BootstrapResult, error)) *MockBrokerBootstrapCall {
+func (c *MockBrokerBootstrapCall) DoAndReturn(f func(environs.BootstrapContext, environs.BootstrapParams) (*environs.BootstrapResult, error)) *MockBrokerBootstrapCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -319,7 +358,7 @@ func (c *MockBrokerConfigCall) DoAndReturn(f func() *config.Config) *MockBrokerC
 }
 
 // ConstraintsValidator mocks base method.
-func (m *MockBroker) ConstraintsValidator(arg0 envcontext.ProviderCallContext) (constraints.Validator, error) {
+func (m *MockBroker) ConstraintsValidator(arg0 context.Context) (constraints.Validator, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ConstraintsValidator", arg0)
 	ret0, _ := ret[0].(constraints.Validator)
@@ -346,95 +385,19 @@ func (c *MockBrokerConstraintsValidatorCall) Return(arg0 constraints.Validator, 
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerConstraintsValidatorCall) Do(f func(envcontext.ProviderCallContext) (constraints.Validator, error)) *MockBrokerConstraintsValidatorCall {
+func (c *MockBrokerConstraintsValidatorCall) Do(f func(context.Context) (constraints.Validator, error)) *MockBrokerConstraintsValidatorCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerConstraintsValidatorCall) DoAndReturn(f func(envcontext.ProviderCallContext) (constraints.Validator, error)) *MockBrokerConstraintsValidatorCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// Create mocks base method.
-func (m *MockBroker) Create(arg0 envcontext.ProviderCallContext, arg1 environs.CreateParams) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Create", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Create indicates an expected call of Create.
-func (mr *MockBrokerMockRecorder) Create(arg0, arg1 any) *MockBrokerCreateCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockBroker)(nil).Create), arg0, arg1)
-	return &MockBrokerCreateCall{Call: call}
-}
-
-// MockBrokerCreateCall wrap *gomock.Call
-type MockBrokerCreateCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockBrokerCreateCall) Return(arg0 error) *MockBrokerCreateCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockBrokerCreateCall) Do(f func(envcontext.ProviderCallContext, environs.CreateParams) error) *MockBrokerCreateCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerCreateCall) DoAndReturn(f func(envcontext.ProviderCallContext, environs.CreateParams) error) *MockBrokerCreateCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// DeleteJujuSecret mocks base method.
-func (m *MockBroker) DeleteJujuSecret(arg0 context.Context, arg1 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteJujuSecret", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// DeleteJujuSecret indicates an expected call of DeleteJujuSecret.
-func (mr *MockBrokerMockRecorder) DeleteJujuSecret(arg0, arg1 any) *MockBrokerDeleteJujuSecretCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteJujuSecret", reflect.TypeOf((*MockBroker)(nil).DeleteJujuSecret), arg0, arg1)
-	return &MockBrokerDeleteJujuSecretCall{Call: call}
-}
-
-// MockBrokerDeleteJujuSecretCall wrap *gomock.Call
-type MockBrokerDeleteJujuSecretCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockBrokerDeleteJujuSecretCall) Return(arg0 error) *MockBrokerDeleteJujuSecretCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockBrokerDeleteJujuSecretCall) Do(f func(context.Context, string) error) *MockBrokerDeleteJujuSecretCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerDeleteJujuSecretCall) DoAndReturn(f func(context.Context, string) error) *MockBrokerDeleteJujuSecretCall {
+func (c *MockBrokerConstraintsValidatorCall) DoAndReturn(f func(context.Context) (constraints.Validator, error)) *MockBrokerConstraintsValidatorCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // Destroy mocks base method.
-func (m *MockBroker) Destroy(arg0 envcontext.ProviderCallContext) error {
+func (m *MockBroker) Destroy(arg0 context.Context) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Destroy", arg0)
 	ret0, _ := ret[0].(error)
@@ -460,19 +423,19 @@ func (c *MockBrokerDestroyCall) Return(arg0 error) *MockBrokerDestroyCall {
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerDestroyCall) Do(f func(envcontext.ProviderCallContext) error) *MockBrokerDestroyCall {
+func (c *MockBrokerDestroyCall) Do(f func(context.Context) error) *MockBrokerDestroyCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerDestroyCall) DoAndReturn(f func(envcontext.ProviderCallContext) error) *MockBrokerDestroyCall {
+func (c *MockBrokerDestroyCall) DoAndReturn(f func(context.Context) error) *MockBrokerDestroyCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // DestroyController mocks base method.
-func (m *MockBroker) DestroyController(arg0 envcontext.ProviderCallContext, arg1 string) error {
+func (m *MockBroker) DestroyController(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DestroyController", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -498,13 +461,13 @@ func (c *MockBrokerDestroyControllerCall) Return(arg0 error) *MockBrokerDestroyC
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerDestroyControllerCall) Do(f func(envcontext.ProviderCallContext, string) error) *MockBrokerDestroyControllerCall {
+func (c *MockBrokerDestroyControllerCall) Do(f func(context.Context, string) error) *MockBrokerDestroyControllerCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerDestroyControllerCall) DoAndReturn(f func(envcontext.ProviderCallContext, string) error) *MockBrokerDestroyControllerCall {
+func (c *MockBrokerDestroyControllerCall) DoAndReturn(f func(context.Context, string) error) *MockBrokerDestroyControllerCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -585,80 +548,41 @@ func (c *MockBrokerEnsureModelOperatorCall) DoAndReturn(f func(context.Context, 
 	return c
 }
 
-// EnsureSecretAccessToken mocks base method.
-func (m *MockBroker) EnsureSecretAccessToken(arg0 context.Context, arg1 string, arg2, arg3, arg4 []string) (string, error) {
+// GetModelOperatorDeploymentImage mocks base method.
+func (m *MockBroker) GetModelOperatorDeploymentImage(arg0 context.Context) (string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "EnsureSecretAccessToken", arg0, arg1, arg2, arg3, arg4)
+	ret := m.ctrl.Call(m, "GetModelOperatorDeploymentImage", arg0)
 	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// EnsureSecretAccessToken indicates an expected call of EnsureSecretAccessToken.
-func (mr *MockBrokerMockRecorder) EnsureSecretAccessToken(arg0, arg1, arg2, arg3, arg4 any) *MockBrokerEnsureSecretAccessTokenCall {
+// GetModelOperatorDeploymentImage indicates an expected call of GetModelOperatorDeploymentImage.
+func (mr *MockBrokerMockRecorder) GetModelOperatorDeploymentImage(arg0 any) *MockBrokerGetModelOperatorDeploymentImageCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureSecretAccessToken", reflect.TypeOf((*MockBroker)(nil).EnsureSecretAccessToken), arg0, arg1, arg2, arg3, arg4)
-	return &MockBrokerEnsureSecretAccessTokenCall{Call: call}
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetModelOperatorDeploymentImage", reflect.TypeOf((*MockBroker)(nil).GetModelOperatorDeploymentImage), arg0)
+	return &MockBrokerGetModelOperatorDeploymentImageCall{Call: call}
 }
 
-// MockBrokerEnsureSecretAccessTokenCall wrap *gomock.Call
-type MockBrokerEnsureSecretAccessTokenCall struct {
+// MockBrokerGetModelOperatorDeploymentImageCall wrap *gomock.Call
+type MockBrokerGetModelOperatorDeploymentImageCall struct {
 	*gomock.Call
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockBrokerEnsureSecretAccessTokenCall) Return(arg0 string, arg1 error) *MockBrokerEnsureSecretAccessTokenCall {
+func (c *MockBrokerGetModelOperatorDeploymentImageCall) Return(arg0 string, arg1 error) *MockBrokerGetModelOperatorDeploymentImageCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerEnsureSecretAccessTokenCall) Do(f func(context.Context, string, []string, []string, []string) (string, error)) *MockBrokerEnsureSecretAccessTokenCall {
+func (c *MockBrokerGetModelOperatorDeploymentImageCall) Do(f func(context.Context) (string, error)) *MockBrokerGetModelOperatorDeploymentImageCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerEnsureSecretAccessTokenCall) DoAndReturn(f func(context.Context, string, []string, []string, []string) (string, error)) *MockBrokerEnsureSecretAccessTokenCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
-// GetJujuSecret mocks base method.
-func (m *MockBroker) GetJujuSecret(arg0 context.Context, arg1 string) (secrets.SecretValue, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetJujuSecret", arg0, arg1)
-	ret0, _ := ret[0].(secrets.SecretValue)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// GetJujuSecret indicates an expected call of GetJujuSecret.
-func (mr *MockBrokerMockRecorder) GetJujuSecret(arg0, arg1 any) *MockBrokerGetJujuSecretCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetJujuSecret", reflect.TypeOf((*MockBroker)(nil).GetJujuSecret), arg0, arg1)
-	return &MockBrokerGetJujuSecretCall{Call: call}
-}
-
-// MockBrokerGetJujuSecretCall wrap *gomock.Call
-type MockBrokerGetJujuSecretCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockBrokerGetJujuSecretCall) Return(arg0 secrets.SecretValue, arg1 error) *MockBrokerGetJujuSecretCall {
-	c.Call = c.Call.Return(arg0, arg1)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockBrokerGetJujuSecretCall) Do(f func(context.Context, string) (secrets.SecretValue, error)) *MockBrokerGetJujuSecretCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerGetJujuSecretCall) DoAndReturn(f func(context.Context, string) (secrets.SecretValue, error)) *MockBrokerGetJujuSecretCall {
+func (c *MockBrokerGetModelOperatorDeploymentImageCall) DoAndReturn(f func(context.Context) (string, error)) *MockBrokerGetModelOperatorDeploymentImageCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -819,8 +743,47 @@ func (c *MockBrokerModelOperatorExistsCall) DoAndReturn(f func(context.Context) 
 	return c
 }
 
+// NetworkInterfaces mocks base method.
+func (m *MockBroker) NetworkInterfaces(arg0 context.Context, arg1 []instance.Id) ([]network.InterfaceInfos, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NetworkInterfaces", arg0, arg1)
+	ret0, _ := ret[0].([]network.InterfaceInfos)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NetworkInterfaces indicates an expected call of NetworkInterfaces.
+func (mr *MockBrokerMockRecorder) NetworkInterfaces(arg0, arg1 any) *MockBrokerNetworkInterfacesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NetworkInterfaces", reflect.TypeOf((*MockBroker)(nil).NetworkInterfaces), arg0, arg1)
+	return &MockBrokerNetworkInterfacesCall{Call: call}
+}
+
+// MockBrokerNetworkInterfacesCall wrap *gomock.Call
+type MockBrokerNetworkInterfacesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerNetworkInterfacesCall) Return(arg0 []network.InterfaceInfos, arg1 error) *MockBrokerNetworkInterfacesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerNetworkInterfacesCall) Do(f func(context.Context, []instance.Id) ([]network.InterfaceInfos, error)) *MockBrokerNetworkInterfacesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerNetworkInterfacesCall) DoAndReturn(f func(context.Context, []instance.Id) ([]network.InterfaceInfos, error)) *MockBrokerNetworkInterfacesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // PrecheckInstance mocks base method.
-func (m *MockBroker) PrecheckInstance(arg0 envcontext.ProviderCallContext, arg1 environs.PrecheckInstanceParams) error {
+func (m *MockBroker) PrecheckInstance(arg0 context.Context, arg1 environs.PrecheckInstanceParams) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "PrecheckInstance", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -846,13 +809,13 @@ func (c *MockBrokerPrecheckInstanceCall) Return(arg0 error) *MockBrokerPrecheckI
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerPrecheckInstanceCall) Do(f func(envcontext.ProviderCallContext, environs.PrecheckInstanceParams) error) *MockBrokerPrecheckInstanceCall {
+func (c *MockBrokerPrecheckInstanceCall) Do(f func(context.Context, environs.PrecheckInstanceParams) error) *MockBrokerPrecheckInstanceCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerPrecheckInstanceCall) DoAndReturn(f func(envcontext.ProviderCallContext, environs.PrecheckInstanceParams) error) *MockBrokerPrecheckInstanceCall {
+func (c *MockBrokerPrecheckInstanceCall) DoAndReturn(f func(context.Context, environs.PrecheckInstanceParams) error) *MockBrokerPrecheckInstanceCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -933,6 +896,45 @@ func (c *MockBrokerProviderCall) DoAndReturn(f func() caas.ContainerEnvironProvi
 	return c
 }
 
+// ProviderSpaceInfo mocks base method.
+func (m *MockBroker) ProviderSpaceInfo(arg0 context.Context, arg1 *network.SpaceInfo) (*environs.ProviderSpaceInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ProviderSpaceInfo", arg0, arg1)
+	ret0, _ := ret[0].(*environs.ProviderSpaceInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ProviderSpaceInfo indicates an expected call of ProviderSpaceInfo.
+func (mr *MockBrokerMockRecorder) ProviderSpaceInfo(arg0, arg1 any) *MockBrokerProviderSpaceInfoCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProviderSpaceInfo", reflect.TypeOf((*MockBroker)(nil).ProviderSpaceInfo), arg0, arg1)
+	return &MockBrokerProviderSpaceInfoCall{Call: call}
+}
+
+// MockBrokerProviderSpaceInfoCall wrap *gomock.Call
+type MockBrokerProviderSpaceInfoCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerProviderSpaceInfoCall) Return(arg0 *environs.ProviderSpaceInfo, arg1 error) *MockBrokerProviderSpaceInfoCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerProviderSpaceInfoCall) Do(f func(context.Context, *network.SpaceInfo) (*environs.ProviderSpaceInfo, error)) *MockBrokerProviderSpaceInfoCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerProviderSpaceInfoCall) DoAndReturn(f func(context.Context, *network.SpaceInfo) (*environs.ProviderSpaceInfo, error)) *MockBrokerProviderSpaceInfoCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // ProxyToApplication mocks base method.
 func (m *MockBroker) ProxyToApplication(arg0 context.Context, arg1, arg2 string) (proxy.Proxier, error) {
 	m.ctrl.T.Helper()
@@ -972,41 +974,78 @@ func (c *MockBrokerProxyToApplicationCall) DoAndReturn(f func(context.Context, s
 	return c
 }
 
-// SaveJujuSecret mocks base method.
-func (m *MockBroker) SaveJujuSecret(arg0 context.Context, arg1 string, arg2 secrets.SecretValue) (string, error) {
+// RecommendedPoolForKind mocks base method.
+func (m *MockBroker) RecommendedPoolForKind(arg0 storage.StorageKind) *storage.Config {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SaveJujuSecret", arg0, arg1, arg2)
-	ret0, _ := ret[0].(string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret := m.ctrl.Call(m, "RecommendedPoolForKind", arg0)
+	ret0, _ := ret[0].(*storage.Config)
+	return ret0
 }
 
-// SaveJujuSecret indicates an expected call of SaveJujuSecret.
-func (mr *MockBrokerMockRecorder) SaveJujuSecret(arg0, arg1, arg2 any) *MockBrokerSaveJujuSecretCall {
+// RecommendedPoolForKind indicates an expected call of RecommendedPoolForKind.
+func (mr *MockBrokerMockRecorder) RecommendedPoolForKind(arg0 any) *MockBrokerRecommendedPoolForKindCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveJujuSecret", reflect.TypeOf((*MockBroker)(nil).SaveJujuSecret), arg0, arg1, arg2)
-	return &MockBrokerSaveJujuSecretCall{Call: call}
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecommendedPoolForKind", reflect.TypeOf((*MockBroker)(nil).RecommendedPoolForKind), arg0)
+	return &MockBrokerRecommendedPoolForKindCall{Call: call}
 }
 
-// MockBrokerSaveJujuSecretCall wrap *gomock.Call
-type MockBrokerSaveJujuSecretCall struct {
+// MockBrokerRecommendedPoolForKindCall wrap *gomock.Call
+type MockBrokerRecommendedPoolForKindCall struct {
 	*gomock.Call
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockBrokerSaveJujuSecretCall) Return(arg0 string, arg1 error) *MockBrokerSaveJujuSecretCall {
-	c.Call = c.Call.Return(arg0, arg1)
+func (c *MockBrokerRecommendedPoolForKindCall) Return(arg0 *storage.Config) *MockBrokerRecommendedPoolForKindCall {
+	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerSaveJujuSecretCall) Do(f func(context.Context, string, secrets.SecretValue) (string, error)) *MockBrokerSaveJujuSecretCall {
+func (c *MockBrokerRecommendedPoolForKindCall) Do(f func(storage.StorageKind) *storage.Config) *MockBrokerRecommendedPoolForKindCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerSaveJujuSecretCall) DoAndReturn(f func(context.Context, string, secrets.SecretValue) (string, error)) *MockBrokerSaveJujuSecretCall {
+func (c *MockBrokerRecommendedPoolForKindCall) DoAndReturn(f func(storage.StorageKind) *storage.Config) *MockBrokerRecommendedPoolForKindCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// ReleaseContainerAddresses mocks base method.
+func (m *MockBroker) ReleaseContainerAddresses(arg0 context.Context, arg1 []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReleaseContainerAddresses", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ReleaseContainerAddresses indicates an expected call of ReleaseContainerAddresses.
+func (mr *MockBrokerMockRecorder) ReleaseContainerAddresses(arg0, arg1 any) *MockBrokerReleaseContainerAddressesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReleaseContainerAddresses", reflect.TypeOf((*MockBroker)(nil).ReleaseContainerAddresses), arg0, arg1)
+	return &MockBrokerReleaseContainerAddressesCall{Call: call}
+}
+
+// MockBrokerReleaseContainerAddressesCall wrap *gomock.Call
+type MockBrokerReleaseContainerAddressesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerReleaseContainerAddressesCall) Return(arg0 error) *MockBrokerReleaseContainerAddressesCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerReleaseContainerAddressesCall) Do(f func(context.Context, []string) error) *MockBrokerReleaseContainerAddressesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerReleaseContainerAddressesCall) DoAndReturn(f func(context.Context, []string) error) *MockBrokerReleaseContainerAddressesCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1045,6 +1084,45 @@ func (c *MockBrokerSetConfigCall) Do(f func(context.Context, *config.Config) err
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockBrokerSetConfigCall) DoAndReturn(f func(context.Context, *config.Config) error) *MockBrokerSetConfigCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// Spaces mocks base method.
+func (m *MockBroker) Spaces(arg0 context.Context) (network.SpaceInfos, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Spaces", arg0)
+	ret0, _ := ret[0].(network.SpaceInfos)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Spaces indicates an expected call of Spaces.
+func (mr *MockBrokerMockRecorder) Spaces(arg0 any) *MockBrokerSpacesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Spaces", reflect.TypeOf((*MockBroker)(nil).Spaces), arg0)
+	return &MockBrokerSpacesCall{Call: call}
+}
+
+// MockBrokerSpacesCall wrap *gomock.Call
+type MockBrokerSpacesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerSpacesCall) Return(arg0 network.SpaceInfos, arg1 error) *MockBrokerSpacesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerSpacesCall) Do(f func(context.Context) (network.SpaceInfos, error)) *MockBrokerSpacesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerSpacesCall) DoAndReturn(f func(context.Context) (network.SpaceInfos, error)) *MockBrokerSpacesCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1127,6 +1205,161 @@ func (c *MockBrokerStorageProviderTypesCall) DoAndReturn(f func() ([]storage.Pro
 	return c
 }
 
+// Subnets mocks base method.
+func (m *MockBroker) Subnets(arg0 context.Context, arg1 []network.Id) ([]network.SubnetInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Subnets", arg0, arg1)
+	ret0, _ := ret[0].([]network.SubnetInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Subnets indicates an expected call of Subnets.
+func (mr *MockBrokerMockRecorder) Subnets(arg0, arg1 any) *MockBrokerSubnetsCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Subnets", reflect.TypeOf((*MockBroker)(nil).Subnets), arg0, arg1)
+	return &MockBrokerSubnetsCall{Call: call}
+}
+
+// MockBrokerSubnetsCall wrap *gomock.Call
+type MockBrokerSubnetsCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerSubnetsCall) Return(arg0 []network.SubnetInfo, arg1 error) *MockBrokerSubnetsCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerSubnetsCall) Do(f func(context.Context, []network.Id) ([]network.SubnetInfo, error)) *MockBrokerSubnetsCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerSubnetsCall) DoAndReturn(f func(context.Context, []network.Id) ([]network.SubnetInfo, error)) *MockBrokerSubnetsCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// SupportsContainerAddresses mocks base method.
+func (m *MockBroker) SupportsContainerAddresses() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SupportsContainerAddresses")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// SupportsContainerAddresses indicates an expected call of SupportsContainerAddresses.
+func (mr *MockBrokerMockRecorder) SupportsContainerAddresses() *MockBrokerSupportsContainerAddressesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SupportsContainerAddresses", reflect.TypeOf((*MockBroker)(nil).SupportsContainerAddresses))
+	return &MockBrokerSupportsContainerAddressesCall{Call: call}
+}
+
+// MockBrokerSupportsContainerAddressesCall wrap *gomock.Call
+type MockBrokerSupportsContainerAddressesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerSupportsContainerAddressesCall) Return(arg0 bool) *MockBrokerSupportsContainerAddressesCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerSupportsContainerAddressesCall) Do(f func() bool) *MockBrokerSupportsContainerAddressesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerSupportsContainerAddressesCall) DoAndReturn(f func() bool) *MockBrokerSupportsContainerAddressesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// SupportsSpaceDiscovery mocks base method.
+func (m *MockBroker) SupportsSpaceDiscovery() (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SupportsSpaceDiscovery")
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SupportsSpaceDiscovery indicates an expected call of SupportsSpaceDiscovery.
+func (mr *MockBrokerMockRecorder) SupportsSpaceDiscovery() *MockBrokerSupportsSpaceDiscoveryCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SupportsSpaceDiscovery", reflect.TypeOf((*MockBroker)(nil).SupportsSpaceDiscovery))
+	return &MockBrokerSupportsSpaceDiscoveryCall{Call: call}
+}
+
+// MockBrokerSupportsSpaceDiscoveryCall wrap *gomock.Call
+type MockBrokerSupportsSpaceDiscoveryCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerSupportsSpaceDiscoveryCall) Return(arg0 bool, arg1 error) *MockBrokerSupportsSpaceDiscoveryCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerSupportsSpaceDiscoveryCall) Do(f func() (bool, error)) *MockBrokerSupportsSpaceDiscoveryCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerSupportsSpaceDiscoveryCall) DoAndReturn(f func() (bool, error)) *MockBrokerSupportsSpaceDiscoveryCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// SupportsSpaces mocks base method.
+func (m *MockBroker) SupportsSpaces() (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SupportsSpaces")
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SupportsSpaces indicates an expected call of SupportsSpaces.
+func (mr *MockBrokerMockRecorder) SupportsSpaces() *MockBrokerSupportsSpacesCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SupportsSpaces", reflect.TypeOf((*MockBroker)(nil).SupportsSpaces))
+	return &MockBrokerSupportsSpacesCall{Call: call}
+}
+
+// MockBrokerSupportsSpacesCall wrap *gomock.Call
+type MockBrokerSupportsSpacesCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBrokerSupportsSpacesCall) Return(arg0 bool, arg1 error) *MockBrokerSupportsSpacesCall {
+	c.Call = c.Call.Return(arg0, arg1)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBrokerSupportsSpacesCall) Do(f func() (bool, error)) *MockBrokerSupportsSpacesCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBrokerSupportsSpacesCall) DoAndReturn(f func() (bool, error)) *MockBrokerSupportsSpacesCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // Units mocks base method.
 func (m *MockBroker) Units(arg0 context.Context, arg1 string) ([]caas.Unit, error) {
 	m.ctrl.T.Helper()
@@ -1167,7 +1400,7 @@ func (c *MockBrokerUnitsCall) DoAndReturn(f func(context.Context, string) ([]caa
 }
 
 // Upgrade mocks base method.
-func (m *MockBroker) Upgrade(arg0 context.Context, arg1 string, arg2 version.Number) error {
+func (m *MockBroker) Upgrade(arg0 context.Context, arg1 string, arg2 semversion.Number) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Upgrade", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
@@ -1193,13 +1426,13 @@ func (c *MockBrokerUpgradeCall) Return(arg0 error) *MockBrokerUpgradeCall {
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerUpgradeCall) Do(f func(context.Context, string, version.Number) error) *MockBrokerUpgradeCall {
+func (c *MockBrokerUpgradeCall) Do(f func(context.Context, string, semversion.Number) error) *MockBrokerUpgradeCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerUpgradeCall) DoAndReturn(f func(context.Context, string, version.Number) error) *MockBrokerUpgradeCall {
+func (c *MockBrokerUpgradeCall) DoAndReturn(f func(context.Context, string, semversion.Number) error) *MockBrokerUpgradeCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -1243,10 +1476,10 @@ func (c *MockBrokerValidateStorageClassCall) DoAndReturn(f func(context.Context,
 }
 
 // Version mocks base method.
-func (m *MockBroker) Version() (*version.Number, error) {
+func (m *MockBroker) Version() (*semversion.Number, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Version")
-	ret0, _ := ret[0].(*version.Number)
+	ret0, _ := ret[0].(*semversion.Number)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -1264,19 +1497,19 @@ type MockBrokerVersionCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockBrokerVersionCall) Return(arg0 *version.Number, arg1 error) *MockBrokerVersionCall {
+func (c *MockBrokerVersionCall) Return(arg0 *semversion.Number, arg1 error) *MockBrokerVersionCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockBrokerVersionCall) Do(f func() (*version.Number, error)) *MockBrokerVersionCall {
+func (c *MockBrokerVersionCall) Do(f func() (*semversion.Number, error)) *MockBrokerVersionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockBrokerVersionCall) DoAndReturn(f func() (*version.Number, error)) *MockBrokerVersionCall {
+func (c *MockBrokerVersionCall) DoAndReturn(f func() (*semversion.Number, error)) *MockBrokerVersionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

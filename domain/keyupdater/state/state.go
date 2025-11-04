@@ -5,101 +5,124 @@ package state
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/database"
 	coremachine "github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/domain"
 	machineerrors "github.com/juju/juju/domain/machine/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
+// State defines the access mechanism for interacting with authorized keys in
+// the context of the model database.
 type State struct {
 	*domain.StateBase
 }
 
-// AllPublicKeysQuery returns a state SQL query for fetching the public keys
-// available on a model. This is useful for constructing authorised keys
-// watchers.
-func (s *State) AllPublicKeysQuery() string {
-	return "SELECT public_key FROM user_public_ssh_key"
-}
-
-// AuthorisedKeysForMachine returns a list of authorised public ssh keys for a
-// machine name. If no machine exists for the given machine name an error
-// satisfying [machineerrors.NotFound] will be returned.
-func (s *State) AuthorisedKeysForMachine(
+// CheckMachineExists checks to see if the given machine exists in the model. If
+// the machine does not exist an error satisfying
+// [machineerrors.MachineNotFound] is returned.
+func (s *State) CheckMachineExists(
 	ctx context.Context,
 	name coremachine.Name,
-) ([]string, error) {
-	db, err := s.DB()
+) error {
+	db, err := s.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return errors.Errorf(
+			"getting database to check if machine %q exists: %w",
+			name, err,
+		)
 	}
 
 	machineArg := machineName{name.String()}
 	machineStmt, err := s.Prepare(`
-SELECT name AS &machineName.*
+SELECT &machineName.*
 FROM machine
 WHERE name = $machineName.name
 `, machineArg)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"preparing select statement for getting machine %q when determining authorised keys: %w",
+		return errors.Errorf(
+			"preparing statement for checking if machine %q exists: %w",
 			name, err,
 		)
 	}
 
-	stmt, err := s.Prepare(`
-SELECT public_key AS &authorisedKey.*
-FROM user_public_ssh_key
-`, authorisedKey{})
-	if err != nil {
-		return nil, fmt.Errorf(
-			"preparing select statement for getting machine %q authorised keys: %w",
-			name, err,
-		)
-	}
-
-	authorisedKeys := []authorisedKey{}
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		// Because we have two queries to run and two error paths we need to
-		// handle the errors inside this TX so we can produce the correct error.
 		err := tx.Query(ctx, machineStmt, machineArg).Get(&machineArg)
 		if errors.Is(err, sqlair.ErrNoRows) {
-			return fmt.Errorf(
-				"cannot get authorised keys for machine %q: %w",
-				name, machineerrors.NotFound,
-			)
+			return errors.Errorf(
+				"machine %q does not exist", name,
+			).Add(machineerrors.MachineNotFound)
 		} else if err != nil {
-			return fmt.Errorf(
-				"cannot get authorised keys for machine %q: %w",
-				name, domain.CoerceError(err),
-			)
-		}
-
-		err = tx.Query(ctx, stmt).GetAll(&authorisedKeys)
-		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return fmt.Errorf(
-				"cannot get authorised keys for machine %q: %w",
-				name, domain.CoerceError(err),
+			return errors.Errorf(
+				"checking if machine %q exists: %w", name, err,
 			)
 		}
 		return nil
 	})
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	rval := make([]string, 0, len(authorisedKeys))
-	for _, authKey := range authorisedKeys {
-		rval = append(rval, authKey.PublicKey)
+	return nil
+}
+
+// GetModelUUID returns the uuid for the model represented by this state.
+func (s *State) GetModelUUID(ctx context.Context) (model.UUID, error) {
+	db, err := s.DB(ctx)
+	if err != nil {
+		return model.UUID(""), errors.Errorf(
+			"getting database to get the model uuid: %w", err,
+		)
 	}
 
-	return rval, nil
+	modelUUIDVal := modelUUIDValue{}
+
+	stmt, err := s.Prepare(`
+SELECT (uuid) AS (&modelUUIDValue.model_uuid)
+FROM model
+`, modelUUIDVal)
+	if err != nil {
+		return model.UUID(""), errors.Errorf(
+			"preparing model uuid selection statement: %w", err,
+		)
+	}
+
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt).Get(&modelUUIDVal)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return errors.New(
+				"getting model uuid from database, read only model records don't exist",
+			)
+		} else if err != nil {
+			return errors.Errorf(
+				"getting model uuid from database: %w", err,
+			)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return model.UUID(""), err
+	}
+
+	return model.UUID(modelUUIDVal.UUID), nil
+}
+
+// NamespaceForWatchUserAuthentication returns the namespace used to
+// monitor user authentication changes.
+func (s *State) NamespaceForWatchUserAuthentication() string {
+	return "user_authentication"
+}
+
+// NamespaceForWatchModelAuthorizationKeys returns the namespace used to
+// monitor authorization keys for the current model.
+func (s *State) NamespaceForWatchModelAuthorizationKeys() string {
+	return "model_authorized_keys"
 }
 
 // NewState constructs a new state for interacting with the underlying

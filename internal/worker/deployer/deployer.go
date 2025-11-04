@@ -9,7 +9,7 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/agent"
@@ -104,34 +104,31 @@ func (d *Deployer) Report() map[string]interface{} {
 
 // SetUp is called by the NewStringsWorker to create the watcher that drives the
 // worker.
-func (d *Deployer) SetUp() (watcher.StringsWatcher, error) {
-	d.logger.Tracef("SetUp")
+func (d *Deployer) SetUp(ctx context.Context) (watcher.StringsWatcher, error) {
 	tag := d.ctx.AgentConfig().Tag()
 	machineTag, ok := tag.(names.MachineTag)
 	if !ok {
 		return nil, errors.Errorf("expected names.MachineTag, got %T", tag)
 	}
-	d.logger.Tracef("getting Machine %s", machineTag)
 	machine, err := d.client.Machine(machineTag)
 	if err != nil {
 		return nil, err
 	}
-	d.logger.Tracef("getting units watcher")
-	machineUnitsWatcher, err := machine.WatchUnits(context.TODO())
+
+	machineUnitsWatcher, err := machine.WatchUnits(ctx)
 	if err != nil {
-		d.logger.Tracef("error: %v", err)
 		return nil, err
 	}
-	d.logger.Tracef("looking for deployed units")
+	d.logger.Infof(ctx, "looking for deployed units")
 
 	deployed, err := d.ctx.DeployedUnits()
 	if err != nil {
 		return nil, err
 	}
-	d.logger.Tracef("deployed units: %v", deployed)
+	d.logger.Infof(ctx, "deployed units: %v", deployed)
 	for _, unitName := range deployed {
 		d.deployed.Add(unitName)
-		if err := d.changed(context.TODO(), unitName); err != nil {
+		if err := d.changed(ctx, unitName); err != nil {
 			return nil, err
 		}
 	}
@@ -139,10 +136,9 @@ func (d *Deployer) SetUp() (watcher.StringsWatcher, error) {
 }
 
 // Handle is called for new value in the StringsWatcher.
-func (d *Deployer) Handle(_ <-chan struct{}, unitNames []string) error {
-	d.logger.Tracef("Handle: %v", unitNames)
+func (d *Deployer) Handle(ctx context.Context, unitNames []string) error {
 	for _, unitName := range unitNames {
-		if err := d.changed(context.TODO(), unitName); err != nil {
+		if err := d.changed(ctx, unitName); err != nil {
 			return err
 		}
 	}
@@ -154,7 +150,7 @@ func (d *Deployer) Handle(_ <-chan struct{}, unitNames []string) error {
 func (d *Deployer) changed(ctx context.Context, unitName string) error {
 	unitTag := names.NewUnitTag(unitName)
 	// Determine unit life state, and whether we're responsible for it.
-	d.logger.Infof("checking unit %q", unitName)
+	d.logger.Tracef(ctx, "checking unit %q", unitName)
 	var unitLife life.Value
 	unit, err := d.client.Unit(ctx, unitTag)
 	if params.IsCodeNotFoundOrCodeUnauthorized(err) {
@@ -168,15 +164,17 @@ func (d *Deployer) changed(ctx context.Context, unitName string) error {
 	// is no longer responsible for them.
 	if d.deployed.Contains(unitName) {
 		if unitLife == life.Dead {
-			if err := d.recall(unitName); err != nil {
+			if err := d.recall(ctx, unitName); err != nil {
 				return err
 			}
 		}
 	}
-	// The only units that should be deployed are those that (1) we are responsible
-	// for and (2) are Alive -- if we're responsible for a Dying unit that is not
-	// yet deployed, we should remove it immediately rather than undergo the hassle
-	// of deploying a unit agent purely so it can set itself to Dead.
+
+	// The only units that should be deployed are those that (1) we are
+	// responsible for and (2) are becoming Alive -- if we're responsible for a
+	// Dying unit that is not yet deployed, we should remove it immediately
+	// rather than undergo the hassle of deploying a unit agent purely so it can
+	// set itself to Dead.
 	if !d.deployed.Contains(unitName) {
 		if unitLife == life.Alive {
 			return d.deploy(ctx, unit)
@@ -191,13 +189,13 @@ func (d *Deployer) changed(ctx context.Context, unitName string) error {
 // panic if it observes inconsistent internal state.
 func (d *Deployer) deploy(ctx context.Context, unit Unit) error {
 	unitName := unit.Name()
-	if d.deployed.Contains(unit.Name()) {
+	if d.deployed.Contains(unitName) {
 		panic("must not re-deploy a deployed unit")
 	}
 	if err := unit.SetStatus(ctx, status.Waiting, status.MessageInstallingAgent, nil); err != nil {
 		return errors.Trace(err)
 	}
-	d.logger.Infof("deploying unit %q", unitName)
+	d.logger.Infof(ctx, "deploying unit %q", unitName)
 	initialPassword, err := password.RandomPassword()
 	if err != nil {
 		return err
@@ -214,11 +212,11 @@ func (d *Deployer) deploy(ctx context.Context, unit Unit) error {
 
 // recall will recall the named unit with the deployer's manager. It will
 // panic if it observes inconsistent internal state.
-func (d *Deployer) recall(unitName string) error {
+func (d *Deployer) recall(ctx context.Context, unitName string) error {
 	if !d.deployed.Contains(unitName) {
 		panic("must not recall a unit that is not deployed")
 	}
-	d.logger.Infof("recalling unit %q", unitName)
+	d.logger.Infof(ctx, "recalling unit %q", unitName)
 	if err := d.ctx.RecallUnit(unitName); err != nil {
 		return err
 	}
@@ -235,7 +233,7 @@ func (d *Deployer) remove(ctx context.Context, unit Unit) error {
 	} else if unit.Life() == life.Alive {
 		panic("must not remove an Alive unit")
 	}
-	d.logger.Infof("removing unit %q", unitName)
+	d.logger.Infof(ctx, "removing unit %q", unitName)
 	return unit.Remove(ctx)
 }
 

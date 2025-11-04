@@ -5,87 +5,28 @@ package bootstrap
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/credential"
 	"github.com/juju/juju/core/flags"
-	"github.com/juju/juju/core/instance"
+	corehttp "github.com/juju/juju/core/http"
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/user"
-	userservice "github.com/juju/juju/domain/access/service"
-	applicationservice "github.com/juju/juju/domain/application/service"
-	storageservice "github.com/juju/juju/domain/storage/service"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
+	"github.com/juju/juju/core/providertracker"
+	corestatus "github.com/juju/juju/core/status"
 	"github.com/juju/juju/internal/bootstrap"
-	"github.com/juju/juju/internal/servicefactory"
-	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/internal/worker/common"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/statushistory"
 	"github.com/juju/juju/internal/worker/gate"
-	workerstate "github.com/juju/juju/internal/worker/state"
-	"github.com/juju/juju/state/stateenvirons"
 )
-
-// ControllerConfigService is the interface that is used to get the
-// controller configuration.
-type ControllerConfigService interface {
-	ControllerConfig(context.Context) (controller.Config, error)
-}
-
-// CredentialService is the interface that is used to get the
-// cloud credential.
-type CredentialService interface {
-	CloudCredential(ctx context.Context, key credential.Key) (cloud.Credential, error)
-}
-
-// CloudService is the interface that is used to interact with the
-// cloud.
-type CloudService interface {
-	Cloud(context.Context, string) (*cloud.Cloud, error)
-}
-
-// StorageService instances save a storage pool to dqlite state.
-type StorageService interface {
-	CreateStoragePool(ctx context.Context, name string, providerType storage.ProviderType, attrs storageservice.PoolAttrs) error
-}
-
-// ApplicationService instances save an application to dqlite state.
-type ApplicationService interface {
-	CreateApplication(ctx context.Context, name string, params applicationservice.AddApplicationParams, units ...applicationservice.AddUnitParams) error
-}
-
-// NetworkService is the interface that is used to interact with the
-// network spaces/subnets.
-type NetworkService interface {
-	// Space returns a space from state that matches the input ID.
-	// An error is returned if the space does not exist or if there was a problem
-	// accessing its information.
-	Space(ctx context.Context, uuid string) (*network.SpaceInfo, error)
-	// SpaceByName returns a space from state that matches the input name.
-	// An error is returned that satisfied errors.NotFound if the space was not found
-	// or an error static any problems fetching the given space.
-	SpaceByName(ctx context.Context, name string) (*network.SpaceInfo, error)
-	// GetAllSpaces returns all spaces for the model.
-	GetAllSpaces(ctx context.Context) (network.SpaceInfos, error)
-	// ReloadSpaces loads spaces and subnets from the provider into state.
-	ReloadSpaces(ctx context.Context) error
-}
-
-// BakeryConfigService describes the service used to initialise the
-// maccaroon bakery config
-type BakeryConfigService interface {
-	InitialiseBakeryConfig(context.Context) error
-}
 
 // FlagService is the interface that is used to set the value of a
 // flag.
@@ -100,25 +41,21 @@ type ObjectStoreGetter interface {
 	GetObjectStore(context.Context, string) (objectstore.ObjectStore, error)
 }
 
-// UserService is the interface that is used to add a new user to the
-// database.
-type UserService interface {
-	// AddUser will add a new user to the database and return the UUID of the
-	// user if successful. If no password is set in the incoming argument,
-	// the user will be added with an activation key.
-	AddUser(ctx context.Context, arg userservice.AddUserArg) (user.UUID, []byte, error)
-
-	// GetUserByName will return the user with the given name.
-	GetUserByName(ctx context.Context, name string) (user.User, error)
-}
-
 // ControllerCharmDeployerFunc is the function that is used to upload the
 // controller charm.
-type ControllerCharmDeployerFunc func(ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error)
+type ControllerCharmDeployerFunc func(context.Context, ControllerCharmDeployerConfig) (bootstrap.ControllerCharmDeployer, error)
 
 // PopulateControllerCharmFunc is the function that is used to populate the
 // controller charm.
 type PopulateControllerCharmFunc func(context.Context, bootstrap.ControllerCharmDeployer) error
+
+// BootstrapAddressFinderGetter is the function that is used to get the
+// bootstrap address finder.
+type BootstrapAddressFinderGetter func(providerFactory providertracker.ProviderFactory, namespace string) BootstrapAddressFinderFunc
+
+// AgentFinalizerFunc is the function that is used to finalize the agent
+// during bootstrap.
+type AgentFinalizerFunc func(context.Context, AgentPasswordService, MachineService, instancecfg.StateInitializationParams, agent.Config) error
 
 // ControllerUnitPasswordFunc is the function that is used to get the
 // controller unit password.
@@ -128,69 +65,39 @@ type ControllerUnitPasswordFunc func(context.Context) (string, error)
 // process has completed.
 type RequiresBootstrapFunc func(context.Context, FlagService) (bool, error)
 
-// NewEnvironFunc is the function that is used to create a new environ.
-type NewEnvironFunc func(context.Context, environs.OpenParams) (environs.Environ, error)
-
-// BootstrapAddressesFunc is the function that is used to get the bootstrap
-// addresses.
-type BootstrapAddressesFunc func(context.Context, environs.Environ, instance.Id) (network.ProviderAddresses, error)
-
-// BootstrapAddressFinderFunc is the function that is used to upload the agent
-// binary.
-type BootstrapAddressFinderFunc func(context.Context, BootstrapAddressesConfig) (network.ProviderAddresses, error)
-
 // HTTPClient is the interface that is used to make HTTP requests.
 type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// BootstrapAddress attempts to use the provided Environ to get the list of
-// instances and its addresses. If the Environ does not implement
-// InstanceListener (this is the case of CAAS for the moment), then we
-// return the hard-coded 'localhost' address.
-func BootstrapAddresses(
-	ctx context.Context,
-	env environs.Environ,
-	bootstrapInstanceID instance.Id,
-) (network.ProviderAddresses, error) {
-	callCtx := envcontext.WithoutCredentialInvalidator(ctx)
-	instanceLister, ok := env.(environs.InstanceLister)
-	if !ok {
-		return nil, errors.NotSupportedf("bootstrap address not supported on this environ")
-
-	}
-	// TODO(nvinuesa): which instanceID to use?
-	instances, err := instanceLister.Instances(callCtx, []instance.Id{bootstrapInstanceID})
-	if err != nil {
-		return nil, errors.Annotate(err, "getting bootstrap instance")
-	}
-	addrs, err := instances[0].Addresses(callCtx)
-	if err != nil {
-		return nil, errors.Annotate(err, "getting bootstrap instance addresses")
-	}
-	return addrs, nil
+// StatusHistory records status information into a generalized way.
+type StatusHistory interface {
+	// RecordStatus records the given status information.
+	// If the status data cannot be marshalled, it will not be recorded, instead
+	// the error will be logged under the data_error key.
+	RecordStatus(context.Context, statushistory.Namespace, corestatus.StatusInfo) error
 }
 
 // ManifoldConfig defines the configuration for the trace manifold.
 type ManifoldConfig struct {
-	AgentName              string
-	StateName              string
-	ObjectStoreName        string
-	BootstrapGateName      string
-	ServiceFactoryName     string
-	CharmhubHTTPClientName string
+	AgentName           string
+	ObjectStoreName     string
+	BootstrapGateName   string
+	DomainServicesName  string
+	HTTPClientName      string
+	ProviderFactoryName string
 
-	AgentBinaryUploader     AgentBinaryBootstrapFunc
-	ControllerCharmDeployer ControllerCharmDeployerFunc
-	ControllerUnitPassword  ControllerUnitPasswordFunc
-	RequiresBootstrap       RequiresBootstrapFunc
-	PopulateControllerCharm PopulateControllerCharmFunc
-
-	BootstrapAddressFinder BootstrapAddressFinderFunc
-	NewEnviron             NewEnvironFunc
-	BootstrapAddresses     BootstrapAddressesFunc
+	AgentBinaryUploader          AgentBinaryBootstrapFunc
+	ControllerCharmDeployer      ControllerCharmDeployerFunc
+	ControllerUnitPassword       ControllerUnitPasswordFunc
+	RequiresBootstrap            RequiresBootstrapFunc
+	PopulateControllerCharm      PopulateControllerCharmFunc
+	BootstrapAddressFinderGetter BootstrapAddressFinderGetter
+	AgentFinalizer               AgentFinalizerFunc
+	StatusHistory                StatusHistory
 
 	Logger logger.Logger
+	Clock  clock.Clock
 }
 
 // Validate validates the manifold configuration.
@@ -201,21 +108,19 @@ func (cfg ManifoldConfig) Validate() error {
 	if cfg.ObjectStoreName == "" {
 		return errors.NotValidf("empty ObjectStoreName")
 	}
-	if cfg.StateName == "" {
-		return errors.NotValidf("empty StateName")
-	}
 	if cfg.BootstrapGateName == "" {
 		return errors.NotValidf("empty BootstrapGateName")
 	}
-	if cfg.ServiceFactoryName == "" {
-		return errors.NotValidf("empty ServiceFactoryName")
+	if cfg.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
-	if cfg.CharmhubHTTPClientName == "" {
-		return errors.NotValidf("empty CharmhubHTTPClientName")
+	if cfg.HTTPClientName == "" {
+		return errors.NotValidf("empty HTTPClientName")
 	}
-	if cfg.Logger == nil {
-		return errors.NotValidf("nil Logger")
+	if cfg.ProviderFactoryName == "" {
+		return errors.NotValidf("empty ProviderFactoryName")
 	}
+
 	if cfg.AgentBinaryUploader == nil {
 		return errors.NotValidf("nil AgentBinaryUploader")
 	}
@@ -231,14 +136,20 @@ func (cfg ManifoldConfig) Validate() error {
 	if cfg.PopulateControllerCharm == nil {
 		return errors.NotValidf("nil PopulateControllerCharm")
 	}
-	if cfg.BootstrapAddressFinder == nil {
-		return errors.NotValidf("nil BootstrapAddressFinder")
+	if cfg.BootstrapAddressFinderGetter == nil {
+		return errors.NotValidf("nil BootstrapAddressFinderGetter")
 	}
-	if cfg.NewEnviron == nil {
-		return errors.NotValidf("nil NewEnviron")
+	if cfg.AgentFinalizer == nil {
+		return errors.NotValidf("nil AgentFinalizer")
 	}
-	if cfg.BootstrapAddresses == nil {
-		return errors.NotValidf("nil BootstrapAddresses")
+	if cfg.StatusHistory == nil {
+		return errors.NotValidf("nil StatusHistory")
+	}
+	if cfg.Logger == nil {
+		return errors.NotValidf("nil Logger")
+	}
+	if cfg.Clock == nil {
+		return errors.NotValidf("nil Clock")
 	}
 	return nil
 }
@@ -248,11 +159,11 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
 			config.AgentName,
-			config.StateName,
 			config.ObjectStoreName,
 			config.BootstrapGateName,
-			config.ServiceFactoryName,
-			config.CharmhubHTTPClientName,
+			config.DomainServicesName,
+			config.HTTPClientName,
+			config.ProviderFactoryName,
 		},
 		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
@@ -269,15 +180,15 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 				return nil, err
 			}
 
-			var controllerServiceFactory servicefactory.ControllerServiceFactory
-			if err := getter.Get(config.ServiceFactoryName, &controllerServiceFactory); err != nil {
+			var controllerDomainServices services.ControllerDomainServices
+			if err := getter.Get(config.DomainServicesName, &controllerDomainServices); err != nil {
 				return nil, errors.Trace(err)
 			}
 
 			// If the controller application exists, then we don't need to
 			// bootstrap. Uninstall the worker, as we don't need it running
 			// anymore.
-			flagService := controllerServiceFactory.Flag()
+			flagService := controllerDomainServices.Flag()
 			if ok, err := config.RequiresBootstrap(ctx, flagService); err != nil {
 				return nil, errors.Trace(err)
 			} else if !ok {
@@ -291,100 +202,85 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 				return nil, errors.Trace(err)
 			}
 
+			var providerFactory providertracker.ProviderFactory
+			if err := getter.Get(config.ProviderFactoryName, &providerFactory); err != nil {
+				return nil, errors.Trace(err)
+			}
+
+			controllerModel, err := controllerDomainServices.Model().ControllerModel(ctx)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"cannot get controller model when making bootstrap worker: %w",
+					err,
+				)
+			}
+
+			serviceManagerGetter := providertracker.ProviderRunner[ServiceManager](
+				providerFactory, controllerModel.UUID.String(),
+			)
+
 			var objectStoreGetter objectstore.ObjectStoreGetter
 			if err := getter.Get(config.ObjectStoreName, &objectStoreGetter); err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			var charmhubHTTPClient HTTPClient
-			if err := getter.Get(config.CharmhubHTTPClientName, &charmhubHTTPClient); err != nil {
+			var httpClientGetter corehttp.HTTPClientGetter
+			if err := getter.Get(config.HTTPClientName, &httpClientGetter); err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			var stTracker workerstate.StateTracker
-			if err := getter.Get(config.StateName, &stTracker); err != nil {
-				return nil, errors.Trace(err)
-			}
-
-			// Get the state pool after grabbing dependencies so we don't need
-			// to remember to call Done on it if they're not running yet.
-			statePool, _, err := stTracker.Use()
+			charmhubHTTPClient, err := httpClientGetter.GetHTTPClient(ctx, corehttp.CharmhubPurpose)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			systemState, err := statePool.SystemState()
+			var domainServicesGetter services.DomainServicesGetter
+			if err := getter.Get(config.DomainServicesName, &domainServicesGetter); err != nil {
+				return nil, errors.Trace(err)
+			}
+			controllerModelDomainServices, err := domainServicesGetter.ServicesForModel(ctx, controllerModel.UUID)
 			if err != nil {
-				_ = stTracker.Done()
 				return nil, errors.Trace(err)
 			}
 
-			var serviceFactoryGetter servicefactory.ServiceFactoryGetter
-			if err := getter.Get(config.ServiceFactoryName, &serviceFactoryGetter); err != nil {
-				_ = stTracker.Done()
-				return nil, errors.Trace(err)
-			}
-			modelServiceFactory := serviceFactoryGetter.FactoryForModel(systemState.ModelUUID())
-
-			// TODO (stickupkid): This should be removed once we get rid of
-			// the policy and move it into the service factory.
-			prechecker, err := stateenvirons.NewInstancePrechecker(systemState, modelServiceFactory.Cloud(), modelServiceFactory.Credential())
-			if err != nil {
-				_ = stTracker.Done()
-				return nil, errors.Trace(err)
-			}
-
-			model, err := systemState.Model()
-			if err != nil {
-				_ = stTracker.Done()
-				return nil, errors.Trace(err)
-			}
-			registry, err := stateenvirons.NewStorageProviderRegistryForModel(
-				model, controllerServiceFactory.Cloud(), controllerServiceFactory.Credential(),
-				stateenvirons.GetNewEnvironFunc(environs.New),
-				stateenvirons.GetNewCAASBrokerFunc(caas.New),
-			)
-			if err != nil {
-				_ = stTracker.Done()
-				return nil, errors.Trace(err)
-			}
+			applicationService := controllerModelDomainServices.Application()
 
 			w, err := NewWorker(WorkerConfig{
-				Agent:                   a,
-				ObjectStoreGetter:       objectStoreGetter,
-				ControllerConfigService: controllerServiceFactory.ControllerConfig(),
-				CredentialService:       controllerServiceFactory.Credential(),
-				CloudService:            controllerServiceFactory.Cloud(),
-				UserService:             controllerServiceFactory.Access(),
-				StorageService:          modelServiceFactory.Storage(registry),
-				ProviderRegistry:        registry,
-				ApplicationService:      modelServiceFactory.Application(registry),
-				FlagService:             flagService,
-				NetworkService:          modelServiceFactory.Network(),
-				BakeryConfigService:     controllerServiceFactory.Macaroon(),
-				SystemState: &stateShim{
-					State:      systemState,
-					prechecker: prechecker,
-				},
-				BootstrapUnlocker:       bootstrapUnlocker,
-				AgentBinaryUploader:     config.AgentBinaryUploader,
-				ControllerCharmDeployer: config.ControllerCharmDeployer,
-				PopulateControllerCharm: config.PopulateControllerCharm,
-				CharmhubHTTPClient:      charmhubHTTPClient,
-				UnitPassword:            unitPassword,
-				Logger:                  config.Logger,
-				NewEnviron:              config.NewEnviron,
-				BootstrapAddresses:      config.BootstrapAddresses,
-				BootstrapAddressFinder:  config.BootstrapAddressFinder,
+				Agent:                      a,
+				ObjectStoreGetter:          objectStoreGetter,
+				ControllerAgentBinaryStore: controllerDomainServices.ControllerAgentBinaryStore(),
+				ControllerConfigService:    controllerDomainServices.ControllerConfig(),
+				ControllerNodeService:      controllerDomainServices.ControllerNode(),
+				CloudService:               controllerDomainServices.Cloud(),
+				UserService:                controllerDomainServices.Access(),
+				StorageService:             controllerModelDomainServices.Storage(),
+				AgentPasswordService:       controllerModelDomainServices.AgentPassword(),
+				ApplicationService:         applicationService,
+				ControllerModel:            controllerModel,
+				ModelConfigService:         controllerModelDomainServices.Config(),
+				ModelInfoService:           controllerModelDomainServices.ModelInfo(),
+				MachineService:             controllerModelDomainServices.Machine(),
+				KeyManagerService:          controllerModelDomainServices.KeyManager(),
+				FlagService:                flagService,
+				NetworkService:             controllerModelDomainServices.Network(),
+				BakeryConfigService:        controllerDomainServices.Macaroon(),
+				BootstrapUnlocker:          bootstrapUnlocker,
+				AgentBinaryUploader:        config.AgentBinaryUploader,
+				ControllerCharmDeployer:    config.ControllerCharmDeployer,
+				PopulateControllerCharm:    config.PopulateControllerCharm,
+				AgentFinalizer:             config.AgentFinalizer,
+				CharmhubHTTPClient:         charmhubHTTPClient,
+				UnitPassword:               unitPassword,
+				ServiceManagerGetter:       serviceManagerGetter,
+				BootstrapAddressFinder:     config.BootstrapAddressFinderGetter(providerFactory, controllerModel.UUID.String()),
+				StatusHistory:              config.StatusHistory,
+				Logger:                     config.Logger,
+				Clock:                      config.Clock,
 			})
 			if err != nil {
-				_ = stTracker.Done()
 				return nil, errors.Trace(err)
 			}
-			return common.NewCleanupWorker(w, func() {
-				// Ensure we clean up the state pool.
-				_ = stTracker.Done()
-			}), nil
+			return w, nil
 		},
 	}
 }
@@ -399,8 +295,79 @@ func RequiresBootstrap(ctx context.Context, flagService FlagService) (bool, erro
 	return !bootstrapped, nil
 }
 
-// PopulateControllerCharm is the function that is used to populate the
-// controller charm.
-func PopulateControllerCharm(ctx context.Context, controllerCharmDeployer bootstrap.ControllerCharmDeployer) error {
-	return bootstrap.PopulateControllerCharm(ctx, controllerCharmDeployer)
+// PopulateIAASControllerCharm is the function that is used to populate the
+// controller IAAS charm.
+func PopulateIAASControllerCharm(ctx context.Context, controllerCharmDeployer bootstrap.ControllerCharmDeployer) error {
+	return bootstrap.PopulateIAASControllerCharm(ctx, controllerCharmDeployer)
+}
+
+// PopulateCAASControllerCharm is the function that is used to populate the
+// controller CAAS charm.
+func PopulateCAASControllerCharm(ctx context.Context, controllerCharmDeployer bootstrap.ControllerCharmDeployer) error {
+	return bootstrap.PopulateCAASControllerCharm(ctx, controllerCharmDeployer)
+}
+
+// IAASAgentFinalizer is the function that is used to finalize the
+// IAAS agent during bootstrap.
+func IAASAgentFinalizer(
+	ctx context.Context,
+	agentPasswordService AgentPasswordService,
+	machineService MachineService,
+	bootstrapParams instancecfg.StateInitializationParams,
+	agentConfig agent.Config,
+) error {
+	// Set machine cloud instance data for the bootstrap machine.
+	bootstrapMachineUUID, err := machineService.GetMachineUUID(ctx, machine.Name(agent.BootstrapControllerId))
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	apiInfo, ok := agentConfig.APIInfo()
+	if !ok {
+		// If this is missing, we cannot set the machine password or set the
+		// machine as provisioned.
+		return errors.Errorf("agent config is missing APIInfo for %q", agent.BootstrapControllerId)
+	}
+
+	// Set the machine password for the bootstrap controller.
+	if err := agentPasswordService.SetMachinePassword(ctx, machine.Name(agent.BootstrapControllerId), apiInfo.Password); err != nil {
+		return errors.Trace(err)
+	}
+
+	// If this data exists, we consider the machine as provisioned.
+	if err := machineService.SetMachineCloudInstance(
+		ctx,
+		bootstrapMachineUUID,
+		bootstrapParams.BootstrapMachineInstanceId,
+		bootstrapParams.BootstrapMachineDisplayName,
+		agent.BootstrapNonce,
+		bootstrapParams.BootstrapMachineHardwareCharacteristics,
+	); err != nil {
+		return errors.Trace(err)
+	}
+
+	return nil
+}
+
+// CAASAgentFinalizer is the function that is used to finalize the
+// CAAS agent during bootstrap.
+func CAASAgentFinalizer(
+	ctx context.Context,
+	agentPasswordService AgentPasswordService,
+	machineService MachineService,
+	bootstrapParams instancecfg.StateInitializationParams,
+	agentConfig agent.Config,
+) error {
+	apiInfo, ok := agentConfig.APIInfo()
+	if !ok {
+		// If this is missing, we cannot set the controller node password.
+		return errors.Errorf("agent config is missing APIInfo for %q", agent.BootstrapControllerId)
+	}
+
+	// Set the controller node password.
+	if err := agentPasswordService.SetControllerNodePassword(ctx, agent.BootstrapControllerId, apiInfo.Password); err != nil {
+		return errors.Trace(err)
+	}
+
+	return nil
 }

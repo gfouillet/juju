@@ -3,12 +3,4 @@
 
 package gce_test
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -package gce -destination gcemock_test.go github.com/juju/juju/internal/provider/gce ComputeService

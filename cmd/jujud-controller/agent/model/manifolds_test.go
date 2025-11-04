@@ -4,27 +4,28 @@
 package model_test
 
 import (
-	"context"
+	stdtesting "testing"
 
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent/agenttest"
 	"github.com/juju/juju/cmd/jujud-controller/agent/model"
 	internallogger "github.com/juju/juju/internal/logger"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type ManifoldsSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&ManifoldsSuite{})
+func TestManifoldsSuite(t *stdtesting.T) {
+	tc.Run(t, &ManifoldsSuite{})
+}
 
-func (s *ManifoldsSuite) TestIAASNames(c *gc.C) {
+func (s *ManifoldsSuite) TestIAASNames(c *tc.C) {
 	actual := set.NewStrings()
 	manifolds := model.IAASManifolds(model.ManifoldsConfig{
 		Agent:          &mockAgent{},
@@ -35,46 +36,41 @@ func (s *ManifoldsSuite) TestIAASNames(c *gc.C) {
 	}
 	// NOTE: if this test failed, the cmd/jujud-controller/agent tests will
 	// also fail. Search for 'ModelWorkers' to find affected vars.
-	c.Check(actual.SortedValues(), jc.DeepEquals, []string{
-		"action-pruner",
+	c.Check(actual.SortedValues(), tc.SameContents, []string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
-		"application-scaler",
-		"charm-downloader",
-		"charm-revision-updater",
+		"api-remote-relation-caller",
+		"async-charm-downloader",
+		"change-stream-pruner",
+		"charm-revisioner",
 		"clock",
 		"compute-provisioner",
+		"domain-services",
 		"firewaller",
-		"instance-mutater",
+		"http-client",
 		"instance-poller",
 		"is-responsible-flag",
+		"lease-manager",
 		"logging-config-updater",
-		"machine-undertaker",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"migration-master",
-		"not-alive-flag",
 		"not-dead-flag",
+		"operation-pruner",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"provider-upgrader",
-		"remote-relations",
+		"remote-relation-consumer",
+		"removal",
 		"secrets-pruner",
-		"service-factory",
-		"state-cleaner",
-		"status-history-pruner",
 		"storage-provisioner",
-		"undertaker",
-		"unit-assigner",
 		"user-secrets-drain-worker",
 		"valid-credential-flag",
 	})
 }
 
-func (s *ManifoldsSuite) TestCAASNames(c *gc.C) {
+func (s *ManifoldsSuite) TestCAASNames(c *tc.C) {
 	actual := set.NewStrings()
 	manifolds := model.CAASManifolds(model.ManifoldsConfig{
 		Agent:          &mockAgent{},
@@ -85,58 +81,56 @@ func (s *ManifoldsSuite) TestCAASNames(c *gc.C) {
 	}
 	// NOTE: if this test failed, the cmd/jujud-controller/agent tests will
 	// also fail. Search for 'ModelWorkers' to find affected vars.
-	c.Check(actual.SortedValues(), jc.DeepEquals, []string{
-		"action-pruner",
+	c.Check(actual.SortedValues(), tc.SameContents, []string{
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"api-remote-relation-caller",
+		"async-charm-downloader",
 		"caas-application-provisioner",
 		"caas-firewaller",
 		"caas-model-config-manager",
 		"caas-model-operator",
-		"caas-storage-provisioner",
-		"charm-downloader",
-		"charm-revision-updater",
+		"change-stream-pruner",
+		"charm-revisioner",
 		"clock",
+		"domain-services",
+		"http-client",
 		"is-responsible-flag",
+		"lease-manager",
 		"logging-config-updater",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"migration-master",
-		"not-alive-flag",
 		"not-dead-flag",
+		"operation-pruner",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"provider-upgrader",
-		"remote-relations",
+		"remote-relation-consumer",
+		"removal",
 		"secrets-pruner",
-		"service-factory",
-		"state-cleaner",
-		"status-history-pruner",
-		"undertaker",
 		"user-secrets-drain-worker",
 		"valid-credential-flag",
 	})
 }
 
-func (s *ManifoldsSuite) TestFlagDependencies(c *gc.C) {
+func (s *ManifoldsSuite) TestFlagDependencies(c *tc.C) {
 	exclusions := set.NewStrings(
 		"agent",
 		"api-caller",
 		"api-config-watcher",
+		"api-remote-relation-caller",
 		"clock",
 		"is-responsible-flag",
-		"not-alive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		// model upgrade manifolds are run on all
 		// controller agents, "responsible" or not.
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"provider-upgrader",
-		"service-factory",
+		"domain-services",
+		"lease-manager",
+		"log-sink",
+		"http-client",
 		"valid-credential-flag",
 	)
 	manifolds := model.IAASManifolds(model.ManifoldsConfig{
@@ -150,26 +144,13 @@ func (s *ManifoldsSuite) TestFlagDependencies(c *gc.C) {
 		}
 		inputs := set.NewStrings(manifold.Inputs...)
 		if !inputs.Contains("is-responsible-flag") {
-			c.Check(inputs.Contains("migration-fortress"), jc.IsTrue)
-			c.Check(inputs.Contains("migration-inactive-flag"), jc.IsTrue)
+			c.Check(inputs.Contains("migration-fortress"), tc.IsTrue)
+			c.Check(inputs.Contains("migration-inactive-flag"), tc.IsTrue)
 		}
 	}
 }
 
-func (s *ManifoldsSuite) TestStateCleanerIgnoresLifeFlags(c *gc.C) {
-	manifolds := model.IAASManifolds(model.ManifoldsConfig{
-		Agent:          &mockAgent{},
-		LoggingContext: internallogger.DefaultContext(),
-	})
-	manifold, found := manifolds["state-cleaner"]
-	c.Assert(found, jc.IsTrue)
-
-	inputs := set.NewStrings(manifold.Inputs...)
-	c.Check(inputs.Contains("not-alive-flag"), jc.IsFalse)
-	c.Check(inputs.Contains("not-dead-flag"), jc.IsFalse)
-}
-
-func (s *ManifoldsSuite) TestClockWrapper(c *gc.C) {
+func (s *ManifoldsSuite) TestClockWrapper(c *tc.C) {
 	expectClock := &fakeClock{}
 	manifolds := model.IAASManifolds(model.ManifoldsConfig{
 		Agent:          &mockAgent{},
@@ -177,20 +158,20 @@ func (s *ManifoldsSuite) TestClockWrapper(c *gc.C) {
 		LoggingContext: internallogger.DefaultContext(),
 	})
 	manifold, ok := manifolds["clock"]
-	c.Assert(ok, jc.IsTrue)
-	worker, err := manifold.Start(context.Background(), nil)
-	c.Assert(err, jc.ErrorIsNil)
-	defer workertest.CheckKill(c, worker)
+	c.Assert(ok, tc.IsTrue)
+	worker, err := manifold.Start(c.Context(), nil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, worker)
 
 	var aClock clock.Clock
 	err = manifold.Output(worker, &aClock)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(aClock, gc.Equals, expectClock)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(aClock, tc.Equals, expectClock)
 }
 
 type fakeClock struct{ clock.Clock }
 
-func (s *ManifoldsSuite) TestIAASManifold(c *gc.C) {
+func (s *ManifoldsSuite) TestIAASManifold(c *tc.C) {
 	agenttest.AssertManifoldsDependencies(c,
 		model.IAASManifolds(model.ManifoldsConfig{
 			Agent:          &mockAgent{},
@@ -200,7 +181,7 @@ func (s *ManifoldsSuite) TestIAASManifold(c *gc.C) {
 	)
 }
 
-func (s *ManifoldsSuite) TestCAASManifold(c *gc.C) {
+func (s *ManifoldsSuite) TestCAASManifold(c *tc.C) {
 	agenttest.AssertManifoldsDependencies(c,
 		model.CAASManifolds(model.ManifoldsConfig{
 			Agent:          &mockAgent{},
@@ -211,43 +192,34 @@ func (s *ManifoldsSuite) TestCAASManifold(c *gc.C) {
 }
 
 var expectedCAASModelManifoldsWithDependencies = map[string][]string{
-	"action-pruner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"service-factory",
-	},
 
 	"secrets-pruner": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
 	"user-secrets-drain-worker": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
 	"agent": {},
 
 	"api-caller": {"agent"},
+
+	"api-remote-relation-caller": {},
 
 	"api-config-watcher": {"agent"},
 
@@ -255,6 +227,8 @@ var expectedCAASModelManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"provider-service-factories",
 		"valid-credential-flag",
 	},
@@ -263,6 +237,8 @@ var expectedCAASModelManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"provider-service-factories",
 		"provider-tracker",
 		"valid-credential-flag",
@@ -271,23 +247,26 @@ var expectedCAASModelManifoldsWithDependencies = map[string][]string{
 	"caas-firewaller": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"valid-credential-flag",
 	},
 
 	"caas-model-operator": {
 		"agent",
 		"api-caller",
+		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"provider-service-factories",
 		"provider-tracker",
-		"is-responsible-flag",
 		"valid-credential-flag",
 	},
 
@@ -295,182 +274,146 @@ var expectedCAASModelManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"clock",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"valid-credential-flag",
 	},
 
-	"caas-storage-provisioner": {
+	"async-charm-downloader": {
 		"agent",
-		"api-caller",
+		"domain-services",
+		"http-client",
 		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-service-factories",
-		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"valid-credential-flag",
+		"lease-manager",
 	},
 
-	"charm-downloader": {
+	"charm-revisioner": {
 		"agent",
-		"api-caller",
+		"domain-services",
+		"http-client",
 		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"valid-credential-flag",
+		"lease-manager",
 	},
 
-	"charm-revision-updater": {
+	"change-stream-pruner": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
 	"clock": {},
 
-	"is-responsible-flag": {"agent", "api-caller"},
+	"is-responsible-flag": {"agent", "lease-manager"},
+
+	"lease-manager": {},
 
 	"logging-config-updater": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
+
+	"log-sink": {},
 
 	"migration-fortress": {
 		"agent",
-		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
 	"migration-inactive-flag": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
 	"migration-master": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
-	"provider-upgrade-gate": {},
+	"not-dead-flag": {
+		"domain-services",
+	},
 
-	"provider-upgraded-flag": {"provider-upgrade-gate"},
-
-	"provider-upgrader": {
+	"operation-pruner": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"migration-fortress",
+		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"valid-credential-flag",
 	},
-
-	"not-alive-flag": {"agent", "api-caller"},
-
-	"not-dead-flag": {"agent", "api-caller"},
 
 	"provider-service-factories": {},
 
-	"remote-relations": {
+	"remote-relation-consumer": {
 		"agent",
 		"api-caller",
+		"api-remote-relation-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
-	"service-factory": {},
-
-	"state-cleaner": {
+	"removal": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 	},
 
-	"status-history-pruner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"service-factory",
-	},
+	"domain-services": {},
 
-	"undertaker": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"not-alive-flag",
-	},
+	"http-client": {},
 
 	"valid-credential-flag": {"agent", "api-caller"},
 }
 
 var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 
-	"action-pruner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"service-factory",
-	},
-
 	"secrets-pruner": {
 		"agent",
 		"api-caller",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
@@ -479,9 +422,9 @@ var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 	"user-secrets-drain-worker": {
 		"agent",
 		"api-caller",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
@@ -493,36 +436,34 @@ var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 
 	"api-config-watcher": {"agent"},
 
-	"application-scaler": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
+	"api-remote-relation-caller": {},
 
-	"charm-downloader": {
+	"async-charm-downloader": {
+		"agent",
+		"lease-manager",
+		"domain-services",
+		"http-client",
+		"is-responsible-flag",
+	},
+
+	"charm-revisioner": {
+		"agent",
+		"lease-manager",
+		"domain-services",
+		"http-client",
+		"is-responsible-flag",
+	},
+
+	"change-stream-pruner": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"not-dead-flag",
-		"valid-credential-flag"},
-
-	"charm-revision-updater": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
+	},
 
 	"clock": {},
 
@@ -530,13 +471,14 @@ var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
+		"domain-services",
 		"valid-credential-flag",
 	},
 
@@ -544,6 +486,8 @@ var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 		"agent",
 		"api-caller",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"provider-service-factories",
 		"valid-credential-flag",
 	},
@@ -551,184 +495,135 @@ var expectedIAASModelManifoldsWithDependencies = map[string][]string{
 	"firewaller": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"valid-credential-flag",
-	},
-
-	"instance-mutater": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-service-factories",
-		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"valid-credential-flag",
 	},
 
 	"instance-poller": {
 		"agent",
 		"api-caller",
-		"clock",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"valid-credential-flag",
 	},
 
-	"is-responsible-flag": {"agent", "api-caller"},
+	"is-responsible-flag": {"agent", "lease-manager"},
+
+	"lease-manager": {},
 
 	"logging-config-updater": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"not-dead-flag",
 	},
 
-	"machine-undertaker": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"not-dead-flag",
-		"provider-service-factories",
-		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"valid-credential-flag",
-	},
+	"log-sink": {},
 
 	"migration-fortress": {
 		"agent",
-		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
+		"lease-manager",
+		"not-dead-flag",
+	},
 
 	"migration-inactive-flag": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
+		"lease-manager",
+		"not-dead-flag",
+	},
 
 	"migration-master": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
-
-	"provider-upgrade-gate": {},
-
-	"provider-upgraded-flag": {"provider-upgrade-gate"},
-
-	"provider-upgrader": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
 		"not-dead-flag",
-		"provider-service-factories",
-		"provider-tracker",
-		"provider-upgrade-gate",
-		"valid-credential-flag",
 	},
 
-	"not-alive-flag": {"agent", "api-caller"},
+	"not-dead-flag": {
+		"domain-services",
+	},
 
-	"not-dead-flag": {"agent", "api-caller"},
+	"operation-pruner": {
+		"agent",
+		"api-caller",
+		"domain-services",
+		"is-responsible-flag",
+		"lease-manager",
+		"migration-fortress",
+		"migration-inactive-flag",
+		"not-dead-flag",
+	},
 
 	"provider-service-factories": {},
 
-	"remote-relations": {
+	"remote-relation-consumer": {
 		"agent",
 		"api-caller",
+		"api-remote-relation-caller",
+		"domain-services",
 		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag",
-	},
-
-	"service-factory": {},
-
-	"state-cleaner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
-
-	"status-history-pruner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
+		"lease-manager",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"service-factory",
 	},
+
+	"removal": {
+		"agent",
+		"api-caller",
+		"domain-services",
+		"is-responsible-flag",
+		"lease-manager",
+		"migration-fortress",
+		"migration-inactive-flag",
+		"not-dead-flag",
+	},
+
+	"domain-services": {},
+
+	"http-client": {},
 
 	"storage-provisioner": {
 		"agent",
 		"api-caller",
+		"domain-services",
 		"is-responsible-flag",
+		"lease-manager",
+		"log-sink",
 		"migration-fortress",
 		"migration-inactive-flag",
 		"not-dead-flag",
 		"provider-service-factories",
 		"provider-tracker",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
 		"valid-credential-flag",
 	},
-
-	"undertaker": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"not-alive-flag",
-	},
-
-	"unit-assigner": {
-		"agent",
-		"api-caller",
-		"is-responsible-flag",
-		"migration-fortress",
-		"migration-inactive-flag",
-		"provider-upgrade-gate",
-		"provider-upgraded-flag",
-		"not-dead-flag"},
 
 	"valid-credential-flag": {"agent", "api-caller"},
 }

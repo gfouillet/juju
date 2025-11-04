@@ -6,9 +6,10 @@ package dbaccessor
 import (
 	"context"
 	"database/sql"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
 
 	"github.com/juju/juju/domain/schema"
 	"github.com/juju/juju/internal/database"
@@ -20,18 +21,21 @@ type deleteDBSuite struct {
 	databasetesting.DqliteSuite
 }
 
-var _ = gc.Suite(&deleteDBSuite{})
-
-func (s *deleteDBSuite) TestDeleteDBContentsOnEmptyDB(c *gc.C) {
-	runner := s.TxnRunner()
-
-	err := runner.StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		return deleteDBContents(ctx, tx, loggertesting.WrapCheckLog(c))
-	})
-	c.Assert(err, gc.IsNil)
+func TestDeleteDBSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &deleteDBSuite{})
 }
 
-func (s *deleteDBSuite) TestDeleteDBContentsOnControllerDB(c *gc.C) {
+func (s *deleteDBSuite) TestDeleteDBContentsOnEmptyDB(c *tc.C) {
+	runner := s.TxnRunner()
+
+	err := runner.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		return deleteDBContents(ctx, tx, loggertesting.WrapCheckLog(c))
+	})
+	c.Assert(err, tc.IsNil)
+}
+
+func (s *deleteDBSuite) TestDeleteDBContentsOnControllerDB(c *tc.C) {
 	runner, db := s.OpenDBForNamespace(c, "controller-foo", false)
 	logger := loggertesting.WrapCheckLog(c)
 
@@ -39,38 +43,38 @@ func (s *deleteDBSuite) TestDeleteDBContentsOnControllerDB(c *gc.C) {
 	// contents, but adds more validation to the function.
 
 	err := database.NewDBMigration(
-		runner, logger, schema.ControllerDDL()).Apply(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+		runner, logger, schema.ControllerDDL()).Apply(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = runner.StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+	err = runner.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return deleteDBContents(ctx, tx, logger)
 	})
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
 	s.ensureEmpty(c, db)
 }
 
-func (s *deleteDBSuite) TestDeleteDBContentsOnModelDB(c *gc.C) {
+func (s *deleteDBSuite) TestDeleteDBContentsOnModelDB(c *tc.C) {
 	runner, db := s.OpenDBForNamespace(c, "model-foo", false)
 
 	logger := loggertesting.WrapCheckLog(c)
 
 	err := database.NewDBMigration(
-		runner, logger, schema.ModelDDL()).Apply(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+		runner, logger, schema.ModelDDL()).Apply(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = runner.StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
+	err = runner.StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		return deleteDBContents(ctx, tx, logger)
 	})
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
 	s.ensureEmpty(c, db)
 }
 
-func (s *deleteDBSuite) ensureEmpty(c *gc.C, db *sql.DB) {
+func (s *deleteDBSuite) ensureEmpty(c *tc.C, db *sql.DB) {
 	schemaStmt := `SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%';`
 	var count int
 	err := db.QueryRow(schemaStmt).Scan(&count)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(count, gc.Equals, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(count, tc.Equals, 0)
 }

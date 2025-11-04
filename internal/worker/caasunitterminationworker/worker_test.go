@@ -9,30 +9,27 @@ import (
 	"testing"
 
 	"github.com/juju/clock"
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/agent/caasapplication"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/caasunitterminationworker"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
+func TestTerminationWorkerSuite(t *testing.T) {
+	tc.Run(t, &TerminationWorkerSuite{})
 }
-
-var _ = gc.Suite(&TerminationWorkerSuite{})
 
 type TerminationWorkerSuite struct {
 	state      *mockState
 	terminator *mockTerminator
 }
 
-func (s *TerminationWorkerSuite) newWorker(c *gc.C, willRestart bool) worker.Worker {
+func (s *TerminationWorkerSuite) newWorker(c *tc.C, willRestart bool) worker.Worker {
 	s.state = &mockState{
 		termination: caasapplication.UnitTermination{
 			WillRestart: willRestart,
@@ -49,38 +46,38 @@ func (s *TerminationWorkerSuite) newWorker(c *gc.C, willRestart bool) worker.Wor
 	return caasunitterminationworker.NewWorker(config)
 }
 
-func (s *TerminationWorkerSuite) TestStartStop(c *gc.C) {
+func (s *TerminationWorkerSuite) TestStartStop(c *tc.C) {
 	w := s.newWorker(c, false)
 	w.Kill()
 	err := w.Wait()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *TerminationWorkerSuite) TestAgentWillRestart(c *gc.C) {
+func (s *TerminationWorkerSuite) TestAgentWillRestart(c *tc.C) {
 	w := s.newWorker(c, true)
 	proc, err := os.FindProcess(os.Getpid())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer proc.Release()
 	err = proc.Signal(caasunitterminationworker.TerminationSignal)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = w.Wait()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.state.CheckCallNames(c, "UnitTerminating")
-	c.Assert(s.state.Calls()[0].Args[0], gc.DeepEquals, names.NewUnitTag("gitlab/0"))
+	c.Assert(s.state.Calls()[0].Args[0], tc.DeepEquals, names.NewUnitTag("gitlab/0"))
 	s.terminator.CheckCallNames(c, "Terminate")
 }
 
-func (s *TerminationWorkerSuite) TestAgentDying(c *gc.C) {
+func (s *TerminationWorkerSuite) TestAgentDying(c *tc.C) {
 	w := s.newWorker(c, false)
 	proc, err := os.FindProcess(os.Getpid())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer proc.Release()
 	err = proc.Signal(caasunitterminationworker.TerminationSignal)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = w.Wait()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.state.CheckCallNames(c, "UnitTerminating")
-	c.Assert(s.state.Calls()[0].Args[0], gc.DeepEquals, names.NewUnitTag("gitlab/0"))
+	c.Assert(s.state.Calls()[0].Args[0], tc.DeepEquals, names.NewUnitTag("gitlab/0"))
 	s.terminator.CheckCallNames(c)
 }
 
@@ -101,7 +98,7 @@ func (c *mockAgentConfig) Tag() names.Tag {
 }
 
 type mockState struct {
-	jujutesting.Stub
+	testhelpers.Stub
 
 	termination caasapplication.UnitTermination
 }
@@ -112,7 +109,7 @@ func (s *mockState) UnitTerminating(_ context.Context, tag names.UnitTag) (caasa
 }
 
 type mockTerminator struct {
-	jujutesting.Stub
+	testhelpers.Stub
 }
 
 func (t *mockTerminator) Terminate() error {

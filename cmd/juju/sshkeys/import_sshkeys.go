@@ -6,12 +6,12 @@ package sshkeys
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageImportSSHKeySummary = `
@@ -93,8 +93,8 @@ func (c *importKeysCommand) Init(args []string) error {
 }
 
 // Run implemetns Command.Run.
-func (c *importKeysCommand) Run(context *cmd.Context) error {
-	client, err := c.NewKeyManagerClient()
+func (c *importKeysCommand) Run(ctx *cmd.Context) error {
+	client, err := c.NewKeyManagerClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -103,13 +103,13 @@ func (c *importKeysCommand) Run(context *cmd.Context) error {
 	// TODO(alexisb) - currently keys are global which is not ideal.
 	// keymanager needs to be updated to allow keys per user
 	c.user = "admin"
-	results, err := client.ImportKeys(c.user, c.sshKeyIds...)
+	results, err := client.ImportKeys(ctx, c.user, c.sshKeyIds...)
 	if err != nil {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
 	for i, result := range results {
 		if result.Error != nil {
-			fmt.Fprintf(context.Stderr, "cannot import key id %q: %v\n", c.sshKeyIds[i], result.Error)
+			fmt.Fprintf(ctx.Stderr, "cannot import key id %q: %v\n", c.sshKeyIds[i], result.Error)
 		}
 	}
 	return nil

@@ -4,13 +4,15 @@
 package user
 
 import (
+	"context"
+
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 
 	"github.com/juju/juju/api"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
 )
 
 var (
@@ -70,7 +72,7 @@ func NewShowUserCommandForTest(api UserInfoAPI, store jujuclient.ClientStore) cm
 // NewChangePasswordCommand returns a ChangePasswordCommand with the api
 // and writer provided as specified.
 func NewChangePasswordCommandForTest(
-	newAPIConnection func(juju.NewAPIConnectionParams) (api.Connection, error),
+	newAPIConnection func(context.Context, juju.NewAPIConnectionParams) (api.Connection, error),
 	api ChangePasswordAPI,
 	store jujuclient.ClientStore,
 ) (cmd.Command, *ChangePasswordCommand) {
@@ -123,4 +125,12 @@ func NewListCommandForTest(api UserInfoAPI, modelAPI modelUsersAPI, store jujucl
 func NewWhoAmICommandForTest(store jujuclient.ClientStore) cmd.Command {
 	c := &whoAmICommand{store: store}
 	return c
+}
+
+func NewLoginCommandWithSessionLoginFactory(factory modelcmd.SessionLoginFactory) cmd.Command {
+	var c loginCommand
+	c.SetClientStore(loginClientStore)
+	c.CanClearCurrentModel = true
+	c.SetSessionLoginFactory(factory)
+	return modelcmd.WrapController(&c, modelcmd.WrapControllerSkipControllerFlags)
 }

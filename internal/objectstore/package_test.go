@@ -12,40 +12,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	stdtesting "testing"
 	"time"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"go.uber.org/goleak"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -typed -package objectstore -destination state_mock_test.go github.com/juju/juju/internal/objectstore Claimer,ClaimExtender,HashFileSystemAccessor
+//go:generate go run go.uber.org/mock/mockgen -typed -package objectstore -destination state_mock_test.go github.com/juju/juju/internal/objectstore Claimer,ClaimExtender,TrackedObjectStore,RemoteRetriever
 //go:generate go run go.uber.org/mock/mockgen -typed -package objectstore -destination objectstore_mock_test.go github.com/juju/juju/core/objectstore ObjectStoreMetadata,Session
 //go:generate go run go.uber.org/mock/mockgen -typed -package objectstore -destination clock_mock_test.go github.com/juju/clock Clock
 
-func TestAll(t *stdtesting.T) {
-	defer goleak.VerifyNone(t)
-
-	gc.TestingT(t)
-}
-
 type baseSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	service       *MockObjectStoreMetadata
 	claimer       *MockClaimer
 	claimExtender *MockClaimExtender
 }
 
-func (s *baseSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *baseSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.service = NewMockObjectStoreMetadata(ctrl)
 	s.claimer = NewMockClaimer(ctrl)
 	s.claimExtender = NewMockClaimExtender(ctrl)
+
+	c.Cleanup(func() {
+		s.service = nil
+		s.claimer = nil
+		s.claimExtender = nil
+	})
 
 	return ctrl
 }
@@ -60,56 +58,65 @@ func (s *baseSuite) expectRelease(hash string, num int) {
 	s.claimer.EXPECT().Release(gomock.Any(), hash).Return(nil).Times(num)
 }
 
-func (s *baseSuite) readFile(c *gc.C, reader io.ReadCloser) string {
+func (s *baseSuite) readFile(c *tc.C, reader io.ReadCloser) string {
 	defer reader.Close()
 
 	content, err := io.ReadAll(reader)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return string(content)
 }
 
-func (s *baseSuite) calculateHexHash(c *gc.C, contents string) string {
+func (s *baseSuite) calculateHexSHA384(c *tc.C, contents string) string {
 	hasher := sha512.New384()
 	_, err := io.Copy(hasher, strings.NewReader(contents))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-func (s *baseSuite) calculateBase64Hash(c *gc.C, contents string) string {
+func (s *baseSuite) calculateHexSHA256(c *tc.C, contents string) string {
 	hasher := sha256.New()
 	_, err := io.Copy(hasher, strings.NewReader(contents))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func (s *baseSuite) calculateBase64SHA256(c *tc.C, contents string) string {
+	hasher := sha256.New()
+	_, err := io.Copy(hasher, strings.NewReader(contents))
+	c.Assert(err, tc.ErrorIsNil)
 	return base64.StdEncoding.EncodeToString(hasher.Sum(nil))
 }
 
-func (s *baseSuite) createFile(c *gc.C, path, name, contents string) (int64, string) {
+func (s *baseSuite) createFile(c *tc.C, path, name, contents string) (int64, string, string) {
 	// Ensure the directory exists.
 	err := os.MkdirAll(path, 0755)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create a file in a temporary directory.
 	dir := c.MkDir()
 
 	f, err := os.Create(filepath.Join(dir, name))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer f.Close()
 
 	// Create a hash of the contents when writing the file. The hash will
 	// be used as the file name on disk.
-	hasher := sha512.New384()
-	size, err := io.Copy(f, io.TeeReader(strings.NewReader(contents), hasher))
-	c.Assert(err, jc.ErrorIsNil)
+	hasher384 := sha512.New384()
+	hasher256 := sha256.New()
+
+	size, err := io.Copy(f, io.TeeReader(strings.NewReader(contents), io.MultiWriter(hasher384, hasher256)))
+	c.Assert(err, tc.ErrorIsNil)
 
 	info, err := f.Stat()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	if info.Size() != size {
 		c.Fatalf("file size %d does not match expected size %d", info.Size(), size)
 	}
 
-	hash := hex.EncodeToString(hasher.Sum(nil))
-	err = os.Rename(filepath.Join(dir, name), filepath.Join(path, hash))
-	c.Assert(err, jc.ErrorIsNil)
+	hash384 := hex.EncodeToString(hasher384.Sum(nil))
+	err = os.Rename(filepath.Join(dir, name), filepath.Join(path, hash384))
+	c.Assert(err, tc.ErrorIsNil)
 
-	return info.Size(), hash
+	return info.Size(), hash384, hex.EncodeToString(hasher256.Sum(nil))
 }

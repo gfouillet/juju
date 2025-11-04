@@ -6,10 +6,12 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
 	"golang.org/x/crypto/acme/autocert"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/errors"
 )
 
 // State describes retrieval and persistence methods for storage.
@@ -41,15 +43,21 @@ func NewService(st State, logger logger.Logger) *Service {
 
 // Put implements autocert.Cache.Put.
 func (s *Service) Put(ctx context.Context, name string, data []byte) error {
-	s.logger.Tracef("storing autocert %s with contents '%+v' in the autocert cache", name, string(data))
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	s.logger.Tracef(ctx, "storing autocert %s with contents '%+v' in the autocert cache", name, string(data))
 	return s.st.Put(ctx, name, data)
 }
 
 // Get implements autocert.Cache.Get.
 func (s *Service) Get(ctx context.Context, name string) ([]byte, error) {
-	s.logger.Tracef("retrieving autocert %s from the autocert cache", name)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	s.logger.Tracef(ctx, "retrieving autocert %s from the autocert cache", name)
 	cert, err := s.st.Get(ctx, name)
-	if errors.Is(err, errors.NotFound) {
+	if errors.Is(err, coreerrors.NotFound) {
 		return nil, autocert.ErrCacheMiss
 	}
 	return cert, err
@@ -57,6 +65,9 @@ func (s *Service) Get(ctx context.Context, name string) ([]byte, error) {
 
 // Delete implements autocert.Cache.Delete.
 func (s *Service) Delete(ctx context.Context, name string) error {
-	s.logger.Tracef("removing autocert %s from the autocert cache", name)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	s.logger.Tracef(ctx, "removing autocert %s from the autocert cache", name)
 	return s.st.Delete(ctx, name)
 }

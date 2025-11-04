@@ -4,20 +4,23 @@
 package lxdprofile_test
 
 import (
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type LXDProfileNameSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&LXDProfileNameSuite{})
+func TestLXDProfileNameSuite(t *testing.T) {
+	tc.Run(t, &LXDProfileNameSuite{})
+}
 
-func (*LXDProfileNameSuite) TestProfileNames(c *gc.C) {
+func (*LXDProfileNameSuite) TestProfileNames(c *tc.C) {
 	testCases := []struct {
 		input  []string
 		output []string
@@ -39,45 +42,45 @@ func (*LXDProfileNameSuite) TestProfileNames(c *gc.C) {
 		},
 		{
 			input: []string{
-				lxdprofile.Name("foo", "bar", 1),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
 			},
 			output: []string{
-				lxdprofile.Name("foo", "bar", 1),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
 			},
 		},
 		{
 			input: []string{
 				"default",
-				lxdprofile.Name("foo", "bar", 1),
-				lxdprofile.Name("foo", "bar", 1),
-				lxdprofile.Name("aaa", "bbb", 100),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
+				lxdprofile.Name("aaa", "shortid2", "bbb", 100),
 			},
 			output: []string{
-				lxdprofile.Name("foo", "bar", 1),
-				lxdprofile.Name("aaa", "bbb", 100),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
+				lxdprofile.Name("aaa", "shortid2", "bbb", 100),
 			},
 		},
 		{
 			input: []string{
 				"default",
-				lxdprofile.Name("foo", "bar", 1),
-				lxdprofile.Name("foo", "bar", 1),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
 				"some-other-profile",
-				lxdprofile.Name("aaa", "bbb", 100),
+				lxdprofile.Name("aaa", "shortid2", "bbb", 100),
 			},
 			output: []string{
-				lxdprofile.Name("foo", "bar", 1),
-				lxdprofile.Name("aaa", "bbb", 100),
+				lxdprofile.Name("foo", "shortid", "bar", 1),
+				lxdprofile.Name("aaa", "shortid2", "bbb", 100),
 			},
 		},
 	}
-	for k, tc := range testCases {
-		c.Logf("running test %d with input %q", k, tc.input)
-		c.Assert(lxdprofile.LXDProfileNames(tc.input), gc.DeepEquals, tc.output)
+	for k, testCase := range testCases {
+		c.Logf("running test %d with input %q", k, testCase.input)
+		c.Assert(lxdprofile.FilterLXDProfileNames(testCase.input), tc.DeepEquals, testCase.output)
 	}
 }
 
-func (*LXDProfileNameSuite) TestIsValidName(c *gc.C) {
+func (*LXDProfileNameSuite) TestIsValidName(c *tc.C) {
 	testCases := []struct {
 		input  string
 		output bool
@@ -95,21 +98,21 @@ func (*LXDProfileNameSuite) TestIsValidName(c *gc.C) {
 			output: false,
 		},
 		{
-			input:  lxdprofile.Name("foo", "bar", 1),
+			input:  lxdprofile.Name("foo", "shortid", "bar", 1),
 			output: true,
 		},
 		{
-			input:  lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 100),
+			input:  lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 100),
 			output: true,
 		},
 	}
-	for k, tc := range testCases {
-		c.Logf("running test %d with input %q", k, tc.input)
-		c.Assert(lxdprofile.IsValidName(tc.input), gc.Equals, tc.output)
+	for k, testCase := range testCases {
+		c.Logf("running test %d with input %q", k, testCase.input)
+		c.Assert(lxdprofile.IsValidName(testCase.input), tc.Equals, testCase.output)
 	}
 }
 
-func (*LXDProfileNameSuite) TestProfileRevision(c *gc.C) {
+func (*LXDProfileNameSuite) TestProfileRevision(c *tc.C) {
 	testCases := []struct {
 		input  string
 		output int
@@ -128,27 +131,27 @@ func (*LXDProfileNameSuite) TestProfileRevision(c *gc.C) {
 			err:   "not a juju profile name: \"juju-model\"",
 		},
 		{
-			input:  lxdprofile.Name("foo", "bar", 1),
+			input:  lxdprofile.Name("foo", "shortid", "bar", 1),
 			output: 1,
 		},
 		{
-			input:  lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 100),
+			input:  lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 100),
 			output: 100,
 		},
 	}
-	for k, tc := range testCases {
-		c.Logf("running test %d of %d with input %q", k, len(testCases), tc.input)
-		obtained, err := lxdprofile.ProfileRevision(tc.input)
-		if tc.err != "" {
-			c.Assert(err, gc.ErrorMatches, tc.err)
+	for k, testCase := range testCases {
+		c.Logf("running test %d of %d with input %q", k, len(testCases), testCase.input)
+		obtained, err := lxdprofile.ProfileRevision(testCase.input)
+		if testCase.err != "" {
+			c.Assert(err, tc.ErrorMatches, testCase.err)
 			continue
 		}
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(obtained, gc.Equals, tc.output)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(obtained, tc.Equals, testCase.output)
 	}
 }
 
-func (*LXDProfileNameSuite) TestProfileReplaceRevision(c *gc.C) {
+func (*LXDProfileNameSuite) TestProfileReplaceRevision(c *tc.C) {
 	testCases := []struct {
 		input    string
 		inputRev int
@@ -168,29 +171,29 @@ func (*LXDProfileNameSuite) TestProfileReplaceRevision(c *gc.C) {
 			err:   "not a juju profile name: \"juju-model\"",
 		},
 		{
-			input:    lxdprofile.Name("foo", "bar", 1),
+			input:    lxdprofile.Name("foo", "shortid", "bar", 1),
 			inputRev: 4,
-			output:   lxdprofile.Name("foo", "bar", 4),
+			output:   lxdprofile.Name("foo", "shortid", "bar", 4),
 		},
 		{
-			input:    lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 123),
+			input:    lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 123),
 			inputRev: 312,
-			output:   lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 312),
+			output:   lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 312),
 		},
 	}
-	for k, tc := range testCases {
-		c.Logf("running test %d of %d with input %q", k, len(testCases), tc.input)
-		obtained, err := lxdprofile.ProfileReplaceRevision(tc.input, tc.inputRev)
-		if tc.err != "" {
-			c.Assert(err, gc.ErrorMatches, tc.err)
+	for k, testCase := range testCases {
+		c.Logf("running test %d of %d with input %q", k, len(testCases), testCase.input)
+		obtained, err := lxdprofile.ProfileReplaceRevision(testCase.input, testCase.inputRev)
+		if testCase.err != "" {
+			c.Assert(err, tc.ErrorMatches, testCase.err)
 			continue
 		}
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(obtained, gc.Equals, tc.output)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(obtained, tc.Equals, testCase.output)
 	}
 }
 
-func (*LXDProfileNameSuite) TestMatchProfileNameByAppName(c *gc.C) {
+func (*LXDProfileNameSuite) TestMatchProfileNameByAppName(c *tc.C) {
 	testCases := []struct {
 		input    []string
 		inputApp string
@@ -216,39 +219,39 @@ func (*LXDProfileNameSuite) TestMatchProfileNameByAppName(c *gc.C) {
 			input: []string{
 				"default",
 				"juju-model",
-				lxdprofile.Name("foo", "bar", 2),
+				lxdprofile.Name("foo", "shortid", "bar", 2),
 			},
 			inputApp: "bar",
-			output:   lxdprofile.Name("foo", "bar", 2),
+			output:   lxdprofile.Name("foo", "shortid", "bar", 2),
 		},
 		{
 			input: []string{
 				"default",
 				"juju-model",
-				lxdprofile.Name("foo", "nonebar", 2),
-				lxdprofile.Name("foo", "bar", 2),
+				lxdprofile.Name("foo", "shortid", "nonebar", 2),
+				lxdprofile.Name("foo", "shortid", "bar", 2),
 			},
 			inputApp: "bar",
-			output:   lxdprofile.Name("foo", "bar", 2),
+			output:   lxdprofile.Name("foo", "shortid", "bar", 2),
 		},
 		{
 			input: []string{
 				"default",
 				"juju-model",
-				lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 123),
+				lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 123),
 			},
 			inputApp: "b312--?123!!bb-x__xx-012-y123yy",
-			output:   lxdprofile.Name("aaa-zzz", "b312--?123!!bb-x__xx-012-y123yy", 123),
+			output:   lxdprofile.Name("aaa-zzz", "shortid", "b312--?123!!bb-x__xx-012-y123yy", 123),
 		},
 	}
-	for k, tc := range testCases {
-		c.Logf("running test %d of %d with input %q", k, len(testCases), tc.input)
-		obtained, err := lxdprofile.MatchProfileNameByAppName(tc.input, tc.inputApp)
-		if tc.err != "" {
-			c.Assert(err, gc.ErrorMatches, tc.err)
+	for k, testCase := range testCases {
+		c.Logf("running test %d of %d with input %q", k, len(testCases), testCase.input)
+		obtained, err := lxdprofile.MatchProfileNameByAppName(testCase.input, testCase.inputApp)
+		if testCase.err != "" {
+			c.Assert(err, tc.ErrorMatches, testCase.err)
 			continue
 		}
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(obtained, gc.Equals, tc.output)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(obtained, tc.Equals, testCase.output)
 	}
 }

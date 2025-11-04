@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretUpsertCommand struct {
@@ -57,8 +57,8 @@ If a key has the '#file' suffix, the value is read from the corresponding file.
 By default, a secret is owned by the application, meaning only the unit
 leader can manage it. Use "--owner unit" to create a secret owned by the
 specific unit which created it.
-
-Examples:
+`
+	examples := `
     secret-add token=34ae35facd4
     secret-add key#base64=AA==
     secret-add key#file=/path/to/file another-key=s3cret
@@ -74,10 +74,11 @@ Examples:
         --file=/path/to/file
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-add",
-		Args:    "[key[#base64|#file]=value...]",
-		Purpose: "add a new secret",
-		Doc:     doc,
+		Name:     "secret-add",
+		Args:     "[key[#base64|#file]=value...]",
+		Purpose:  "Add a new secret.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -184,7 +185,7 @@ func (c *secretAddCommand) Run(ctx *cmd.Context) error {
 		SecretUpdateArgs: *updateArgs,
 		Owner:            owner,
 	}
-	uri, err := c.ctx.CreateSecret(arg)
+	uri, err := c.ctx.CreateSecret(ctx, arg)
 	if err != nil {
 		return err
 	}

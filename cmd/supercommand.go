@@ -4,16 +4,17 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
 
-	"github.com/juju/cmd/v4"
 	"golang.org/x/crypto/ssh/terminal"
 
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
-	jujuversion "github.com/juju/juju/version"
 )
 
 func init() {
@@ -53,8 +54,8 @@ func NewSuperCommand(p cmd.SuperCommandParams) *cmd.SuperCommand {
 }
 
 func runNotifier(name string) {
-	logger.Infof("running %s [%s %s %s %s]", name, jujuversion.Current, jujuversion.GitCommit, runtime.Compiler, runtime.Version())
-	logger.Debugf("  args: %#v", os.Args)
+	logger.Infof(context.TODO(), "running %s [%s %s %s %s]", name, jujuversion.Current, jujuversion.GitCommit, runtime.Compiler, runtime.Version())
+	logger.Debugf(context.TODO(), "  args: %#v", os.Args)
 }
 
 func Info(i *cmd.Info) *cmd.Info {

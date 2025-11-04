@@ -4,15 +4,15 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"regexp"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/applicationoffers"
@@ -21,6 +21,7 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -31,7 +32,7 @@ This topology allows units to share data, without needing direct connectivity
 between units is restricted by firewall rules. Charms define the logic for
 transferring and interpreting integration data.
 
-The most common use of 'juju integrate' specifies two applications that co-exist
+The most common use of ` + "`juju integrate`" + ` specifies two applications that co-exist
 within the same model:
 
     juju integrate <application> <application>
@@ -39,33 +40,32 @@ within the same model:
 Occasionally, more explicit syntax is required. Juju is able to integrate
 units that span models, controllers and clouds, as described below.
 
-
-Integrating applications in the same model
+### Integrating applications in the same model
 
 The most common case specifies two applications, adding specific endpoint
 name(s) when required.
 
     juju integrate <application>[:<endpoint>] <application>[:<endpoint>]
 
-The role and endpoint names are described by charms' metadata.yaml file.
+The role and endpoint names are described by charms' ` + "`metadata.yaml`" + ` file.
 
 The order does not matter, however each side must implement complementary roles.
-One side implements the "provides" role and the other implements the "requires"
+One side implements the ` + "`provides`" + ` role and the other implements the ` + "`requires`" + `
 role. Juju can always infer the role that each side is implementing, so specifying
 them is not necessary as command-line arguments.
 
-<application> is the name of an application that has already been added to the
-model. The Applications section of 'juju status' provides a list of current
+` + "`<application>`" + ` is the name of an application that has already been added to the
+model. The Applications section of ` + "`juju status`" + ` provides a list of current
 applications.
 
-<endpoint> is the name of an endpoint defined within the metadata.yaml
-of the charm for <application>. Valid endpoint names are defined within the
-"provides:" and "requires:" section of that file. Juju will request that you
-specify the <endpoint> if there is more than one possible integration between
+` + "`<endpoint>`" + ` is the name of an endpoint defined within the metadata.yaml
+of the charm for ` + "`<application>`" + `. Valid endpoint names are defined within the
+` + "`provides:`" + ` and ` + "`requires:`" + ` section of that file. Juju will request that you
+specify the ` + "`<endpoint>`" + ` if there is more than one possible integration between
 the two applications.
 
 
-Subordinate applications
+### Subordinate applications
 
 Subordinate applications are designed to be deployed alongside a primary
 application. They must define a container scoped endpoint. When that endpoint
@@ -75,100 +75,94 @@ deployed. Integration with the primary application has the same syntax as
 integration any two applications within the same model.
 
 
-Peer integrations
+### Peer relations
 
-Integrations within an application between units (known as "peer integrations") do
-not need to be added manually. They are created when the 'juju add-unit' and
-'juju scale-application' commands are executed.
+Relations within an application between units (known as 'peer relations') do
+not need to be added manually. They are created when the ` + "`juju add-unit`" + ` and
+` + "`juju scale-application`" + ` commands are executed.
 
 
-Cross-model integrations
+### Cross-model relations
 
 Applications can be integrated, even when they are deployed to different models.
 Those models may be managed by different controllers and/or be hosted on
-different clouds. This functionality is known as "cross-model integration" or CMI.
+different clouds. This functionality is known as 'cross-model relation' (CMR).
 
 
-Cross-model integrations: different model on the same controller
+#### Cross-model relations: different models on the same controller
 
 Integrating applications in models managed by the same controller
 is very similar to adding an integration between applications in the same model:
 
     juju integrate <application>[:<endpoint>] <model>.<application>[:<endpoint>]
 
-<model> is the name of the model outside of the current context. This enables the
+` + "`<model>`" + ` is the name of the model outside of the current context. This enables the
 Juju controller to bridge two models. You can list the currently available
-models with 'juju models'.
+models with ` + "`juju models`" + `.
 
-To integrate models outside of the current context, add the '-m <model>' option:
+To integrate models outside of the current context, add the ` + "`-m <model>`" + ` option:
 
     juju integrate -m <model> <application>[:<endpoint>] \
                      <model>.<application>[:<endpoint>]
 
 
-Cross-model integrations: different controllers
+#### Cross-model relations: different controllers
 
-Applications can be integrated with a remote application via an "offer URL" that has
-been generated by the 'juju offer' command. The syntax for adding a cross-model
-integration is similar to adding a local integration:
+Applications can be integrated with a remote application via an offer URL that has
+been generated by the ` + "`juju offer`" + ` command. The syntax for adding a cross-model
+relation is similar to adding a local relation:
 
     juju integrate <application>[:<endpoint>] <offer-endpoint>
 
-<offer-endpoint> describes the remote application, from the point of view of the
-local one. An <offer-endpoint> takes one of two forms:
+` + "`<offer-endpoint> `" + `describes the remote application, from the point of view of the
+local one. An ` + "`<offer-endpoint>`" + ` takes one of two forms:
 
     <offer-alias>
     <offer-url>[:<endpoint>]
 
-<offer-alias> is an alias that has been defined by the 'juju consume' command.
-Use the 'juju find-offers' command to list aliases.
+` + "`<offer-alias>`" + ` is an alias that has been defined by the ` + "`juju consume`" + ` command.
+Use the ` + "`juju find-offers`" + ` command to list aliases.
 
-<offer-url> is a path to enable Juju to resolve communication between
+` + "`<offer-url>`" + ` is a path to enable Juju to resolve communication between
 controllers and the models they control.
 
-    [[<controller>:]<user>/]<model-name>.<application-name>
+    [[<controller>:]<qualifier>/]<model-name>.<application-name>
 
-<controller> is the name of a controller. The 'juju controllers' command
-provides a list of controllers.
+` + "`<controller>`" + ` is the name of a controller. The ` + "`juju controllers`" + ` command
+provides a list of controllers.` + "`<user>`" + ` is the user account of the model's owner.
 
-<user> is the user account of the model's owner.
+` + "`<qualifier>`" + ` is used to disambiguate the model name.
 
-
-Cross-model integration: network management
+### Cross-model relations: network management
 
 When the consuming side (the local application) is behind a firewall and/or
-NAT is used for outbound traffic, it is possible to use the '--via' option to
+NAT is used for outbound traffic, it is possible to use the ` + "`--via`" + ` option to
 inform the offering side (the remote application) the source of traffic to
 enable network ports to be opened.
 
     ... --via <cidr-subnet>[,<cidr-subnet>[, ...]]
 
-
-Further reading:
-
-    https://juju.is/docs/juju/integration
-    https://juju.is/docs/juju/cross-model-integration
 `
 
 const integrateExamples = `
 Integrate wordpress and percona-cluster, asking Juju to resolve
- the endpoint names. Expands to "wordpress:db" (with the requires role) and
- "percona-cluster:server" (with the provides role).
+ the endpoint names. Expands to ` + "`wordpress:db`" + ` (with the ` + "`requires`" + ` role) and
+ ` + "`percona-cluster:server`" + ` (with the ` + "`provides`" + ` role).
 
     juju integrate wordpress percona-cluster
 
 Integrate wordpress and postgresql, using an explicit
-endpoint name.
+endpoint name:
 
     juju integrate wordpress postgresql:db
 
 Integrate an etcd instance within the current model to centrally managed
-EasyRSA Certificate Authority hosted in the "secrets" model.
+EasyRSA Certificate Authority hosted in the ` + "`secrets`" + ` model:
 
     juju integrate etcd secrets.easyrsa
 
 Integrate a wordpress application with a mysql application hosted within the
-"prod" model, using the "automation" user. Facilitate firewall management
+` + "`prod`" + ` model, using the ` + "`automation`" + ` user. Facilitate firewall management
 by specifying the routes used for integration data.
 
     juju integrate wordpress automation/prod.mysql --via 192.168.0.0/16,10.0.0.0/8
@@ -196,7 +190,7 @@ func (c *addRelationCommand) Info() *cmd.Info {
 	addCmd := &cmd.Info{
 		Name:     "integrate",
 		Aliases:  []string{"relate"},
-		Args:     "<application>[:<relation>] <application>[:<relation>]",
+		Args:     "<application>[:<endpoint>] <application>[:<endpoint>]",
 		Purpose:  "Integrate two applications.",
 		Doc:      integrateDoc,
 		Examples: integrateExamples,
@@ -224,34 +218,34 @@ func (c *addRelationCommand) Init(args []string) error {
 }
 
 func (c *addRelationCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.StringVar(&c.viaValue, "via", "", "for cross model integrations, specify the egress subnets for outbound traffic")
+	f.StringVar(&c.viaValue, "via", "", "For cross model relations, specify the egress subnets for outbound traffic")
 }
 
 // applicationAddRelationAPI defines the API methods that application add relation command uses.
 type applicationAddRelationAPI interface {
 	Close() error
-	AddRelation(endpoints, viaCIDRs []string) (*params.AddRelationResults, error)
-	Consume(crossmodel.ConsumeApplicationArgs) (string, error)
+	AddRelation(ctx context.Context, endpoints, viaCIDRs []string) (*params.AddRelationResults, error)
+	Consume(context.Context, crossmodel.ConsumeApplicationArgs) (string, error)
 }
 
-func (c *addRelationCommand) getAddRelationAPI() (applicationAddRelationAPI, error) {
+func (c *addRelationCommand) getAddRelationAPI(ctx context.Context) (applicationAddRelationAPI, error) {
 	if c.addRelationAPI != nil {
 		return c.addRelationAPI, nil
 	}
 
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return application.NewClient(root), nil
 }
 
-func (c *addRelationCommand) getOffersAPI(url *crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
+func (c *addRelationCommand) getOffersAPI(ctx context.Context, url *crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
 	if c.consumeDetailsAPI != nil {
 		return c.consumeDetailsAPI, nil
 	}
 
-	root, err := c.CommandBase.NewAPIRoot(c.ClientStore(), url.Source, "")
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), url.Source, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -260,10 +254,10 @@ func (c *addRelationCommand) getOffersAPI(url *crossmodel.OfferURL) (application
 
 // offerTerminatedRegexp is used to parse an error due to the remote offer being terminated.
 // (TODO) we don't have an error code for this scenario so need to rely on a string match.
-var offerTerminatedRegexp = regexp.MustCompile(".*offer (?P<offer>\\S+) .*terminated.*")
+var offerTerminatedRegexp = regexp.MustCompile(`.*offer (?P<offer>\S+) .*terminated.*`)
 
 func (c *addRelationCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAddRelationAPI()
+	client, err := c.getAddRelationAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -278,12 +272,12 @@ func (c *addRelationCommand) Run(ctx *cmd.Context) error {
 			}
 			c.remoteEndpoint.Source = controllerName
 		}
-		if err := c.maybeConsumeOffer(client); err != nil {
+		if err := c.maybeConsumeOffer(ctx, client); err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	_, err = client.AddRelation(c.endpoints, c.viaCIDRs)
+	_, err = client.AddRelation(ctx, c.endpoints, c.viaCIDRs)
 	if params.IsCodeUnauthorized(err) {
 		// XXX: Double check the error message looks sane
 		common.PermissionsMessage(ctx.Stderr, "integrate")
@@ -293,7 +287,7 @@ func (c *addRelationCommand) Run(ctx *cmd.Context) error {
 		infoErr := errors.Errorf(`
 
 Use 'juju status --relations' to view the current relations.`)
-		return errors.Annotatef(infoErr, splitError)
+		return errors.Annotate(infoErr, splitError)
 	}
 	if err != nil {
 		if offerTerminatedRegexp.MatchString(err.Error()) {
@@ -304,7 +298,7 @@ To integrate with a new offer with the same name, first run
 'juju remove-saas %s' to remove the SAAS record from this model.`, offerName, offerName))
 		}
 		if c.remoteEndpoint != nil && strings.HasSuffix(err.Error(), "not alive") {
-			saasName := c.remoteEndpoint.ApplicationName
+			saasName := c.remoteEndpoint.Name
 			return errors.New(fmt.Sprintf(
 				`SAAS application %q has been removed but termination has not completed.
 To integrate with a new offer with the same name, first run
@@ -314,8 +308,8 @@ To integrate with a new offer with the same name, first run
 	return block.ProcessBlockedError(err, block.BlockChange)
 }
 
-func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelationAPI) error {
-	sourceClient, err := c.getOffersAPI(c.remoteEndpoint)
+func (c *addRelationCommand) maybeConsumeOffer(ctx context.Context, targetClient applicationAddRelationAPI) error {
+	sourceClient, err := c.getOffersAPI(ctx, c.remoteEndpoint)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -323,7 +317,7 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 
 	// Get the details of the remote offer - this will fail with a permission
 	// error if the user isn't authorised to consume the offer.
-	consumeDetails, err := sourceClient.GetConsumeDetails(c.remoteEndpoint.AsLocal().String())
+	consumeDetails, err := sourceClient.GetConsumeDetails(ctx, c.remoteEndpoint.AsLocal().String())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -340,7 +334,7 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 	// it's safe to do so again.
 	arg := crossmodel.ConsumeApplicationArgs{
 		Offer:            *consumeDetails.Offer,
-		ApplicationAlias: c.remoteEndpoint.ApplicationName,
+		ApplicationAlias: c.remoteEndpoint.Name,
 		Macaroon:         consumeDetails.Macaroon,
 	}
 	if consumeDetails.ControllerInfo != nil {
@@ -349,13 +343,13 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 			return errors.Trace(err)
 		}
 		arg.ControllerInfo = &crossmodel.ControllerInfo{
-			ControllerTag: controllerTag,
-			Alias:         offerURL.Source,
-			Addrs:         consumeDetails.ControllerInfo.Addrs,
-			CACert:        consumeDetails.ControllerInfo.CACert,
+			ControllerUUID: controllerTag.Id(),
+			Alias:          offerURL.Source,
+			Addrs:          consumeDetails.ControllerInfo.Addrs,
+			CACert:         consumeDetails.ControllerInfo.CACert,
 		}
 	}
-	_, err = targetClient.Consume(arg)
+	_, err = targetClient.Consume(ctx, arg)
 	return errors.Trace(err)
 }
 
@@ -371,8 +365,8 @@ func (c *addRelationCommand) validateEndpoints(all []string) error {
 			if c.remoteEndpoint != nil {
 				return errors.NotSupportedf("providing more than one remote endpoints")
 			}
-			c.remoteEndpoint = url
-			c.endpoints = append(c.endpoints, url.ApplicationName)
+			c.remoteEndpoint = &url
+			c.endpoints = append(c.endpoints, url.Name)
 			continue
 		}
 		// at this stage, we are assuming that this could be a local endpoint

@@ -4,19 +4,18 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/loggo/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/voyeur"
-	"github.com/juju/version/v2"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
@@ -24,17 +23,18 @@ import (
 	agentconfig "github.com/juju/juju/agent/config"
 	agentengine "github.com/juju/juju/agent/engine"
 	agenterrors "github.com/juju/juju/agent/errors"
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/agent/agentconf"
 	"github.com/juju/juju/cmd/jujud-controller/agent/safemode"
 	cmdutil "github.com/juju/juju/cmd/jujud-controller/util"
 	"github.com/juju/juju/cmd/jujud/reboot"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/cmd"
+	internaldependency "github.com/juju/juju/internal/dependency"
 	internallogger "github.com/juju/juju/internal/logger"
-	"github.com/juju/juju/internal/storage/looputil"
-	jworker "github.com/juju/juju/internal/worker"
+	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
+	internalworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/dbaccessor"
-	"github.com/juju/juju/internal/worker/logsender"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -105,7 +105,7 @@ func (a *safeModeAgentCommand) Init(args []string) error {
 	}
 	config := a.currentConfig.CurrentConfig()
 	if err := os.MkdirAll(config.LogDir(), 0644); err != nil {
-		logger.Warningf("cannot create log dir: %v", err)
+		logger.Warningf(context.TODO(), "cannot create log dir: %v", err)
 	}
 	a.isCaas = config.Value(agent.ProviderType) == k8sconstants.CAASProviderType
 
@@ -175,26 +175,24 @@ type safeModeMachineAgentFactoryFnType func(names.Tag, bool) (*SafeModeMachineAg
 // SafeModeMachineAgent given a machineId.
 func SafeModeMachineAgentFactoryFn(
 	agentConfWriter agentconfig.AgentConfigWriter,
-	bufferedLogger *logsender.BufferedLogWriter,
 	newDBWorkerFunc dbaccessor.NewDBWorkerFunc,
-	newIntrospectionSocketName func(names.Tag) string,
-	rootDir string,
 ) safeModeMachineAgentFactoryFnType {
 	return func(agentTag names.Tag, isCaasAgent bool) (*SafeModeMachineAgent, error) {
+		runner, err := worker.NewRunner(worker.RunnerParams{
+			Name:          "safemode",
+			IsFatal:       agenterrors.IsFatal,
+			MoreImportant: agenterrors.MoreImportant,
+			RestartDelay:  internalworker.RestartDelay,
+			Logger:        internalworker.WrapLogger(logger),
+		})
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 		return NewSafeModeMachineAgent(
 			agentTag,
 			agentConfWriter,
-			bufferedLogger,
-			worker.NewRunner(worker.RunnerParams{
-				IsFatal:       agenterrors.IsFatal,
-				MoreImportant: agenterrors.MoreImportant,
-				RestartDelay:  jworker.RestartDelay,
-				Logger:        logger,
-			}),
-			looputil.NewLoopDeviceManager(),
+			runner,
 			newDBWorkerFunc,
-			newIntrospectionSocketName,
-			rootDir,
 			isCaasAgent,
 		)
 	}
@@ -204,27 +202,19 @@ func SafeModeMachineAgentFactoryFn(
 func NewSafeModeMachineAgent(
 	agentTag names.Tag,
 	agentConfWriter agentconfig.AgentConfigWriter,
-	bufferedLogger *logsender.BufferedLogWriter,
 	runner *worker.Runner,
-	loopDeviceManager looputil.LoopDeviceManager,
 	newDBWorkerFunc dbaccessor.NewDBWorkerFunc,
-	newIntrospectionSocketName func(names.Tag) string,
-	rootDir string,
 	isCaasAgent bool,
 ) (*SafeModeMachineAgent, error) {
 	a := &SafeModeMachineAgent{
-		agentTag:                   agentTag,
-		AgentConfigWriter:          agentConfWriter,
-		configChangedVal:           voyeur.NewValue(true),
-		bufferedLogger:             bufferedLogger,
-		workersStarted:             make(chan struct{}),
-		dead:                       make(chan struct{}),
-		runner:                     runner,
-		rootDir:                    rootDir,
-		newDBWorkerFunc:            newDBWorkerFunc,
-		loopDeviceManager:          loopDeviceManager,
-		newIntrospectionSocketName: newIntrospectionSocketName,
-		isCaasAgent:                isCaasAgent,
+		agentTag:          agentTag,
+		AgentConfigWriter: agentConfWriter,
+		configChangedVal:  voyeur.NewValue(true),
+		workersStarted:    make(chan struct{}),
+		dead:              make(chan struct{}),
+		runner:            runner,
+		newDBWorkerFunc:   newDBWorkerFunc,
+		isCaasAgent:       isCaasAgent,
 	}
 	return a, nil
 }
@@ -238,16 +228,11 @@ type SafeModeMachineAgent struct {
 	errReason        error
 	agentTag         names.Tag
 	runner           *worker.Runner
-	rootDir          string
-	bufferedLogger   *logsender.BufferedLogWriter
 	configChangedVal *voyeur.Value
 
 	workersStarted chan struct{}
 
 	newDBWorkerFunc dbaccessor.NewDBWorkerFunc
-
-	loopDeviceManager          looputil.LoopDeviceManager
-	newIntrospectionSocketName func(names.Tag) string
 
 	isCaasAgent bool
 }
@@ -284,17 +269,17 @@ func (a *SafeModeMachineAgent) Run(ctx *cmd.Context) (err error) {
 	agentconf.SetupAgentLogging(internallogger.DefaultContext(), agentConfig)
 
 	createEngine := a.makeEngineCreator(agentName, agentConfig.UpgradedToVersion())
-	_ = a.runner.StartWorker("engine", createEngine)
+	_ = a.runner.StartWorker(ctx, "engine", createEngine)
 
 	// At this point, all workers will have been configured to start
 	close(a.workersStarted)
 	err = a.runner.Wait()
 	switch errors.Cause(err) {
-	case jworker.ErrRebootMachine:
-		logger.Infof("Caught reboot error")
+	case internalworker.ErrRebootMachine:
+		logger.Infof(context.TODO(), "Caught reboot error")
 		err = a.executeRebootOrShutdown(params.ShouldReboot)
-	case jworker.ErrShutdownMachine:
-		logger.Infof("Caught shutdown error")
+	case internalworker.ErrShutdownMachine:
+		logger.Infof(context.TODO(), "Caught shutdown error")
 		err = a.executeRebootOrShutdown(params.ShouldShutdown)
 	}
 	return cmdutil.AgentDone(logger, err)
@@ -311,37 +296,35 @@ func (a *SafeModeMachineAgent) ChangeConfig(mutate agent.ConfigMutator) error {
 }
 
 func (a *SafeModeMachineAgent) makeEngineCreator(
-	agentName string, previousAgentVersion version.Number,
-) func() (worker.Worker, error) {
-	return func() (worker.Worker, error) {
+	agentName string, previousAgentVersion semversion.Number,
+) func(ctx context.Context) (worker.Worker, error) {
+	return func(ctx context.Context) (worker.Worker, error) {
 		eng, err := dependency.NewEngine(agentengine.DependencyEngineConfig(
 			dependency.DefaultMetrics(),
-			internallogger.GetLogger("juju.worker.dependency"),
+			internaldependency.WrapLogger(internallogger.GetLogger("juju.worker.dependency")),
 		))
 		if err != nil {
 			return nil, err
 		}
 
 		manifoldsCfg := safemode.ManifoldsConfig{
-			PreviousAgentVersion: previousAgentVersion,
-			AgentName:            agentName,
-			Agent:                agent.APIHostPortsSetter{Agent: a},
-			RootDir:              a.rootDir,
-			AgentConfigChanged:   a.configChangedVal,
-			NewDBWorkerFunc:      a.newDBWorkerFunc,
-			LogSource:            a.bufferedLogger.Logs(),
-			Clock:                clock.WallClock,
-			IsCaasConfig:         a.isCaasAgent,
-
-			SetupLogging: agentconf.SetupAgentLogging,
+			Agent:              agent.APIHostPortsSetter{Agent: a},
+			AgentConfigChanged: a.configChangedVal,
+			NewDBWorkerFunc:    a.newDBWorkerFunc,
+			Clock:              clock.WallClock,
+			IsCaasConfig:       a.isCaasAgent,
 		}
-		manifolds := safemode.IAASManifolds(manifoldsCfg)
+
+		var manifolds dependency.Manifolds
 		if a.isCaasAgent {
 			manifolds = safemode.CAASManifolds(manifoldsCfg)
+		} else {
+			manifolds = safemode.IAASManifolds(manifoldsCfg)
 		}
+
 		if err := dependency.Install(eng, manifolds); err != nil {
 			if err := worker.Stop(eng); err != nil {
-				logger.Errorf("while stopping engine with bad manifolds: %v", err)
+				logger.Errorf(context.TODO(), "while stopping engine with bad manifolds: %v", err)
 			}
 			return nil, err
 		}
@@ -356,15 +339,15 @@ func (a *SafeModeMachineAgent) executeRebootOrShutdown(action params.RebootActio
 		return errors.Trace(err)
 	}
 
-	logger.Infof("Reboot: Executing reboot")
+	logger.Infof(context.TODO(), "Reboot: Executing reboot")
 	err = finalize.ExecuteReboot(action)
 	if err != nil {
-		logger.Infof("Reboot: Error executing reboot: %v", err)
+		logger.Infof(context.TODO(), "Reboot: Error executing reboot: %v", err)
 		return errors.Trace(err)
 	}
 	// We return ErrRebootMachine so the agent will simply exit without error
 	// pending reboot/shutdown.
-	return jworker.ErrRebootMachine
+	return internalworker.ErrRebootMachine
 }
 
 func ensuringJujudNotRunning(tag names.Tag) error {

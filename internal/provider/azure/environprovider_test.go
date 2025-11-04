@@ -4,16 +4,14 @@
 package azure_test
 
 import (
-	"context"
-	stdcontext "context"
 	"net/http"
+	stdtesting "testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/juju/clock/testclock"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
@@ -22,7 +20,7 @@ import (
 	"github.com/juju/juju/internal/provider/azure/internal/azureauth"
 	"github.com/juju/juju/internal/provider/azure/internal/azurecli"
 	"github.com/juju/juju/internal/provider/azure/internal/azuretesting"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type environProviderSuite struct {
@@ -33,9 +31,11 @@ type environProviderSuite struct {
 	sender   azuretesting.Senders
 }
 
-var _ = gc.Suite(&environProviderSuite{})
+func TestEnvironProviderSuite(t *stdtesting.T) {
+	tc.Run(t, &environProviderSuite{})
+}
 
-func (s *environProviderSuite) SetUpTest(c *gc.C) {
+func (s *environProviderSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 	s.provider = newProvider(c, azure.ProviderConfig{
 		Sender:           &s.sender,
@@ -67,54 +67,49 @@ func fakeServicePrincipalCredential() *cloud.Credential {
 	return &cred
 }
 
-func (s *environProviderSuite) TestPrepareConfig(c *gc.C) {
-	cfg := makeTestModelConfig(c)
-	cfg, err := s.provider.PrepareConfig(context.Background(), environs.PrepareConfigParams{
-		Cloud:  s.spec,
-		Config: cfg,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(cfg, gc.NotNil)
+func (s *environProviderSuite) TestPrepareConfig(c *tc.C) {
+	err := s.provider.ValidateCloud(c.Context(), s.spec)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *environProviderSuite) TestOpen(c *gc.C) {
+func (s *environProviderSuite) TestOpen(c *tc.C) {
 	s.sender = azuretesting.Senders{
 		discoverAuthSender(),
 		makeResourceGroupNotFoundSender(".*/resourcegroups/juju-testmodel-model-deadbeef-.*"),
 		makeSender(".*/resourcegroups/juju-testmodel-.*", makeResourceGroupResult()),
 	}
-	env, err := environs.Open(stdcontext.Background(), s.provider, environs.OpenParams{
+	env, err := environs.Open(c.Context(), s.provider, environs.OpenParams{
 		Cloud:  s.spec,
 		Config: makeTestModelConfig(c),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(env, gc.NotNil)
+	}, environs.NoopCredentialInvalidator())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(env, tc.NotNil)
 }
 
-func (s *environProviderSuite) TestOpenMissingCredential(c *gc.C) {
+func (s *environProviderSuite) TestOpenMissingCredential(c *tc.C) {
 	s.spec.Credential = nil
 	s.testOpenError(c, s.spec, `validating cloud spec: missing credential not valid`)
 }
 
-func (s *environProviderSuite) TestOpenUnsupportedCredential(c *gc.C) {
+func (s *environProviderSuite) TestOpenUnsupportedCredential(c *tc.C) {
 	credential := cloud.NewCredential(cloud.OAuth1AuthType, map[string]string{})
 	s.spec.Credential = &credential
 	s.testOpenError(c, s.spec, `validating cloud spec: "oauth1" auth-type not supported`)
 }
 
-func (s *environProviderSuite) testOpenError(c *gc.C, spec environscloudspec.CloudSpec, expect string) {
+func (s *environProviderSuite) testOpenError(c *tc.C, spec environscloudspec.CloudSpec, expect string) {
 	s.sender = azuretesting.Senders{
 		makeResourceGroupNotFoundSender(".*/resourcegroups/juju-testmodel-model-deadbeef-.*"),
 		makeSender(".*/resourcegroups/juju-testmodel-.*", makeResourceGroupResult()),
 	}
-	_, err := environs.Open(stdcontext.Background(), s.provider, environs.OpenParams{
+	_, err := environs.Open(c.Context(), s.provider, environs.OpenParams{
 		Cloud:  spec,
 		Config: makeTestModelConfig(c),
-	})
-	c.Assert(err, gc.ErrorMatches, expect)
+	}, environs.NoopCredentialInvalidator())
+	c.Assert(err, tc.ErrorMatches, expect)
 }
 
-func newProvider(c *gc.C, config azure.ProviderConfig) environs.EnvironProvider {
+func newProvider(c *tc.C, config azure.ProviderConfig) environs.EnvironProvider {
 	if config.RetryClock == nil {
 		config.RetryClock = testclock.NewClock(time.Time{})
 	}
@@ -132,6 +127,6 @@ func newProvider(c *gc.C, config azure.ProviderConfig) environs.EnvironProvider 
 		MaxRetries: -1,
 	}
 	environProvider, err := azure.NewProvider(config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return environProvider
 }

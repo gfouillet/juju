@@ -8,11 +8,10 @@ import (
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/common"
-	"github.com/juju/juju/api/common/cloudspec"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
@@ -29,24 +28,17 @@ var WithTracer = base.WithTracer
 // Client provides access to an agent's view of the state.
 type Client struct {
 	facade base.FacadeCaller
-	*common.ModelWatcher
-	*cloudspec.CloudSpecAPI
+	*common.ModelConfigWatcher
 	*common.ControllerConfigAPI
 }
 
 // NewClient returns a version of the state that provides functionality
 // required by agent code.
 func NewClient(caller base.APICaller, options ...Option) (*Client, error) {
-	modelTag, isModel := caller.ModelTag()
-	if !isModel {
-		return nil, errors.New("expected model specific API connection")
-	}
-
 	facadeCaller := base.NewFacadeCaller(caller, "Agent", options...)
 	return &Client{
 		facade:              facadeCaller,
-		ModelWatcher:        common.NewModelWatcher(facadeCaller),
-		CloudSpecAPI:        cloudspec.NewCloudSpecAPI(facadeCaller, modelTag),
+		ModelConfigWatcher:  common.NewModelConfigWatcher(facadeCaller),
 		ControllerConfigAPI: common.NewControllerConfig(facadeCaller),
 	}, nil
 }
@@ -69,21 +61,18 @@ func (st *Client) getEntity(ctx context.Context, tag names.Tag) (*params.AgentGe
 	return &results.Entities[0], nil
 }
 
-func (st *Client) StateServingInfo(ctx context.Context) (controller.StateServingInfo, error) {
+func (st *Client) StateServingInfo(ctx context.Context) (controller.ControllerAgentInfo, error) {
 	var results params.StateServingInfo
 	err := st.facade.FacadeCall(ctx, "StateServingInfo", nil, &results)
 	if err != nil {
-		return controller.StateServingInfo{}, errors.Trace(err)
+		return controller.ControllerAgentInfo{}, errors.Trace(err)
 	}
-	return controller.StateServingInfo{
-		APIPort:           results.APIPort,
-		ControllerAPIPort: results.ControllerAPIPort,
-		StatePort:         results.StatePort,
-		Cert:              results.Cert,
-		PrivateKey:        results.PrivateKey,
-		CAPrivateKey:      results.CAPrivateKey,
-		SharedSecret:      results.SharedSecret,
-		SystemIdentity:    results.SystemIdentity,
+	return controller.ControllerAgentInfo{
+		APIPort:        results.APIPort,
+		Cert:           results.Cert,
+		PrivateKey:     results.PrivateKey,
+		CAPrivateKey:   results.CAPrivateKey,
+		SystemIdentity: results.SystemIdentity,
 	}, nil
 }
 
@@ -124,11 +113,11 @@ func (m *Entity) Jobs() []model.MachineJob {
 }
 
 // IsController returns true of the tag is for a controller (machine or agent).
-// TODO(controlleragent) - this method is needed while IAAS controllers are still machines.
 func IsController(ctx context.Context, caller base.APICaller, tag names.Tag) (bool, error) {
 	if tag.Kind() == names.ControllerAgentTagKind {
 		return true, nil
 	}
+
 	apiSt, err := NewClient(caller)
 	if err != nil {
 		return false, errors.Trace(err)

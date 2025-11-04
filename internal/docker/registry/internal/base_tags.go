@@ -4,11 +4,12 @@
 package internal
 
 import (
+	"context"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/docker"
 	"github.com/juju/juju/internal/docker/registry/image"
 	"github.com/juju/juju/internal/tools"
@@ -48,7 +49,7 @@ func fetchTagsV2(c tagFetcher, imageName string) (tools.Versions, error) {
 }
 
 // Tags fetches tags for an OCI image.
-func (c baseClient) Tags(imageName string) (tools.Versions, error) {
+func (c *baseClient) Tags(imageName string) (tools.Versions, error) {
 	switch c.APIVersion() {
 	case APIVersionV2:
 		return fetchTagsV2(c, imageName)
@@ -57,21 +58,21 @@ func (c baseClient) Tags(imageName string) (tools.Versions, error) {
 	}
 }
 
-func (c baseClient) fetchTags(url string, res tagsGetter) (versions tools.Versions, err error) {
+func (c *baseClient) fetchTags(url string, res tagsGetter) (versions tools.Versions, err error) {
 	pushVersions := func(tags []string) {
 		for _, tag := range tags {
-			v, err := version.Parse(tag)
+			v, err := semversion.Parse(tag)
 			if err != nil {
-				logger.Warningf("ignoring invalid image tag %q", tag)
+				logger.Warningf(context.TODO(), "ignoring invalid image tag %q", tag)
 				continue
 			}
 			versions = append(versions, image.NewImageInfo(v))
 		}
 	}
 	for {
-		logger.Tracef("fetching tags %q", url)
+		logger.Tracef(context.TODO(), "fetching tags %q", url)
 		url, err = c.getPaginatedJSON(url, &res)
-		logger.Tracef("response %#v, err %v", res, err)
+		logger.Tracef(context.TODO(), "response %#v, err %v", res, err)
 		switch err {
 		case errNoMorePages:
 			pushVersions(res.GetTags())

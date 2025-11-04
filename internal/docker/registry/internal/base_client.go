@@ -4,6 +4,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/internal/docker"
@@ -172,7 +173,7 @@ func decideBaseURLCommon(version APIVersion, repoDetails *docker.ImageRepoDetail
 
 	serverAddressURL.Scheme = ""
 	repoDetails.ServerAddress = serverAddressURL.String()
-	logger.Tracef("baseClient repoDetails %s", repoDetails)
+	logger.Tracef(context.TODO(), "baseClient repoDetails %s", repoDetails)
 	return nil
 }
 
@@ -194,14 +195,14 @@ func commonURLGetter(version APIVersion, url url.URL, pathTemplate string, args 
 	return url.String()
 }
 
-func (c baseClient) url(pathTemplate string, args ...interface{}) string {
+func (c *baseClient) url(pathTemplate string, args ...interface{}) string {
 	return commonURLGetter(c.APIVersion(), *c.baseURL, pathTemplate, args...)
 }
 
 // Ping pings the baseClient endpoint.
-func (c baseClient) Ping() error {
+func (c *baseClient) Ping() error {
 	url := c.url("/")
-	logger.Debugf("baseClient ping %q", url)
+	logger.Debugf(context.TODO(), "baseClient ping %q", url)
 	resp, err := c.client.Get(url)
 	if resp != nil {
 		defer resp.Body.Close()
@@ -209,7 +210,7 @@ func (c baseClient) Ping() error {
 	return errors.Trace(unwrapNetError(err))
 }
 
-func (c baseClient) ImageRepoDetails() (o docker.ImageRepoDetails) {
+func (c *baseClient) ImageRepoDetails() (o docker.ImageRepoDetails) {
 	if c.repoDetails != nil {
 		return *c.repoDetails
 	}
@@ -224,9 +225,9 @@ func (c *baseClient) Close() error {
 	return nil
 }
 
-func (c baseClient) getPaginatedJSON(url string, response interface{}) (string, error) {
+func (c *baseClient) getPaginatedJSON(url string, response interface{}) (string, error) {
 	resp, err := c.client.Get(url)
-	logger.Tracef("getPaginatedJSON for %q, err %v", url, err)
+	logger.Tracef(context.TODO(), "getPaginatedJSON for %q, err %v", url, err)
 	if err != nil {
 		return "", errors.Trace(unwrapNetError(err))
 	}

@@ -4,110 +4,103 @@
 package logsink
 
 import (
-	"io"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/juju/clock"
 	"github.com/juju/errors"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"gopkg.in/tomb.v2"
 
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-type bufferedLogWriterCloser struct {
-	*corelogger.BufferedLogWriter
-	closer io.Closer
-}
+type modelLogger struct {
+	tomb tomb.Tomb
 
-func (b *bufferedLogWriterCloser) Close() error {
-	err := errors.Trace(b.BufferedLogWriter.Flush())
-	_ = b.closer.Close()
-	return err
+	logSink       corelogger.LogSink
+	loggerContext corelogger.LoggerContext
 }
 
 // NewModelLogger returns a new model logger instance.
-// The actual loggers returned for each model are created
-// by the supplied loggerForModelFunc.
-func NewModelLogger(
-	loggerForModelFunc corelogger.LogWriterForModelFunc,
-	bufferSize int,
-	flushInterval time.Duration,
-	clock clock.Clock,
-) corelogger.ModelLogger {
-	return &modelLogger{
-		clock:               clock,
-		loggerBufferSize:    bufferSize,
-		loggerFlushInterval: flushInterval,
-		loggerForModel:      loggerForModelFunc,
-		modelLoggers:        make(map[string]corelogger.LogWriterCloser),
+func NewModelLogger(logSink corelogger.LogSink, modelUUID model.UUID, agentTag names.Tag) (worker.Worker, error) {
+	// Assign the log sink to the model logger. This redirects the loggo
+	// writer to the underlying log sink.
+	loggerContext := loggo.NewContext(loggo.INFO)
+	if err := loggerContext.AddWriter("model-sink", corelogger.NewTaggedRedirectWriter(
+		logSink,
+		agentTag.String(),
+		modelUUID.String(),
+	)); err != nil {
+		return nil, errors.Annotatef(err, "adding model-sink writer")
 	}
+
+	w := &modelLogger{
+		logSink:       logSink,
+		loggerContext: internallogger.WrapLoggoContext(loggerContext),
+	}
+	w.tomb.Go(w.loop)
+
+	return w, nil
 }
 
-type modelLogger struct {
-	mu sync.Mutex
-
-	clock               clock.Clock
-	loggerBufferSize    int
-	loggerFlushInterval time.Duration
-
-	modelLoggers   map[string]corelogger.LogWriterCloser
-	loggerForModel corelogger.LogWriterForModelFunc
+// Log writes the given log records to the logger's storage.
+func (d *modelLogger) Log(records []corelogger.LogRecord) error {
+	return d.logSink.Log(records)
 }
 
-// GetLogWriter creates a new log writer for the given model UUID.
-func (d *modelLogger) GetLogWriter(modelUUID, modelName, modelOwner string) (corelogger.LogWriterCloser, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if l, ok := d.modelLoggers[modelUUID]; ok {
-		return l, nil
-	}
-
-	modelPrefix := corelogger.ModelFilePrefix(modelOwner, modelName)
-	l, err := d.loggerForModel(modelUUID, modelPrefix)
-	if err != nil {
-		return nil, errors.Annotatef(err, "getting logger for model %q (%s)", modelPrefix, modelUUID)
-	}
-
-	bufferedLogWriter := &bufferedLogWriterCloser{
-		BufferedLogWriter: corelogger.NewBufferedLogWriter(
-			l,
-			d.loggerBufferSize,
-			d.loggerFlushInterval,
-			d.clock,
-		),
-		closer: l,
-	}
-	d.modelLoggers[modelUUID] = bufferedLogWriter
-	return bufferedLogWriter, nil
+// GetLogger returns a logger with the given name and tags.
+func (d *modelLogger) GetLogger(name string, tags ...string) corelogger.Logger {
+	return d.loggerContext.GetLogger(name, tags...)
 }
 
-// RemoveLogWriter closes then removes a log writer by model UUID.
-// Returns an error if there was a problem closing the logger.
-func (d *modelLogger) RemoveLogWriter(modelUUID string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if l, ok := d.modelLoggers[modelUUID]; ok {
-		err := l.Close()
-		delete(d.modelLoggers, modelUUID)
-		return err
-	}
-	return nil
+// ConfigureLoggers configures loggers according to the given string
+// specification, which specifies a set of modules and their associated
+// logging levels. Loggers are colon- or semicolon-separated; each
+// module is specified as <modulename>=<level>.  White space outside of
+// module names and levels is ignored. The root module is specified
+// with the name "<root>".
+//
+// An example specification:
+//
+//	<root>=ERROR; foo.bar=WARNING
+//
+// Label matching can be applied to the loggers by providing a set of labels
+// to the function. If a logger has a label that matches the provided labels,
+// then the logger will be configured with the provided level. If the logger
+// does not have a label that matches the provided labels, then the logger
+// will not be configured. No labels will configure all loggers in the
+// specification.
+func (d *modelLogger) ConfigureLoggers(specification string) error {
+	return d.loggerContext.ConfigureLoggers(specification)
 }
 
-// Close implements io.Close.
-func (d *modelLogger) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// ResetLoggerLevels iterates through the known logging modules and sets the
+// levels of all to UNSPECIFIED, except for <root> which is set to WARNING.
+// If labels are provided, then only loggers that have the provided labels
+// will be reset.
+func (d *modelLogger) ResetLoggerLevels() {
+	d.loggerContext.ResetLoggerLevels()
+}
 
-	var errs []string
-	for _, m := range d.modelLoggers {
-		if err := m.Close(); err != nil {
-			errs = append(errs, err.Error())
-		}
-	}
-	if len(errs) == 0 {
-		return nil
-	}
-	return errors.Errorf("errors closing loggers: %v", strings.Join(errs, "\n"))
+// Config returns the current configuration of the Loggers. Loggers
+// with UNSPECIFIED level will not be included.
+func (d *modelLogger) Config() corelogger.Config {
+	return d.loggerContext.Config()
+}
+
+// Kill stops the model logger.
+func (d *modelLogger) Kill() {
+	d.tomb.Kill(nil)
+}
+
+// Wait waits for the model logger to stop.
+func (d *modelLogger) Wait() error {
+	return d.tomb.Wait()
+}
+
+func (d *modelLogger) loop() error {
+	// Wait for the heat death of the universe.
+	<-d.tomb.Dying()
+	return tomb.ErrDying
 }

@@ -9,7 +9,7 @@ import (
 
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -36,14 +36,12 @@ const uniterFacade = "Uniter"
 
 // Client provides access to the Uniter API facade.
 type Client struct {
-	*common.ModelWatcher
+	*common.ModelConfigWatcher
 	*common.APIAddresser
-	*common.UpgradeSeriesAPI
 	*common.UnitStateAPI
 	*StorageAccessor
 
-	leadershipSettings *LeadershipSettings
-	facade             base.FacadeCaller
+	facade base.FacadeCaller
 	// unitTag contains the authenticated unit's tag.
 	unitTag names.UnitTag
 }
@@ -59,24 +57,14 @@ func NewClient(
 		uniterFacade,
 		options...,
 	)
-	client := &Client{
-		ModelWatcher:     common.NewModelWatcher(facadeCaller),
-		APIAddresser:     common.NewAPIAddresser(facadeCaller),
-		UpgradeSeriesAPI: common.NewUpgradeSeriesAPI(facadeCaller, authTag),
-		UnitStateAPI:     common.NewUniterStateAPI(facadeCaller, authTag),
-		StorageAccessor:  NewStorageAccessor(facadeCaller),
-		facade:           facadeCaller,
-		unitTag:          authTag,
+	return &Client{
+		ModelConfigWatcher: common.NewModelConfigWatcher(facadeCaller),
+		APIAddresser:       common.NewAPIAddresser(facadeCaller),
+		UnitStateAPI:       common.NewUniterStateAPI(facadeCaller, authTag),
+		StorageAccessor:    NewStorageAccessor(facadeCaller),
+		facade:             facadeCaller,
+		unitTag:            authTag,
 	}
-
-	newWatcher := func(result params.NotifyWatchResult) watcher.NotifyWatcher {
-		return apiwatcher.NewNotifyWatcher(caller, result)
-	}
-	client.leadershipSettings = NewLeadershipSettings(
-		facadeCaller.FacadeCall,
-		newWatcher,
-	)
-	return client
 }
 
 // NewFromConnection returns a version of the Connection that provides
@@ -102,9 +90,9 @@ func (client *Client) life(ctx context.Context, tag names.Tag) (life.Value, erro
 }
 
 // relation requests relation information from the server.
-func (client *Client) relation(ctx context.Context, relationTag, unitTag names.Tag) (params.RelationResult, error) {
-	nothing := params.RelationResult{}
-	var result params.RelationResults
+func (client *Client) relation(ctx context.Context, relationTag, unitTag names.Tag) (params.RelationResultV2, error) {
+	nothing := params.RelationResultV2{}
+	var result params.RelationResultsV2
 	args := params.RelationUnits{
 		RelationUnits: []params.RelationUnit{
 			{Relation: relationTag.String(), Unit: unitTag.String()},
@@ -165,19 +153,6 @@ func (client *Client) getOneAction(ctx context.Context, tag *names.ActionTag) (p
 	}
 
 	return result, nil
-}
-
-// LeadershipSettingsAccessor is an interface that allows us not to have
-// to use the concrete `api/uniter/LeadershipSettings` type, thus
-// simplifying testing.
-type LeadershipSettingsAccessor interface {
-	Read(applicationName string) (map[string]string, error)
-	Merge(applicationName, unitName string, settings map[string]string) error
-}
-
-// LeadershipSettings returns the client's leadership settings api.
-func (client *Client) LeadershipSettings() LeadershipSettingsAccessor {
-	return client.leadershipSettings
 }
 
 // ActionStatus provides the status of a single action.
@@ -267,12 +242,13 @@ func (client *Client) Relation(ctx context.Context, relationTag names.RelationTa
 		return nil, err
 	}
 	return &Relation{
-		id:        result.Id,
-		tag:       relationTag,
-		life:      result.Life,
-		suspended: result.Suspended,
-		client:    client,
-		otherApp:  result.OtherApplication,
+		id:             result.Id,
+		tag:            relationTag,
+		life:           result.Life,
+		suspended:      result.Suspended,
+		client:         client,
+		otherApp:       result.OtherApplication.ApplicationName,
+		otherModelUUID: result.OtherApplication.ModelUUID,
 	}, nil
 }
 
@@ -351,7 +327,7 @@ func (client *Client) ActionFinish(ctx context.Context, tag names.ActionTag, sta
 
 // RelationById returns the existing relation with the given id.
 func (client *Client) RelationById(ctx context.Context, id int) (*Relation, error) {
-	var results params.RelationResults
+	var results params.RelationResultsV2
 	args := params.RelationIds{
 		RelationIds: []int{id},
 	}
@@ -369,12 +345,13 @@ func (client *Client) RelationById(ctx context.Context, id int) (*Relation, erro
 	}
 	relationTag := names.NewRelationTag(result.Key)
 	return &Relation{
-		id:        result.Id,
-		tag:       relationTag,
-		life:      result.Life,
-		suspended: result.Suspended,
-		client:    client,
-		otherApp:  result.OtherApplication,
+		id:             result.Id,
+		tag:            relationTag,
+		life:           result.Life,
+		suspended:      result.Suspended,
+		client:         client,
+		otherApp:       result.OtherApplication.ApplicationName,
+		otherModelUUID: result.OtherApplication.ModelUUID,
 	}, nil
 }
 

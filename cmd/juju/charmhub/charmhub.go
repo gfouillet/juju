@@ -9,13 +9,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -43,7 +43,7 @@ type charmHubCommand struct {
 }
 
 func (c *charmHubCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.StringVar(&c.charmHubURL, "charmhub-url", charmhub.DefaultServerURL, "specify the Charmhub URL for querying the store")
+	f.StringVar(&c.charmHubURL, "charmhub-url", charmhub.DefaultServerURL, "Specify the Charmhub URL for querying the store")
 }
 
 // Init initializes the info command, including validating the provided

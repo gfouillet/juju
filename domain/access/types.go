@@ -4,9 +4,11 @@
 package access
 
 import (
-	"github.com/juju/errors"
-
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/uuid"
 )
 
 // UpdatePermissionArgs are necessary arguments to run
@@ -16,29 +18,21 @@ type UpdatePermissionArgs struct {
 	// combined with the target the subject's permission to is being
 	// updated on.
 	AccessSpec permission.AccessSpec
-	// AddUser will add the subject if the user does not exist.
-	AddUser bool
-	// ApiUser is the user requesting the change, they must have
-	// permission to do it as well.
-	ApiUser string
 	// What type of change to access is needed, grant or revoke?
 	Change permission.AccessChange
 	// Subject is the subject of the permission, e.g. user.
-	Subject string
+	Subject user.Name
 }
 
 func (args UpdatePermissionArgs) Validate() error {
-	if args.ApiUser == "" {
-		return errors.Trace(errors.NotValidf("empty api user"))
-	}
-	if args.Subject == "" {
-		return errors.Trace(errors.NotValidf("empty subject"))
+	if args.Subject.IsZero() {
+		return errors.Errorf("empty subject %w", coreerrors.NotValid)
 	}
 	if err := args.AccessSpec.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	if args.Change != permission.Grant && args.Change != permission.Revoke {
-		return errors.Trace(errors.NotValidf("change %q", args.Change))
+		return errors.Errorf("change %q %w", args.Change, coreerrors.NotValid)
 	}
 	return nil
 }
@@ -48,4 +42,10 @@ func (args UpdatePermissionArgs) Validate() error {
 type CredentialOwnerModelAccess struct {
 	ModelName   string            `db:"model_name"`
 	OwnerAccess permission.Access `db:"access_type"`
+}
+
+// OfferImport contains details to import access to an offer.
+type OfferImportAccess struct {
+	UUID   uuid.UUID
+	Access map[string]permission.Access
 }

@@ -10,10 +10,11 @@
 package client_test
 
 import (
+	context "context"
 	reflect "reflect"
 
 	permission "github.com/juju/juju/core/permission"
-	names "github.com/juju/names/v5"
+	names "github.com/juju/names/v6"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -306,56 +307,18 @@ func (c *MockAuthorizerAuthUnitAgentCall) DoAndReturn(f func() bool) *MockAuthor
 	return c
 }
 
-// ConnectedModel mocks base method.
-func (m *MockAuthorizer) ConnectedModel() string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ConnectedModel")
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-// ConnectedModel indicates an expected call of ConnectedModel.
-func (mr *MockAuthorizerMockRecorder) ConnectedModel() *MockAuthorizerConnectedModelCall {
-	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ConnectedModel", reflect.TypeOf((*MockAuthorizer)(nil).ConnectedModel))
-	return &MockAuthorizerConnectedModelCall{Call: call}
-}
-
-// MockAuthorizerConnectedModelCall wrap *gomock.Call
-type MockAuthorizerConnectedModelCall struct {
-	*gomock.Call
-}
-
-// Return rewrite *gomock.Call.Return
-func (c *MockAuthorizerConnectedModelCall) Return(arg0 string) *MockAuthorizerConnectedModelCall {
-	c.Call = c.Call.Return(arg0)
-	return c
-}
-
-// Do rewrite *gomock.Call.Do
-func (c *MockAuthorizerConnectedModelCall) Do(f func() string) *MockAuthorizerConnectedModelCall {
-	c.Call = c.Call.Do(f)
-	return c
-}
-
-// DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockAuthorizerConnectedModelCall) DoAndReturn(f func() string) *MockAuthorizerConnectedModelCall {
-	c.Call = c.Call.DoAndReturn(f)
-	return c
-}
-
 // EntityHasPermission mocks base method.
-func (m *MockAuthorizer) EntityHasPermission(arg0 names.Tag, arg1 permission.Access, arg2 names.Tag) error {
+func (m *MockAuthorizer) EntityHasPermission(arg0 context.Context, arg1 names.Tag, arg2 permission.Access, arg3 names.Tag) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "EntityHasPermission", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "EntityHasPermission", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // EntityHasPermission indicates an expected call of EntityHasPermission.
-func (mr *MockAuthorizerMockRecorder) EntityHasPermission(arg0, arg1, arg2 any) *MockAuthorizerEntityHasPermissionCall {
+func (mr *MockAuthorizerMockRecorder) EntityHasPermission(arg0, arg1, arg2, arg3 any) *MockAuthorizerEntityHasPermissionCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EntityHasPermission", reflect.TypeOf((*MockAuthorizer)(nil).EntityHasPermission), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EntityHasPermission", reflect.TypeOf((*MockAuthorizer)(nil).EntityHasPermission), arg0, arg1, arg2, arg3)
 	return &MockAuthorizerEntityHasPermissionCall{Call: call}
 }
 
@@ -371,13 +334,13 @@ func (c *MockAuthorizerEntityHasPermissionCall) Return(arg0 error) *MockAuthoriz
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockAuthorizerEntityHasPermissionCall) Do(f func(names.Tag, permission.Access, names.Tag) error) *MockAuthorizerEntityHasPermissionCall {
+func (c *MockAuthorizerEntityHasPermissionCall) Do(f func(context.Context, names.Tag, permission.Access, names.Tag) error) *MockAuthorizerEntityHasPermissionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockAuthorizerEntityHasPermissionCall) DoAndReturn(f func(names.Tag, permission.Access, names.Tag) error) *MockAuthorizerEntityHasPermissionCall {
+func (c *MockAuthorizerEntityHasPermissionCall) DoAndReturn(f func(context.Context, names.Tag, permission.Access, names.Tag) error) *MockAuthorizerEntityHasPermissionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -421,17 +384,17 @@ func (c *MockAuthorizerGetAuthTagCall) DoAndReturn(f func() names.Tag) *MockAuth
 }
 
 // HasPermission mocks base method.
-func (m *MockAuthorizer) HasPermission(arg0 permission.Access, arg1 names.Tag) error {
+func (m *MockAuthorizer) HasPermission(arg0 context.Context, arg1 permission.Access, arg2 names.Tag) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "HasPermission", arg0, arg1)
+	ret := m.ctrl.Call(m, "HasPermission", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // HasPermission indicates an expected call of HasPermission.
-func (mr *MockAuthorizerMockRecorder) HasPermission(arg0, arg1 any) *MockAuthorizerHasPermissionCall {
+func (mr *MockAuthorizerMockRecorder) HasPermission(arg0, arg1, arg2 any) *MockAuthorizerHasPermissionCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasPermission", reflect.TypeOf((*MockAuthorizer)(nil).HasPermission), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasPermission", reflect.TypeOf((*MockAuthorizer)(nil).HasPermission), arg0, arg1, arg2)
 	return &MockAuthorizerHasPermissionCall{Call: call}
 }
 
@@ -447,13 +410,13 @@ func (c *MockAuthorizerHasPermissionCall) Return(arg0 error) *MockAuthorizerHasP
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockAuthorizerHasPermissionCall) Do(f func(permission.Access, names.Tag) error) *MockAuthorizerHasPermissionCall {
+func (c *MockAuthorizerHasPermissionCall) Do(f func(context.Context, permission.Access, names.Tag) error) *MockAuthorizerHasPermissionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockAuthorizerHasPermissionCall) DoAndReturn(f func(permission.Access, names.Tag) error) *MockAuthorizerHasPermissionCall {
+func (c *MockAuthorizerHasPermissionCall) DoAndReturn(f func(context.Context, permission.Access, names.Tag) error) *MockAuthorizerHasPermissionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

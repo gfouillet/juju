@@ -1,165 +1,105 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package machinemanager_test
+package machinemanager
 
 import (
-	stdcontext "context"
-	"sort"
-	"strconv"
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/juju/collections/transform"
+	"github.com/juju/clock"
+	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/apiserver/common"
 	commonmocks "github.com/juju/juju/apiserver/common/mocks"
-	"github.com/juju/juju/apiserver/common/storagecommon"
-	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/apiserver/facades/client/application/mocks"
-	"github.com/juju/juju/apiserver/facades/client/machinemanager"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/machine"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/core/network"
+	coremachine "github.com/juju/juju/core/machine"
+	machinetesting "github.com/juju/juju/core/machine/testing"
+	coremodel "github.com/juju/juju/core/model"
+	modeltesting "github.com/juju/juju/core/model/testing"
 	"github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/agentbinary"
+	blockcommanderrors "github.com/juju/juju/domain/blockcommand/errors"
+	"github.com/juju/juju/domain/deployment"
+	domainmachine "github.com/juju/juju/domain/machine"
+	machineservice "github.com/juju/juju/domain/machine/service"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/internal/charm"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/binarystorage"
-	stateerrors "github.com/juju/juju/state/errors"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&MachineManagerSuite{})
-
-var defaultSupportedBases = []corebase.Base{
-	corebase.MustParseBaseFromString("ubuntu@20.04"),
-	corebase.MustParseBaseFromString("ubuntu@22.04"),
-}
-
-type MachineManagerSuite struct {
-	authorizer *apiservertesting.FakeAuthorizer
-
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
-}
-
-func (s *MachineManagerSuite) SetUpTest(c *gc.C) {
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
-}
-
-func (s *MachineManagerSuite) TestNewMachineManagerAPINonClient(c *gc.C) {
-	tag := names.NewUnitTag("mysql/0")
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: tag}
-
-	ctrl := gomock.NewController(c)
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
-	s.machineService = NewMockMachineService(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
-
-	_, err := machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		machinemanager.ModelAuthorizer{
-			Authorizer: s.authorizer,
-			ModelTag:   names.ModelTag{},
-		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
-		loggertesting.WrapCheckLog(c),
-		s.networkService,
-	)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-}
-
-var _ = gc.Suite(&AddMachineManagerSuite{})
-
 type AddMachineManagerSuite struct {
-	authorizer    *apiservertesting.FakeAuthorizer
-	st            *MockBackend
-	storageAccess *MockStorageInterface
-	pool          *MockPool
-	api           *machinemanager.MachineManagerAPI
-	model         *MockModel
-	store         *MockObjectStore
-	cloudService  *commonmocks.MockCloudService
-	credService   *commonmocks.MockCredentialService
+	authorizer     *apiservertesting.FakeAuthorizer
+	modelUUID      coremodel.UUID
+	controllerUUID string
+	api            *MachineManagerAPI
+	cloudService   *commonmocks.MockCloudService
 
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
+	machineService      *MockMachineService
+	networkService      *MockNetworkService
+	blockCommandService *MockBlockCommandService
 }
 
-func (s *AddMachineManagerSuite) SetUpTest(c *gc.C) {
+func TestAddMachineManagerSuite(t *testing.T) {
+	tc.Run(t, &AddMachineManagerSuite{})
+}
+
+func (s *AddMachineManagerSuite) SetUpTest(c *tc.C) {
 	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
+	s.modelUUID = modeltesting.GenModelUUID(c)
+	s.controllerUUID = uuid.MustNewUUID().String()
 }
 
-func (s *AddMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
+func (s *AddMachineManagerSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.pool = NewMockPool(ctrl)
-	s.model = NewMockModel(ctrl)
-
-	s.st = NewMockBackend(ctrl)
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
-
-	s.storageAccess = NewMockStorageInterface(ctrl)
 	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
 	s.machineService = NewMockMachineService(ctrl)
-	s.store = NewMockObjectStore(ctrl)
 	s.networkService = NewMockNetworkService(ctrl)
 
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
+	s.blockCommandService = NewMockBlockCommandService(ctrl)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound).AnyTimes()
+
+	s.api = NewMachineManagerAPI(
+		s.controllerUUID,
+		s.modelUUID,
 		nil,
-		s.storageAccess,
-		s.pool,
-		machinemanager.ModelAuthorizer{
+		ModelAuthorizer{
 			Authorizer: s.authorizer,
 		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
 		loggertesting.WrapCheckLog(c),
-		s.networkService,
+		clock.WallClock,
+		Services{
+			BlockCommandService: s.blockCommandService,
+			CloudService:        s.cloudService,
+			MachineService:      s.machineService,
+			NetworkService:      s.networkService,
+		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+
+	c.Cleanup(func() {
+		s.blockCommandService = nil
+		s.cloudService = nil
+		s.machineService = nil
+		s.api = nil
+		s.networkService = nil
+	})
 
 	return ctrl
 }
 
-func (s *AddMachineManagerSuite) TestAddMachines(c *gc.C) {
+func (s *AddMachineManagerSuite) TestAddMachines(c *tc.C) {
 	ctrl := s.setup(c)
 	defer ctrl.Finish()
 
@@ -167,365 +107,187 @@ func (s *AddMachineManagerSuite) TestAddMachines(c *gc.C) {
 	for i := range apiParams {
 		apiParams[i] = params.AddMachineParams{
 			Base: &params.Base{Name: "ubuntu", Channel: "22.04"},
-			Jobs: []model.MachineJob{model.JobHostUnits},
+			Jobs: []coremodel.MachineJob{coremodel.JobHostUnits},
 		}
 	}
 	apiParams[0].Disks = []storage.Directive{{Size: 1, Count: 2}, {Size: 2, Count: 1}}
 	apiParams[1].Disks = []storage.Directive{{Size: 1, Count: 2, Pool: "three"}}
 
-	m1 := NewMockMachine(ctrl)
-	m1.EXPECT().Id().Return("666").AnyTimes()
-	m2 := NewMockMachine(ctrl)
-	m2.EXPECT().Id().Return("667/lxd/1").AnyTimes()
-
-	s.st.EXPECT().AddOneMachine(state.MachineTemplate{
-		Base: state.UbuntuBase("22.04"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-		Volumes: []state.HostVolumeParams{
-			{
-				Volume:     state.VolumeParams{Pool: "", Size: 1},
-				Attachment: state.VolumeAttachmentParams{ReadOnly: false},
-			},
-			{
-				Volume:     state.VolumeParams{Pool: "", Size: 1},
-				Attachment: state.VolumeAttachmentParams{ReadOnly: false},
-			},
-			{
-				Volume:     state.VolumeParams{Pool: "", Size: 2},
-				Attachment: state.VolumeAttachmentParams{ReadOnly: false},
-			},
+	// Machine 666.
+	s.machineService.EXPECT().AddMachine(gomock.Any(), domainmachine.AddMachineArgs{
+		Platform: deployment.Platform{
+			Channel: "22.04/stable",
+			OSType:  deployment.Ubuntu,
 		},
-	}).Return(m1, nil)
-	s.machineService.EXPECT().CreateMachine(gomock.Any(), machine.Name("666"))
-	s.machineService.EXPECT().CreateMachine(gomock.Any(), machine.Name("667/lxd/1"))
-	s.machineService.EXPECT().CreateMachine(gomock.Any(), machine.Name("667"))
-	s.st.EXPECT().AddOneMachine(state.MachineTemplate{
-		Base: state.UbuntuBase("22.04"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-		Volumes: []state.HostVolumeParams{
-			{
-				Volume:     state.VolumeParams{Pool: "three", Size: 1},
-				Attachment: state.VolumeAttachmentParams{ReadOnly: false},
-			},
-			{
-				Volume:     state.VolumeParams{Pool: "three", Size: 1},
-				Attachment: state.VolumeAttachmentParams{ReadOnly: false},
-			},
+	})
+	// Machine 667.
+	s.machineService.EXPECT().AddMachine(gomock.Any(), domainmachine.AddMachineArgs{
+		Platform: deployment.Platform{
+			Channel: "22.04/stable",
+			OSType:  deployment.Ubuntu,
 		},
-	}).Return(m2, nil)
-	s.networkService.EXPECT().GetAllSpaces(gomock.Any())
+	})
 
-	machines, err := s.api.AddMachines(stdcontext.Background(), params.AddMachines{MachineParams: apiParams})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machines.Machines, gc.HasLen, 2)
+	machines, err := s.api.AddMachines(c.Context(), params.AddMachines{MachineParams: apiParams})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(machines.Machines, tc.HasLen, 2)
 }
 
-func (s *AddMachineManagerSuite) TestAddMachinesStateError(c *gc.C) {
+func (s *AddMachineManagerSuite) TestAddMachinesContainer(c *tc.C) {
+	ctrl := s.setup(c)
+	defer ctrl.Finish()
+
+	apiParams := params.AddMachineParams{
+		Base:      &params.Base{Name: "ubuntu", Channel: "22.04"},
+		Jobs:      []coremodel.MachineJob{coremodel.JobHostUnits},
+		Placement: &instance.Placement{Scope: string(instance.LXD), Directive: "0"},
+	}
+
+	s.machineService.EXPECT().AddMachine(gomock.Any(), domainmachine.AddMachineArgs{
+		Platform: deployment.Platform{
+			Channel: "22.04/stable",
+			OSType:  deployment.Ubuntu,
+		},
+		Directive: deployment.Placement{
+			Type:      deployment.PlacementTypeContainer,
+			Container: deployment.ContainerTypeLXD,
+			Directive: "0",
+		},
+	}).Return(machineservice.AddMachineResults{
+		MachineName:      coremachine.Name("0"),
+		ChildMachineName: ptr(coremachine.Name("0/lxd/0")),
+	}, nil)
+
+	machines, err := s.api.AddMachines(c.Context(), params.AddMachines{MachineParams: []params.AddMachineParams{apiParams}})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(machines.Machines, tc.HasLen, 1)
+	c.Check(machines.Machines[0].Machine, tc.Equals, "0/lxd/0")
+	c.Check(machines.Machines[0].Error, tc.IsNil)
+}
+
+func (s *AddMachineManagerSuite) TestAddMachinesStateError(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.st.EXPECT().AddOneMachine(gomock.Any()).Return(nil, errors.New("boom"))
-	s.networkService.EXPECT().GetAllSpaces(gomock.Any())
+	s.machineService.EXPECT().AddMachine(gomock.Any(), domainmachine.AddMachineArgs{
+		Platform: deployment.Platform{
+			Channel: "22.04/stable",
+			OSType:  deployment.Ubuntu,
+		},
+	}).Return(machineservice.AddMachineResults{}, errors.New("boom"))
 
-	results, err := s.api.AddMachines(stdcontext.Background(), params.AddMachines{
+	results, err := s.api.AddMachines(c.Context(), params.AddMachines{
 		MachineParams: []params.AddMachineParams{{
 			Base: &params.Base{Name: "ubuntu", Channel: "22.04"},
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.AddMachinesResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.AddMachinesResults{
 		Machines: []params.AddMachinesResult{{
 			Error: &params.Error{Message: "boom", Code: ""},
 		}},
 	})
 }
 
-var _ = gc.Suite(&DestroyMachineManagerSuite{})
-
 type DestroyMachineManagerSuite struct {
-	testing.CleanupSuite
-	authorizer    *apiservertesting.FakeAuthorizer
-	st            *MockBackend
-	storageAccess *MockStorageInterface
-	leadership    *MockLeadership
-	store         *MockObjectStore
-	cloudService  *commonmocks.MockCloudService
-	credService   *commonmocks.MockCredentialService
-	api           *machinemanager.MachineManagerAPI
+	testhelpers.CleanupSuite
+	authorizer     *apiservertesting.FakeAuthorizer
+	api            *MachineManagerAPI
+	modelUUID      coremodel.UUID
+	controllerUUID string
 
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
+	machineService      *MockMachineService
+	applicationService  *MockApplicationService
+	blockCommandService *MockBlockCommandService
+	removalService      *MockRemovalService
 }
 
-func (s *DestroyMachineManagerSuite) SetUpTest(c *gc.C) {
+func TestDestroyMachineManagerSuite(t *testing.T) {
+	tc.Run(t, &DestroyMachineManagerSuite{})
+}
+
+func (s *DestroyMachineManagerSuite) TestStub(c *tc.C) {
+	c.Skip(`This suite is missing the following tests:
+- TestForceDestroyMachineFailedSomeStorageRetrievalManyMachines
+- TestDestroyMachineFailedAllStorageRetrieval
+- TestDestroyMachineFailedSomeUnitStorageRetrieval
+- TestDestroyMachineFailedSomeStorageRetrievalManyMachines
+`)
+}
+
+func (s *DestroyMachineManagerSuite) SetUpTest(c *tc.C) {
 	s.CleanupSuite.SetUpTest(c)
 	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
-	s.PatchValue(&machinemanager.ClassifyDetachedStorage, mockedClassifyDetachedStorage)
+	s.modelUUID = modeltesting.GenModelUUID(c)
+	s.controllerUUID = uuid.MustNewUUID().String()
 }
 
-func (s *DestroyMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
+func (s *DestroyMachineManagerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.st = NewMockBackend(ctrl)
-	s.st.EXPECT().GetBlockForType(state.RemoveBlock).Return(nil, false, nil).AnyTimes()
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
-
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
 	s.machineService = NewMockMachineService(ctrl)
-	s.store = NewMockObjectStore(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.removalService = NewMockRemovalService(ctrl)
 
-	s.storageAccess = NewMockStorageInterface(ctrl)
-	s.storageAccess.EXPECT().VolumeAccess().Return(nil).AnyTimes()
-	s.storageAccess.EXPECT().FilesystemAccess().Return(nil).AnyTimes()
+	s.blockCommandService = NewMockBlockCommandService(ctrl)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound).AnyTimes()
 
-	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.leadership = NewMockLeadership(ctrl)
-
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
+	s.api = NewMachineManagerAPI(
+		s.controllerUUID,
+		s.modelUUID,
 		nil,
-		s.storageAccess,
-		nil,
-		machinemanager.ModelAuthorizer{
+		ModelAuthorizer{
 			Authorizer: s.authorizer,
 		},
-		nil,
-		nil,
-		s.leadership,
-		nil,
 		loggertesting.WrapCheckLog(c),
-		s.networkService,
+		clock.WallClock,
+		Services{
+			ApplicationService:  s.applicationService,
+			BlockCommandService: s.blockCommandService,
+			MachineService:      s.machineService,
+			RemovalService:      s.removalService,
+		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+
+	c.Cleanup(func() {
+		s.blockCommandService = nil
+		s.machineService = nil
+		s.api = nil
+		s.api = nil
+	})
 
 	return ctrl
 }
 
-func (s *DestroyMachineManagerSuite) expectUnpinAppLeaders(id string) {
-	machineTag := names.NewMachineTag(id)
-
-	s.leadership.EXPECT().GetMachineApplicationNames(gomock.Any(), id).Return([]string{"foo-app-1"}, nil)
-	s.leadership.EXPECT().UnpinApplicationLeadersByName(gomock.Any(), machineTag, []string{"foo-app-1"}).Return(params.PinApplicationsResults{}, nil)
+func (s *DestroyMachineManagerSuite) expectCalculateDestroyResult(
+	c *tc.C, ctrl *gomock.Controller, machineName coremachine.Name, unitNames []coreunit.Name,
+	containers []coremachine.Name,
+) {
+	if unitNames == nil {
+		unitNames = []coreunit.Name{"foo/0", "foo/1", "foo/2"}
+	}
+	for _, container := range containers {
+		s.applicationService.EXPECT().GetUnitNamesOnMachine(gomock.Any(), container).Return(unitNames, nil)
+	}
+	s.applicationService.EXPECT().GetUnitNamesOnMachine(gomock.Any(), machineName).Return(unitNames, nil).Times(1)
 }
 
-func (s *DestroyMachineManagerSuite) expectDestroyMachine(ctrl *gomock.Controller, units []machinemanager.Unit, containers []string, attemptDestroy, keep, force bool) *MockMachine {
-	machine := NewMockMachine(ctrl)
-	if keep {
-		machine.EXPECT().SetKeepInstance(true).Return(nil)
-	}
-
-	machine.EXPECT().Containers().Return(containers, nil)
-
-	if units == nil {
-		units = []machinemanager.Unit{
-			s.expectDestroyUnit(ctrl, "foo/0", true, nil),
-			s.expectDestroyUnit(ctrl, "foo/1", false, nil),
-			s.expectDestroyUnit(ctrl, "foo/2", false, nil),
-		}
-	}
-	machine.EXPECT().Units().Return(units, nil)
-
-	if attemptDestroy {
-		if force {
-			machine.EXPECT().ForceDestroy(gomock.Any()).Return(nil)
-		} else {
-			if len(containers) > 0 {
-				machine.EXPECT().Destroy(gomock.Any()).Return(stateerrors.NewHasContainersError("0", containers))
-			} else if len(units) > 0 {
-				machine.EXPECT().Destroy(gomock.Any()).Return(stateerrors.NewHasAssignedUnitsError("0", []string{"foo/0", "foo/1", "foo/2"}))
-			} else {
-				machine.EXPECT().Destroy(gomock.Any()).Return(nil)
-			}
-		}
-	}
-	return machine
-}
-
-func (s *DestroyMachineManagerSuite) expectDestroyUnit(ctrl *gomock.Controller, name string, hasStorage bool, retrievalErr error) *MockUnit {
-	unitTag := names.NewUnitTag(name)
-	unit := NewMockUnit(ctrl)
-	unit.EXPECT().UnitTag().Return(unitTag).AnyTimes()
-	if retrievalErr != nil {
-		s.storageAccess.EXPECT().UnitStorageAttachments(unitTag).Return(nil, retrievalErr)
-	} else if !hasStorage {
-		s.storageAccess.EXPECT().UnitStorageAttachments(unitTag).Return([]state.StorageAttachment{}, nil)
-	} else {
-		s.storageAccess.EXPECT().UnitStorageAttachments(unitTag).Return([]state.StorageAttachment{
-			s.expectDestroyStorage(ctrl, "disks/0", true),
-			s.expectDestroyStorage(ctrl, "disks/1", false),
-		}, nil)
-	}
-	return unit
-}
-
-func (s *DestroyMachineManagerSuite) expectDestroyStorage(ctrl *gomock.Controller, id string, detachable bool) *MockStorageAttachment {
-	storageInstanceTag := names.NewStorageTag(id)
-	storageAttachment := NewMockStorageAttachment(ctrl)
-	storageAttachment.EXPECT().StorageInstance().Return(storageInstanceTag)
-
-	storageInstance := NewMockStorageInstance(ctrl)
-	storageInstance.EXPECT().StorageTag().Return(storageInstanceTag).AnyTimes()
-	s.storageAccess.EXPECT().StorageInstance(storageInstanceTag).Return(storageInstance, nil)
-
-	return storageAttachment
-}
-
-func (s *DestroyMachineManagerSuite) TestDestroyMachineFailedAllStorageRetrieval(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *DestroyMachineManagerSuite) TestDestroyMachineDryRun(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	units := []machinemanager.Unit{
-		s.expectDestroyUnit(ctrl, "foo/0", false, errors.New("kaboom")),
-		s.expectDestroyUnit(ctrl, "foo/1", false, errors.New("kaboom")),
-		s.expectDestroyUnit(ctrl, "foo/2", false, errors.New("kaboom")),
-	}
-	machine0 := s.expectDestroyMachine(ctrl, units, nil, false, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return(machineUUID, nil).MaxTimes(1)
 
-	noWait := 0 * time.Second
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
-		MachineTags: []string{"machine-0"},
-		MaxWait:     &noWait,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
-		Results: []params.DestroyMachineResult{{
-			Error: apiservererrors.ServerError(errors.New("getting storage for unit foo/0: kaboom\ngetting storage for unit foo/1: kaboom\ngetting storage for unit foo/2: kaboom")),
-		}},
-	})
-}
+	s.machineService.EXPECT().GetMachineContainers(gomock.Any(), machineUUID).Return(nil, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0", nil, nil)
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineFailedSomeUnitStorageRetrieval(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	units := []machinemanager.Unit{
-		s.expectDestroyUnit(ctrl, "foo/0", false, nil),
-		s.expectDestroyUnit(ctrl, "foo/1", false, errors.New("kaboom")),
-		s.expectDestroyUnit(ctrl, "foo/2", false, nil),
-	}
-	machine0 := s.expectDestroyMachine(ctrl, units, nil, false, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	noWait := 0 * time.Second
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
-		MachineTags: []string{"machine-0"},
-		MaxWait:     &noWait,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
-		Results: []params.DestroyMachineResult{{
-			Error: apiservererrors.ServerError(errors.New("getting storage for unit foo/1: kaboom")),
-		}},
-	})
-}
-
-func (s *DestroyMachineManagerSuite) TestDestroyMachineFailedSomeStorageRetrievalManyMachines(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	s.expectUnpinAppLeaders("1")
-
-	units0 := []machinemanager.Unit{
-		s.expectDestroyUnit(ctrl, "foo/1", false, errors.New("kaboom")),
-	}
-	machine0 := s.expectDestroyMachine(ctrl, units0, nil, false, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	units1 := []machinemanager.Unit{}
-	machine1 := s.expectDestroyMachine(ctrl, units1, nil, true, false, false)
-	s.st.EXPECT().Machine("1").Return(machine1, nil)
-
-	noWait := 0 * time.Second
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
-		MachineTags: []string{"machine-0", "machine-1"},
-		MaxWait:     &noWait,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
-		Results: []params.DestroyMachineResult{
-			{Error: apiservererrors.ServerError(errors.New("getting storage for unit foo/1: kaboom"))},
-			{Info: &params.DestroyMachineInfo{
-				MachineId: "1",
-			}},
-		},
-	})
-}
-
-func (s *DestroyMachineManagerSuite) TestForceDestroyMachineFailedSomeStorageRetrievalManyMachines(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	s.expectUnpinAppLeaders("0")
-	s.expectUnpinAppLeaders("1")
-
-	units0 := []machinemanager.Unit{
-		s.expectDestroyUnit(ctrl, "foo/1", false, errors.New("kaboom")),
-	}
-	machine0 := s.expectDestroyMachine(ctrl, units0, nil, true, false, true)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	units1 := []machinemanager.Unit{
-		s.expectDestroyUnit(ctrl, "bar/0", true, nil),
-	}
-	machine1 := s.expectDestroyMachine(ctrl, units1, nil, true, false, true)
-	s.st.EXPECT().Machine("1").Return(machine1, nil)
-
-	noWait := 0 * time.Second
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
-		Force:       true,
-		MachineTags: []string{"machine-0", "machine-1"},
-		MaxWait:     &noWait,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
-		Results: []params.DestroyMachineResult{
-			{Info: &params.DestroyMachineInfo{
-				MachineId: "0",
-				DestroyedUnits: []params.Entity{
-					{"unit-foo-1"},
-				},
-			}},
-			{Info: &params.DestroyMachineInfo{
-				MachineId: "1",
-				DestroyedUnits: []params.Entity{
-					{"unit-bar-0"},
-				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
-				},
-			}},
-		},
-	})
-}
-
-func (s *DestroyMachineManagerSuite) TestDestroyMachineDryRun(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectDestroyMachine(ctrl, nil, nil, false, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
+	results, err := s.api.DestroyMachineWithParams(c.Context(), params.DestroyMachinesParams{
 		MachineTags: []string{"machine-0"},
 		DryRun:      true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
+	c.Assert(results, tc.DeepEquals, params.DestroyMachineResults{
 		Results: []params.DestroyMachineResult{{
 			Info: &params.DestroyMachineInfo{
 				MachineId: "0",
@@ -533,33 +295,29 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineDryRun(c *gc.C) {
 					{"unit-foo-0"},
 					{"unit-foo-1"},
 					{"unit-foo-2"},
-				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
 				},
 			},
 		}},
 	})
 }
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersDryRun(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersDryRun(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	machine0 := s.expectDestroyMachine(ctrl, nil, []string{"0/lxd/0"}, false, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-	container0 := s.expectDestroyMachine(ctrl, nil, nil, false, false, false)
-	s.st.EXPECT().Machine("0/lxd/0").Return(container0, nil)
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return(machineUUID, nil).MaxTimes(1)
 
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
+	s.machineService.EXPECT().GetMachineContainers(gomock.Any(), machineUUID).Return([]coremachine.Name{"0/lxd/0"}, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0", nil, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0/lxd/0", nil, nil)
+
+	results, err := s.api.DestroyMachineWithParams(c.Context(), params.DestroyMachinesParams{
 		MachineTags: []string{"machine-0"},
 		DryRun:      true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.DestroyMachineResults{
 		Results: []params.DestroyMachineResult{{
 			Info: &params.DestroyMachineInfo{
 				MachineId: "0",
@@ -567,12 +325,6 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersDryRun(c *g
 					{"unit-foo-0"},
 					{"unit-foo-1"},
 					{"unit-foo-2"},
-				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
 				},
 				DestroyedContainers: []params.DestroyMachineResult{{
 					Info: &params.DestroyMachineInfo{
@@ -582,12 +334,6 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersDryRun(c *g
 							{"unit-foo-1"},
 							{"unit-foo-2"},
 						},
-						DetachedStorage: []params.Entity{
-							{"storage-disks-0"},
-						},
-						DestroyedStorage: []params.Entity{
-							{"storage-disks-1"},
-						},
 					},
 				}},
 			},
@@ -595,24 +341,29 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersDryRun(c *g
 	})
 }
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNoWait(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNoWait(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.expectUnpinAppLeaders("0")
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return(machineUUID, nil).Times(1)
 
-	machine0 := s.expectDestroyMachine(ctrl, nil, nil, true, true, true)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	s.machineService.EXPECT().GetMachineContainers(gomock.Any(), machineUUID).Return(nil, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0", nil, nil)
+
+	s.removalService.EXPECT().RemoveMachine(gomock.Any(), machineUUID, true, gomock.Any()).Return("", nil).Times(1)
+
+	s.machineService.EXPECT().SetKeepInstance(gomock.Any(), coremachine.Name("0"), true)
 
 	noWait := 0 * time.Second
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
+	results, err := s.api.DestroyMachineWithParams(c.Context(), params.DestroyMachinesParams{
 		Keep:        true,
 		Force:       true,
 		MachineTags: []string{"machine-0"},
 		MaxWait:     &noWait,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.DestroyMachineResults{
 		Results: []params.DestroyMachineResult{{
 			Info: &params.DestroyMachineInfo{
 				MachineId: "0",
@@ -621,34 +372,33 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNoWait(c *gc.C)
 					{"unit-foo-1"},
 					{"unit-foo-2"},
 				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
-				},
 			},
 		}},
 	})
 }
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNilWait(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNilWait(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.expectUnpinAppLeaders("0")
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return(machineUUID, nil).Times(1)
 
-	machine0 := s.expectDestroyMachine(ctrl, nil, nil, true, true, true)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	s.machineService.EXPECT().GetMachineContainers(gomock.Any(), machineUUID).Return(nil, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0", nil, nil)
 
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
+	s.removalService.EXPECT().RemoveMachine(gomock.Any(), machineUUID, true, gomock.Any()).Return("", nil).Times(1)
+
+	s.machineService.EXPECT().SetKeepInstance(gomock.Any(), coremachine.Name("0"), true)
+
+	results, err := s.api.DestroyMachineWithParams(c.Context(), params.DestroyMachinesParams{
 		Keep:        true,
 		Force:       true,
 		MachineTags: []string{"machine-0"},
 		// This will use max wait of system default for delay between cleanup operations.
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.DestroyMachineResults{
 		Results: []params.DestroyMachineResult{{
 			Info: &params.DestroyMachineInfo{
 				MachineId: "0",
@@ -656,58 +406,31 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithParamsNilWait(c *gc.C
 					{"unit-foo-0"},
 					{"unit-foo-1"},
 					{"unit-foo-2"},
-				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
 				},
 			},
 		}},
 	})
 }
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainers(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainers(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.leadership.EXPECT().GetMachineApplicationNames(gomock.Any(), "0").Return([]string{"foo-app-1"}, nil)
+	machineUUID := machinetesting.GenUUID(c)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return(machineUUID, nil).MaxTimes(1)
 
-	machine0 := s.expectDestroyMachine(ctrl, nil, []string{"0/lxd/0"}, true, false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	s.machineService.EXPECT().GetMachineContainers(gomock.Any(), machineUUID).Return([]coremachine.Name{"0/lxd/0"}, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0", nil, nil)
+	s.expectCalculateDestroyResult(c, ctrl, "0/lxd/0", nil, nil)
 
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
-		Force:       false,
-		MachineTags: []string{"machine-0"},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
-		Results: []params.DestroyMachineResult{{
-			Error: apiservererrors.ServerError(stateerrors.NewHasContainersError("0", []string{"0/lxd/0"})),
-		}},
-	})
-}
+	s.removalService.EXPECT().RemoveMachine(gomock.Any(), machineUUID, true, gomock.Any()).Return("", nil).Times(1)
 
-func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersWithForce(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	s.expectUnpinAppLeaders("0")
-
-	s.expectUnpinAppLeaders("0/lxd/0")
-
-	machine0 := s.expectDestroyMachine(ctrl, nil, []string{"0/lxd/0"}, true, false, true)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-	container0 := s.expectDestroyMachine(ctrl, nil, nil, true, false, true)
-	s.st.EXPECT().Machine("0/lxd/0").Return(container0, nil)
-
-	results, err := s.api.DestroyMachineWithParams(stdcontext.Background(), params.DestroyMachinesParams{
+	results, err := s.api.DestroyMachineWithParams(c.Context(), params.DestroyMachinesParams{
 		Force:       true,
 		MachineTags: []string{"machine-0"},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.DestroyMachineResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.DestroyMachineResults{
 		Results: []params.DestroyMachineResult{{
 			Info: &params.DestroyMachineInfo{
 				MachineId: "0",
@@ -715,12 +438,6 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersWithForce(c
 					{"unit-foo-0"},
 					{"unit-foo-1"},
 					{"unit-foo-2"},
-				},
-				DetachedStorage: []params.Entity{
-					{"storage-disks-0"},
-				},
-				DestroyedStorage: []params.Entity{
-					{"storage-disks-1"},
 				},
 				DestroyedContainers: []params.DestroyMachineResult{{
 					Info: &params.DestroyMachineInfo{
@@ -730,12 +447,6 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersWithForce(c
 							{"unit-foo-1"},
 							{"unit-foo-2"},
 						},
-						DetachedStorage: []params.Entity{
-							{"storage-disks-0"},
-						},
-						DestroyedStorage: []params.Entity{
-							{"storage-disks-1"},
-						},
 					},
 				}},
 			},
@@ -743,947 +454,259 @@ func (s *DestroyMachineManagerSuite) TestDestroyMachineWithContainersWithForce(c
 	})
 }
 
-// Alternate placing storage instaces in detached, then destroyed
-func mockedClassifyDetachedStorage(
-	_ storagecommon.VolumeAccess,
-	_ storagecommon.FilesystemAccess,
-	storage []state.StorageInstance,
-) ([]params.Entity, []params.Entity, error) {
-	destroyed := make([]params.Entity, 0)
-	detached := make([]params.Entity, 0)
-	for i, stor := range storage {
-		if i%2 == 0 {
-			detached = append(detached, params.Entity{stor.StorageTag().String()})
-		} else {
-			destroyed = append(destroyed, params.Entity{stor.StorageTag().String()})
-		}
-	}
-	return destroyed, detached, nil
-}
-
-var _ = gc.Suite(&ProvisioningMachineManagerSuite{})
-
 type ProvisioningMachineManagerSuite struct {
-	authorizer   *apiservertesting.FakeAuthorizer
-	st           *MockBackend
-	ctrlSt       *MockControllerBackend
-	pool         *MockPool
-	model        *MockModel
-	store        *MockObjectStore
-	cloudService *commonmocks.MockCloudService
-	credService  *commonmocks.MockCredentialService
-	api          *machinemanager.MachineManagerAPI
+	authorizer     *apiservertesting.FakeAuthorizer
+	clock          clock.Clock
+	cloudService   *commonmocks.MockCloudService
+	api            *MachineManagerAPI
+	modelUUID      coremodel.UUID
+	controllerUUID string
 
 	controllerConfigService *MockControllerConfigService
+	controllerNodeService   *MockControllerNodeService
 	machineService          *MockMachineService
-	networkService          *MockNetworkService
+	statusService           *MockStatusService
+	keyUpdaterService       *MockKeyUpdaterService
+	modelConfigService      *MockModelConfigService
+	bootstrapEnviron        *MockBootstrapEnviron
+	blockCommandService     *MockBlockCommandService
+	agentBinaryService      *MockAgentBinaryService
+	agentPasswordService    *MockAgentPasswordService
 }
 
-func (s *ProvisioningMachineManagerSuite) SetUpTest(c *gc.C) {
+func TestProvisioningMachineManagerSuite(t *testing.T) {
+	tc.Run(t, &ProvisioningMachineManagerSuite{})
+}
+
+func (s *ProvisioningMachineManagerSuite) SetUpTest(c *tc.C) {
 	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
 }
 
-func (s *ProvisioningMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
+func (s *ProvisioningMachineManagerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
-
-	s.st = NewMockBackend(ctrl)
-
-	s.ctrlSt = NewMockControllerBackend(ctrl)
-	s.ctrlSt.EXPECT().ControllerTag().Return(coretesting.ControllerTag).AnyTimes()
+	s.controllerUUID = uuid.MustNewUUID().String()
+	s.modelUUID = modeltesting.GenModelUUID(c)
 
 	s.controllerConfigService = NewMockControllerConfigService(ctrl)
 	s.controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).Return(coretesting.FakeControllerConfig(), nil).AnyTimes()
+	s.controllerNodeService = NewMockControllerNodeService(ctrl)
 	s.machineService = NewMockMachineService(ctrl)
-
-	s.pool = NewMockPool(ctrl)
-	s.pool.EXPECT().SystemState().Return(s.ctrlSt, nil).AnyTimes()
-
-	s.model = NewMockModel(ctrl)
-	s.model.EXPECT().UUID().Return("uuid").AnyTimes()
-	s.model.EXPECT().ModelTag().Return(coretesting.ModelTag).AnyTimes()
-	s.st.EXPECT().Model().Return(s.model, nil).AnyTimes()
+	s.statusService = NewMockStatusService(ctrl)
 
 	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
+	s.keyUpdaterService = NewMockKeyUpdaterService(ctrl)
+	s.modelConfigService = NewMockModelConfigService(ctrl)
+	s.bootstrapEnviron = NewMockBootstrapEnviron(ctrl)
+	s.clock = testclock.NewClock(time.Now())
 
-	s.store = NewMockObjectStore(ctrl)
+	s.blockCommandService = NewMockBlockCommandService(ctrl)
+	s.blockCommandService.EXPECT().GetBlockSwitchedOn(gomock.Any(), gomock.Any()).Return("", blockcommanderrors.NotFound).AnyTimes()
 
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
+	s.agentBinaryService = NewMockAgentBinaryService(ctrl)
+	s.agentPasswordService = NewMockAgentPasswordService(ctrl)
+
+	s.api = NewMachineManagerAPI(
+		s.controllerUUID,
+		s.modelUUID,
 		nil,
-		nil,
-		s.pool,
-		machinemanager.ModelAuthorizer{
+		ModelAuthorizer{
 			Authorizer: s.authorizer,
 		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
 		loggertesting.WrapCheckLog(c),
-		s.networkService,
+		s.clock,
+		Services{
+			AgentBinaryService:      s.agentBinaryService,
+			AgentPasswordService:    s.agentPasswordService,
+			BlockCommandService:     s.blockCommandService,
+			CloudService:            s.cloudService,
+			ControllerConfigService: s.controllerConfigService,
+			ControllerNodeService:   s.controllerNodeService,
+			KeyUpdaterService:       s.keyUpdaterService,
+			MachineService:          s.machineService,
+			StatusService:           s.statusService,
+			ModelConfigService:      s.modelConfigService,
+		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+
+	c.Cleanup(func() {
+		s.blockCommandService = nil
+		s.cloudService = nil
+		s.controllerConfigService = nil
+		s.controllerNodeService = nil
+		s.keyUpdaterService = nil
+		s.machineService = nil
+		s.modelConfigService = nil
+		s.api = nil
+	})
 	return ctrl
 }
 
-func (s *ProvisioningMachineManagerSuite) expectProvisioningMachine(ctrl *gomock.Controller, arch *string) *MockMachine {
-	machine := NewMockMachine(ctrl)
-	machine.EXPECT().Base().Return(state.Base{OS: "ubuntu", Channel: "20.04/stable"}).AnyTimes()
-	machine.EXPECT().Tag().Return(names.NewMachineTag("0")).AnyTimes()
-	machine.EXPECT().HardwareCharacteristics().Return(&instance.HardwareCharacteristics{Arch: arch}, nil)
+func (s *ProvisioningMachineManagerSuite) expectProvisioningMachine(arch *string) {
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return("deadbeef", nil)
+	s.machineService.EXPECT().GetHardwareCharacteristics(gomock.Any(), coremachine.UUID("deadbeef")).Return(instance.HardwareCharacteristics{Arch: arch}, nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), coremachine.Name("0")).Return(corebase.MustParseBaseFromString("ubuntu@20.04/stable"), nil)
 	if arch != nil {
-		machine.EXPECT().SetPassword(gomock.Any()).Return(nil)
+		s.agentPasswordService.EXPECT().SetMachinePassword(gomock.Any(), coremachine.Name("0"), gomock.Any()).Return(nil).AnyTimes()
 	}
-
-	return machine
 }
 
-func (s *ProvisioningMachineManagerSuite) expectProvisioningStorageCloser(ctrl *gomock.Controller) *MockStorageCloser {
-	storageCloser := NewMockStorageCloser(ctrl)
-	storageCloser.EXPECT().AllMetadata().Return([]binarystorage.Metadata{{
-		Version: "2.6.6-ubuntu-amd64",
-	}}, nil)
-	storageCloser.EXPECT().Close().Return(nil)
-
-	return storageCloser
-}
-
-func (s *ProvisioningMachineManagerSuite) TestProvisioningScript(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *ProvisioningMachineManagerSuite) TestProvisioningScript(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.model.EXPECT().Config().Return(config.New(config.UseDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
+	cfg, err := config.New(config.NoDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
 		"agent-version":            "2.6.6",
 		"enable-os-upgrade":        true,
 		"enable-os-refresh-update": true,
-	}))).Times(2)
+	}))
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil).Times(2)
 
 	arch := "amd64"
-	machine0 := s.expectProvisioningMachine(ctrl, &arch)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	s.expectProvisioningMachine(&arch)
 
-	storageCloser := s.expectProvisioningStorageCloser(ctrl)
-	s.st.EXPECT().ToolsStorage(gomock.Any()).Return(storageCloser, nil)
+	metadata := []agentbinary.Metadata{{
+		Version: "2.6.6",
+		Arch:    arch,
+		Size:    4,
+		SHA256:  "sha256",
+	}}
+	s.agentBinaryService.EXPECT().ListAgentBinaries(gomock.Any()).Return(metadata, nil)
 
-	s.ctrlSt.EXPECT().APIHostPortsForAgents(gomock.Any()).Return([]network.SpaceHostPorts{{{
-		SpaceAddress: network.NewSpaceAddress("0.2.4.6", network.WithScope(network.ScopeCloudLocal)),
-		NetPort:      1,
-	}}}, nil).Times(2)
+	addrs := []string{"0.2.4.6:1"}
+	s.controllerNodeService.EXPECT().GetAllAPIAddressesForAgents(gomock.Any()).Return(addrs, nil).MinTimes(2)
+	s.keyUpdaterService.EXPECT().GetAuthorisedKeysForMachine(
+		gomock.Any(), coremachine.Name("0"),
+	).Return([]string{
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4GpCvqUUYUJlx6d1kpUO9k/t4VhSYsf0yE0/QTqDzC existing1",
+	}, nil)
 
-	result, err := s.api.ProvisioningScript(stdcontext.Background(), params.ProvisioningScriptParams{
+	result, err := s.api.ProvisioningScript(c.Context(), params.ProvisioningScriptParams{
 		MachineId: "0",
 		Nonce:     "nonce",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	scriptLines := strings.Split(result.Script, "\n")
 	provisioningScriptLines := strings.Split(result.Script, "\n")
-	c.Assert(scriptLines, gc.HasLen, len(provisioningScriptLines))
+	c.Assert(scriptLines, tc.HasLen, len(provisioningScriptLines))
 	for i, line := range scriptLines {
 		if strings.Contains(line, "oldpassword") {
 			continue
 		}
-		c.Assert(line, gc.Equals, provisioningScriptLines[i])
+		c.Assert(line, tc.Equals, provisioningScriptLines[i])
 	}
 }
 
-func (s *ProvisioningMachineManagerSuite) TestProvisioningScriptNoArch(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *ProvisioningMachineManagerSuite) TestProvisioningScriptNoArch(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.model.EXPECT().Config().Return(config.New(config.UseDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
+	cfg, err := config.New(config.NoDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
 		"agent-version":            "2.6.6",
 		"enable-os-upgrade":        false,
 		"enable-os-refresh-update": false,
-	})))
+	}))
+	c.Assert(err, tc.ErrorIsNil)
 
-	machine0 := s.expectProvisioningMachine(ctrl, nil)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-	_, err := s.api.ProvisioningScript(stdcontext.Background(), params.ProvisioningScriptParams{
+	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil)
+
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return("deadbeef", nil)
+	s.machineService.EXPECT().GetHardwareCharacteristics(gomock.Any(), coremachine.UUID("deadbeef")).Return(instance.HardwareCharacteristics{}, nil)
+
+	_, err = s.api.ProvisioningScript(c.Context(), params.ProvisioningScriptParams{
 		MachineId: "0",
 		Nonce:     "nonce",
 	})
-	c.Assert(err, gc.ErrorMatches, `getting instance config: arch is not set for "machine-0"`)
+	c.Assert(err, tc.ErrorMatches, `getting instance config: arch is not set for "0"`)
 }
 
-func (s *ProvisioningMachineManagerSuite) TestProvisioningScriptDisablePackageCommands(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *ProvisioningMachineManagerSuite) TestProvisioningScriptDisablePackageCommands(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.model.EXPECT().Config().Return(config.New(config.UseDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
+	cfg, err := config.New(config.NoDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
 		"agent-version":            "2.6.6",
 		"enable-os-upgrade":        false,
 		"enable-os-refresh-update": false,
-	}))).Times(2)
+	}))
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil).Times(2)
 
 	arch := "amd64"
-	machine0 := s.expectProvisioningMachine(ctrl, &arch)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
+	s.expectProvisioningMachine(&arch)
 
-	storageCloser := s.expectProvisioningStorageCloser(ctrl)
-	s.st.EXPECT().ToolsStorage(gomock.Any()).Return(storageCloser, nil)
+	metadata := []agentbinary.Metadata{{
+		Version: "2.6.6",
+		Arch:    arch,
+		Size:    4,
+		SHA256:  "sha256",
+	}}
+	s.agentBinaryService.EXPECT().ListAgentBinaries(gomock.Any()).Return(metadata, nil)
 
-	s.ctrlSt.EXPECT().APIHostPortsForAgents(gomock.Any()).Return([]network.SpaceHostPorts{{{
-		SpaceAddress: network.NewSpaceAddress("0.2.4.6", network.WithScope(network.ScopeCloudLocal)),
-		NetPort:      1,
-	}}}, nil).Times(2)
+	addrs := []string{"0.2.4.6:1"}
+	s.controllerNodeService.EXPECT().GetAllAPIAddressesForAgents(gomock.Any()).Return(addrs, nil).MinTimes(2)
 
-	result, err := s.api.ProvisioningScript(stdcontext.Background(), params.ProvisioningScriptParams{
+	s.keyUpdaterService.EXPECT().GetAuthorisedKeysForMachine(
+		gomock.Any(), coremachine.Name("0"),
+	).Return([]string{}, nil)
+
+	result, err := s.api.ProvisioningScript(c.Context(), params.ProvisioningScriptParams{
 		MachineId: "0",
 		Nonce:     "nonce",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Script, gc.Not(jc.Contains), "apt-get update")
-	c.Assert(result.Script, gc.Not(jc.Contains), "apt-get upgrade")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Script, tc.Not(tc.Contains), "apt-get update")
+	c.Assert(result.Script, tc.Not(tc.Contains), "apt-get upgrade")
 }
 
-type statusMatcher struct {
-	c        *gc.C
-	expected status.StatusInfo
-}
-
-func (m statusMatcher) Matches(x interface{}) bool {
-	obtained, ok := x.(status.StatusInfo)
-	m.c.Assert(ok, jc.IsTrue)
-	if !ok {
-		return false
-	}
-
-	m.c.Assert(obtained.Since, gc.NotNil)
-	obtained.Since = nil
-	m.c.Assert(obtained, jc.DeepEquals, m.expected)
-	return true
-}
-
-func (m statusMatcher) String() string {
-	return "Match the status.StatusInfo value"
-}
-
-func (s *ProvisioningMachineManagerSuite) TestRetryProvisioning(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *ProvisioningMachineManagerSuite) TestRetryProvisioning(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
+	now := s.clock.Now()
 
-	machine0 := NewMockMachine(ctrl)
-	machine0.EXPECT().Id().Return("0")
-	machine0.EXPECT().InstanceStatus().Return(status.StatusInfo{Status: "provisioning error"}, nil)
-	machine0.EXPECT().SetInstanceStatus(statusMatcher{c: c, expected: status.StatusInfo{
+	s.statusService.EXPECT().GetInstanceStatus(gomock.Any(), coremachine.Name("0")).Return(status.StatusInfo{Status: status.ProvisioningError}, nil)
+	s.statusService.EXPECT().SetInstanceStatus(gomock.Any(), coremachine.Name("0"), status.StatusInfo{
 		Status: status.ProvisioningError,
 		Data:   map[string]interface{}{"transient": true},
-	}}).Return(nil)
-	machine1 := NewMockMachine(ctrl)
-	machine1.EXPECT().Id().Return("1")
-	s.st.EXPECT().AllMachines().Return([]machinemanager.Machine{machine0, machine1}, nil)
+		Since:  &now,
+	}).Return(nil)
 
-	results, err := s.api.RetryProvisioning(stdcontext.Background(), params.RetryProvisioningArgs{
+	s.machineService.EXPECT().AllMachineNames(gomock.Any()).Return([]coremachine.Name{"0", "1"}, nil)
+
+	results, err := s.api.RetryProvisioning(c.Context(), params.RetryProvisioningArgs{
 		Machines: []string{"machine-0"},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ErrorResults{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{})
 }
 
-func (s *ProvisioningMachineManagerSuite) TestRetryProvisioningAll(c *gc.C) {
-	ctrl := s.setup(c)
+func (s *ProvisioningMachineManagerSuite) TestRetryProvisioningAll(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
+	now := s.clock.Now()
 
-	machine0 := NewMockMachine(ctrl)
-	machine0.EXPECT().InstanceStatus().Return(status.StatusInfo{Status: "provisioning error"}, nil)
-	machine0.EXPECT().SetInstanceStatus(statusMatcher{c: c, expected: status.StatusInfo{
+	s.machineService.EXPECT().AllMachineNames(gomock.Any()).Return([]coremachine.Name{"0", "1"}, nil)
+
+	s.statusService.EXPECT().GetInstanceStatus(gomock.Any(), coremachine.Name("0")).Return(status.StatusInfo{Status: status.ProvisioningError}, nil)
+	s.statusService.EXPECT().SetInstanceStatus(gomock.Any(), coremachine.Name("0"), status.StatusInfo{
 		Status: status.ProvisioningError,
 		Data:   map[string]interface{}{"transient": true},
-	}}).Return(nil)
-	machine1 := NewMockMachine(ctrl)
-	machine1.EXPECT().InstanceStatus().Return(status.StatusInfo{Status: "pending"}, nil)
-	s.st.EXPECT().AllMachines().Return([]machinemanager.Machine{machine0, machine1}, nil)
+		Since:  &now,
+	}).Return(nil)
 
-	results, err := s.api.RetryProvisioning(stdcontext.Background(), params.RetryProvisioningArgs{
+	s.statusService.EXPECT().GetInstanceStatus(gomock.Any(), coremachine.Name("1")).Return(status.StatusInfo{Status: status.Pending}, nil)
+
+	results, err := s.api.RetryProvisioning(c.Context(), params.RetryProvisioningArgs{
 		All: true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ErrorResults{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{})
 }
 
-type UpgradeSeriesMachineManagerSuite struct{}
-
-func (s *UpgradeSeriesMachineManagerSuite) expectValidateMachine(ctrl *gomock.Controller, os, channel string, isManager, isLockedForSeriesUpgrade bool) *MockMachine {
-	machine := NewMockMachine(ctrl)
-	machine.EXPECT().Tag().Return(names.NewMachineTag("0")).AnyTimes()
-	machine.EXPECT().Base().Return(state.Base{OS: os, Channel: channel + "/stable"}).AnyTimes()
-	machine.EXPECT().Id().Return("0").AnyTimes()
-
-	machine.EXPECT().IsManager().Return(isManager)
-	if isManager {
-		return machine
-	}
-	machine.EXPECT().IsLockedForSeriesUpgrade().Return(isLockedForSeriesUpgrade, nil)
-	if isLockedForSeriesUpgrade {
-		machine.EXPECT().UpgradeSeriesStatus().Return(model.UpgradeSeriesNotStarted, nil)
-		return machine
-	}
-
-	return machine
-}
-
-func (s *UpgradeSeriesMachineManagerSuite) expectValidateApplicationOnMachine(ctrl *gomock.Controller, supportedBases []corebase.Base) *MockApplication {
-	app := NewMockApplication(ctrl)
-	ch := NewMockCharm(ctrl)
-	ch.EXPECT().Manifest().Return(&charm.Manifest{
-		Bases: transform.Slice(supportedBases, func(b corebase.Base) charm.Base {
-			return charm.Base{
-				Name:    b.OS,
-				Channel: charm.Channel{Track: b.Channel.Track, Risk: charm.Risk(b.Channel.Risk)},
-			}
-		}),
-	}).AnyTimes()
-	ch.EXPECT().Meta().Return(&charm.Meta{
-		Name: "TestCharm",
-	}).AnyTimes()
-	app.EXPECT().Charm().Return(ch, true, nil)
-	app.EXPECT().CharmOrigin().Return(&state.CharmOrigin{})
-
-	return app
-}
-
-var _ = gc.Suite(&UpgradeSeriesValidateMachineManagerSuite{})
-
-type UpgradeSeriesValidateMachineManagerSuite struct {
-	*UpgradeSeriesMachineManagerSuite
-	authorizer   *apiservertesting.FakeAuthorizer
-	st           *MockBackend
-	store        *MockObjectStore
-	cloudService *commonmocks.MockCloudService
-	credService  *commonmocks.MockCredentialService
-	api          *machinemanager.MachineManagerAPI
-
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) SetUpTest(c *gc.C) {
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-
-	s.st = NewMockBackend(ctrl)
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
-	s.machineService = NewMockMachineService(ctrl)
-	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.store = NewMockObjectStore(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
-
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
-		nil,
-		nil,
-		nil,
-		machinemanager.ModelAuthorizer{
-			Authorizer: s.authorizer,
-		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
-		loggertesting.WrapCheckLog(c),
-		s.networkService,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	return ctrl
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) expectValidateUnit(ctrl *gomock.Controller, unitName string, unitAgentState, unitState status.Status) *MockUnit {
-	unitTag := names.NewUnitTag(unitName)
-	unit := NewMockUnit(ctrl)
-	unit.EXPECT().Name().Return(unitTag.String()).AnyTimes()
-	unit.EXPECT().AgentStatus().Return(status.StatusInfo{Status: unitAgentState}, nil)
-	if unitAgentState != status.Executing && unitAgentState != status.Error {
-		unit.EXPECT().Status().Return(status.StatusInfo{Status: unitState}, nil)
-		if unitState != status.Executing && unitState != status.Error {
-			unit.EXPECT().UnitTag().Return(unitTag)
-		}
-	}
-	return unit
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateOK(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	machine0.EXPECT().ApplicationNames().Return([]string{"foo"}, nil)
-	app := s.expectValidateApplicationOnMachine(ctrl, defaultSupportedBases)
-	s.st.EXPECT().Application("foo").Return(app, nil)
-
-	machine0.EXPECT().Units().Return([]machinemanager.Unit{
-		s.expectValidateUnit(ctrl, "foo/0", status.Idle, status.Idle),
-		s.expectValidateUnit(ctrl, "foo/1", status.Idle, status.Idle),
-		s.expectValidateUnit(ctrl, "foo/2", status.Idle, status.Idle),
-	}, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "22.04",
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	result := results.Results[0]
-	c.Assert(result.Error, gc.IsNil)
-	c.Assert(result.UnitNames, gc.DeepEquals, []string{"foo/0", "foo/1", "foo/2"})
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateIsControllerError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", true, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity: params.Entity{Tag: names.NewMachineTag("0").String()},
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"machine-0 is a controller and cannot be targeted for series upgrade")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateIsLockedForSeriesUpgradeError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, true)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity: params.Entity{Tag: names.NewMachineTag("0").String()},
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		`upgrade series lock found for "0"; series upgrade is in the "not started" state`)
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateNoChannelError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity: params.Entity{Tag: names.NewMachineTag("0").String()},
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, "channel missing from args")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateNotFromUbuntuError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "centos", "7", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "18.04",
-		}},
-	}
-
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"machine-0 is running centos and is not valid for Ubuntu series upgrade")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateAlreadyRunningSeriesError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "20.04",
-		}},
-	}
-
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, "machine-0 is already running base ubuntu@20.04")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateOlderSeriesError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "18.04",
-		}},
-	}
-
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"machine machine-0 is running ubuntu@20.04 which is a newer base than ubuntu@18.04.")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateUnitNotIdleError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	machine0.EXPECT().ApplicationNames().Return([]string{"foo"}, nil)
-	app := s.expectValidateApplicationOnMachine(ctrl, defaultSupportedBases)
-	s.st.EXPECT().Application("foo").Return(app, nil)
-
-	machine0.EXPECT().Units().Return([]machinemanager.Unit{
-		s.expectValidateUnit(ctrl, "foo/0", status.Executing, status.Active),
-		NewMockUnit(ctrl),
-	}, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "22.04",
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"unit unit-foo-0 is not ready to start a series upgrade; its agent status is: \"executing\" ")
-}
-
-func (s *UpgradeSeriesValidateMachineManagerSuite) TestUpgradeSeriesValidateUnitStatusError(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	machine0.EXPECT().ApplicationNames().Return([]string{"foo"}, nil)
-	app := s.expectValidateApplicationOnMachine(ctrl, defaultSupportedBases)
-	s.st.EXPECT().Application("foo").Return(app, nil)
-
-	machine0.EXPECT().Units().Return([]machinemanager.Unit{
-		s.expectValidateUnit(ctrl, "foo/0", status.Idle, status.Error),
-		NewMockUnit(ctrl),
-	}, nil)
-
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "22.04",
-		}},
-	}
-	results, err := s.api.UpgradeSeriesValidate(stdcontext.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches,
-		"unit unit-foo-[0-2] is not ready to start a series upgrade; its status is: \"error\" ")
-}
-
-var _ = gc.Suite(&UpgradeSeriesPrepareMachineManagerSuite{})
-
-type UpgradeSeriesPrepareMachineManagerSuite struct {
-	*UpgradeSeriesMachineManagerSuite
-	authorizer   *apiservertesting.FakeAuthorizer
-	st           *MockBackend
-	store        *MockObjectStore
-	cloudService *commonmocks.MockCloudService
-	credService  *commonmocks.MockCredentialService
-	api          *machinemanager.MachineManagerAPI
-
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) SetUpTest(c *gc.C) {
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-
-	s.st = NewMockBackend(ctrl)
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
-	s.machineService = NewMockMachineService(ctrl)
-
-	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
-
-	s.store = NewMockObjectStore(ctrl)
-
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
-		nil,
-		nil,
-		nil,
-		machinemanager.ModelAuthorizer{
-			Authorizer: s.authorizer,
-		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
-		loggertesting.WrapCheckLog(c),
-		s.networkService,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	return ctrl
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) expectPrepareMachine(ctrl *gomock.Controller, app *MockApplication, upgradeSeriesErr error) *MockMachine {
-	machine := s.expectValidateMachine(ctrl, "ubuntu", "20.04", false, false)
-
-	machine.EXPECT().ApplicationNames().Return([]string{"foo"}, nil)
-	s.st.EXPECT().Application("foo").Return(app, nil)
-
-	machine.EXPECT().Units().Return([]machinemanager.Unit{
-		s.expectPrepareUnit(ctrl, "foo/0"),
-		s.expectPrepareUnit(ctrl, "foo/1"),
-		s.expectPrepareUnit(ctrl, "foo/2"),
-	}, nil)
-
-	if upgradeSeriesErr == nil {
-		machine.EXPECT().CreateUpgradeSeriesLock([]string{"foo/0", "foo/1", "foo/2"}, state.Base{OS: "ubuntu", Channel: "22.04"})
-
-		machine.EXPECT().SetUpgradeSeriesStatus(
-			model.UpgradeSeriesPrepareStarted,
-			"started upgrade from \"ubuntu@20.04\" to \"ubuntu@22.04\"",
-		).Return(upgradeSeriesErr)
-	}
-
-	return machine
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) expectPrepareUnit(ctrl *gomock.Controller, unitName string) *MockUnit {
-	unit := NewMockUnit(ctrl)
-	unit.EXPECT().UnitTag().Return(names.NewUnitTag(unitName))
-
-	return unit
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepare(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	app := s.expectValidateApplicationOnMachine(ctrl, defaultSupportedBases)
-	machine0 := s.expectPrepareMachine(ctrl, app, nil)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	machineTag := names.NewMachineTag("0")
-	result, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{
-				Tag: machineTag.String()},
-			Channel: "22.04",
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Error, gc.IsNil)
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepareMachineNotFound(c *gc.C) {
-	defer s.setup(c).Finish()
-
-	s.st.EXPECT().Machine("76").Return(nil, errors.NotFoundf("machine 76"))
-
-	machineTag := names.NewMachineTag("76")
-	result, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{
-				Tag: machineTag.String()},
-			Channel: "20.04",
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Error, gc.ErrorMatches, "machine 76 not found")
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepareNotMachineTag(c *gc.C) {
-	unitTag := names.NewUnitTag("mysql/0")
-	result, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{
-				Tag: unitTag.String()},
-			Channel: "20.04",
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Error, gc.ErrorMatches, "\"unit-mysql-0\" is not a valid machine tag")
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) setAPIUser(c *gc.C, user names.UserTag) {
-	s.authorizer.Tag = user
-	mm, err := machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
-		nil,
-		nil,
-		nil,
-		machinemanager.ModelAuthorizer{
-			Authorizer: s.authorizer,
-		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
-		loggertesting.WrapCheckLog(c),
-		s.networkService,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	s.api = mm
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPreparePermissionDenied(c *gc.C) {
-	user := names.NewUserTag("fred")
-	s.setAPIUser(c, user)
-	machineTag := names.NewMachineTag("0")
-	_, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{
-				Tag: machineTag.String()},
-			Channel: "22.04",
-		},
-	)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepareNoSeries(c *gc.C) {
-	result, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{Tag: names.NewMachineTag("0").String()},
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, params.ErrorResult{
-		Error: &params.Error{
-			Code:    params.CodeBadRequest,
-			Message: `channel missing from args`,
-		},
-	})
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepareIncompatibleBase(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	supportedBases := []corebase.Base{
-		corebase.MustParseBaseFromString("ubuntu@16.10"),
-		corebase.MustParseBaseFromString("ubuntu@17.04"),
-	}
-
-	app := s.expectValidateApplicationOnMachine(ctrl, supportedBases)
-	machine0 := s.expectPrepareMachine(ctrl, app, apiservererrors.NewErrIncompatibleBase(
-		supportedBases,
-		corebase.MustParseBaseFromString("ubuntu@22.04"), "TestCharm"),
-	)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	result, err := s.api.UpgradeSeriesPrepare(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity:  params.Entity{Tag: names.NewMachineTag("0").String()},
-			Channel: "22.04",
-			Force:   false,
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, params.ErrorResult{
-		Error: &params.Error{
-			Code:    params.CodeIncompatibleBase,
-			Message: "base \"ubuntu@22.04\" not supported by charm \"TestCharm\", supported bases are: ubuntu@16.10, ubuntu@17.04",
-		},
-	})
-}
-
-func (s *UpgradeSeriesPrepareMachineManagerSuite) TestUpgradeSeriesPrepareRemoveLockAfterFail(c *gc.C) {
-	// TODO managed upgrade series
-}
-
-var _ = gc.Suite(&UpgradeSeriesCompleteMachineManagerSuite{})
-
-type UpgradeSeriesCompleteMachineManagerSuite struct {
-	authorizer   *apiservertesting.FakeAuthorizer
-	st           *MockBackend
-	store        *mocks.MockObjectStore
-	cloudService *commonmocks.MockCloudService
-	credService  *commonmocks.MockCredentialService
-	api          *machinemanager.MachineManagerAPI
-
-	controllerConfigService *MockControllerConfigService
-	machineService          *MockMachineService
-	networkService          *MockNetworkService
-}
-
-func (s *UpgradeSeriesCompleteMachineManagerSuite) SetUpTest(c *gc.C) {
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: names.NewUserTag("admin")}
-}
-
-func (s *UpgradeSeriesCompleteMachineManagerSuite) setup(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-
-	s.st = NewMockBackend(ctrl)
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
-	s.st.EXPECT().GetBlockForType(state.ChangeBlock).Return(nil, false, nil).AnyTimes()
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
-	s.machineService = NewMockMachineService(ctrl)
-	s.networkService = NewMockNetworkService(ctrl)
-
-	s.cloudService = commonmocks.NewMockCloudService(ctrl)
-	s.credService = commonmocks.NewMockCredentialService(ctrl)
-	s.store = mocks.NewMockObjectStore(ctrl)
-
-	var err error
-	s.api, err = machinemanager.NewMachineManagerAPI(
-		s.controllerConfigService,
-		s.st,
-		s.cloudService,
-		s.credService,
-		s.machineService,
-		s.store,
-		nil,
-		nil,
-		nil,
-		machinemanager.ModelAuthorizer{
-			Authorizer: s.authorizer,
-		},
-		apiservertesting.NoopModelCredentialInvalidatorGetter,
-		common.NewResources(),
-		nil,
-		nil,
-		loggertesting.WrapCheckLog(c),
-		s.networkService,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	return ctrl
-}
-
-func (s *UpgradeSeriesCompleteMachineManagerSuite) TestUpgradeSeriesComplete(c *gc.C) {
-	ctrl := s.setup(c)
-	defer ctrl.Finish()
-
-	machine0 := NewMockMachine(ctrl)
-	machine0.EXPECT().CompleteUpgradeSeries().Return(nil)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
-
-	_, err := s.api.UpgradeSeriesComplete(
-		stdcontext.Background(),
-		params.UpdateChannelArg{
-			Entity: params.Entity{Tag: names.NewMachineTag("0").String()},
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-var _ = gc.Suite(&IsBaseLessThanMachineManagerSuite{})
-
-type IsBaseLessThanMachineManagerSuite struct{}
-
-// TestIsBaseLessThan tests a validation method which is not very complicated
-// but complex enough to warrant being exported from an export test package for
-// testing.
-func (s *IsBaseLessThanMachineManagerSuite) TestIsBaseLessThan(c *gc.C) {
-	vers := transform.Slice(corebase.WorkloadBases(), func(b corebase.Base) string { return b.Channel.Track })
-	s.assertSeriesLessThan(c, "ubuntu", vers)
-}
-
-func (s *IsBaseLessThanMachineManagerSuite) assertSeriesLessThan(c *gc.C, os string, vs []string) {
-	// sort the values, so the lexicographical order is determined
-	sort.Slice(vs, func(i, j int) bool {
-		v1 := vs[i]
-		v2 := vs[j]
-		v1Int, err1 := strconv.Atoi(v1)
-		v2Int, err2 := strconv.Atoi(v2)
-		if err1 == nil && err2 == nil {
-			return v1Int < v2Int
-		}
-		return v1 < v2
-	})
-
-	// check that the IsSeriesLessThan works for all supported series
-	for i := range vs {
-
-		// We need both the series and the next series in the list. So
-		// we provide a check here to prevent going out of bounds.
-		if i+1 > len(vs)-1 {
-			break
-		}
-
-		// get the series for the specified version
-		os = strings.ToLower(os)
-		b1, err := corebase.ParseBase(os, vs[i])
-		c.Assert(err, jc.ErrorIsNil)
-		b2, err := corebase.ParseBase(os, vs[i+1])
-		c.Assert(err, jc.ErrorIsNil)
-
-		isLessThan, err := machinemanager.IsBaseLessThan(b1, b2)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(isLessThan, jc.IsTrue, gc.Commentf("%q < %q", b1, b2))
-	}
+func ptr[T any](v T) *T {
+	return &v
 }

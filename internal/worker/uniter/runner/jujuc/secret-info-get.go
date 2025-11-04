@@ -6,12 +6,12 @@ package jujuc
 import (
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretInfoGetCommand struct {
@@ -33,16 +33,17 @@ func (c *secretInfoGetCommand) Info() *cmd.Info {
 	doc := `
 Get the metadata of a secret with a given secret ID.
 Either the ID or label can be used to identify the secret.
-
-Examples
+`
+	examples := `
     secret-info-get secret:9m4e2mr0ui3e8a215n4g
     secret-info-get --label db-password
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-info-get",
-		Args:    "<ID>",
-		Purpose: "get a secret's metadata info",
-		Doc:     doc,
+		Name:     "secret-info-get",
+		Args:     "<ID>",
+		Purpose:  "Get a secret's metadata info.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -106,7 +107,7 @@ func toAccessInfo(grants []secrets.AccessInfo) []accessInfo {
 
 // Run implements cmd.Command.
 func (c *secretInfoGetCommand) Run(ctx *cmd.Context) error {
-	all, err := c.ctx.SecretMetadata()
+	all, err := c.ctx.SecretMetadata(ctx)
 	if err != nil {
 		return err
 	}

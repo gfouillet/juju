@@ -5,7 +5,6 @@ package maas
 
 import (
 	"context"
-	stdcontext "context"
 	"fmt"
 	"net/url"
 
@@ -16,8 +15,6 @@ import (
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -60,12 +57,12 @@ func (EnvironProvider) Version() int {
 	return 0
 }
 
-func (EnvironProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
-	logger.Debugf("opening model %q.", args.Config.Name())
+func (EnvironProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+	logger.Debugf(ctx, "opening model %q.", args.Config.Name())
 	if err := validateCloudSpec(args.Cloud); err != nil {
 		return nil, errors.Annotate(err, "validating cloud spec")
 	}
-	env, err := NewEnviron(ctx, args.Cloud, args.Config, nil)
+	env, err := NewEnviron(ctx, args.Cloud, args.Config, invalidator, nil)
 	if err != nil {
 		return nil, errors.Annotate(err, "creating MAAS environ")
 	}
@@ -78,17 +75,17 @@ func (p EnvironProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p EnvironProvider) Ping(ctx envcontext.ProviderCallContext, endpoint string) error {
+func (p EnvironProvider) Ping(ctx context.Context, endpoint string) error {
 	var err error
 	base, version, includesVersion := gomaasapi.SplitVersionedURL(endpoint)
 	if includesVersion {
-		err = p.checkMaas(base, version)
+		err = p.checkMaas(ctx, base, version)
 		if err == nil {
 			return nil
 		}
 	} else {
 		// No version info in the endpoint - try both in preference order.
-		err = p.checkMaas(endpoint, apiVersion2)
+		err = p.checkMaas(ctx, endpoint, apiVersion2)
 		if err == nil {
 			return nil
 		}
@@ -96,32 +93,20 @@ func (p EnvironProvider) Ping(ctx envcontext.ProviderCallContext, endpoint strin
 	return errors.Annotatef(err, "No MAAS server running at %s", endpoint)
 }
 
-func (p EnvironProvider) checkMaas(endpoint, ver string) error {
+func (p EnvironProvider) checkMaas(ctx context.Context, endpoint, ver string) error {
 	c, err := gomaasapi.NewAnonymousClient(endpoint, ver)
 	if err != nil {
-		logger.Debugf("Can't create maas API %s client for %q: %v", ver, endpoint, err)
+		logger.Debugf(ctx, "Can't create maas API %s client for %q: %v", ver, endpoint, err)
 		return errors.Trace(err)
 	}
 	maas := gomaasapi.NewMAAS(*c)
-	_, err = p.GetCapabilities(maas, endpoint)
+	_, err = p.GetCapabilities(ctx, maas, endpoint)
 	return errors.Trace(err)
 }
 
-// PrepareConfig is specified in the EnvironProvider interface.
-func (p EnvironProvider) PrepareConfig(ctx context.Context, args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	var attrs map[string]interface{}
-	if _, ok := args.Config.StorageDefaultBlockSource(); !ok {
-		attrs = map[string]interface{}{
-			config.StorageDefaultBlockSourceKey: maasStorageProviderType,
-		}
-	}
-	if len(attrs) == 0 {
-		return args.Config, nil
-	}
-	return args.Config.Apply(attrs)
+// ValidateCloud is specified in the EnvironProvider interface.
+func (EnvironProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 // DetectRegions is specified in the environs.CloudRegionDetector interface.

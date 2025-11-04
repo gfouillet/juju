@@ -6,11 +6,11 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -55,16 +55,25 @@ the binding, as well as the ingress address for the binding. If defined, any
 egress subnets are also returned.
 If one of the following flags are specified, just that value is returned.
 If more than one flag is specified, a map of values is returned.
+
     --bind-address: the address the local unit should listen on to serve connections, as well
                     as the address that should be advertised to its peers.
     --ingress-address: the address the local unit should advertise as being used for incoming connections.
     --egress-subnets: subnets (in CIDR notation) from which traffic on this relation will originate.
 `
+	examples := `
+    network-get dbserver
+    network-get dbserver --bind-address
+
+    See https://discourse.charmhub.io/t/charm-network-primitives/1126 for more
+    in depth examples and explanation of usage.
+`
 	return jujucmd.Info(&cmd.Info{
-		Name:    "network-get",
-		Args:    args,
-		Purpose: "get network config",
-		Doc:     doc,
+		Name:     "network-get",
+		Args:     args,
+		Purpose:  "Get network config.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -108,7 +117,7 @@ func (c *NetworkGetCommand) Init(args []string) error {
 }
 
 func (c *NetworkGetCommand) Run(ctx *cmd.Context) error {
-	netInfo, err := c.ctx.NetworkInfo([]string{c.bindingName}, c.RelationId)
+	netInfo, err := c.ctx.NetworkInfo(ctx, []string{c.bindingName}, c.RelationId)
 	if err != nil {
 		return errors.Trace(err)
 	}

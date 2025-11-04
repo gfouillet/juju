@@ -6,80 +6,112 @@ package usermanager
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/common"
+	commonmodel "github.com/juju/juju/apiserver/common/model"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	coreerrors "github.com/juju/juju/core/errors"
 	corelogger "github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/securitylog"
 	coreuser "github.com/juju/juju/core/user"
+	accesserrors "github.com/juju/juju/domain/access/errors"
 	"github.com/juju/juju/domain/access/service"
+	"github.com/juju/juju/environs"
 	"github.com/juju/juju/internal/auth"
+	interrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 // AccessService defines the methods to operate with the database.
 type AccessService interface {
 	GetAllUsers(ctx context.Context, includeDisabled bool) ([]coreuser.User, error)
-	GetUserByName(ctx context.Context, name string) (coreuser.User, error)
+	GetUserByName(ctx context.Context, name coreuser.Name) (coreuser.User, error)
+	GetUser(ctx context.Context, uuid coreuser.UUID) (coreuser.User, error)
 	AddUser(ctx context.Context, arg service.AddUserArg) (coreuser.UUID, []byte, error)
-	EnableUserAuthentication(ctx context.Context, name string) error
-	DisableUserAuthentication(ctx context.Context, name string) error
-	SetPassword(ctx context.Context, name string, password auth.Password) error
-	ResetPassword(ctx context.Context, name string) ([]byte, error)
-	RemoveUser(ctx context.Context, name string) error
+	EnableUserAuthentication(ctx context.Context, name coreuser.Name) error
+	DisableUserAuthentication(ctx context.Context, name coreuser.Name) error
+	SetPassword(ctx context.Context, name coreuser.Name, password auth.Password) error
+	ResetPassword(ctx context.Context, name coreuser.Name) ([]byte, error)
+	RemoveUser(ctx context.Context, name coreuser.Name) error
 
-	// ReadUserAccessForTarget returns the access level that the
+	// ReadUserAccessLevelForTarget returns the access level that the
 	// input user has been on the input target entity.
-	ReadUserAccessForTarget(ctx context.Context, subject string, target permission.ID) (permission.UserAccess, error)
+	// If the access level of a user cannot be found then
+	// accesserrors.AccessNotFound is returned.
+	ReadUserAccessLevelForTarget(ctx context.Context, subject coreuser.Name, target permission.ID) (permission.Access, error)
+}
+
+// ModelService defines an interface for interacting with the model service.
+type ModelService interface {
+	// ControllerModel returns the model used for housing the Juju controller.
+	// Should no model exist for the controller an error of [modelerrors.NotFound]
+	// will be returned.
+	ControllerModel(ctx context.Context) (coremodel.Model, error)
+
+	// GetModelUsers will retrieve basic information about users with
+	// permissions on the given model UUID.
+	// If the model cannot be found it will return
+	// [github.com/juju/juju/domain/model/errors.NotFound].
+	GetModelUsers(ctx context.Context, modelUUID coremodel.UUID) ([]coremodel.ModelUserInfo, error)
+
+	// GetModelUser will retrieve basic information about the specified model
+	// user.
+	// If the model cannot be found it will return
+	// [github.com/juju/juju/domain/model/errors.NotFound].
+	// If the user cannot be found it will return
+	// [github.com/juju/juju/domain/model/errors.UserNotFoundOnModel].
+	GetModelUser(ctx context.Context, modelUUID coremodel.UUID, name coreuser.Name) (coremodel.ModelUserInfo, error)
 }
 
 // UserManagerAPI implements the user manager interface and is the concrete
 // implementation of the api end point.
 type UserManagerAPI struct {
-	state         *state.State
-	accessService AccessService
-	pool          *state.StatePool
-	authorizer    facade.Authorizer
-	check         *common.BlockChecker
-	apiUserTag    names.UserTag
-	apiUser       coreuser.User
-	isAdmin       bool
-	logger        corelogger.Logger
+	accessService  AccessService
+	modelService   ModelService
+	authorizer     facade.Authorizer
+	check          *common.BlockChecker
+	apiUserTag     names.UserTag
+	apiUser        coreuser.User
+	isAdmin        bool
+	logger         corelogger.Logger
+	controllerUUID string
 }
 
 // NewAPI creates a new API endpoint for calling user manager functions.
 func NewAPI(
-	state *state.State,
 	accessService AccessService,
-	pool *state.StatePool,
+	modelService ModelService,
 	authorizer facade.Authorizer,
 	check *common.BlockChecker,
 	apiUserTag names.UserTag,
 	apiUser coreuser.User,
 	isAdmin bool,
 	logger corelogger.Logger,
+	controllerUUID string,
 ) (*UserManagerAPI, error) {
 	return &UserManagerAPI{
-		state:         state,
-		accessService: accessService,
-		pool:          pool,
-		authorizer:    authorizer,
-		check:         check,
-		apiUserTag:    apiUserTag,
-		apiUser:       apiUser,
-		isAdmin:       isAdmin,
-		logger:        logger,
+		accessService:  accessService,
+		modelService:   modelService,
+		authorizer:     authorizer,
+		check:          check,
+		apiUserTag:     apiUserTag,
+		apiUser:        apiUser,
+		isAdmin:        isAdmin,
+		logger:         logger,
+		controllerUUID: controllerUUID,
 	}, nil
 }
 
-func (api *UserManagerAPI) hasControllerAdminAccess() (bool, error) {
-	err := api.authorizer.HasPermission(permission.SuperuserAccess, api.state.ControllerTag())
+func (api *UserManagerAPI) hasControllerAdminAccess(ctx context.Context) (bool, error) {
+	err := api.authorizer.HasPermission(ctx, permission.SuperuserAccess, names.NewControllerTag(api.controllerUUID))
 	return err == nil, err
 }
 
@@ -88,7 +120,7 @@ func (api *UserManagerAPI) hasControllerAdminAccess() (bool, error) {
 func (api *UserManagerAPI) AddUser(ctx context.Context, args params.AddUsers) (params.AddUserResults, error) {
 	var result params.AddUserResults
 
-	if _, err := api.hasControllerAdminAccess(); err != nil {
+	if _, err := api.hasControllerAdminAccess(ctx); err != nil {
 		return result, err
 	}
 
@@ -103,6 +135,15 @@ func (api *UserManagerAPI) AddUser(ctx context.Context, args params.AddUsers) (p
 	result.Results = make([]params.AddUserResult, len(args.Users))
 	for i, arg := range args.Users {
 		result.Results[i] = api.addOneUser(ctx, arg)
+		// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+		securitylog.LogUser(
+			securitylog.UserSecurityEvent{
+				Actor:  api.apiUser.Name.String(),
+				Target: arg.Username,
+				Action: securitylog.UserActionCreated,
+				Access: string(permission.LoginAccess),
+			},
+		)
 	}
 	return result, nil
 }
@@ -111,25 +152,22 @@ func (api *UserManagerAPI) addOneUser(ctx context.Context, arg params.AddUser) p
 	var activationKey []byte
 	var err error
 
-	// TODO(anvial): Legacy block to delete when user domain wire up is complete.
-	if arg.Password != "" {
-		_, err = api.state.AddUser(arg.Username, arg.DisplayName, arg.Password, api.apiUserTag.Id())
-		if err != nil {
-			return params.AddUserResult{Error: apiservererrors.ServerError(errors.Annotate(err, "creating user"))}
-		}
-	} else {
-		_, err = api.state.AddUserWithSecretKey(arg.Username, arg.DisplayName, api.apiUserTag.Id())
-		if err != nil {
-			return params.AddUserResult{Error: apiservererrors.ServerError(errors.Annotate(err, "creating user"))}
-		}
+	name, err := coreuser.NewName(arg.Username)
+	if err != nil {
+		return params.AddUserResult{Error: apiservererrors.ServerError(errors.Annotate(err, "creating user"))}
 	}
-	// End legacy block.
 
 	addUserArg := service.AddUserArg{
-		Name:        arg.Username,
+		Name:        name,
 		DisplayName: arg.DisplayName,
 		CreatorUUID: api.apiUser.UUID,
-		Permission:  permission.ControllerForAccess(permission.LoginAccess),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        api.controllerUUID,
+			},
+		},
 	}
 	if arg.Password != "" {
 		pass := auth.NewPassword(arg.Password)
@@ -159,15 +197,10 @@ func (api *UserManagerAPI) RemoveUser(ctx context.Context, entities params.Entit
 		return deletions, errors.Trace(err)
 	}
 
-	controllerOwner, err := api.state.ControllerOwner()
-	if err != nil {
-		return deletions, errors.Trace(err)
-	}
-
 	// Create the results list to populate.
 	deletions.Results = make([]params.ErrorResult, len(entities.Entities))
 
-	isSuperUser, err := api.hasControllerAdminAccess()
+	isSuperUser, err := api.hasControllerAdminAccess(ctx)
 	if err != nil {
 		return deletions, errors.Trace(err)
 	}
@@ -183,13 +216,16 @@ func (api *UserManagerAPI) RemoveUser(ctx context.Context, entities params.Entit
 			continue
 		}
 
-		if controllerOwner.Id() == userTag.Id() {
+		// TODO - check if user is the last admin of any models
+		//  do not allow last admin to be deleted.
+		if environs.AdminUser == userTag.Id() {
 			deletions.Results[i].Error = apiservererrors.ServerError(
 				errors.Errorf("cannot delete controller owner %q", userTag.Name()))
 			continue
 		}
 
-		err = api.accessService.RemoveUser(ctx, userTag.Name())
+		user := coreuser.NameFromTag(userTag)
+		err = api.accessService.RemoveUser(ctx, user)
 		if err != nil {
 			deletions.Results[i].Error = apiservererrors.ServerError(
 				errors.Annotatef(err, "failed to delete user %q", userTag.Name()))
@@ -197,6 +233,15 @@ func (api *UserManagerAPI) RemoveUser(ctx context.Context, entities params.Entit
 		}
 		deletions.Results[i].Error = nil
 
+		// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+		securitylog.LogUser(
+			securitylog.UserSecurityEvent{
+				Actor:  api.apiUser.Name.String(),
+				Target: user.String(),
+				Action: securitylog.UserActionDeleted,
+				Access: string(permission.NoAccess),
+			},
+		)
 	}
 	return deletions, nil
 }
@@ -204,7 +249,7 @@ func (api *UserManagerAPI) RemoveUser(ctx context.Context, entities params.Entit
 // EnableUser enables one or more users.  If the user is already enabled,
 // the action is considered a success.
 func (api *UserManagerAPI) EnableUser(ctx context.Context, users params.Entities) (params.ErrorResults, error) {
-	if _, err := api.hasControllerAdminAccess(); err != nil {
+	if _, err := api.hasControllerAdminAccess(ctx); err != nil {
 		return params.ErrorResults{}, err
 	}
 
@@ -217,7 +262,7 @@ func (api *UserManagerAPI) EnableUser(ctx context.Context, users params.Entities
 // DisableUser disables one or more users.  If the user is already disabled,
 // the action is considered a success.
 func (api *UserManagerAPI) DisableUser(ctx context.Context, users params.Entities) (params.ErrorResults, error) {
-	if _, err := api.hasControllerAdminAccess(); err != nil {
+	if _, err := api.hasControllerAdminAccess(ctx); err != nil {
 		return params.ErrorResults{}, err
 	}
 
@@ -235,7 +280,7 @@ func (api *UserManagerAPI) enableUser(ctx context.Context, args params.Entities,
 	}
 
 	if !api.isAdmin {
-		if _, err := api.hasControllerAdminAccess(); err != nil {
+		if _, err := api.hasControllerAdminAccess(ctx); err != nil {
 			return result, err
 		}
 	}
@@ -249,9 +294,9 @@ func (api *UserManagerAPI) enableUser(ctx context.Context, args params.Entities,
 		}
 
 		if action == "enable" {
-			err = api.accessService.EnableUserAuthentication(ctx, userTag.Name())
+			err = api.accessService.EnableUserAuthentication(ctx, coreuser.NameFromTag(userTag))
 		} else {
-			err = api.accessService.DisableUserAuthentication(ctx, userTag.Name())
+			err = api.accessService.DisableUserAuthentication(ctx, coreuser.NameFromTag(userTag))
 		}
 		if err != nil {
 			result.Results[i].Error = apiservererrors.ServerError(errors.Errorf("failed to %s user: %s", action, err))
@@ -264,52 +309,13 @@ func (api *UserManagerAPI) enableUser(ctx context.Context, args params.Entities,
 // UserInfo returns information on a user.
 func (api *UserManagerAPI) UserInfo(ctx context.Context, request params.UserInfoRequest) (params.UserInfoResults, error) {
 	var results params.UserInfoResults
-	isAdmin, err := api.hasControllerAdminAccess()
+	isAdmin, err := api.hasControllerAdminAccess(ctx)
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return results, errors.Trace(err)
 	}
 
-	var accessForUser = func(userTag names.UserTag, result *params.UserInfoResult) {
-		userPermission := func(subject names.UserTag, target names.Tag) (permission.Access, error) {
-			access, err := api.accessService.ReadUserAccessForTarget(ctx, subject.Id(), permission.ID{
-				ObjectType: permission.Controller,
-				Key:        "controller",
-			})
-			return access.Access, errors.Trace(err)
-		}
-
-		access, err := common.GetPermission(userPermission, userTag, api.state.ControllerTag())
-		if err != nil {
-			result.Result = nil
-			result.Error = apiservererrors.ServerError(err)
-		} else {
-			result.Result.Access = string(access)
-		}
-	}
-
-	var infoForUser = func(tag names.UserTag, user coreuser.User) params.UserInfoResult {
-		result := params.UserInfoResult{
-			Result: &params.UserInfo{
-				Username:       user.Name,
-				DisplayName:    user.DisplayName,
-				CreatedBy:      user.CreatorName,
-				DateCreated:    user.CreatedAt,
-				LastConnection: &user.LastLogin,
-				Disabled:       user.Disabled,
-			},
-		}
-		if user.Disabled {
-			// disabled users have no access to the controller.
-			result.Result.Access = string(permission.NoAccess)
-		} else {
-			accessForUser(tag, &result)
-		}
-		return result
-	}
-
 	argCount := len(request.Entities)
 	if argCount == 0 {
-
 		if isAdmin {
 			// Get all users if isAdmin
 			users, err := api.accessService.GetAllUsers(ctx, request.IncludeDisabled)
@@ -317,8 +323,8 @@ func (api *UserManagerAPI) UserInfo(ctx context.Context, request params.UserInfo
 				return results, errors.Trace(err)
 			}
 			for _, user := range users {
-				userTag := names.NewLocalUserTag(user.Name)
-				results.Results = append(results.Results, infoForUser(userTag, user))
+				userTag := names.NewUserTag(user.Name.Name())
+				results.Results = append(results.Results, api.infoForUser(ctx, userTag, user))
 			}
 			return results, nil
 		}
@@ -327,18 +333,18 @@ func (api *UserManagerAPI) UserInfo(ctx context.Context, request params.UserInfo
 		// check if the auth tag is a user tag, and if so, get the users filtered
 		// by the user name.
 		tag := api.authorizer.GetAuthTag()
-		if _, ok := tag.(names.UserTag); !ok {
+		userTag, ok := tag.(names.UserTag)
+		if !ok {
 			return results, apiservererrors.ErrPerm
 		}
 
 		// Get users filtered by the apiUser name as a creator
-		user, err := api.accessService.GetUserByName(ctx, tag.Id())
+		user, err := api.accessService.GetUserByName(ctx, coreuser.NameFromTag(userTag))
 		if err != nil {
 			return results, errors.Trace(err)
 		}
 
-		userTag := names.NewLocalUserTag(user.Name)
-		results.Results = append(results.Results, infoForUser(userTag, user))
+		results.Results = append(results.Results, api.infoForUser(ctx, userTag, user))
 
 		return results, nil
 	}
@@ -354,32 +360,63 @@ func (api *UserManagerAPI) UserInfo(ctx context.Context, request params.UserInfo
 			results.Results = append(results.Results, params.UserInfoResult{Error: apiservererrors.ServerError(apiservererrors.ErrPerm)})
 			continue
 		}
-		if !userTag.IsLocal() {
-			// TODO(wallyworld) record login information about external users.
-			result := params.UserInfoResult{
-				Result: &params.UserInfo{
-					Username: userTag.Id(),
-				},
-			}
-			accessForUser(userTag, &result)
-			results.Results = append(results.Results, result)
-			continue
-		}
 
 		// Get User
-		user, err := api.getLocalUserByTag(ctx, arg.Tag)
+		user, err := api.accessService.GetUserByName(ctx, coreuser.NameFromTag(userTag))
+		if errors.Is(err, accesserrors.UserNotFound) {
+			err = interrors.Errorf("user %q not found", userTag.Name()).Add(coreerrors.UserNotFound)
+		}
+
 		if err != nil {
 			results.Results = append(results.Results, params.UserInfoResult{Error: apiservererrors.ServerError(err)})
 			continue
 		}
-		results.Results = append(results.Results, infoForUser(userTag, user))
+		results.Results = append(results.Results, api.infoForUser(ctx, userTag, user))
 	}
 
 	return results, nil
 }
 
-func (api *UserManagerAPI) checkCanRead(modelTag names.Tag) error {
-	return api.authorizer.HasPermission(permission.ReadAccess, modelTag)
+// infoForUser generates a UserInfoResult from a coreuser.User, it fills in
+// information needed but not contained in the core user from the access
+// service.
+func (api *UserManagerAPI) infoForUser(ctx context.Context, tag names.UserTag, user coreuser.User) params.UserInfoResult {
+	var lastLogin *time.Time
+	if !user.LastLogin.IsZero() {
+		lastLogin = &user.LastLogin
+	}
+	result := params.UserInfoResult{
+		Result: &params.UserInfo{
+			Username:       user.Name.Name(),
+			DisplayName:    user.DisplayName,
+			CreatedBy:      user.CreatorName.Name(),
+			DateCreated:    user.CreatedAt,
+			LastConnection: lastLogin,
+			Disabled:       user.Disabled,
+		},
+	}
+
+	if user.Disabled {
+		// disabled users have no access to the controller.
+		result.Result.Access = string(permission.NoAccess)
+		return result
+	}
+
+	access, err := api.accessService.ReadUserAccessLevelForTarget(ctx, coreuser.NameFromTag(tag), permission.ID{
+		ObjectType: permission.Controller,
+		Key:        api.controllerUUID,
+	})
+	if err != nil && !errors.Is(err, accesserrors.AccessNotFound) {
+		result.Result = nil
+		result.Error = apiservererrors.ServerError(err)
+	} else {
+		result.Result.Access = string(access)
+	}
+	return result
+}
+
+func (api *UserManagerAPI) checkCanRead(ctx context.Context, modelTag names.Tag) error {
+	return api.authorizer.HasPermission(ctx, permission.ReadAccess, modelTag)
 }
 
 // ModelUserInfo returns information on all users in the model.
@@ -390,7 +427,7 @@ func (api *UserManagerAPI) ModelUserInfo(ctx context.Context, args params.Entiti
 		if err != nil {
 			return result, errors.Trace(err)
 		}
-		infos, err := api.modelUserInfo(modelTag)
+		infos, err := api.modelUserInfo(ctx, modelTag)
 		if err != nil {
 			return result, errors.Trace(err)
 		}
@@ -399,32 +436,30 @@ func (api *UserManagerAPI) ModelUserInfo(ctx context.Context, args params.Entiti
 	return result, nil
 }
 
-func (api *UserManagerAPI) modelUserInfo(modelTag names.ModelTag) ([]params.ModelUserInfoResult, error) {
+func (api *UserManagerAPI) modelUserInfo(ctx context.Context, modelTag names.ModelTag) ([]params.ModelUserInfoResult, error) {
 	var results []params.ModelUserInfoResult
-	model, closer, err := api.pool.GetModel(modelTag.Id())
-	if err != nil {
-		return results, errors.Trace(err)
-	}
-	defer closer.Release()
-	if err := api.checkCanRead(model.ModelTag()); err != nil {
+	if err := api.checkCanRead(ctx, modelTag); err != nil {
 		return results, err
 	}
 
-	users, err := model.Users()
+	// If the user is a controller superuser, they are considered a model
+	// admin.
+	modelUserInfo, err := commonmodel.ModelUserInfo(
+		ctx,
+		api.modelService,
+		modelTag,
+		api.apiUser.Name,
+		api.isModelAdmin(ctx, modelTag),
+	)
 	if err != nil {
 		return results, errors.Trace(err)
 	}
 
-	for _, user := range users {
-		var result params.ModelUserInfoResult
-		userInfo, err := common.ModelUserInfo(user, model)
-		if err != nil {
-			result.Error = apiservererrors.ServerError(err)
-		} else {
-			userInfo.ModelTag = modelTag.String()
-			result.Result = &userInfo
-		}
-		results = append(results, result)
+	for i := range modelUserInfo {
+		modelUserInfo[i].ModelTag = modelTag.String()
+		results = append(results, params.ModelUserInfoResult{
+			Result: &modelUserInfo[i],
+		})
 	}
 	return results, nil
 }
@@ -447,6 +482,12 @@ func (api *UserManagerAPI) SetPassword(ctx context.Context, args params.EntityPa
 		if err := api.setPassword(ctx, arg); err != nil {
 			result.Results[i].Error = apiservererrors.ServerError(err)
 		}
+		// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+		securitylog.LogPasswordChange(
+			securitylog.PasswordChangeSecurityEvent{
+				User: api.apiUser.Name.String(),
+			},
+		)
 	}
 	return result, nil
 }
@@ -457,7 +498,7 @@ func (api *UserManagerAPI) setPassword(ctx context.Context, arg params.EntityPas
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := api.hasControllerAdminAccess(); err != nil && api.apiUserTag != userTag {
+		if _, err := api.hasControllerAdminAccess(ctx); err != nil && api.apiUserTag != userTag {
 			return err
 		}
 	}
@@ -474,7 +515,7 @@ func (api *UserManagerAPI) setPassword(ctx context.Context, arg params.EntityPas
 	pass := auth.NewPassword(arg.Password)
 	defer pass.Destroy()
 
-	if err := api.accessService.SetPassword(ctx, userTag.Name(), pass); err != nil {
+	if err := api.accessService.SetPassword(ctx, coreuser.NameFromTag(userTag), pass); err != nil {
 		return errors.Annotate(err, "failed to set password")
 	}
 
@@ -496,7 +537,7 @@ func (api *UserManagerAPI) ResetPassword(ctx context.Context, args params.Entiti
 		return result, nil
 	}
 
-	isSuperUser, err := api.hasControllerAdminAccess()
+	isSuperUser, err := api.hasControllerAdminAccess(ctx)
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return result, errors.Trace(err)
 	}
@@ -512,7 +553,7 @@ func (api *UserManagerAPI) ResetPassword(ctx context.Context, args params.Entiti
 		}
 
 		if isSuperUser && api.apiUserTag != userTag {
-			key, err := api.accessService.ResetPassword(ctx, userTag.Name())
+			key, err := api.accessService.ResetPassword(ctx, coreuser.NameFromTag(userTag))
 			if err != nil {
 				result.Results[i].Error = apiservererrors.ServerError(err)
 				continue
@@ -521,19 +562,21 @@ func (api *UserManagerAPI) ResetPassword(ctx context.Context, args params.Entiti
 		} else {
 			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
 		}
+		// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+		securitylog.LogPasswordChange(
+			securitylog.PasswordChangeSecurityEvent{
+				User: api.apiUser.Name.String(),
+			},
+		)
 	}
 	return result, nil
 }
 
-// getLocalUserByTag returns the local user with the given tag. It returns an
-// error if the tag is not a valid local user tag.
-func (api *UserManagerAPI) getLocalUserByTag(ctx context.Context, tag string) (coreuser.User, error) {
-	userTag, err := names.ParseUserTag(tag)
-	if err != nil {
-		return coreuser.User{}, errors.Trace(err)
+// isModelAdmin checks if the user is a controller superuser or admin on the
+// model.
+func (api *UserManagerAPI) isModelAdmin(ctx context.Context, modelTag names.ModelTag) bool {
+	if api.isAdmin {
+		return true
 	}
-	if !userTag.IsLocal() {
-		return coreuser.User{}, errors.Errorf("%q is not a local user", userTag)
-	}
-	return api.accessService.GetUserByName(ctx, userTag.Name())
+	return api.authorizer.HasPermission(ctx, permission.AdminAccess, modelTag) == nil
 }

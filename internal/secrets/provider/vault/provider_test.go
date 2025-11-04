@@ -4,51 +4,52 @@
 package vault_test
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"strings"
+	"testing"
 
 	"github.com/hashicorp/vault/api"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	vault "github.com/mittwald/vaultgo"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/secrets/provider"
 	_ "github.com/juju/juju/internal/secrets/provider/all"
 	jujuvault "github.com/juju/juju/internal/secrets/provider/vault"
 	"github.com/juju/juju/internal/secrets/provider/vault/mocks"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type providerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	coretesting.JujuOSEnvSuite
 
 	mockRoundTripper *mocks.MockRoundTripper
 }
 
-var _ = gc.Suite(&providerSuite{})
+func TestProviderSuite(t *testing.T) {
+	tc.Run(t, &providerSuite{})
+}
 
-func (s *providerSuite) SetUpTest(c *gc.C) {
+func (s *providerSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.JujuOSEnvSuite.SetUpTest(c)
 }
 
 type newVaultClientFunc func(addr string, tlsConf *vault.TLSConfig, opts ...vault.ClientOpts) (*vault.Client, error)
 
-func (s *providerSuite) newVaultClient(c *gc.C, returnErr error) (*gomock.Controller, newVaultClientFunc) {
+func (s *providerSuite) newVaultClient(c *tc.C, returnErr error) (*gomock.Controller, newVaultClientFunc) {
 	ctrl := gomock.NewController(c)
 	s.mockRoundTripper = mocks.NewMockRoundTripper(ctrl)
 
 	return ctrl, func(addr string, tlsConf *vault.TLSConfig, opts ...vault.ClientOpts) (*vault.Client, error) {
-		c.Assert(addr, gc.Equals, "http://vault-ip:8200/")
-		c.Assert(tlsConf, jc.DeepEquals, &vault.TLSConfig{
+		c.Assert(addr, tc.Equals, "http://vault-ip:8200/")
+		c.Assert(tlsConf, tc.DeepEquals, &vault.TLSConfig{
 			TLSConfig: &api.TLSConfig{
 				CACertBytes:   []byte(coretesting.CACert),
 				TLSServerName: "tls-server",
@@ -56,11 +57,11 @@ func (s *providerSuite) newVaultClient(c *gc.C, returnErr error) (*gomock.Contro
 		})
 
 		client, err := vault.NewClient(addr, tlsConf, opts...)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(opts, gc.HasLen, 1)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(opts, tc.HasLen, 1)
 		err = opts[0](client)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(client.Token(), gc.Equals, "vault-token")
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(client.Token(), tc.Equals, "vault-token")
 		if returnErr != nil {
 			return nil, returnErr
 		}
@@ -69,23 +70,23 @@ func (s *providerSuite) newVaultClient(c *gc.C, returnErr error) (*gomock.Contro
 		conf.Address = addr
 		if tlsConf != nil {
 			err = conf.ConfigureTLS(tlsConf.TLSConfig)
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		}
 		conf.HttpClient.Transport = s.mockRoundTripper
 		client.Client, err = api.NewClient(conf)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		return client, nil
 	}
 }
 
-func (s *providerSuite) TestBackendConfigBadClient(c *gc.C) {
+func (s *providerSuite) TestBackendConfigBadClient(c *tc.C) {
 	ctrl, newVaultClient := s.newVaultClient(c, errors.New("boom"))
 	defer ctrl.Finish()
 
 	s.PatchValue(&jujuvault.NewVaultClient, newVaultClient)
 	p, err := provider.Provider(jujuvault.BackendType)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	adminCfg := &provider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
@@ -107,18 +108,18 @@ func (s *providerSuite) TestBackendConfigBadClient(c *gc.C) {
 		Kind: secrets.UnitAccessor,
 		ID:   "gitlab/0",
 	}
-	_, err = p.RestrictedConfig(context.Background(), adminCfg, true, false, accessor, nil, nil)
-	c.Assert(err, gc.ErrorMatches, "boom")
+	_, err = p.RestrictedConfig(c.Context(), adminCfg, true, false, accessor, nil, nil)
+	c.Assert(err, tc.ErrorMatches, "boom")
 }
 
-func (s *providerSuite) TestBackendConfigAdmin(c *gc.C) {
+func (s *providerSuite) TestBackendConfigAdmin(c *tc.C) {
 	ctrl, newVaultClient := s.newVaultClient(c, nil)
 	defer ctrl.Finish()
 
 	gomock.InOrder(
 		s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read`)
+				c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -128,7 +129,17 @@ func (s *providerSuite) TestBackendConfigAdmin(c *gc.C) {
 		),
 		s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 			func(req *http.Request) (*http.Response, error) {
-				c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
+				c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-create`)
+				return &http.Response{
+					Request:    req,
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(nil),
+				}, nil
+			},
+		),
+		s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
+			func(req *http.Request) (*http.Response, error) {
+				c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
 				return &http.Response{
 					Request:    req,
 					StatusCode: http.StatusOK,
@@ -140,7 +151,7 @@ func (s *providerSuite) TestBackendConfigAdmin(c *gc.C) {
 
 	s.PatchValue(&jujuvault.NewVaultClient, newVaultClient)
 	p, err := provider.Provider(jujuvault.BackendType)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	adminCfg := &provider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
@@ -162,18 +173,18 @@ func (s *providerSuite) TestBackendConfigAdmin(c *gc.C) {
 		Kind: secrets.ModelAccessor,
 		ID:   coretesting.ModelTag.Id(),
 	}
-	cfg, err := p.RestrictedConfig(context.Background(), adminCfg, true, false, accessor, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["token"], gc.Equals, "foo")
+	cfg, err := p.RestrictedConfig(c.Context(), adminCfg, true, false, accessor, nil, nil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cfg.Config["token"], tc.Equals, "foo")
 }
 
-func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
+func (s *providerSuite) TestBackendConfigNonAdmin(c *tc.C) {
 	ctrl, newVaultClient := s.newVaultClient(c, nil)
 	defer ctrl.Finish()
 
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-create`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-create`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -183,7 +194,7 @@ func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-owned-1-owner`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-owned-1-owner`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -193,7 +204,7 @@ func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read-1-read`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read-1-read`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -203,7 +214,7 @@ func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -214,7 +225,7 @@ func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
 
 	s.PatchValue(&jujuvault.NewVaultClient, newVaultClient)
 	p, err := provider.Provider(jujuvault.BackendType)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	adminCfg := &provider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
@@ -242,18 +253,18 @@ func (s *providerSuite) TestBackendConfigNonAdmin(c *gc.C) {
 		Kind: secrets.UnitAccessor,
 		ID:   "ubuntu/0",
 	}
-	cfg, err := p.RestrictedConfig(context.Background(), adminCfg, true, false, accessor, ownedRevs, readRevs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["token"], gc.Equals, "foo")
+	cfg, err := p.RestrictedConfig(c.Context(), adminCfg, true, false, accessor, ownedRevs, readRevs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cfg.Config["token"], tc.Equals, "foo")
 }
 
-func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
+func (s *providerSuite) TestBackendConfigForDrain(c *tc.C) {
 	ctrl, newVaultClient := s.newVaultClient(c, nil)
 	defer ctrl.Finish()
 
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-update`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-update`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -263,7 +274,7 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-create`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-create`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -273,7 +284,7 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-owned-1-owner`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-owned-1-owner`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -283,7 +294,7 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read-1-read`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/sys/policies/acl/fred-06f00d-read-1-read`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -293,7 +304,7 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 	)
 	s.mockRoundTripper.EXPECT().RoundTrip(gomock.Any()).DoAndReturn(
 		func(req *http.Request) (*http.Response, error) {
-			c.Assert(req.URL.String(), gc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
+			c.Assert(req.URL.String(), tc.Equals, `http://vault-ip:8200/v1/auth/token/create`)
 			return &http.Response{
 				Request:    req,
 				StatusCode: http.StatusOK,
@@ -304,7 +315,7 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 
 	s.PatchValue(&jujuvault.NewVaultClient, newVaultClient)
 	p, err := provider.Provider(jujuvault.BackendType)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	adminCfg := &provider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
@@ -329,20 +340,20 @@ func (s *providerSuite) TestBackendConfigForDrain(c *gc.C) {
 	}
 
 	accessor := secrets.Accessor{
-		Kind: secrets.UnitAccessor,
-		ID:   "gitlab/0",
+		Kind: secrets.ModelAccessor,
+		ID:   coretesting.ModelTag.Id(),
 	}
-	cfg, err := p.RestrictedConfig(context.Background(), adminCfg, true, true, accessor, ownedRevs, readRevs)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["token"], gc.Equals, "foo")
+	cfg, err := p.RestrictedConfig(c.Context(), adminCfg, true, true, accessor, ownedRevs, readRevs)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cfg.Config["token"], tc.Equals, "foo")
 }
 
-func (s *providerSuite) TestNewBackend(c *gc.C) {
+func (s *providerSuite) TestNewBackend(c *tc.C) {
 	ctrl, newVaultClient := s.newVaultClient(c, nil)
 	defer ctrl.Finish()
 	s.PatchValue(&jujuvault.NewVaultClient, newVaultClient)
 	p, err := provider.Provider(jujuvault.BackendType)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	cfg := &provider.ModelBackendConfig{
 		ModelName: "fred",
@@ -359,6 +370,6 @@ func (s *providerSuite) TestNewBackend(c *gc.C) {
 		},
 	}
 	b, err := p.NewBackend(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(jujuvault.MountPath(b), gc.Equals, "fred-06f00d")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(jujuvault.MountPath(b), tc.Equals, "fred-06f00d")
 }

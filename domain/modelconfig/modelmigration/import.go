@@ -6,13 +6,16 @@ package modelmigration
 import (
 	"context"
 
-	"github.com/juju/description/v6"
-	"github.com/juju/errors"
+	"github.com/juju/collections/set"
+	"github.com/juju/description/v10"
 
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/domain/modelconfig/service"
 	"github.com/juju/juju/domain/modelconfig/state"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Coordinator is the interface that is used to add operations to a migration.
@@ -22,9 +25,12 @@ type Coordinator interface {
 }
 
 // RegisterImport registers the import operations with the given coordinator.
-func RegisterImport(coordinator Coordinator, defaultsProvider service.ModelDefaultsProvider) {
+func RegisterImport(
+	coordinator Coordinator, defaultsProvider service.ModelDefaultsProvider, logger logger.Logger,
+) {
 	coordinator.Add(&importOperation{
 		defaultsProvider: defaultsProvider,
+		logger:           logger,
 	})
 }
 
@@ -42,6 +48,7 @@ type ImportService interface {
 type importOperation struct {
 	modelmigration.BaseOperation
 
+	logger           logger.Logger
 	service          ImportService
 	defaultsProvider service.ModelDefaultsProvider
 }
@@ -70,11 +77,30 @@ func (i *importOperation) Execute(ctx context.Context, model description.Model) 
 	// If we don't have any model config, then there is something seriously
 	// wrong. In this case, we should return an error.
 	if len(attrs) == 0 {
-		return errors.NotValidf("model config")
+		return errors.Errorf("model config %w", coreerrors.NotValid)
+	}
+
+	// Models imported from older controllers may contain config attributes
+	// which have since been removed from use. We filter these out by removing
+	// any incoming attributes not in the default list.
+	defaults, err := i.defaultsProvider.ModelDefaults(ctx)
+	if err != nil {
+		return errors.Capture(err)
+	}
+	defaultAttrs := set.NewStrings()
+	for k := range defaults {
+		defaultAttrs.Add(k)
+	}
+
+	for k, v := range attrs {
+		if !defaultAttrs.Contains(k) {
+			i.logger.Debugf(ctx, "model config attribute %s=%v is removed on import", k, v)
+			delete(attrs, k)
+		}
 	}
 
 	if err := i.service.SetModelConfig(ctx, attrs); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }

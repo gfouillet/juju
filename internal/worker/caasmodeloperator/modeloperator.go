@@ -7,21 +7,22 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/controller/caasmodeloperator"
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
 	"github.com/juju/juju/internal/password"
 )
 
 type ModelOperatorAPI interface {
-	SetPassword(password string) error
-	ModelOperatorProvisioningInfo() (caasmodeloperator.ModelOperatorProvisioningInfo, error)
+	SetPassword(ctx context.Context, password string) error
+	ModelOperatorProvisioningInfo(context.Context) (caasmodeloperator.ModelOperatorProvisioningInfo, error)
 	WatchModelOperatorProvisioningInfo(context.Context) (watcher.NotifyWatcher, error)
 }
 
@@ -31,6 +32,7 @@ type ModelOperatorBroker interface {
 	EnsureModelOperator(context.Context, string, string, *caas.ModelOperatorConfig) error
 	ModelOperator(ctx context.Context) (*caas.ModelOperatorConfig, error)
 	ModelOperatorExists(ctx context.Context) (bool, error)
+	GetModelOperatorDeploymentImage(ctx context.Context) (string, error)
 }
 
 // ModelOperatorManager defines the worker used for managing model operators in
@@ -78,7 +80,7 @@ func (m *ModelOperatorManager) loop() error {
 		case <-m.catacomb.Dying():
 			return m.catacomb.ErrDying()
 		case <-watcher.Changes():
-			err := m.update(context.TODO())
+			err := m.update(ctx)
 			if err != nil {
 				return errors.Annotate(err, "failed to update model operator")
 			}
@@ -92,8 +94,8 @@ func (m *ModelOperatorManager) scopedContext() (context.Context, context.CancelF
 }
 
 func (m *ModelOperatorManager) update(ctx context.Context) error {
-	m.logger.Debugf("gathering model operator provisioning information for model %s", m.modelUUID)
-	info, err := m.api.ModelOperatorProvisioningInfo()
+	m.logger.Debugf(ctx, "gathering model operator provisioning information for model %s", m.modelUUID)
+	info, err := m.api.ModelOperatorProvisioningInfo(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -125,9 +127,28 @@ func (m *ModelOperatorManager) update(ctx context.Context) error {
 			password = prevConf.OldPassword()
 			setPassword = false
 		}
+
+		// retrieves model operator deployment image to keep model operator's image the same after migration
+		modelImage, err := m.broker.GetModelOperatorDeploymentImage(ctx)
+		if err != nil {
+			return errors.Annotate(err, "failed to get model deployment image")
+		}
+
+		modelImageRepo, err := podcfg.RecoverRepoFromOperatorPath(modelImage)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		registryPath, err := podcfg.GetJujuOCIImagePathFromModelRepo(modelImageRepo, info.Version)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		info.ImageDetails.RegistryPath = registryPath
+
 	}
 	if setPassword {
-		err := m.api.SetPassword(password)
+		err := m.api.SetPassword(ctx, password)
 		if err != nil {
 			return errors.Annotate(err, "failed to set model api passwords")
 		}
@@ -142,7 +163,7 @@ func (m *ModelOperatorManager) update(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	m.logger.Debugf("ensuring model operator deployment in kubernetes for model %s", m.modelUUID)
+	m.logger.Debugf(ctx, "ensuring model operator deployment in kubernetes for model %s", m.modelUUID)
 	err = m.broker.EnsureModelOperator(
 		ctx,
 		m.modelUUID,
@@ -177,6 +198,7 @@ func NewModelOperatorManager(
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-model-operator-manager",
 		Site: &m.catacomb,
 		Work: m.loop,
 	}); err != nil {
@@ -189,7 +211,7 @@ func NewModelOperatorManager(
 func (m *ModelOperatorManager) updateAgentConf(
 	apiAddresses []string,
 	password string,
-	ver version.Number,
+	ver semversion.Number,
 ) (agent.ConfigSetterWriter, error) {
 	modelTag := names.NewModelTag(m.modelUUID)
 	conf, err := agent.NewAgentConfig(

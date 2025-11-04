@@ -8,15 +8,15 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -43,18 +43,18 @@ type showTaskCommand struct {
 }
 
 const showTaskDoc = `
-Show the results returned by a task with the given ID.  
+Show the results returned by a task with the given ID.
 To block until the result is known completed or failed, use
-the --wait option with a duration, as in --wait 5s or --wait 1h.
-Use --watch to wait indefinitely.  
+the ` + "`--wait`" + ` option with a duration, as in ` + "`--wait 5s`" + ` or ` + "`--wait 1h`" + `.
+Use ` + "`--watch`" + ` to wait indefinitely.
 
-The default behavior without --wait or --watch is to immediately check and return;
-if the results are "pending" then only the available information will be
+The default behavior without ` + "`--wait`" + ` or ` + "`--watch`" + ` is to immediately check and return;
+if the results are ` + "`pending`" + `, then only the available information will be
 displayed.  This is also the behavior when any negative time is given.
 
 Note: if Juju has been upgraded from 2.6 and there are old action UUIDs still in use,
 and you want to specify just the UUID prefix to match on, you will need to include up
-to at least the first "-" to disambiguate from a newer numeric id.
+to at least the first ` + "`-`" + ` to disambiguate from a newer numeric ID.
 `
 
 const showTaskExamples = `
@@ -88,6 +88,7 @@ func (c *showTaskCommand) Info() *cmd.Info {
 		Doc:      showTaskDoc,
 		Examples: showTaskExamples,
 		SeeAlso: []string{
+			"cancel-task",
 			"run",
 			"operations",
 			"show-operation",
@@ -121,7 +122,7 @@ func (c *showTaskCommand) Init(args []string) error {
 
 // Run issues the API call to get Actions by ID.
 func (c *showTaskCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -139,7 +140,7 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 
 	shouldWatch := c.wait.Nanoseconds() >= 0
 	if shouldWatch {
-		result, err := fetchResult(api, c.requestedId)
+		result, err := fetchResult(ctx, api, c.requestedId)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -148,7 +149,7 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if shouldWatch {
-		logsWatcher, err = api.WatchActionProgress(c.requestedId)
+		logsWatcher, err = api.WatchActionProgress(ctx, c.requestedId)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -160,10 +161,9 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 
 	var result actionapi.ActionResult
 	if shouldWatch {
-		tick := c.clock.NewTimer(resultPollTime)
-		result, err = GetActionResult(api, c.requestedId, tick, wait)
+		result, err = GetActionResult(ctx, api, c.requestedId, c.clock, wait)
 	} else {
-		result, err = fetchResult(api, c.requestedId)
+		result, err = fetchResult(ctx, api, c.requestedId)
 	}
 	close(actionDone)
 	if logsWatcher != nil {

@@ -9,9 +9,8 @@ import (
 	"strconv"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
@@ -19,10 +18,10 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
-	"github.com/juju/juju/internal/mongo"
 	"github.com/juju/juju/internal/password"
 )
 
@@ -62,7 +61,7 @@ type ControllerPodConfig struct {
 	ControllerName string
 
 	// JujuVersion is the juju version.
-	JujuVersion version.Number
+	JujuVersion semversion.Number
 
 	// DataDir holds the directory that juju state will be put in the new
 	// instance.
@@ -97,25 +96,25 @@ func (cfg *ControllerPodConfig) AgentConfig(tag names.Tag) (agent.ConfigSetterWr
 			LogDir:          cfg.LogDir,
 			MetricsSpoolDir: cfg.MetricsSpoolDir,
 		},
-		Tag:                      tag,
-		UpgradedToVersion:        cfg.JujuVersion,
-		Password:                 cfg.APIInfo.Password,
-		APIAddresses:             cfg.APIHostAddrs(),
-		CACert:                   cfg.APIInfo.CACert,
-		Values:                   cfg.AgentEnvironment,
-		Controller:               cfg.ControllerTag,
-		Model:                    cfg.APIInfo.ModelTag,
-		MongoMemoryProfile:       mongo.MemoryProfile(cfg.Controller.MongoMemoryProfile()),
-		QueryTracingEnabled:      cfg.Controller.QueryTracingEnabled(),
-		QueryTracingThreshold:    cfg.Controller.QueryTracingThreshold(),
-		OpenTelemetryEnabled:     cfg.Controller.OpenTelemetryEnabled(),
-		OpenTelemetryEndpoint:    cfg.Controller.OpenTelemetryEndpoint(),
-		OpenTelemetryInsecure:    cfg.Controller.OpenTelemetryInsecure(),
-		OpenTelemetryStackTraces: cfg.Controller.OpenTelemetryStackTraces(),
-		OpenTelemetrySampleRatio: cfg.Controller.OpenTelemetrySampleRatio(),
-		ObjectStoreType:          cfg.Controller.ObjectStoreType(),
+		Tag:                                tag,
+		UpgradedToVersion:                  cfg.JujuVersion,
+		Password:                           cfg.APIInfo.Password,
+		APIAddresses:                       cfg.APIHostAddrs(),
+		CACert:                             cfg.APIInfo.CACert,
+		Values:                             cfg.AgentEnvironment,
+		Controller:                         cfg.ControllerTag,
+		Model:                              cfg.APIInfo.ModelTag,
+		QueryTracingEnabled:                cfg.Controller.QueryTracingEnabled(),
+		QueryTracingThreshold:              cfg.Controller.QueryTracingThreshold(),
+		OpenTelemetryEnabled:               cfg.Controller.OpenTelemetryEnabled(),
+		OpenTelemetryEndpoint:              cfg.Controller.OpenTelemetryEndpoint(),
+		OpenTelemetryInsecure:              cfg.Controller.OpenTelemetryInsecure(),
+		OpenTelemetryStackTraces:           cfg.Controller.OpenTelemetryStackTraces(),
+		OpenTelemetrySampleRatio:           cfg.Controller.OpenTelemetrySampleRatio(),
+		OpenTelemetryTailSamplingThreshold: cfg.Controller.OpenTelemetryTailSamplingThreshold(),
+		ObjectStoreType:                    cfg.Controller.ObjectStoreType(),
 	}
-	return agent.NewStateMachineConfig(configParams, cfg.Bootstrap.StateServingInfo)
+	return agent.NewStateMachineConfig(configParams, cfg.Bootstrap.ControllerAgentInfo)
 }
 
 // UnitAgentConfig returns the agent config file for the controller unit charm.
@@ -136,7 +135,7 @@ func (cfg *ControllerPodConfig) UnitAgentConfig() (agent.ConfigSetterWriter, err
 		Password:          password,
 		// Unit agent should always connect to the local controller.
 		APIAddresses: []string{net.JoinHostPort(
-			"localhost", strconv.Itoa(cfg.Bootstrap.StateServingInfo.APIPort),
+			"localhost", strconv.Itoa(cfg.Bootstrap.ControllerAgentInfo.APIPort),
 		)},
 		CACert:     cfg.APIInfo.CACert,
 		Values:     cfg.AgentEnvironment,
@@ -156,7 +155,7 @@ func (cfg *ControllerPodConfig) APIHostAddrs() []string {
 	var hosts []string
 	if cfg.Bootstrap != nil {
 		hosts = append(hosts, net.JoinHostPort(
-			"localhost", strconv.Itoa(cfg.Bootstrap.StateServingInfo.APIPort)),
+			"localhost", strconv.Itoa(cfg.Bootstrap.ControllerAgentInfo.APIPort)),
 		)
 	}
 	if cfg.APIInfo != nil {
@@ -180,7 +179,7 @@ func (cfg *ControllerPodConfig) VerifyConfig() (err error) {
 	if cfg.MetricsSpoolDir == "" {
 		return errors.New("missing metrics spool directory")
 	}
-	if cfg.JujuVersion == version.Zero {
+	if cfg.JujuVersion == semversion.Zero {
 		return errors.New("missing juju version")
 	}
 	if cfg.APIInfo == nil {
@@ -245,19 +244,16 @@ func (cfg *BootstrapConfig) VerifyConfig() (err error) {
 	if cfg.ControllerModelConfig == nil {
 		return errors.New("missing model configuration")
 	}
-	if len(cfg.StateServingInfo.Cert) == 0 {
+	if len(cfg.ControllerAgentInfo.Cert) == 0 {
 		return errors.New("missing controller certificate")
 	}
-	if len(cfg.StateServingInfo.PrivateKey) == 0 {
+	if len(cfg.ControllerAgentInfo.PrivateKey) == 0 {
 		return errors.New("missing controller private key")
 	}
-	if len(cfg.StateServingInfo.CAPrivateKey) == 0 {
+	if len(cfg.ControllerAgentInfo.CAPrivateKey) == 0 {
 		return errors.New("missing ca cert private key")
 	}
-	if cfg.StateServingInfo.StatePort == 0 {
-		return errors.New("missing state port")
-	}
-	if cfg.StateServingInfo.APIPort == 0 {
+	if cfg.ControllerAgentInfo.APIPort == 0 {
 		return errors.New("missing API port")
 	}
 	return nil

@@ -5,40 +5,56 @@ package service
 
 import (
 	"context"
-	"database/sql"
 
-	"github.com/juju/errors"
-	"github.com/juju/version/v2"
+	"github.com/juju/collections/transform"
 
 	"github.com/juju/juju/core/changestream"
-	coredatabase "github.com/juju/juju/core/database"
-	"github.com/juju/juju/core/upgrade"
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/trace"
+	coreupgrade "github.com/juju/juju/core/upgrade"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
-	"github.com/juju/juju/domain"
-	domainupgrade "github.com/juju/juju/domain/upgrade"
+	"github.com/juju/juju/domain/upgrade"
 	upgradeerrors "github.com/juju/juju/domain/upgrade/errors"
-	"github.com/juju/juju/internal/database"
+	"github.com/juju/juju/internal/errors"
 )
 
 // State describes retrieval and persistence methods for upgrade info.
 type State interface {
-	CreateUpgrade(context.Context, version.Number, version.Number) (domainupgrade.UUID, error)
-	SetControllerReady(context.Context, domainupgrade.UUID, string) error
-	AllProvisionedControllersReady(context.Context, domainupgrade.UUID) (bool, error)
-	StartUpgrade(context.Context, domainupgrade.UUID) error
-	SetControllerDone(context.Context, domainupgrade.UUID, string) error
-	ActiveUpgrade(context.Context) (domainupgrade.UUID, error)
-	SetDBUpgradeCompleted(context.Context, domainupgrade.UUID) error
-	SetDBUpgradeFailed(context.Context, domainupgrade.UUID) error
-	UpgradeInfo(context.Context, domainupgrade.UUID) (upgrade.Info, error)
+	CreateUpgrade(context.Context, semversion.Number, semversion.Number) (upgrade.UUID, error)
+
+	// GetAllModelUUIDs returns all model uuids in the controller that are
+	// alive. If no models exist in the controller an empty list is returned.
+	GetAllModelUUIDs(context.Context) ([]coremodel.UUID, error)
+
+	SetControllerReady(context.Context, upgrade.UUID, string) error
+	AllProvisionedControllersReady(context.Context, upgrade.UUID) (bool, error)
+	StartUpgrade(context.Context, upgrade.UUID) error
+	SetControllerDone(context.Context, upgrade.UUID, string) error
+	ActiveUpgrade(context.Context) (upgrade.UUID, error)
+	SetDBUpgradeCompleted(context.Context, upgrade.UUID) error
+	SetDBUpgradeFailed(context.Context, upgrade.UUID) error
+	UpgradeInfo(context.Context, upgrade.UUID) (coreupgrade.Info, error)
+	NamespaceForWatchUpgradeReady() string
+	NamespaceForWatchUpgradeState() string
 }
 
 // WatcherFactory describes methods for creating watchers.
 type WatcherFactory interface {
-	// NewValueMapperWatcher returns a new namespace watcher
-	// for events based on the input change mask and predicate.
-	NewValueMapperWatcher(string, string, changestream.ChangeType, eventsource.Mapper) (watcher.NotifyWatcher, error)
+	// NewNotifyMapperWatcher returns a new watcher that receives changes from
+	// the input base watcher's db/queue. A single filter option is required,
+	// though additional filter options can be provided. Filtering of values is
+	// done first by the filter, and then subsequently by the mapper. Based on
+	// the mapper's logic a subset of them (or none) may be emitted.
+	NewNotifyMapperWatcher(
+		ctx context.Context,
+		summary string,
+		mapper eventsource.Mapper,
+		filter eventsource.FilterOption,
+		filterOpts ...eventsource.FilterOption,
+	) (watcher.NotifyWatcher, error)
 }
 
 // Service provides the API for working with upgrade info
@@ -53,107 +69,115 @@ func NewService(st State, wf WatcherFactory) *Service {
 
 // CreateUpgrade creates an upgrade to and from specified versions
 // If an upgrade is already running/pending, return an AlreadyExists err
-func (s *Service) CreateUpgrade(ctx context.Context, previousVersion, targetVersion version.Number) (domainupgrade.UUID, error) {
+func (s *Service) CreateUpgrade(ctx context.Context, previousVersion, targetVersion semversion.Number) (upgrade.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 	if previousVersion.Compare(targetVersion) >= 0 {
-		return "", errors.NotValidf("target version %q must be greater than current version %q", targetVersion, previousVersion)
+		return "", errors.Errorf("target version %q must be greater than current version %q %w", targetVersion, previousVersion, coreerrors.NotValid)
 	}
-	upgradeUUID, err := s.st.CreateUpgrade(ctx, previousVersion, targetVersion)
-	if database.IsErrConstraintUnique(err) {
-		return "", upgradeerrors.ErrUpgradeAlreadyStarted
-	}
-	return upgradeUUID, domain.CoerceError(err)
+	return s.st.CreateUpgrade(ctx, previousVersion, targetVersion)
+}
+
+// GetAllModelUUIDs returns all model uuids in the controller. If the controller
+// has no models an empty result is returned.
+func (s *Service) GetAllModelUUIDs(ctx context.Context) ([]coremodel.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	return s.st.GetAllModelUUIDs(ctx)
 }
 
 // SetControllerReady marks the supplied controllerID as being ready
 // to start its upgrade. All provisioned controllers need to be ready
 // before an upgrade can start
-func (s *Service) SetControllerReady(ctx context.Context, upgradeUUID domainupgrade.UUID, controllerID string) error {
+func (s *Service) SetControllerReady(ctx context.Context, upgradeUUID upgrade.UUID, controllerID string) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-	err := s.st.SetControllerReady(ctx, upgradeUUID, controllerID)
-	if database.IsErrConstraintForeignKey(err) {
-		return errors.NotFoundf("upgrade %q", upgradeUUID)
-	}
-	return domain.CoerceError(err)
+	return s.st.SetControllerReady(ctx, upgradeUUID, controllerID)
 }
 
 // StartUpgrade starts the current upgrade if it exists
-func (s *Service) StartUpgrade(ctx context.Context, upgradeUUID domainupgrade.UUID) error {
+func (s *Service) StartUpgrade(ctx context.Context, upgradeUUID upgrade.UUID) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-	err := s.st.StartUpgrade(ctx, upgradeUUID)
-	if database.IsErrNotFound(err) {
-		return errors.NotFoundf("upgrade %q", upgradeUUID)
-	}
-	return domain.CoerceError(err)
+	return s.st.StartUpgrade(ctx, upgradeUUID)
 }
 
 // SetControllerDone marks the supplied controllerID as having
 // completed its upgrades. When SetControllerDone is called by the
 // last provisioned controller, the upgrade will be archived.
-func (s *Service) SetControllerDone(ctx context.Context, upgradeUUID domainupgrade.UUID, controllerID string) error {
+func (s *Service) SetControllerDone(ctx context.Context, upgradeUUID upgrade.UUID, controllerID string) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-	return domain.CoerceError(s.st.SetControllerDone(ctx, upgradeUUID, controllerID))
+	return s.st.SetControllerDone(ctx, upgradeUUID, controllerID)
 }
 
 // SetDBUpgradeCompleted marks the upgrade as completed in the database
-func (s *Service) SetDBUpgradeCompleted(ctx context.Context, upgradeUUID domainupgrade.UUID) error {
+func (s *Service) SetDBUpgradeCompleted(ctx context.Context, upgradeUUID upgrade.UUID) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-	err := s.st.SetDBUpgradeCompleted(ctx, upgradeUUID)
-	return domain.CoerceError(err)
+	return s.st.SetDBUpgradeCompleted(ctx, upgradeUUID)
 }
 
 // SetDBUpgradeFailed marks the upgrade as failed in the database.
 // Manual intervention will be required if this has been invoked.
-func (s *Service) SetDBUpgradeFailed(ctx context.Context, upgradeUUID domainupgrade.UUID) error {
+func (s *Service) SetDBUpgradeFailed(ctx context.Context, upgradeUUID upgrade.UUID) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
-	err := s.st.SetDBUpgradeFailed(ctx, upgradeUUID)
-	return domain.CoerceError(err)
+	return s.st.SetDBUpgradeFailed(ctx, upgradeUUID)
 }
 
 // ActiveUpgrade returns the uuid of the current active upgrade.
 // If there are no active upgrades, return a NotFound error
-func (s *Service) ActiveUpgrade(ctx context.Context) (domainupgrade.UUID, error) {
-	activeUpgrade, err := s.st.ActiveUpgrade(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", errors.NotFoundf("active upgrade")
-	}
-	return activeUpgrade, domain.CoerceError(err)
+func (s *Service) ActiveUpgrade(ctx context.Context) (upgrade.UUID, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+	return s.st.ActiveUpgrade(ctx)
 }
 
 // UpgradeInfo returns the upgrade info for the supplied upgradeUUID
-func (s *Service) UpgradeInfo(ctx context.Context, upgradeUUID domainupgrade.UUID) (upgrade.Info, error) {
+func (s *Service) UpgradeInfo(ctx context.Context, upgradeUUID upgrade.UUID) (coreupgrade.Info, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 	if err := upgradeUUID.Validate(); err != nil {
-		return upgrade.Info{}, errors.Trace(err)
+		return coreupgrade.Info{}, errors.Capture(err)
 	}
-	upgradeInfo, err := s.st.UpgradeInfo(ctx, upgradeUUID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return upgrade.Info{}, errors.NotFoundf("upgrade %q", upgradeUUID)
-	}
-	return upgradeInfo, domain.CoerceError(err)
+	return s.st.UpgradeInfo(ctx, upgradeUUID)
 }
 
 // IsUpgrading returns true if there is an upgrade in progress.
 // This essentially asks is there any upgrades that are not in the terminal
 // states (completed or failed)
 func (s *Service) IsUpgrading(ctx context.Context) (bool, error) {
-	_, err := s.ActiveUpgrade(ctx)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, errors.NotFound) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	if _, err := s.ActiveUpgrade(ctx); errors.Is(err, upgradeerrors.NotFound) {
 		return false, nil
+	} else if err != nil {
+		return false, errors.Capture(err)
 	}
 
-	return false, errors.Trace(err)
+	return true, nil
 }
 
 // WatchableService provides the API for working with upgrade info
@@ -174,43 +198,75 @@ func NewWatchableService(st State, wf WatcherFactory) *WatchableService {
 
 // WatchForUpgradeReady creates a watcher which notifies when all controller
 // nodes have been registered, meaning the upgrade is ready to start.
-func (s *WatchableService) WatchForUpgradeReady(ctx context.Context, upgradeUUID domainupgrade.UUID) (watcher.NotifyWatcher, error) {
+func (s *WatchableService) WatchForUpgradeReady(ctx context.Context, upgradeUUID upgrade.UUID) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	mask := changestream.Create | changestream.Update
-	mapper := func(ctx context.Context, db coredatabase.TxnRunner, changes []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
+	mapper := func(ctx context.Context, changes []changestream.ChangeEvent) (_ []string, err error) {
+		ctx, span := trace.Start(ctx, trace.NameFromFunc())
+		defer span.End()
+
 		ready, err := s.st.AllProvisionedControllersReady(ctx, upgradeUUID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		// Only dispatch if all controllers are ready.
-		if ready {
-			return changes, nil
+		if !ready {
+			return nil, nil
 		}
-		return nil, nil
+		return transform.Slice(changes, func(c changestream.ChangeEvent) string {
+			return c.Changed()
+		}), nil
 	}
-	return s.watcherFactory.NewValueMapperWatcher("upgrade_info_controller_node", upgradeUUID.String(), mask, mapper)
+	return s.watcherFactory.NewNotifyMapperWatcher(
+		ctx,
+		"upgrade ready watcher",
+		mapper,
+		eventsource.PredicateFilter(
+			s.st.NamespaceForWatchUpgradeReady(),
+			changestream.Changed,
+			eventsource.EqualsPredicate(upgradeUUID.String()),
+		),
+	)
 }
 
 // WatchForUpgradeState creates a watcher which notifies when the upgrade
 // has reached the given state.
-func (s *WatchableService) WatchForUpgradeState(ctx context.Context, upgradeUUID domainupgrade.UUID, state upgrade.State) (watcher.NotifyWatcher, error) {
+func (s *WatchableService) WatchForUpgradeState(ctx context.Context, upgradeUUID upgrade.UUID, state coreupgrade.State) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := upgradeUUID.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	mask := changestream.Create | changestream.Update
-	mapper := func(ctx context.Context, db coredatabase.TxnRunner, changes []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
+	mapper := func(ctx context.Context, changes []changestream.ChangeEvent) (_ []string, err error) {
+		ctx, span := trace.Start(ctx, trace.NameFromFunc())
+		defer span.End()
+
 		info, err := s.st.UpgradeInfo(ctx, upgradeUUID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
-		if info.State == state {
-			return changes, nil
+		if info.State != state {
+			return nil, nil
 		}
-		return nil, nil
+		return transform.Slice(changes, func(c changestream.ChangeEvent) string {
+			return c.Changed()
+		}), nil
 	}
-	return s.watcherFactory.NewValueMapperWatcher("upgrade_info", upgradeUUID.String(), mask, mapper)
+	return s.watcherFactory.NewNotifyMapperWatcher(
+		ctx,
+		"upgrade state watcher",
+		mapper,
+		eventsource.PredicateFilter(
+			s.st.NamespaceForWatchUpgradeState(),
+			changestream.Changed,
+			eventsource.EqualsPredicate(upgradeUUID.String()),
+		),
+	)
 }

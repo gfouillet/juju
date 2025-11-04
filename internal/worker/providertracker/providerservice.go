@@ -13,15 +13,15 @@ import (
 	"github.com/juju/juju/environs/config"
 )
 
-// ServiceFactoryGetter defines an interface that returns a ServiceFactory
+// DomainServicesGetter defines an interface that returns a DomainServices
 // for a given model UUID.
-type ServiceFactoryGetter interface {
-	// FactoryForModel returns a ProviderServiceFactory for the given model.
-	FactoryForModel(modelUUID string) ServiceFactory
+type DomainServicesGetter interface {
+	// ServicesForModel returns a ProviderServices for the given model.
+	ServicesForModel(modelUUID string) DomainServices
 }
 
-// ServiceFactory provides access to the services required by the provider.
-type ServiceFactory interface {
+// DomainServices provides access to the services required by the provider.
+type DomainServices interface {
 	// Model returns the model service.
 	Model() ModelService
 	// Cloud returns the cloud service.
@@ -34,25 +34,30 @@ type ServiceFactory interface {
 
 // ModelService represents the model service provided by the provider.
 type ModelService interface {
-	// Model returns the read-only default model.
-	Model(ctx context.Context) (model.ReadOnlyModel, error)
+	// Model returns information for the current model.
+	Model(ctx context.Context) (model.ModelInfo, error)
+
+	// WatchModelCloudCredential returns a new NotifyWatcher watching for changes that
+	// result in the cloud spec for a model changing.
+	WatchModelCloudCredential(ctx context.Context, modelUUID model.UUID) (watcher.NotifyWatcher, error)
+
+	// WatchModel returns a watcher that emits an event if the model changes.
+	WatchModel(ctx context.Context) (watcher.NotifyWatcher, error)
 }
 
 // CloudService represents the cloud service provided by the provider.
 type CloudService interface {
 	// Cloud returns the named cloud.
 	Cloud(ctx context.Context, name string) (*cloud.Cloud, error)
-	// WatchCloud returns a watcher that observes changes to the specified cloud.
-	WatchCloud(ctx context.Context, name string) (watcher.NotifyWatcher, error)
 }
 
 // ConfigService represents the config service provided by the provider.
 type ConfigService interface {
 	// ModelConfig returns the model configuration for the given tag.
 	ModelConfig(ctx context.Context) (*config.Config, error)
-	// WatchModelConfig returns a watcher that observes changes to the specified
+	// Watch returns a watcher that observes changes to the specified
 	// model configuration.
-	Watch() (watcher.StringsWatcher, error)
+	Watch(context.Context) (watcher.StringsWatcher, error)
 }
 
 // CredentialService represents the credential service provided by the
@@ -60,7 +65,6 @@ type ConfigService interface {
 type CredentialService interface {
 	// CloudCredential returns the cloud credential for the given tag.
 	CloudCredential(ctx context.Context, key credential.Key) (cloud.Credential, error)
-	// WatchCredential returns a watcher that observes changes to the specified
-	// credential.
-	WatchCredential(ctx context.Context, key credential.Key) (watcher.NotifyWatcher, error)
+	// InvalidateCredential marks the cloud credential for the given key as invalid.
+	InvalidateCredential(ctx context.Context, key credential.Key, reason string) error
 }

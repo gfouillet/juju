@@ -4,16 +4,24 @@
 package secretbackend
 
 import (
-	"fmt"
 	"time"
 
 	backenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // BackendIdentifier is used to identify a secret backend.
 type BackendIdentifier struct {
 	ID   string
 	Name string
+}
+
+// String returns the identifier as a string.
+func (i BackendIdentifier) String() string {
+	if i.Name != "" {
+		return i.Name
+	}
+	return i.ID
 }
 
 // CreateSecretBackendParams are used to create a secret backend.
@@ -28,22 +36,24 @@ type CreateSecretBackendParams struct {
 // Validate checks that the parameters are valid.
 func (p CreateSecretBackendParams) Validate() error {
 	if p.ID == "" {
-		return fmt.Errorf("%w: ID is missing", backenderrors.NotValid)
+		return errors.Errorf("%w: ID is missing", backenderrors.NotValid)
 	}
 	if p.Name == "" {
-		return fmt.Errorf("%w: name is missing", backenderrors.NotValid)
+		return errors.Errorf("%w: name is missing", backenderrors.NotValid)
 	}
 	if p.BackendType == "" {
-		return fmt.Errorf("%w: type is missing", backenderrors.NotValid)
+		return errors.Errorf("%w: type is missing", backenderrors.NotValid)
 	}
 	for k, v := range p.Config {
 		if k == "" {
-			return fmt.Errorf(
+			return errors.Errorf(
 				"%w: empty config key for %q", backenderrors.NotValid, p.Name)
+
 		}
 		if v == "" {
-			return fmt.Errorf(
+			return errors.Errorf(
 				"%w: empty config value for %q", backenderrors.NotValid, p.Name)
+
 		}
 	}
 	return nil
@@ -63,23 +73,25 @@ func (p UpdateSecretBackendParams) Validate() error {
 	if p.ID == "" && p.Name == "" {
 		// We need at least one identifier.
 		// So we can identify the secret backend to update by ID or name.
-		return fmt.Errorf("%w: both ID and name are missing", backenderrors.NotValid)
+		return errors.Errorf("%w: both ID and name are missing", backenderrors.NotValid)
 	}
 	if p.ID != "" && p.Name != "" {
 		// We just need one identifier.
-		return fmt.Errorf("%w: both ID and name are set", backenderrors.NotValid)
+		return errors.Errorf("%w: both ID and name are set", backenderrors.NotValid)
 	}
 	if p.NewName != nil && *p.NewName == "" {
-		return fmt.Errorf("%w: name cannot be set to empty", backenderrors.NotValid)
+		return errors.Errorf("%w: name cannot be set to empty", backenderrors.NotValid)
 	}
 	for k, v := range p.Config {
 		if k == "" {
-			return fmt.Errorf(
+			return errors.Errorf(
 				"%w: empty config key for %q", backenderrors.NotValid, p.ID)
+
 		}
 		if v == "" {
-			return fmt.Errorf(
+			return errors.Errorf(
 				"%w: empty config value for %q", backenderrors.NotValid, p.ID)
+
 		}
 	}
 	return nil
@@ -98,5 +110,7 @@ type SecretBackend struct {
 	// NextRotateTime is the time at which the next token rotation should occur.
 	NextRotateTime *time.Time
 	// Config is the configuration of the secret backend.
-	Config map[string]string
+	Config map[string]any
+	// NumSecrets is the number of secrets stored in the secret backend.
+	NumSecrets int
 }

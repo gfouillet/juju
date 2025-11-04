@@ -4,6 +4,7 @@
 package auditlog
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,10 +14,10 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/errors"
 	"github.com/juju/lumberjack/v2"
 
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/internal/errors"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
@@ -131,7 +132,7 @@ func NewRecorder(log AuditLog, clock clock.Clock, c ConversationArgs) (*Recorder
 		ModelUUID:      c.ModelUUID,
 	})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return &Recorder{
 		log:          log,
@@ -143,7 +144,7 @@ func NewRecorder(log AuditLog, clock clock.Clock, c ConversationArgs) (*Recorder
 
 // AddRequest records a method call to the API.
 func (r *Recorder) AddRequest(m RequestArgs) error {
-	return errors.Trace(r.log.AddRequest(Request{
+	return errors.Capture(r.log.AddRequest(Request{
 		ConversationID: r.callID,
 		ConnectionID:   r.connectionID,
 		RequestID:      m.RequestID,
@@ -153,17 +154,19 @@ func (r *Recorder) AddRequest(m RequestArgs) error {
 		Version:        m.Version,
 		Args:           m.Args,
 	}))
+
 }
 
 // AddResponse records the result of a method call to the API.
 func (r *Recorder) AddResponse(m ResponseErrorsArgs) error {
-	return errors.Trace(r.log.AddResponse(ResponseErrors{
+	return errors.Capture(r.log.AddResponse(ResponseErrors{
 		ConversationID: r.callID,
 		ConnectionID:   r.connectionID,
 		RequestID:      m.RequestID,
 		When:           r.clock.Now().Format(time.RFC3339),
 		Errors:         m.Errors,
 	}))
+
 }
 
 // newConversationID generates a random 64bit integer as hex - this
@@ -193,7 +196,7 @@ func NewLogFile(logDir string, maxSize, maxBackups int) AuditLog {
 	if err := paths.PrimeLogFile(logPath); err != nil {
 		// This isn't a fatal error so log and continue if priming
 		// fails.
-		logger.Errorf("Unable to prime %s (proceeding anyway): %v", logPath, err)
+		logger.Errorf(context.TODO(), "Unable to prime %s (proceeding anyway): %v", logPath, err)
 	}
 
 	ljLogger := &lumberjack.Logger{
@@ -202,7 +205,7 @@ func NewLogFile(logDir string, maxSize, maxBackups int) AuditLog {
 		MaxBackups: maxBackups,
 		Compress:   true,
 	}
-	logger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
+	logger.Debugf(context.TODO(), "created rotating log file %q with max size %d MB and max backups %d",
 		ljLogger.Filename, ljLogger.MaxSize, ljLogger.MaxBackups)
 	return &auditLogFile{
 		fileLogger: ljLogger,
@@ -211,35 +214,35 @@ func NewLogFile(logDir string, maxSize, maxBackups int) AuditLog {
 
 // AddConversation implements AuditLog.
 func (a *auditLogFile) AddConversation(c Conversation) error {
-	return errors.Trace(a.addRecord(Record{Conversation: &c}))
+	return errors.Capture(a.addRecord(Record{Conversation: &c}))
 }
 
 // AddRequest implements AuditLog.
 func (a *auditLogFile) AddRequest(m Request) error {
-	return errors.Trace(a.addRecord(Record{Request: &m}))
+	return errors.Capture(a.addRecord(Record{Request: &m}))
 
 }
 
 // AddResponse implements AuditLog.
 func (a *auditLogFile) AddResponse(m ResponseErrors) error {
-	return errors.Trace(a.addRecord(Record{Errors: &m}))
+	return errors.Capture(a.addRecord(Record{Errors: &m}))
 }
 
 // Close implements AuditLog.
 func (a *auditLogFile) Close() error {
-	return errors.Trace(a.fileLogger.Close())
+	return errors.Capture(a.fileLogger.Close())
 }
 
 func (a *auditLogFile) addRecord(r Record) error {
 	bytes, err := json.Marshal(r)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	// Add a linebreak to bytes rather than doing two calls to write
 	// just in case lumberjack rolls the file between them.
 	bytes = append(bytes, byte('\n'))
 	_, err = a.fileLogger.Write(bytes)
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 func idString(id uint64) string {

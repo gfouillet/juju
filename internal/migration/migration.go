@@ -5,118 +5,110 @@ package migration
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 
-	"github.com/juju/description/v6"
+	"github.com/juju/clock"
+	"github.com/juju/description/v10"
 	"github.com/juju/errors"
-	"github.com/juju/naturalsort"
-	"github.com/juju/version/v2"
 
-	"github.com/juju/juju/controller"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/migration"
 	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/modelmigration"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
+	corestorage "github.com/juju/juju/core/storage"
+	domaincharm "github.com/juju/juju/domain/application/charm"
+	"github.com/juju/juju/domain/modeldefaults"
 	migrations "github.com/juju/juju/domain/modelmigration"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/charm"
-	"github.com/juju/juju/internal/servicefactory"
-	"github.com/juju/juju/internal/storage"
+	internalerrors "github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/naturalsort"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/tools"
-	"github.com/juju/juju/state"
 )
 
-// LegacyStateExporter describes interface on state required to export a
-// model.
-// Deprecated: This is being replaced with the ModelExporter.
-type LegacyStateExporter interface {
-	// Export generates an abstract representation of a model.
-	Export(leaders map[string]string, store objectstore.ObjectStore) (description.Model, error)
-	// ExportPartial produces a partial export based based on the input
-	// config.
-	ExportPartial(cfg state.ExportConfig, store objectstore.ObjectStore) (description.Model, error)
+// OperationExporter describes the interface for running the ExportOpertions
+// method.
+type OperationExporter interface {
+	// ExportOperations registers the export operations with the given coordinator.
+	ExportOperations(registry corestorage.ModelStorageRegistryGetter)
 }
 
-type storageRegistryGetter func() (storage.ProviderRegistry, error)
+// Coordinator describes the interface required for coordinating model
+// migration operations.
+type Coordinator interface {
+	// Add a new operation to the migration. It will be appended at the end of the
+	// list of operations.
+	Add(operations modelmigration.Operation)
+	// Perform executes the migration.
+	// We log in addition to returning errors because the error is ultimately
+	// returned to the caller on the source, and we want them to be reflected
+	// in *this* controller's logs.
+	Perform(ctx context.Context, scope modelmigration.Scope, model description.Model) (err error)
+}
 
 // ModelExporter facilitates partial and full export of a model.
 type ModelExporter struct {
-	// TODO(nvinuesa): This is being deprecated, only needed until the
-	// migration to dqlite is complete.
-	legacyStateExporter   LegacyStateExporter
-	storageRegistryGetter storageRegistryGetter
+	storageRegistryGetter corestorage.ModelStorageRegistryGetter
+	operationExporter     OperationExporter
 
-	scope  modelmigration.Scope
-	logger corelogger.Logger
+	scope       modelmigration.Scope
+	coordinator Coordinator
+	logger      corelogger.Logger
+
+	clock clock.Clock
 }
 
 // NewModelExporter returns a new ModelExporter that encapsulates the
 // legacyStateExporter. The legacyStateExporter is being deprecated, only
 // needed until the migration to dqlite is complete.
 func NewModelExporter(
-	legacyStateExporter LegacyStateExporter,
+	operationExporter OperationExporter,
 	scope modelmigration.Scope,
-	storageRegistryGetter storageRegistryGetter,
+	storageRegistryGetter corestorage.ModelStorageRegistryGetter,
+	coordinator Coordinator,
 	logger corelogger.Logger,
+	clock clock.Clock,
 ) *ModelExporter {
-	return &ModelExporter{
-		legacyStateExporter: legacyStateExporter, scope: scope,
+	me := &ModelExporter{
+		operationExporter:     operationExporter,
+		scope:                 scope,
 		storageRegistryGetter: storageRegistryGetter,
+		coordinator:           coordinator,
 		logger:                logger,
+		clock:                 clock,
 	}
-}
-
-// ExportModelPartial partially serializes a model description from the
-// database (legacy mongodb plus dqlite) contents, optionally skipping aspects
-// as defined by the ExportConfig.
-func (e *ModelExporter) ExportModelPartial(ctx context.Context, cfg state.ExportConfig, store objectstore.ObjectStore) (description.Model, error) {
-	model, err := e.legacyStateExporter.ExportPartial(cfg, store)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return e.Export(ctx, model)
+	me.operationExporter.ExportOperations(me.storageRegistryGetter)
+	return me
 }
 
 // ExportModel serializes a model description from the database (legacy mongodb
 // plus dqlite) contents.
-func (e *ModelExporter) ExportModel(ctx context.Context, leaders map[string]string, store objectstore.ObjectStore) (description.Model, error) {
-	model, err := e.legacyStateExporter.Export(leaders, store)
-	if err != nil {
-		return nil, errors.Trace(err)
+func (e *ModelExporter) ExportModel(ctx context.Context, store objectstore.ObjectStore) (description.Model, error) {
+	var model description.Model
+	if model == nil {
+		return nil, errors.ConstError("model export not implemented")
 	}
-
 	return e.Export(ctx, model)
 }
 
 // Export serializes a model description from the database contents.
 func (e *ModelExporter) Export(ctx context.Context, model description.Model) (description.Model, error) {
-	registry, err := e.storageRegistryGetter()
-	if err != nil {
+	if err := e.coordinator.Perform(ctx, e.scope, model); err != nil {
 		return nil, errors.Trace(err)
 	}
-	coordinator := modelmigration.NewCoordinator(e.logger)
-	migrations.ExportOperations(coordinator, registry, e.logger)
-	if err := coordinator.Perform(ctx, e.scope, model); err != nil {
+	// The model now contains all the exported data from the legacy state along
+	// with the new domains' one. Time to validate.
+	if err := model.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	return model, nil
-}
-
-// Note: This is being deprecated.
-// legacyStateImporter describes the method needed to import a model
-// into the database.
-type legacyStateImporter interface {
-	Import(description.Model, controller.Config, config.ConfigSchemaSourceGetter) (*state.Model, *state.State, error)
 }
 
 // ConfigSchemaSourceProvider returns a config.ConfigSchemaSourceGetter based
@@ -125,102 +117,111 @@ type ConfigSchemaSourceProvider = func(environs.CloudService) config.ConfigSchem
 
 // ModelImporter represents a model migration that implements Import.
 type ModelImporter struct {
-	// TODO(nvinuesa): This is being deprecated, only needed until the
-	// migration to dqlite is complete.
-	legacyStateImporter        legacyStateImporter
-	controllerConfigService    ControllerConfigService
-	serviceFactoryGetter       servicefactory.ServiceFactoryGetter
-	configSchemaSourceProvider ConfigSchemaSourceProvider
-	storageRegistryGetter      storageRegistryGetter
+	controllerConfigService ControllerConfigService
+	domainServices          services.DomainServicesGetter
+	storageRegistryGetter   corestorage.ModelStorageRegistryGetter
+	objectStoreGetter       objectstore.ModelObjectStoreGetter
 
 	scope  modelmigration.ScopeForModel
 	logger corelogger.Logger
+	clock  clock.Clock
 }
 
 // NewModelImporter returns a new ModelImporter that encapsulates the
 // legacyStateImporter. The legacyStateImporter is being deprecated, only
 // needed until the migration to dqlite is complete.
 func NewModelImporter(
-	stateImporter legacyStateImporter,
 	scope modelmigration.ScopeForModel,
 	controllerConfigService ControllerConfigService,
-	serviceFactoryGetter servicefactory.ServiceFactoryGetter,
-	configSchemaSourceProvider ConfigSchemaSourceProvider,
-	storageRegistryGetter storageRegistryGetter,
+	domainServices services.DomainServicesGetter,
+	storageRegistryGetter corestorage.ModelStorageRegistryGetter,
+	objectStoreGetter objectstore.ModelObjectStoreGetter,
 	logger corelogger.Logger,
+	clock clock.Clock,
 ) *ModelImporter {
 	return &ModelImporter{
-		legacyStateImporter:        stateImporter,
-		scope:                      scope,
-		controllerConfigService:    controllerConfigService,
-		serviceFactoryGetter:       serviceFactoryGetter,
-		configSchemaSourceProvider: configSchemaSourceProvider,
-		storageRegistryGetter:      storageRegistryGetter,
-		logger:                     logger,
+		scope:                   scope,
+		controllerConfigService: controllerConfigService,
+		domainServices:          domainServices,
+		storageRegistryGetter:   storageRegistryGetter,
+		objectStoreGetter:       objectStoreGetter,
+		logger:                  logger,
+		clock:                   clock,
 	}
 }
 
 // ImportModel deserializes a model description from the bytes, transforms
 // the model config based on information from the controller model, and then
 // imports that as a new database model.
-func (i *ModelImporter) ImportModel(ctx context.Context, bytes []byte) (*state.Model, *state.State, error) {
+func (i *ModelImporter) ImportModel(ctx context.Context, bytes []byte) error {
 	model, err := description.Deserialize(bytes)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return errors.Trace(err)
 	}
 
-	ctrlConfig, err := i.controllerConfigService.ControllerConfig(ctx)
-	if err != nil {
-		return nil, nil, errors.Annotatef(err, "unable to get controller config")
+	modelUUID := coremodel.UUID(model.UUID())
+
+	// The domain services are not available during the import, until the
+	// model is created and activated. The model defaults provider is used
+	// to provide the model defaults during the migration, so we allow access
+	// but in a lazy way.
+
+	modelDefaultsProvider := modelDefaultsProvider{
+		modelUUID:      modelUUID,
+		servicesGetter: i.domainServices,
 	}
 
-	modelUUID := coremodel.UUID(model.Tag().Id())
-
-	serviceFactory := i.serviceFactoryGetter.FactoryForModel(modelUUID.String())
-	configSchemaSource := i.configSchemaSourceProvider(serviceFactory.Cloud())
-	dbModel, dbState, err := i.legacyStateImporter.Import(model, ctrlConfig, configSchemaSource)
-	if err != nil {
-		return nil, nil, errors.Trace(err)
-	}
-
-	modelDefaults := serviceFactory.ModelDefaults()
-	modelDefaultsProvider := modelDefaults.ModelDefaultsProvider(modelUUID)
-
-	registry, err := i.storageRegistryGetter()
-	if err != nil {
-		return nil, nil, errors.Trace(err)
-	}
 	coordinator := modelmigration.NewCoordinator(i.logger)
-	migrations.ImportOperations(coordinator, i.logger, modelDefaultsProvider, registry)
-	if err := coordinator.Perform(ctx, i.scope(modelUUID.String()), model); err != nil {
-		return nil, nil, errors.Trace(err)
+	migrations.ImportOperations(coordinator, modelDefaultsProvider, i.storageRegistryGetter, i.objectStoreGetter, i.clock, i.logger)
+	if err := coordinator.Perform(ctx, i.scope(modelUUID), model); err != nil {
+		return errors.Trace(err)
 	}
 
-	return dbModel, dbState, nil
+	return nil
 }
 
-// CharmDownloader defines a single method that is used to download a
-// charm from the source controller in a migration.
-type CharmDownloader interface {
-	OpenCharm(context.Context, string) (io.ReadCloser, error)
+type modelDefaultsProvider struct {
+	modelUUID      coremodel.UUID
+	servicesGetter services.DomainServicesGetter
+}
+
+func (p modelDefaultsProvider) ModelDefaults(ctx context.Context) (modeldefaults.Defaults, error) {
+	domainServices, err := p.servicesGetter.ServicesForModel(ctx, p.modelUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	modelDefaults := domainServices.ModelDefaults()
+	fn := modelDefaults.ModelDefaultsProvider(p.modelUUID)
+	return fn(ctx)
+}
+
+type CharmService interface {
+	// GetCharmArchive returns a ReadCloser stream for the charm archive for a given
+	// charm id, along with the hash of the charm archive. Clients can use the hash
+	// to verify the integrity of the charm archive.
+	GetCharmArchive(context.Context, domaincharm.CharmLocator) (io.ReadCloser, string, error)
 }
 
 // CharmUploader defines a single method that is used to upload a
 // charm to the target controller in a migration.
 type CharmUploader interface {
-	UploadCharm(ctx context.Context, charmURL string, charmRef string, content io.ReadSeeker) (string, error)
+	UploadCharm(ctx context.Context, charmURL string, charmRef string, content io.Reader) (string, error)
 }
 
-// ToolsDownloader defines a single method that is used to download
-// tools from the source controller in a migration.
-type ToolsDownloader interface {
-	OpenURI(context.Context, string, url.Values) (io.ReadCloser, error)
+// AgentBinaryStore provides an interface for interacting with the stored agent
+// binaries within a controller and model.
+type AgentBinaryStore interface {
+	// GetAgentBinaryForSHA256 returns the agent binary associated with the
+	// given SHA256 sum. The following errors can be expected:
+	// - [github.com/juju/juju/domain/agentbinary/errors.NotFound] when no agent
+	// binaries exist for the provided sha.
+	GetAgentBinaryUsingSHA256(context.Context, string) (io.ReadCloser, int64, error)
 }
 
 // ToolsUploader defines a single method that is used to upload tools
 // to the target controller in a migration.
 type ToolsUploader interface {
-	UploadTools(context.Context, io.ReadSeeker, version.Binary) (tools.List, error)
+	UploadTools(context.Context, io.Reader, semversion.Binary) (tools.List, error)
 }
 
 // ResourceDownloader defines the interface for downloading resources
@@ -232,38 +233,38 @@ type ResourceDownloader interface {
 // ResourceUploader defines the interface for uploading resources into
 // the target controller during a migration.
 type ResourceUploader interface {
-	UploadResource(context.Context, resources.Resource, io.ReadSeeker) error
-	SetPlaceholderResource(context.Context, resources.Resource) error
-	SetUnitResource(context.Context, string, resources.Resource) error
+	UploadResource(context.Context, resource.Resource, io.Reader) error
 }
 
 // UploadBinariesConfig provides all the configuration that the
 // UploadBinaries function needs to operate. To construct the config
 // with the default helper functions, use `NewUploadBinariesConfig`.
 type UploadBinariesConfig struct {
-	Charms          []string
-	CharmDownloader CharmDownloader
-	CharmUploader   CharmUploader
+	Charms        []string
+	CharmService  CharmService
+	CharmUploader CharmUploader
 
-	Tools           map[version.Binary]string
-	ToolsDownloader ToolsDownloader
-	ToolsUploader   ToolsUploader
+	// Tools is a collection of agent binaries to be uploaded keyed on the
+	// sha256 sum and referenced to a version.
+	Tools            map[string]semversion.Binary
+	AgentBinaryStore AgentBinaryStore
+	ToolsUploader    ToolsUploader
 
-	Resources          []migration.SerializedModelResource
+	Resources          []resource.Resource
 	ResourceDownloader ResourceDownloader
 	ResourceUploader   ResourceUploader
 }
 
 // Validate makes sure that all the config values are non-nil.
 func (c *UploadBinariesConfig) Validate() error {
-	if c.CharmDownloader == nil {
-		return errors.NotValidf("missing CharmDownloader")
+	if c.CharmService == nil {
+		return errors.NotValidf("missing CharmService")
 	}
 	if c.CharmUploader == nil {
 		return errors.NotValidf("missing CharmUploader")
 	}
-	if c.ToolsDownloader == nil {
-		return errors.NotValidf("missing ToolsDownloader")
+	if c.AgentBinaryStore == nil {
+		return errors.NotValidf("missing AgentBinaryStore")
 	}
 	if c.ToolsUploader == nil {
 		return errors.NotValidf("missing ToolsUploader")
@@ -323,19 +324,6 @@ func streamThroughTempFile(r io.Reader) (_ io.ReadSeeker, cleanup func(), err er
 	return tempFile, rmTempFile, nil
 }
 
-func hashArchive(archive io.ReadSeeker) (string, error) {
-	hash := sha256.New()
-	_, err := io.Copy(hash, archive)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	_, err = archive.Seek(0, os.SEEK_SET)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	return hex.EncodeToString(hash.Sum(nil))[0:7], nil
-}
-
 func uploadCharms(ctx context.Context, config UploadBinariesConfig, logger corelogger.Logger) error {
 	// It is critical that charms are uploaded in ascending charm URL
 	// order so that charm revisions end up the same in the target as
@@ -343,30 +331,27 @@ func uploadCharms(ctx context.Context, config UploadBinariesConfig, logger corel
 	naturalsort.Sort(config.Charms)
 
 	for _, charmURL := range config.Charms {
-		logger.Debugf("sending charm %s to target", charmURL)
-		reader, err := config.CharmDownloader.OpenCharm(ctx, charmURL)
+		logger.Debugf(ctx, "sending charm %s to target", charmURL)
+		curl, err := charm.ParseURL(charmURL)
+		if err != nil {
+			return errors.Annotate(err, "bad charm URL")
+		}
+		charmSource, err := domaincharm.ParseCharmSchema(charm.Schema(curl.Schema))
+		if err != nil {
+			return errors.Annotate(err, "bad charm URL schema")
+		}
+		reader, hash, err := config.CharmService.GetCharmArchive(ctx, domaincharm.CharmLocator{
+			Name:     curl.Name,
+			Revision: curl.Revision,
+			Source:   charmSource,
+		})
 		if err != nil {
 			return errors.Annotate(err, "cannot open charm")
 		}
 		defer func() { _ = reader.Close() }()
 
-		content, cleanup, err := streamThroughTempFile(reader)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer cleanup()
-
-		curl, err := charm.ParseURL(charmURL)
-		if err != nil {
-			return errors.Annotate(err, "bad charm URL")
-		}
-		hash, err := hashArchive(content)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		charmRef := fmt.Sprintf("%s-%s", curl.Name, hash)
-
-		if usedCurl, err := config.CharmUploader.UploadCharm(ctx, charmURL, charmRef, content); err != nil {
+		charmRef := fmt.Sprintf("%s-%s", curl.Name, hash[0:8])
+		if usedCurl, err := config.CharmUploader.UploadCharm(ctx, charmURL, charmRef, reader); err != nil {
 			return errors.Annotate(err, "cannot upload charm")
 		} else if usedCurl != charmURL {
 			// The target controller shouldn't assign a different charm URL.
@@ -376,24 +361,33 @@ func uploadCharms(ctx context.Context, config UploadBinariesConfig, logger corel
 	return nil
 }
 
-func uploadTools(ctx context.Context, config UploadBinariesConfig, logger corelogger.Logger) error {
-	for v, uri := range config.Tools {
-		logger.Debugf("sending agent binaries to target: %s", v)
+func uploadTools(
+	ctx context.Context,
+	config UploadBinariesConfig,
+	logger corelogger.Logger,
+) error {
+	for sha256Sum, version := range config.Tools {
+		logger.Debugf(
+			ctx,
+			"sending agent binaries for sha256 %q and version %q to target controller",
+			sha256Sum, version,
+		)
 
-		reader, err := config.ToolsDownloader.OpenURI(ctx, uri, nil)
+		reader, _, err := config.AgentBinaryStore.GetAgentBinaryUsingSHA256(ctx, sha256Sum)
 		if err != nil {
-			return errors.Annotate(err, "cannot open charm")
+			return internalerrors.Errorf(
+				"getting agent binaries for sha %q to upload in migration: %w",
+				sha256Sum, err,
+			)
 		}
 		defer func() { _ = reader.Close() }()
 
-		content, cleanup, err := streamThroughTempFile(reader)
+		_, err = config.ToolsUploader.UploadTools(ctx, reader, version)
 		if err != nil {
-			return errors.Trace(err)
-		}
-		defer cleanup()
-
-		if _, err := config.ToolsUploader.UploadTools(context.TODO(), content, v); err != nil {
-			return errors.Annotate(err, "cannot upload agent binaries")
+			return internalerrors.Errorf(
+				"upladoing agent binaries for sha256 %q and version %q: %w",
+				sha256Sum, version, err,
+			)
 		}
 	}
 	return nil
@@ -401,30 +395,21 @@ func uploadTools(ctx context.Context, config UploadBinariesConfig, logger corelo
 
 func uploadResources(ctx context.Context, config UploadBinariesConfig, logger corelogger.Logger) error {
 	for _, res := range config.Resources {
-		if res.ApplicationRevision.IsPlaceholder() {
-			// Resource placeholders created in the migration import rather
-			// than attempting to post empty resources.
-		} else {
-			err := uploadAppResource(ctx, config, res.ApplicationRevision, logger)
+		if !res.Fingerprint.IsZero() {
+			// If the fingerprint is zero there is no blob to upload for this
+			// resource, skip it.
+			err := uploadAppResource(ctx, config, res, logger)
 			if err != nil {
 				return errors.Trace(err)
 			}
 		}
-		for unitName, unitRev := range res.UnitRevisions {
-			if err := config.ResourceUploader.SetUnitResource(ctx, unitName, unitRev); err != nil {
-				return errors.Annotate(err, "cannot set unit resource")
-			}
-		}
-		// Each config.Resources element also contains a
-		// CharmStoreRevision field. This isn't especially important
-		// to migrate so is skipped for now.
 	}
 	return nil
 }
 
-func uploadAppResource(ctx context.Context, config UploadBinariesConfig, rev resources.Resource, logger corelogger.Logger) error {
-	logger.Debugf("opening application resource for %s: %s", rev.ApplicationID, rev.Name)
-	reader, err := config.ResourceDownloader.OpenResource(ctx, rev.ApplicationID, rev.Name)
+func uploadAppResource(ctx context.Context, config UploadBinariesConfig, rev resource.Resource, logger corelogger.Logger) error {
+	logger.Debugf(ctx, "opening application resource for %s: %s", rev.ApplicationName, rev.Name)
+	reader, err := config.ResourceDownloader.OpenResource(ctx, rev.ApplicationName, rev.Name)
 	if err != nil {
 		return errors.Annotate(err, "cannot open resource")
 	}

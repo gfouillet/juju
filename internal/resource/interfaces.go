@@ -6,43 +6,76 @@ package resource
 import (
 	"context"
 	"io"
-	"net/url"
 
-	"github.com/juju/juju/core/resources"
-	charmresource "github.com/juju/juju/internal/charm/resource"
-	"github.com/juju/juju/internal/charmhub"
-	"github.com/juju/juju/internal/charmhub/transport"
-	"github.com/juju/juju/state"
+	coreapplication "github.com/juju/juju/core/application"
+	"github.com/juju/juju/core/charm"
+	corelogger "github.com/juju/juju/core/logger"
+	coreresource "github.com/juju/juju/core/resource"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/resource"
+	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/resource/charmhub"
 )
 
-// Resources represents the methods used by the resource opener from state.Resources.
-type Resources interface {
-	// GetResource returns the identified resource.
-	GetResource(applicationID, name string) (resources.Resource, error)
-	// OpenResource returns the metadata for a resource and a reader for the resource.
-	OpenResource(applicationID, name string) (resources.Resource, io.ReadCloser, error)
-	// OpenResourceForUniter returns the metadata for a resource and a reader for the resource.
-	OpenResourceForUniter(unitName, resName string) (resources.Resource, io.ReadCloser, error)
-	// SetResource adds the resource to blob storage and updates the metadata.
-	SetResource(applicationID, userID string, res charmresource.Resource, r io.Reader, _ state.IncrementCharmModifiedVersionType) (resources.Resource, error)
+// ModelConfigService provides access to the model configuration.
+type ModelConfigService interface {
+	// ModelConfig returns the current config for the model.
+	ModelConfig(context.Context) (*config.Config, error)
 }
 
 // ResourceGetter provides the functionality for getting a resource file.
 type ResourceGetter interface {
 	// GetResource returns a reader for the resource's data. That data
 	// is streamed from the charm store. The charm's revision, if any,
-	// is ignored. If the identified resource is not in the charm store
-	// then errors.NotFound is returned.
-	//
-	// But if you write any code that assumes a NotFound error returned
-	// from this method means that the resource was not found, you fail
-	// basic logic.
-	GetResource(ResourceRequest) (ResourceData, error)
+	// is ignored.
+	GetResource(charmhub.ResourceRequest) (charmhub.ResourceData, error)
 }
 
-// CharmHub represents methods required from a charmhub client talking to the
-// charmhub api used by the local CharmHubClient
-type CharmHub interface {
-	DownloadResource(ctx context.Context, resourceURL *url.URL) (r io.ReadCloser, err error)
-	Refresh(ctx context.Context, config charmhub.RefreshConfig) ([]transport.RefreshResponse, error)
+type ApplicationService interface {
+	// GetUnitUUID returns the UUID for the named unit.
+	GetUnitUUID(ctx context.Context, unitName coreunit.Name) (coreunit.UUID, error)
+
+	// GetApplicationUUIDByUnitName returns the application UUID for the named unit.
+	GetApplicationUUIDByUnitName(ctx context.Context, name coreunit.Name) (coreapplication.UUID, error)
+
+	// GetApplicationUUIDByName returns an application UUID by application name. It
+	// returns an error if the application can not be found by the name.
+	GetApplicationUUIDByName(ctx context.Context, name string) (coreapplication.UUID, error)
+
+	// GetApplicationCharmOrigin returns the charm origin for the specified
+	// application name.
+	GetApplicationCharmOrigin(ctx context.Context, name string) (charm.Origin, error)
+}
+
+type ResourceService interface {
+	// GetApplicationResourceID returns the UUID of the resource specified by natural key
+	// of application and resource name.
+	GetApplicationResourceID(ctx context.Context, args resource.GetApplicationResourceIDArgs) (coreresource.UUID, error)
+
+	// GetResource returns the identified application resource.
+	GetResource(ctx context.Context, resourceUUID coreresource.UUID) (coreresource.Resource, error)
+
+	// OpenResource returns the details of and a reader for the resource.
+	//
+	// The following error types can be expected to be returned:
+	//   - [resourceerrors.StoredResourceNotFound] if the specified resource is not
+	//     in the resource store.
+	OpenResource(ctx context.Context, resourceUUID coreresource.UUID) (coreresource.Resource, io.ReadCloser, error)
+
+	// StoreResource adds the application resource to blob storage and updates the
+	// metadata. It also sets the retrival information for the resource.
+	StoreResource(ctx context.Context, args resource.StoreResourceArgs) error
+
+	// SetUnitResource sets the unit as using the resource.
+	SetUnitResource(
+		ctx context.Context,
+		resourceUUID coreresource.UUID,
+		unitUUID coreunit.UUID,
+	) error
+}
+
+// ResourceClientGetter gets a client for getting resources.
+type ResourceClientGetter interface {
+	// GetResourceClient returns a ResourceGetter.
+	GetResourceClient(ctx context.Context, logger corelogger.Logger) (charmhub.ResourceClient, error)
 }

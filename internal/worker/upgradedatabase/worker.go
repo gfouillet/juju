@@ -9,8 +9,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 	"github.com/juju/worker/v4/dependency"
@@ -19,6 +18,7 @@ import (
 	coredatabase "github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/logger"
 	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/upgrade"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
@@ -38,21 +38,26 @@ const (
 type UpgradeService interface {
 	// CreateUpgrade creates an upgrade to and from specified versions
 	// If an upgrade is already running/pending, return an AlreadyExists err
-	CreateUpgrade(ctx context.Context, previousVersion, targetVersion version.Number) (domainupgrade.UUID, error)
+	CreateUpgrade(ctx context.Context, previousVersion, targetVersion semversion.Number) (domainupgrade.UUID, error)
+	// GetAllModelUUIDs returns all model uuids in the controller. If the
+	// controller has no models an empty result is returned.
+	GetAllModelUUIDs(ctx context.Context) ([]coremodel.UUID, error)
 	// SetControllerReady marks the supplied controllerID as being ready
 	// to start its upgrade. All provisioned controllers need to be ready
 	// before an upgrade can start
 	SetControllerReady(ctx context.Context, upgradeUUID domainupgrade.UUID, controllerID string) error
-	// StartUpgrade starts the current upgrade if it exists
+	// StartUpgrade starts the current upgrade if it exists. If it is already
+	// started it will return an AlreadyStarted error.
 	StartUpgrade(ctx context.Context, upgradeUUID domainupgrade.UUID) error
 	// SetDBUpgradeCompleted marks the upgrade as completed in the database
 	SetDBUpgradeCompleted(ctx context.Context, upgradeUUID domainupgrade.UUID) error
 	// SetDBUpgradeFailed marks the upgrade as failed in the database
 	SetDBUpgradeFailed(ctx context.Context, upgradeUUID domainupgrade.UUID) error
-	// ActiveUpgrade returns the uuid of the current active upgrade.
-	// If there are no active upgrades, return a NotFound error
+	// ActiveUpgrade returns the uuid of the current active upgrade. If there
+	// are no active upgrades, return an upgradeerrors.NotFound error.
 	ActiveUpgrade(ctx context.Context) (domainupgrade.UUID, error)
-	// UpgradeInfo returns the upgrade info for the supplied upgradeUUID
+	// UpgradeInfo returns the upgrade info for the supplied upgradeUUID. If
+	// there are no active upgrades, return an upgradeerrors.NotFound error.
 	UpgradeInfo(ctx context.Context, upgradeUUID domainupgrade.UUID) (upgrade.Info, error)
 	// WatchForUpgradeReady creates a watcher which notifies when all controller
 	// nodes have been registered, meaning the upgrade is ready to start.
@@ -60,14 +65,6 @@ type UpgradeService interface {
 	// WatchForUpgradeState creates a watcher which notifies when the upgrade
 	// has reached the given state.
 	WatchForUpgradeState(ctx context.Context, upgradeUUID domainupgrade.UUID, state upgrade.State) (watcher.NotifyWatcher, error)
-}
-
-// ModelService is the interface for the model service.
-type ModelService interface {
-	// ListModelIDs returns a list of all model UUIDs.
-	// This only includes active models from the perspective of dqlite. These
-	// are not the same as alive models.
-	ListModelIDs(context.Context) ([]coremodel.UUID, error)
 }
 
 // Config holds the configuration for the worker.
@@ -79,10 +76,6 @@ type Config struct {
 	// Agent is the running machine agent.
 	Agent agent.Agent
 
-	// ModelService is the model manager service used to identify
-	// the model uuids required to upgrade.
-	ModelService ModelService
-
 	// UpgradeService is the upgrade service used to drive the upgrade.
 	UpgradeService UpgradeService
 
@@ -93,8 +86,8 @@ type Config struct {
 	Tag names.Tag
 
 	// Versions of the source and destination.
-	FromVersion version.Number
-	ToVersion   version.Number
+	FromVersion semversion.Number
+	ToVersion   semversion.Number
 
 	Logger logger.Logger
 	Clock  clock.Clock
@@ -114,14 +107,17 @@ func (c Config) Validate() error {
 	if c.Clock == nil {
 		return errors.NotValidf("nil Clock")
 	}
-	if c.FromVersion == version.Zero {
+	if c.FromVersion == semversion.Zero {
 		return errors.NotValidf("invalid FromVersion")
 	}
-	if c.ToVersion == version.Zero {
+	if c.ToVersion == semversion.Zero {
 		return errors.NotValidf("invalid ToVersion")
 	}
 	if c.Tag == nil {
 		return errors.NotValidf("invalid Tag")
+	}
+	if c.UpgradeService == nil {
+		return errors.NotValidf("nil UpgradeService")
 	}
 	return nil
 }
@@ -133,12 +129,11 @@ type upgradeDBWorker struct {
 
 	controllerID string
 
-	fromVersion version.Number
-	toVersion   version.Number
+	fromVersion semversion.Number
+	toVersion   semversion.Number
 
 	dbGetter coredatabase.DBGetter
 
-	modelService   ModelService
 	upgradeService UpgradeService
 
 	logger logger.Logger
@@ -161,7 +156,6 @@ func NewUpgradeDatabaseWorker(config Config) (worker.Worker, error) {
 
 		dbGetter: config.DBGetter,
 
-		modelService:   config.ModelService,
 		upgradeService: config.UpgradeService,
 
 		logger: config.Logger,
@@ -169,6 +163,7 @@ func NewUpgradeDatabaseWorker(config Config) (worker.Worker, error) {
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "upgrade-database",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -190,50 +185,50 @@ func (w *upgradeDBWorker) Wait() error {
 
 // loop implements Worker main loop.
 func (w *upgradeDBWorker) loop() error {
-	if w.upgradeDone() {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	if w.upgradeDone(ctx) {
 		// We're already upgraded, so we can uninstall this worker. This will
 		// prevent it from running again, without an agent restart.
 		return dependency.ErrUninstall
 	}
 
-	ctx, cancel := w.scopedContext()
-	defer cancel()
-
-	w.logger.Debugf("attempting to create upgrade from: %v to: %v", w.fromVersion, w.toVersion)
+	w.logger.Debugf(ctx, "attempting to create upgrade from: %v to: %v", w.fromVersion, w.toVersion)
 
 	// Create an upgrade for this controller. If another controller has already
-	// created the upgrade, we will get an ErrUpgradeAlreadyStarted error. The
-	// job of this controller is just to wait for the upgrade to be done and
-	// then unlock the DBUpgradeCompleteLock.
+	// created the upgrade, we will get an AlreadyExists error. The job of this
+	// controller is just to wait for the upgrade to be done and then unlock the
+	// DBUpgradeCompleteLock.
 	//
 	// If the upgrade failed the previous time, we'll be allowed to create a
 	// new upgrade. We don't want to block this, as this will brick all
 	// controllers attempting upgrade and fail with an error.
 	upgradeUUID, err := w.upgradeService.CreateUpgrade(ctx, w.fromVersion, w.toVersion)
 	if err != nil {
-		if errors.Is(err, upgradeerrors.ErrUpgradeAlreadyStarted) {
+		if errors.Is(err, upgradeerrors.AlreadyExists) {
 			// We're already running the upgrade, so we can just watch the
 			// upgrade and wait for it to complete.
-			w.logger.Tracef("upgrade already started, watching upgrade")
+			w.logger.Tracef(ctx, "upgrade already started, watching upgrade")
 			return w.watchUpgrade(ctx)
 		}
-		w.logger.Errorf("failed to create upgrade: %v\nmanual manual intervention is required", err)
+		w.logger.Errorf(ctx, "failed to create upgrade: %v\nmanual manual intervention is required", err)
 		// Failed to set the upgrade as failed, we can't do anything
 		// here. It requires a manual intervention to fix the problem.
 		return nil
 	}
 
-	return w.runUpgrade(upgradeUUID)
+	return w.runUpgrade(ctx, upgradeUUID)
 }
 
 // watchUpgrade watches the upgrade until it is complete.
 // Once the upgrade is complete, the DBUpgradeCompleteLock is unlocked.
 func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
-	w.logger.Infof("watching upgrade from: %v to: %v", w.fromVersion, w.toVersion)
+	w.logger.Infof(ctx, "watching upgrade from: %v to: %v", w.fromVersion, w.toVersion)
 
 	upgradeUUID, err := w.upgradeService.ActiveUpgrade(ctx)
 	if err != nil {
-		if errors.Is(err, errors.NotFound) {
+		if errors.Is(err, upgradeerrors.NotFound) {
 			// This currently no active upgrade, so we can't watch anything.
 			// If this happens, it's probably in a bad state. We can't really
 			// do anything about it, so we'll just bounce and hope that we
@@ -246,7 +241,7 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 
 	info, err := w.upgradeService.UpgradeInfo(ctx, upgradeUUID)
 	if err != nil {
-		if errors.Is(err, errors.NotFound) {
+		if errors.Is(err, upgradeerrors.NotFound) {
 			// This currently no active upgrade, so we can't watch anything.
 			// If this happens, it's probably in a bad state. We can't really
 			// do anything about it, so we'll just bounce and hope that we
@@ -261,7 +256,7 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 		// We're in an error state, so we can't do anything about it, so we'll
 		// make a note and kill the worker. It's then up to the user to fix the
 		// problem and restart the agent.
-		w.logger.Errorf("database upgrade failed, already in an error state, check logs for details")
+		w.logger.Errorf(ctx, "database upgrade failed, already in an error state, check logs for details")
 		return nil
 	}
 
@@ -290,10 +285,10 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 		// If the set controller ready fails, we'll abort the upgrade. This will
 		// cause the upgrade to be marked as failed, and the next time the agent
 		// restarts, it will try again.
-		w.logger.Errorf("failed to set controller ready: %v", err)
+		w.logger.Errorf(ctx, "failed to set controller ready: %v", err)
 		return w.abort(ctx, upgradeUUID)
 	}
-	w.logger.Infof("marking the controller ready for upgrade")
+	w.logger.Infof(ctx, "marking the controller ready for upgrade")
 
 	for {
 		select {
@@ -302,7 +297,7 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 
 		case <-completedWatcher.Changes():
 			// The upgrade is complete, so we can unlock the lock.
-			w.logger.Infof("database upgrade completed")
+			w.logger.Infof(ctx, "database upgrade completed")
 			w.dbUpgradeCompleteLock.Unlock()
 			return dependency.ErrUninstall
 
@@ -311,7 +306,7 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 			// a note about the failure to upgrade. We'll return
 			// dependency.ErrBounce, this will allow the workers to restart
 			// and try again.
-			w.logger.Errorf("database upgrade failed, check logs for details")
+			w.logger.Errorf(ctx, "database upgrade failed, check logs for details")
 			return dependency.ErrBounce
 		}
 	}
@@ -319,14 +314,14 @@ func (w *upgradeDBWorker) watchUpgrade(ctx context.Context) error {
 
 // upgradeDone returns true if this worker does not need to run any upgrade
 // logic.
-func (w *upgradeDBWorker) upgradeDone() bool {
+func (w *upgradeDBWorker) upgradeDone(ctx context.Context) bool {
 	// If we are already unlocked, there is nothing to do.
 	if w.dbUpgradeCompleteLock.IsUnlocked() {
 		return true
 	}
 
 	if w.fromVersion == w.toVersion {
-		w.logger.Infof("database upgrade for %v already completed", w.toVersion)
+		w.logger.Infof(ctx, "database upgrade for %v already completed", w.toVersion)
 		w.dbUpgradeCompleteLock.Unlock()
 		return true
 	}
@@ -334,8 +329,8 @@ func (w *upgradeDBWorker) upgradeDone() bool {
 	return false
 }
 
-func (w *upgradeDBWorker) runUpgrade(upgradeUUID domainupgrade.UUID) error {
-	w.logger.Infof("leading the database upgrade from: %v to: %v", w.fromVersion, w.toVersion)
+func (w *upgradeDBWorker) runUpgrade(ctx context.Context, upgradeUUID domainupgrade.UUID) error {
+	w.logger.Infof(ctx, "leading the database upgrade from: %v to: %v", w.fromVersion, w.toVersion)
 
 	ctx, cancel := w.scopedContext()
 	defer cancel()
@@ -357,18 +352,18 @@ func (w *upgradeDBWorker) runUpgrade(upgradeUUID domainupgrade.UUID) error {
 		// If the set controller ready fails, we'll abort the upgrade. This will
 		// cause the upgrade to be marked as failed, and the next time the agent
 		// restarts, it will try again.
-		w.logger.Errorf("failed to set controller ready: %v", err)
+		w.logger.Errorf(ctx, "failed to set controller ready: %v", err)
 		return w.abortWithError(ctx, upgradeUUID, err)
 	}
-	w.logger.Infof("marking the controller ready for upgrade")
+	w.logger.Infof(ctx, "marking the controller ready for upgrade")
 
 	for {
 		select {
 		case <-w.catacomb.Dying():
-			w.logger.Errorf("upgrade worker is dying whilst performing upgrade: %s, marking upgrade as failed", upgradeUUID)
+			w.logger.Errorf(ctx, "upgrade worker is dying whilst performing upgrade: %s, marking upgrade as failed", upgradeUUID)
 			// We didn't perform the upgrade, so we need to mark it as failed.
 			if err := w.upgradeService.SetDBUpgradeFailed(ctx, upgradeUUID); err != nil {
-				w.logger.Errorf("failed to set db upgrade failed: %v, manual intervention required.", err)
+				w.logger.Errorf(ctx, "failed to set db upgrade failed: %v, manual intervention required.", err)
 			}
 			return w.catacomb.ErrDying()
 
@@ -376,23 +371,23 @@ func (w *upgradeDBWorker) runUpgrade(upgradeUUID domainupgrade.UUID) error {
 			return w.abort(ctx, upgradeUUID)
 
 		case <-watcher.Changes():
-			w.logger.Infof("database upgrade starting")
+			w.logger.Infof(ctx, "database upgrade starting")
 
 			// Any errors within this block will need to set the upgrade as
 			// failed. Otherwise once the agent restarts upon the error, the
-			// create upgrade will error out with ErrUpgradeAlreadyStarted. This
+			// create upgrade will error out with AlreadyExists. This
 			// will cause the controller to fall into the watching state. No
 			// other controller will be able to start the upgrade, at they're
 			// also in the watching state. No forward progress will be made.
 
 			err := w.performUpgrade(ctx, upgradeUUID)
 			if err == nil {
-				w.logger.Infof("database upgrade completed")
+				w.logger.Infof(ctx, "database upgrade completed")
 				w.dbUpgradeCompleteLock.Unlock()
 				return dependency.ErrUninstall
 			}
 
-			w.logger.Errorf("database upgrade failed, check logs for details")
+			w.logger.Errorf(ctx, "database upgrade failed, check logs for details")
 
 			return w.abort(ctx, upgradeUUID)
 		}
@@ -408,7 +403,7 @@ func (w *upgradeDBWorker) abortWithError(ctx context.Context, upgradeUUID domain
 	// Set the upgrade as failed, so that the next time the agent
 	// restarts, it will try again.
 	if err := w.upgradeService.SetDBUpgradeFailed(ctx, upgradeUUID); err != nil {
-		w.logger.Errorf("failed to set db upgrade failed: %v", err)
+		w.logger.Errorf(ctx, "failed to set db upgrade failed: %v", err)
 
 		// Failed to set the upgrade as failed, we can't do anything
 		// here. It requires a manual intervention to fix the problem.
@@ -440,9 +435,9 @@ func (w *upgradeDBWorker) performUpgrade(ctx context.Context, upgradeUUID domain
 }
 
 func (w *upgradeDBWorker) upgradeController(ctx context.Context) error {
-	w.logger.Infof("upgrading controller database from: %v to: %v", w.fromVersion, w.toVersion)
+	w.logger.Infof(ctx, "upgrading controller database from: %v to: %v", w.fromVersion, w.toVersion)
 
-	db, err := w.dbGetter.GetDB(coredatabase.ControllerNS)
+	db, err := w.dbGetter.GetDB(ctx, coredatabase.ControllerNS)
 	if err != nil {
 		return errors.Annotatef(err, "controller db")
 	}
@@ -452,19 +447,19 @@ func (w *upgradeDBWorker) upgradeController(ctx context.Context) error {
 	if err != nil {
 		return errors.Annotatef(err, "applying controller schema")
 	}
-	w.logger.Infof("applied controller schema changes from: %d to: %d", changeSet.Post, changeSet.Current)
+	w.logger.Infof(ctx, "applied controller schema changes from: %d to: %d", changeSet.Post, changeSet.Current)
 	return nil
 }
 
 func (w *upgradeDBWorker) upgradeModels(ctx context.Context) error {
-	w.logger.Infof("upgrading model databases from: %v to: %v", w.fromVersion, w.toVersion)
+	w.logger.Infof(ctx, "upgrading model databases from: %v to: %v", w.fromVersion, w.toVersion)
 
-	models, err := w.modelService.ListModelIDs(ctx)
+	modelUUIDs, err := w.upgradeService.GetAllModelUUIDs(ctx)
 	if err != nil {
-		return errors.Annotatef(err, "getting model list")
+		return errors.Annotatef(err, "getting all alive model uuids in controller")
 	}
 
-	for _, modelUUID := range models {
+	for _, modelUUID := range modelUUIDs {
 		if err := w.upgradeModel(ctx, modelUUID); err != nil {
 			return errors.Trace(err)
 		}
@@ -474,7 +469,7 @@ func (w *upgradeDBWorker) upgradeModels(ctx context.Context) error {
 }
 
 func (w *upgradeDBWorker) upgradeModel(ctx context.Context, modelUUID coremodel.UUID) error {
-	db, err := w.dbGetter.GetDB(modelUUID.String())
+	db, err := w.dbGetter.GetDB(ctx, modelUUID.String())
 	if err != nil {
 		return errors.Annotatef(err, "model db %s", modelUUID)
 	}
@@ -484,7 +479,7 @@ func (w *upgradeDBWorker) upgradeModel(ctx context.Context, modelUUID coremodel.
 	if err != nil {
 		return errors.Annotatef(err, "applying model schema %s", modelUUID)
 	}
-	w.logger.Infof("applied model schema changes from: %d to: %d for model %s", changeSet.Post, changeSet.Current, modelUUID)
+	w.logger.Infof(ctx, "applied model schema changes from: %d to: %d for model %s", changeSet.Post, changeSet.Current, modelUUID)
 	return nil
 }
 

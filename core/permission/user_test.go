@@ -4,19 +4,17 @@
 package permission_test
 
 import (
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	"github.com/juju/juju/core/database"
+	"github.com/juju/tc"
+
 	"github.com/juju/juju/core/permission"
 )
 
 type userSuite struct{}
 
-var _ = gc.Suite(&userSuite{})
-
-func (s *userSuite) TestControllerForAccess(c *gc.C) {
-	spec := permission.ControllerForAccess(permission.ReadAccess)
-	c.Assert(spec.Target.Key, gc.Equals, database.ControllerNS)
+func TestUserSuite(t *testing.T) {
+	tc.Run(t, &userSuite{})
 }
 
 var validateRevokeAccessTest = []struct {
@@ -24,7 +22,7 @@ var validateRevokeAccessTest = []struct {
 	expected permission.Access
 }{
 	{
-		spec:     permission.AccessSpec{Target: permission.ID{ObjectType: permission.Model}, Access: permission.AddModelAccess},
+		spec:     permission.AccessSpec{Target: permission.ID{ObjectType: permission.Model}, Access: permission.AdminAccess},
 		expected: permission.WriteAccess,
 	}, {
 		spec:     permission.AccessSpec{Target: permission.ID{ObjectType: permission.Model}, Access: permission.WriteAccess},
@@ -56,12 +54,12 @@ var validateRevokeAccessTest = []struct {
 	},
 }
 
-func (*userSuite) TestRevokeAccess(c *gc.C) {
+func (*userSuite) TestRevokeAccess(c *tc.C) {
 	size := len(validateRevokeAccessTest)
 	for i, test := range validateRevokeAccessTest {
 		c.Logf("Running test %d of %d", i, size)
 		obtained := test.spec.RevokeAccess()
-		c.Check(obtained, gc.Equals, test.expected,
-			gc.Commentf("revoke %q on %q, expect %q", test.spec.Access, test.spec.Target.ObjectType, test.expected))
+		c.Check(obtained, tc.Equals, test.expected,
+			tc.Commentf("revoke %q on %q, expect %q", test.spec.Access, test.spec.Target.ObjectType, test.expected))
 	}
 }

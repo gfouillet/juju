@@ -8,7 +8,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 	"gopkg.in/tomb.v2"
@@ -18,13 +18,13 @@ import (
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/upgrade"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
 	domainupgrade "github.com/juju/juju/domain/upgrade"
 	"github.com/juju/juju/internal/upgrades"
 	"github.com/juju/juju/internal/upgradesteps"
 	"github.com/juju/juju/internal/worker/gate"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // UpgradeService is the interface for the upgrade service.
@@ -36,10 +36,11 @@ type UpgradeService interface {
 	// SetDBUpgradeFailed marks the upgrade as failed in the database.
 	// Manual intervention will be required if this has been invoked.
 	SetDBUpgradeFailed(ctx context.Context, upgradeUUID domainupgrade.UUID) error
-	// ActiveUpgrade returns the uuid of the current active upgrade.
-	// If there are no active upgrades, return a NotFound error
+	// ActiveUpgrade returns the uuid of the current active upgrade. If there
+	// are no active upgrades, return an upgradeerrors.NotFound error.
 	ActiveUpgrade(ctx context.Context) (domainupgrade.UUID, error)
-	// // UpgradeInfo returns the upgrade info for the supplied upgradeUUID.
+	// UpgradeInfo returns the upgrade info for the supplied upgradeUUID. If
+	// there are no active upgrades, return an upgradeerrors.NotFound error.
 	UpgradeInfo(ctx context.Context, upgradeUUID domainupgrade.UUID) (upgrade.Info, error)
 	// WatchForUpgradeState creates a watcher which notifies when the upgrade
 	// has reached the given state.
@@ -85,6 +86,7 @@ func newControllerWorker(base *upgradesteps.BaseWorker, upgradeService UpgradeSe
 		logger:         base.Logger,
 	}
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "controller-upgrade",
 		Site: &w.catacomb,
 		Work: w.run,
 	}); err != nil {
@@ -136,7 +138,7 @@ func (w *controllerWorker) run() error {
 		return errors.Trace(err)
 	}
 
-	// Verify the the active upgrade information is at the correct state.
+	// Verify the active upgrade information is at the correct state.
 	info, err := w.upgradeService.UpgradeInfo(ctx, upgradeUUID)
 	if err != nil {
 		return errors.Trace(err)
@@ -144,7 +146,7 @@ func (w *controllerWorker) run() error {
 
 	// We're not in the right state, so we can't proceed.
 	if info.State != upgrade.DBCompleted {
-		w.logger.Errorf("upgrade %q is not in the db completed state %q", upgradeUUID, info.State.String())
+		w.logger.Errorf(ctx, "upgrade %q is not in the db completed state %q", upgradeUUID, info.State.String())
 		return w.abort(ctx, upgradeUUID, upgradesteps.ErrUpgradeStepsInvalidState)
 	}
 
@@ -172,24 +174,29 @@ func (w *controllerWorker) run() error {
 	// Kick off the upgrade steps for the controller in a new managed context.
 	stepsWorker := newControllerStepsWorker(w.base)
 	if err := w.catacomb.Add(stepsWorker); err != nil {
+		w.logger.Errorf(ctx, "upgrade worker is dying whilst starting upgrade steps: %s, marking upgrade as failed", upgradeUUID)
+		// We didn't perform the upgrade, so we need to mark it as failed.
+		if err := w.upgradeService.SetDBUpgradeFailed(ctx, upgradeUUID); err != nil {
+			w.logger.Errorf(ctx, "failed to set db upgrade failed: %v, manual intervention required.", err)
+		}
 		return errors.Trace(err)
 	}
 
 	for {
 		select {
 		case <-w.catacomb.Dying():
-			w.logger.Errorf("upgrade worker is dying whilst performing upgrade steps: %s, marking upgrade as failed", upgradeUUID)
+			w.logger.Errorf(ctx, "upgrade worker is dying whilst performing upgrade steps: %s, marking upgrade as failed", upgradeUUID)
 			// We didn't perform the upgrade, so we need to mark it as failed.
 			if err := w.upgradeService.SetDBUpgradeFailed(ctx, upgradeUUID); err != nil {
-				w.logger.Errorf("failed to set db upgrade failed: %v, manual intervention required.", err)
+				w.logger.Errorf(ctx, "failed to set db upgrade failed: %v, manual intervention required.", err)
 			}
 			return w.catacomb.ErrDying()
 
 		case <-completedWatcher.Changes():
 			// All the controllers have completed their upgrade steps, so
 			// we can now proceed with the upgrade.
-			w.logger.Infof("upgrade to %v completed successfully.", w.base.ToVersion)
-			_ = w.base.StatusSetter.SetStatus(status.Started, "", nil)
+			w.logger.Infof(ctx, "upgrade to %v completed successfully.", w.base.ToVersion)
+			_ = w.base.StatusSetter.SetStatus(ctx, status.Started, "", nil)
 			w.base.UpgradeCompleteLock.Unlock()
 
 			return nil
@@ -197,7 +204,7 @@ func (w *controllerWorker) run() error {
 		case <-failedWatcher.Changes():
 			// One or all of the controllers have failed their upgrade steps,
 			// so we can't proceed with the upgrade.
-			w.logger.Errorf("upgrade steps failed")
+			w.logger.Errorf(ctx, "upgrade steps failed")
 			return w.abort(ctx, upgradeUUID, upgradesteps.ErrFailedUpgradeSteps)
 
 		case err := <-stepsWorker.Err():
@@ -229,7 +236,7 @@ func (w *controllerWorker) run() error {
 
 		case <-w.base.Clock.After(upgradesteps.DefaultUpgradeTimeout):
 			// We've timed out waiting for the upgrade steps to complete.
-			w.logger.Errorf("timed out waiting for upgrade steps to complete")
+			w.logger.Errorf(ctx, "timed out waiting for upgrade steps to complete")
 			return w.abort(ctx, upgradeUUID, upgradesteps.ErrUpgradeTimeout)
 		}
 	}
@@ -257,11 +264,11 @@ func (w *controllerWorker) addWatcher(ctx context.Context, watcher eventsource.W
 func (w *controllerWorker) abort(ctx context.Context, upgradeUUID domainupgrade.UUID, err error) error {
 	// Set the status to error, we can't proceed with the upgrade.
 	// Ignore the error as it's not critical if it fails.
-	_ = w.base.StatusSetter.SetStatus(status.Error, "failed to perform upgrade steps, check logs.", nil)
+	_ = w.base.StatusSetter.SetStatus(ctx, status.Error, "failed to perform upgrade steps, check logs.", nil)
 
-	w.logger.Errorf("aborting upgrade steps: %v, manual intervention is required", err)
+	w.logger.Errorf(ctx, "aborting upgrade steps: %v, manual intervention is required", err)
 	if err := w.upgradeService.SetDBUpgradeFailed(ctx, upgradeUUID); err != nil {
-		w.logger.Errorf("unable to fail upgrade steps %v.\nmanual intervention is required to force the upgrade state into an error state before proceeding", err)
+		w.logger.Errorf(ctx, "unable to fail upgrade steps %v.\nmanual intervention is required to force the upgrade state into an error state before proceeding", err)
 	}
 	return nil
 }
@@ -308,11 +315,11 @@ func (w *controllerStepsWorker) run() error {
 	ctx, cancel := w.scopedContext()
 	defer cancel()
 
+	err := w.runUpgrades(ctx)
 	select {
 	case <-w.tomb.Dying():
 		return tomb.ErrDying
-
-	case w.status <- w.runUpgrades(ctx):
+	case w.status <- err:
 		return nil
 	}
 }
@@ -320,12 +327,12 @@ func (w *controllerStepsWorker) run() error {
 // runUpgrades runs the upgrade operations for each job type and
 // updates the updatedToVersion on success.
 func (w *controllerStepsWorker) runUpgrades(ctx context.Context) error {
-	w.logger.Infof("checking that upgrade can proceed")
+	w.logger.Infof(ctx, "checking that upgrade can proceed")
 	if err := w.base.PreUpgradeSteps(w.base.Agent.CurrentConfig(), false); err != nil {
 		return errors.Annotatef(err, "%s cannot be upgraded", names.ReadableString(w.base.Tag))
 	}
 
-	w.logger.Infof("running upgrade steps for %q", w.base.Tag)
+	w.logger.Infof(ctx, "running upgrade steps for %q", w.base.Tag)
 	if err := w.base.Agent.ChangeConfig(w.base.RunUpgradeSteps(ctx, []upgrades.Target{
 		upgrades.Controller,
 		upgrades.HostMachine,

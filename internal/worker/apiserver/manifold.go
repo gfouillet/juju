@@ -9,52 +9,57 @@ import (
 	"strings"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/pubsub/v2"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/apiserver"
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
 	"github.com/juju/juju/cmd/juju/commands"
-	jujucontroller "github.com/juju/juju/controller"
 	"github.com/juju/juju/core/auditlog"
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/database"
 	coredependency "github.com/juju/juju/core/dependency"
+	"github.com/juju/juju/core/flightrecorder"
+	corehttp "github.com/juju/juju/core/http"
 	"github.com/juju/juju/core/lease"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/objectstore"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/jwtparser"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/common"
 	"github.com/juju/juju/internal/worker/gate"
-	workerstate "github.com/juju/juju/internal/worker/state"
 	"github.com/juju/juju/internal/worker/trace"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 )
 
-// GetControllerConfigServiceFunc is a helper function that gets a service from
-// the manifold.
+// GetControllerConfigServiceFunc is a helper function that gets a
+// [ControllerConfigService] from the manifold.
 type GetControllerConfigServiceFunc func(getter dependency.Getter, name string) (ControllerConfigService, error)
 
-// GetControllerConfigService is a helper function that gets a service from the
-// manifold.
+// GetControllerConfigService is a helper function that gets a
+// [ControllerConfigService] from the manifold.
 func GetControllerConfigService(getter dependency.Getter, name string) (ControllerConfigService, error) {
-	return coredependency.GetDependencyByName(getter, name, func(factory servicefactory.ControllerServiceFactory) ControllerConfigService {
+	return coredependency.GetDependencyByName(getter, name, func(factory services.ControllerDomainServices) ControllerConfigService {
 		return factory.ControllerConfig()
 	})
 }
 
-// ControllerConfigService is the interface that the worker uses to get the
-// controller configuration.
-type ControllerConfigService interface {
-	// ControllerConfig returns the current controller configuration.
-	ControllerConfig(context.Context) (jujucontroller.Config, error)
+// GetModelServiceFunc is a helper function that gets a [ModelService] from the
+// manifold.
+type GetModelServiceFunc func(getter dependency.Getter, name string) (ModelService, error)
+
+// GetModelService is a helper function that gets a [ModelService] from the
+// manifold.
+func GetModelService(getter dependency.Getter, name string) (ModelService, error) {
+	return coredependency.GetDependencyByName(getter, name, func(factory services.ControllerDomainServices) ModelService {
+		return factory.Model()
+	})
 }
 
 // ManifoldConfig holds the information necessary to run an apiserver
@@ -64,23 +69,25 @@ type ManifoldConfig struct {
 	AuthenticatorName      string
 	ClockName              string
 	MuxName                string
-	StateName              string
 	UpgradeGateName        string
 	AuditConfigUpdaterName string
 	LeaseManagerName       string
 	LogSinkName            string
-	CharmhubHTTPClientName string
-	DBAccessorName         string
-	ChangeStreamName       string
-	ServiceFactoryName     string
-	TraceName              string
-	ObjectStoreName        string
+	HTTPClientName         string
+	WatcherRegistryName    string
+	FlightRecorderName     string
+
+	DBAccessorName     string
+	ChangeStreamName   string
+	DomainServicesName string
+	TraceName          string
+	ObjectStoreName    string
+	JWTParserName      string
 
 	PrometheusRegisterer              prometheus.Registerer
 	RegisterIntrospectionHTTPHandlers func(func(path string, _ http.Handler))
-	Hub                               *pubsub.StructuredHub
-	Presence                          presence.Recorder
 	GetControllerConfigService        GetControllerConfigServiceFunc
+	GetModelService                   GetModelServiceFunc
 
 	NewWorker           func(context.Context, Config) (worker.Worker, error)
 	NewMetricsCollector func() *apiserver.Collector
@@ -100,9 +107,6 @@ func (config ManifoldConfig) Validate() error {
 	if config.MuxName == "" {
 		return errors.NotValidf("empty MuxName")
 	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
-	}
 	if config.UpgradeGateName == "" {
 		return errors.NotValidf("empty UpgradeGateName")
 	}
@@ -121,8 +125,11 @@ func (config ManifoldConfig) Validate() error {
 	if config.LogSinkName == "" {
 		return errors.NotValidf("empty LogSinkName")
 	}
-	if config.CharmhubHTTPClientName == "" {
-		return errors.NotValidf("empty CharmhubHTTPClientName")
+	if config.HTTPClientName == "" {
+		return errors.NotValidf("empty HTTPClientName")
+	}
+	if config.WatcherRegistryName == "" {
+		return errors.NotValidf("empty WatcherRegistryName")
 	}
 	if config.DBAccessorName == "" {
 		return errors.NotValidf("empty DBAccessorName")
@@ -130,8 +137,8 @@ func (config ManifoldConfig) Validate() error {
 	if config.ChangeStreamName == "" {
 		return errors.NotValidf("empty ChangeStreamName")
 	}
-	if config.ServiceFactoryName == "" {
-		return errors.NotValidf("empty ServiceFactoryName")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.TraceName == "" {
 		return errors.NotValidf("empty TraceName")
@@ -139,11 +146,11 @@ func (config ManifoldConfig) Validate() error {
 	if config.ObjectStoreName == "" {
 		return errors.NotValidf("empty ObjectStoreName")
 	}
-	if config.Hub == nil {
-		return errors.NotValidf("nil Hub")
+	if config.FlightRecorderName == "" {
+		return errors.NotValidf("empty FlightRecorderName")
 	}
-	if config.Presence == nil {
-		return errors.NotValidf("nil Presence")
+	if config.JWTParserName == "" {
+		return errors.NotValidf("empty JWTParserName")
 	}
 	if config.NewWorker == nil {
 		return errors.NotValidf("nil NewWorker")
@@ -153,6 +160,9 @@ func (config ManifoldConfig) Validate() error {
 	}
 	if config.GetControllerConfigService == nil {
 		return errors.NotValidf("nil GetControllerConfigService")
+	}
+	if config.GetModelService == nil {
+		return errors.NotValidf("nil GetModelService")
 	}
 	return nil
 }
@@ -167,17 +177,19 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.AuthenticatorName,
 			config.ClockName,
 			config.MuxName,
-			config.StateName,
 			config.UpgradeGateName,
 			config.AuditConfigUpdaterName,
 			config.LeaseManagerName,
-			config.CharmhubHTTPClientName,
+			config.HTTPClientName,
 			config.DBAccessorName,
 			config.ChangeStreamName,
-			config.ServiceFactoryName,
+			config.DomainServicesName,
 			config.TraceName,
+			config.FlightRecorderName,
 			config.ObjectStoreName,
 			config.LogSinkName,
+			config.JWTParserName,
+			config.WatcherRegistryName,
 		},
 		Start: config.start,
 	}
@@ -209,11 +221,6 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := getter.Get(config.StateName, &stTracker); err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	var upgradeLock gate.Waiter
 	if err := getter.Get(config.UpgradeGateName, &upgradeLock); err != nil {
 		return nil, errors.Trace(err)
@@ -234,8 +241,22 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	var charmhubHTTPClient HTTPClient
-	if err := getter.Get(config.CharmhubHTTPClientName, &charmhubHTTPClient); err != nil {
+	var httpClientGetter corehttp.HTTPClientGetter
+	if err := getter.Get(config.HTTPClientName, &httpClientGetter); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var flightRecorder flightrecorder.FlightRecorder
+	if err := getter.Get(config.FlightRecorderName, &flightRecorder); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	charmhubHTTPClient, err := httpClientGetter.GetHTTPClient(ctx, corehttp.CharmhubPurpose)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	macaroonHTTPClient, err := httpClientGetter.GetHTTPClient(ctx, corehttp.MacaroonPurpose)
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -249,8 +270,8 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	var serviceFactoryGetter servicefactory.ServiceFactoryGetter
-	if err := getter.Get(config.ServiceFactoryName, &serviceFactoryGetter); err != nil {
+	var domainServicesGetter services.DomainServicesGetter
+	if err := getter.Get(config.DomainServicesName, &domainServicesGetter); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -264,8 +285,23 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	controllerConfigService, err := config.GetControllerConfigService(getter, config.ServiceFactoryName)
+	var watcherRegistryGetter watcherregistry.WatcherRegistryGetter
+	if err := getter.Get(config.WatcherRegistryName, &watcherRegistryGetter); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	controllerConfigService, err := config.GetControllerConfigService(getter, config.DomainServicesName)
 	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	modelService, err := config.GetModelService(getter, config.DomainServicesName)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var jwtParser *jwtparser.Parser
+	if err := getter.Get(config.JWTParserName, &jwtParser); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -280,41 +316,35 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return cmd.Main(jujuCmd, ctx, strings.Split(cmdPlusARgs, " "))
 	}
 
-	// Get the state pool after grabbing dependencies so we don't need
-	// to remember to call Done on it if they're not running yet.
-	statePool, _, err := stTracker.Use()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	w, err := config.NewWorker(ctx, Config{
 		AgentConfig:                       agent.CurrentConfig(),
 		Clock:                             clock,
 		Mux:                               mux,
-		StatePool:                         statePool,
 		LeaseManager:                      leaseManager,
 		RegisterIntrospectionHTTPHandlers: config.RegisterIntrospectionHTTPHandlers,
 		UpgradeComplete:                   upgradeLock.IsUnlocked,
-		Hub:                               config.Hub,
-		Presence:                          config.Presence,
 		LocalMacaroonAuthenticator:        macaroonAuthenticator,
+		JWTParser:                         jwtParser,
 		GetAuditConfig:                    getAuditConfig,
 		NewServer:                         newServerShim,
 		MetricsCollector:                  metricsCollector,
 		EmbeddedCommand:                   execEmbeddedCommand,
 		LogSink:                           logSink,
 		CharmhubHTTPClient:                charmhubHTTPClient,
+		MacaroonHTTPClient:                macaroonHTTPClient,
 		DBGetter:                          dbGetter,
 		DBDeleter:                         dbDeleter,
-		ServiceFactoryGetter:              serviceFactoryGetter,
-		TracerGetter:                      tracerGetter,
-		ObjectStoreGetter:                 objectStoreGetter,
+		DomainServicesGetter:              domainServicesGetter,
 		ControllerConfigService:           controllerConfigService,
+		TracerGetter:                      tracerGetter,
+		FlightRecorder:                    flightRecorder,
+		ObjectStoreGetter:                 objectStoreGetter,
+		ModelService:                      modelService,
+		WatcherRegistryGetter:             watcherRegistryGetter,
 	})
 	if err != nil {
 		// Ensure we clean up the resources we've registered with. This includes
 		// the state pool and the metrics collector.
-		_ = stTracker.Done()
 		_ = config.PrometheusRegisterer.Unregister(metricsCollector)
 
 		return nil, errors.Trace(err)
@@ -325,7 +355,6 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 
 		// Ensure we clean up the resources we've registered with. This includes
 		// the state pool and the metrics collector.
-		_ = stTracker.Done()
 		_ = config.PrometheusRegisterer.Unregister(metricsCollector)
 	}), nil
 }

@@ -12,31 +12,39 @@ import (
 	"github.com/juju/juju/domain/schema/controller/triggers"
 )
 
-//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/cloud-triggers.gen.go -package=triggers -tables=cloud,cloud_credential,external_controller
-//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/controller-triggers.gen.go -package=triggers -tables=controller_config,controller_node
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/cloud-triggers.gen.go -package=triggers -tables=cloud,cloud_ca_cert,cloud_credential,cloud_credential_attribute
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/controller-triggers.gen.go -package=triggers -tables=controller_config,controller_node,external_controller,controller_api_address
 //go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/migration-triggers.gen.go -package=triggers -tables=model_migration_status,model_migration_minion_sync
 //go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/upgrade-triggers.gen.go -package=triggers -tables=upgrade_info,upgrade_info_controller_node
-//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/objectstore-triggers.gen.go -package=triggers -tables=object_store_metadata_path
-//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/secret-triggers.gen.go -package=triggers -tables=secret_backend_rotation
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/objectstore-triggers.gen.go -package=triggers -tables=object_store_metadata_path,object_store_drain_info
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/secret-triggers.gen.go -package=triggers -tables=secret_backend_rotation,model_secret_backend
 //go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/model-triggers.gen.go -package=triggers -tables=model
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/model-authorized-keys-triggers.gen.go -package=triggers -tables=model_authorized_keys
+//go:generate go run ./../../generate/triggergen -db=controller -destination=./controller/triggers/user-authentication-triggers.gen.go -package=triggers -tables=user_authentication
 
 //go:embed controller/sql/*.sql
 var controllerSchemaDir embed.FS
 
 const (
-	tableExternalController tableNamespaceID = iota
+	tableExternalController tableNamespaceID = iota + reservedCustomNamespaceIDOffset
 	tableControllerNode
 	tableControllerConfig
+	tableControllerAPIAddress
 	tableModelMigrationStatus
 	tableModelMigrationMinionSync
 	tableUpgradeInfo
 	tableCloud
+	tableCloudCACert
 	tableCloudCredential
-	tableAutocertCache
+	tableCloudCredentialAttribute
 	tableUpgradeInfoControllerNode
 	tableObjectStoreMetadata
+	tableObjectStoreDrainInfo
 	tableSecretBackendRotation
+	tableModelSecretBackend
 	tableModelMetadata
+	tableModelAuthorizedKeys
+	tableUserAuthentication
 )
 
 // ControllerDDL is used to create the controller database schema at bootstrap.
@@ -73,17 +81,24 @@ func ControllerDDL() *schema.Schema {
 	// Changestream triggers.
 	patches = append(patches,
 		triggers.ChangeLogTriggersForCloud("uuid", tableCloud),
+		triggers.ChangeLogTriggersForCloudCaCert("cloud_uuid", tableCloudCACert),
 		triggers.ChangeLogTriggersForCloudCredential("uuid", tableCloudCredential),
+		triggers.ChangeLogTriggersForCloudCredentialAttribute("cloud_credential_uuid", tableCloudCredentialAttribute),
 		triggers.ChangeLogTriggersForExternalController("uuid", tableExternalController),
 		triggers.ChangeLogTriggersForControllerConfig("key", tableControllerConfig),
 		triggers.ChangeLogTriggersForControllerNode("controller_id", tableControllerNode),
+		triggers.ChangeLogTriggersForControllerApiAddress("controller_id", tableControllerAPIAddress),
 		triggers.ChangeLogTriggersForModelMigrationStatus("uuid", tableModelMigrationStatus),
 		triggers.ChangeLogTriggersForModelMigrationMinionSync("uuid", tableModelMigrationMinionSync),
 		triggers.ChangeLogTriggersForUpgradeInfo("uuid", tableUpgradeInfo),
 		triggers.ChangeLogTriggersForUpgradeInfoControllerNode("upgrade_info_uuid", tableUpgradeInfoControllerNode),
 		triggers.ChangeLogTriggersForObjectStoreMetadataPath("path", tableObjectStoreMetadata),
+		triggers.ChangeLogTriggersForObjectStoreDrainInfo("uuid", tableObjectStoreDrainInfo),
 		triggers.ChangeLogTriggersForSecretBackendRotation("backend_uuid", tableSecretBackendRotation),
+		triggers.ChangeLogTriggersForModelSecretBackend("model_uuid", tableModelSecretBackend),
 		triggers.ChangeLogTriggersForModel("uuid", tableModelMetadata),
+		triggers.ChangeLogTriggersForModelAuthorizedKeys("model_uuid", tableModelAuthorizedKeys),
+		triggers.ChangeLogTriggersForUserAuthentication("user_uuid", tableUserAuthentication),
 	)
 
 	// Generic triggers.

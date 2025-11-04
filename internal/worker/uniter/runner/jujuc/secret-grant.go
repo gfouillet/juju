@@ -4,13 +4,13 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretGrantCommand struct {
@@ -46,16 +46,17 @@ earlier, once the relation is removed, so too is the access grant.
 
 By default, all units of the related application are granted access.
 Optionally specify a unit name to limit access to just that unit.
-
-Examples:
+`
+	examples := `
     secret-grant secret:9m4e2mr0ui3e8a215n4g -r 0 --unit mediawiki/6
     secret-grant secret:9m4e2mr0ui3e8a215n4g --relation db:2
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-grant",
-		Args:    "<ID>",
-		Purpose: "grant access to a secret",
-		Doc:     doc,
+		Name:     "secret-grant",
+		Args:     "<ID>",
+		Purpose:  "Grant access to a secret.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -97,7 +98,7 @@ func (c *secretGrantCommand) Init(args []string) error {
 }
 
 // Run implements cmd.Command.
-func (c *secretGrantCommand) Run(_ *cmd.Context) error {
+func (c *secretGrantCommand) Run(ctx *cmd.Context) error {
 	args := &SecretGrantRevokeArgs{
 		RelationKey: &c.relation,
 	}
@@ -108,5 +109,5 @@ func (c *secretGrantCommand) Run(_ *cmd.Context) error {
 		args.ApplicationName = &c.app
 	}
 
-	return c.ctx.GrantSecret(c.secretURI, args)
+	return c.ctx.GrantSecret(ctx, c.secretURI, args)
 }

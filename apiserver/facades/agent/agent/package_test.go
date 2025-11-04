@@ -3,12 +3,4 @@
 
 package agent_test
 
-import (
-	stdtesting "testing"
-
-	coretesting "github.com/juju/juju/testing"
-)
-
-func TestPackage(t *stdtesting.T) {
-	coretesting.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package agent -destination service_mock_test.go github.com/juju/juju/apiserver/facades/agent/agent CredentialService,AgentPasswordService

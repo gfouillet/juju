@@ -10,9 +10,10 @@ type dbKey struct {
 	Key string `db:"key"`
 }
 
-// dbAgentVersion represents the target agent version from the model table.
-type dbAgentVersion struct {
-	TargetAgentVersion string `db:"target_agent_version"`
+// dbAgentVersion represents the target agent version and stream for the model.
+type dbAgentVersionAndStream struct {
+	Stream             string `db:"name"`
+	TargetAgentVersion string `db:"target_version"`
 }
 
 // dbKeyValue represents a key-value pair from the model_config table.
@@ -23,3 +24,12 @@ type dbKeyValue struct {
 
 // dbKeys represents a slice of keys from the model_config table.
 type dbKeys []string
+
+// dbSpace represents the name column from the space table.
+type dbSpace struct {
+	Space string `db:"name"`
+}
+
+type entityUUID struct {
+	UUID string `db:"uuid"`
+}

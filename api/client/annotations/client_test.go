@@ -5,11 +5,11 @@ package annotations_test
 
 import (
 	"context"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/kr/pretty"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/annotations"
@@ -18,9 +18,11 @@ import (
 
 type annotationsMockSuite struct{}
 
-var _ = gc.Suite(&annotationsMockSuite{})
+func TestAnnotationsMockSuite(t *testing.T) {
+	tc.Run(t, &annotationsMockSuite{})
+}
 
-func (s *annotationsMockSuite) TestSetEntitiesAnnotation(c *gc.C) {
+func (s *annotationsMockSuite) TestSetEntitiesAnnotation(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -56,23 +58,23 @@ func (s *annotationsMockSuite) TestSetEntitiesAnnotation(c *gc.C) {
 				// architectures vary the order within params.AnnotationsSet,
 				// simply assert that each entity has its own annotations.
 				// Bug 1409141
-				c.Assert(aParam.Annotations, gc.DeepEquals, setParams[aParam.EntityTag])
+				c.Assert(aParam.Annotations, tc.DeepEquals, setParams[aParam.EntityTag])
 			}
 			return nil
 		})
 
 	annotationsClient := annotations.NewClientFromCaller(mockFacadeCaller)
-	callErrs, err := annotationsClient.Set(setParams)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(callErrs, gc.HasLen, 0)
+	callErrs, err := annotationsClient.Set(c.Context(), setParams)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(callErrs, tc.HasLen, 0)
 }
 
-func (s *annotationsMockSuite) TestGetEntitiesAnnotations(c *gc.C) {
+func (s *annotationsMockSuite) TestGetEntitiesAnnotations(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	args := params.Entities{
-		Entities: []params.Entity{{"charm"}},
+		Entities: []params.Entity{{Tag: "charm"}},
 	}
 	facadeAnnts := map[string]string{
 		"annotations": "test",
@@ -90,13 +92,13 @@ func (s *annotationsMockSuite) TestGetEntitiesAnnotations(c *gc.C) {
 	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "Get", args, result).SetArg(3, results).Return(nil)
 
 	annotationsClient := annotations.NewClientFromCaller(mockFacadeCaller)
-	found, err := annotationsClient.Get([]string{"charm"})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(found, gc.HasLen, 1)
+	found, err := annotationsClient.Get(c.Context(), []string{"charm"})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(found, tc.HasLen, 1)
 }
 
 type annotationsSetMatcher struct {
-	m            *gc.C
+	m            *tc.C
 	expectedArgs params.AnnotationsSet
 }
 
@@ -105,18 +107,18 @@ func (c annotationsSetMatcher) Matches(x interface{}) bool {
 	if !ok {
 		return false
 	}
-	c.m.Assert(obtainedArgs.Annotations, gc.HasLen, len(c.expectedArgs.Annotations))
+	c.m.Assert(obtainedArgs.Annotations, tc.HasLen, len(c.expectedArgs.Annotations))
 
 	for _, obt := range obtainedArgs.Annotations {
 		var found bool
 		for _, exp := range c.expectedArgs.Annotations {
 			if obt.EntityTag == exp.EntityTag {
-				c.m.Assert(obt, jc.DeepEquals, exp)
+				c.m.Assert(obt, tc.DeepEquals, exp)
 				found = true
 				break
 			}
 		}
-		c.m.Assert(found, jc.IsTrue, gc.Commentf("unexpected annotation entity tag %s"))
+		c.m.Assert(found, tc.IsTrue, tc.Commentf("unexpected annotation entity tag %s"))
 	}
 	return true
 }

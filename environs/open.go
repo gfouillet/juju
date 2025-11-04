@@ -4,32 +4,31 @@
 package environs
 
 import (
-	stdcontext "context"
+	"context"
 
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/api/jujuclient"
 )
 
 // AdminUser is the initial admin user created for all controllers.
 const AdminUser = "admin"
 
 // New returns a new environment based on the provided configuration.
-func New(ctx stdcontext.Context, args OpenParams) (Environ, error) {
+func New(ctx context.Context, args OpenParams, invalidator CredentialInvalidator) (Environ, error) {
 	p, err := Provider(args.Cloud.Type)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return Open(ctx, p, args)
+	return Open(ctx, p, args, invalidator)
 }
 
 // Open creates an Environ instance and errors if the provider is not for a cloud.
-func Open(ctx stdcontext.Context, p EnvironProvider, args OpenParams) (Environ, error) {
+func Open(ctx context.Context, p EnvironProvider, args OpenParams, invalidator CredentialInvalidator) (Environ, error) {
 	if envProvider, ok := p.(CloudEnvironProvider); !ok {
 		return nil, errors.NotValidf("cloud environ provider %T", p)
 	} else {
-		return envProvider.Open(ctx, args)
+		return envProvider.Open(ctx, args, invalidator)
 	}
 }
 
@@ -38,7 +37,7 @@ func Open(ctx stdcontext.Context, p EnvironProvider, args OpenParams) (Environ, 
 func Destroy(
 	controllerName string,
 	env ControllerDestroyer,
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	store jujuclient.ControllerStore,
 ) error {
 	details, err := store.ControllerByName(controllerName)

@@ -4,20 +4,19 @@
 package model
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/template"
 	"time"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
@@ -27,6 +26,7 @@ import (
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/output"
 	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
@@ -67,30 +67,30 @@ var destroyDoc = `
 Destroys the specified model. This will result in the non-recoverable
 removal of all the units operating in the model and any resources stored
 there. Due to the irreversible nature of the command, it will prompt for
-confirmation (unless overridden with the '-y' option) before taking any
+confirmation (unless overridden with the ` + "`--no-prompt`" + ` option) before taking any
 action.
 
 If there is persistent storage in any of the models managed by the
 controller, then you must choose to either destroy or release the
-storage, using --destroy-storage or --release-storage respectively.
+storage, using ` + "`--destroy-storage`" + ` or ` + "`--release-storage`" + ` respectively.
 
 Sometimes, the destruction of the model may fail as Juju encounters errors
 and failures that need to be dealt with before a model can be destroyed.
 However, at times, there is a need to destroy a model ignoring
-all operational errors. In these rare cases, use --force option but note 
-that --force will also remove all units of the application, its subordinates
+all operational errors. In these rare cases, use the ` + "`--force`" + ` option but note
+that ` + "`--force`" + ` will also remove all units of the application, its subordinates
 and, potentially, machines without given them the opportunity to shutdown cleanly.
 
 Model destruction is a multi-step process. Under normal circumstances, Juju will not
-proceed to the next step until the current step has finished. 
-However, when using --force, users can also specify --no-wait to progress through steps 
+proceed to the next step until the current step has finished.
+However, when using ` + "`--force`" + `, users can also specify ` + "`--no-wait`" + ` to progress through steps
 without delay waiting for each step to complete.
 
-WARNING: Passing --force with --timeout will continue the final destruction without
-consideration or respect for clean shutdown or resource cleanup. If timeout 
-elapses with --force, you may have resources left behind that will require
-manual cleanup. If --force --timeout 0 is passed, the model is brutally
-removed with haste. It is recommended to use graceful destroy (without --force or --no-wait).
+WARNING: Passing ` + "`--force`" + ` with ` + "`--timeout`" + ` will continue the final destruction without
+consideration or respect for clean shutdown or resource cleanup. If timeout
+elapses with ` + "`--force`" + `, you may have resources left behind that will require
+manual cleanup. If ` + "`--force --timeout 0`" + ` is passed, the model is brutally
+removed with haste. It is recommended to use graceful destroy (without ` + "`--force`" + ` or ` + "`--no-wait`" + `).
 `
 
 const destroyExamples = `
@@ -102,25 +102,39 @@ const destroyExamples = `
 `
 
 var destroyModelMsg = `
-This command will destroy the %q model and all its resources. It cannot be stopped.`[1:]
+This command will destroy the %q model and affect the following resources. It cannot be stopped.`[1:]
 
 var destroyModelMsgDetails = `
 {{- if gt .MachineCount 0}}
- - {{.MachineCount}} {{if .IsCaaS}}container{{else}}machine{{end}}{{if gt .MachineCount 1}}s{{end}} will be destroyed
-  - {{if .IsCaaS}}container{{else}}machine{{end}} list:{{range .MachineIds}} "{{.}}"{{end}}
+ - {{.MachineCount}} machine{{if gt .MachineCount 1}}s{{end}} will be destroyed
+  - machine list:{{range .MachineIds}} "{{.}}"{{end}}
+{{- end}}
  - {{.ApplicationCount}} application{{if gt .ApplicationCount 1}}s{{end}} will be removed
  {{- if gt (len .ApplicationNames) 0}}
   - application list:{{range .ApplicationNames}} "{{.}}"{{end}}
  {{- end}}
  - {{.FilesystemCount}} filesystem{{if gt .FilesystemCount 1}}s{{end}} and {{.VolumeCount}} volume{{if gt .VolumeCount 1}}s{{end}} will be {{if .ReleaseStorage}}released{{else}}destroyed{{end}}
-{{- end}}
+`
+
+var persistentStorageErrorMsg = `cannot destroy model "%s"
+
+The model has persistent storage remaining:%s
+
+To destroy the storage, run the destroy-model
+command again with the "--destroy-storage" option.
+
+To release the storage from Juju's management
+without destroying it, use the "--release-storage"
+option instead. The storage can then be imported
+into another Juju model.
+
 `
 
 // DestroyModelAPI defines the methods on the modelmanager
 // API that the destroy command calls. It is exported for mocking in tests.
 type DestroyModelAPI interface {
 	Close() error
-	DestroyModel(tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error
+	DestroyModel(ctx context.Context, tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error
 	ModelStatus(ctx context.Context, models ...names.ModelTag) ([]base.ModelStatus, error)
 }
 
@@ -174,11 +188,11 @@ func (c *destroyCommand) Init(args []string) error {
 	}
 }
 
-func (c *destroyCommand) getAPI() (DestroyModelAPI, error) {
+func (c *destroyCommand) getAPI(ctx context.Context) (DestroyModelAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewControllerAPIRoot()
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -200,18 +214,17 @@ func getApplicationNames(data base.ModelStatus) []string {
 }
 
 // printDestroyWarningDetails prints to stderr the warning with additional info about destroying model.
-func printDestroyWarningDetails(ctx *cmd.Context, modelStatus base.ModelStatus, modelName string, modelType model.ModelType, releaseStorage bool) error {
+func printDestroyWarningDetails(ctx *cmd.Context, modelStatus *base.ModelStatus, modelName string, modelType model.ModelType, releaseStorage bool) error {
 	destroyMsgDetailsTmpl := template.New("destroyMsdDetails")
 	destroyMsgDetailsTmpl, err := destroyMsgDetailsTmpl.Parse(destroyModelMsgDetails)
 	if err != nil {
 		return errors.Annotate(err, "Destroy controller message template parsing error.")
 	}
 	_ = destroyMsgDetailsTmpl.Execute(ctx.Stderr, map[string]any{
-		"IsCaaS":           modelType == model.CAAS,
 		"MachineCount":     modelStatus.HostedMachineCount,
-		"MachineIds":       getMachineIds(modelStatus),
+		"MachineIds":       getMachineIds(*modelStatus),
 		"ApplicationCount": modelStatus.ApplicationCount,
-		"ApplicationNames": getApplicationNames(modelStatus),
+		"ApplicationNames": getApplicationNames(*modelStatus),
 		"FilesystemCount":  len(modelStatus.Filesystems),
 		"VolumeCount":      len(modelStatus.Volumes),
 		"ReleaseStorage":   releaseStorage,
@@ -244,7 +257,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Annotate(err, "cannot read controller details")
 	}
-	modelName, modelDetails, err := c.ModelDetails()
+	modelName, modelDetails, err := c.ModelDetails(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -253,19 +266,27 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	}
 
 	// Attempt to connect to the API.  If we can't, fail the destroy.
-	api, err := c.getAPI()
+	api, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Annotate(err, "cannot connect to API")
 	}
 	defer func() { _ = api.Close() }()
 
+	modelTag := names.NewModelTag(modelDetails.ModelUUID)
+	modelStatus, err := getModelStatus(ctx, modelTag, api)
+	if err != nil {
+		return err
+	}
+
+	// Error out if the model has detachable storage and is not authorized to destroy or release it.
+	detachableVolumes, detachableFilesystems := countDetachableStorage(modelStatus)
+	if (detachableVolumes > 0 || detachableFilesystems > 0) && !(c.destroyStorage || c.releaseStorage) {
+		return generatePersistentStorageErrorMsg(modelName, detachableVolumes, detachableFilesystems)
+	}
+
 	if c.DestroyConfirmationCommandBase.NeedsConfirmation() {
-		modelStatuses, err := api.ModelStatus(ctx, names.NewModelTag(modelDetails.ModelUUID))
-		if err != nil {
-			return errors.Annotate(err, "getting model status")
-		}
 		ctx.Warningf(destroyModelMsg, modelName)
-		if err := printDestroyWarningDetails(ctx, modelStatuses[0], modelName, modelDetails.ModelType, c.releaseStorage); err != nil {
+		if err := printDestroyWarningDetails(ctx, modelStatus, modelName, modelDetails.ModelType, c.releaseStorage); err != nil {
 			return errors.Trace(err)
 		}
 		if err := jujucmd.UserConfirmName(modelName, "model", ctx); err != nil {
@@ -274,7 +295,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	}
 
 	// Attempt to destroy the model.
-	_, _ = fmt.Fprint(ctx.Stderr, "Destroying model")
+	_, _ = fmt.Fprintln(ctx.Stderr, "Destroying model")
 	var destroyStorage *bool
 	if c.destroyStorage || c.releaseStorage {
 		destroyStorage = &c.destroyStorage
@@ -284,21 +305,32 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	if c.Force {
 		force = &c.Force
 		if c.NoWait {
-			zeroSec := 0 * time.Second
-			maxWait = &zeroSec
+			zero := 0 * time.Second
+			maxWait = &zero
 		}
 	}
-	modelTag := names.NewModelTag(modelDetails.ModelUUID)
+
 	var timeout *time.Duration
 	if c.timeout >= 0 {
 		timeout = &c.timeout
 	}
-	if err := api.DestroyModel(modelTag, destroyStorage, force, maxWait, timeout); err != nil {
-		return c.handleError(
-			ctx,
-			modelTag, modelName, api,
-			errors.Annotate(err, "cannot destroy model"),
-		)
+	if err := api.DestroyModel(ctx, modelTag, destroyStorage, force, maxWait, timeout); err != nil {
+		err = errors.Annotate(err, "cannot destroy model")
+
+		if params.IsCodeOperationBlocked(err) {
+			return block.ProcessBlockedError(err, block.BlockDestroy)
+		}
+		if params.IsCodeHasPersistentStorage(err) {
+			modelStatus, err := getModelStatus(ctx, modelTag, api)
+			if err != nil {
+				return err
+			}
+
+			persistentVolumes, persistentFilesystems := countDetachableStorage(modelStatus)
+			return generatePersistentStorageErrorMsg(modelName, persistentVolumes, persistentFilesystems)
+		}
+		logger.Errorf(context.TODO(), `failed to destroy model %q`, modelName)
+		return err
 	}
 
 	// Wait for model to be destroyed.
@@ -342,8 +374,10 @@ func waitForModelDestroyed(
 		erroredStatuses.PrettyPrint(ctx.Stdout)
 	}
 
-	// no wait for 1st time.
-	intervalSeconds := 0 * time.Second
+	// wait a little bit for the model to be destroyed, backoff
+	// exponentially, but no longer than 2s
+	intervalSeconds := 10 * time.Millisecond
+	const maxIntervalSeconds = 2 * time.Second
 	reported := ""
 	lineLength := 0
 	const perLineLength = 80
@@ -356,7 +390,7 @@ func waitForModelDestroyed(
 			fmt.Fprintln(ctx.Stderr, msg)
 			return cmd.ErrSilent
 		case <-clock.After(intervalSeconds):
-			data, erroredStatuses = getModelStatus(ctx, api, tag)
+			data, erroredStatuses = summarizeModelStatus(ctx, api, tag)
 			if data == nil {
 				// model has been destroyed successfully.
 				return nil
@@ -371,11 +405,14 @@ func waitForModelDestroyed(
 				fmt.Fprint(ctx.Stderr, ".")
 				lineLength++
 			} else {
-				fmt.Fprint(ctx.Stderr, fmt.Sprintf("\n%v...", msg))
+				fmt.Fprintf(ctx.Stderr, "\n%v...", msg)
 				reported = msg
 				lineLength = len(msg) + 3
 			}
-			intervalSeconds = 2 * time.Second
+			intervalSeconds *= 2
+			if intervalSeconds > maxIntervalSeconds {
+				intervalSeconds = maxIntervalSeconds
+			}
 		}
 	}
 }
@@ -400,7 +437,7 @@ func (s modelResourceErrorStatusSummary) PrettyPrint(writer io.Writer) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 	w.Println(`
 The following errors were encountered during destroying the model.
 You can fix the problem causing the errors and run destroy-model again.
@@ -423,7 +460,7 @@ You can fix the problem causing the errors and run destroy-model again.
 	return nil
 }
 
-func getModelStatus(ctx *cmd.Context, api DestroyModelAPI, tag names.ModelTag) (*modelData, modelResourceErrorStatusSummary) {
+func summarizeModelStatus(ctx *cmd.Context, api DestroyModelAPI, tag names.ModelTag) (*modelData, modelResourceErrorStatusSummary) {
 	var erroredStatuses modelResourceErrorStatusSummary
 
 	status, err := api.ModelStatus(ctx, tag)
@@ -433,7 +470,7 @@ func getModelStatus(ctx *cmd.Context, api DestroyModelAPI, tag names.ModelTag) (
 		err = status[0].Error
 	}
 	if err != nil {
-		if params.IsCodeNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			ctx.Infof("\nModel destroyed.")
 		} else {
 			ctx.Infof("Unable to get the model status from the API: %v.", err)
@@ -499,7 +536,7 @@ func formatDestroyModelInfo(data *modelData) string {
 		out += fmt.Sprintf(", %d volume(s)", data.volumeCount)
 	}
 	if data.filesystemCount > 0 {
-		out += fmt.Sprintf(", %d filesystems(s)", data.filesystemCount)
+		out += fmt.Sprintf(", %d filesystem(s)", data.filesystemCount)
 	}
 	return out
 }
@@ -518,7 +555,7 @@ func formatDestroyModelAbortInfo(data *modelData, timeout, force bool) string {
 			out += fmt.Sprintf("\n - %d volume(s)", data.volumeCount)
 		}
 		if data.filesystemCount > 0 {
-			out += fmt.Sprintf("\n - %d filesystems(s)", data.filesystemCount)
+			out += fmt.Sprintf("\n - %d filesystem(s)", data.filesystemCount)
 		}
 	}
 	if !timeout {
@@ -531,47 +568,46 @@ func formatDestroyModelAbortInfo(data *modelData, timeout, force bool) string {
 	return out
 }
 
-func (c *destroyCommand) handleError(
-	ctx context.Context,
-	modelTag names.ModelTag,
-	modelName string,
-	api DestroyModelAPI,
-	err error,
-) error {
-	if params.IsCodeOperationBlocked(err) {
-		return block.ProcessBlockedError(err, block.BlockDestroy)
-	}
-	if params.IsCodeHasPersistentStorage(err) {
-		return handlePersistentStorageError(ctx, modelTag, modelName, api)
-	}
-	logger.Errorf(`failed to destroy model %q`, modelName)
-	return err
-}
-
-func handlePersistentStorageError(
-	ctx context.Context,
-	modelTag names.ModelTag,
-	modelName string,
-	api DestroyModelAPI,
-) error {
+func getModelStatus(ctx context.Context, modelTag names.ModelTag, api DestroyModelAPI) (*base.ModelStatus, error) {
 	modelStatuses, err := api.ModelStatus(ctx, modelTag)
 	if err != nil {
-		return errors.Annotate(err, "getting model status")
+		return nil, errors.Annotate(err, "getting model status")
 	}
 	if l := len(modelStatuses); l != 1 {
-		return errors.Errorf("error finding model status: expected one result, got %d", l)
+		return nil, errors.Errorf("error finding model status: expected one result, got %d", l)
 	}
 	modelStatus := modelStatuses[0]
+	if errors.Is(modelStatus.Error, errors.NotFound) {
+		// This most likely occurred because a model was
+		// destroyed half-way through the call.
+		return nil, errors.Errorf("model not found, it may have been destroyed during this operation")
+	}
 	if modelStatus.Error != nil {
 		if errors.Is(modelStatus.Error, errors.NotFound) {
 			// This most likely occurred because a model was
 			// destroyed half-way through the call.
-			return nil
+			return nil, errors.Errorf("model not found, it may have been destroyed during this operation")
 		}
-		return errors.Annotate(err, "getting model status")
+		return nil, errors.Annotate(modelStatus.Error, "getting model status")
+	}
+	return &modelStatus, nil
+}
+
+func generatePersistentStorageErrorMsg(modelName string, detachableVolumeCount, detachableFilesystemCount int) error {
+	var storageBuilder strings.Builder
+
+	if detachableVolumeCount > 0 {
+		storageBuilder.WriteString(fmt.Sprintf("\n    %d volume(s)", detachableVolumeCount))
 	}
 
-	var buf bytes.Buffer
+	if detachableFilesystemCount > 0 {
+		storageBuilder.WriteString(fmt.Sprintf("\n    %d filesystem(s)", detachableFilesystemCount))
+	}
+
+	return errors.Errorf(persistentStorageErrorMsg, modelName, storageBuilder.String())
+}
+
+func countDetachableStorage(modelStatus *base.ModelStatus) (int, int) {
 	var persistentVolumes, persistentFilesystems int
 	for _, v := range modelStatus.Volumes {
 		if v.Detachable {
@@ -583,34 +619,5 @@ func handlePersistentStorageError(
 			persistentFilesystems++
 		}
 	}
-	if n := persistentVolumes; n > 0 {
-		fmt.Fprintf(&buf, "%d volume", n)
-		if n > 1 {
-			buf.WriteRune('s')
-		}
-		if persistentFilesystems > 0 {
-			buf.WriteString(" and ")
-		}
-	}
-	if n := persistentFilesystems; n > 0 {
-		fmt.Fprintf(&buf, "%d filesystem", n)
-		if n > 1 {
-			buf.WriteRune('s')
-		}
-	}
-
-	return errors.Errorf(`cannot destroy model %q
-
-The model has persistent storage remaining:
-	%s
-
-To destroy the storage, run the destroy-model
-command again with the "--destroy-storage" option.
-
-To release the storage from Juju's management
-without destroying it, use the "--release-storage"
-option instead. The storage can then be imported
-into another Juju model.
-
-`, modelName, buf.String())
+	return persistentVolumes, persistentFilesystems
 }

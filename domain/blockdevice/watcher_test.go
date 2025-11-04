@@ -6,92 +6,61 @@ package blockdevice_test
 import (
 	"context"
 	"database/sql"
+	stdtesting "testing"
 
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/core/blockdevice"
+	coreblockdevice "github.com/juju/juju/core/blockdevice"
 	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/watcher/watchertest"
 	"github.com/juju/juju/domain"
+	"github.com/juju/juju/domain/blockdevice"
 	"github.com/juju/juju/domain/blockdevice/service"
 	"github.com/juju/juju/domain/blockdevice/state"
-	"github.com/juju/juju/internal/changestream/testing"
+	changestreamtesting "github.com/juju/juju/internal/changestream/testing"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type watcherSuite struct {
-	testing.ModelSuite
+	changestreamtesting.ModelSuite
 }
 
-var _ = gc.Suite(&watcherSuite{})
+func TestWatcherSuite(t *stdtesting.T) {
+	tc.Run(t, &watcherSuite{})
+}
 
-func (s *watcherSuite) createMachine(c *gc.C, name string) string {
-	db := s.TxnRunner()
-
+func (s *watcherSuite) createMachine(c *tc.C, name string) machine.UUID {
 	netNodeUUID := uuid.MustNewUUID().String()
-	machineUUID := uuid.MustNewUUID().String()
+	machineUUID := tc.Must(c, machine.NewUUID)
 
-	queryNetNode := `
+	s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
 INSERT INTO net_node (uuid) VALUES (?)
-`
-	queryMachine := `
+`, netNodeUUID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
 INSERT INTO machine (uuid, life_id, name, net_node_uuid)
 VALUES (?, ?, ?, ?)
-	`
-
-	err := db.StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, queryNetNode, netNodeUUID); err != nil {
-			return errors.Trace(err)
-		}
-
-		if _, err := tx.ExecContext(ctx, queryMachine, machineUUID, 0, name, netNodeUUID); err != nil {
-			return errors.Trace(err)
-		}
-		return nil
+`, machineUUID, 0, name, netNodeUUID)
+		return err
 	})
-	c.Assert(err, jc.ErrorIsNil)
 
 	return machineUUID
 }
 
-func (s *watcherSuite) TestWatchBlockDevicesMissingMachine(c *gc.C) {
-	st := state.NewState(s.TxnRunnerFactory())
-	factory := domain.NewWatcherFactory(
-		changestream.NewWatchableDBFactoryForNamespace(s.GetWatchableDB, "uuid"),
-		loggertesting.WrapCheckLog(c))
-	service := service.NewWatchableService(st, factory, loggertesting.WrapCheckLog(c))
-
-	_, err := service.WatchBlockDevices(context.Background(), "666")
-	c.Assert(err, gc.ErrorMatches, `machine "666" not found`)
-}
-
-func (s *watcherSuite) TestStops(c *gc.C) {
-	s.createMachine(c, "666")
-
-	st := state.NewState(s.TxnRunnerFactory())
-	factory := domain.NewWatcherFactory(
-		changestream.NewWatchableDBFactoryForNamespace(s.GetWatchableDB, "uuid"),
-		loggertesting.WrapCheckLog(c))
-	service := service.NewWatchableService(st, factory, loggertesting.WrapCheckLog(c))
-
-	w, err := service.WatchBlockDevices(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = workertest.CheckKill(c, w)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *watcherSuite) TestWatchBlockDevices(c *gc.C) {
-	bd := blockdevice.BlockDevice{
-		DeviceName:     "name-666",
-		SizeMiB:        666,
-		FilesystemType: "btrfs",
+func (s *watcherSuite) TestWatchBlockDevices(c *tc.C) {
+	added := map[blockdevice.BlockDeviceUUID]coreblockdevice.BlockDevice{
+		"a": {
+			DeviceName:     "name-666",
+			SizeMiB:        666,
+			FilesystemType: "btrfs",
+		},
 	}
-	s.createMachine(c, "666")
+	machineUUID := s.createMachine(c, "666")
 
 	st := state.NewState(s.TxnRunnerFactory())
 	factory := domain.NewWatcherFactory(
@@ -99,44 +68,66 @@ func (s *watcherSuite) TestWatchBlockDevices(c *gc.C) {
 		loggertesting.WrapCheckLog(c))
 	service := service.NewWatchableService(st, factory, loggertesting.WrapCheckLog(c))
 
-	w, err := service.WatchBlockDevices(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := service.WatchBlockDevicesForMachine(c.Context(), machineUUID)
+	c.Assert(err, tc.ErrorIsNil)
 
-	wc := watchertest.NewNotifyWatcherC(c, w)
-	defer wc.AssertKilled()
+	harness := watchertest.NewHarness(s, watchertest.NewWatcherC(c, w))
+	harness.AddTest(c, func(c *tc.C) {
+		err := st.UpdateBlockDevicesForMachine(
+			c.Context(), machineUUID, added, nil, nil)
+		c.Assert(err, tc.ErrorIsNil)
+	}, func(wc watchertest.WatcherC[struct{}]) {
+		wc.AssertChange()
+	})
 
-	// Initial event.
-	wc.AssertOneChange()
+	harness.AddTest(c, func(c *tc.C) {
+		// Saving existing devices -> no change.
+		err := st.UpdateBlockDevicesForMachine(
+			c.Context(), machineUUID, nil, added, nil)
+		c.Assert(err, tc.ErrorIsNil)
+	}, func(wc watchertest.WatcherC[struct{}]) {
+		wc.AssertNoChange()
+	})
 
-	err = st.SetMachineBlockDevices(context.Background(), "666", bd)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertOneChange()
+	harness.AddTest(c, func(c *tc.C) {
+		// Updating existing device -> change.
+		updated := map[blockdevice.BlockDeviceUUID]coreblockdevice.BlockDevice{
+			"a": {
+				DeviceName:     "name-666",
+				SizeMiB:        666,
+				FilesystemType: "btrfs",
+				SerialId:       "serial",
+			},
+		}
+		err = st.UpdateBlockDevicesForMachine(
+			c.Context(), machineUUID, nil, updated, nil)
+		c.Assert(err, tc.ErrorIsNil)
+	}, func(wc watchertest.WatcherC[struct{}]) {
+		wc.AssertChange()
+	})
 
-	// Saving existing devices -> no change.
-	err = st.SetMachineBlockDevices(context.Background(), "666", bd)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
+	harness.AddTest(c, func(c *tc.C) {
+		// Removing devices -> change.
+		err = st.UpdateBlockDevicesForMachine(
+			c.Context(), machineUUID, nil, nil, []blockdevice.BlockDeviceUUID{"a"})
+		c.Assert(err, tc.ErrorIsNil)
+	}, func(wc watchertest.WatcherC[struct{}]) {
+		wc.AssertChange()
+	})
 
-	// Updating existing device -> change.
-	bd.SerialId = "serial"
-	err = st.SetMachineBlockDevices(context.Background(), "666", bd)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertOneChange()
-
-	// Removing devices -> change.
-	err = st.SetMachineBlockDevices(context.Background(), "666")
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertOneChange()
+	harness.Run(c, struct{}{})
 }
 
-func (s *watcherSuite) TestWatchBlockDevicesIgnoresWrongMachine(c *gc.C) {
-	bd := blockdevice.BlockDevice{
-		DeviceName:     "name-666",
-		SizeMiB:        666,
-		FilesystemType: "btrfs",
+func (s *watcherSuite) TestWatchBlockDevicesIgnoresWrongMachine(c *tc.C) {
+	bd := map[blockdevice.BlockDeviceUUID]coreblockdevice.BlockDevice{
+		"a": {
+			DeviceName:     "name-666",
+			SizeMiB:        666,
+			FilesystemType: "btrfs",
+		},
 	}
-	s.createMachine(c, "666")
-	s.createMachine(c, "667")
+	machine1UUID := s.createMachine(c, "666")
+	machine2UUID := s.createMachine(c, "667")
 
 	st := state.NewState(s.TxnRunnerFactory())
 	factory := domain.NewWatcherFactory(
@@ -144,17 +135,18 @@ func (s *watcherSuite) TestWatchBlockDevicesIgnoresWrongMachine(c *gc.C) {
 		loggertesting.WrapCheckLog(c))
 	service := service.NewWatchableService(st, factory, loggertesting.WrapCheckLog(c))
 
-	w, err := service.WatchBlockDevices(context.Background(), "667")
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := service.WatchBlockDevicesForMachine(c.Context(), machine2UUID)
+	c.Assert(err, tc.ErrorIsNil)
 
-	wc := watchertest.NewNotifyWatcherC(c, w)
-	defer wc.AssertKilled()
+	harness := watchertest.NewHarness(s, watchertest.NewWatcherC(c, w))
 
-	// Initial event.
-	wc.AssertOneChange()
+	harness.AddTest(c, func(c *tc.C) {
+		// No events for changes done to a different machine.
+		err = st.UpdateBlockDevicesForMachine(c.Context(), machine1UUID, bd, nil, nil)
+		c.Assert(err, tc.ErrorIsNil)
+	}, func(wc watchertest.WatcherC[struct{}]) {
+		wc.AssertNoChange()
+	})
 
-	// No events for changes done to a different machine.
-	err = st.SetMachineBlockDevices(context.Background(), "666", bd)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
+	harness.Run(c, struct{}{})
 }

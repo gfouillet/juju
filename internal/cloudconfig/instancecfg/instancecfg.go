@@ -5,6 +5,7 @@
 package instancecfg
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,11 +17,9 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 	"github.com/juju/utils/v4/shell"
-	"github.com/juju/utils/v4/ssh"
-	"github.com/juju/version/v2"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/agent"
@@ -33,6 +32,7 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/tags"
@@ -222,11 +222,11 @@ type BootstrapConfig struct {
 	// trample on the host keys of manually provisioned machines.
 	InitialSSHHostKeys SSHHostKeys
 
-	// StateServingInfo holds the information for serving the state.
+	// ControllerAgentInfo holds the information for the controller agent.
 	// This is only specified for bootstrap; controllers started
 	// subsequently will acquire their serving info from another
 	// server.
-	StateServingInfo controller.StateServingInfo
+	ControllerAgentInfo controller.ControllerAgentInfo
 
 	// JujuDbSnapPath is the path to a .snap file that will be used as the juju-db
 	// service.
@@ -273,10 +273,14 @@ type SSHKeyPair struct {
 type StateInitializationParams struct {
 	// AgentVersion is the desired agent version to run for models created as
 	// part of state initialization.
-	AgentVersion version.Number
+	AgentVersion semversion.Number
 
 	// ControllerModelConfig holds the initial controller model configuration.
 	ControllerModelConfig *config.Config
+
+	// ControllerModelAuthorizedKeys is a list of authorized keys to be added to
+	// the controller model and the admin user during bootstrap.
+	ControllerModelAuthorizedKeys []string
 
 	// ControllerModelEnvironVersion holds the initial controller model
 	// environ version.
@@ -347,12 +351,16 @@ type StateInitializationParams struct {
 	// StoragePools is one or more named storage pools to create
 	// in the controller model.
 	StoragePools map[string]storage.Attrs
+
+	// SSHServerHostKey holds the host key to be used within the embedded SSH server for Juju.
+	SSHServerHostKey string
 }
 
 type stateInitializationParamsInternal struct {
 	AgentVersion                            string                            `yaml:"agent-version"`
-	ControllerConfig                        map[string]interface{}            `yaml:"controller-config"`
-	ControllerModelConfig                   map[string]interface{}            `yaml:"controller-model-config"`
+	ControllerConfig                        map[string]any                    `yaml:"controller-config"`
+	ControllerModelConfig                   map[string]any                    `yaml:"controller-model-config"`
+	ControllerModelAuthorizedKeys           []string                          `yaml:"controller-model-authorized-keys"`
 	ControllerModelEnvironVersion           int                               `yaml:"controller-model-version"`
 	ControllerInheritedConfig               map[string]interface{}            `yaml:"controller-config-defaults,omitempty"`
 	RegionInheritedConfig                   cloud.RegionConfig                `yaml:"region-inherited-config,omitempty"`
@@ -369,6 +377,7 @@ type stateInitializationParamsInternal struct {
 	ControllerCloudCredential               *cloud.Credential                 `yaml:"controller-cloud-credential,omitempty"`
 	ControllerCharmPath                     string                            `yaml:"controller-charm-path,omitempty"`
 	ControllerCharmChannel                  charm.Channel                     `yaml:"controller-charm-channel,omitempty"`
+	SSHServerHostKey                        string                            `yaml:"ssh-server-host-key,omitempty"`
 }
 
 // Marshal marshals StateInitializationParams to an opaque byte array.
@@ -385,6 +394,7 @@ func (p *StateInitializationParams) Marshal() ([]byte, error) {
 		AgentVersion:                            p.AgentVersion.String(),
 		ControllerConfig:                        p.ControllerConfig,
 		ControllerModelConfig:                   p.ControllerModelConfig.AllAttrs(),
+		ControllerModelAuthorizedKeys:           p.ControllerModelAuthorizedKeys,
 		ControllerModelEnvironVersion:           p.ControllerModelEnvironVersion,
 		ControllerInheritedConfig:               p.ControllerInheritedConfig,
 		RegionInheritedConfig:                   p.RegionInheritedConfig,
@@ -401,6 +411,7 @@ func (p *StateInitializationParams) Marshal() ([]byte, error) {
 		ControllerCloudCredential:               p.ControllerCloudCredential,
 		ControllerCharmPath:                     p.ControllerCharmPath,
 		ControllerCharmChannel:                  p.ControllerCharmChannel,
+		SSHServerHostKey:                        p.SSHServerHostKey,
 	}
 	return yaml.Marshal(&internal)
 }
@@ -424,7 +435,7 @@ func (p *StateInitializationParams) Unmarshal(data []byte) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	agentVersion, err := version.Parse(internal.AgentVersion)
+	agentVersion, err := semversion.Parse(internal.AgentVersion)
 	if err != nil {
 		return fmt.Errorf("parsing agent-version in state initialisation params: %w", err)
 	}
@@ -432,6 +443,7 @@ func (p *StateInitializationParams) Unmarshal(data []byte) error {
 		AgentVersion:                            agentVersion,
 		ControllerConfig:                        internal.ControllerConfig,
 		ControllerModelConfig:                   cfg,
+		ControllerModelAuthorizedKeys:           internal.ControllerModelAuthorizedKeys,
 		ControllerModelEnvironVersion:           internal.ControllerModelEnvironVersion,
 		ControllerInheritedConfig:               internal.ControllerInheritedConfig,
 		RegionInheritedConfig:                   internal.RegionInheritedConfig,
@@ -448,6 +460,7 @@ func (p *StateInitializationParams) Unmarshal(data []byte) error {
 		ControllerCloudCredential:               internal.ControllerCloudCredential,
 		ControllerCharmPath:                     internal.ControllerCharmPath,
 		ControllerCharmChannel:                  internal.ControllerCharmChannel,
+		SSHServerHostKey:                        internal.SSHServerHostKey,
 	}
 	return nil
 }
@@ -482,7 +495,7 @@ var newService = func(name string, conf common.Conf) (service.Service, error) {
 
 func (cfg *InstanceConfig) AgentConfig(
 	tag names.Tag,
-	toolsVersion version.Number,
+	toolsVersion semversion.Number,
 ) (agent.ConfigSetter, error) {
 	configParams := agent.AgentConfigParams{
 		Paths: agent.Paths{
@@ -512,12 +525,13 @@ func (cfg *InstanceConfig) AgentConfig(
 		configParams.OpenTelemetryInsecure = cfg.ControllerConfig.OpenTelemetryInsecure()
 		configParams.OpenTelemetryStackTraces = cfg.ControllerConfig.OpenTelemetryStackTraces()
 		configParams.OpenTelemetrySampleRatio = cfg.ControllerConfig.OpenTelemetrySampleRatio()
+		configParams.OpenTelemetryTailSamplingThreshold = cfg.ControllerConfig.OpenTelemetryTailSamplingThreshold()
 		configParams.ObjectStoreType = cfg.ControllerConfig.ObjectStoreType()
 	}
 	if cfg.Bootstrap == nil {
 		return agent.NewAgentConfig(configParams)
 	}
-	return agent.NewStateMachineConfig(configParams, cfg.Bootstrap.StateServingInfo)
+	return agent.NewStateMachineConfig(configParams, cfg.Bootstrap.ControllerAgentInfo)
 }
 
 // JujuTools returns the directory where Juju tools are stored.
@@ -539,7 +553,7 @@ func (cfg *InstanceConfig) APIHostAddrs() []string {
 	var hosts []string
 	if cfg.Bootstrap != nil {
 		hosts = append(hosts, net.JoinHostPort(
-			"localhost", strconv.Itoa(cfg.Bootstrap.StateServingInfo.APIPort)),
+			"localhost", strconv.Itoa(cfg.Bootstrap.ControllerAgentInfo.APIPort)),
 		)
 	}
 	if cfg.APIInfo != nil {
@@ -557,7 +571,7 @@ func (cfg *InstanceConfig) APIHosts() []string {
 		for _, addr := range cfg.APIInfo.Addrs {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
-				logger.Errorf("Can't split API address %q to host:port - %q", host, err)
+				logger.Errorf(context.TODO(), "Can't split API address %q to host:port - %q", host, err)
 				continue
 			}
 			hosts = append(hosts, host)
@@ -568,9 +582,9 @@ func (cfg *InstanceConfig) APIHosts() []string {
 
 // AgentVersion returns the version of the Juju agent that will be configured
 // on the instance. The zero value will be returned if there are no tools set.
-func (cfg *InstanceConfig) AgentVersion() version.Binary {
+func (cfg *InstanceConfig) AgentVersion() semversion.Binary {
 	if len(cfg.tools) == 0 {
-		return version.Binary{}
+		return semversion.Binary{}
 	}
 	return cfg.tools[0].Version
 }
@@ -741,19 +755,16 @@ func (cfg *BootstrapConfig) VerifyConfig() (err error) {
 	if cfg.ControllerModelConfig == nil {
 		return errors.New("missing model configuration")
 	}
-	if len(cfg.StateServingInfo.Cert) == 0 {
+	if len(cfg.ControllerAgentInfo.Cert) == 0 {
 		return errors.New("missing controller certificate")
 	}
-	if len(cfg.StateServingInfo.PrivateKey) == 0 {
+	if len(cfg.ControllerAgentInfo.PrivateKey) == 0 {
 		return errors.New("missing controller private key")
 	}
-	if len(cfg.StateServingInfo.CAPrivateKey) == 0 {
+	if len(cfg.ControllerAgentInfo.CAPrivateKey) == 0 {
 		return errors.New("missing ca cert private key")
 	}
-	if cfg.StateServingInfo.StatePort == 0 {
-		return errors.New("missing state port")
-	}
-	if cfg.StateServingInfo.APIPort == 0 {
+	if cfg.ControllerAgentInfo.APIPort == 0 {
 		return errors.New("missing API port")
 	}
 	if cfg.BootstrapMachineInstanceId == "" {
@@ -817,7 +828,6 @@ func NewBootstrapInstanceConfig(
 	if err != nil {
 		return nil, err
 	}
-	icfg.AuthorizedKeys = config.SystemSSHKeys()
 	icfg.PublicImageSigningKey = publicImageSigningKey
 	icfg.ControllerConfig = make(map[string]interface{})
 	for k, v := range config {
@@ -898,7 +908,7 @@ func proxyConfigurationFromEnv(cfg *config.Config) ProxyConfiguration {
 // provisioner in the ContainerConfig structure. Those values are then used to
 // call this function.
 func PopulateInstanceConfig(icfg *InstanceConfig,
-	providerType, authorizedKeys string,
+	providerType string,
 	sslHostnameVerification bool,
 	proxyCfg ProxyConfiguration,
 	enableOSRefreshUpdates bool,
@@ -906,8 +916,6 @@ func PopulateInstanceConfig(icfg *InstanceConfig,
 	cloudInitUserData map[string]interface{},
 	profiles []string,
 ) error {
-	systemSSHKeys := icfg.ControllerConfig.SystemSSHKeys()
-	icfg.AuthorizedKeys = ssh.ConcatAuthorisedKeys(systemSSHKeys, authorizedKeys)
 	if icfg.AgentEnvironment == nil {
 		icfg.AgentEnvironment = make(map[string]string)
 	}
@@ -949,7 +957,6 @@ func FinishInstanceConfig(
 	if err := PopulateInstanceConfig(
 		icfg,
 		cfg.Type(),
-		cfg.AuthorizedKeys(),
 		cfg.SSLHostnameVerification(),
 		proxyConfigurationFromEnv(cfg),
 		cfg.EnableOSRefreshUpdate(),
@@ -962,7 +969,7 @@ func FinishInstanceConfig(
 	if icfg.IsController() {
 		// Add NUMACTL preference. Needed to work for both bootstrap and high availability
 		// Only makes sense for controller,
-		logger.Debugf("Setting numa ctl preference to %v", icfg.ControllerConfig.NUMACtlPreference())
+		logger.Debugf(context.TODO(), "Setting numa ctl preference to %v", icfg.ControllerConfig.NUMACtlPreference())
 		// Unfortunately, AgentEnvironment can only take strings as values
 		icfg.AgentEnvironment[agent.NUMACtlPreference] = fmt.Sprintf("%v", icfg.ControllerConfig.NUMACtlPreference())
 	}

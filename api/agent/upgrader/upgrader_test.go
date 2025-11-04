@@ -4,36 +4,39 @@
 package upgrader_test
 
 import (
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/agent/upgrader"
 	"github.com/juju/juju/api/base/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type machineUpgraderSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&machineUpgraderSuite{})
+func TestMachineUpgraderSuite(t *stdtesting.T) {
+	tc.Run(t, &machineUpgraderSuite{})
+}
 
-func (s *machineUpgraderSuite) TestSetVersion(c *gc.C) {
+func (s *machineUpgraderSuite) TestSetVersion(c *tc.C) {
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Upgrader")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "SetTools")
-		c.Check(arg, jc.DeepEquals, params.EntitiesVersion{
+		c.Check(objType, tc.Equals, "Upgrader")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "SetTools")
+		c.Check(arg, tc.DeepEquals, params.EntitiesVersion{
 			AgentTools: []params.EntityVersion{{
 				Tag:   "machine-666",
 				Tools: &params.Version{Version: coretesting.CurrentVersion()},
 			}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
 			Results: []params.ErrorResult{{Error: &params.Error{Message: "FAIL"}}},
 		}
@@ -41,21 +44,21 @@ func (s *machineUpgraderSuite) TestSetVersion(c *gc.C) {
 
 	})
 	client := upgrader.NewClient(apiCaller)
-	err := client.SetVersion("machine-666", coretesting.CurrentVersion())
-	c.Assert(err, gc.ErrorMatches, "FAIL")
+	err := client.SetVersion(c.Context(), "machine-666", coretesting.CurrentVersion())
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }
 
-func (s *machineUpgraderSuite) TestTools(c *gc.C) {
+func (s *machineUpgraderSuite) TestTools(c *tc.C) {
 	toolsResult := tools.List{{URL: "https://tools"}}
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Upgrader")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "Tools")
-		c.Check(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Upgrader")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Tools")
+		c.Check(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.ToolsResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.ToolsResults{})
 		*(result.(*params.ToolsResults)) = params.ToolsResults{
 			Results: []params.ToolsResult{{ToolsList: toolsResult}},
 		}
@@ -63,21 +66,21 @@ func (s *machineUpgraderSuite) TestTools(c *gc.C) {
 
 	})
 	client := upgrader.NewClient(apiCaller)
-	t, err := client.Tools("machine-666")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(t, jc.DeepEquals, toolsResult)
+	t, err := client.Tools(c.Context(), "machine-666")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(t, tc.DeepEquals, toolsResult)
 }
 
-func (s *machineUpgraderSuite) TestWatchAPIVersion(c *gc.C) {
+func (s *machineUpgraderSuite) TestWatchAPIVersion(c *tc.C) {
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Upgrader")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "WatchAPIVersion")
-		c.Check(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Upgrader")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "WatchAPIVersion")
+		c.Check(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.NotifyWatchResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.NotifyWatchResults{})
 		*(result.(*params.NotifyWatchResults)) = params.NotifyWatchResults{
 			Results: []params.NotifyWatchResult{{Error: &params.Error{Message: "FAIL"}}},
 		}
@@ -85,21 +88,21 @@ func (s *machineUpgraderSuite) TestWatchAPIVersion(c *gc.C) {
 
 	})
 	client := upgrader.NewClient(apiCaller)
-	_, err := client.WatchAPIVersion("machine-666")
-	c.Assert(err, gc.ErrorMatches, "FAIL")
+	_, err := client.WatchAPIVersion(c.Context(), "machine-666")
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }
 
-func (s *machineUpgraderSuite) TestDesiredVersion(c *gc.C) {
+func (s *machineUpgraderSuite) TestDesiredVersion(c *tc.C) {
 	versResult := coretesting.CurrentVersion().Number
 	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Upgrader")
-		c.Check(version, gc.Equals, 0)
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "DesiredVersion")
-		c.Check(arg, jc.DeepEquals, params.Entities{
+		c.Check(objType, tc.Equals, "Upgrader")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "DesiredVersion")
+		c.Check(arg, tc.DeepEquals, params.Entities{
 			Entities: []params.Entity{{Tag: "machine-666"}},
 		})
-		c.Assert(result, gc.FitsTypeOf, &params.VersionResults{})
+		c.Assert(result, tc.FitsTypeOf, &params.VersionResults{})
 		*(result.(*params.VersionResults)) = params.VersionResults{
 			Results: []params.VersionResult{{Version: &versResult}},
 		}
@@ -107,7 +110,7 @@ func (s *machineUpgraderSuite) TestDesiredVersion(c *gc.C) {
 
 	})
 	client := upgrader.NewClient(apiCaller)
-	v, err := client.DesiredVersion("machine-666")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(v, jc.DeepEquals, versResult)
+	v, err := client.DesiredVersion(c.Context(), "machine-666")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(v, tc.DeepEquals, versResult)
 }

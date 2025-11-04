@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/internal/charm/hooks"
@@ -53,6 +53,9 @@ type Info struct {
 
 	// NoticeKey is the Pebble notice key associated with the hook.
 	NoticeKey string `yaml:"notice-key,omitempty"`
+
+	// CheckName is the Pebble check name associated with the hook.
+	CheckName string `yaml:"check-name,omitempty"`
 
 	// MachineUpgradeTarget is the base that the unit's machine is to be
 	// updated to when Juju is issued the `upgrade-machine` command.
@@ -107,14 +110,16 @@ func (hi Info) Validate() error {
 			return errors.Errorf("%q hook requires a workload name", hi.Kind)
 		}
 		return nil
-	case hooks.PreSeriesUpgrade:
-		if hi.MachineUpgradeTarget == "" {
-			return errors.Errorf("%q hook requires a target base", hi.Kind)
+	case hooks.PebbleCheckFailed, hooks.PebbleCheckRecovered:
+		if hi.WorkloadName == "" {
+			return errors.Errorf("%q hook requires a workload name", hi.Kind)
+		}
+		if hi.CheckName == "" {
+			return errors.Errorf("%q hook requires a check name", hi.Kind)
 		}
 		return nil
 	case hooks.Install, hooks.Remove, hooks.Start, hooks.ConfigChanged, hooks.UpgradeCharm, hooks.Stop,
-		hooks.RelationCreated, hooks.RelationBroken, hooks.UpdateStatus,
-		hooks.PostSeriesUpgrade:
+		hooks.RelationCreated, hooks.RelationBroken, hooks.UpdateStatus:
 		return nil
 	case hooks.Action:
 		return errors.Errorf("hooks.Kind Action is deprecated")
@@ -123,7 +128,7 @@ func (hi Info) Validate() error {
 			return errors.Errorf("invalid storage ID %q", hi.StorageId)
 		}
 		return nil
-	case hooks.LeaderElected, hooks.LeaderDeposed, hooks.LeaderSettingsChanged:
+	case hooks.LeaderElected, hooks.LeaderDeposed:
 		return nil
 	case hooks.SecretRotate, hooks.SecretChanged, hooks.SecretExpired, hooks.SecretRemove:
 		if hi.SecretURI == "" {

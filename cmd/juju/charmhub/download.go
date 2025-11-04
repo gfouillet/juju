@@ -10,10 +10,10 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -22,27 +22,28 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/output/progress"
+	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charmhub"
 	"github.com/juju/juju/internal/charmhub/transport"
-	"github.com/juju/juju/version"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
-	downloadSummary = "Locates and then downloads a CharmHub charm."
+	downloadSummary = "Locates and then downloads a Charmhub charm."
 	downloadDoc     = `
-Download a charm to the current directory from the CharmHub store
+Download a charm to the current directory from the Charmhb store
 by a specified name. Downloading for a specific base can be done via
---base. --base can be specified using the OS name and the version of
-the OS, separated by @. For example, --base ubuntu@22.04.
+` + "`--base`" + `. ` + "`--base`" + ` can be specified using the OS name and the version of
+the OS, separated by ` + "`@`" + `. For example, ` + "`--base ubuntu@22.04`" + `.
 
 By default, the latest revision in the default channel will be
 downloaded. To download the latest revision from another channel,
-use --channel. To download a specific revision, use --revision,
-which cannot be used together with --arch, --base or --channel.
+use ` + "`--channel`" + `. To download a specific revision, use ` + "`--revision`" + `,
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
 
 Adding a hyphen as the second argument allows the download to be piped
-to stdout.
+to ` + "`stdout`" + `.
 `
 
 	downloadExamples = `
@@ -69,6 +70,7 @@ type downloadCommand struct {
 	archivePath   string
 	pipeToStdout  bool
 	noProgress    bool
+	resources     bool
 }
 
 // Info returns help related download about the command, it implements
@@ -93,12 +95,13 @@ func (c *downloadCommand) Info() *cmd.Info {
 func (c *downloadCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.charmHubCommand.SetFlags(f)
 
-	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.base, "base", "", "specify a base")
-	f.StringVar(&c.channel, "channel", "", "specify a channel to use instead of the default release")
-	f.IntVar(&c.revision, "revision", -1, "specify a revision of the charm to download")
-	f.StringVar(&c.archivePath, "filepath", "", "filepath location of the charm to download to")
-	f.BoolVar(&c.noProgress, "no-progress", false, "disable the progress bar")
+	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("Specify an arch <%s>", c.archArgumentList()))
+	f.StringVar(&c.base, "base", "", "Specify a base")
+	f.StringVar(&c.channel, "channel", "", "Specify a channel to use instead of the default release")
+	f.IntVar(&c.revision, "revision", -1, "Specify a revision of the charm to download")
+	f.StringVar(&c.archivePath, "filepath", "", "Specify the filepath location of the charm to download to")
+	f.BoolVar(&c.noProgress, "no-progress", false, "Disable the progress bar")
+	f.BoolVar(&c.resources, "resources", false, "Download the resources associated with the charm (will be DEPRECATED and default behaviour in 4.0)")
 }
 
 // Init initializes the download command, including validating the provided
@@ -125,6 +128,10 @@ func (c *downloadCommand) Init(args []string) error {
 		c.pipeToStdout = true
 	}
 
+	if c.pipeToStdout && c.resources {
+		return errors.Errorf("cannot pipe to stdout and download resources: do not pass --resources to download to stdout")
+	}
+
 	curl, err := c.validateCharmOrBundle(args[0])
 	if err != nil {
 		return errors.Trace(err)
@@ -138,7 +145,7 @@ func (c *downloadCommand) Init(args []string) error {
 func (c *downloadCommand) validateCharmOrBundle(charmOrBundle string) (*charm.URL, error) {
 	curl, err := charm.ParseURL(charmOrBundle)
 	if err != nil {
-		logger.Debugf("%s", err)
+		logger.Debugf(context.TODO(), "%s", err)
 		return nil, errors.NotValidf("charm or bundle name, %q, is", charmOrBundle)
 	}
 	if !charm.CharmHub.Matches(curl.Schema) {
@@ -230,11 +237,12 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 
 	ctx = context.WithValue(ctx, charmhub.DownloadNameKey, entity.Name)
 
+	var digest *charmhub.Digest
 	if c.noProgress {
-		err = client.Download(ctx, resourceURL, path)
+		digest, err = client.Download(ctx, resourceURL, path)
 	} else {
 		pb := progress.MakeProgressBar(cmdContext.Stdout)
-		err = client.Download(ctx, resourceURL, path, charmhub.WithProgressBar(pb))
+		digest, err = client.Download(ctx, resourceURL, path, charmhub.WithProgressBar(pb))
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -247,26 +255,87 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 		return nil
 	}
 
-	// Ensure we calculate the hash of the file.
-	calculatedHash, err := c.calculateHash(path)
+	calculatedHash, err := c.calculateHashFromDigest(path, digest)
 	if err != nil {
 		return errors.Trace(err)
 	}
+
 	if calculatedHash != entitySHA {
 		return errors.Errorf(`Checksum of download failed for %q:
 Expected:   %s
 Calculated: %s`, c.charmOrBundle, entitySHA, calculatedHash)
 	}
 
+	rscPaths := make(map[string]string)
+	if c.resources {
+		dir := filepath.Dir(path)
+
+		for _, resource := range entity.Resources {
+			rscPath := filepath.Join(dir, fmt.Sprintf("resource_%s_r%d", resource.Name, resource.Revision))
+			if resource.Filename != "" {
+				rscPath = fmt.Sprintf("%s_%s", rscPath, resource.Filename)
+			}
+			rscURL, err := url.Parse(resource.Download.URL)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			rscCtx := context.WithValue(ctx, charmhub.DownloadNameKey, resource.Name)
+
+			var digest *charmhub.Digest
+			if c.noProgress {
+				digest, err = client.Download(rscCtx, rscURL, rscPath)
+			} else {
+				pb := progress.MakeProgressBar(cmdContext.Stdout)
+				digest, err = client.Download(rscCtx, rscURL, rscPath, charmhub.WithProgressBar(pb))
+			}
+			if err != nil {
+				return errors.Trace(err)
+			}
+
+			rscHash, err := c.calculateHashFromDigest(path, digest)
+			if err != nil {
+				return errors.Trace(err)
+			}
+
+			if rscHash != resource.Download.HashSHA256 {
+				return errors.Errorf(`Checksum of download failed for %q resource %s:
+Expected:   %s
+Calculated: %s`, c.charmOrBundle, resource.Name, resource.Download.HashSHA256, rscHash)
+			}
+			rscPaths[resource.Name] = rscPath
+		}
+	}
+
 	if !strings.HasPrefix(path, "/") {
 		path = fmt.Sprintf("./%s", path)
 	}
 
-	cmdContext.Infof(`
+	if c.resources && len(entity.Resources) > 0 {
+		resourceArgs := []string{}
+		for _, resource := range entity.Resources {
+			rscPath := rscPaths[resource.Name]
+			if !strings.HasPrefix(rscPath, "/") {
+				rscPath = fmt.Sprintf("./%s", rscPath)
+			}
+			resourceArgs = append(resourceArgs, "--resource", fmt.Sprintf("%s=%s", resource.Name, rscPath))
+		}
+		cmdContext.Infof(`
+Install the %q %s with:
+    juju deploy %s %s`[1:], entity.Name, entityType, path, strings.Join(resourceArgs, " "))
+	} else {
+		cmdContext.Infof(`
 Install the %q %s with:
     juju deploy %s`[1:], entity.Name, entityType, path)
+	}
 
 	return nil
+}
+
+func (c *downloadCommand) calculateHashFromDigest(path string, digest *charmhub.Digest) (string, error) {
+	if digest == nil {
+		return c.calculateHash(path)
+	}
+	return digest.SHA256, nil
 }
 
 func (c *downloadCommand) refresh(
@@ -285,7 +354,7 @@ func (c *downloadCommand) refresh(
 
 	var refreshConfig charmhub.RefreshConfig
 	if c.revision == -1 {
-		refreshConfig, err = charmhub.InstallOneFromChannel(c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
+		refreshConfig, err = charmhub.InstallOneFromChannel(ctx, c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
 			Architecture: normBase.Architecture,
 			Name:         normBase.OS,
 			Channel:      normBase.Channel,
@@ -294,7 +363,7 @@ func (c *downloadCommand) refresh(
 			return nil, nil, errors.Trace(err)
 		}
 	} else {
-		refreshConfig, err = charmhub.InstallOneFromRevision(c.charmOrBundle, c.revision)
+		refreshConfig, err = charmhub.InstallOneFromRevision(ctx, c.charmOrBundle, c.revision)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}

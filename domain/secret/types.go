@@ -25,9 +25,23 @@ var (
 	NilSecretURI         = (*secrets.URI)(nil)
 )
 
+// These represent the kinds of secret owner.
+const (
+	ApplicationOwner = secrets.ApplicationOwner
+	UnitOwner        = secrets.UnitOwner
+	ModelOwner       = secrets.ModelOwner
+)
+
+// Owner is the owner of a secret.
+type Owner struct {
+	Kind secrets.OwnerKind
+	UUID string
+}
+
 // UpsertSecretParams are used to upsert a secret.
 // Only non-nil values are used.
 type UpsertSecretParams struct {
+	RevisionID     *string
 	RotatePolicy   *RotatePolicy
 	ExpireTime     *time.Time
 	NextRotateTime *time.Time
@@ -37,6 +51,7 @@ type UpsertSecretParams struct {
 
 	Data     secrets.SecretData
 	ValueRef *secrets.ValueRef
+	Checksum string
 }
 
 // HasUpdate returns true if at least one attribute to update is not nil.
@@ -54,24 +69,44 @@ func (u *UpsertSecretParams) HasUpdate() bool {
 // GrantParams are used when granting access to a secret.
 type GrantParams struct {
 	ScopeTypeID GrantScopeType
-	ScopeID     string
+	ScopeUUID   string
 
 	SubjectTypeID GrantSubjectType
-	SubjectID     string
+	SubjectUUID   string
 
 	RoleID Role
 }
 
-// AccessParams are used when querying secret access.
+// AccessParams are used when querying secrets
+// granted to a unit, application, or model.
 type AccessParams struct {
 	SubjectTypeID GrantSubjectType
 	SubjectID     string
 }
 
-// AccessScope are used when querying secret access scopes.
+// RevokeParams are used when revoking access to a secret.
+type RevokeParams struct {
+	SubjectTypeID GrantSubjectType
+	SubjectUUID   string
+}
+
+// AccessScope is the result of querying secret access scopes.
 type AccessScope struct {
 	ScopeTypeID GrantScopeType
+	ScopeUUID   string
+}
+
+// GrantDetails holds the access and scope details for
+// a secret permission record.
+type GrantDetails struct {
+	ScopeTypeID GrantScopeType
 	ScopeID     string
+	ScopeUUID   string
+
+	SubjectTypeID GrantSubjectType
+	SubjectID     string
+
+	RoleID Role
 }
 
 // RotationExpiryInfo holds information about the rotation and expiry of a secret.
@@ -99,4 +134,23 @@ type ExpiryInfo struct {
 	Revision        int
 	RevisionID      string
 	NextTriggerTime time.Time
+}
+
+// ConsumerInfo holds information about a secret consumer.
+type ConsumerInfo struct {
+	SubjectTypeID   GrantSubjectType
+	SubjectID       string
+	Label           string
+	CurrentRevision int
+}
+
+// RemoteSecretInfo holds information about a remote secret
+// for a given consumer.
+type RemoteSecretInfo struct {
+	URI             *secrets.URI
+	SubjectTypeID   GrantSubjectType
+	SubjectID       string
+	Label           string
+	CurrentRevision int
+	LatestRevision  int
 }

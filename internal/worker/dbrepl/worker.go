@@ -1,0 +1,747 @@
+// Copyright 2024 Canonical Ltd.
+// Licensed under the AGPLv3, see LICENCE file for details.
+
+package dbrepl
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/chzyer/readline"
+	"github.com/fatih/color"
+	"github.com/juju/ansiterm"
+	"github.com/juju/errors"
+	"gopkg.in/tomb.v2"
+
+	"github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/database/client"
+	"github.com/juju/juju/internal/database/dqlite"
+	"github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/worker/dbreplaccessor"
+)
+
+// NodeManager creates Dqlite `App` initialisation arguments and options.
+type NodeManager interface {
+	// ClusterServers returns the node information for
+	// Dqlite nodes configured to be in the cluster.
+	ClusterServers(context.Context) ([]dqlite.NodeInfo, error)
+
+	// WithTLSDialer returns a dbApp that can be used to connect to the Dqlite
+	// cluster.
+	WithTLSDialer(ctx context.Context) (client.DialFunc, error)
+}
+
+// DBGetter describes the ability to supply a sql.DB
+// reference for a particular database.
+type DBGetter interface {
+	// GetDB returns a sql.DB reference for the dqlite-backed database that
+	// contains the data for the specified namespace.
+	// A NotFound error is returned if the worker is unaware of the requested DB.
+	GetDB(namespace string) (database.TxnRunner, error)
+}
+
+// WorkerConfig encapsulates the configuration options for the
+// dbaccessor worker.
+type WorkerConfig struct {
+	DBGetter            database.DBGetter
+	ClusterIntrospector dbreplaccessor.ClusterIntrospector
+	Logger              logger.Logger
+	Stdout              io.Writer
+	Stderr              io.Writer
+	Stdin               io.Reader
+}
+
+// Validate ensures that the config values are valid.
+func (c *WorkerConfig) Validate() error {
+	if c.DBGetter == nil {
+		return errors.NotValidf("missing DBGetter")
+	}
+	if c.ClusterIntrospector == nil {
+		return errors.NotValidf("missing ClusterIntrospector")
+	}
+	if c.Logger == nil {
+		return errors.NotValidf("missing Logger")
+	}
+	if c.Stdout == nil {
+		return errors.NotValidf("missing Stdout")
+	}
+	if c.Stderr == nil {
+		return errors.NotValidf("missing Stderr")
+	}
+	if c.Stdin == nil {
+		return errors.NotValidf("missing Stdin")
+	}
+	return nil
+}
+
+type dbReplWorker struct {
+	cfg  WorkerConfig
+	tomb tomb.Tomb
+
+	dbGetter         database.DBGetter
+	controllerDB     database.TxnRunner
+	currentDB        database.TxnRunner
+	currentNamespace string
+}
+
+// NewWorker creates a new dbaccessor worker.
+func NewWorker(cfg WorkerConfig) (*dbReplWorker, error) {
+	var err error
+	if err = cfg.Validate(); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	controllerDB, err := cfg.DBGetter.GetDB(context.TODO(), database.ControllerNS)
+	if err != nil {
+		return nil, errors.Annotate(err, "getting controller db")
+	}
+
+	w := &dbReplWorker{
+		cfg:              cfg,
+		dbGetter:         cfg.DBGetter,
+		controllerDB:     controllerDB,
+		currentDB:        controllerDB,
+		currentNamespace: "*",
+	}
+
+	w.tomb.Go(w.loop)
+
+	return w, nil
+}
+
+func (w *dbReplWorker) loop() (err error) {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	history, err := os.CreateTemp("", "juju-repl")
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer func() {
+		_ = history.Close()
+		if err := os.Remove(history.Name()); err != nil {
+			w.cfg.Logger.Errorf(ctx, "failed to remove history file: %v", err)
+		}
+	}()
+
+	line, err := readline.NewEx(&readline.Config{
+		Stdin:               readline.NewCancelableStdin(w.cfg.Stdin),
+		Stdout:              w.cfg.Stdout,
+		Stderr:              w.cfg.Stderr,
+		HistoryFile:         history.Name(),
+		InterruptPrompt:     "^C",
+		HistorySearchFold:   true,
+		FuncFilterInputRune: filterInput,
+	})
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer func() { _ = line.Close() }()
+
+	// TODO (stickupkid): If we're not in a tty, then just write "connecting" to
+	// stdout.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Millisecond * 500)
+		defer ticker.Stop()
+
+		var amount int
+		for {
+			select {
+			case <-done:
+				return
+			case <-w.tomb.Dying():
+				return
+			case <-ticker.C:
+				if amount > 0 {
+					_, _ = fmt.Fprint(w.cfg.Stdout, "\033[1A\033[K")
+				}
+				_, _ = fmt.Fprintln(w.cfg.Stdout, "connecting", strings.Repeat(".", amount%4))
+				amount++
+			}
+		}
+	}()
+
+	currentDB, err := w.dbGetter.GetDB(ctx, database.ControllerNS)
+	if err != nil {
+		return errors.Annotate(err, "failed to get db")
+	}
+	w.controllerDB = currentDB
+	w.currentNamespace = "controller"
+
+	close(done)
+
+	// Allow the line to be closed when the worker is dying.
+	go func() {
+		defer func() { _ = line.Close() }()
+
+		select {
+		case <-w.tomb.Dying():
+			return
+		case <-ctx.Done():
+			return
+		}
+	}()
+
+	// Run the main REPL loop.
+	lineBuildUp := new(strings.Builder)
+	for {
+		select {
+		case <-w.tomb.Dying():
+			return tomb.ErrDying
+		default:
+		}
+
+		if lineBuildUp.Len() == 0 {
+			line.SetPrompt("repl (" + w.currentNamespace + ")> ")
+		} else {
+			line.SetPrompt("... ")
+		}
+
+		input, err := line.Readline()
+		if err == readline.ErrInterrupt {
+			if len(input) == 0 {
+				return nil
+			} else {
+				continue
+			}
+		} else if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		} else if strings.HasSuffix(input, "\\") {
+			_, _ = lineBuildUp.WriteString(input[:len(input)-1])
+			_, _ = lineBuildUp.WriteString(" ")
+			continue
+		}
+		_, _ = lineBuildUp.WriteString(input)
+
+		compiled := lineBuildUp.String()
+
+		args := strings.Split(compiled, " ")
+		if len(args) == 0 {
+			continue
+		}
+
+		switch args[0] {
+		case ".exit", ".quit":
+			return worker.ErrTerminateAgent
+		case ".help", ".h":
+			_, _ = fmt.Fprint(w.cfg.Stdout, helpText)
+		case ".switch":
+			w.execSwitch(ctx, args[1:])
+		case ".open":
+			w.execOpen(ctx, args[1:])
+		case ".models":
+			w.execModels(ctx)
+		case ".tables":
+			w.execTables(ctx)
+		case ".triggers":
+			w.execTriggers(ctx)
+		case ".views":
+			w.execViews(ctx)
+		case ".ddl":
+			w.execShowDDL(ctx, args[1:])
+		case ".query-models":
+			w.execQueryForModels(ctx, args[1:])
+		case ".fk_list":
+			w.execForeignKeysList(ctx, args[1:])
+		case ".describe-cluster":
+			w.describeCluster(ctx)
+
+		default:
+			if err := w.executeQuery(ctx, w.currentDB, compiled); err != nil {
+				w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+			}
+		}
+
+		lineBuildUp.Reset()
+	}
+}
+
+func (w *dbReplWorker) execSwitch(ctx context.Context, args []string) {
+	if len(args) != 1 {
+		_, _ = fmt.Fprintln(w.cfg.Stderr, "usage: .switch model-<name> or .switch controller for global controller database")
+		return
+	}
+
+	argName := args[0]
+	if argName == "controller" {
+		w.currentDB = w.controllerDB
+		w.currentNamespace = argName
+		return
+	}
+
+	name, ok := strings.CutPrefix(argName, "model-")
+	if !ok {
+		_, _ = fmt.Fprintln(w.cfg.Stderr, `invalid model namespace name: expected "model-<name>" or "controller"`)
+		return
+	}
+
+	var uuid string
+	if err := w.controllerDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, "SELECT uuid FROM model WHERE name=?", name)
+		if err := row.Scan(&uuid); err != nil {
+			return err
+		}
+		return nil
+	}); errors.Is(err, sql.ErrNoRows) {
+		_, _ = fmt.Fprintf(w.cfg.Stderr, "model %q not found\n", name)
+		return
+	} else if err != nil {
+		_, _ = fmt.Fprintf(w.cfg.Stderr, "failed to select %q database: %v\n", name, err)
+		return
+	}
+
+	var err error
+	w.currentDB, err = w.dbGetter.GetDB(ctx, uuid)
+	if err != nil {
+		_, _ = fmt.Fprintf(w.cfg.Stderr, "failed to switch to namespace %q: %v\n", name, err)
+		return
+	}
+	w.currentNamespace = argName
+}
+
+func (w *dbReplWorker) execOpen(ctx context.Context, args []string) {
+	if len(args) != 1 {
+		_, _ = fmt.Fprintln(w.cfg.Stderr, "usage: .open <model-uuid>")
+		return
+	}
+
+	modelUUID := args[0]
+	db, err := w.dbGetter.GetDB(ctx, modelUUID)
+	if err != nil {
+		_, _ = fmt.Fprintf(w.cfg.Stderr, "failed to open model %q: %v\n", modelUUID, err)
+		return
+	}
+
+	w.currentDB = db
+	w.currentNamespace = modelUUID
+	_, _ = fmt.Fprintf(w.cfg.Stdout, "switched to model %q\n", modelUUID)
+}
+
+func (w *dbReplWorker) execModels(ctx context.Context) {
+	if err := w.executeQuery(ctx, w.controllerDB, "SELECT uuid, name FROM model"); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+	}
+}
+
+func (w *dbReplWorker) execQueryForModels(ctx context.Context, args []string) {
+	var models []string
+	if err := w.controllerDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, "SELECT uuid FROM model")
+		if err != nil {
+			return err
+		}
+
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var uuid string
+			if err := rows.Scan(&uuid); err != nil {
+				return err
+			}
+			models = append(models, uuid)
+		}
+
+		return nil
+	}); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+		return
+	}
+
+	for _, model := range models {
+		db, err := w.dbGetter.GetDB(ctx, model)
+		if err != nil {
+			w.cfg.Logger.Errorf(ctx, "failed to get db for model %q: %v", model, err)
+			continue
+		}
+
+		str := "Executing query on model: " + model
+		_, _ = fmt.Fprintln(w.cfg.Stdout, str)
+		_, _ = fmt.Fprintln(w.cfg.Stdout, strings.Repeat("-", len(str)))
+		query := strings.Join(args, " ")
+		if err := w.executeQuery(ctx, db, query); err != nil {
+			w.cfg.Logger.Errorf(ctx, "failed to execute query on model %q: %v", model, err)
+		}
+	}
+}
+
+func (w *dbReplWorker) execTables(ctx context.Context) {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS table_name FROM sqlite_master WHERE type='table'"); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+	}
+}
+
+// execForeignKeysList lists all foreign key relationships that reference a specific table and column.
+// This command helps identify dependencies by showing which child tables have foreign keys
+// pointing to the specified parent table/column.
+//
+// When an identifier is provided, it also shows the live count of references for each child table.
+//
+// The query returns:
+//   - child_table: Name of the table containing the foreign key
+//   - child_column: Name of the column in the child table that references the parent
+//   - parent_column: Name of the referenced column in the parent table (when no identifier)
+//   - fk_id: Foreign key constraint identifier (0, 1, 2...) - each FK constraint gets a unique ID
+//   - fk_seq: Sequence number within a composite foreign key (0, 1, 2...) - for multi-column FKs
+//   - reference_count: Live count of references (when identifier provided)
+func (w *dbReplWorker) execForeignKeysList(ctx context.Context, args []string) {
+	if len(args) < 2 || len(args) > 3 {
+		_, _ = fmt.Fprintln(w.cfg.Stderr, "usage: .fk_list <table_name> <column_name> [identifier]")
+		return
+	}
+
+	tableName := args[0]
+	columnName := args[1]
+
+	var identifier string
+	if len(args) == 3 {
+		identifier = args[2]
+	}
+
+	if err := w.execForeignKeysListInternal(ctx, tableName, columnName, identifier); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute foreign keys list: %v", err)
+	}
+}
+
+// fkRelation represents a foreign key relationship.
+type fkRelation struct {
+	childTable  string
+	childColumn string
+	fkID        int
+	fkSeq       int
+}
+
+// fkRelationWithCount represents a foreign key relationship with reference count.
+type fkRelationWithCount struct {
+	fkRelation
+	count int64
+}
+
+// execForeignKeysListInternal is the unified implementation that handles both use cases.
+func (w *dbReplWorker) execForeignKeysListInternal(ctx context.Context, tableName, columnName, identifier string) error {
+	relations, err := w.getForeignKeyRelations(ctx, tableName, columnName)
+	if err != nil {
+		return err
+	}
+
+	if len(relations) == 0 {
+		_, _ = fmt.Fprintf(w.cfg.Stdout, "No foreign key references found for table %q column %q\n", tableName, columnName)
+		return nil
+	}
+
+	if identifier == "" {
+		return w.displayForeignKeysOnly(relations, tableName, columnName)
+	}
+	return w.displayForeignKeysWithCounts(ctx, relations, identifier)
+}
+
+// getForeignKeyRelations fetches foreign key relationships (shared between both modes).
+func (w *dbReplWorker) getForeignKeyRelations(ctx context.Context, tableName, columnName string) ([]fkRelation, error) {
+	var relations []fkRelation
+
+	err := w.currentDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		const fkListQuery = `
+WITH tbls(name) AS ( 
+	SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' 
+) 
+SELECT t.name AS child_table, 
+	fk."from" AS child_column, 
+	fk.id AS fk_id, 
+	fk.seq AS fk_seq 
+FROM tbls t, pragma_foreign_key_list(t.name) AS fk 
+WHERE fk."table" = ? AND fk."to" = ?
+ORDER BY child_table, fk_id, fk_seq;
+`
+		rows, err := tx.QueryContext(ctx, fkListQuery, tableName, columnName)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+
+		for rows.Next() {
+			var rel fkRelation
+			if err := rows.Scan(&rel.childTable, &rel.childColumn, &rel.fkID, &rel.fkSeq); err != nil {
+				return err
+			}
+			relations = append(relations, rel)
+		}
+		return rows.Err()
+	})
+
+	return relations, err
+}
+
+// displayForeignKeysOnly shows just the foreign key relationships.
+func (w *dbReplWorker) displayForeignKeysOnly(relations []fkRelation, tableName, columnName string) error {
+	headerStyle := color.New(color.Bold)
+	var sb strings.Builder
+	writer := ansiterm.NewTabWriter(&sb, 0, 8, 1, '\t', 0)
+
+	_, _ = headerStyle.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n",
+		"child_table", "child_column", "parent_column", "fk_id", "fk_seq")
+
+	for _, rel := range relations {
+		_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%d\n",
+			rel.childTable, rel.childColumn, columnName, rel.fkID, rel.fkSeq)
+	}
+
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintln(w.cfg.Stdout, sb.String())
+	return nil
+}
+
+// displayForeignKeysWithCounts shows foreign keys with live reference counts, sorted by count (descending).
+func (w *dbReplWorker) displayForeignKeysWithCounts(ctx context.Context, relations []fkRelation, identifier string) error {
+	var relationsWithCounts []fkRelationWithCount
+
+	err := w.currentDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, rel := range relations {
+			countQuery := fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE `%s` = ?", rel.childTable, rel.childColumn)
+
+			var count int64
+			row := tx.QueryRowContext(ctx, countQuery, identifier)
+			if err := row.Scan(&count); err != nil {
+				w.cfg.Logger.Debugf(ctx, "failed to count references in table %q column %q: %v", rel.childTable, rel.childColumn, err)
+				count = -1
+			}
+
+			relationsWithCounts = append(relationsWithCounts, fkRelationWithCount{
+				fkRelation: rel,
+				count:      count,
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	sort.SliceStable(relationsWithCounts, func(i, j int) bool {
+		return relationsWithCounts[i].count > relationsWithCounts[j].count
+	})
+
+	headerStyle := color.New(color.Bold)
+	var sb strings.Builder
+	writer := ansiterm.NewTabWriter(&sb, 0, 8, 1, '\t', 0)
+
+	_, _ = headerStyle.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n",
+		"child_table", "child_column", "fk_id", "fk_seq", "reference_count")
+
+	for _, rel := range relationsWithCounts {
+		countStr := fmt.Sprintf("%d", rel.count)
+		if rel.count == -1 {
+			countStr = "ERROR"
+		}
+		_, _ = fmt.Fprintf(writer, "%s\t%s\t%d\t%d\t%s\n",
+			rel.childTable, rel.childColumn, rel.fkID, rel.fkSeq, countStr)
+	}
+
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintln(w.cfg.Stdout, sb.String())
+	return nil
+}
+
+func (w *dbReplWorker) execShowDDL(ctx context.Context, args []string) {
+	if len(args) != 1 {
+		_, _ = fmt.Fprintln(w.cfg.Stderr, "usage: .ddl <name>")
+		return
+	}
+
+	name := args[0]
+	var ddl string
+	if err := w.currentDB.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name=?", name)
+		if err := row.Scan(&ddl); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v\n", err)
+	}
+
+	_, _ = fmt.Fprintln(w.cfg.Stdout, ddl)
+}
+
+func (w *dbReplWorker) execTriggers(ctx context.Context) {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS trigger_name FROM sqlite_master WHERE type='trigger'"); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+	}
+}
+
+func (w *dbReplWorker) execViews(ctx context.Context) {
+	if err := w.executeQuery(ctx, w.currentDB, "SELECT name AS view_name FROM sqlite_master WHERE type='view'"); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to execute query: %v", err)
+	}
+}
+
+func (w *dbReplWorker) describeCluster(ctx context.Context) {
+	cluster, err := w.cfg.ClusterIntrospector.DescribeCluster(ctx)
+	if err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to describe cluster: %v", err)
+		return
+	}
+
+	headerStyle := color.New(color.Bold)
+	var sb strings.Builder
+
+	// Use the ansiterm tabwriter because the stdlib tabwriter contains a bug
+	// which breaks if there are color codes. Our own tabwriter implementation
+	// doesn't have this issue.
+	writer := ansiterm.NewTabWriter(&sb, 0, 8, 1, '\t', 0)
+
+	columns := []string{"ID", "Address", "Role"}
+	for _, col := range columns {
+		_, _ = headerStyle.Fprintf(writer, "%s\t", col)
+	}
+	_, _ = fmt.Fprintln(writer)
+
+	for _, server := range cluster {
+		_, _ = fmt.Fprintf(writer, "%x\t%s\t%s", server.ID, server.Address, server.Role)
+		_, _ = fmt.Fprintln(writer)
+	}
+
+	if err := writer.Flush(); err != nil {
+		w.cfg.Logger.Errorf(ctx, "failed to flush writer: %v", err)
+		// If the flush fails, we still want to print the
+		// output that has been written so far.
+	}
+
+	_, _ = fmt.Fprintln(w.cfg.Stdout, sb.String())
+}
+
+// Kill is part of the worker.Worker interface.
+func (w *dbReplWorker) Kill() {
+	w.tomb.Kill(nil)
+}
+
+// Wait is part of the worker.Worker interface.
+func (w *dbReplWorker) Wait() error {
+	return w.tomb.Wait()
+}
+
+// scopedContext returns a context that is in the scope of the worker lifetime.
+// It returns a cancellable context that is cancelled when the action has
+// completed.
+func (w *dbReplWorker) scopedContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return w.tomb.Context(ctx), cancel
+}
+
+func (w *dbReplWorker) executeQuery(ctx context.Context, db database.TxnRunner, query string, args ...any) error {
+	return db.StdTxn(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+
+		defer func() { _ = rows.Close() }()
+
+		columns, err := rows.Columns()
+		if err != nil {
+			return err
+		}
+		n := len(columns)
+
+		headerStyle := color.New(color.Bold)
+		var sb strings.Builder
+
+		// Use the ansiterm tabwriter because the stdlib tabwriter contains a
+		// bug which breaks if there are color codes. Our own tabwriter
+		// implementation doesn't have this issue.
+		writer := ansiterm.NewTabWriter(&sb, 0, 8, 1, '\t', 0)
+		for _, col := range columns {
+			_, _ = headerStyle.Fprintf(writer, "%s\t", col)
+		}
+		_, _ = fmt.Fprintln(writer)
+
+		for rows.Next() {
+			row := make([]interface{}, n)
+			rowPointers := make([]interface{}, n)
+			for i := range row {
+				rowPointers[i] = &row[i]
+			}
+
+			if err := rows.Scan(rowPointers...); err != nil {
+				return err
+			}
+
+			for _, column := range row {
+				_, _ = fmt.Fprintf(writer, "%v\t", column)
+			}
+			_, _ = fmt.Fprintln(writer)
+		}
+
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+
+		_, _ = fmt.Fprintln(w.cfg.Stdout, sb.String())
+
+		return err
+	})
+}
+
+// filterInput is used to exclude characters
+// from being accepted from stdin.
+func filterInput(r rune) (rune, bool) {
+	switch r {
+	// block CtrlZ feature
+	case readline.CharCtrlZ:
+		return r, false
+	}
+	return r, true
+}
+
+const helpText = `
+The following commands are available:
+
+  .exit, .quit             Exit the REPL.
+  .help, .h                Show this help message.
+
+Database commands:
+
+  .models                  	  Show all models.
+  .switch model-<model>       Switch to a different model.
+  .switch controller          Switch to the controller global database.
+  .open <model-uuid>          Open a specific model database by UUID.
+  .tables                     Show all standard tables in the current database.
+  .triggers                   Show all trigger tables in the current database.
+  .fk_list <table> <column> [identifier]
+                              List foreign keys referencing the specified table and column.
+                              Shows child tables that have foreign keys pointing to the given
+                              parent table/column. Returns fk_id (constraint identifier) and
+                              fk_seq (column position within composite foreign keys).
+                              When identifier is provided, also shows live reference counts
+                              for each child table (e.g., ".fk_list unit uuid <unit-uuid>").
+  .views                      Show all views in the current database.
+  .ddl <name>                 Show the DDL for the specified table, trigger, or view.
+  .query-models <query>       Execute a query on all models and print the results.
+
+DQlite cluster commands:
+
+  .describe-cluster           Describe the current cluster, showing node IDs, addresses, and roles.
+
+`

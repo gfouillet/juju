@@ -4,13 +4,14 @@
 package upgradesteps
 
 import (
+	"testing"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	version "github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/agent"
+	version "github.com/juju/juju/core/semversion"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/upgrades"
 )
@@ -18,47 +19,49 @@ import (
 type manifoldSuite struct {
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
 	cfg := s.getConfig(c)
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
 
 	cfg = s.getConfig(c)
 	cfg.AgentName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
 	cfg.APICallerName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
 	cfg.UpgradeStepsGateName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
-	cfg.ServiceFactoryName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg.DomainServicesName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
 	cfg.PreUpgradeSteps = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
 	cfg.Logger = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = s.getConfig(c)
 	cfg.Clock = nil
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
-func (s *manifoldSuite) getConfig(c *gc.C) ManifoldConfig {
+func (s *manifoldSuite) getConfig(c *tc.C) ManifoldConfig {
 	return ManifoldConfig{
 		AgentName:            "agent",
 		APICallerName:        "api-caller",
 		UpgradeStepsGateName: "upgrade-steps-lock",
-		ServiceFactoryName:   "service-factory",
+		DomainServicesName:   "domain-services",
 		PreUpgradeSteps:      func(_ agent.Config, isController bool) error { return nil },
 		UpgradeSteps: func(from version.Number, targets []upgrades.Target, context upgrades.Context) error {
 			return nil
@@ -68,8 +71,8 @@ func (s *manifoldSuite) getConfig(c *gc.C) ManifoldConfig {
 	}
 }
 
-var expectedInputs = []string{"agent", "api-caller", "upgrade-steps-lock", "service-factory"}
+var expectedInputs = []string{"agent", "api-caller", "upgrade-steps-lock", "domain-services"}
 
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(Manifold(s.getConfig(c)).Inputs, jc.SameContents, expectedInputs)
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig(c)).Inputs, tc.SameContents, expectedInputs)
 }

@@ -4,97 +4,87 @@
 package upgradevalidation_test
 
 import (
+	"testing"
+
 	"github.com/juju/collections/transform"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/base"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/internal/provider/lxd"
+	"github.com/juju/juju/core/machine"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/upgrades/upgradevalidation"
 	"github.com/juju/juju/internal/upgrades/upgradevalidation/mocks"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
 )
 
-func makeBases(os string, vers []string) []state.Base {
-	bases := make([]state.Base, len(vers))
-	for i, vers := range vers {
-		bases[i] = state.Base{OS: os, Channel: vers}
-	}
-	return bases
+func TestMigrateSuite(t *testing.T) {
+	tc.Run(t, &migrateSuite{})
 }
-
-var _ = gc.Suite(&migrateSuite{})
 
 type migrateSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 
-	st        *mocks.MockState
-	statePool *mocks.MockStatePool
-	model     *mocks.MockModel
+	agentService   *mocks.MockModelAgentService
+	machineService *mocks.MockMachineService
 }
 
-func (s *migrateSuite) TestValidatorsForModelMigrationSourceJuju3(c *gc.C) {
-	ctrl, cloudSpec := s.setupMocks(c)
-	defer ctrl.Finish()
+func (s *migrateSuite) TestValidatorsForModelMigrationSourceJuju3(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	modelTag := coretesting.ModelTag
-	validators := upgradevalidation.ValidatorsForModelMigrationSource(cloudSpec)
+	machineNames := []machine.Name{"0", "1", "2"}
+	s.machineService.EXPECT().AllMachineNames(gomock.Any()).Return(machineNames, nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("0")).Return(base.MustParseBaseFromString("ubuntu@24.04"), nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("1")).Return(base.MustParseBaseFromString("ubuntu@22.04"), nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("2")).Return(base.MustParseBaseFromString("ubuntu@20.04"), nil)
 
-	checker := upgradevalidation.NewModelUpgradeCheck(modelTag.Id(), s.statePool, s.st, s.model, validators...)
-	blockers, err := checker.Validate()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(blockers, gc.IsNil)
+	validators := upgradevalidation.ValidatorsForModelMigrationSource()
+	validatorServices := upgradevalidation.ValidatorServices{
+		ModelAgentService: s.agentService,
+		MachineService:    s.machineService,
+	}
+	checker := upgradevalidation.NewModelUpgradeCheck("test-model", validatorServices, validators...)
+	blockers, err := checker.Validate(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(blockers, tc.IsNil)
 }
 
-func (s *migrateSuite) TestValidatorsForModelMigrationSourceJuju31(c *gc.C) {
-	ctrl, cloudSpec := s.setupMocks(c)
-	defer ctrl.Finish()
+func (s *migrateSuite) TestValidatorsForModelMigrationSourceJuju3Failed(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	modelTag := coretesting.ModelTag
-	validators := upgradevalidation.ValidatorsForModelMigrationSource(cloudSpec)
+	machineNames := []machine.Name{"0", "1", "2"}
+	s.machineService.EXPECT().AllMachineNames(gomock.Any()).Return(machineNames, nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("0")).Return(base.MustParseBaseFromString("ubuntu@24.04"), nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("1")).Return(base.MustParseBaseFromString("ubuntu@22.04"), nil)
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), machine.Name("2")).Return(base.MustParseBaseFromString("ubuntu@18.04"), nil)
 
-	checker := upgradevalidation.NewModelUpgradeCheck(modelTag.Id(), s.statePool, s.st, s.model, validators...)
-	blockers, err := checker.Validate()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(blockers, gc.IsNil)
+	validators := upgradevalidation.ValidatorsForModelMigrationSource()
+	validatorServices := upgradevalidation.ValidatorServices{
+		ModelAgentService: s.agentService,
+		MachineService:    s.machineService,
+	}
+	checker := upgradevalidation.NewModelUpgradeCheck("test-model", validatorServices, validators...)
+	blockers, err := checker.Validate(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(blockers.String(), tc.Contains, "unsupported base")
 }
 
-func (s *migrateSuite) initializeMocks(c *gc.C) *gomock.Controller {
+func (s *migrateSuite) initializeMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
-	s.statePool = mocks.NewMockStatePool(ctrl)
-	s.st = mocks.NewMockState(ctrl)
-	s.model = mocks.NewMockModel(ctrl)
+	s.agentService = mocks.NewMockModelAgentService(ctrl)
+	s.machineService = mocks.NewMockMachineService(ctrl)
+	c.Cleanup(func() {
+		s.agentService = nil
+		s.machineService = nil
+	})
 	return ctrl
 }
 
-func (s *migrateSuite) setupMocks(c *gc.C) (*gomock.Controller, environscloudspec.CloudSpec) {
+func (s *migrateSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := s.initializeMocks(c)
-	server := mocks.NewMockServer(ctrl)
-	serverFactory := mocks.NewMockServerFactory(ctrl)
-	// - check LXD version.
-	cloudSpec := lxd.CloudSpec{CloudSpec: environscloudspec.CloudSpec{Type: "lxd"}}
-	serverFactory.EXPECT().RemoteServer(cloudSpec).Return(server, nil)
-	server.EXPECT().ServerVersion().Return("5.2")
-
-	s.PatchValue(&upgradevalidation.NewServerFactory,
-		func(_ lxd.NewHTTPClientFunc) lxd.ServerFactory {
-			return serverFactory
-		},
-	)
 
 	s.PatchValue(&upgradevalidation.SupportedJujuBases, func() []base.Base {
 		return transform.Slice([]string{"ubuntu@24.04", "ubuntu@22.04", "ubuntu@20.04"}, base.MustParseBaseFromString)
 	})
 
-	// - check no upgrade series in process.
-	s.st.EXPECT().HasUpgradeSeriesLocks().Return(false, nil)
-	// - check if the model has win machines;
-	s.st.EXPECT().MachineCountForBase(makeBases("ubuntu", []string{"24.04/stable", "22.04/stable", "20.04/stable"})).Return(nil, nil)
-	s.st.EXPECT().AllMachinesCount().Return(0, nil)
-
-	return ctrl, cloudSpec.CloudSpec
+	return ctrl
 }

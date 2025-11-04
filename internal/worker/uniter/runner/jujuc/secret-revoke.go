@@ -4,13 +4,13 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretRevokeCommand struct {
@@ -45,18 +45,19 @@ that application lose access), or from a specified unit.
 If run in a relation hook, the related application's 
 access is revoked, unless a uni is specified, in which
 case just that unit's access is revoked.'
-
-Examples:
+`
+	examples := `
     secret-revoke secret:9m4e2mr0ui3e8a215n4g
     secret-revoke secret:9m4e2mr0ui3e8a215n4g --relation 1
     secret-revoke secret:9m4e2mr0ui3e8a215n4g --app mediawiki
     secret-revoke secret:9m4e2mr0ui3e8a215n4g --unit mediawiki/6
 `
 	return jujucmd.Info(&cmd.Info{
-		Name:    "secret-revoke",
-		Args:    "<ID>",
-		Purpose: "revoke access to a secret",
-		Doc:     doc,
+		Name:     "secret-revoke",
+		Args:     "<ID>",
+		Purpose:  "Revoke access to a secret.",
+		Doc:      doc,
+		Examples: examples,
 	})
 }
 
@@ -108,7 +109,7 @@ func (c *secretRevokeCommand) Init(args []string) error {
 }
 
 // Run implements cmd.Command.
-func (c *secretRevokeCommand) Run(_ *cmd.Context) error {
+func (c *secretRevokeCommand) Run(ctx *cmd.Context) error {
 	args := &SecretGrantRevokeArgs{}
 	if c.app != "" {
 		args.ApplicationName = &c.app
@@ -117,5 +118,5 @@ func (c *secretRevokeCommand) Run(_ *cmd.Context) error {
 		args.UnitName = &c.unit
 	}
 
-	return c.ctx.RevokeSecret(c.secretURL, args)
+	return c.ctx.RevokeSecret(ctx, c.secretURL, args)
 }

@@ -19,8 +19,7 @@ func Register(registry facade.FacadeRegistry) {
 
 // newFacadeV3 is used for API registration.
 func newFacadeV3(ctx facade.ModelContext) (*InstanceMutaterAPI, error) {
-	st := &instanceMutaterStateShim{State: ctx.State()}
-
-	watcher := &instanceMutatorWatcher{st: st}
-	return NewInstanceMutaterAPI(st, watcher, ctx.Resources(), ctx.Auth(), ctx.Logger().Child("instancemutater"))
+	return NewInstanceMutaterAPI(
+		ctx.WatcherRegistry(),
+	), nil
 }

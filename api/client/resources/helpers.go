@@ -5,35 +5,35 @@ package resources
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/unit"
 	charmresource "github.com/juju/juju/internal/charm/resource"
 	"github.com/juju/juju/rpc/params"
 )
 
 // Resource2API converts a resource.Resource into
 // a Resource struct.
-func Resource2API(res resources.Resource) params.Resource {
+func Resource2API(res resource.Resource) params.Resource {
 	return params.Resource{
-		CharmResource: CharmResource2API(res.Resource),
-		ID:            res.ID,
-		PendingID:     res.PendingID,
-		ApplicationID: res.ApplicationID,
-		Username:      res.Username,
-		Timestamp:     res.Timestamp,
+		CharmResource:   CharmResource2API(res.Resource),
+		UUID:            res.UUID.String(),
+		ApplicationName: res.ApplicationName,
+		Username:        res.RetrievedBy,
+		Timestamp:       res.Timestamp,
 	}
 }
 
 // apiResult2ApplicationResources converts a ResourcesResult into a resources.ApplicationResources.
-func apiResult2ApplicationResources(apiResult params.ResourcesResult) (resources.ApplicationResources, error) {
-	var result resources.ApplicationResources
+func apiResult2ApplicationResources(apiResult params.ResourcesResult) (resource.ApplicationResources, error) {
+	var result resource.ApplicationResources
 
 	if apiResult.Error != nil {
 		// TODO(ericsnow) Return the resources too?
 		err := apiservererrors.RestoreError(apiResult.Error)
-		return resources.ApplicationResources{}, errors.Trace(err)
+		return resource.ApplicationResources{}, errors.Trace(err)
 	}
 
 	for _, apiRes := range apiResult.Resources {
@@ -42,7 +42,7 @@ func apiResult2ApplicationResources(apiResult params.ResourcesResult) (resources
 			// This could happen if the server is misbehaving
 			// or non-conforming.
 			// TODO(ericsnow) Aggregate errors?
-			return resources.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
+			return resource.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
 		}
 		result.Resources = append(result.Resources, res)
 	}
@@ -50,27 +50,21 @@ func apiResult2ApplicationResources(apiResult params.ResourcesResult) (resources
 	for _, unitRes := range apiResult.UnitResources {
 		tag, err := names.ParseUnitTag(unitRes.Tag)
 		if err != nil {
-			return resources.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
+			return resource.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
 		}
 		resNames := map[string]bool{}
-		unitResources := resources.UnitResources{Tag: tag}
+		unitName, err := unit.NewName(tag.Id())
+		if err != nil {
+			return resource.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
+		}
+		unitResources := resource.UnitResources{Name: unitName}
 		for _, apiRes := range unitRes.Resources {
 			res, err := API2Resource(apiRes)
 			if err != nil {
-				return resources.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
+				return resource.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
 			}
 			resNames[res.Name] = true
 			unitResources.Resources = append(unitResources.Resources, res)
-		}
-		if len(unitRes.DownloadProgress) > 0 {
-			unitResources.DownloadProgress = make(map[string]int64)
-			for resName, progress := range unitRes.DownloadProgress {
-				if _, ok := resNames[resName]; !ok {
-					err := errors.Errorf("got progress from unrecognized resource %q", resName)
-					return resources.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
-				}
-				unitResources.DownloadProgress[resName] = progress
-			}
 		}
 		result.UnitResources = append(result.UnitResources, unitResources)
 	}
@@ -78,61 +72,35 @@ func apiResult2ApplicationResources(apiResult params.ResourcesResult) (resources
 	for _, chRes := range apiResult.CharmStoreResources {
 		res, err := API2CharmResource(chRes)
 		if err != nil {
-			return resources.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
+			return resource.ApplicationResources{}, errors.Annotate(err, "got bad data from server")
 		}
-		result.CharmStoreResources = append(result.CharmStoreResources, res)
+		result.RepositoryResources = append(result.RepositoryResources, res)
 	}
 
 	return result, nil
 }
 
-func ApplicationResources2APIResult(svcRes resources.ApplicationResources) params.ResourcesResult {
-	var result params.ResourcesResult
-	for _, res := range svcRes.Resources {
-		result.Resources = append(result.Resources, Resource2API(res))
-	}
-
-	for _, unitResources := range svcRes.UnitResources {
-		tag := unitResources.Tag
-		apiRes := params.UnitResources{
-			Entity: params.Entity{Tag: tag.String()},
-		}
-		for _, unitRes := range unitResources.Resources {
-			apiRes.Resources = append(apiRes.Resources, Resource2API(unitRes))
-		}
-		if len(unitResources.DownloadProgress) > 0 {
-			apiRes.DownloadProgress = make(map[string]int64)
-			for resName, progress := range unitResources.DownloadProgress {
-				apiRes.DownloadProgress[resName] = progress
-			}
-		}
-		result.UnitResources = append(result.UnitResources, apiRes)
-	}
-
-	result.CharmStoreResources = make([]params.CharmResource, len(svcRes.CharmStoreResources))
-	for i, chRes := range svcRes.CharmStoreResources {
-		result.CharmStoreResources[i] = CharmResource2API(chRes)
-	}
-	return result
-}
-
 // API2Resource converts an API Resource struct into
 // a resource.Resource.
-func API2Resource(apiRes params.Resource) (resources.Resource, error) {
-	var res resources.Resource
+func API2Resource(apiRes params.Resource) (resource.Resource, error) {
+	var res resource.Resource
 
 	charmRes, err := API2CharmResource(apiRes.CharmResource)
 	if err != nil {
 		return res, errors.Trace(err)
 	}
 
-	res = resources.Resource{
-		Resource:      charmRes,
-		ID:            apiRes.ID,
-		PendingID:     apiRes.PendingID,
-		ApplicationID: apiRes.ApplicationID,
-		Username:      apiRes.Username,
-		Timestamp:     apiRes.Timestamp,
+	uuid, err := resource.ParseUUID(apiRes.UUID)
+	if err != nil {
+		return res, errors.Trace(err)
+	}
+
+	res = resource.Resource{
+		Resource:        charmRes,
+		UUID:            uuid,
+		ApplicationName: apiRes.ApplicationName,
+		RetrievedBy:     apiRes.Username,
+		Timestamp:       apiRes.Timestamp,
 	}
 
 	if err := res.Validate(); err != nil {
@@ -172,7 +140,7 @@ func API2CharmResource(apiInfo params.CharmResource) (charmresource.Resource, er
 		return res, errors.Trace(err)
 	}
 
-	fp, err := resources.DeserializeFingerprint(apiInfo.Fingerprint)
+	fp, err := resource.DeserializeFingerprint(apiInfo.Fingerprint)
 	if err != nil {
 		return res, errors.Trace(err)
 	}

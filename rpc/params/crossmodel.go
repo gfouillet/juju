@@ -53,8 +53,8 @@ type OfferFilters struct {
 
 // OfferFilter is used to query offers.
 type OfferFilter struct {
-	// OwnerName is the owner of the model hosting the offer.
-	OwnerName string `json:"owner-name"`
+	// ModelQualifier disambiguates the name of the model hosting the offer.
+	ModelQualifier string `json:"model-qualifier"`
 
 	// ModelName is the name of the model hosting the offer.
 	ModelName string `json:"model-name"`
@@ -365,12 +365,10 @@ type RemoteRelationChangeEvent struct {
 	// ensure that all relation units have left scope.
 	ForceCleanup *bool `json:"force-cleanup,omitempty"`
 
-	// UnitCount is the number of units still in relation scope.
-	UnitCount *int `json:"unit-count"`
-
 	// Suspended is the current suspended status of the relation.
 	Suspended *bool `json:"suspended,omitempty"`
 
+	// SuspendedReason is an optional message to explain why suspended is true.
 	SuspendedReason string `json:"suspended-reason,omitempty"`
 
 	// ApplicationSettings represent the updated application-level settings in
@@ -380,15 +378,25 @@ type RemoteRelationChangeEvent struct {
 	// ChangedUnits maps unit tokens to relation unit changes.
 	ChangedUnits []RemoteRelationUnitChange `json:"changed-units,omitempty"`
 
-	// DepartedUnits contains the ids of units that have departed
-	// the relation since the last change.
-	DepartedUnits []int `json:"departed-units,omitempty"`
+	// InScopeUnits contains the ids of all units that are currently
+	// in scope of the relation for the application
+	InScopeUnits []int `json:"in-scope-units,omitempty"`
 
 	// Macaroons are used for authentication.
 	Macaroons macaroon.Slice `json:"macaroons,omitempty"`
 
 	// BakeryVersion is the version of the bakery used to mint macaroons.
 	BakeryVersion bakery.Version `json:"bakery-version,omitempty"`
+
+	// DepartedUnits contains the ids of units that have departed
+	// the relation since the last change.
+	// Deprecated: Use InScopeUnits will tell us which units are expected
+	// to be alive and in-scope. Anything else should be treated as departed.
+	DepartedUnits []int `json:"departed-units,omitempty"`
+
+	// UnitCount is the number of units still in relation scope.
+	// Deprecated: Use len(InScopeUnits) instead.
+	UnitCount int `json:"unit-count"`
 }
 
 func (e *RemoteRelationChangeEvent) GoString() string {
@@ -446,8 +454,9 @@ type RelationStatusWatchResults struct {
 
 // OfferStatusChange describes the status of an offer.
 type OfferStatusChange struct {
-	// OfferName is the name of the offer.
-	OfferName string `json:"offer-name"`
+	// OfferUUID is the name of the offer.
+	// NOTE: We use the tag "offer-name" here for compatibility
+	OfferUUID string `json:"offer-name"`
 
 	// Status is the status of the offer.
 	Status EntityStatus `json:"status"`
@@ -499,10 +508,10 @@ func (e *IngressNetworksChangeEvent) GoString() string {
 	return pretty.Sprint(eCopy)
 }
 
-// RegisterRemoteRelationArg holds attributes used to register a remote relation.
-type RegisterRemoteRelationArg struct {
-	// ApplicationToken is the application token on the remote model.
-	ApplicationToken string `json:"application-token"`
+// RegisterConsumingRelationArg holds attributes used to register a consuming relation.
+type RegisterConsumingRelationArg struct {
+	// ConsumerApplicationToken is the application token on the consuming model.
+	ConsumerApplicationToken string `json:"application-token"`
 
 	// SourceModelTag is the tag of the model hosting the application.
 	SourceModelTag string `json:"source-model-tag"`
@@ -510,14 +519,14 @@ type RegisterRemoteRelationArg struct {
 	// RelationToken is the relation token on the remote model.
 	RelationToken string `json:"relation-token"`
 
-	// RemoteEndpoint contains info about the endpoint in the remote model.
-	RemoteEndpoint RemoteEndpoint `json:"remote-endpoint"`
+	// ConsumerApplicationEndpoint contains info about the endpoint in the remote model.
+	ConsumerApplicationEndpoint RemoteEndpoint `json:"remote-endpoint"`
 
 	// OfferUUID is the UUID of the offer.
 	OfferUUID string `json:"offer-uuid"`
 
-	// LocalEndpointName is the name of the endpoint in the local model.
-	LocalEndpointName string `json:"local-endpoint-name"`
+	// OfferEndpointName is the name of the endpoint in the offer which is used.
+	OfferEndpointName string `json:"local-endpoint-name"`
 
 	// ConsumeVersion is incremented each time a new consumer
 	// proxy is created for an offer.
@@ -530,24 +539,24 @@ type RegisterRemoteRelationArg struct {
 	BakeryVersion bakery.Version `json:"bakery-version,omitempty"`
 }
 
-// RegisterRemoteRelationArgs holds args used to add remote relations.
-type RegisterRemoteRelationArgs struct {
-	Relations []RegisterRemoteRelationArg `json:"relations"`
+// RegisterConsumingRelationArgs holds args used to add consuming relations.
+type RegisterConsumingRelationArgs struct {
+	Relations []RegisterConsumingRelationArg `json:"relations"`
 }
 
-// RegisterRemoteRelationResult holds a remote relation details and an error.
-type RegisterRemoteRelationResult struct {
-	Result *RemoteRelationDetails `json:"result,omitempty"`
-	Error  *Error                 `json:"error,omitempty"`
+// RegisterConsumingRelationResult holds a remote relation details and an error.
+type RegisterConsumingRelationResult struct {
+	Result *ConsumingRelationDetails `json:"result,omitempty"`
+	Error  *Error                    `json:"error,omitempty"`
 }
 
-// RegisterRemoteRelationResults has a set of remote relation results.
-type RegisterRemoteRelationResults struct {
-	Results []RegisterRemoteRelationResult `json:"results,omitempty"`
+// RegisterConsumingRelationResults has a set of consuming relation results.
+type RegisterConsumingRelationResults struct {
+	Results []RegisterConsumingRelationResult `json:"results,omitempty"`
 }
 
-// RemoteRelationDetails holds a remote relation token and corresponding macaroon.
-type RemoteRelationDetails struct {
+// ConsumingRelationDetails holds a remote relation token and corresponding macaroon.
+type ConsumingRelationDetails struct {
 	Token         string             `json:"relation-token"`
 	Macaroon      *macaroon.Macaroon `json:"macaroon,omitempty"`
 	BakeryVersion bakery.Version     `json:"bakery-version,omitempty"`

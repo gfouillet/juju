@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/common"
 	"github.com/juju/juju/core/life"
@@ -45,14 +45,14 @@ func (m *Machine) Refresh(ctx context.Context) error {
 }
 
 // SetStatus sets the status of the machine.
-func (m *Machine) SetStatus(status status.Status, info string, data map[string]interface{}) error {
+func (m *Machine) SetStatus(ctx context.Context, status status.Status, info string, data map[string]interface{}) error {
 	var result params.ErrorResults
 	args := params.SetStatus{
 		Entities: []params.EntityStatusArgs{
 			{Tag: m.tag.String(), Status: status.String(), Info: info, Data: data},
 		},
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "SetStatus", args, &result)
+	err := m.client.facade.FacadeCall(ctx, "SetStatus", args, &result)
 	if err != nil {
 		return err
 	}
@@ -60,14 +60,14 @@ func (m *Machine) SetStatus(status status.Status, info string, data map[string]i
 }
 
 // SetMachineAddresses sets the machine determined addresses of the machine.
-func (m *Machine) SetMachineAddresses(addresses []network.MachineAddress) error {
+func (m *Machine) SetMachineAddresses(ctx context.Context, addresses []network.MachineAddress) error {
 	var result params.ErrorResults
 	args := params.SetMachinesAddresses{
 		MachineAddresses: []params.MachineAddresses{
 			{Tag: m.Tag().String(), Addresses: params.FromMachineAddresses(addresses...)},
 		},
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "SetMachineAddresses", args, &result)
+	err := m.client.facade.FacadeCall(ctx, "SetMachineAddresses", args, &result)
 	if err != nil {
 		return err
 	}
@@ -76,12 +76,12 @@ func (m *Machine) SetMachineAddresses(addresses []network.MachineAddress) error 
 
 // EnsureDead sets the machine lifecycle to Dead if it is Alive or
 // Dying. It does nothing otherwise.
-func (m *Machine) EnsureDead() error {
+func (m *Machine) EnsureDead(ctx context.Context) error {
 	var result params.ErrorResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: m.tag.String()}},
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "EnsureDead", args, &result)
+	err := m.client.facade.FacadeCall(ctx, "EnsureDead", args, &result)
 	if err != nil {
 		return err
 	}
@@ -93,34 +93,34 @@ func (m *Machine) Watch(ctx context.Context) (watcher.NotifyWatcher, error) {
 	return common.Watch(ctx, m.client.facade, "Watch", m.tag)
 }
 
-// Jobs returns a list of jobs for the machine.
-func (m *Machine) Jobs() (*params.JobsResult, error) {
-	var results params.JobsResults
+// IsController returns true if the provided machine is a controller one.
+func (m *Machine) IsController(ctx context.Context, machineName string) (bool, error) {
+	var results params.IsControllerResults
 	args := params.Entities{
-		Entities: []params.Entity{{Tag: m.Tag().String()}},
+		Entities: []params.Entity{{Tag: m.tag.String()}},
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "Jobs", args, &results)
+	err := m.client.facade.FacadeCall(ctx, "IsController", args, &results)
 	if err != nil {
-		return nil, errors.Annotate(err, "error from FacadeCall")
+		return false, errors.Annotate(err, "error from FacadeCall")
 	}
-	if len(results.Results) != 1 {
-		return nil, errors.Errorf("expected 1 result, got %d", len(results.Results))
+	if n := len(results.Results); n != 1 {
+		return false, errors.Errorf("expected 1 result, got %d", n)
 	}
-	result := results.Results[0]
-	if result.Error != nil {
-		return nil, result.Error
+	var errOut error
+	if err := results.Results[0].Error; err != nil {
+		errOut = err
 	}
-	return &result, nil
+	return results.Results[0].IsController, errOut
 }
 
 // SetObservedNetworkConfig sets the machine network config as observed on the
 // machine.
-func (m *Machine) SetObservedNetworkConfig(netConfig []params.NetworkConfig) error {
+func (m *Machine) SetObservedNetworkConfig(ctx context.Context, netConfig []params.NetworkConfig) error {
 	args := params.SetMachineNetworkConfig{
 		Tag:    m.Tag().String(),
 		Config: netConfig,
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "SetObservedNetworkConfig", args, nil)
+	err := m.client.facade.FacadeCall(ctx, "SetObservedNetworkConfig", args, nil)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -129,7 +129,7 @@ func (m *Machine) SetObservedNetworkConfig(netConfig []params.NetworkConfig) err
 
 // RecordAgentStartInformation reports the host name of the machine and updates
 // the start time for the agent.
-func (m *Machine) RecordAgentStartInformation(hostname string) error {
+func (m *Machine) RecordAgentStartInformation(ctx context.Context, hostname string) error {
 	var result params.ErrorResults
 	args := params.RecordAgentStartInformationArgs{
 		Args: []params.RecordAgentStartInformationArg{
@@ -139,7 +139,7 @@ func (m *Machine) RecordAgentStartInformation(hostname string) error {
 			},
 		},
 	}
-	err := m.client.facade.FacadeCall(context.TODO(), "RecordAgentStartInformation", args, &result)
+	err := m.client.facade.FacadeCall(ctx, "RecordAgentStartInformation", args, &result)
 
 	if err != nil {
 		return err

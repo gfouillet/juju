@@ -4,26 +4,32 @@
 package providertracker
 
 import (
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
+
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type trackerTypeSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&trackerTypeSuite{})
+func TestTrackerTypeSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &trackerTypeSuite{})
+}
 
-func (s *trackerTypeSuite) TestSingularNamespace(c *gc.C) {
+func (s *trackerTypeSuite) TestSingularNamespace(c *tc.C) {
 	single := SingularType("foo")
 	namespace, ok := single.SingularNamespace()
-	c.Assert(ok, jc.IsTrue)
-	c.Check(namespace, gc.Equals, "foo")
+	c.Assert(ok, tc.IsTrue)
+	c.Check(namespace, tc.Equals, "foo")
 }
 
-func (s *trackerTypeSuite) TestMultiType(c *gc.C) {
+func (s *trackerTypeSuite) TestMultiType(c *tc.C) {
 	namespace, ok := MultiType().SingularNamespace()
-	c.Assert(ok, jc.IsFalse)
-	c.Check(namespace, gc.Equals, "")
+	c.Assert(ok, tc.IsFalse)
+	c.Check(namespace, tc.Equals, "")
 }

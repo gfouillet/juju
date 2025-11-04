@@ -7,14 +7,8 @@ import (
 	"crypto/x509"
 	"testing"
 
-	gc "gopkg.in/check.v1"
-
 	"github.com/juju/juju/internal/pki/assertion"
 )
-
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}
 
 func TestHasExtKeyUsage(t *testing.T) {
 	tests := []struct {

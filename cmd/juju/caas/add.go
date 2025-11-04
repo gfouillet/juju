@@ -5,7 +5,7 @@ package caas
 
 import (
 	"bytes"
-	stdcontext "context"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,28 +13,27 @@ import (
 	"time"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/crypto/ssh/terminal"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	k8s "github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/caas/kubernetes/clientconfig"
 	k8scloud "github.com/juju/juju/caas/kubernetes/cloud"
-	"github.com/juju/juju/caas/kubernetes/provider"
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	jujucmdcloud "github.com/juju/juju/cmd/juju/cloud"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/cmd"
 	internallogger "github.com/juju/juju/internal/logger"
-	"github.com/juju/juju/jujuclient"
+	k8sprovider "github.com/juju/juju/internal/provider/kubernetes"
 )
 
 var logger = internallogger.GetLogger("juju.cmd.juju.k8s")
@@ -54,51 +53,48 @@ type CredentialStoreAPI interface {
 
 // AddCloudAPI - Implemented by cloudapi.Client.
 type AddCloudAPI interface {
-	AddCloud(jujucloud.Cloud, bool) error
-	AddCredential(tag string, credential jujucloud.Credential) error
+	AddCloud(context.Context, jujucloud.Cloud, bool) error
+	AddCredential(ctx context.Context, tag string, credential jujucloud.Credential) error
 	Close() error
 }
 
 // BrokerGetter returns caas broker instance.
-type BrokerGetter func(ctx stdcontext.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error)
+type BrokerGetter func(ctx context.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error)
 
 var usageAddCAASSummary = `
-Adds a k8s endpoint and credential to Juju.`[1:]
+Adds a Kubernetes endpoint and credential to Juju.`[1:]
 
 var usageAddCAASDetails = `
-Creates a user-defined cloud based on a k8s cluster.
+Creates a user-defined cloud based on a Kubernetes cluster.
 
-The new k8s cloud can then be used to bootstrap into, or it
+The new Kubernetes cloud can then be used to bootstrap into, or it
 can be added to an existing controller.
 
-Use --controller option to add k8s cloud to a controller.
-Use --client option to add k8s cloud to this client.
+Specify a non default kubeconfig file location using ` + "`$KUBECONFIG` " +
+	`environment variable or pipe in file content from stdin.
 
-Specify a non default kubeconfig file location using $KUBECONFIG
-environment variable or pipe in file content from stdin.
+The config file can contain definitions for different Kubernetes clusters,
+use ` + "`--cluster-name` " + `to pick which one to use.
+It's also possible to select a context by name using ` + "`--context-name`" + `.
 
-The config file can contain definitions for different k8s clusters,
-use --cluster-name to pick which one to use.
-It's also possible to select a context by name using --context-name.
-
-When running add-k8s the underlying cloud/region hosting the cluster needs to be
+When running ` + "`add-k8s` " + `the underlying cloud/region hosting the cluster needs to be
 detected to enable storage to be correctly configured. If the cloud/region cannot
 be detected automatically, use either
-  --cloud <cloudType|cloudName> to specify the host cloud
+  ` + "`--cloud <cloudType|cloudName> `" + `to specify the host cloud
 or
-  --region <cloudType|cloudName>/<someregion> to specify the host
+  ` + "`--region <cloudType|cloudName>/<someregion>` " + `to specify the host
   cloud type and region.
 
-Region is strictly necessary only when adding a k8s cluster to a JAAS controller.
-When using a standalone Juju controller, usually just --cloud is required.
+Region is strictly necessary only when adding a Kubernetes cluster to a JAAS controller.
+When using a standalone Juju controller, usually just ` + "`--cloud` " + `is required.
 
-Once Juju is aware of the underlying cloud type, it looks for a suitably configured
-storage class to provide operator and workload storage. If none is found, use
-of the --storage option is required so that Juju will create a storage class
-with the specified name.
+Once Juju is aware of the underlying cloud type, it looks for a suitably
+configured storage class to provide workload storage. If none is found, use of
+the ` + "`--storage` " + `option is required so that Juju will select (or create if not
+already present) a storage class with the specified name.
 
 If the cluster does not have a storage provisioning capability, use the
---skip-storage option to add the cluster without any workload storage configured.
+` + "`--skip-storage` " + `option to add the cluster without any workload storage configured.
 
 `
 
@@ -113,11 +109,11 @@ When your kubeconfig file is in the default location:
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType --region=someregion
     juju add-k8s myk8scloud --cloud cloudNameOrCloudType --storage mystorageclass
-    
+
 To add a Kubernetes cloud using data from your kubeconfig file, when this file is not in the default location:
 
     KUBECONFIG=path-to-kubeconfig-file juju add-k8s myk8scloud --cluster-name=my_cluster_name
-    
+
 To add a Kubernetes cloud using data from kubectl, when your kubeconfig file is not in the default location:
 
     kubectl config view --raw | juju add-k8s myk8scloud --cluster-name=my_cluster_name
@@ -131,7 +127,7 @@ type AddCAASCommand struct {
 	clock jujuclock.Clock
 
 	// These attributes are used when adding a cluster to a controller.
-	addCloudAPIFunc func() (AddCloudAPI, error)
+	addCloudAPIFunc func(ctx context.Context) (AddCloudAPI, error)
 
 	// caasName is the name of the CAAS to add.
 	caasName string
@@ -177,7 +173,7 @@ type AddCAASCommand struct {
 	eks        bool
 	k8sCluster k8sCluster
 
-	adminServiceAccountResolver func(stdcontext.Context, jujuclock.Clock) clientconfig.K8sCredentialResolver
+	adminServiceAccountResolver func(context.Context, jujuclock.Clock) clientconfig.K8sCredentialResolver
 	cloudMetadataStore          CloudMetadataStore
 	credentialStoreAPI          CredentialStoreAPI
 	newClientConfigReader       func(string) (clientconfig.ClientConfigFunc, error)
@@ -206,8 +202,8 @@ func newAddCAASCommand(cloudMetadataStore CloudMetadataStore, clock jujuclock.Cl
 		},
 		credentialUIDGetter: decideCredentialUID,
 	}
-	command.addCloudAPIFunc = func() (AddCloudAPI, error) {
-		root, err := command.NewAPIRoot(command.Store, command.ControllerName, "")
+	command.addCloudAPIFunc = func(ctx context.Context) (AddCloudAPI, error) {
+		root, err := command.NewAPIRoot(ctx, command.Store, command.ControllerName, "")
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -236,13 +232,13 @@ func (c *AddCAASCommand) Info() *cmd.Info {
 // SetFlags initializes the flags supported by the command.
 func (c *AddCAASCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.OptionalControllerCommand.SetFlags(f)
-	f.StringVar(&c.clusterName, "cluster-name", "", "Specify the k8s cluster to import")
-	f.StringVar(&c.contextName, "context-name", "", "Specify the k8s context to import")
-	f.StringVar(&c.hostCloudRegion, "region", "", "k8s cluster region or cloud/region")
-	f.StringVar(&c.hostCloud, "cloud", "", "k8s cluster cloud")
-	f.StringVar(&c.workloadStorage, "storage", "", "k8s storage class for workload storage")
-	f.BoolVar(&c.skipStorage, "skip-storage", false, "used when adding a cluster that doesn't have storage")
-	f.StringVar(&c.credential, "credential", "", "the credential to use when accessing the cluster")
+	f.StringVar(&c.clusterName, "cluster-name", "", "Specify the Kubernetes cluster to import")
+	f.StringVar(&c.contextName, "context-name", "", "Specify the Kubernetes context to import")
+	f.StringVar(&c.hostCloudRegion, "region", "", "Specify the Kubernetes cluster region or cloud/region")
+	f.StringVar(&c.hostCloud, "cloud", "", "Specify the Kubernetes cluster cloud")
+	f.StringVar(&c.workloadStorage, "storage", "", "Specify the Kubernetes storage class for workload storage")
+	f.BoolVar(&c.skipStorage, "skip-storage", false, "Skip storage provisioning for clusters that don't have storage")
+	f.StringVar(&c.credential, "credential", "", "Specify the credential to use when accessing the cluster")
 	// TODO(k8s) - support k8s tooling in strict snap
 	// f.StringVar(&c.project, "project", "", "project to which the cluster belongs")
 	// f.StringVar(&c.resourceGroup, "resource-group", "", "the Azure resource group of the AKS cluster")
@@ -530,7 +526,7 @@ func (c *AddCAASCommand) Run(ctx *cmd.Context) (err error) {
 		if len(newCloud.CACertificates) > 0 && newCloud.CACertificates[0] != "" {
 			return errors.NotValidf("cloud with both skip-TLS-verify=true and CA certificates")
 		}
-		logger.Warningf("k8s cloud %v is configured to skip server certificate validity checks", newCloud.Name)
+		logger.Warningf(context.TODO(), "k8s cloud %v is configured to skip server certificate validity checks", newCloud.Name)
 	}
 	newCredential, err = ensureCredentialUID(credentialName, credentialUID, newCredential)
 	if err != nil {
@@ -549,7 +545,7 @@ func (c *AddCAASCommand) Run(ctx *cmd.Context) (err error) {
 		return errors.Trace(err)
 	}
 	if !c.skipStorage {
-		storageParams := provider.KubeCloudStorageParams{
+		storageParams := k8sprovider.KubeCloudStorageParams{
 			WorkloadStorage:        c.workloadStorage,
 			HostCloudRegion:        c.hostCloudRegion,
 			MetadataChecker:        broker,
@@ -558,9 +554,9 @@ func (c *AddCAASCommand) Run(ctx *cmd.Context) (err error) {
 
 		var err error
 		var preferredStorageErr *environs.PreferredStorageNotFound
-		newCloud, err = provider.UpdateKubeCloudWithStorage(newCloud, storageParams)
+		newCloud, err = k8sprovider.UpdateKubeCloudWithStorage(newCloud, storageParams)
 		if err != nil {
-			if provider.IsClusterQueryError(err) {
+			if k8sprovider.IsClusterQueryError(err) {
 				cloudArg := "--cloud=<cloud> to specify the cloud"
 				if c.ControllerName == "jaas" {
 					cloudArg = "--region=<cloud>/<someregion> to specify the cloud/region"
@@ -625,8 +621,7 @@ func (c *AddCAASCommand) Run(ctx *cmd.Context) (err error) {
 	storageMsg := " with no configured storage provisioning capability"
 	if !c.skipStorage && c.workloadStorage != "" {
 		storageMsg = fmt.Sprintf(` with storage provisioned
-by the existing %q storage class`,
-			newCloud.Config[k8sconstants.WorkloadStorageKey])
+by the existing %q storage class`, c.workloadStorage)
 	} else if !c.skipStorage && c.workloadStorage == "" {
 		storageMsg = ""
 	}
@@ -645,7 +640,7 @@ by the existing %q storage class`,
 		} else {
 			successMsg += fmt.Sprintf(" on controller %s.", c.ControllerName)
 		}
-		if err := c.addRemoteCloud(newCloud, newCredential, credentialName); err == nil {
+		if err := c.addRemoteCloud(ctx, newCloud, newCredential, credentialName); err == nil {
 			if !msgDisplayed {
 				fmt.Fprintln(ctx.Stdout, successMsg)
 			}
@@ -656,20 +651,20 @@ by the existing %q storage class`,
 	return returnErr
 }
 
-func (c *AddCAASCommand) addRemoteCloud(newCloud jujucloud.Cloud, newCredential jujucloud.Credential, credentialName string) error {
+func (c *AddCAASCommand) addRemoteCloud(ctx context.Context, newCloud jujucloud.Cloud, newCredential jujucloud.Credential, credentialName string) error {
 	if err := jujuclient.ValidateControllerName(c.ControllerName); err != nil {
 		return errors.Trace(err)
 	}
-	cloudClient, err := c.addCloudAPIFunc()
+	cloudClient, err := c.addCloudAPIFunc(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer cloudClient.Close()
 
-	if err := addCloudToController(cloudClient, newCloud); err != nil {
+	if err := addCloudToController(ctx, cloudClient, newCloud); err != nil {
 		return errors.Trace(err)
 	}
-	if err := c.addCredentialToController(cloudClient, newCredential, newCloud.Name, credentialName); err != nil {
+	if err := c.addCredentialToController(ctx, cloudClient, newCredential, newCloud.Name, credentialName); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -695,8 +690,8 @@ func checkCloudRegion(given, detected string) error {
 	return nil
 }
 
-func (c *AddCAASCommand) newK8sClusterBroker(ctx stdcontext.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error) {
-	openParams, err := provider.BaseKubeCloudOpenParams(cloud, credential)
+func (c *AddCAASCommand) newK8sClusterBroker(ctx context.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error) {
+	openParams, err := k8sprovider.BaseKubeCloudOpenParams(cloud, credential)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -708,7 +703,7 @@ func (c *AddCAASCommand) newK8sClusterBroker(ctx stdcontext.Context, cloud jujuc
 		openParams.ControllerUUID = ctrlUUID
 	}
 
-	broker, err := caas.New(ctx, openParams)
+	broker, err := caas.New(ctx, openParams, environs.NoopCredentialInvalidator())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -754,12 +749,12 @@ func getCloudAndRegionFromOptions(cloudOption, regionOption string) (string, str
 
 // tryEnsureCloudType try to find cloud type if the cloudNameOrType is cloud name.
 func (c *AddCAASCommand) tryEnsureCloudTypeForHostRegion(cloudOption, regionOption string) (string, error) {
-	logger.Debugf("cloud option %q region option %q", cloudOption, regionOption)
+	logger.Debugf(context.TODO(), "cloud option %q region option %q", cloudOption, regionOption)
 	cloudNameOrType, region, err := getCloudAndRegionFromOptions(cloudOption, regionOption)
 	if err != nil {
 		return "", errors.Annotate(err, "parsing cloud region")
 	}
-	logger.Debugf("cloud %q region %q", cloudNameOrType, region)
+	logger.Debugf(context.TODO(), "cloud %q region %q", cloudNameOrType, region)
 
 	clouds, err := c.getAllCloudDetails(c.Store)
 	if err != nil {
@@ -821,12 +816,12 @@ func (c *AddCAASCommand) validateCloudRegion(ctx *cmd.Context, cloudRegion strin
 				return details.CloudType, nil
 			}
 			if region == "" && details.DefaultRegion != "" {
-				logger.Debugf("cloud region not provided by user, using client default %q", details.DefaultRegion)
+				logger.Debugf(context.TODO(), "cloud region not provided by user, using client default %q", details.DefaultRegion)
 				region = details.DefaultRegion
 			}
 			for k := range details.RegionsMap {
 				if k == region {
-					logger.Debugf("cloud region %q is valid", cloudRegion)
+					logger.Debugf(context.TODO(), "cloud region %q is valid", cloudRegion)
 					return jujucloud.BuildHostCloudRegion(details.CloudType, region), nil
 				}
 				regionListMsg += fmt.Sprintf("\t%q\n", k)
@@ -837,8 +832,8 @@ func (c *AddCAASCommand) validateCloudRegion(ctx *cmd.Context, cloudRegion strin
 	return "", errors.NotValidf("cloud region %q", cloudRegion)
 }
 
-func (c *AddCAASCommand) getClusterMetadataFunc(ctx *cmd.Context) provider.GetClusterMetadataFunc {
-	return func(storageParams provider.KubeCloudStorageParams) (*k8s.ClusterMetadata, error) {
+func (c *AddCAASCommand) getClusterMetadataFunc(ctx *cmd.Context) k8sprovider.GetClusterMetadataFunc {
+	return func(storageParams k8sprovider.KubeCloudStorageParams) (*k8s.ClusterMetadata, error) {
 		interrupted := make(chan os.Signal, 1)
 		defer close(interrupted)
 		ctx.InterruptNotify(interrupted)
@@ -876,34 +871,28 @@ func (c *AddCAASCommand) getClusterMetadataFunc(ctx *cmd.Context) provider.GetCl
 }
 
 func (c *AddCAASCommand) verifyName(name string) error {
-	public, _, err := c.cloudMetadataStore.PublicCloudMetadata()
-	if err != nil {
-		return err
+	if name == k8s.K8sCloudMicrok8s {
+		return fmt.Errorf(`%q is the name of a built-in cloud.
+If you want to use Juju with microk8s, the recommended way is to install the strictly confined microk8s snap.
+Using the strictly confined microk8s snap means that Juju and microk8s will work together out of the box.`, name)
 	}
-	msg, err := nameExists(name, public)
+
+	public, _, err := c.cloudMetadataStore.PublicCloudMetadata()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if msg != "" {
-		return errors.Errorf(msg)
-	}
-	return nil
-}
 
-// nameExists returns either an empty string if the name does not exist, or a
-// non-empty string with an error message if it does exist.
-func nameExists(name string, public map[string]jujucloud.Cloud) (string, error) {
 	if _, ok := public[name]; ok {
-		return fmt.Sprintf("%q is the name of a public cloud", name), nil
+		return fmt.Errorf("%q is the name of a public cloud", name)
 	}
 	builtin, err := common.BuiltInClouds()
 	if err != nil {
-		return "", errors.Trace(err)
+		return errors.Trace(err)
 	}
 	if _, ok := builtin[name]; ok {
-		return fmt.Sprintf("%q is the name of a built-in cloud", name), nil
+		return fmt.Errorf("%q is the name of a built-in cloud", name)
 	}
-	return "", nil
+	return nil
 }
 
 func addCloudToLocal(cloudMetadataStore CloudMetadataStore, newCloud jujucloud.Cloud) error {
@@ -918,9 +907,9 @@ func addCloudToLocal(cloudMetadataStore CloudMetadataStore, newCloud jujucloud.C
 	return cloudMetadataStore.WritePersonalCloudMetadata(personalClouds)
 }
 
-func addCloudToController(apiClient AddCloudAPI, newCloud jujucloud.Cloud) error {
+func addCloudToController(ctx context.Context, apiClient AddCloudAPI, newCloud jujucloud.Cloud) error {
 	// No need to force this addition as k8s is special.
-	err := apiClient.AddCloud(newCloud, false)
+	err := apiClient.AddCloud(ctx, newCloud, false)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -939,7 +928,7 @@ func (c *AddCAASCommand) addCredentialToLocal(store CredentialStoreAPI, cloudNam
 	return nil
 }
 
-func (c *AddCAASCommand) addCredentialToController(apiClient AddCloudAPI, newCredential jujucloud.Credential, cloudName, credentialName string) error {
+func (c *AddCAASCommand) addCredentialToController(ctx context.Context, apiClient AddCloudAPI, newCredential jujucloud.Credential, cloudName, credentialName string) error {
 	_, err := c.Store.ControllerByName(c.ControllerName)
 	if err != nil {
 		return errors.Trace(err)
@@ -956,7 +945,7 @@ func (c *AddCAASCommand) addCredentialToController(apiClient AddCloudAPI, newCre
 	}
 	cloudCredTag := names.NewCloudCredentialTag(id)
 
-	if err := apiClient.AddCredential(cloudCredTag.String(), newCredential); err != nil {
+	if err := apiClient.AddCredential(ctx, cloudCredTag.String(), newCredential); err != nil {
 		return errors.Trace(err)
 	}
 	return nil

@@ -4,238 +4,329 @@
 package state
 
 import (
-	"context"
+	"database/sql"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/machine"
 	machineerrors "github.com/juju/juju/domain/machine/errors"
 )
 
-func (s *stateSuite) TestGetHardwareCharacteristics(c *gc.C) {
-	db := s.DB()
+func (s *stateSuite) TestGetHardwareCharacteristicsMachineNotFound(c *tc.C) {
+	machineUUID := tc.Must(c, machine.NewUUID)
 
-	// Create a reference machine.
-	err := s.state.CreateMachine(context.Background(), "42", "", "")
-	c.Assert(err, jc.ErrorIsNil)
-	var machineUUID string
-	row := db.QueryRowContext(context.Background(), "SELECT uuid FROM machine WHERE name='42'")
-	c.Assert(row.Err(), jc.ErrorIsNil)
-	err = row.Scan(&machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
-	// Add a reference AZ.
-	_, err = db.ExecContext(context.Background(), "INSERT INTO availability_zone VALUES('az-1', 'az1')")
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.state.SetMachineCloudInstance(
-		context.Background(),
-		machineUUID,
-		instance.Id("1"),
-		instance.HardwareCharacteristics{
-			Arch:             strptr("arm64"),
-			Mem:              uintptr(1024),
-			RootDisk:         uintptr(256),
-			RootDiskSource:   strptr("/test"),
-			CpuCores:         uintptr(4),
-			CpuPower:         uintptr(75),
-			Tags:             strsliceptr([]string{"tag1", "tag2"}),
-			AvailabilityZone: strptr("az-1"),
-			VirtType:         strptr("virtual-machine"),
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	hc, err := s.state.HardwareCharacteristics(context.Background(), machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(*hc.Arch, gc.Equals, "arm64")
-	c.Check(*hc.Mem, gc.Equals, uint64(1024))
-	c.Check(*hc.RootDisk, gc.Equals, uint64(256))
-	c.Check(*hc.RootDiskSource, gc.Equals, "/test")
-	c.Check(*hc.CpuCores, gc.Equals, uint64(4))
-	c.Check(*hc.CpuPower, gc.Equals, uint64(75))
-	c.Check(*hc.AvailabilityZone, gc.Equals, "az-1")
-	c.Check(*hc.VirtType, gc.Equals, "virtual-machine")
+	_, err := s.state.GetHardwareCharacteristics(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIs, machineerrors.MachineNotFound)
 }
 
-func (s *stateSuite) TestSetInstanceData(c *gc.C) {
+func (s *stateSuite) TestGetHardwareCharacteristics(c *tc.C) {
+	machineUUID, _ := s.ensureInstance(c)
+
+	hc, err := s.state.GetHardwareCharacteristics(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(*hc.Arch, tc.Equals, "arm64")
+	c.Check(*hc.Mem, tc.Equals, uint64(1024))
+	c.Check(*hc.RootDisk, tc.Equals, uint64(256))
+	c.Check(*hc.RootDiskSource, tc.Equals, "/test")
+	c.Check(*hc.CpuCores, tc.Equals, uint64(4))
+	c.Check(*hc.CpuPower, tc.Equals, uint64(75))
+	c.Check(*hc.AvailabilityZone, tc.Equals, "az-1")
+	c.Check(*hc.VirtType, tc.Equals, "virtual-machine")
+}
+
+func (s *stateSuite) TestGetHardwareCharacteristicsWithoutAvailabilityZone(c *tc.C) {
+	// Create a reference machine.
+	machineUUID, _ := s.addMachine(c)
+
+	err := s.state.SetMachineCloudInstance(
+		c.Context(),
+		machineUUID.String(),
+		instance.Id("123"),
+		"",
+		"nonce",
+		&instance.HardwareCharacteristics{
+			Arch:           ptr("arm64"),
+			Mem:            ptr[uint64](1024),
+			RootDisk:       ptr[uint64](256),
+			RootDiskSource: ptr("/test"),
+			CpuCores:       ptr[uint64](4),
+			CpuPower:       ptr[uint64](75),
+			Tags:           ptr([]string{"tag1", "tag2"}),
+			VirtType:       ptr("virtual-machine"),
+		},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+
+	hc, err := s.state.GetHardwareCharacteristics(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(*hc.Arch, tc.Equals, "arm64")
+	c.Check(*hc.Mem, tc.Equals, uint64(1024))
+	c.Check(*hc.RootDisk, tc.Equals, uint64(256))
+	c.Check(*hc.RootDiskSource, tc.Equals, "/test")
+	c.Check(*hc.CpuCores, tc.Equals, uint64(4))
+	c.Check(*hc.CpuPower, tc.Equals, uint64(75))
+	c.Check(hc.AvailabilityZone, tc.IsNil)
+	c.Check(*hc.VirtType, tc.Equals, "virtual-machine")
+}
+
+func (s *stateSuite) TestAvailabilityZoneWithNoMachine(c *tc.C) {
+	machineUUID := tc.Must(c, machine.NewUUID)
+
+	_, err := s.state.AvailabilityZone(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIs, machineerrors.MachineNotFound)
+}
+
+func (s *stateSuite) TestAvailabilityZoneWithNoHardwareCharacteristics(c *tc.C) {
+	machineUUID, _ := s.addMachine(c)
+
+	_, err := s.state.AvailabilityZone(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIs, machineerrors.AvailabilityZoneNotFound)
+}
+
+func (s *stateSuite) TestAvailabilityZone(c *tc.C) {
+	machineUUID, _ := s.ensureInstance(c)
+
+	az, err := s.state.AvailabilityZone(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(az, tc.Equals, "az-1")
+}
+
+func (s *stateSuite) TestSetInstanceData(c *tc.C) {
 	db := s.DB()
 
 	// Create a reference machine.
-	err := s.state.CreateMachine(context.Background(), "42", "", "")
-	c.Assert(err, jc.ErrorIsNil)
-	var machineUUID string
-	row := db.QueryRowContext(context.Background(), "SELECT uuid FROM machine WHERE name='42'")
-	c.Assert(row.Err(), jc.ErrorIsNil)
-	err = row.Scan(&machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	machineUUID, _ := s.addMachine(c)
 	// Add a reference AZ.
-	_, err = db.ExecContext(context.Background(), "INSERT INTO availability_zone VALUES('az-1', 'az1')")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.state.SetMachineCloudInstance(
-		context.Background(),
-		machineUUID,
+		c.Context(),
+		machineUUID.String(),
 		instance.Id("1"),
-		instance.HardwareCharacteristics{
-			Arch:             strptr("arm64"),
-			Mem:              uintptr(1024),
-			RootDisk:         uintptr(256),
-			CpuCores:         uintptr(4),
-			CpuPower:         uintptr(75),
-			Tags:             strsliceptr([]string{"tag1", "tag2"}),
-			AvailabilityZone: strptr("az-1"),
-			VirtType:         strptr("virtual-machine"),
+		"one",
+		"nonce",
+		&instance.HardwareCharacteristics{
+			Arch:             ptr("arm64"),
+			Mem:              ptr[uint64](1024),
+			RootDisk:         ptr[uint64](256),
+			CpuCores:         ptr[uint64](4),
+			CpuPower:         ptr[uint64](75),
+			Tags:             ptr([]string{"tag1", "tag2"}),
+			AvailabilityZone: ptr("az-1"),
+			VirtType:         ptr("virtual-machine"),
 		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	var instanceData instanceData
-	row = db.QueryRowContext(context.Background(), "SELECT * FROM machine_cloud_instance WHERE instance_id='1'")
-	c.Assert(row.Err(), jc.ErrorIsNil)
+	row := db.QueryRowContext(c.Context(), "SELECT * FROM machine_cloud_instance WHERE instance_id='1'")
+	c.Assert(row.Err(), tc.ErrorIsNil)
 	err = row.Scan(
 		&instanceData.MachineUUID,
+		&instanceData.LifeID,
 		&instanceData.InstanceID,
+		&instanceData.DisplayName,
 		&instanceData.Arch,
+		&instanceData.AvailabilityZoneUUID,
+		&instanceData.CPUCores,
+		&instanceData.CPUPower,
 		&instanceData.Mem,
 		&instanceData.RootDisk,
 		&instanceData.RootDiskSource,
-		&instanceData.CPUCores,
-		&instanceData.CPUPower,
-		&instanceData.AvailabilityZoneUUID,
 		&instanceData.VirtType,
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(instanceData.MachineUUID, gc.Equals, machineUUID)
-	c.Check(instanceData.InstanceID, gc.Equals, "1")
-	c.Check(*instanceData.Arch, gc.Equals, "arm64")
-	c.Check(*instanceData.Mem, gc.Equals, uint64(1024))
-	c.Check(*instanceData.RootDisk, gc.Equals, uint64(256))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(instanceData.MachineUUID, tc.Equals, machineUUID.String())
+	c.Check(instanceData.LifeID, tc.Equals, int64(0))
+	c.Check(instanceData.InstanceID, tc.DeepEquals, sql.Null[string]{V: "1", Valid: true})
+	c.Check(instanceData.DisplayName, tc.DeepEquals, sql.Null[string]{V: "one", Valid: true})
+	c.Check(*instanceData.Arch, tc.Equals, "arm64")
+	c.Check(*instanceData.Mem, tc.Equals, uint64(1024))
+	c.Check(*instanceData.RootDisk, tc.Equals, uint64(256))
 	// Make sure we also handle correctly NULL values.
-	c.Check(instanceData.RootDiskSource, gc.IsNil)
-	c.Check(*instanceData.CPUCores, gc.Equals, uint64(4))
-	c.Check(*instanceData.CPUPower, gc.Equals, uint64(75))
-	c.Check(*instanceData.AvailabilityZoneUUID, gc.Equals, "az-1")
-	c.Check(*instanceData.VirtType, gc.Equals, "virtual-machine")
+	c.Check(instanceData.RootDiskSource, tc.IsNil)
+	c.Check(*instanceData.CPUCores, tc.Equals, uint64(4))
+	c.Check(*instanceData.CPUPower, tc.Equals, uint64(75))
+	c.Check(*instanceData.AvailabilityZoneUUID, tc.Equals, "deadbeef-0bad-400d-8000-4b1d0d06f00d")
+	c.Check(*instanceData.VirtType, tc.Equals, "virtual-machine")
 
-	rows, err := db.QueryContext(context.Background(), "SELECT tag FROM instance_tag WHERE machine_uuid='"+machineUUID+"'")
-	defer rows.Close()
-	c.Assert(err, jc.ErrorIsNil)
+	rows, err := db.QueryContext(c.Context(), "SELECT tag FROM instance_tag WHERE machine_uuid='"+machineUUID.String()+"'")
+	defer func() { _ = rows.Close() }()
+	c.Assert(err, tc.ErrorIsNil)
 	var instanceTags []string
 	for rows.Next() {
 		var tag string
 		err = rows.Scan(&tag)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		instanceTags = append(instanceTags, tag)
 	}
-	c.Check(instanceTags, gc.HasLen, 2)
-	c.Check(instanceTags[0], gc.Equals, "tag1")
-	c.Check(instanceTags[1], gc.Equals, "tag2")
+	c.Check(instanceTags, tc.HasLen, 2)
+	c.Check(instanceTags[0], tc.Equals, "tag1")
+	c.Check(instanceTags[1], tc.Equals, "tag2")
 }
 
-func (s *stateSuite) TestDeleteInstanceData(c *gc.C) {
+func (s *stateSuite) TestSetInstanceDataEmptyInstanceID(c *tc.C) {
 	db := s.DB()
 
 	// Create a reference machine.
-	err := s.state.CreateMachine(context.Background(), "42", "", "")
-	c.Assert(err, jc.ErrorIsNil)
-	var machineUUID string
-	row := db.QueryRowContext(context.Background(), "SELECT uuid FROM machine WHERE name='42'")
-	c.Assert(row.Err(), jc.ErrorIsNil)
-	err = row.Scan(&machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
-	// Add a reference AZ.
-	_, err = db.ExecContext(context.Background(), "INSERT INTO availability_zone VALUES('az-1', 'az1')")
-	c.Assert(err, jc.ErrorIsNil)
+	machineUUID, _ := s.addMachine(c)
 
-	err = s.state.SetMachineCloudInstance(
-		context.Background(),
-		machineUUID,
+	err := s.state.SetMachineCloudInstance(
+		c.Context(),
+		machineUUID.String(),
+		instance.Id(""),
+		"one",
+		"nonce",
+		&instance.HardwareCharacteristics{},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+
+	var instanceID sql.Null[string]
+	row := db.QueryRowContext(c.Context(), "SELECT instance_id FROM machine_cloud_instance WHERE machine_uuid=?", machineUUID)
+	err = row.Scan(
+		&instanceID,
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(row.Err(), tc.ErrorIsNil)
+	c.Check(instanceID.Valid, tc.IsFalse)
+}
+
+func (s *stateSuite) TestSetInstanceDataEmptyDisplayName(c *tc.C) {
+	db := s.DB()
+
+	// Create a reference machine.
+	machineUUID, _ := s.addMachine(c)
+
+	err := s.state.SetMachineCloudInstance(
+		c.Context(),
+		machineUUID.String(),
 		instance.Id("1"),
-		instance.HardwareCharacteristics{
-			Arch:             strptr("arm64"),
-			Mem:              uintptr(1024),
-			RootDisk:         uintptr(256),
-			RootDiskSource:   strptr("/test"),
-			CpuCores:         uintptr(4),
-			CpuPower:         uintptr(75),
-			Tags:             strsliceptr([]string{"tag1", "tag2"}),
-			AvailabilityZone: strptr("az-1"),
-			VirtType:         strptr("virtual-machine"),
+		"",
+		"nonce",
+		&instance.HardwareCharacteristics{},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+
+	var displayName sql.Null[string]
+	row := db.QueryRowContext(c.Context(), "SELECT display_name FROM machine_cloud_instance WHERE machine_uuid=?", machineUUID)
+	c.Assert(row.Err(), tc.ErrorIsNil)
+	err = row.Scan(
+		&displayName,
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(displayName.Valid, tc.IsFalse)
+}
+
+func (s *stateSuite) TestSetInstanceDataEmptyUniqueIndex(c *tc.C) {
+	// Ensure that setting empty instance IDs and display names does not
+	// violate the unique index on the machine_cloud_instance table.
+	for range 10 {
+		// Create a reference machine.
+		machineUUID, _ := s.addMachine(c)
+
+		err := s.state.SetMachineCloudInstance(
+			c.Context(),
+			machineUUID.String(),
+			instance.Id(""),
+			"",
+			"nonce",
+			&instance.HardwareCharacteristics{},
+		)
+		c.Assert(err, tc.ErrorIsNil)
+	}
+}
+
+func (s *stateSuite) TestSetInstanceDataAlreadyExists(c *tc.C) {
+	// Create a reference machine.
+	machineUUID, _ := s.addMachine(c)
+
+	err := s.state.SetMachineCloudInstance(
+		c.Context(),
+		machineUUID.String(),
+		instance.Id("1"),
+		"one",
+		"nonce",
+		&instance.HardwareCharacteristics{
+			Arch: ptr("arm64"),
 		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = s.state.DeleteMachineCloudInstance(context.Background(), machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Check that all rows've been deleted.
-	rows, err := db.QueryContext(context.Background(), "SELECT * FROM machine_cloud_instance WHERE instance_id='1'")
-	defer rows.Close()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rows.Err(), jc.ErrorIsNil)
-	c.Check(rows.Next(), jc.IsFalse)
-	rows, err = db.QueryContext(context.Background(), "SELECT * FROM instance_tag WHERE machine_uuid='"+machineUUID+"'")
-	defer rows.Close()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rows.Err(), jc.ErrorIsNil)
-	c.Check(rows.Next(), jc.IsFalse)
+	// Must fail when we try to add again.
+	err = s.state.SetMachineCloudInstance(
+		c.Context(),
+		machineUUID.String(),
+		instance.Id("1"),
+		"one",
+		"nonce",
+		&instance.HardwareCharacteristics{
+			Arch: ptr("amd64"),
+		},
+	)
+	c.Assert(err, tc.ErrorMatches, "machine cloud instance already exists.*")
+	c.Assert(err, tc.ErrorIs, machineerrors.MachineCloudInstanceAlreadyExists)
 }
 
-func strptr(s string) *string {
-	return &s
+func (s *stateSuite) TestInstanceIdSuccess(c *tc.C) {
+	machineUUID, _ := s.ensureInstance(c)
+
+	instanceId, err := s.state.GetInstanceID(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(instanceId, tc.Equals, "123")
 }
 
-func uintptr(u uint64) *uint64 {
-	return &u
+func (s *stateSuite) TestInstanceIdError(c *tc.C) {
+	machineUUID, _ := s.addMachine(c)
+
+	_, err := s.state.GetInstanceID(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIs, machineerrors.NotProvisioned)
 }
 
-func strsliceptr(s []string) *[]string {
-	return &s
+func (s *stateSuite) TestInstanceNameSuccess(c *tc.C) {
+	machineUUID, _ := s.ensureInstance(c)
+
+	instanceID, displayName, err := s.state.GetInstanceIDAndName(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(instanceID, tc.Equals, "123")
+	c.Assert(displayName, tc.Equals, "one-two-three")
 }
 
-func (s *stateSuite) TestInstanceIdSuccess(c *gc.C) {
+func (s *stateSuite) TestInstanceNameError(c *tc.C) {
+	machineUUID, _ := s.addMachine(c)
+
+	_, _, err := s.state.GetInstanceIDAndName(c.Context(), machineUUID.String())
+	c.Assert(err, tc.ErrorIs, machineerrors.NotProvisioned)
+}
+
+func (s *stateSuite) ensureInstance(c *tc.C) (machine.UUID, machine.Name) {
 	db := s.DB()
 
 	// Create a reference machine.
-	err := s.state.CreateMachine(context.Background(), "666", "", "")
-	c.Assert(err, jc.ErrorIsNil)
-	var machineUUID string
-	row := db.QueryRowContext(context.Background(), "SELECT uuid FROM machine WHERE name='666'")
-	c.Assert(row.Err(), jc.ErrorIsNil)
-	err = row.Scan(&machineUUID)
-	c.Assert(err, jc.ErrorIsNil)
+	machineUUID, machineName := s.addMachine(c)
 	// Add a reference AZ.
-	_, err = db.ExecContext(context.Background(), "INSERT INTO availability_zone VALUES('az-1', 'az1')")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := db.ExecContext(c.Context(), "INSERT INTO availability_zone VALUES('deadbeef-0bad-400d-8000-4b1d0d06f00d', 'az-1')")
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.state.SetMachineCloudInstance(
-		context.Background(),
-		machineUUID,
+		c.Context(),
+		machineUUID.String(),
 		instance.Id("123"),
-		instance.HardwareCharacteristics{
-			Arch:             strptr("arm64"),
-			Mem:              uintptr(1024),
-			RootDisk:         uintptr(256),
-			RootDiskSource:   strptr("/test"),
-			CpuCores:         uintptr(4),
-			CpuPower:         uintptr(75),
-			Tags:             strsliceptr([]string{"tag1", "tag2"}),
-			AvailabilityZone: strptr("az-1"),
-			VirtType:         strptr("virtual-machine"),
+		"one-two-three",
+		"nonce",
+		&instance.HardwareCharacteristics{
+			Arch:             ptr("arm64"),
+			Mem:              ptr[uint64](1024),
+			RootDisk:         ptr[uint64](256),
+			RootDiskSource:   ptr("/test"),
+			CpuCores:         ptr[uint64](4),
+			CpuPower:         ptr[uint64](75),
+			Tags:             ptr([]string{"tag1", "tag2"}),
+			AvailabilityZone: ptr("az-1"),
+			VirtType:         ptr("virtual-machine"),
 		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	instanceId, err := s.state.InstanceId(context.Background(), "666")
-	c.Check(err, jc.ErrorIsNil)
-	c.Assert(instanceId, gc.Equals, "123")
-}
-
-func (s *stateSuite) TestInstanceIdError(c *gc.C) {
-	err := s.state.CreateMachine(context.Background(), "666", "", "")
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = s.state.InstanceId(context.Background(), "666")
-	c.Check(err, jc.ErrorIs, machineerrors.NotProvisioned)
+	c.Assert(err, tc.ErrorIsNil)
+	return machineUUID, machineName
 }

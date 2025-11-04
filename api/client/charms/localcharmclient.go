@@ -10,16 +10,19 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/api/base"
+	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/charm"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // LocalCharmClient allows access to the API endpoints
@@ -44,7 +47,7 @@ func NewLocalCharmClient(st base.APICallCloser) (*LocalCharmClient, error) {
 // AddLocalCharm prepares the given charm with a local: schema in its
 // URL, and uploads it via the API server, returning the assigned
 // charm URL.
-func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool, agentVersion version.Number) (*charm.URL, error) {
+func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool, agentVersion semversion.Number) (*charm.URL, error) {
 	if curl.Schema != "local" {
 		return nil, errors.Errorf("expected charm URL with local: schema, got %q", curl.String())
 	}
@@ -61,22 +64,6 @@ func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force 
 	// Package the charm for uploading.
 	var archive *os.File
 	switch ch := ch.(type) {
-	case *charm.CharmDir:
-		var err error
-		if archive, err = os.CreateTemp("", "charm"); err != nil {
-			return nil, errors.Annotate(err, "cannot create temp file")
-		}
-		defer func() {
-			_ = archive.Close()
-			_ = os.Remove(archive.Name())
-		}()
-
-		if err := ch.ArchiveTo(archive); err != nil {
-			return nil, errors.Annotate(err, "cannot repackage charm")
-		}
-		if _, err := archive.Seek(0, os.SEEK_SET); err != nil {
-			return nil, errors.Annotate(err, "cannot rewind packaged charm")
-		}
 	case *charm.CharmArchive:
 		var err error
 		if archive, err = os.Open(ch.Path); err != nil {
@@ -84,7 +71,7 @@ func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force 
 		}
 		defer archive.Close()
 	default:
-		return nil, errors.Errorf("unknown charm type %T", ch)
+		return nil, errors.Errorf("unsupported charm type %T", ch)
 	}
 
 	anyHooksOrDispatch, err := hasHooksOrDispatch(archive.Name())
@@ -143,24 +130,10 @@ func hasHooksFolderOrDispatchFile(name string) (bool, error) {
 		return false, err
 	}
 	defer zipr.Close()
-	count := 0
 	// zip file spec 4.4.17.1 says that separators are always "/" even on Windows.
-	hooksPath := "hooks/"
 	dispatchPath := "dispatch"
 	for _, f := range zipr.File {
-		if strings.Contains(f.Name, hooksPath) {
-			count++
-		}
-		if count > 1 {
-			// 1 is the magic number here.
-			// Charm zip archive is expected to contain several files and folders.
-			// All properly built charms will have a non-empty "hooks" folders OR
-			// a dispatch file.
-			// File names in the archive will be of the form "hooks/" - for hooks folder; and
-			// "hooks/*" for the actual charm hooks implementations.
-			// For example, install hook may have a file with a name "hooks/install".
-			// Once we know that there are, at least, 2 files that have names that start with "hooks/", we
-			// know for sure that the charm has a non-empty hooks folder.
+		if isHook(f) {
 			return true, nil
 		}
 		if strings.Contains(f.Name, dispatchPath) {
@@ -170,9 +143,28 @@ func hasHooksFolderOrDispatchFile(name string) (bool, error) {
 	return false, nil
 }
 
-func (c *LocalCharmClient) validateCharmVersion(ch charm.Charm, agentVersion version.Number) error {
+// isHook verifies whether the given file inside a zip archive is a valid hook
+// file.
+func isHook(f *zip.File) bool {
+	// Hook files must be in the top level of the 'hooks' directory
+	if filepath.Dir(f.Name) != "hooks" {
+		return false
+	}
+	// Valid file modes are regular files or symlinks. All others (directories,
+	// sockets, devices, etc.) are considered invalid file modes.
+	switch mode := f.Mode(); {
+	case mode.IsRegular():
+		return true
+	case mode&fs.ModeSymlink != 0:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *LocalCharmClient) validateCharmVersion(ch charm.Charm, agentVersion semversion.Number) error {
 	minver := ch.Meta().MinJujuVersion
-	if minver != version.Zero {
+	if minver != semversion.Zero {
 		return jujuversion.CheckJujuMinVersion(minver, agentVersion)
 	}
 	return nil
@@ -188,5 +180,5 @@ func hashArchive(archive *os.File) (string, error) {
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	return hex.EncodeToString(hash.Sum(nil))[0:7], nil
+	return hex.EncodeToString(hash.Sum(nil))[0:corecharm.MinSHA256PrefixLength], nil
 }

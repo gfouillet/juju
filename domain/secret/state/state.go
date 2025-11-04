@@ -11,18 +11,24 @@ import (
 	"time"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
 
+	coreapplication "github.com/juju/juju/core/application"
 	coredatabase "github.com/juju/juju/core/database"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
+	corerelation "github.com/juju/juju/core/relation"
 	coresecrets "github.com/juju/juju/core/secrets"
+	coreunit "github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/domain"
 	applicationerrors "github.com/juju/juju/domain/application/errors"
 	modelerrors "github.com/juju/juju/domain/model/errors"
+	relationerrors "github.com/juju/juju/domain/relation/errors"
 	domainsecret "github.com/juju/juju/domain/secret"
 	secreterrors "github.com/juju/juju/domain/secret/errors"
-	uniterrors "github.com/juju/juju/domain/unit/errors"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/uuid"
 )
 
@@ -43,185 +49,108 @@ func NewState(factory coredatabase.TxnRunnerFactory, logger logger.Logger) *Stat
 
 // GetModelUUID returns the uuid of the model,
 // or an error satisfying [modelerrors.NotFound]
-func (st State) GetModelUUID(ctx context.Context) (string, error) {
-	db, err := st.DB()
+func (st State) GetModelUUID(ctx context.Context) (coremodel.UUID, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
-	var modelUUID string
+	var modelUUID coremodel.UUID
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		var err error
 		modelUUID, err = st.getModelUUID(ctx, tx)
 		return err
 	})
-	return modelUUID, errors.Trace(domain.CoerceError(err))
+	return modelUUID, errors.Capture(err)
 }
 
-func (st State) getModelUUID(ctx context.Context, tx *sqlair.TX) (string, error) {
-	result := sqlair.M{}
+func (st State) getModelUUID(ctx context.Context, tx *sqlair.TX) (coremodel.UUID, error) {
+	result := modelUUID{}
 
-	getModelUUIDSQL := "SELECT &M.uuid FROM model"
-	getModelUUIDStmt, err := st.Prepare(getModelUUIDSQL, result)
+	getModelUUIDStmt, err := st.Prepare("SELECT &modelUUID.uuid FROM model", result)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, getModelUUIDStmt).Get(&result)
+	if errors.Is(err, sqlair.ErrNoRows) {
+		return "", modelerrors.NotFound
+	}
 	if err != nil {
+		return "", errors.Errorf("looking up model UUID: %w", err)
+	}
+	return result.UUID, nil
+}
+
+// GetApplicationUUID returns the UUID of the application with the given name, returning an error satisfying
+// [applicationerrors.ApplicationNotFound] if the application does not exist.
+func (st State) GetApplicationUUID(ctx domain.AtomicContext, appName string) (coreapplication.UUID, error) {
+	app := application{Name: appName}
+
+	selectApplicationUUIDStmt, err := st.Prepare(`
+SELECT &application.uuid
+FROM application
+WHERE name=$application.name`, app)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	err = domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err = tx.Query(ctx, selectApplicationUUIDStmt, app).Get(&app)
 		if errors.Is(err, sqlair.ErrNoRows) {
-			return "", modelerrors.NotFound
-		} else {
-			return "", errors.Annotatef(err, "looking up model UUID")
+			return errors.Errorf("application %q not found", appName).Add(applicationerrors.ApplicationNotFound)
 		}
-	}
-	return result["uuid"].(string), nil
-}
-
-// CreateUserSecret creates a user secret, returning an error satisfying
-// [secreterrors.SecretAlreadyExists]if a user secret with the same
-// label already exists.
-func (st State) CreateUserSecret(
-	ctx context.Context, version int, uri *coresecrets.URI, secret domainsecret.UpsertSecretParams,
-) error {
-	db, err := st.DB()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	revisionUUID, err := uuid.NewUUID()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if err := st.createSecret(ctx, tx, version, uri, secret, revisionUUID, st.checkUserSecretLabelExists); err != nil {
-			return errors.Annotatef(err, "inserting secret records for secret %q", uri)
-		}
-
-		label := ""
-		if secret.Label != nil {
-			label = *secret.Label
-		}
-		dbSecretOwner := secretModelOwner{SecretID: uri.ID, Label: label}
-		if err := st.upsertSecretModelOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "inserting user secret record for secret %q", uri)
-		}
-
-		modelUUID, err := st.getModelUUID(ctx, tx)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Errorf("looking up application UUID for %q: %w", appName, err)
 		}
-
-		if err := st.grantSecretOwnerManage(ctx, tx, uri, modelUUID, domainsecret.SubjectModel); err != nil {
-			return errors.Annotatef(err, "granting owner manage access for secret %q", uri)
-		}
-
 		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return app.UUID, errors.Capture(err)
 }
 
-// checkSecretUserLabelExists returns an error if a user
-// secret with the given label already exists.
-func (st State) checkUserSecretLabelExists(ctx context.Context, tx *sqlair.TX, label string) error {
-	dbSecretOwner := secretOwner{Label: label}
+// GetUnitUUID returns the UUID of the unit with the given name, returning an error satisfying
+// [applicationerrors.UnitNotFound] if the unit does not exist.
+func (st State) GetUnitUUID(ctx domain.AtomicContext, unitName coreunit.Name) (coreunit.UUID, error) {
+	var unitUUID coreunit.UUID
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		var err error
+		unitUUID, err = st.getUnitUUID(ctx, tx, unitName)
+		return errors.Capture(err)
+	})
+	return unitUUID, errors.Capture(err)
+}
 
+func (st State) getUnitUUID(ctx context.Context, tx *sqlair.TX, unitName coreunit.Name) (coreunit.UUID, error) {
+	u := unit{Name: unitName}
+
+	selectUnitUUIDStmt, err := st.Prepare(`
+SELECT &unit.uuid
+FROM unit
+WHERE name=$unit.name`, u)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	err = tx.Query(ctx, selectUnitUUIDStmt, u).Get(&u)
+	if errors.Is(err, sqlair.ErrNoRows) {
+		return "", errors.Errorf("unit %q not found", unitName).Add(applicationerrors.UnitNotFound)
+	}
+	if err != nil {
+		return "", errors.Errorf("looking up unit UUID for %q: %w", unitName, err)
+	}
+	return u.UUID, errors.Capture(err)
+}
+
+// CheckApplicationSecretLabelExists checks if a charm application secret with the given label already exists.
+func (st State) CheckApplicationSecretLabelExists(ctx domain.AtomicContext, appUUID coreapplication.UUID, label string) (bool, error) {
+	if label == "" {
+		return false, nil
+	}
+
+	input := secretApplicationOwner{Label: label, ApplicationUUID: appUUID.String()}
+	count := count{}
+	// TODO(secrets) - we check using 2 queries, but should do in DDL
 	checkLabelExistsSQL := `
-SELECT &secretOwner.secret_id
-FROM   secret_model_owner
-WHERE  label = $secretOwner.label`
-
-	checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, dbSecretOwner)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	err = tx.Query(ctx, checkExistsStmt, dbSecretOwner).Get(&dbSecretOwner)
-	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-		return errors.Trace(domain.CoerceError(err))
-	}
-	if err == nil {
-		return fmt.Errorf("secret with label %q already exists%w", label, errors.Hide(secreterrors.SecretLabelAlreadyExists))
-	}
-	return nil
-}
-
-// CreateCharmApplicationSecret creates a secret onwed by the specified
-// application, returning an error satisfying [secreterrors.SecretAlreadyExists]
-// if a secretowned by the same application with the same label already exists.
-// It also returns an error satisfying [applicationerrors.ApplicationNotFound]
-// ifthe application does not exist.
-func (st State) CreateCharmApplicationSecret(
-	ctx context.Context, version int, uri *coresecrets.URI, appName string, secret domainsecret.UpsertSecretParams,
-) error {
-	if secret.AutoPrune != nil && *secret.AutoPrune {
-		return secreterrors.AutoPruneNotSupported
-	}
-
-	db, err := st.DB()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	revisionUUID, err := uuid.NewUUID()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	label := ""
-	if secret.Label != nil {
-		label = *secret.Label
-	}
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		dbSecretOwner := secretApplicationOwner{SecretID: uri.ID, Label: label}
-		result := sqlair.M{}
-
-		selectApplicationUUID := `SELECT &M.uuid FROM application WHERE name=$M.name`
-		selectApplicationUUIDStmt, err := st.Prepare(selectApplicationUUID, result)
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		err = tx.Query(ctx, selectApplicationUUIDStmt, sqlair.M{"name": appName}).Get(&result)
-		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return applicationerrors.ApplicationNotFound
-			} else {
-				return errors.Annotatef(err, "looking up application UUID for %q", appName)
-			}
-		}
-		dbSecretOwner.ApplicationUUID = result["uuid"].(string)
-
-		checkExists := st.checkApplicationSecretLabelExists(dbSecretOwner.ApplicationUUID)
-		if err := st.createSecret(ctx, tx, version, uri, secret, revisionUUID, checkExists); err != nil {
-			return errors.Annotatef(err, "inserting secret records for secret %q", uri)
-		}
-
-		if err := st.upsertSecretApplicationOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "inserting application secret record for secret %q", uri)
-		}
-
-		if err := st.grantSecretOwnerManage(
-			ctx, tx, uri, dbSecretOwner.ApplicationUUID, domainsecret.SubjectApplication,
-		); err != nil {
-			return errors.Annotatef(err, "granting owner manage access for secret %q", uri)
-		}
-		return nil
-	})
-	return errors.Trace(domain.CoerceError(err))
-}
-
-// checkApplicationSecretLabelExists returns function which checks if
-// a charm application secret with the given label already exists.
-func (st State) checkApplicationSecretLabelExists(app_uuid string) checkExistsFunc {
-	return func(ctx context.Context, tx *sqlair.TX, label string) error {
-		if label == "" {
-			return nil
-		}
-
-		// TODO(secrets) - we check using 2 queries, but should do in DDL
-		checkLabelExistsSQL := `
-SELECT secret_id AS &secretApplicationOwner.secret_id
+SELECT COUNT(*) AS &count.num
 FROM (
     SELECT secret_id
     FROM   secret_application_owner
@@ -230,125 +159,37 @@ FROM (
     UNION
     SELECT secret_id
     FROM   secret_unit_owner
-           JOIN unit u ON u.uuid = unit_uuid
+       JOIN unit u ON u.uuid = unit_uuid
     WHERE  label = $secretApplicationOwner.label
     AND    u.application_uuid = $secretApplicationOwner.application_uuid
 )`
 
-		checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, secretApplicationOwner{})
-		if err != nil {
-			return errors.Trace(err)
-		}
-		dbSecretOwner := secretApplicationOwner{Label: label, ApplicationUUID: app_uuid}
-		err = tx.Query(ctx, checkExistsStmt, dbSecretOwner).Get(&dbSecretOwner)
-		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Trace(domain.CoerceError(err))
-		}
-		if err == nil {
-			return fmt.Errorf(
-				"secret with label %q already exists%w", label, errors.Hide(secreterrors.SecretLabelAlreadyExists))
-		}
-		return nil
-	}
-}
-
-// CreateCharmUnitSecret creates a secret onwed by the specified unit,
-// returning an error satisfying [secreterrors.SecretAlreadyExists] if a secret
-// owned by the same unit with the same label already exists.
-// It also returns an error satisfying [uniterrors.NotFound] if
-// the unit does not exist.
-func (st State) CreateCharmUnitSecret(
-	ctx context.Context, version int, uri *coresecrets.URI, unitName string, secret domainsecret.UpsertSecretParams,
-) error {
-	if secret.AutoPrune != nil && *secret.AutoPrune {
-		return secreterrors.AutoPruneNotSupported
-	}
-
-	db, err := st.DB()
+	checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, input, count)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Capture(err)
 	}
 
-	revisionUUID, err := uuid.NewUUID()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	label := ""
-	if secret.Label != nil {
-		label = *secret.Label
-	}
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		dbSecretOwner := secretUnitOwner{SecretID: uri.ID, Label: label}
-
-		selectUnitUUID := `SELECT &unit.uuid FROM unit WHERE name=$unit.name`
-		selectUnitUUIDStmt, err := st.Prepare(selectUnitUUID, unit{})
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		result := unit{}
-		err = tx.Query(ctx, selectUnitUUIDStmt, unit{Name: unitName}).Get(&result)
-		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return fmt.Errorf("unit %q not found%w", unitName, errors.Hide(uniterrors.NotFound))
-			} else {
-				return errors.Annotatef(err, "looking up unit UUID for %q", unitName)
-			}
-		}
-		dbSecretOwner.UnitUUID = result.UUID
-
-		checkExists := st.checkUnitSecretLabelExists(dbSecretOwner.UnitUUID)
-		if err := st.createSecret(ctx, tx, version, uri, secret, revisionUUID, checkExists); err != nil {
-			return errors.Annotatef(err, "inserting secret records for secret %q", uri)
-		}
-
-		if err := st.upsertSecretUnitOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "inserting unit secret record for secret %q", uri)
-		}
-
-		if err := st.grantSecretOwnerManage(ctx, tx, uri, dbSecretOwner.UnitUUID, domainsecret.SubjectUnit); err != nil {
-			return errors.Annotatef(err, "granting owner manage access for secret %q", uri)
-		}
-		return nil
+	err = domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, checkExistsStmt, input).Get(&count)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
-}
-
-// UpdateSecret creates a secret with the specified parameters, returning an
-// errorsatisfying [secreterrors.SecretNotFound] if the secret does not exist.
-// It also returns an error satisfying [secreterrors.SecretLabelAlreadyExists]
-// if the secret owner already has a secret with the same label.
-func (st State) UpdateSecret(ctx context.Context, uri *coresecrets.URI, secret domainsecret.UpsertSecretParams) error {
-	if !secret.HasUpdate() {
-		return errors.New("must specify a new value or metadata to update a secret")
-	}
-
-	db, err := st.DB()
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Errorf("checking if secret owned by application %q with label %q exists: %w", appUUID, label, err)
 	}
-
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if err := st.updateSecret(ctx, tx, uri, secret); err != nil {
-			return errors.Annotatef(err, "updating secret records for secret %q", uri)
-		}
-		return nil
-	})
-	return errors.Trace(domain.CoerceError(err))
+	return count.Num > 0, nil
 }
 
-// checkUnitSecretLabelExists returns function which checks if a
-// charm unit secret with the given label already exists.
-func (st State) checkUnitSecretLabelExists(unit_uuid string) checkExistsFunc {
-	return func(ctx context.Context, tx *sqlair.TX, label string) error {
-		if label == "" {
-			return nil
-		}
+// CheckUnitSecretLabelExists checks if a charm unit secret with the given label already exists.
+func (st State) CheckUnitSecretLabelExists(ctx domain.AtomicContext, unitUUID coreunit.UUID, label string) (bool, error) {
+	if label == "" {
+		return false, nil
+	}
 
-		// TODO(secrets) - we check using 2 queries, but should do in DDL
-		checkLabelExistsSQL := `
-SELECT secret_id AS &secretUnitOwner.secret_id
+	input := secretUnitOwner{Label: label, UnitUUID: unitUUID.String()}
+	count := count{}
+	// TODO(secrets) - we check using 2 queries, but should do in DDL
+	checkLabelExistsSQL := `
+SELECT COUNT(*) AS &count.num
 FROM (
     SELECT secret_id
     FROM   secret_application_owner sao
@@ -364,39 +205,194 @@ FROM (
     AND peer.uuid != u.uuid
 )`
 
-		checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, secretUnitOwner{})
-		if err != nil {
-			return errors.Trace(err)
-		}
-		dbSecretOwner := secretUnitOwner{Label: label, UnitUUID: unit_uuid}
-		err = tx.Query(ctx, checkExistsStmt, dbSecretOwner).Get(&dbSecretOwner)
-		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Trace(domain.CoerceError(err))
-		}
-		if err == nil {
-			return fmt.Errorf(
-				"secret with label %q already exists%w", label, errors.Hide(secreterrors.SecretLabelAlreadyExists))
-		}
-		return nil
+	checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, input, count)
+	if err != nil {
+		return false, errors.Capture(err)
 	}
+
+	err = domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, checkExistsStmt, input).Get(&count)
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return false, errors.Errorf(
+			"checking if secret owned by unit %q with label %q exists: %w", unitUUID, label, err)
+
+	}
+	return count.Num > 0, nil
+
 }
 
-type checkExistsFunc = func(ctx context.Context, tx *sqlair.TX, label string) error
+// CheckUserSecretLabelExists checks if a user secret with the given label already exists.
+func (st State) CheckUserSecretLabelExists(ctx domain.AtomicContext, label string) (bool, error) {
+	if label == "" {
+		return false, nil
+	}
+	input := secretOwner{Label: label}
+	count := count{}
+	checkLabelExistsSQL := `
+SELECT COUNT(*) AS &count.num
+FROM   secret_model_owner
+WHERE  label = $secretOwner.label`
+
+	checkExistsStmt, err := st.Prepare(checkLabelExistsSQL, input, count)
+	if err != nil {
+		return false, errors.Capture(err)
+	}
+	err = domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, checkExistsStmt, input).Get(&count)
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return false, errors.Errorf("checking if user secret with label %q exists: %w", label, err)
+	}
+	return count.Num > 0, nil
+}
+
+// CreateUserSecret creates a user secret, returning an error satisfying
+// [secreterrors.SecretAlreadyExists] if a user secret with the same
+// label already exists.
+func (st State) CreateUserSecret(
+	ctx domain.AtomicContext, version int, uri *coresecrets.URI, secret domainsecret.UpsertSecretParams,
+) error {
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		if err := st.createSecret(ctx, tx, version, uri, secret); err != nil {
+			return errors.Errorf("inserting secret records for secret %q: %w", uri, err)
+		}
+
+		label := ""
+		if secret.Label != nil {
+			label = *secret.Label
+		}
+		dbSecretOwner := secretModelOwner{SecretID: uri.ID, Label: label}
+		if err := st.upsertSecretModelOwner(ctx, tx, dbSecretOwner); err != nil {
+			return errors.Errorf("inserting user secret record for secret %q: %w", uri, err)
+		}
+
+		modelUUID, err := st.getModelUUID(ctx, tx)
+		if err != nil {
+			return errors.Errorf("cannot get current model UUID for secret %q: %w", uri, err)
+		}
+
+		if err := st.grantSecretOwnerManage(ctx, tx, uri, modelUUID.String(), domainsecret.SubjectModel); err != nil {
+			return errors.Errorf("granting owner manage access for secret %q: %w", uri, err)
+		}
+		return nil
+	})
+	return errors.Capture(err)
+}
+
+// CreateCharmApplicationSecret creates a secret onwed by the specified
+// application, returning an error satisfying [secreterrors.SecretAlreadyExists]
+// if a secretowned by the same application with the same label already exists.
+// It also returns an error satisfying [applicationerrors.ApplicationNotFound]
+// ifthe application does not exist.
+func (st State) CreateCharmApplicationSecret(
+	ctx domain.AtomicContext, version int, uri *coresecrets.URI, appUUID coreapplication.UUID, secret domainsecret.UpsertSecretParams,
+) error {
+	if secret.AutoPrune != nil && *secret.AutoPrune {
+		return secreterrors.AutoPruneNotSupported
+	}
+
+	label := ""
+	if secret.Label != nil {
+		label = *secret.Label
+	}
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		dbSecretOwner := secretApplicationOwner{
+			SecretID:        uri.ID,
+			Label:           label,
+			ApplicationUUID: appUUID.String(),
+		}
+
+		if err := st.createSecret(ctx, tx, version, uri, secret); err != nil {
+			return errors.Errorf("inserting secret records for secret %q: %w", uri, err)
+		}
+
+		if err := st.upsertSecretApplicationOwner(ctx, tx, dbSecretOwner); err != nil {
+			return errors.Errorf("inserting application secret record for secret %q: %w", uri, err)
+		}
+
+		if err := st.grantSecretOwnerManage(
+			ctx, tx, uri, dbSecretOwner.ApplicationUUID, domainsecret.SubjectApplication,
+		); err != nil {
+			return errors.Errorf("granting owner manage access for secret %q: %w", uri, err)
+		}
+		return nil
+	})
+	return errors.Capture(err)
+}
+
+// CreateCharmUnitSecret creates a secret onwed by the specified unit,
+// returning an error satisfying [secreterrors.SecretAlreadyExists] if a secret
+// owned by the same unit with the same label already exists.
+// It also returns an error satisfying [applicationerrors.UnitNotFound] if
+// the unit does not exist.
+func (st State) CreateCharmUnitSecret(
+	ctx domain.AtomicContext, version int, uri *coresecrets.URI, unitUUID coreunit.UUID, secret domainsecret.UpsertSecretParams,
+) error {
+	if secret.AutoPrune != nil && *secret.AutoPrune {
+		return secreterrors.AutoPruneNotSupported
+	}
+
+	label := ""
+	if secret.Label != nil {
+		label = *secret.Label
+	}
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		dbSecretOwner := secretUnitOwner{
+			SecretID: uri.ID,
+			Label:    label,
+			UnitUUID: unitUUID.String(),
+		}
+		if err := st.createSecret(ctx, tx, version, uri, secret); err != nil {
+			return errors.Errorf("inserting secret records for secret %q: %w", uri, err)
+		}
+
+		if err := st.upsertSecretUnitOwner(ctx, tx, dbSecretOwner); err != nil {
+			return errors.Errorf("inserting unit secret record for secret %q: %w", uri, err)
+		}
+
+		if err := st.grantSecretOwnerManage(ctx, tx, uri, dbSecretOwner.UnitUUID, domainsecret.SubjectUnit); err != nil {
+			return errors.Errorf("granting owner manage access for secret %q: %w", uri, err)
+		}
+		return nil
+	})
+	return errors.Capture(err)
+}
+
+// UpdateSecret creates a secret with the specified parameters, returning an
+// error satisfying [secreterrors.SecretNotFound] if the secret does not exist.
+// It also returns an error satisfying [secreterrors.SecretLabelAlreadyExists]
+// if the secret owner already has a secret with the same label.
+func (st State) UpdateSecret(
+	ctx domain.AtomicContext, uri *coresecrets.URI, secret domainsecret.UpsertSecretParams,
+) error {
+	if !secret.HasUpdate() {
+		return errors.New("must specify a new value or metadata to update a secret")
+	}
+
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := st.updateSecret(ctx, tx, uri, secret)
+		if err != nil {
+			return errors.Errorf("updating secret records for secret %q: %w", uri, err)
+		}
+		return nil
+	})
+	return errors.Capture(err)
+}
 
 // createSecret creates the records needed to store secret data,
 // excluding secret owner records.
 func (st State) createSecret(
 	ctx context.Context, tx *sqlair.TX, version int, uri *coresecrets.URI,
-	secret domainsecret.UpsertSecretParams, revisionUUID uuid.UUID,
-	checkExists checkExistsFunc,
+	secret domainsecret.UpsertSecretParams,
 ) error {
 	if len(secret.Data) == 0 && secret.ValueRef == nil {
-		return errors.Errorf("cannot create a secret without content")
+		return errors.Errorf("cannot create a secret %q without content", uri)
 	}
-	if secret.Label != nil && *secret.Label != "" {
-		if err := checkExists(ctx, tx, *secret.Label); err != nil {
-			return errors.Trace(err)
-		}
+	if secret.RevisionID == nil {
+		return errors.Errorf("revision ID must be provided")
 	}
 
 	insertQuery := `
@@ -405,12 +401,12 @@ VALUES ($secretID.id)`
 
 	insertStmt, err := st.Prepare(insertQuery, secretID{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, secretID{ID: uri.ID}).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	now := time.Now().UTC()
@@ -422,51 +418,97 @@ VALUES ($secretID.id)`
 	}
 	updateSecretMetadataFromParams(secret, &dbSecret)
 	if err := st.upsertSecret(ctx, tx, dbSecret); err != nil {
-		return errors.Annotatef(err, "creating user secret %q", uri)
+		return errors.Errorf("creating user secret %q: %w", uri, err)
 	}
 
 	dbRevision := &secretRevision{
-		ID:         revisionUUID.String(),
+		ID:         *secret.RevisionID,
 		SecretID:   uri.ID,
 		Revision:   1,
 		CreateTime: now,
 	}
 
 	if err := st.upsertSecretRevision(ctx, tx, dbRevision); err != nil {
-		return errors.Annotatef(err, "inserting revision for secret %q", uri)
+		return errors.Errorf("inserting revision for secret %q: %w", uri, err)
 	}
 
 	if secret.ExpireTime != nil {
 		if err := st.upsertSecretRevisionExpiry(ctx, tx, dbRevision.ID, secret.ExpireTime); err != nil {
-			return errors.Annotatef(err, "inserting revision expiry for secret %q", uri)
+			return errors.Errorf("inserting revision expiry for secret %q: %w", uri, err)
 		}
 	}
 
 	if secret.NextRotateTime != nil {
 		if err := st.upsertSecretNextRotateTime(ctx, tx, uri, *secret.NextRotateTime); err != nil {
-			return errors.Annotatef(err, "inserting next rotate time for secret %q", uri)
+			return errors.Errorf("inserting next rotate time for secret %q: %w", uri, err)
 		}
 	}
 
 	if len(secret.Data) > 0 {
 		if err := st.updateSecretContent(ctx, tx, dbRevision.ID, secret.Data); err != nil {
-			return errors.Annotatef(err, "updating content for secret %q", uri)
+			return errors.Errorf("updating content for secret %q: %w", uri, err)
 		}
 	}
 
 	if secret.ValueRef != nil {
 		if err := st.upsertSecretValueRef(ctx, tx, dbRevision.ID, secret.ValueRef); err != nil {
-			return errors.Annotatef(err, "updating backend value reference for secret %q", uri)
+			return errors.Errorf("updating backend value reference for secret %q: %w", uri, err)
 		}
 	}
 	return nil
 }
 
+// GetSecretOwner returns the owner of the secret with the given URI, returning an error satisfying
+// [secreterrors.SecretNotFound] if the secret does not exist.
+func (st State) GetSecretOwner(ctx domain.AtomicContext, uri *coresecrets.URI) (domainsecret.Owner, error) {
+	input := secretID{ID: uri.ID}
+	stmt, err := st.Prepare(`
+SELECT
+       (so.owner_kind,
+        so.owner_id) AS (&secretOwner.*)
+FROM   secret_metadata sm
+LEFT JOIN (
+    SELECT $ownerKind.model_owner_kind AS owner_kind, '' AS owner_id,  secret_id
+    FROM   secret_model_owner so
+    UNION
+    SELECT $ownerKind.application_owner_kind AS owner_kind, application.uuid AS owner_id,  secret_id
+    FROM   secret_application_owner so
+    JOIN   application
+    WHERE  application.uuid = so.application_uuid
+    UNION
+    SELECT $ownerKind.unit_owner_kind AS owner_kind, unit_uuid AS owner_id,  secret_id
+    FROM   secret_unit_owner so
+    JOIN   unit
+    WHERE  unit.uuid = so.unit_uuid
+) so ON so.secret_id = sm.secret_id
+WHERE  sm.secret_id = $secretID.id
+`, input, secretOwner{}, ownerKindParam)
+	if err != nil {
+		return domainsecret.Owner{}, errors.Capture(err)
+	}
+
+	var result []secretOwner
+	err = domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt, input, ownerKindParam).GetAll(&result)
+		if errors.Is(err, sqlair.ErrNoRows) || len(result) == 0 {
+			return errors.Errorf("secret %q not found", uri).Add(secreterrors.SecretNotFound)
+		}
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return domainsecret.Owner{}, errors.Capture(err)
+	}
+	owner := result[0]
+	return domainsecret.Owner{
+		UUID: owner.OwnerID,
+		Kind: coresecrets.OwnerKind(owner.OwnerKind),
+	}, nil
+}
+
 // createSecret creates the records needed to store secret data,
 // excluding secret owner records.
 func (st State) updateSecret(
-	ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI,
-	secret domainsecret.UpsertSecretParams,
+	ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI, secret domainsecret.UpsertSecretParams,
 ) error {
 	// We need the latest revision so far, plus owner info for the secret,
 	// so we may as well also include existing metadata as well so simplify
@@ -479,6 +521,7 @@ SELECT
        auto_prune AS &secretInfo.auto_prune,
        rp.policy AS &secretInfo.policy,
        MAX(sr.revision) AS &secretInfo.latest_revision,
+       sm.latest_revision_checksum AS &secretInfo.latest_revision_checksum,
        sr.uuid AS &secretInfo.latest_revision_uuid,
        (so.owner_kind,
         so.owner_id,
@@ -505,7 +548,7 @@ GROUP BY sm.secret_id`
 
 	existingSecretStmt, err := st.Prepare(existingSecretQuery, secretID{}, secretInfo{}, secretOwner{}, ownerKindParam)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	var (
@@ -515,46 +558,18 @@ GROUP BY sm.secret_id`
 	secretIDParam := secretID{ID: uri.ID}
 	err = tx.Query(ctx, existingSecretStmt, secretIDParam, ownerKindParam).GetAll(&dbSecrets, &dbsecretOwners)
 	if errors.Is(err, sqlair.ErrNoRows) {
-		return fmt.Errorf("secret %q not found%w", uri, errors.Hide(secreterrors.SecretNotFound))
+		return errors.Errorf("secret %q not found", uri).Add(secreterrors.SecretNotFound)
 	}
 	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	existingResult, err := dbSecrets.toSecretMetadata(dbsecretOwners)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	existing := existingResult[0]
 	latestRevisionUUID := dbSecrets[0].LatestRevisionUUID
-
-	// Check to be sure a duplicate label won't be used.
-	var checkExists checkExistsFunc
-	switch kind := existing.Owner.Kind; kind {
-	case coresecrets.ModelOwner:
-		checkExists = st.checkUserSecretLabelExists
-	case coresecrets.ApplicationOwner:
-		if secret.AutoPrune != nil && *secret.AutoPrune {
-			return secreterrors.AutoPruneNotSupported
-		}
-		// Query selects the app uuid as owner id.
-		checkExists = st.checkApplicationSecretLabelExists(existing.Owner.ID)
-	case coresecrets.UnitOwner:
-		if secret.AutoPrune != nil && *secret.AutoPrune {
-			return secreterrors.AutoPruneNotSupported
-		}
-		// Query selects the unit uuid as owner id.
-		checkExists = st.checkUnitSecretLabelExists(existing.Owner.ID)
-	default:
-		// Should never happen.
-		return errors.Errorf("unexpected secret owner kind %q", kind)
-	}
-
-	if secret.Label != nil && *secret.Label != "" {
-		if err := checkExists(ctx, tx, *secret.Label); err != nil {
-			return errors.Trace(err)
-		}
-	}
 
 	now := time.Now().UTC()
 	dbSecret := secretMetadata{
@@ -568,12 +583,12 @@ GROUP BY sm.secret_id`
 	dbSecret.UpdateTime = now
 	updateSecretMetadataFromParams(secret, &dbSecret)
 	if err := st.upsertSecret(ctx, tx, dbSecret); err != nil {
-		return errors.Annotatef(err, "updating secret %q", uri)
+		return errors.Errorf("updating secret %q: %w", uri, err)
 	}
 
 	if secret.Label != nil {
 		if err := st.upsertSecretLabel(ctx, tx, existing.URI, *secret.Label, existing.Owner); err != nil {
-			return errors.Annotatef(err, "updating label for secret %q", uri)
+			return errors.Errorf("updating label for secret %q: %w", uri, err)
 		}
 	}
 
@@ -582,30 +597,31 @@ GROUP BY sm.secret_id`
 		deleteNextRotate := "DELETE FROM secret_rotation WHERE secret_id=$secretID.id"
 		deleteNextRotateStmt, err := st.Prepare(deleteNextRotate, secretID{})
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		err = tx.Query(ctx, deleteNextRotateStmt, secretIDParam).Run()
 		if err != nil {
-			return errors.Annotatef(err, "deleting next rotate record for secret %q", uri)
+			return errors.Errorf("deleting next rotate record for secret %q: %w", uri, err)
 		}
 	}
 	if secret.NextRotateTime != nil {
 		if err := st.upsertSecretNextRotateTime(ctx, tx, uri, *secret.NextRotateTime); err != nil {
-			return errors.Annotatef(err, "updating next rotate time for secret %q", uri)
+			return errors.Errorf("updating next rotate time for secret %q: %w", uri, err)
 		}
 	}
 
 	var dbRevision *secretRevision
-	if len(secret.Data) != 0 || secret.ValueRef != nil {
-		revisionUUID, err := uuid.NewUUID()
-		if err != nil {
-			return errors.Trace(err)
+	shouldCreateNewRevision := (len(secret.Data) > 0 || secret.ValueRef != nil) && (secret.Checksum != existing.LatestRevisionChecksum ||
+		// migrated charm-owned secrets from old models.
+		secret.Checksum == "" && existing.LatestRevisionChecksum == "")
+	if shouldCreateNewRevision {
+		if secret.RevisionID == nil {
+			return errors.Errorf("revision ID must be provided")
 		}
-		latestRevisionUUID = revisionUUID.String()
-
+		latestRevisionUUID = *secret.RevisionID
 		nextRevision := existing.LatestRevision + 1
 		dbRevision = &secretRevision{
-			ID:         revisionUUID.String(),
+			ID:         *secret.RevisionID,
 			SecretID:   uri.ID,
 			Revision:   nextRevision,
 			CreateTime: now,
@@ -613,36 +629,30 @@ GROUP BY sm.secret_id`
 	}
 	if dbRevision != nil {
 		if err := st.upsertSecretRevision(ctx, tx, dbRevision); err != nil {
-			return errors.Annotatef(err, "inserting revision for secret %q", uri)
+			return errors.Errorf("inserting revision for secret %q: %w", uri, err)
 		}
 	}
 	if secret.ExpireTime != nil {
 		if err := st.upsertSecretRevisionExpiry(ctx, tx, latestRevisionUUID, secret.ExpireTime); err != nil {
-			return errors.Annotatef(err, "inserting revision expiry for secret %q", uri)
+			return errors.Errorf("inserting revision expiry for secret %q: %w", uri, err)
 		}
 
 	}
 
-	if len(secret.Data) > 0 {
+	if len(secret.Data) > 0 && shouldCreateNewRevision {
 		if err := st.updateSecretContent(ctx, tx, dbRevision.ID, secret.Data); err != nil {
-			return errors.Annotatef(err, "updating content for secret %q", uri)
+			return errors.Errorf("updating content for secret %q: %w", uri, err)
 		}
 	}
 
-	if secret.ValueRef != nil {
+	if secret.ValueRef != nil && shouldCreateNewRevision {
 		if err := st.upsertSecretValueRef(ctx, tx, dbRevision.ID, secret.ValueRef); err != nil {
-			return errors.Annotatef(err, "updating backend value reference for secret %q", uri)
+			return errors.Errorf("updating backend value reference for secret %q: %w", uri, err)
 		}
 	}
 
 	if err := st.markObsoleteRevisions(ctx, tx, uri); err != nil {
-		return errors.Annotatef(err, "marking obsolete revisions for secret %q", uri)
-	}
-
-	if dbSecret.AutoPrune {
-		if err := st.pruneUnusedRevisions(ctx, tx, uri); err != nil {
-			return errors.Annotatef(err, "deleting unused revisions for secret %q", uri)
-		}
+		return errors.Errorf("marking obsolete revisions for secret %q: %w", uri, err)
 	}
 	return nil
 }
@@ -672,7 +682,7 @@ WHERE sr.secret_id = $secretRef.secret_id
 AND (in_use.revision IS NULL OR in_use.revision = 0);
 `, secretRef{}, secretRevision{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	stmt, err := st.Prepare(`
@@ -682,7 +692,7 @@ ON CONFLICT(revision_uuid) DO UPDATE SET
     obsolete=excluded.obsolete,
     pending_delete=excluded.pending_delete`, secretRevisionObsolete{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	var revisionUUIIDs secretRevisions
@@ -692,7 +702,7 @@ ON CONFLICT(revision_uuid) DO UPDATE SET
 		return nil
 	}
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	for _, revisionUUID := range revisionUUIIDs {
@@ -704,7 +714,7 @@ ON CONFLICT(revision_uuid) DO UPDATE SET
 		}
 		err = tx.Query(ctx, stmt, obsolete).Run()
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	return nil
@@ -720,7 +730,7 @@ func (st State) upsertSecretLabel(
 			Label:    label,
 		}
 		if err := st.upsertSecretModelOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "updating model secret record for secret %q", uri)
+			return errors.Errorf("updating model secret record for secret %q: %w", uri, err)
 		}
 	case coresecrets.ApplicationOwner:
 		dbSecretOwner := secretApplicationOwner{
@@ -730,7 +740,7 @@ func (st State) upsertSecretLabel(
 			Label:           label,
 		}
 		if err := st.upsertSecretApplicationOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "updating application secret record for secret %q", uri)
+			return errors.Errorf("updating application secret record for secret %q: %w", uri, err)
 		}
 	case coresecrets.UnitOwner:
 		dbSecretOwner := secretUnitOwner{
@@ -740,42 +750,10 @@ func (st State) upsertSecretLabel(
 			Label:    label,
 		}
 		if err := st.upsertSecretUnitOwner(ctx, tx, dbSecretOwner); err != nil {
-			return errors.Annotatef(err, "updating unit secret record for secret %q", uri)
+			return errors.Errorf("updating unit secret record for secret %q: %w", uri, err)
 		}
 	}
 	return nil
-}
-
-func (st State) pruneUnusedRevisions(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI) error {
-	// TODO(secrets)
-	return nil
-	//var md *secrets.SecretMetadata
-	//if !md.AutoPrune {
-	//	return md, nil
-	//}
-	//// If the secret was updated, we need to delete the old unused secret revisions.
-	//revsToDelete, err := s.ListUnusedSecretRevisions(ctx, uri)
-	//if err != nil {
-	//	return nil, errors.Trace(err)
-	//}
-	//var revisions []int
-	//for _, rev := range revsToDelete {
-	//	if rev == md.LatestRevision {
-	//		// We don't want to delete the latest revision.
-	//		continue
-	//	}
-	//	revisions = append(revisions, rev)
-	//}
-	//if len(revisions) == 0 {
-	//	return md, nil
-	//}
-	//err = s.DeleteUserSecret(ctx, uri, revisions, func(uri *secrets.URI) error { return nil })
-	//if err != nil {
-	//	// We don't want to fail the update if we can't prune the unused secret revisions because they will be picked up later
-	//	// when the secret has any new obsolete revisions.
-	//	s.logger.Warningf("failed to prune unused secret revisions for %q: %v", uri, err)
-	//}
-	//return md, nil
 }
 
 func updateSecretMetadataFromParams(p domainsecret.UpsertSecretParams, md *secretMetadata) {
@@ -788,6 +766,7 @@ func updateSecretMetadataFromParams(p domainsecret.UpsertSecretParams, md *secre
 	if p.RotatePolicy != nil {
 		md.RotatePolicyID = int(*p.RotatePolicy)
 	}
+	md.LatestRevisionChecksum = p.Checksum
 }
 
 func (st State) upsertSecret(ctx context.Context, tx *sqlair.TX, dbSecret secretMetadata) error {
@@ -799,17 +778,18 @@ ON CONFLICT(secret_id) DO UPDATE SET
     description=excluded.description,
     rotate_policy_id=excluded.rotate_policy_id,
     auto_prune=excluded.auto_prune,
+    latest_revision_checksum=excluded.latest_revision_checksum,
     update_time=excluded.update_time
 `
 
 	insertMetadataStmt, err := st.Prepare(insertMetadataQuery, secretMetadata{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertMetadataStmt, dbSecret).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -843,12 +823,12 @@ ON CONFLICT(secret_id) DO UPDATE SET label=excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretModelOwner{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, owner).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -861,12 +841,12 @@ ON CONFLICT(secret_id, application_uuid) DO UPDATE SET label=excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretApplicationOwner{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, owner).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -879,12 +859,12 @@ ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET label=excluded.label`
 
 	insertStmt, err := st.Prepare(insertQuery, secretUnitOwner{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, owner).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -901,12 +881,12 @@ ON CONFLICT(secret_id) DO UPDATE SET
 	rotate := secretRotate{SecretID: uri.ID, NextRotateTime: next.UTC()}
 	insertStmt, err := st.Prepare(insertQuery, rotate)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, rotate).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -920,12 +900,12 @@ VALUES ($secretRevision.*)`
 
 	insertStmt, err := st.Prepare(insertQuery, secretRevision{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertStmt, dbRevision).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	return nil
@@ -947,12 +927,12 @@ ON CONFLICT(revision_uuid) DO UPDATE SET
 	expire := secretRevisionExpire{RevisionUUID: revisionUUID, ExpireTime: expireTime.UTC()}
 	insertExpireTimeStmt, err := st.Prepare(insertExpireTimeQuery, expire)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = tx.Query(ctx, insertExpireTimeStmt, expire).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	return nil
@@ -961,25 +941,25 @@ ON CONFLICT(revision_uuid) DO UPDATE SET
 func (st State) upsertSecretValueRef(
 	ctx context.Context, tx *sqlair.TX, revisionUUID string, valueRef *coresecrets.ValueRef,
 ) error {
-	insertQuery := `
+	upsertQuery := `
 INSERT INTO secret_value_ref (*)
 VALUES ($secretValueRef.*)
 ON CONFLICT(revision_uuid) DO UPDATE SET
     backend_uuid=excluded.backend_uuid,
     revision_id=excluded.revision_id`
 
-	insertStmt, err := st.Prepare(insertQuery, secretValueRef{})
+	upsertStmt, err := st.Prepare(upsertQuery, secretValueRef{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
-	err = tx.Query(ctx, insertStmt, secretValueRef{
+	err = tx.Query(ctx, upsertStmt, secretValueRef{
 		RevisionUUID: revisionUUID,
 		BackendUUID:  valueRef.BackendID,
 		RevisionID:   valueRef.RevisionID,
 	}).Run()
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
@@ -997,7 +977,7 @@ AND    name NOT IN ($keysToKeep[:])`
 
 	deleteStmt, err := st.Prepare(deleteQuery, revisionUUID{}, keysToKeep{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	insertQuery := `
@@ -1013,7 +993,7 @@ ON CONFLICT(revision_uuid, name) DO UPDATE SET
 
 	insertStmt, err := st.Prepare(insertQuery, secretContent{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	var keys keysToKeep
@@ -1021,7 +1001,7 @@ ON CONFLICT(revision_uuid, name) DO UPDATE SET
 		keys = append(keys, k)
 	}
 	if err := tx.Query(ctx, deleteStmt, revisionUUID{UUID: revUUID}, keys).Run(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	for key, value := range content {
 		if err := tx.Query(ctx, insertStmt, secretContent{
@@ -1029,10 +1009,147 @@ ON CONFLICT(revision_uuid, name) DO UPDATE SET
 			Name:         key,
 			Content:      value,
 		}).Run(); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	return nil
+}
+
+// GetApplicationUUIDsForNames return the application UUIDs for the specified application names.
+// Only UUIDs for names that exist are included.
+func (st State) GetApplicationUUIDsForNames(ctx context.Context, names domainsecret.ApplicationOwners) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	queryStmt, err := st.Prepare(`
+SELECT uuid AS &application.uuid
+FROM   application a
+WHERE  a.name IN ($ApplicationOwners[:])
+`, names, application{})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var apps []application
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, queryStmt, names).GetAll(&apps)
+		if err == nil || errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		}
+		return errors.Errorf("querying application UUIDs for %q: %w", names, err)
+	}); err != nil {
+		return nil, errors.Capture(err)
+	}
+	var result []string
+	for _, app := range apps {
+		result = append(result, app.UUID.String())
+	}
+	return result, nil
+}
+
+// GetUnitUUIDsForNames return the unit UUIDs for the specified unit names.
+// Only UUIDs for names that exist are included.
+func (st State) GetUnitUUIDsForNames(ctx context.Context, names domainsecret.UnitOwners) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	queryStmt, err := st.Prepare(`
+SELECT uuid AS &unit.uuid
+FROM   unit u
+WHERE  u.name IN ($UnitOwners[:])
+`, names, unit{})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var units []unit
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, queryStmt, names).GetAll(&units)
+		if err == nil || errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		}
+		return errors.Errorf("querying unit UUIDs for %q: %w", names, err)
+	}); err != nil {
+		return nil, errors.Capture(err)
+	}
+	var result []string
+	for _, u := range units {
+		result = append(result, u.UUID.String())
+	}
+	return result, nil
+}
+
+// GetOwnedSecretIDs returns a slice of the secret ID owned by the specified apps and/or units.
+func (st State) GetOwnedSecretIDs(
+	ctx context.Context, appOwnerUUIDs []string, unitOwnerUUIDs []string,
+) ([]string, error) {
+	if len(appOwnerUUIDs) == 0 && len(unitOwnerUUIDs) == 0 {
+		return nil, errors.New("must supply at least one app owner or unit owner")
+	}
+
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var dbSecrets secretIDs
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		dbSecrets, err = st.getSecretsForOwners(ctx, tx, appOwnerUUIDs, unitOwnerUUIDs)
+		return errors.Capture(err)
+	}); err != nil {
+		return nil, errors.Errorf("getting owned secret IDs: %w", err)
+	}
+	var result []string
+	for _, secret := range dbSecrets {
+		result = append(result, secret.ID)
+	}
+	return result, nil
+}
+
+func (st State) getSecretsForOwners(
+	ctx context.Context, tx *sqlair.TX, appOwnerUUIDs domainsecret.ApplicationOwners, unitOwnerUUIDs domainsecret.UnitOwners,
+) (secretIDs, error) {
+	if len(appOwnerUUIDs) == 0 && len(unitOwnerUUIDs) == 0 {
+		return nil, errors.New("must supply at least one app owner or unit owner")
+	}
+
+	query := `
+SELECT sm.secret_id AS &secretID.id
+FROM   secret_metadata sm
+       LEFT JOIN secret_application_owner sao ON sao.secret_id = sm.secret_id
+       LEFT JOIN secret_unit_owner suo ON suo.secret_id = sm.secret_id
+WHERE  sao.application_uuid IN ($ApplicationOwners[:]) OR suo.unit_uuid IN ($UnitOwners[:])
+`
+
+	queryTypes := []any{
+		secretID{},
+		domainsecret.ApplicationOwners{},
+		domainsecret.UnitOwners{},
+	}
+
+	queryStmt, err := st.Prepare(query, queryTypes...)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var dbSecrets secretIDs
+	err = tx.Query(ctx, queryStmt, appOwnerUUIDs, unitOwnerUUIDs).GetAll(&dbSecrets)
+	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
+		return nil, errors.Capture(err)
+	}
+	return dbSecrets, nil
 }
 
 // ListSecrets returns the secrets matching the specified criteria.
@@ -1042,15 +1159,15 @@ func (st State) ListSecrets(ctx context.Context, uri *coresecrets.URI,
 	// TODO(secrets) - use all filter terms
 	labels domainsecret.Labels,
 ) ([]*coresecrets.SecretMetadata, [][]*coresecrets.SecretRevisionMetadata, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.Capture(err)
 	}
 
 	var revisionNotFoundErr error
 	if revision != nil {
-		revisionNotFoundErr = fmt.Errorf(
-			"secret revision %d for %s not found%w", *revision, uri, errors.Hide(secreterrors.SecretRevisionNotFound))
+		revisionNotFoundErr = errors.Errorf(
+			"secret revision %d for %s not found", *revision, uri).Add(secreterrors.SecretRevisionNotFound)
 	}
 
 	var (
@@ -1061,13 +1178,13 @@ func (st State) ListSecrets(ctx context.Context, uri *coresecrets.URI,
 		var err error
 		secrets, err = st.listSecretsAnyOwner(ctx, tx, uri)
 		if err != nil {
-			return errors.Annotate(err, "querying secrets")
+			return errors.Errorf("querying secrets: %w", err)
 		}
 		revisionResult = make([][]*coresecrets.SecretRevisionMetadata, len(secrets))
 		for i, secret := range secrets {
 			secretRevisions, err := st.listSecretRevisions(ctx, tx, secret.URI, revision)
 			if err != nil {
-				return errors.Annotatef(err, "querying secret revisions for %q", secret.URI.ID)
+				return errors.Errorf("querying secret revisions for %q: %w", secret.URI.ID, err)
 			}
 			revisionResult[i] = secretRevisions
 			if revision != nil && len(secretRevisions) == 0 {
@@ -1076,7 +1193,7 @@ func (st State) ListSecrets(ctx context.Context, uri *coresecrets.URI,
 		}
 		return nil
 	}); err != nil {
-		return nil, nil, errors.Trace(domain.CoerceError(err))
+		return nil, nil, errors.Capture(err)
 	}
 	if revision != nil && len(secrets) == 0 {
 		return nil, nil, revisionNotFoundErr
@@ -1088,31 +1205,120 @@ func (st State) ListSecrets(ctx context.Context, uri *coresecrets.URI,
 // GetSecret returns the secret with the given URI, returning an error satisfying [secreterrors.SecretNotFound]
 // if the secret does not exist.
 func (st State) GetSecret(ctx context.Context, uri *coresecrets.URI) (*coresecrets.SecretMetadata, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var secrets []*coresecrets.SecretMetadata
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		var err error
 		secrets, err = st.listSecretsAnyOwner(ctx, tx, uri)
-		return errors.Annotatef(err, "querying secret for %q", uri.ID)
+		if err != nil {
+			return errors.Errorf("querying secret for %q: %w", uri.ID, err)
+		}
+		return nil
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	if len(secrets) == 0 {
-		return nil, fmt.Errorf("secret %q not found%w", uri, errors.Hide(secreterrors.SecretNotFound))
+		return nil, errors.Errorf("secret %q not found", uri).Add(secreterrors.SecretNotFound)
 	}
 	return secrets[0], nil
 }
 
+// GetLatestRevision returns the latest revision number for the specified secret,
+// returning an error satisfying [secreterrors.SecretNotFound] if the secret does not exist.
+func (st State) GetLatestRevision(ctx context.Context, uri *coresecrets.URI) (int, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return 0, errors.Capture(err)
+	}
+	query := `
+SELECT MAX(sr.revision) AS &secretInfo.latest_revision
+FROM   secret_revision sr
+WHERE  sr.secret_id = $secretInfo.secret_id
+`
+	info := secretInfo{
+		ID: uri.ID,
+	}
+	stmt, err := st.Prepare(query, info)
+	if err != nil {
+		return 0, errors.Capture(err)
+	}
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt, info).Get(&info)
+		if err != nil {
+			return errors.Capture(err)
+		}
+		if info.LatestRevision == 0 {
+			return errors.Errorf("secret %q not found", uri).Add(secreterrors.SecretNotFound)
+		}
+		return nil
+	}); err != nil {
+		return 0, errors.Capture(err)
+	}
+	return info.LatestRevision, nil
+}
+
+// GetLatestRevisions returns the latest secret revisions for the specified URIs, keyed on secret ID.
+// An error satisfying [secreterrors.SecretNotFound] is return if any of the secreta do not exist.
+func (st State) GetLatestRevisions(ctx context.Context, uris []*coresecrets.URI) (map[string]int, error) {
+	if len(uris) == 0 {
+		return nil, nil
+	}
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	type secretIDStr []string
+	uriStr := make(secretIDStr, len(uris))
+	for i, uri := range uris {
+		uriStr[i] = uri.ID
+	}
+
+	stmt, err := st.Prepare(`
+SELECT   sr.secret_id AS &lastestSecretRevision.secret_id,
+         MAX(sr.revision) AS &lastestSecretRevision.latest_revision
+FROM     secret_revision sr
+WHERE    sr.secret_id IN ($secretIDStr[:])
+GROUP BY sr.secret_id
+`, uriStr, lastestSecretRevision{})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var latestRevisions []lastestSecretRevision
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt, uriStr).GetAll(&latestRevisions)
+		if err == nil || errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		}
+		return errors.Capture(err)
+	}); err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	result := make(map[string]int)
+	for _, rev := range latestRevisions {
+		result[rev.SecretID] = rev.LatestRevision
+	}
+	for _, want := range uris {
+		if _, ok := result[want.ID]; !ok {
+			return nil, errors.Errorf("secret %q not found", want.ID).Add(secreterrors.SecretNotFound)
+		}
+	}
+
+	return result, nil
+}
+
 // GetRotationExpiryInfo returns the rotation expiry information for the specified secret.
 func (st State) GetRotationExpiryInfo(ctx context.Context, uri *coresecrets.URI) (*domainsecret.RotationExpiryInfo, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	input := secretID{ID: uri.ID}
 	result := secretInfo{}
@@ -1130,17 +1336,17 @@ WHERE    sm.secret_id = $secretID.id
 GROUP BY sr.secret_id`, input, result)
 
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, stmt, input).Get(&result)
 		if errors.Is(err, sqlair.ErrNoRows) {
-			return fmt.Errorf("secret %q not found%w", uri, errors.Hide(secreterrors.SecretNotFound))
+			return errors.Errorf("secret %q not found", uri).Add(secreterrors.SecretNotFound)
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	info := &domainsecret.RotationExpiryInfo{
 		RotatePolicy:   coresecrets.RotatePolicy(result.RotatePolicy),
@@ -1157,9 +1363,9 @@ GROUP BY sr.secret_id`, input, result)
 
 // GetRotatePolicy returns the rotate policy for the specified secret.
 func (st State) GetRotatePolicy(ctx context.Context, uri *coresecrets.URI) (coresecrets.RotatePolicy, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return coresecrets.RotateNever, errors.Trace(err)
+		return coresecrets.RotateNever, errors.Capture(err)
 	}
 	stmt, err := st.Prepare(`
 SELECT srp.policy AS &secretInfo.policy
@@ -1167,18 +1373,18 @@ FROM   secret_metadata sm
        JOIN secret_rotate_policy srp ON srp.id = sm.rotate_policy_id
 WHERE  sm.secret_id = $secretID.id`, secretID{}, secretInfo{})
 	if err != nil {
-		return coresecrets.RotateNever, errors.Trace(err)
+		return coresecrets.RotateNever, errors.Capture(err)
 	}
 
 	var info secretInfo
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, stmt, secretID{ID: uri.ID}).Get(&info)
 		if errors.Is(err, sqlair.ErrNoRows) {
-			return fmt.Errorf("rotate policy for %q not found%w", uri, errors.Hide(secreterrors.SecretNotFound))
+			return errors.Errorf("rotate policy for %q not found", uri).Add(secreterrors.SecretNotFound)
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}); err != nil {
-		return coresecrets.RotateNever, errors.Trace(domain.CoerceError(err))
+		return coresecrets.RotateNever, errors.Capture(err)
 	}
 	return coresecrets.RotatePolicy(info.RotatePolicy), nil
 }
@@ -1192,6 +1398,7 @@ SELECT sm.secret_id AS &secretInfo.secret_id,
        sm.version AS &secretInfo.version,
        sm.description AS &secretInfo.description,
        sm.auto_prune AS &secretInfo.auto_prune,
+       sm.latest_revision_checksum AS &secretInfo.latest_revision_checksum,
        sm.create_time AS &secretInfo.create_time,
        sm.update_time AS &secretInfo.update_time,
        rp.policy AS &secretInfo.policy,
@@ -1235,8 +1442,8 @@ FROM   secret_metadata sm
 	query += "\nGROUP BY sm.secret_id"
 	queryStmt, err := st.Prepare(query, queryTypes...)
 	if err != nil {
-		st.logger.Tracef("failed to prepare err: %v, query: \n%s", err, query)
-		return nil, errors.Trace(err)
+		st.logger.Tracef(ctx, "failed to prepare err: %v, query: \n%s", err, query)
+		return nil, errors.Capture(err)
 	}
 
 	var (
@@ -1245,7 +1452,7 @@ FROM   secret_metadata sm
 	)
 	err = tx.Query(ctx, queryStmt, queryParams...).GetAll(&dbSecrets, &dbsecretOwners)
 	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return dbSecrets.toSecretMetadata(dbsecretOwners)
 }
@@ -1255,9 +1462,9 @@ FROM   secret_metadata sm
 func (st State) ListCharmSecrets(ctx context.Context,
 	appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners,
 ) ([]*coresecrets.SecretMetadata, [][]*coresecrets.SecretRevisionMetadata, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.Capture(err)
 	}
 
 	var (
@@ -1268,19 +1475,19 @@ func (st State) ListCharmSecrets(ctx context.Context,
 		var err error
 		secrets, err = st.listCharmSecrets(ctx, tx, appOwners, unitOwners)
 		if err != nil {
-			return errors.Annotate(err, "querying charm secrets")
+			return errors.Errorf("querying charm secrets: %w", err)
 		}
 		revisionResult = make([][]*coresecrets.SecretRevisionMetadata, len(secrets))
 		for i, secret := range secrets {
 			secretRevisions, err := st.listSecretRevisions(ctx, tx, secret.URI, nil)
 			if err != nil {
-				return errors.Annotatef(err, "querying secret revisions for %q", secret.URI.ID)
+				return errors.Errorf("querying secret revisions for %q: %w", secret.URI.ID, err)
 			}
 			revisionResult[i] = secretRevisions
 		}
 		return nil
 	}); err != nil {
-		return nil, nil, errors.Trace(domain.CoerceError(err))
+		return nil, nil, errors.Capture(err)
 	}
 
 	return secrets, revisionResult, nil
@@ -1328,6 +1535,7 @@ SELECT sm.secret_id AS &secretInfo.secret_id,
        rp.policy AS &secretInfo.policy,
        sro.next_rotation_time AS &secretInfo.next_rotation_time,
        sre.expire_time AS &secretInfo.latest_expire_time,
+       sm.latest_revision_checksum AS &secretInfo.latest_revision_checksum,
        sm.create_time AS &secretInfo.create_time,
        sm.update_time AS &secretInfo.update_time,
        MAX(sr.revision) AS &secretInfo.latest_revision,
@@ -1369,7 +1577,7 @@ FROM   secret_metadata sm
 	queryParts = append(queryParts, ownerJoin, `GROUP BY sm.secret_id`)
 	queryStmt, err := st.Prepare(strings.Join(queryParts, "\n"), queryTypes...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var (
@@ -1378,16 +1586,16 @@ FROM   secret_metadata sm
 	)
 	err = tx.Query(ctx, queryStmt, queryParams...).GetAll(&dbSecrets, &dbsecretOwners)
 	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return dbSecrets.toSecretMetadata(dbsecretOwners)
 }
 
 // ListUserSecretsToDrain returns secret drain revision info for any user secrets.
 func (st State) ListUserSecretsToDrain(ctx context.Context) ([]*coresecrets.SecretMetadataForDrain, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	query := `
@@ -1395,14 +1603,14 @@ SELECT sm.secret_id AS &secretID.id,
        svr.backend_uuid AS &secretExternalRevision.backend_uuid,
        svr.revision_id AS &secretExternalRevision.revision_id,
        rev.revision AS &secretExternalRevision.revision
-FROM   secret_metadata sm
-       JOIN secret_revision rev ON rev.secret_id = sm.secret_id
-       LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
-       JOIN secret_model_owner mso ON mso.secret_id = sm.secret_id`
+FROM      secret_metadata sm
+JOIN      secret_revision rev ON rev.secret_id = sm.secret_id
+LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
+JOIN      secret_model_owner mso ON mso.secret_id = sm.secret_id`
 
 	queryStmt, err := st.Prepare(query, secretID{}, secretExternalRevision{})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var (
@@ -1413,11 +1621,11 @@ FROM   secret_metadata sm
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err = tx.Query(ctx, queryStmt).GetAll(&dbSecrets, &dbsecretRevs)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		return nil
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	return dbSecrets.toSecretMetadataForDrain(dbsecretRevs)
@@ -1433,9 +1641,9 @@ func (st State) ListCharmSecretsToDrain(
 		return nil, errors.New("must supply at least one app owner or unit owner")
 	}
 
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	appOwnedSelect := `
@@ -1479,9 +1687,9 @@ SELECT sm.secret_id AS &secretID.id,
        svr.backend_uuid AS &secretExternalRevision.backend_uuid,
        svr.revision_id AS &secretExternalRevision.revision_id,
        rev.revision AS &secretExternalRevision.revision
-FROM   secret_metadata sm
-       JOIN secret_revision rev ON rev.secret_id = sm.secret_id
-       LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid`[1:]
+FROM      secret_metadata sm
+JOIN      secret_revision rev ON rev.secret_id = sm.secret_id
+LEFT JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid`[1:]
 
 	queryParts = append(queryParts, query)
 
@@ -1495,7 +1703,7 @@ JOIN (
 
 	queryStmt, err := st.Prepare("WITH "+strings.Join(queryParts, "\n"), append(queryTypes, queryParams...)...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var (
@@ -1506,11 +1714,11 @@ JOIN (
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err = tx.Query(ctx, queryStmt, queryParams...).GetAll(&dbSecrets, &dbsecretRevs)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		return nil
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	return dbSecrets.toSecretMetadataForDrain(dbsecretRevs)
@@ -1520,12 +1728,12 @@ JOIN (
 // or an error satisfying [secreterrors.SecretNotFound] if there's no corresponding URI.
 func (st State) GetUserSecretURIByLabel(ctx context.Context, label string) (*coresecrets.URI, error) {
 	if label == "" {
-		return nil, errors.NotValidf("empty secret label")
+		return nil, errors.Errorf("empty secret label %w", coreerrors.NotValid)
 	}
 
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	query := `
@@ -1538,22 +1746,22 @@ WHERE  mso.label = $M.label
 
 	queryStmt, err := st.Prepare(query, secretInfo{}, arg)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var dbSecrets secretInfos
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, queryStmt, arg).GetAll(&dbSecrets)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "querying secret URI for label %q", label)
+			return errors.Errorf("querying secret URI for label %q: %w", label, err)
 		}
 		return nil
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	if len(dbSecrets) == 0 {
-		return nil, fmt.Errorf("secret with label %q not found%w", label, errors.Hide(secreterrors.SecretNotFound))
+		return nil, errors.Errorf("secret with label %q not found", label).Add(secreterrors.SecretNotFound)
 	}
 	return coresecrets.ParseURI(dbSecrets[0].ID)
 }
@@ -1561,16 +1769,16 @@ WHERE  mso.label = $M.label
 // GetURIByConsumerLabel looks up the secret URI using the label previously
 // registered by the specified unit,returning an error satisfying
 // [secreterrors.SecretNotFound] if there's no corresponding URI.
-// If the unit does not exist, an error satisfying [uniterrors.NotFound]
+// If the unit does not exist, an error satisfying [applicationerrors.UnitNotFound]
 // is returned.
-func (st State) GetURIByConsumerLabel(ctx context.Context, label string, unitName string) (*coresecrets.URI, error) {
+func (st State) GetURIByConsumerLabel(ctx context.Context, label string, unitName coreunit.Name) (*coresecrets.URI, error) {
 	if label == "" {
-		return nil, errors.NotValidf("empty secret label")
+		return nil, errors.Errorf("empty secret label %w", coreerrors.NotValid)
 	}
 
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	query := `
@@ -1583,99 +1791,35 @@ AND    suc.unit_uuid = $secretUnitConsumer.unit_uuid
 
 	queryStmt, err := st.Prepare(query, secretUnitConsumer{})
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	selectUnitUUID := `select &unit.uuid FROM unit WHERE name=$unit.name`
-	selectUnitUUIDStmt, err := st.Prepare(selectUnitUUID, unit{})
-	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var dbConsumers []secretUnitConsumer
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		result := unit{}
-		err = tx.Query(ctx, selectUnitUUIDStmt, unit{Name: unitName}).Get(&result)
+		suc := secretUnitConsumer{Label: label}
+		suc.UnitUUID, err = st.getUnitUUID(ctx, tx, unitName)
 		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return fmt.Errorf("unit %q not found%w", unitName, errors.Hide(uniterrors.NotFound))
-			} else {
-				return errors.Annotatef(err, "looking up unit UUID for %q", unitName)
-			}
+			return errors.Capture(err)
 		}
 
-		suc := secretUnitConsumer{UnitUUID: result.UUID, Label: label}
 		err := tx.Query(ctx, queryStmt, suc).GetAll(&dbConsumers)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "querying secret URI for label %q", label)
+			return errors.Errorf("querying secret URI for label %q: %w", label, err)
 		}
 		return nil
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	if len(dbConsumers) == 0 {
-		return nil, fmt.Errorf(
-			"secret with label %q for unit %q not found%w", label, unitName, errors.Hide(secreterrors.SecretNotFound))
+		return nil, errors.Errorf(
+			"secret with label %q for unit %q not found", label, unitName).Add(secreterrors.SecretNotFound)
 	}
 	uri, err := coresecrets.ParseURI(dbConsumers[0].SecretID)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return uri.WithSource(dbConsumers[0].SourceModelUUID), nil
-}
-
-// ListExternalSecretRevisions returns the secret revisions which are stored
-// externally ina secret backend, returning an error satisfying
-// [secreterrors.SecretNotFound] if the secret does not exist.
-func (st State) ListExternalSecretRevisions(
-	ctx context.Context, uri *coresecrets.URI, revs ...int) ([]coresecrets.ValueRef, error,
-) {
-	db, err := st.DB()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	selectRevisionParams := []any{secretID{
-		ID: uri.ID,
-	}}
-
-	var revFilter string
-	if len(revs) > 0 {
-		revFilter = "\nAND revision IN ($revisions[:])"
-		selectRevisionParams = append(selectRevisionParams, revisions(revs))
-	}
-
-	query := fmt.Sprintf(`
-SELECT (svr.*) AS (&secretValueRef.*)
-FROM   secret_revision sr
-JOIN   secret_value_ref svr ON svr.revision_uuid = sr.uuid
-WHERE  secret_id = $secretID.id%s
-`, revFilter)
-
-	queryStmt, err := st.Prepare(query, append(selectRevisionParams, secretValueRef{})...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	var dbSecretRevisions secretValueRefs
-	if err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
-		} else if !isLocal {
-			// Should never happen.
-			return secreterrors.SecretIsNotLocal
-		}
-
-		err = tx.Query(ctx, queryStmt, selectRevisionParams...).GetAll(&dbSecretRevisions)
-		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "retrieving extrnal secret revisions for %q", uri)
-		}
-		return nil
-	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
-	}
-	return dbSecretRevisions.toValueRefs(), nil
 }
 
 func (st State) listSecretRevisions(
@@ -1686,7 +1830,6 @@ SELECT (sr.*) AS (&secretRevision.*),
        (svr.*) AS (&secretValueRef.*),
        (sre.*) AS (&secretRevisionExpire.*)
 FROM   secret_revision sr
-       LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
        LEFT JOIN secret_revision_expire sre ON sre.revision_uuid = sr.uuid
        LEFT JOIN secret_value_ref svr ON svr.revision_uuid = sr.uuid
 WHERE  secret_id = $secretRevision.secret_id
@@ -1697,9 +1840,9 @@ WHERE  secret_id = $secretRevision.secret_id
 		want.Revision = *revision
 	}
 
-	queryStmt, err := st.Prepare(query, secretRevision{}, secretRevisionObsolete{}, secretRevisionExpire{}, secretValueRef{})
+	queryStmt, err := st.Prepare(query, secretRevision{}, secretRevisionExpire{}, secretValueRef{})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var (
@@ -1709,7 +1852,7 @@ WHERE  secret_id = $secretRevision.secret_id
 	)
 	err = tx.Query(ctx, queryStmt, want).GetAll(&dbSecretRevisions, &dbSecretValueRefs, &dbSecretRevisionsExpire)
 	if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-		return nil, errors.Annotatef(err, "retrieving secret revisions for %q", uri)
+		return nil, errors.Errorf("retrieving secret revisions for %q: %w", uri, err)
 	}
 
 	return dbSecretRevisions.toSecretRevisions(dbSecretValueRefs, dbSecretRevisionsExpire)
@@ -1721,34 +1864,34 @@ WHERE  secret_id = $secretRevision.secret_id
 func (st State) GetSecretValue(
 	ctx context.Context, uri *coresecrets.URI, revision int) (coresecrets.SecretData, *coresecrets.ValueRef, error,
 ) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.Capture(err)
 	}
 
 	// We look for either content or a value reference, which ever is present.
 	contentQuery := `
 SELECT (*) AS (&secretContent.*)
 FROM   secret_content sc
-       JOIN secret_revision rev ON sc.revision_uuid = rev.uuid
-WHERE  rev.secret_id = $secretRevision.secret_id 
+JOIN   secret_revision rev ON sc.revision_uuid = rev.uuid
+WHERE  rev.secret_id = $secretRevision.secret_id
 AND    rev.revision = $secretRevision.revision`
 
 	contentQueryStmt, err := st.Prepare(contentQuery, secretContent{}, secretRevision{})
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.Capture(err)
 	}
 
 	valueRefQuery := `
 SELECT (*) AS (&secretValueRef.*)
 FROM   secret_value_ref val
-       JOIN secret_revision rev ON val.revision_uuid = rev.uuid
+JOIN   secret_revision rev ON val.revision_uuid = rev.uuid
 WHERE  rev.secret_id = $secretRevision.secret_id
 AND    rev.revision = $secretRevision.revision`
 
 	valueRefQueryStmt, err := st.Prepare(valueRefQuery, secretValueRef{}, secretRevision{})
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.Capture(err)
 	}
 
 	want := secretRevision{SecretID: uri.ID, Revision: revision}
@@ -1760,7 +1903,7 @@ AND    rev.revision = $secretRevision.revision`
 	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, contentQueryStmt, want).GetAll(&dbSecretValues)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "retrieving secret value for %q revision %d", uri, revision)
+			return errors.Errorf("retrieving secret value for %q revision %d: %w", uri, revision, err)
 		}
 		// Do we have content from the db?
 		if len(dbSecretValues) > 0 {
@@ -1772,9 +1915,12 @@ AND    rev.revision = $secretRevision.revision`
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return nil
 		}
-		return errors.Annotatef(err, "retrieving secret value ref for %q revision %d", uri, revision)
+		if err != nil {
+			return errors.Errorf("retrieving secret value ref for %q revision %d: %w", uri, revision, err)
+		}
+		return nil
 	}); err != nil {
-		return nil, nil, errors.Annotate(err, "querying secret value")
+		return nil, nil, errors.Errorf("querying secret value: %w", err)
 	}
 
 	// Compose and return any secret content from the db.
@@ -1785,12 +1931,13 @@ AND    rev.revision = $secretRevision.revision`
 
 	// Process any value reference.
 	if len(dbSecretValueRefs) == 0 {
-		return nil, nil, fmt.Errorf(
-			"secret value ref for %q revision %d not found%w", uri, revision, errors.Hide(secreterrors.SecretRevisionNotFound))
+		return nil, nil, errors.Errorf(
+			"secret value ref for %q revision %d not found", uri, revision).Add(secreterrors.SecretRevisionNotFound)
 	}
 	if len(dbSecretValueRefs) != 1 {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, errors.Errorf(
 			"unexpected secret value refs for %q revision %d: got %d values", uri, revision, len(dbSecretValues))
+
 	}
 	return nil, &coresecrets.ValueRef{
 		BackendID:  dbSecretValueRefs[0].BackendUUID,
@@ -1821,7 +1968,7 @@ FROM (SELECT * FROM local UNION SELECT * FROM remote)`
 	ref := secretRef{ID: uri.ID, SourceUUID: uri.SourceUUID}
 	queryStmt, err := st.Prepare(query, ref, result)
 	if err != nil {
-		return false, errors.Trace(err)
+		return false, errors.Capture(err)
 	}
 	err = tx.Query(ctx, queryStmt, ref).Get(&result)
 	if err == nil {
@@ -1831,23 +1978,26 @@ FROM (SELECT * FROM local UNION SELECT * FROM remote)`
 	if errors.Is(err, sqlair.ErrNoRows) {
 		return false, secreterrors.SecretNotFound
 	}
-	return false, errors.Annotatef(err, "looking up secret URI %q", uri)
+	if err != nil {
+		return false, errors.Errorf("looking up secret URI %q: %w", uri, err)
+	}
+	return false, nil
 }
 
 // GetSecretConsumer returns the secret consumer info for the specified unit
 // and secret, along withthe latest revision for the secret.
-// If the unit does not exist, an error satisfying [uniterrors.NotFound] is
+// If the unit does not exist, an error satisfying [applicationerrors.UnitNotFound] is
 // returned.If the secret does not exist, an error satisfying
 // [secreterrors.SecretNotFound] is returned.
 // If there's not currently a consumer record for the secret, the latest
 // revision is still returned,along with an error satisfying
 // [secreterrors.SecretConsumerNotFound].
 func (st State) GetSecretConsumer(
-	ctx context.Context, uri *coresecrets.URI, unitName string,
+	ctx context.Context, uri *coresecrets.URI, unitName coreunit.Name,
 ) (*coresecrets.SecretConsumerMetadata, int, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, 0, errors.Capture(err)
 	}
 
 	consumer := secretUnitConsumer{
@@ -1863,13 +2013,7 @@ AND    suc.unit_uuid = $secretUnitConsumer.unit_uuid`
 
 	queryStmt, err := st.Prepare(query, secretUnitConsumer{})
 	if err != nil {
-		return nil, 0, errors.Trace(err)
-	}
-
-	selectUnitUUID := `SELECT &unit.uuid FROM unit WHERE name=$unit.name`
-	selectUnitUUIDStmt, err := st.Prepare(selectUnitUUID, unit{})
-	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, 0, errors.Capture(err)
 	}
 
 	selectLatestLocalRevision := `
@@ -1878,7 +2022,7 @@ FROM   secret_revision rev
 WHERE  rev.secret_id = $secretRef.secret_id`
 	selectLatestLocalRevisionStmt, err := st.Prepare(selectLatestLocalRevision, secretRef{})
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, 0, errors.Capture(err)
 	}
 
 	selectLatestRemoteRevision := `
@@ -1887,7 +2031,7 @@ FROM   secret_reference ref
 WHERE  ref.secret_id = $secretRef.secret_id`
 	selectLatestRemoteRevisionStmt, err := st.Prepare(selectLatestRemoteRevision, secretRef{})
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, 0, errors.Capture(err)
 	}
 
 	var (
@@ -1897,22 +2041,16 @@ WHERE  ref.secret_id = $secretRef.secret_id`
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		isLocal, err := st.checkExistsIfLocal(ctx, tx, uri)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
-		result := unit{}
-		err = tx.Query(ctx, selectUnitUUIDStmt, unit{Name: unitName}).Get(&result)
+		consumer.UnitUUID, err = st.getUnitUUID(ctx, tx, unitName)
 		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return fmt.Errorf("unit %q not found%w", unitName, errors.Hide(uniterrors.NotFound))
-			} else {
-				return errors.Annotatef(err, "looking up unit UUID for %q", unitName)
-			}
+			return errors.Capture(err)
 		}
-		consumer.UnitUUID = result.UUID
 		err = tx.Query(ctx, queryStmt, consumer).GetAll(&dbSecretConsumers)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotate(err, "querying secret consumers")
+			return errors.Errorf("querying secret consumers: %w", err)
 		}
 
 		latest := secretRef{}
@@ -1921,40 +2059,36 @@ WHERE  ref.secret_id = $secretRef.secret_id`
 			latestRevisionStmt = selectLatestRemoteRevisionStmt
 		}
 		err = tx.Query(ctx, latestRevisionStmt, secretRef{ID: uri.ID}).Get(&latest)
-		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				// Only return secret not found for local secrets.
-				// For remote secrets we may not yet know the latest revision.
-				if isLocal {
-					return secreterrors.SecretNotFound
-				}
-			} else {
-				return errors.Annotatef(err, "looking up latest revision for %q", uri.ID)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			// Only return secret not found for local secrets.
+			// For remote secrets we may not yet know the latest revision.
+			if isLocal {
+				return secreterrors.SecretNotFound
 			}
+		} else if err != nil {
+			return errors.Errorf("looking up latest revision for %q: %w", uri.ID, err)
 		}
 		latestRevision = latest.Revision
 
 		return nil
 	})
 	if err != nil {
-		return nil, 0, errors.Trace(domain.CoerceError(err))
+		return nil, 0, errors.Capture(err)
 	}
 	if len(dbSecretConsumers) == 0 {
-		return nil, latestRevision, fmt.Errorf("secret consumer for %q and unit %q%w", uri.ID, unitName, secreterrors.SecretConsumerNotFound)
+		return nil, latestRevision, errors.Errorf("secret consumer for %q and unit %q %w", uri.ID, unitName, secreterrors.SecretConsumerNotFound)
 	}
 	consumers := dbSecretConsumers.toSecretConsumers()
 	return consumers[0], latestRevision, nil
 }
 
 // SaveSecretConsumer saves the consumer metadata for the given secret and unit.
-// If the unit does not exist, an error satisfying [uniterrors.NotFound] is returned.
+// If the unit does not exist, an error satisfying [applicationerrors.UnitNotFound] is returned.
 // If the secret does not exist, an error satisfying [secreterrors.SecretNotFound] is returned.
-func (st State) SaveSecretConsumer(
-	ctx context.Context, uri *coresecrets.URI, unitName string, md *coresecrets.SecretConsumerMetadata,
-) error {
-	db, err := st.DB()
+func (st State) SaveSecretConsumer(ctx context.Context, uri *coresecrets.URI, unitName coreunit.Name, md coresecrets.SecretConsumerMetadata) error {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	insertQuery := `
@@ -1966,26 +2100,32 @@ ON CONFLICT(secret_id, unit_uuid) DO UPDATE SET
 
 	insertStmt, err := st.Prepare(insertQuery, secretUnitConsumer{})
 	if err != nil {
-		return errors.Trace(err)
-	}
-
-	selectUnitUUID := `select &M.uuid FROM unit WHERE name=$M.name`
-	selectUnitUUIDStmt, err := st.Prepare(selectUnitUUID, sqlair.M{})
-	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	// We might be saving a tracked revision for a remote secret
 	// before we have been notified of a revision change.
 	// So we might need to insert the parent secret URI.
+	secretRef := secretID{ID: uri.ID}
 	insertRemoteSecretQuery := `
 INSERT INTO secret (id)
 VALUES ($secretID.id)
 ON CONFLICT DO NOTHING`
 
-	insertRemoteSecretStmt, err := st.Prepare(insertRemoteSecretQuery, secretID{})
+	insertRemoteSecretStmt, err := st.Prepare(insertRemoteSecretQuery, secretRef)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
+	}
+
+	remoteRef := lastestSecretRevision{SecretID: uri.ID, LatestRevision: md.CurrentRevision}
+	insertRemoteSecretReferenceQuery := `
+INSERT INTO secret_reference (secret_id, latest_revision)
+VALUES ($lastestSecretRevision.secret_id, $lastestSecretRevision.latest_revision)
+ON CONFLICT DO NOTHING`
+
+	insertRemoteSecretReferenceStmt, err := st.Prepare(insertRemoteSecretReferenceQuery, remoteRef)
+	if err != nil {
+		return errors.Capture(err)
 	}
 
 	consumer := secretUnitConsumer{
@@ -1997,213 +2137,248 @@ ON CONFLICT DO NOTHING`
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		isLocal, err := st.checkExistsIfLocal(ctx, tx, uri)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		if !isLocal {
-			// Ensure a remote secret parent URI is recorded. This will normally
-			// be done by the watcher but it may not have fired yet.
-			err = tx.Query(ctx, insertRemoteSecretStmt, secretID{ID: uri.ID}).Run()
+			// Ensure a remote secret parent URI and revision is recorded.
+			// This will normally be done by the watcher but it may not have fired yet.
+			err = tx.Query(ctx, insertRemoteSecretStmt, secretRef).Run()
 			if err != nil {
-				return errors.Annotatef(err, "inserting secret reference for %q", uri)
+				return errors.Errorf("inserting remote secret reference for %q: %w", uri, err)
 			}
+			err = tx.Query(ctx, insertRemoteSecretReferenceStmt, remoteRef).Run()
+			if err != nil {
+				return errors.Errorf("inserting remote secret revision for %q: %w", uri, err)
+			}
+		}
+		consumer.UnitUUID, err = st.getUnitUUID(ctx, tx, unitName)
+		if err != nil {
+			return errors.Capture(err)
 		}
 
-		result := sqlair.M{}
-		err = tx.Query(ctx, selectUnitUUIDStmt, sqlair.M{"name": unitName}).Get(&result)
-		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return fmt.Errorf("unit %q not found%w", unitName, errors.Hide(uniterrors.NotFound))
-			} else {
-				return errors.Annotatef(err, "looking up unit UUID for %q", unitName)
-			}
-		}
-		consumer.UnitUUID = result["uuid"].(string)
 		if err := tx.Query(ctx, insertStmt, consumer).Run(); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		if err := st.markObsoleteRevisions(ctx, tx, uri); err != nil {
-			return errors.Annotatef(err, "marking obsolete revisions for secret %q", uri)
+			return errors.Errorf("marking obsolete revisions for secret %q: %w", uri, err)
 		}
 
 		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
-// GetSecretRemoteConsumer returns the secret consumer info from a cross model consumer
-// for the specified unit and secret.
-// If the secret does not exist, an error satisfying [secreterrors.SecretNotFound] is returned.
-// If there's not currently a consumer record for the secret, the latest revision is still returned,
-// along with an error satisfying [secreterrors.SecretConsumerNotFound].
-func (st State) GetSecretRemoteConsumer(
-	ctx context.Context, uri *coresecrets.URI, unitName string,
-) (*coresecrets.SecretConsumerMetadata, int, error) {
-	db, err := st.DB()
+// AllSecretConsumers loads all local secret consumers keyed by secret id.
+func (st State) AllSecretConsumers(ctx context.Context) (map[string][]domainsecret.ConsumerInfo, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
-	}
-
-	consumer := secretRemoteUnitConsumer{
-		SecretID: uri.ID,
-		UnitName: unitName,
+		return nil, errors.Capture(err)
 	}
 
 	query := `
-SELECT suc.current_revision AS &secretRemoteUnitConsumer.current_revision
-FROM   secret_remote_unit_consumer suc
-WHERE  suc.secret_id = $secretRemoteUnitConsumer.secret_id
-AND    suc.unit_name = $secretRemoteUnitConsumer.unit_name`
+SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
+       suc.label AS &secretUnitConsumerInfo.label,
+       suc.current_revision AS &secretUnitConsumerInfo.current_revision,
+       u.name AS &secretUnitConsumerInfo.unit_name
+FROM   secret_unit_consumer suc
+       JOIN secret_metadata sm ON sm.secret_id = suc.secret_id
+       JOIN unit u ON u.uuid = suc.unit_uuid
+`
 
-	queryStmt, err := st.Prepare(query, secretRemoteUnitConsumer{})
+	queryStmt, err := st.Prepare(query, secretUnitConsumerInfo{})
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	selectLatestRevision := `
-SELECT MAX(revision) AS &secretInfo.latest_revision
-FROM   secret_revision rev
-WHERE  rev.secret_id = $secretInfo.secret_id`
-	selectLatestRevisionStmt, err := st.Prepare(selectLatestRevision, secretInfo{})
-	if err != nil {
-		return nil, 0, errors.Trace(err)
-	}
-
-	var (
-		dbSecretConsumers secretRemoteUnitConsumers
-		latestRevision    int
-	)
+	var dbSecretConsumers secretUnitConsumerInfos
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
-		} else if !isLocal {
-			// Should never happen.
-			return secreterrors.SecretIsNotLocal
-		}
-
-		err = tx.Query(ctx, queryStmt, consumer).GetAll(&dbSecretConsumers)
+		err = tx.Query(ctx, queryStmt).GetAll(&dbSecretConsumers)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "querying secret consumer info for secret %q and unit %q", uri, unitName)
+			return errors.Errorf("querying secret consumers: %w", err)
 		}
-
-		result := secretInfo{ID: uri.ID}
-		err = tx.Query(ctx, selectLatestRevisionStmt, result).Get(&result)
-		if err != nil {
-			if errors.Is(err, sqlair.ErrNoRows) {
-				return secreterrors.SecretNotFound
-			} else {
-				return errors.Annotatef(err, "looking up latest revision for %q", uri.ID)
-			}
-		}
-		latestRevision = result.LatestRevision
-
 		return nil
 	})
 	if err != nil {
-		return nil, 0, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
-	if len(dbSecretConsumers) == 0 {
-		return nil, latestRevision, fmt.Errorf(
-			"secret consumer for %q and unit %q%w", uri.ID, unitName, secreterrors.SecretConsumerNotFound)
-	}
-	consumers := dbSecretConsumers.toSecretConsumers()
-	return consumers[0], latestRevision, nil
+	consumers := dbSecretConsumers.toSecretConsumersBySecret()
+	return consumers, nil
 }
 
-// SaveSecretRemoteConsumer saves the consumer metadata for the given secret and unit.
-// If the secret does not exist, an error satisfying [secreterrors.SecretNotFound] is returned.
-func (st State) SaveSecretRemoteConsumer(
-	ctx context.Context, uri *coresecrets.URI, unitName string, md *coresecrets.SecretConsumerMetadata,
-) error {
-	db, err := st.DB()
+// AllSecretRemoteConsumers loads all secret remote consumers keyed by secret id.
+func (st State) AllSecretRemoteConsumers(ctx context.Context) (map[string][]domainsecret.ConsumerInfo, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	insertQuery := `
-INSERT INTO secret_remote_unit_consumer (*)
-VALUES ($secretRemoteUnitConsumer.*)
-ON CONFLICT(secret_id, unit_name) DO UPDATE SET
-    current_revision=excluded.current_revision`
+	query := `
+SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
+       suc.current_revision AS &secretUnitConsumerInfo.current_revision,
+       suc.unit_name AS &secretUnitConsumerInfo.unit_name
+FROM   secret_remote_unit_consumer suc
+`
 
-	insertStmt, err := st.Prepare(insertQuery, secretRemoteUnitConsumer{})
+	queryStmt, err := st.Prepare(query, secretUnitConsumerInfo{})
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	consumer := secretRemoteUnitConsumer{
-		SecretID:        uri.ID,
-		UnitName:        unitName,
-		CurrentRevision: md.CurrentRevision,
-	}
+	var dbSecretConsumers secretUnitConsumerInfos
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
-		} else if !isLocal {
-			// Should never happen.
-			return secreterrors.SecretIsNotLocal
+		err = tx.Query(ctx, queryStmt).GetAll(&dbSecretConsumers)
+		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Errorf("querying secret remote consumers: %w", err)
 		}
-		if err := tx.Query(ctx, insertStmt, consumer).Run(); err != nil {
-			return errors.Trace(err)
-		}
-
-		if err := st.markObsoleteRevisions(ctx, tx, uri); err != nil {
-			return errors.Annotatef(err, "marking obsolete revisions for secret %q", uri)
-		}
-
 		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	consumers := dbSecretConsumers.toSecretConsumersBySecret()
+	return consumers, nil
 }
 
-// UpdateRemoteSecretRevision records the latest revision
-// of the specified cross model secret.
-func (st State) UpdateRemoteSecretRevision(ctx context.Context, uri *coresecrets.URI, latestRevision int) error {
-	db, err := st.DB()
+// AllRemoteSecrets returns consumer info for secrets stored in
+// an external model.
+func (st State) AllRemoteSecrets(ctx context.Context) ([]domainsecret.RemoteSecretInfo, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	insertQuery := `
-INSERT INTO secret (id)
-VALUES ($secretID.id)
-ON CONFLICT(id) DO NOTHING`
+	q := `
+SELECT suc.secret_id AS &secretUnitConsumerInfo.secret_id,
+       suc.source_model_uuid AS &secretUnitConsumerInfo.source_model_uuid,
+       suc.label AS &secretUnitConsumerInfo.label,
+       suc.current_revision AS &secretUnitConsumerInfo.current_revision,
+       sr.latest_revision AS &secretUnitConsumerInfo.latest_revision,
+       u.name AS &secretUnitConsumerInfo.unit_name
+FROM   secret_unit_consumer suc
+       JOIN unit u ON u.uuid = suc.unit_uuid
+       JOIN secret_reference sr ON sr.secret_id = suc.secret_id
+`
 
-	insertStmt, err := st.Prepare(insertQuery, secretID{})
+	stmt, err := st.Prepare(q, secretUnitConsumerInfo{})
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-
-	insertLatestQuery := `
-INSERT INTO secret_reference (*)
-VALUES ($remoteSecret.*)
-ON CONFLICT(secret_id) DO UPDATE SET
-    latest_revision=excluded.latest_revision`
-
-	insertLatestStmt, err := st.Prepare(insertLatestQuery, remoteSecret{})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	secret := remoteSecret{
-		SecretID:       uri.ID,
-		LatestRevision: latestRevision,
-	}
+	var dbSecretConsumers secretUnitConsumerInfos
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		err = tx.Query(ctx, insertStmt, secretID{ID: uri.ID}).Run()
-		if err != nil {
-			return errors.Annotatef(err, "inserting URI record for cross model secret %q", uri)
+		err := tx.Query(ctx, stmt).GetAll(&dbSecretConsumers)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			// No secrets found.
+			return nil
 		}
-		if err := tx.Query(ctx, insertLatestStmt, secret).Run(); err != nil {
-			return errors.Annotatef(err, "updating latest revision %d for cross model secret %q", latestRevision, uri)
-		}
-		if err := st.markObsoleteRevisions(ctx, tx, uri); err != nil {
-			return errors.Annotatef(err, "marking obsolete revisions for secret %q", uri)
-		}
-		return nil
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	secrets := dbSecretConsumers.toRemoteSecrets()
+	return secrets, nil
+}
+
+// GetRegularRelationUUIDByEndpointIdentifiers gets the UUID of a regular
+// relation specified by two endpoint identifiers.
+//
+// The following error types can be expected to be returned:
+//   - [relationerrors.RelationNotFound] is returned if endpoints cannot be
+//     found.
+func (st State) GetRegularRelationUUIDByEndpointIdentifiers(
+	ctx context.Context,
+	endpoint1, endpoint2 corerelation.EndpointIdentifier,
+) (string, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	type endpointIdentifier1 endpointIdentifier
+	type endpointIdentifier2 endpointIdentifier
+	e1 := endpointIdentifier1{
+		ApplicationName: endpoint1.ApplicationName,
+		EndpointName:    endpoint1.EndpointName,
+	}
+	e2 := endpointIdentifier2{
+		ApplicationName: endpoint2.ApplicationName,
+		EndpointName:    endpoint2.EndpointName,
+	}
+	stmt, err := st.Prepare(`
+SELECT &relationUUID.*
+FROM   relation r
+JOIN   v_relation_endpoint_identifier e1 ON r.uuid = e1.relation_uuid
+JOIN   v_relation_endpoint_identifier e2 ON r.uuid = e2.relation_uuid
+WHERE  e1.application_name = $endpointIdentifier1.application_name 
+AND    e1.endpoint_name    = $endpointIdentifier1.endpoint_name
+AND    e2.application_name = $endpointIdentifier2.application_name 
+AND    e2.endpoint_name    = $endpointIdentifier2.endpoint_name
+`, relationUUID{}, e1, e2)
+
+	var uuids []relationUUID
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err = tx.Query(ctx, stmt, e1, e2).GetAll(&uuids)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return relationerrors.RelationNotFound
+		}
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	if len(uuids) > 1 {
+		return "", errors.Errorf("found multiple relations for endpoint pair")
+	}
+	return uuids[0].UUID, nil
+}
+
+// GetRelationEndpoints returns relation endpoints for the given relation UUID.
+// The following error types can be expected to be returned:
+//   - [relationerrors.RelationNotFound] is returned if the relation UUID is not found.
+func (st State) GetRelationEndpoints(ctx context.Context, relUUID string) ([]corerelation.EndpointIdentifier, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	uuid := relationUUID{UUID: relUUID}
+	q, err := st.Prepare(`
+SELECT &endpointIdentifier.*
+FROM   v_relation_endpoint
+WHERE  relation_uuid = $relationUUID.uuid
+`, uuid, endpointIdentifier{})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var endpoints []endpointIdentifier
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err = tx.Query(ctx, q, uuid).GetAll(&endpoints)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Errorf("relation %q not found", relUUID).Add(relationerrors.RelationNotFound)
+		} else if err != nil {
+			return errors.Capture(err)
+		}
+		return errors.Capture(err)
+	})
+
+	if length := len(endpoints); length > 2 {
+		return nil, errors.Errorf("internal error: expected 1 or 2 endpoints in relation, got %d", length)
+	}
+
+	var result []corerelation.EndpointIdentifier
+	for _, e := range endpoints {
+		result = append(result, corerelation.EndpointIdentifier{
+			ApplicationName: e.ApplicationName,
+			EndpointName:    e.EndpointName,
+			Role:            charm.RelationRole(e.Role),
+		})
+	}
+	return result, errors.Capture(err)
 }
 
 // GrantAccess grants access to the secret for the specified subject with the specified scope.
@@ -2211,9 +2386,9 @@ ON CONFLICT(secret_id) DO UPDATE SET
 // If an attempt is made to change an existing permission's scope or subject type, an error
 // satisfying [secreterrors.InvalidSecretPermissionChange] is returned.
 func (st State) GrantAccess(ctx context.Context, uri *coresecrets.URI, params domainsecret.GrantParams) error {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	checkInvariantQuery := `
@@ -2227,7 +2402,7 @@ AND    (sp.subject_type_id <> $secretPermission.subject_type_id
 
 	checkInvariantStmt, err := st.Prepare(checkInvariantQuery, secretPermission{}, secretID{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -2236,25 +2411,23 @@ AND    (sp.subject_type_id <> $secretPermission.subject_type_id
 			RoleID:   params.RoleID,
 		}
 		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		} else if !isLocal {
 			// Should never happen.
 			return secreterrors.SecretIsNotLocal
 		}
 
-		// Look up the UUID of the subject.
-		perm.SubjectTypeID = params.SubjectTypeID
-		perm.SubjectUUID, err = st.lookupSubjectUUID(ctx, tx, params.SubjectID, params.SubjectTypeID)
-		if err != nil {
-			return errors.Trace(err)
+		if err := st.checkSubjectUUIDExists(ctx, tx, params.SubjectUUID, params.SubjectTypeID); err != nil {
+			return errors.Capture(err)
+		}
+		if err := st.checkScopeUUIDExists(ctx, tx, params.ScopeUUID, params.ScopeTypeID); err != nil {
+			return errors.Capture(err)
 		}
 
-		// Look up the UUID of the access scope entity.
+		perm.SubjectTypeID = params.SubjectTypeID
+		perm.SubjectUUID = params.SubjectUUID
 		perm.ScopeTypeID = params.ScopeTypeID
-		perm.ScopeUUID, err = st.lookupScopeUUID(ctx, tx, params.ScopeID, params.ScopeTypeID)
-		if err != nil {
-			return errors.Trace(err)
-		}
+		perm.ScopeUUID = params.ScopeUUID
 
 		// Check that the access scope or subject type is not changing.
 		id := secretID{}
@@ -2263,40 +2436,47 @@ AND    (sp.subject_type_id <> $secretPermission.subject_type_id
 			// Should never happen.
 			return secreterrors.InvalidSecretPermissionChange
 		} else if !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "checking duplicate permission record for secret %q", uri)
+			return errors.Errorf("checking duplicate permission record for secret %q: %w", uri, err)
 		}
 
 		return st.grantAccess(ctx, tx, perm)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
+}
+
+// NamespaceForWatchSecretMetadata returns namespace identifier for
+// secret metadata watcher.
+func (st State) NamespaceForWatchSecretMetadata() string {
+	return "secret_metadata"
+}
+
+// NamespaceForWatchSecretRevisionObsolete returns namespace identifier for
+// obsolete secret revision watcher.
+func (st State) NamespaceForWatchSecretRevisionObsolete() string {
+	return "secret_revision_obsolete"
 }
 
 const (
-	selectUnitUUID        = `SELECT uuid AS &entityRef.uuid FROM unit WHERE name=$entityRef.id`
-	selectApplicationUUID = `SELECT uuid AS &entityRef.uuid FROM application WHERE name=$entityRef.id`
-	selectModelUUID       = `SELECT uuid AS &entityRef.uuid FROM model WHERE uuid=$entityRef.id`
+	selectUnitUUID        = `SELECT uuid AS &entityRef.uuid FROM unit WHERE uuid=$entityRef.uuid`
+	selectApplicationUUID = `SELECT uuid AS &entityRef.uuid FROM application WHERE uuid=$entityRef.uuid`
+	selectRelationUUID    = `SELECT uuid AS &entityRef.uuid FROM relation WHERE uuid=$entityRef.uuid`
+	selectModelUUID       = `SELECT uuid AS &entityRef.uuid FROM model WHERE uuid=$entityRef.uuid`
 )
 
-func (st State) lookupSubjectUUID(
-	ctx context.Context, tx *sqlair.TX, subjectID string, subjectTypeID domainsecret.GrantSubjectType,
-) (string, error) {
+func (st State) checkSubjectUUIDExists(
+	ctx context.Context, tx *sqlair.TX, subjectUUID string, subjectTypeID domainsecret.GrantSubjectType,
+) error {
 	var (
 		selectSubjectUUID        string
-		selectSubjectQueryParams = []any{entityRef{ID: subjectID}}
+		selectSubjectQueryParams = []any{entityRef{UUID: subjectUUID}}
 		subjectNotFoundError     error
 	)
 	switch subjectTypeID {
 	case domainsecret.SubjectUnit:
 		selectSubjectUUID = selectUnitUUID
-		subjectNotFoundError = uniterrors.NotFound
+		subjectNotFoundError = applicationerrors.UnitNotFound
 	case domainsecret.SubjectApplication:
 		selectSubjectUUID = selectApplicationUUID
-		subjectNotFoundError = applicationerrors.ApplicationNotFound
-	case domainsecret.SubjectRemoteApplication:
-		// TODO(secrets) - we don't have remote applications in dqlite yet
-		// Just use a temporary query that returns the id as uuid.
-		selectSubjectUUID = "SELECT uuid AS &entityRef.uuid FROM (SELECT $M.subject_id AS uuid FROM model) WHERE $entityRef.id <> ''"
-		selectSubjectQueryParams = append(selectSubjectQueryParams, sqlair.M{"subject_id": subjectID})
 		subjectNotFoundError = applicationerrors.ApplicationNotFound
 	case domainsecret.SubjectModel:
 		selectSubjectUUID = selectModelUUID
@@ -2304,36 +2484,36 @@ func (st State) lookupSubjectUUID(
 	}
 	selectSubjectUUIDStmt, err := st.Prepare(selectSubjectUUID, selectSubjectQueryParams...)
 	if err != nil {
-		return "", errors.Trace(err)
+		return errors.Capture(err)
 	}
 	result := entityRef{}
 	err = tx.Query(ctx, selectSubjectUUIDStmt, selectSubjectQueryParams...).Get(&result)
-	if err != nil {
-		if errors.Is(err, sqlair.ErrNoRows) {
-			return "", fmt.Errorf("%s %q not found%w", subjectTypeID, subjectID, errors.Hide(subjectNotFoundError))
-		} else {
-			subject := subjectID
-			if subjectTypeID == domainsecret.SubjectModel {
-				subject = "model"
-			}
-			return "", errors.Annotatef(err, "looking up secret grant subject UUID for %q", subject)
-		}
+	if err == nil {
+		return nil
 	}
-	return result.UUID, nil
+	if errors.Is(err, sqlair.ErrNoRows) {
+		return errors.Errorf("%s %q not found", subjectTypeID, subjectUUID).Add(subjectNotFoundError)
+	} else {
+		subject := subjectUUID
+		if subjectTypeID == domainsecret.SubjectModel {
+			subject = "model"
+		}
+		return errors.Errorf("looking up secret grant subject UUID for %q: %w", subject, err)
+	}
 }
 
-func (st State) lookupScopeUUID(
-	ctx context.Context, tx *sqlair.TX, scopeID string, scopeTypeID domainsecret.GrantScopeType,
-) (string, error) {
+func (st State) checkScopeUUIDExists(
+	ctx context.Context, tx *sqlair.TX, scopeUUID string, scopeTypeID domainsecret.GrantScopeType,
+) error {
 	var (
 		selectScopeUUID        string
-		selectScopeQueryParams = []any{entityRef{ID: scopeID}}
+		selectScopeQueryParams = []any{entityRef{UUID: scopeUUID}}
 		scopeNotFoundError     error
 	)
 	switch scopeTypeID {
 	case domainsecret.ScopeUnit:
 		selectScopeUUID = selectUnitUUID
-		scopeNotFoundError = uniterrors.NotFound
+		scopeNotFoundError = applicationerrors.UnitNotFound
 	case domainsecret.ScopeApplication:
 		selectScopeUUID = selectApplicationUUID
 		scopeNotFoundError = applicationerrors.ApplicationNotFound
@@ -2341,30 +2521,28 @@ func (st State) lookupScopeUUID(
 		selectScopeUUID = selectModelUUID
 		scopeNotFoundError = modelerrors.NotFound
 	case domainsecret.ScopeRelation:
-		// TODO(secrets) - we don't have relations in dqlite yet
-		// Just use a temporary query that returns the id as uuid.
-		selectScopeUUID = "SELECT uuid AS &entityRef.uuid FROM (SELECT $M.scope_id AS uuid FROM model) WHERE $entityRef.id <> ''"
-		selectScopeQueryParams = append(selectScopeQueryParams, sqlair.M{"scope_id": scopeID})
+		selectScopeUUID = selectRelationUUID
+		scopeNotFoundError = relationerrors.RelationNotFound
 	}
 	selectScopeUUIDStmt, err := st.Prepare(selectScopeUUID, selectScopeQueryParams...)
 	if err != nil {
-		return "", errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	result := entityRef{}
 	err = tx.Query(ctx, selectScopeUUIDStmt, selectScopeQueryParams...).Get(&result)
-	if err != nil {
-		if errors.Is(err, sqlair.ErrNoRows) {
-			return "", fmt.Errorf("%s %q not found%w", scopeTypeID, scopeID, errors.Hide(scopeNotFoundError))
-		} else {
-			scope := scopeID
-			if scopeTypeID == domainsecret.ScopeModel {
-				scope = "model"
-			}
-			return "", errors.Annotatef(err, "looking up secret grant scope UUID for %q", scope)
-		}
+	if err == nil {
+		return nil
 	}
-	return result.UUID, nil
+	if errors.Is(err, sqlair.ErrNoRows) {
+		return errors.Errorf("%s %q not found", scopeTypeID, scopeUUID).Add(scopeNotFoundError)
+	} else {
+		scope := scopeUUID
+		if scopeTypeID == domainsecret.ScopeModel {
+			scope = "model"
+		}
+		return errors.Errorf("looking up secret grant scope UUID for %q: %w", scope, err)
+	}
 }
 
 func (st State) grantAccess(ctx context.Context, tx *sqlair.TX, perm secretPermission) error {
@@ -2380,11 +2558,11 @@ ON CONFLICT(secret_id, subject_uuid) DO UPDATE SET
 
 	insertStmt, err := st.Prepare(insertQuery, secretPermission{})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	if err := tx.Query(ctx, insertStmt, perm).Run(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 
@@ -2393,10 +2571,10 @@ ON CONFLICT(secret_id, subject_uuid) DO UPDATE SET
 // RevokeAccess revokes access to the secret for the specified subject.
 // It returns an error satisfying [secreterrors.SecretNotFound] if the
 // secret is not found.
-func (st State) RevokeAccess(ctx context.Context, uri *coresecrets.URI, params domainsecret.AccessParams) error {
-	db, err := st.DB()
+func (st State) RevokeAccess(ctx context.Context, uri *coresecrets.URI, params domainsecret.RevokeParams) error {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	deleteQuery := `
@@ -2411,26 +2589,28 @@ AND    subject_uuid = $secretPermission.subject_uuid`
 	}
 	deleteStmt, err := st.Prepare(deleteQuery, perm)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		} else if !isLocal {
 			// Should never happen.
 			return secreterrors.SecretIsNotLocal
 		}
 
-		// Look up the UUID of the subject.
-		perm.SubjectUUID, err = st.lookupSubjectUUID(ctx, tx, params.SubjectID, params.SubjectTypeID)
-		if err != nil {
-			return errors.Trace(err)
+		if err := st.checkSubjectUUIDExists(ctx, tx, params.SubjectUUID, params.SubjectTypeID); err != nil {
+			return errors.Capture(err)
 		}
+		perm.SubjectUUID = params.SubjectUUID
 		err = tx.Query(ctx, deleteStmt, perm).Run()
-		return errors.Annotatef(err, "deleting secret grant for %q on %q", params.SubjectID, uri)
+		if err != nil {
+			return errors.Errorf("deleting secret grant for %q on %q: %w", params.SubjectUUID, uri, err)
+		}
+		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 // GetSecretAccess returns the access to the secret for the specified accessor.
@@ -2439,15 +2619,15 @@ AND    subject_uuid = $secretPermission.subject_uuid`
 func (st State) GetSecretAccess(
 	ctx context.Context, uri *coresecrets.URI, params domainsecret.AccessParams,
 ) (string, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
 	query := `
-SELECT sr.role AS &M.role
+SELECT sr.role AS &secretRole.role
 FROM   v_secret_permission sp
-       JOIN secret_role sr ON sr.id = sp.role_id
+JOIN   secret_role sr ON sr.id = sp.role_id
 WHERE  secret_id = $secretAccessor.secret_id
 AND    subject_type_id = $secretAccessor.subject_type_id
 AND    subject_id = $secretAccessor.subject_id`
@@ -2457,47 +2637,46 @@ AND    subject_id = $secretAccessor.subject_id`
 		SubjectTypeID: params.SubjectTypeID,
 		SubjectID:     params.SubjectID,
 	}
-	selectRoleStmt, err := st.Prepare(query, access, sqlair.M{})
+	selectRoleStmt, err := st.Prepare(query, access, secretRole{})
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
-	var role string
+	var result secretRole
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		} else if !isLocal {
 			// Should never happen.
 			return secreterrors.SecretIsNotLocal
 		}
-		result := sqlair.M{}
 		err = tx.Query(ctx, selectRoleStmt, access).Get(&result)
-		if err == nil || errors.Is(err, sqlair.ErrNoRows) {
-			role, _ = result["role"].(string)
-			return nil
+		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Errorf("looking up secret grant for %q on %q: %w", params.SubjectID, uri, err)
 		}
-		return errors.Annotatef(err, "looking up secret grant for %q on %q", params.SubjectID, uri)
+		return nil
 	})
-	return role, errors.Trace(domain.CoerceError(err))
+	return result.Role, errors.Capture(err)
 }
 
-// GetSecretAccessScope returns the access scope for the specified accessor's
+// GetSecretAccessRelationScope returns any relation access scope for the specified accessor's
 // permission on the secret.It returns an error satisfying
 // [secreterrors.SecretNotFound] if the secret is not found.
-func (st State) GetSecretAccessScope(
+func (st State) GetSecretAccessRelationScope(
 	ctx context.Context, uri *coresecrets.URI, params domainsecret.AccessParams,
-) (*domainsecret.AccessScope, error) {
-	db, err := st.DB()
+) (string, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
 	query := `
-SELECT (sp.scope_id, sp.scope_type_id) AS (&secretAccessScope.*)
+SELECT (sp.scope_uuid, sp.scope_type_id) AS (&secretAccessScope.*)
 FROM   v_secret_permission sp
 WHERE  secret_id = $secretAccessor.secret_id
 AND    subject_type_id = $secretAccessor.subject_type_id
-AND    subject_id = $secretAccessor.subject_id`
+AND    subject_id = $secretAccessor.subject_id
+AND    scope_type_id = 3`
 
 	access := secretAccessor{
 		SecretID:      uri.ID,
@@ -2506,42 +2685,43 @@ AND    subject_id = $secretAccessor.subject_id`
 	}
 	selectScopeStmt, err := st.Prepare(query, access, secretAccessScope{})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 
 	result := secretAccessScope{}
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		} else if !isLocal {
 			// Should never happen.
 			return secreterrors.SecretIsNotLocal
 		}
 		err = tx.Query(ctx, selectScopeStmt, access).Get(&result)
 		if errors.Is(err, sqlair.ErrNoRows) {
-			return fmt.Errorf(
-				"access scope for %q on secret %q not found%w",
-				params.SubjectID, uri, errors.Hide(secreterrors.SecretAccessScopeNotFound))
+			return errors.Errorf(
+				"relation access scope for %q on secret %q not found",
+				params.SubjectID, uri).Add(secreterrors.SecretAccessScopeNotFound)
+
 		}
-		return errors.Annotatef(err, "looking up secret access scope for %q on %q", params.SubjectID, uri)
+		if err != nil {
+			return errors.Errorf("looking up secret relation access scope for %q on %q: %w", params.SubjectID, uri, err)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return "", errors.Capture(err)
 	}
-	return &domainsecret.AccessScope{
-		ScopeTypeID: result.ScopeTypeID,
-		ScopeID:     result.ScopeID,
-	}, nil
+	return result.ScopeUUID, nil
 }
 
 // GetSecretGrants returns the subjects which have the specified access to the secret.
 // It returns an error satisfying [secreterrors.SecretNotFound] if the secret is not found.
 func (st State) GetSecretGrants(
 	ctx context.Context, uri *coresecrets.URI, role coresecrets.SecretRole,
-) ([]domainsecret.GrantParams, error) {
-	db, err := st.DB()
+) ([]domainsecret.GrantDetails, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	query := `
@@ -2551,13 +2731,15 @@ FROM   v_secret_permission sp
 WHERE  secret_id = $secretID.id
 AND    role_id = $secretAccessor.role_id
 -- exclude remote applications
-AND    subject_type_id != $M.remote_application_type`
-
-	arg := sqlair.M{"remote_application_type": domainsecret.SubjectRemoteApplication}
-
-	selectStmt, err := st.Prepare(query, secretID{}, secretAccessor{}, secretAccessScope{}, arg)
+AND    NOT EXISTS (
+         SELECT 1
+         FROM   application_remote_consumer arc
+         WHERE  arc.offer_connection_uuid = sp.subject_uuid
+       )
+`
+	selectStmt, err := st.Prepare(query, secretID{}, secretAccessor{}, secretAccessScope{})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	secretIDParam := secretID{
@@ -2573,21 +2755,62 @@ AND    subject_type_id != $M.remote_application_type`
 	)
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		} else if !isLocal {
 			// Should never happen.
 			return secreterrors.SecretIsNotLocal
 		}
-		err = tx.Query(ctx, selectStmt, secretIDParam, secretRole, arg).GetAll(&accessors, &accessScopes)
+		err = tx.Query(ctx, selectStmt, secretIDParam, secretRole).GetAll(&accessors, &accessScopes)
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return nil
 		}
-		return errors.Annotatef(err, "looking up secret grants for %q", uri)
+		if err != nil {
+			return errors.Errorf("looking up secret grants for %q: %w", uri, err)
+		}
+		return nil
 	})
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	return accessors.toSecretGrants(accessScopes)
+}
+
+// AllSecretGrants returns access details for all local secrets, keyed on secret id.
+func (st State) AllSecretGrants(ctx context.Context) (map[string][]domainsecret.GrantDetails, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	query := `
+SELECT (sp.*) AS (&secretAccessor.*),
+       (sp.*) AS (&secretAccessScope.*)
+FROM   v_secret_permission sp
+`
+
+	selectStmt, err := st.Prepare(query, secretAccessor{}, secretAccessScope{})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+
+	var (
+		accessors    secretAccessors
+		accessScopes secretAccessScopes
+	)
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err = tx.Query(ctx, selectStmt).GetAll(&accessors, &accessScopes)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return errors.Errorf("looking up secret grants: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return accessors.toSecretGrantsBySecret(accessScopes)
 }
 
 type (
@@ -2602,18 +2825,18 @@ type (
 func (st State) ListGrantedSecretsForBackend(
 	ctx context.Context, backendID string, accessors []domainsecret.AccessParams, role coresecrets.SecretRole,
 ) ([]*coresecrets.SecretRevisionRef, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	query := `
 SELECT (sm.secret_id) AS (&secretInfo.*),
        (svr.*) AS (&secretValueRef.*)
 FROM   secret_metadata sm
-       JOIN secret_revision rev ON rev.secret_id = sm.secret_id
-       JOIN secret_value_ref svr ON svr.revision_uuid = rev.uuid
-       JOIN v_secret_permission sp ON sp.secret_id = sm.secret_id
+JOIN   secret_revision rev ON rev.secret_id = sm.secret_id
+JOIN   secret_value_ref svr ON svr.revision_uuid = rev.uuid
+JOIN   v_secret_permission sp ON sp.secret_id = sm.secret_id
 WHERE  sp.role_id = $secretAccessor.role_id
 AND    svr.backend_uuid = $secretBackendID.id
 AND    (subject_type_id = $secretAccessorType.unit_type_id AND subject_id IN ($units[:])
@@ -2658,7 +2881,7 @@ AND    (subject_type_id = $secretAccessorType.unit_type_id AND subject_id IN ($u
 
 	queryStmt, err := st.Prepare(query, append(queryParams, secretInfo{}, secretValueRef{})...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var revisionResult []*coresecrets.SecretRevisionRef
@@ -2670,27 +2893,60 @@ AND    (subject_type_id = $secretAccessorType.unit_type_id AND subject_id IN ($u
 		)
 		err = tx.Query(ctx, queryStmt, queryParams...).GetAll(&dbSecrets, &dbValueRefs)
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotate(err, "querying accessible secrets")
+			return errors.Errorf("querying accessible secrets: %w", err)
 		}
 		revisionResult, err = dbSecrets.toSecretRevisionRef(dbValueRefs)
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}); err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	return revisionResult, nil
+}
+
+// GetSecretRevisionID returns the revision UUID for the specified secret URI and revision,
+// or an error satisfying [secreterrors.SecretRevisionNotFound] if the revision is not found.
+func (st State) GetSecretRevisionID(ctx context.Context, uri *coresecrets.URI, revision int) (string, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	secretRev := secretRevision{
+		SecretID: uri.ID,
+		Revision: revision,
+	}
+	stmt, err := st.Prepare(`
+SELECT uuid AS &secretRevision.uuid
+FROM   secret_revision
+WHERE  secret_id = $secretRevision.secret_id
+    AND    revision = $secretRevision.revision`, secretRev)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt, secretRev).Get(&secretRev)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Errorf("%w: %s/%d", secreterrors.SecretRevisionNotFound, uri, revision)
+		}
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	return secretRev.ID, nil
 }
 
 type dbrevisionUUIDs []revisionUUID
 
 // InitialWatchStatementForConsumedSecretsChange returns the initial watch
 // statement and the table name for watching consumed secrets.
-func (st State) InitialWatchStatementForConsumedSecretsChange(unitName string) (string, eventsource.NamespaceQuery) {
+func (st State) InitialWatchStatementForConsumedSecretsChange(unitName coreunit.Name) (string, eventsource.NamespaceQuery) {
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		q := `
 SELECT   DISTINCT sr.uuid AS &revisionUUID.uuid
 FROM     secret_unit_consumer suc
-         JOIN unit u ON u.uuid = suc.unit_uuid
-         JOIN secret_revision sr ON sr.secret_id = suc.secret_id
+JOIN     unit u ON u.uuid = suc.unit_uuid
+JOIN     secret_revision sr ON sr.secret_id = suc.secret_id
 WHERE    u.name = $unit.name
 GROUP BY sr.secret_id
 HAVING   suc.current_revision < MAX(sr.revision)`
@@ -2701,7 +2957,7 @@ HAVING   suc.current_revision < MAX(sr.revision)`
 
 		stmt, err := st.Prepare(q, append(queryParams, revisionUUID{})...)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 
 		var revUUIDs dbrevisionUUIDs
@@ -2711,10 +2967,10 @@ HAVING   suc.current_revision < MAX(sr.revision)`
 				// No consumed secrets found.
 				return nil
 			}
-			return errors.Trace(err)
+			return errors.Capture(err)
 		})
 		if err != nil {
-			return nil, errors.Trace(domain.CoerceError(err))
+			return nil, errors.Capture(err)
 		}
 
 		result := make([]string, len(revUUIDs))
@@ -2729,18 +2985,18 @@ HAVING   suc.current_revision < MAX(sr.revision)`
 // GetConsumedSecretURIsWithChanges returns the URIs of the secrets
 // consumed by the specified unit that has new revisions.
 func (st State) GetConsumedSecretURIsWithChanges(
-	ctx context.Context, unitName string, revisionIDs ...string,
+	ctx context.Context, unitName coreunit.Name, revisionIDs ...string,
 ) ([]string, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	q := `
 SELECT DISTINCT suc.secret_id AS &secretUnitConsumer.secret_id
 FROM   secret_unit_consumer suc
-       JOIN unit u ON u.uuid = suc.unit_uuid
-       JOIN secret_revision sr ON sr.secret_id = suc.secret_id
+JOIN   unit u ON u.uuid = suc.unit_uuid
+JOIN   secret_revision sr ON sr.secret_id = suc.secret_id
 WHERE  u.name = $unit.name`
 
 	queryParams := []any{
@@ -2757,7 +3013,7 @@ HAVING suc.current_revision < MAX(sr.revision)`
 
 	stmt, err := st.Prepare(q, append(queryParams, secretUnitConsumer{})...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var dbConsumers secretUnitConsumers
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -2766,35 +3022,35 @@ HAVING suc.current_revision < MAX(sr.revision)`
 			// No consumed secrets found.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	secretURIs := make([]string, len(dbConsumers))
 	for i, consumer := range dbConsumers {
 		uri, err := coresecrets.ParseURI(consumer.SecretID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		secretURIs[i] = uri.String()
 	}
 	return secretURIs, nil
 }
 
-type remoteSecrets []remoteSecret
+type remoteSecrets []lastestSecretRevision
 
 // InitialWatchStatementForConsumedRemoteSecretsChange returns the initial
 // watch statement and the table name for watching consumed secrets hosted
 // in a different model.
-func (st State) InitialWatchStatementForConsumedRemoteSecretsChange(unitName string) (string, eventsource.NamespaceQuery) {
+func (st State) InitialWatchStatementForConsumedRemoteSecretsChange(unitName coreunit.Name) (string, eventsource.NamespaceQuery) {
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		q := `
-SELECT   DISTINCT sr.secret_id AS &remoteSecret.secret_id
+SELECT   DISTINCT sr.secret_id AS &lastestSecretRevision.secret_id
 FROM     secret_unit_consumer suc
-         JOIN unit u ON u.uuid = suc.unit_uuid
-         JOIN secret_reference sr ON sr.secret_id = suc.secret_id
+JOIN     unit u ON u.uuid = suc.unit_uuid
+JOIN     secret_reference sr ON sr.secret_id = suc.secret_id
 WHERE    u.name = $unit.name
 GROUP BY sr.secret_id
 HAVING   suc.current_revision < sr.latest_revision`
@@ -2803,9 +3059,9 @@ HAVING   suc.current_revision < sr.latest_revision`
 			unit{Name: unitName},
 		}
 
-		stmt, err := st.Prepare(q, append(queryParams, remoteSecret{})...)
+		stmt, err := st.Prepare(q, append(queryParams, lastestSecretRevision{})...)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		var referenceIDs remoteSecrets
 		err = runner.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -2814,10 +3070,10 @@ HAVING   suc.current_revision < sr.latest_revision`
 				// No consumed remote secrets found.
 				return nil
 			}
-			return errors.Trace(err)
+			return errors.Capture(err)
 		})
 		if err != nil {
-			return nil, errors.Trace(domain.CoerceError(err))
+			return nil, errors.Capture(err)
 		}
 
 		result := make([]string, len(referenceIDs))
@@ -2833,19 +3089,19 @@ HAVING   suc.current_revision < sr.latest_revision`
 // consumed by the specified unit that have new revisions and are hosted
 // on a different model.
 func (st State) GetConsumedRemoteSecretURIsWithChanges(
-	ctx context.Context, unitName string, secretIDs ...string,
+	ctx context.Context, unitName coreunit.Name, secretIDs ...string,
 ) ([]string, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	q := `
 SELECT suc.secret_id AS &secretUnitConsumer.secret_id,
        suc.source_model_uuid AS &secretUnitConsumer.source_model_uuid
 FROM   secret_unit_consumer suc
-       JOIN unit u ON u.uuid = suc.unit_uuid
-       JOIN secret_reference sr ON sr.secret_id = suc.secret_id
+JOIN   unit u ON u.uuid = suc.unit_uuid
+JOIN   secret_reference sr ON sr.secret_id = suc.secret_id
 WHERE  u.name = $unit.name`
 
 	queryParams := []any{
@@ -2862,7 +3118,7 @@ HAVING suc.current_revision < sr.latest_revision`
 
 	stmt, err := st.Prepare(q, append(queryParams, secretUnitConsumer{})...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var consumers secretUnitConsumers
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -2871,17 +3127,17 @@ HAVING suc.current_revision < sr.latest_revision`
 			// No consumed secrets found.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 
 	secretURIs := make([]string, len(consumers))
 	for i, consumer := range consumers {
 		uri, err := coresecrets.ParseURI(consumer.SecretID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		uri.SourceUUID = consumer.SourceModelUUID
 		secretURIs[i] = uri.String()
@@ -2889,142 +3145,20 @@ HAVING suc.current_revision < sr.latest_revision`
 	return secretURIs, nil
 }
 
-// InitialWatchStatementForRemoteConsumedSecretsChangesFromOfferingSide
-// returns the initial watch statement and the table name for watching
-// remote consumed secrets.
-func (st State) InitialWatchStatementForRemoteConsumedSecretsChangesFromOfferingSide(
-	appName string,
-) (string, eventsource.NamespaceQuery) {
-	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
-
-		// TODO: sqlair does not support inject parameters into values in quotation marks.
-		// Use sqlair to generate the query once https://github.com/canonical/sqlair/issues/148 is fixed.
-		// q := `
-		// SELECT DISTINCT sr.uuid AS &revisionUUID.uuid
-		// FROM secret_remote_unit_consumer sruc
-		// LEFT JOIN secret_revision sr ON sr.secret_id = sruc.secret_id
-		// WHERE sruc.unit_name LIKE '$M.app_name/%'`
-
-		q := fmt.Sprintf(`
-SELECT DISTINCT sr.uuid AS &revisionUUID.uuid
-FROM   secret_remote_unit_consumer sruc
-       LEFT JOIN secret_revision sr ON sr.secret_id = sruc.secret_id
-WHERE  sruc.unit_name LIKE '%s/%%'`, appName)
-
-		queryParams := []any{
-			// TODO: enable this once https://github.com/canonical/sqlair/issues/148 is fixed.
-			// sqlair.M{"app_name": appName},
-		}
-		q += `
-GROUP BY sruc.secret_id
-HAVING sruc.current_revision < MAX(sr.revision)`
-		stmt, err := st.Prepare(q, append(queryParams, revisionUUID{})...)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		var revisionUUIDs dbrevisionUUIDs
-		err = runner.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-			err := tx.Query(ctx, stmt, queryParams...).GetAll(&revisionUUIDs)
-			if errors.Is(err, sqlair.ErrNoRows) {
-				// No consumed secrets found.
-				return nil
-			}
-			return errors.Trace(err)
-		})
-		if err != nil {
-			return nil, errors.Trace(domain.CoerceError(err))
-		}
-		revUUIDs := make([]string, len(revisionUUIDs))
-		for i, rev := range revisionUUIDs {
-			revUUIDs[i] = rev.UUID
-		}
-		return revUUIDs, nil
-	}
-	return "secret_revision", queryFunc
-}
-
-// GetRemoteConsumedSecretURIsWithChangesFromOfferingSide returns the URIs
-// of the secrets consumed by the specified remote application that has new
-// revisions.
-func (st State) GetRemoteConsumedSecretURIsWithChangesFromOfferingSide(
-	ctx context.Context, appName string, revUUIDs ...string,
-) ([]string, error) {
-	db, err := st.DB()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// TODO: sqlair does not support inject parameters into values in quotation marks.
-	// Use sqlair to generate the query once https://github.com/canonical/sqlair/issues/148 is fixed.
-	// q := `
-	// SELECT DISTINCT sruc.secret_id AS &secretRemoteUnitConsumer.secret_id
-	// FROM secret_remote_unit_consumer sruc
-	// LEFT JOIN secret_revision sr ON sr.secret_id = sruc.secret_id
-	// WHERE sruc.unit_name LIKE '$M.app_name/%'`
-
-	q := fmt.Sprintf(`
-SELECT DISTINCT sruc.secret_id AS &secretRemoteUnitConsumer.secret_id
-FROM   secret_remote_unit_consumer sruc
-       LEFT JOIN secret_revision sr ON sr.secret_id = sruc.secret_id
-WHERE  sruc.unit_name LIKE '%s/%%'`, appName)
-
-	queryParams := []any{
-		// TODO: enable this once https://github.com/canonical/sqlair/issues/148 is fixed.
-		// sqlair.M{"app_name": appName},
-	}
-	if len(revUUIDs) > 0 {
-		queryParams = append(queryParams, revisionUUIDs(revUUIDs))
-		q += " AND sr.uuid IN ($revisionUUIDs[:])"
-	}
-	q += `
-GROUP BY sruc.secret_id
-HAVING sruc.current_revision < MAX(sr.revision)`
-	stmt, err := st.Prepare(q, append(queryParams, secretRemoteUnitConsumer{})...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	var remoteConsumers secretRemoteUnitConsumers
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		err := tx.Query(ctx, stmt, queryParams...).GetAll(&remoteConsumers)
-		if errors.Is(err, sqlair.ErrNoRows) {
-			// No consumed secrets found.
-			return nil
-		}
-		return errors.Trace(err)
-	})
-	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
-	}
-	modelUUID, err := st.GetModelUUID(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	secretURIs := make([]string, len(remoteConsumers))
-	for i, consumer := range remoteConsumers {
-		uri, err := coresecrets.ParseURI(consumer.SecretID)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		// We need to set the source model UUID to mark it as a remote secret for comsumer side to use.
-		uri.SourceUUID = modelUUID
-		secretURIs[i] = uri.String()
-	}
-	return secretURIs, nil
-}
-
 type dbSecretIDs []string
 
-// InitialWatchStatementForObsolete returns the initial watch statement
+// InitialWatchStatementForObsoleteRevision returns the initial watch statement
 // and the table name for watching obsolete revisions.
 func (st State) InitialWatchStatementForObsoleteRevision(
-	appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners,
+	appOwnerUUIDs domainsecret.ApplicationOwners, unitOwnerUUIDs domainsecret.UnitOwners,
 ) (string, eventsource.NamespaceQuery) {
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		var revisions []secretRevision
 		if err := st.getRevisionForObsolete(
 			ctx, runner, "sro.revision_uuid AS &secretRevision.uuid", secretRevision{}, &revisions,
-			appOwners, unitOwners,
+			appOwnerUUIDs, unitOwnerUUIDs,
 		); err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		revUUIDs := make([]string, len(revisions))
 		for i, rev := range revisions {
@@ -3037,41 +3171,48 @@ func (st State) InitialWatchStatementForObsoleteRevision(
 
 // GetRevisionIDsForObsolete filters the revision IDs that are obsolete and
 // owned by the specified owners.Either revisionUUIDs, appOwners,
-// or unitOwners must be specified.
+// or unitOwners must be specified. It returns a map of revision UUIDs
+// to their corresponding secret IDs.
 func (st State) GetRevisionIDsForObsolete(
 	ctx context.Context,
-	appOwners domainsecret.ApplicationOwners,
-	unitOwners domainsecret.UnitOwners,
+	appOwnerUUIDs domainsecret.ApplicationOwners,
+	unitOwnerUUIDs domainsecret.UnitOwners,
 	revisionUUIDs ...string,
-) ([]string, error) {
-	if len(revisionUUIDs) == 0 && len(appOwners) == 0 && len(unitOwners) == 0 {
+) (map[string]string, error) {
+	if len(revisionUUIDs) == 0 && len(appOwnerUUIDs) == 0 && len(unitOwnerUUIDs) == 0 {
 		return nil, nil
 	}
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	var rows obsoleteRevisionRows
+	var revisions []secretRevision
 	if err := st.getRevisionForObsolete(
-		ctx, db,
-		"(sr.revision, sr.secret_id) AS (&obsoleteRevisionRow.*)", obsoleteRevisionRow{}, &rows,
-		appOwners, unitOwners, revisionUUIDs...,
+		ctx, db, `
+sr.secret_id AS &secretRevision.secret_id,
+sr.revision AS &secretRevision.revision,
+sro.revision_uuid AS &secretRevision.uuid`, secretRevision{}, &revisions,
+		appOwnerUUIDs, unitOwnerUUIDs, revisionUUIDs...,
 	); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-	return rows.toRevIDs(), nil
+	result := make(map[string]string, len(revisions))
+	for _, rev := range revisions {
+		result[rev.ID] = getRevisionID(rev.SecretID, rev.Revision)
+	}
+	return result, nil
 }
 
 func (st State) getRevisionForObsolete(
-	ctx context.Context, runner coredatabase.TxnRunner,
+	ctx context.Context, runner domain.TxnRunner,
 	selectStmt string,
 	outputType, result any,
-	appOwners domainsecret.ApplicationOwners,
-	unitOwners domainsecret.UnitOwners,
+	appOwnerUUIDs domainsecret.ApplicationOwners,
+	unitOwnerUUIDs domainsecret.UnitOwners,
 	revUUIDs ...string,
 ) error {
-	if len(revUUIDs) == 0 && len(appOwners) == 0 && len(unitOwners) == 0 {
+	if len(revUUIDs) == 0 && len(appOwnerUUIDs) == 0 && len(unitOwnerUUIDs) == 0 {
 		return nil
 	}
 
@@ -3090,32 +3231,28 @@ FROM secret_revision_obsolete sro
 		queryParams = append(queryParams, revisionUUIDs(revUUIDs))
 		conditions = append(conditions, "AND sr.uuid IN ($revisionUUIDs[:])")
 	}
-	if len(appOwners) > 0 && len(unitOwners) > 0 {
-		queryParams = append(queryParams, appOwners, unitOwners)
+	if len(appOwnerUUIDs) > 0 && len(unitOwnerUUIDs) > 0 {
+		queryParams = append(queryParams, appOwnerUUIDs, unitOwnerUUIDs)
 		joins = append(joins, `
      LEFT JOIN secret_application_owner sao ON sr.secret_id = sao.secret_id
-     LEFT JOIN application ON application.uuid = sao.application_uuid
-     LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id
-     LEFT JOIN unit ON unit.uuid = suo.unit_uuid`[1:],
+     LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id`[1:],
 		)
 		conditions = append(conditions, `AND (
-    sao.application_uuid IS NOT NULL AND application.name IN ($ApplicationOwners[:])
-    OR suo.unit_uuid IS NOT NULL AND unit.name IN ($UnitOwners[:])
+    sao.application_uuid IN ($ApplicationOwners[:])
+    OR suo.unit_uuid IN ($UnitOwners[:])
 )`)
-	} else if len(appOwners) > 0 {
-		queryParams = append(queryParams, appOwners)
+	} else if len(appOwnerUUIDs) > 0 {
+		queryParams = append(queryParams, appOwnerUUIDs)
 		joins = append(joins, `
-     LEFT JOIN secret_application_owner sao ON sr.secret_id = sao.secret_id
-     LEFT JOIN application ON application.uuid = sao.application_uuid`[1:],
+     LEFT JOIN secret_application_owner sao ON sr.secret_id = sao.secret_id`[1:],
 		)
-		conditions = append(conditions, "AND sao.application_uuid IS NOT NULL AND application.name IN ($ApplicationOwners[:])")
-	} else if len(unitOwners) > 0 {
-		queryParams = append(queryParams, unitOwners)
+		conditions = append(conditions, "AND sao.application_uuid IN ($ApplicationOwners[:])")
+	} else if len(unitOwnerUUIDs) > 0 {
+		queryParams = append(queryParams, unitOwnerUUIDs)
 		joins = append(joins, `
-     LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id
-     LEFT JOIN unit ON unit.uuid = suo.unit_uuid`[1:],
+     LEFT JOIN secret_unit_owner suo ON sr.secret_id = suo.secret_id`[1:],
 		)
-		conditions = append(conditions, "AND suo.unit_uuid IS NOT NULL AND unit.name IN ($UnitOwners[:])")
+		conditions = append(conditions, "AND suo.unit_uuid IN ($UnitOwners[:])")
 	}
 	if len(joins) > 0 {
 		q += fmt.Sprintf("\n%s", strings.Join(joins, "\n"))
@@ -3123,13 +3260,13 @@ FROM secret_revision_obsolete sro
 	if len(conditions) > 0 {
 		q += fmt.Sprintf("\nWHERE %s", strings.Join(conditions, "\n"))
 	}
-	st.logger.Tracef(
+	st.logger.Tracef(ctx,
 		"revisionUUIDs %+v, appOwners: %+v, unitOwners: %+v, query: \n%s",
-		revUUIDs, appOwners, unitOwners, q,
+		revUUIDs, appOwnerUUIDs, unitOwnerUUIDs, q,
 	)
 	stmt, err := st.Prepare(q, append(queryParams, outputType)...)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	err = runner.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := tx.Query(ctx, stmt, queryParams...).GetAll(result)
@@ -3137,9 +3274,9 @@ FROM secret_revision_obsolete sro
 			// It's ok, the revisions probably have already been pruned.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 type (
@@ -3148,38 +3285,41 @@ type (
 )
 
 // DeleteSecret deletes the specified secret revisions.
-// If revisions is nil or the last remaining revisions are removed.
-func (st State) DeleteSecret(ctx context.Context, uri *coresecrets.URI, revs []int) error {
-	db, err := st.DB()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		return st.deleteSecretRevisions(ctx, tx, uri, revs)
+// If revisions is nil the last remaining revisions are removed.
+func (st State) DeleteSecret(ctx domain.AtomicContext, uri *coresecrets.URI, revs []int) error {
+	err := domain.Run(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		var err error
+		_, err = st.deleteSecretRevisions(ctx, tx, uri, revs)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	if err != nil {
+		return errors.Capture(err)
+	}
+	return nil
 }
 
 // DeleteObsoleteUserSecretRevisions deletes the obsolete user secret revisions.
-func (st State) DeleteObsoleteUserSecretRevisions(ctx context.Context) error {
-	db, err := st.DB()
+// It returns the string format UUID of the deleted revisions.
+func (st State) DeleteObsoleteUserSecretRevisions(ctx context.Context) ([]string, error) {
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	q := `
 SELECT smo.secret_id AS &secretID.id,
        sr.revision AS &secretExternalRevision.revision
-FROM   secret_model_owner smo
-       JOIN secret_metadata sm ON sm.secret_id = smo.secret_id
-       JOIN secret_revision sr ON sr.secret_id = smo.secret_id
-       LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
-WHERE  sm.auto_prune = true AND sro.obsolete = true`
+FROM      secret_model_owner smo
+JOIN      secret_metadata sm ON sm.secret_id = smo.secret_id
+JOIN      secret_revision sr ON sr.secret_id = smo.secret_id
+LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
+WHERE     sm.auto_prune = true AND sro.obsolete = true`
 
-	stmt, err := st.Prepare(q, secretID{}, secretExternalRevision{}, revisions{})
+	stmt, err := st.Prepare(q, secretID{}, secretExternalRevision{})
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
+	var deletedRevisionIDs []string
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		var (
 			dbSecrets    secretIDs
@@ -3191,29 +3331,34 @@ WHERE  sm.auto_prune = true AND sro.obsolete = true`
 			return nil
 		}
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		itemsToDelete, err := dbSecrets.toSecretMetadataForDrain(dbsecretRevs)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		for _, toDelete := range itemsToDelete {
 			revs := make([]int, len(toDelete.Revisions))
 			for i, r := range toDelete.Revisions {
 				revs[i] = r.Revision
 			}
-			if err := st.deleteSecretRevisions(ctx, tx, toDelete.URI, revs); err != nil {
-				return errors.Trace(err)
+			deleted, err := st.deleteSecretRevisions(ctx, tx, toDelete.URI, revs)
+			if err != nil {
+				return errors.Capture(err)
 			}
+			deletedRevisionIDs = append(deletedRevisionIDs, deleted...)
 		}
 		return nil
 	})
-	return errors.Trace(domain.CoerceError(err))
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return deletedRevisionIDs, nil
 }
 
 // deleteSecretRevisions deletes the specified secret revisions, or all if revs is nil.
 // If the last remaining revisions are removed, the secret is deleted.
-func (st State) deleteSecretRevisions(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI, revs []int) error {
+func (st State) deleteSecretRevisions(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI, revs []int) ([]string, error) {
 	// First delete the specified revisions.
 	selectRevisionParams := []any{secretID{
 		ID: uri.ID,
@@ -3232,13 +3377,13 @@ WHERE  secret_id = $secretID.id%s
 `, revFilter)
 	selectRevisionStmt, err := st.Prepare(selectRevsToDelete, append(selectRevisionParams, revisionUUID{})...)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	countRevisions := `SELECT count(*) AS &M.count FROM secret_revision WHERE secret_id = $secretID.id`
 	countRevisionsStmt, err := st.Prepare(countRevisions, secretID{}, sqlair.M{})
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	deleteRevisionExpire := `
@@ -3268,21 +3413,24 @@ DELETE FROM secret_revision WHERE uuid IN ($revisionUUIDs[:])`
 	for i, q := range deleteRevisionQueries {
 		deleteRevisionStmts[i], err = st.Prepare(q, revisionUUIDs{})
 		if err != nil {
-			return errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 	}
 
 	if isLocal, err := st.checkExistsIfLocal(ctx, tx, uri); err != nil {
-		return errors.Trace(err)
+		return nil, errors.Capture(err)
 	} else if !isLocal {
 		// Should never happen.
-		return secreterrors.SecretIsNotLocal
+		return nil, secreterrors.SecretIsNotLocal
 	}
 
 	result := []revisionUUID{}
 	err = tx.Query(ctx, selectRevisionStmt, selectRevisionParams...).GetAll(&result)
+	if errors.Is(err, sqlair.ErrNoRows) {
+		return nil, errors.Errorf("secret revisions %v not found", revs).Add(secreterrors.SecretRevisionNotFound)
+	}
 	if err != nil {
-		return errors.Annotatef(err, "selecting revision UUIDs to delete for secret %q", uri)
+		return nil, errors.Errorf("selecting revision UUIDs to delete for secret %q: %w", uri, err)
 	}
 
 	toDelete := make(revisionUUIDs, len(result))
@@ -3292,21 +3440,24 @@ DELETE FROM secret_revision WHERE uuid IN ($revisionUUIDs[:])`
 	for _, stmt := range deleteRevisionStmts {
 		err = tx.Query(ctx, stmt, toDelete).Run()
 		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
-			return errors.Annotatef(err, "deleting revision info for secret %q", uri)
+			return nil, errors.Errorf("deleting revision info for secret %q: %w", uri, err)
 		}
 	}
 
 	countResult := sqlair.M{}
 	err = tx.Query(ctx, countRevisionsStmt, selectRevisionParams[0]).Get(&countResult)
 	if err != nil {
-		return errors.Annotatef(err, "counting remaining revisions for secret %q", uri)
+		return nil, errors.Errorf("counting remaining revisions for secret %q: %w", uri, err)
 	}
 	count, _ := strconv.Atoi(fmt.Sprint(countResult["count"]))
 	if count > 0 {
-		return nil
+		return toDelete, nil
 	}
 	// No revisions left so delete the secret.
-	return st.deleteSecret(ctx, tx, uri)
+	if err := st.deleteSecret(ctx, tx, uri); err != nil {
+		return nil, errors.Capture(err)
+	}
+	return toDelete, nil
 }
 
 func (st State) deleteSecret(ctx context.Context, tx *sqlair.TX, uri *coresecrets.URI) error {
@@ -3353,14 +3504,14 @@ DELETE FROM secret WHERE id = $secretID.id`
 	for i, q := range deleteSecretQueries {
 		deleteSecretStmts[i], err = st.Prepare(q, secretIDParamParam)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 
 	for _, stmt := range deleteSecretStmts {
 		err = tx.Query(ctx, stmt, secretIDParamParam).Run()
 		if err != nil {
-			return errors.Annotatef(err, "deleting info for secret %q", uri)
+			return errors.Errorf("deleting info for secret %q: %w", uri, err)
 		}
 	}
 	return nil
@@ -3368,20 +3519,20 @@ DELETE FROM secret WHERE id = $secretID.id`
 
 // SecretRotated updates the next rotation time for the specified secret.
 func (st State) SecretRotated(ctx context.Context, uri *coresecrets.URI, next time.Time) error {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
 		err := st.upsertSecretNextRotateTime(ctx, tx, uri, next)
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
-	return errors.Trace(domain.CoerceError(err))
+	return errors.Capture(err)
 }
 
 func (st State) getSecretsRotationChanges(
-	ctx context.Context, runner coredatabase.TxnRunner,
+	ctx context.Context, runner domain.TxnRunner,
 	appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners,
 	secretIDs ...string,
 ) ([]domainsecret.RotationInfo, error) {
@@ -3390,12 +3541,12 @@ func (st State) getSecretsRotationChanges(
 	}
 
 	q := `
-SELECT 
+SELECT
        sro.secret_id AS &secretRotationChange.secret_id,
        sro.next_rotation_time AS &secretRotationChange.next_rotation_time,
        MAX(sr.revision) AS &secretRotationChange.revision
 FROM   secret_rotation sro
-       JOIN secret_revision sr ON sr.secret_id = sro.secret_id`
+JOIN   secret_revision sr ON sr.secret_id = sro.secret_id`
 
 	var queryParams []any
 	var joins []string
@@ -3439,14 +3590,14 @@ FROM   secret_rotation sro
 	}
 	q += `
 GROUP BY sro.secret_id`
-	st.logger.Tracef(
+	st.logger.Tracef(ctx,
 		"secretIDs %+v, appOwners: %+v, unitOwners: %+v, query: \n%s",
 		secretIDs, appOwners, unitOwners, q,
 	)
 
 	stmt, err := st.Prepare(q, append(queryParams, secretRotationChange{})...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var data []secretRotationChange
 	err = runner.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -3455,11 +3606,11 @@ GROUP BY sro.secret_id`
 			// It's ok because the secret or the rotation was just deleted.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
 
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	result := make([]domainsecret.RotationInfo, len(data))
 	for i, d := range data {
@@ -3469,11 +3620,70 @@ GROUP BY sro.secret_id`
 		}
 		uri, err := coresecrets.ParseURI(d.SecretID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		result[i].URI = uri
 	}
 	return result, nil
+}
+
+// ChangeSecretBackend changes the secret backend for the specified secret.
+func (st State) ChangeSecretBackend(
+	ctx context.Context, revisionID uuid.UUID,
+	valueRef *coresecrets.ValueRef, data coresecrets.SecretData,
+) (err error) {
+	if valueRef != nil && len(data) > 0 {
+		return errors.New("both valueRef and data cannot be set")
+	}
+	if valueRef == nil && len(data) == 0 {
+		return errors.New("either valueRef or data must be set")
+	}
+	db, err := st.DB(ctx)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	input := revisionUUID{
+		UUID: revisionID.String(),
+	}
+
+	deleteValueRefQ, err := st.Prepare(`
+DELETE FROM secret_value_ref
+WHERE revision_uuid = $revisionUUID.uuid`, input)
+	if err != nil {
+		return errors.Capture(err)
+	}
+	deleteDataQ, err := st.Prepare(`
+DELETE FROM secret_content
+WHERE revision_uuid = $revisionUUID.uuid`, input)
+	if err != nil {
+		return errors.Capture(err)
+	}
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		if valueRef != nil {
+			if err := st.upsertSecretValueRef(ctx, tx, input.UUID, valueRef); err != nil {
+				return errors.Capture(err)
+			}
+		} else {
+			if err = tx.Query(ctx, deleteValueRefQ, input).Run(); err != nil {
+				return errors.Capture(err)
+			}
+		}
+		if len(data) > 0 {
+			if err := st.updateSecretContent(ctx, tx, input.UUID, data); err != nil {
+				return errors.Capture(err)
+			}
+		} else {
+			if err = tx.Query(ctx, deleteDataQ, input).Run(); err != nil {
+				return errors.Capture(err)
+			}
+		}
+		return errors.Capture(err)
+	})
+	if err != nil {
+		return errors.Capture(err)
+	}
+	return nil
 }
 
 // InitialWatchStatementForSecretsRotationChanges returns the initial watch statement
@@ -3484,7 +3694,7 @@ func (st State) InitialWatchStatementForSecretsRotationChanges(
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		result, err := st.getSecretsRotationChanges(ctx, runner, appOwners, unitOwners)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		secretIDs := make([]string, len(result))
 		for i, d := range result {
@@ -3499,15 +3709,15 @@ func (st State) InitialWatchStatementForSecretsRotationChanges(
 func (st State) GetSecretsRotationChanges(
 	ctx context.Context, appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners, secretIDs ...string,
 ) ([]domainsecret.RotationInfo, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return st.getSecretsRotationChanges(ctx, db, appOwners, unitOwners, secretIDs...)
 }
 
 func (st State) getSecretsRevisionExpiryChanges(
-	ctx context.Context, runner coredatabase.TxnRunner,
+	ctx context.Context, runner domain.TxnRunner,
 	appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners,
 	revisionIDs ...string,
 ) ([]domainsecret.ExpiryInfo, error) {
@@ -3516,13 +3726,13 @@ func (st State) getSecretsRevisionExpiryChanges(
 	}
 
 	q := `
-SELECT 
+SELECT
        sr.secret_id AS &secretRevisionExpireChange.secret_id,
        sre.revision_uuid AS &secretRevisionExpireChange.revision_uuid,
        sre.expire_time AS &secretRevisionExpireChange.expire_time,
        MAX(sr.revision) AS &secretRevisionExpireChange.revision
 FROM   secret_revision_expire sre
-       JOIN secret_revision sr ON sr.uuid = sre.revision_uuid`
+JOIN   secret_revision sr ON sr.uuid = sre.revision_uuid`
 
 	var queryParams []any
 	var joins []string
@@ -3566,14 +3776,14 @@ FROM   secret_revision_expire sre
 	}
 	q += `
 GROUP BY sr.secret_id`
-	st.logger.Tracef(
+	st.logger.Tracef(ctx,
 		"revisionIDs %+v, appOwners: %+v, unitOwners: %+v, query: \n%s",
 		revisionIDs, appOwners, unitOwners, q,
 	)
 
 	stmt, err := st.Prepare(q, append(queryParams, secretRevisionExpireChange{})...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var data []secretRevisionExpireChange
 	err = runner.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -3582,11 +3792,11 @@ GROUP BY sr.secret_id`
 			// It's ok because the secret or the expiry was just deleted.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
 
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	result := make([]domainsecret.ExpiryInfo, len(data))
 	for i, d := range data {
@@ -3597,7 +3807,7 @@ GROUP BY sr.secret_id`
 		}
 		uri, err := coresecrets.ParseURI(d.SecretID)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		result[i].URI = uri
 	}
@@ -3612,7 +3822,7 @@ func (st State) InitialWatchStatementForSecretsRevisionExpiryChanges(
 	queryFunc := func(ctx context.Context, runner coredatabase.TxnRunner) ([]string, error) {
 		result, err := st.getSecretsRevisionExpiryChanges(ctx, runner, appOwners, unitOwners)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		revisionUUIDs := make([]string, len(result))
 		for i, d := range result {
@@ -3627,29 +3837,29 @@ func (st State) InitialWatchStatementForSecretsRevisionExpiryChanges(
 func (st State) GetSecretsRevisionExpiryChanges(
 	ctx context.Context, appOwners domainsecret.ApplicationOwners, unitOwners domainsecret.UnitOwners, revisionUUIDs ...string,
 ) ([]domainsecret.ExpiryInfo, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return st.getSecretsRevisionExpiryChanges(ctx, db, appOwners, unitOwners, revisionUUIDs...)
 }
 
 // GetObsoleteUserSecretRevisionReadyToPrune returns the specified user secret revision with secret ID if it is ready to prune.
 func (st State) GetObsoleteUserSecretRevisionsReadyToPrune(ctx context.Context) ([]string, error) {
-	db, err := st.DB()
+	db, err := st.DB(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	q := `
 SELECT (sr.revision, sr.secret_id) AS (&obsoleteRevisionRow.*)
-FROM   secret_model_owner smo
-       JOIN secret_metadata sm ON sm.secret_id = smo.secret_id
-       JOIN secret_revision sr ON sr.secret_id = smo.secret_id
-       LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
-WHERE  sm.auto_prune = true AND sro.obsolete = true`
+FROM      secret_model_owner smo
+JOIN      secret_metadata sm ON sm.secret_id = smo.secret_id
+JOIN      secret_revision sr ON sr.secret_id = smo.secret_id
+LEFT JOIN secret_revision_obsolete sro ON sro.revision_uuid = sr.uuid
+WHERE     sm.auto_prune = true AND sro.obsolete = true`
 	stmt, err := st.Prepare(q, obsoleteRevisionRow{})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var result obsoleteRevisionRows
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
@@ -3658,10 +3868,10 @@ WHERE  sm.auto_prune = true AND sro.obsolete = true`
 			// It's ok, the revision probably has already been pruned.
 			return nil
 		}
-		return errors.Trace(err)
+		return errors.Capture(err)
 	})
 	if err != nil {
-		return nil, errors.Trace(domain.CoerceError(err))
+		return nil, errors.Capture(err)
 	}
 	return result.toRevIDs(), nil
 }

@@ -7,10 +7,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/errors"
 )
 
 // CharmhubURLChange returns a config validator that will check to make sure
@@ -25,6 +25,37 @@ func CharmhubURLChange() config.ValidatorFunc {
 					Reason:       "charmhub-url cannot be changed",
 				}
 			}
+		}
+		return cfg, nil
+	}
+}
+
+// AgentStreamChange returns a config validator that will check to make sure the
+// agent stream does not change and also remove it from config so that it does
+// not get committed back to state.
+//
+// Agent stream is an ongoing value that is being actively removed from model
+// config. Until we can finish removing all uses of agent version from model
+// config this validator will keep removing it from the new config so that it
+// does not get persisted to state.
+func AgentStreamChange() config.ValidatorFunc {
+	return func(ctx context.Context, cfg, old *config.Config) (*config.Config, error) {
+		if v := cfg.AgentStream(); v != "" {
+			oldStream := old.AgentStream()
+			if oldStream == "" {
+				return cfg, nil
+			}
+			if v != oldStream {
+				return cfg, &config.ValidationError{
+					InvalidAttrs: []string{config.AgentStreamKey},
+					Reason:       "agent-stream cannot be changed",
+				}
+			}
+		}
+
+		cfg, err := cfg.Remove([]string{config.AgentStreamKey})
+		if err != nil {
+			return cfg, errors.Errorf("removing agent stream key from model config: %w", err)
 		}
 		return cfg, nil
 	}
@@ -55,24 +86,38 @@ func AgentVersionChange() config.ValidatorFunc {
 
 		cfg, err := cfg.Remove([]string{config.AgentVersionKey})
 		if err != nil {
-			return cfg, fmt.Errorf("removing agent version key from model config: %w", err)
+			return cfg, errors.Errorf("removing agent version key from model config: %w", err)
 		}
 		return cfg, nil
 	}
 }
 
-// AuthorizedKeysChange checks to see if there has been any change to a model
-// config authorized keys.
-func AuthorizedKeysChange() config.ValidatorFunc {
+// ContainerNetworkingMethodValue checks that the container networking method
+// supplied to model config is a valid value.
+func ContainerNetworkingMethodValue() config.ValidatorFunc {
 	return func(ctx context.Context, cfg, old *config.Config) (*config.Config, error) {
-		if cfg.AuthorizedKeys() == old.AuthorizedKeys() {
+		if err := cfg.ContainerNetworkingMethod().Validate(); err != nil {
+			return cfg, &config.ValidationError{
+				InvalidAttrs: []string{config.ContainerNetworkingMethodKey},
+				Reason:       err.Error(),
+			}
+		}
+		return cfg, nil
+	}
+}
+
+// ContainerNetworkingMethodChange checks to see if there has been any change
+// to a model config's container networking method.
+func ContainerNetworkingMethodChange() config.ValidatorFunc {
+	return func(ctx context.Context, cfg, old *config.Config) (*config.Config, error) {
+		if cfg.ContainerNetworkingMethod() == old.ContainerNetworkingMethod() {
 			// No change. Nothing more todo.
 			return cfg, nil
 		}
 
 		return cfg, &config.ValidationError{
-			InvalidAttrs: []string{config.AuthorizedKeysKey},
-			Reason:       "authorized-keys cannot be changed",
+			InvalidAttrs: []string{config.ContainerNetworkingMethodKey},
+			Reason:       "container-networking-method cannot be changed",
 		}
 	}
 }
@@ -98,7 +143,7 @@ func SpaceChecker(provider SpaceProvider) config.ValidatorFunc {
 
 		has, err := provider.HasSpace(ctx, spaceName)
 		if err != nil {
-			return cfg, fmt.Errorf("checking for space %q existence to validate model config: %w", spaceName, err)
+			return cfg, errors.Errorf("checking for space %q existence to validate model config: %w", spaceName, err)
 		}
 
 		if !has {
@@ -152,58 +197,15 @@ func LoggingTracePermissionChecker(canTrace bool) config.ValidatorFunc {
 		}
 
 		if !canTrace && haveTrace {
-			return cfg, fmt.Errorf(
+			return cfg, errors.Errorf(
 				"%w %w",
 				ErrorLogTracingPermission,
 				&config.ValidationError{
 					InvalidAttrs: []string{config.LoggingConfigKey},
-				},
-			)
+				})
+
 		}
 
-		return cfg, nil
-	}
-}
-
-// SecretBackendProvider is responsible for checking if a given secrets backend
-// exists.
-type SecretBackendProvider interface {
-	// HasSecretsBackend checks if the provided secrets backend name exists. If
-	// an error occurs during checking for the backend false and a subsequent
-	// error is returned.
-	HasSecretsBackend(string) (bool, error)
-}
-
-// SecretBackendChecker is responsible for asserting the secret backend in the
-// updated model config is a valid secret backend in the controller. If the
-// secret backend has not changed or is the default backend then no validation
-// is performed. Any validation errors will satisfy config.ValidationError.
-func SecretBackendChecker(provider SecretBackendProvider) config.ValidatorFunc {
-	return func(ctx context.Context, cfg, old *config.Config) (*config.Config, error) {
-		backendName := cfg.SecretBackend()
-		if backendName == old.SecretBackend() {
-			return cfg, nil
-		}
-		if backendName == "" {
-			return cfg, &config.ValidationError{
-				InvalidAttrs: []string{config.SecretBackendKey},
-				Reason:       "secret back cannot be empty",
-			}
-		}
-		if backendName == config.DefaultSecretBackend {
-			return cfg, nil
-		}
-
-		has, err := provider.HasSecretsBackend(backendName)
-		if err != nil {
-			return cfg, fmt.Errorf("fetching secret backend for %q to validate model config: %w", backendName, err)
-		}
-		if !has {
-			return cfg, &config.ValidationError{
-				InvalidAttrs: []string{config.SecretBackendKey},
-				Reason:       fmt.Sprintf("secret backend %q not found", backendName),
-			}
-		}
 		return cfg, nil
 	}
 }

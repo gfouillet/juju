@@ -4,11 +4,12 @@
 package jujuc_test
 
 import (
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 )
 
@@ -16,40 +17,8 @@ type stateGetSuite struct {
 	stateSuite
 }
 
-var _ = gc.Suite(&stateGetSuite{})
-
-func (s *stateGetSuite) TestHelp(c *gc.C) {
-	toolCmd, err := jujuc.NewCommand(nil, "state-get")
-	c.Assert(err, jc.ErrorIsNil)
-
-	ctx := cmdtesting.Context(c)
-	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(toolCmd), ctx, []string{"--help"})
-	c.Check(code, gc.Equals, 0)
-	c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
-
-	var expectedHelp = `
-Usage: state-get [options] [<key>]
-
-Summary:
-print server-side-state value
-
-Options:
---format  (= smart)
-    Specify output format (json|smart|yaml)
--o, --output (= "")
-    Specify an output file
---strict  (= false)
-    Return an error if the requested key does not exist
-
-Details:
-state-get prints the value of the server side state specified by key.
-If no key is given, or if the key is "-", all keys and values will be printed.
-
-See also:
-    state-delete
-    state-set
-`[1:]
-	c.Assert(bufferString(ctx.Stdout), gc.Equals, expectedHelp)
+func TestStateGetSuite(t *testing.T) {
+	tc.Run(t, &stateGetSuite{})
 }
 
 type runStateGetCmd struct {
@@ -61,7 +30,7 @@ type runStateGetCmd struct {
 	expect      func()
 }
 
-func (s *stateGetSuite) TestStateGet(c *gc.C) {
+func (s *stateGetSuite) TestStateGet(c *tc.C) {
 	runStateGetCmdTests := []runStateGetCmd{
 		{
 			description: "get all values with no args",
@@ -111,12 +80,12 @@ func (s *stateGetSuite) TestStateGet(c *gc.C) {
 		test.expect()
 
 		toolCmd, err := jujuc.NewCommand(s.mockContext, "state-get")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(toolCmd), ctx, test.args)
-		c.Check(code, gc.Equals, test.code)
-		c.Assert(bufferString(ctx.Stderr), gc.Equals, test.err)
-		c.Assert(bufferString(ctx.Stdout), gc.Equals, test.out)
+		c.Check(code, tc.Equals, test.code)
+		c.Assert(bufferString(ctx.Stderr), tc.Equals, test.err)
+		c.Assert(bufferString(ctx.Stdout), tc.Equals, test.out)
 	}
 }

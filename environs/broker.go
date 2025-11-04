@@ -4,13 +4,14 @@
 package environs
 
 import (
+	"context"
+
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/lxdprofile"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
@@ -19,7 +20,7 @@ import (
 )
 
 // StatusCallbackFunc represents a function that can be called to report a status.
-type StatusCallbackFunc func(settableStatus status.Status, info string, data map[string]interface{}) error
+type StatusCallbackFunc func(ctx context.Context, settableStatus status.Status, info string, data map[string]interface{}) error
 
 // StartInstanceParams holds parameters for the
 // InstanceBroker.StartInstance method.
@@ -160,17 +161,17 @@ type InstanceBroker interface {
 	// to attempt in another zone. If the provider can determine that
 	// the StartInstanceParams can never be fulfilled in any zone, then
 	// it may return an error satisfying Is(err, ErrAvailabilityZoneIndependent).
-	StartInstance(ctx envcontext.ProviderCallContext, args StartInstanceParams) (*StartInstanceResult, error)
+	StartInstance(ctx context.Context, args StartInstanceParams) (*StartInstanceResult, error)
 
 	// StopInstances shuts down the instances with the specified IDs.
 	// Unknown instance IDs are ignored, to enable idempotency.
-	StopInstances(envcontext.ProviderCallContext, ...instance.Id) error
+	StopInstances(context.Context, ...instance.Id) error
 
 	// AllInstances returns all instances currently known to the broker.
-	AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error)
+	AllInstances(ctx context.Context) ([]instances.Instance, error)
 
 	// AllRunningInstances returns all running, available instances currently known to the broker.
-	AllRunningInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error)
+	AllRunningInstances(ctx context.Context) ([]instances.Instance, error)
 }
 
 // LXDProfiler defines an interface for dealing with lxd profiles used to

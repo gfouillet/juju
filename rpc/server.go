@@ -11,10 +11,11 @@ import (
 	"runtime/pprof"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/juju/errors"
-
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/errors"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/rpcreflect"
 )
@@ -136,6 +137,10 @@ type noopTracingRoot struct {
 
 func (noopTracingRoot) StartTrace(ctx context.Context) (context.Context, trace.Span) {
 	return ctx, trace.NoopSpan{}
+}
+
+func (noopTracingRoot) FlightRecorder() flightrecorder.FlightRecorder {
+	return flightrecorder.NoopRecorder{}
 }
 
 // Note that we use "client request" and "server request" to name
@@ -351,7 +356,19 @@ func (conn *Conn) Close() error {
 	// block will be notified that the server is shutting
 	// down.
 	conn.cancelContext()
-	conn.srvPending.Wait()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.srvPending.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		// A request is refusing to close, so we're blocked. We can't wait
+		// indefinitely, and a minute is a lifetime for any request. Close it,
+		// but warn in the logs that the connection is refusing to go away.
+		logger.Warningf(conn.context, "timed out waiting for outstanding requests, closing anyway")
+	}
 
 	conn.mutex.Lock()
 	if conn.root != nil {
@@ -364,7 +381,7 @@ func (conn *Conn) Close() error {
 
 	// Closing the codec should cause the input loop to terminate.
 	if err := conn.codec.Close(); err != nil {
-		logger.Debugf("error closing codec: %v", err)
+		logger.Debugf(conn.context, "error closing codec: %v", err)
 	}
 	<-conn.dead
 
@@ -374,12 +391,14 @@ func (conn *Conn) Close() error {
 // ErrorCoder represents any error that has an associated error code. An error
 // code is a short string that represents the kind of an error.
 type ErrorCoder interface {
+	Error() string
 	ErrorCode() string
 }
 
 // ErrorInfoProvider represents any error that can provide additional error
 // information as a map.
 type ErrorInfoProvider interface {
+	Error() string
 	ErrorInfo() map[string]interface{}
 }
 
@@ -392,6 +411,8 @@ type Root interface {
 	FindMethod(rootName string, version int, methodName string) (rpcreflect.MethodCaller, error)
 	// StartTrace starts a trace for a given request.
 	StartTrace(context.Context) (context.Context, trace.Span)
+	// FlightRecorder returns a flight recorder associated with the root.
+	FlightRecorder() flightrecorder.FlightRecorder
 }
 
 // Killer represents a type that can be asked to abort any outstanding
@@ -411,8 +432,10 @@ func (conn *Conn) input() {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 
-	if conn.closing || errors.Cause(err) == io.EOF {
-		err = ErrShutdown
+	if conn.closing || errors.Is(err, io.EOF) {
+		err = errors.Errorf(
+			"connection is shut down: %w", err,
+		).Add(ErrShutdown)
 	} else {
 		// Make the error available for Conn.Close to see.
 		conn.inputLoopError = err
@@ -420,7 +443,7 @@ func (conn *Conn) input() {
 	// Terminate all client requests.
 	for _, call := range conn.clientPending {
 		call.Error = err
-		call.done()
+		call.done(conn.context)
 	}
 	conn.clientPending = nil
 	conn.shutdown = true
@@ -434,18 +457,22 @@ func (conn *Conn) loop() error {
 		var hdr Header
 		err := conn.codec.ReadHeader(&hdr)
 		switch {
-		case errors.Cause(err) == io.EOF:
+		case errors.Is(err, io.EOF):
 			// handle sentinel error specially
 			return err
 		case err != nil:
-			return errors.Annotate(err, "codec.ReadHeader error")
+			return errors.Errorf("codec.ReadHeader error: %w", err)
 		case hdr.IsRequest():
 			if err := conn.handleRequest(&hdr); err != nil {
-				return errors.Annotatef(err, "codec.handleRequest %#v error", hdr)
+				return errors.Errorf(
+					"codec.handleRequest %#v error: %w", hdr, err,
+				)
 			}
 		default:
 			if err := conn.handleResponse(&hdr); err != nil {
-				return errors.Annotatef(err, "codec.handleResponse %#v error", hdr)
+				return errors.Errorf(
+					"codec.handleResponse %#v error: %w", hdr, err,
+				)
 			}
 		}
 	}
@@ -469,7 +496,7 @@ func (conn *Conn) handleRequest(hdr *Header) error {
 	req, err := conn.bindRequest(hdr)
 	if err != nil {
 		if err := recorder.HandleRequest(hdr, nil); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 		if err := conn.readBody(nil, true); err != nil {
 			return err
@@ -487,12 +514,12 @@ func (conn *Conn) handleRequest(hdr *Header) error {
 	}
 	if err := conn.readBody(argp, true); err != nil {
 		if err := recorder.HandleRequest(hdr, nil); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 
 		// If we get EOF, we know the connection is a
 		// goner, so don't try to respond.
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return err
 		}
 		// An error reading the body often indicates bad
@@ -510,20 +537,23 @@ func (conn *Conn) handleRequest(hdr *Header) error {
 		body = arg.Interface()
 	}
 	if err := recorder.HandleRequest(hdr, body); err != nil {
-		logger.Errorf("error recording request %+v with arg %+v: %T %+v", req, arg, err, err)
+		logger.Errorf(context.TODO(), "error recording request %+v with arg %+v: %T %+v", req, arg, err, err)
 		return conn.writeErrorResponse(hdr, req.transformErrors(err), recorder)
 	}
+
+	// Hold the lock whilst checking the closing flag.
 	conn.mutex.Lock()
 	closing := conn.closing
-	if !closing {
-		conn.srvPending.Add(1)
-		go conn.runRequest(req, arg, hdr.Version, recorder)
-	}
 	conn.mutex.Unlock()
+
 	if closing {
 		// We're closing down - no new requests may be initiated.
 		return conn.writeErrorResponse(hdr, req.transformErrors(ErrShutdown), recorder)
 	}
+
+	conn.srvPending.Add(1)
+	go conn.runRequest(req, arg, hdr.Version, recorder)
+
 	return nil
 }
 
@@ -547,7 +577,7 @@ func (conn *Conn) writeErrorResponse(reqHdr *Header, err error, recorder Recorde
 		hdr.ErrorInfo = err.ErrorInfo()
 	}
 	if err := recorder.HandleReply(reqHdr.Request, hdr, struct{}{}); err != nil {
-		logger.Errorf("error recording reply %+v: %T %+v", hdr, err, err)
+		logger.Errorf(context.TODO(), "error recording reply %+v: %T %+v", hdr, err, err)
 	}
 
 	return conn.codec.WriteMessage(hdr, struct{}{})
@@ -599,20 +629,23 @@ func (conn *Conn) runRequest(
 	version int,
 	recorder Recorder,
 ) {
-	// If the request causes a panic, ensure we log that before closing the connection.
+	// Close the service pending last, so that if there is a panic in the
+	// request handling, we don't mark the request as done before writing the
+	// error response.
+	defer conn.srvPending.Done()
+
+	// If the request causes a panic, ensure we log that before closing the
+	// connection.
 	defer func() {
 		if panicResult := recover(); panicResult != nil {
-			logger.Criticalf(
+			logger.Criticalf(conn.context,
 				"panic running request %+v with arg %+v: %v\n%v", req, arg, panicResult, string(debug.Stack()))
 			_ = conn.writeErrorResponse(&req.hdr, errors.Errorf("%v", panicResult), recorder)
 		}
 	}()
-	defer conn.srvPending.Done()
 
 	// Create a request-specific context, cancelled when the
 	// request returns.
-	//
-	// TODO(axw) provide a means for clients to cancel a request.
 	ctx, cancel := context.WithCancel(conn.context)
 	defer cancel()
 
@@ -621,12 +654,19 @@ func (conn *Conn) runRequest(
 	// don't care, a new one will be curated for us.
 	ctx = trace.WithTraceScope(ctx, req.hdr.TraceID, req.hdr.SpanID, req.hdr.TraceFlags)
 
-	conn.withTrace(ctx, req.hdr.Request, func() {
+	conn.withTrace(ctx, req.hdr.Request, func(ctx context.Context) {
 		conn.callRequest(ctx, req, arg, version, recorder)
 	})
 }
 
-func (conn *Conn) withTrace(ctx context.Context, request Request, fn func()) {
+func (conn *Conn) withTrace(ctx context.Context, request Request, fn func(ctx context.Context)) {
+	// For some asinine reason, the connection may not have a root. In that
+	// case we just call the function without tracing.
+	if conn.root == nil {
+		fn(ctx)
+		return
+	}
+
 	ctx, span := conn.root.StartTrace(ctx)
 	defer span.End(
 		trace.StringAttr("request.type", request.Type),
@@ -636,8 +676,9 @@ func (conn *Conn) withTrace(ctx context.Context, request Request, fn func()) {
 
 	// Set the otel.traceid for the goroutine, so profiling tools can then link
 	// the trace to the profile.
-	pprof.Do(ctx, pprof.Labels(trace.OTELTraceID, trace.TraceIDFromContext(ctx)), func(ctx context.Context) {
-		fn()
+	traceID, _ := trace.TraceIDFromContext(ctx)
+	pprof.Do(ctx, pprof.Labels(trace.OTELTraceID, traceID), func(ctx context.Context) {
+		fn(ctx)
 	})
 }
 
@@ -650,6 +691,10 @@ func (conn *Conn) callRequest(
 ) {
 	rv, err := req.Call(ctx, req.hdr.Request.Id, arg)
 	if err != nil {
+		if err := conn.getFlightRecorder().Capture(flightrecorder.KindError); err != nil {
+			logger.Tracef(ctx, "error capturing flight recorder: %v", err)
+		}
+
 		// Record the first error, this is the one that will be returned to
 		// the client.
 		trace.SpanFromContext(ctx).RecordError(err)
@@ -669,11 +714,19 @@ func (conn *Conn) callRequest(
 			rvi = struct{}{}
 		}
 		if err := recorder.HandleReply(req.hdr.Request, hdr, rvi); err != nil {
-			logger.Errorf("error recording reply %+v: %T %+v", hdr, err, err)
+			logger.Errorf(ctx, "error recording reply %+v: %T %+v", hdr, err, err)
 		}
+
+		if err := conn.getFlightRecorder().Capture(flightrecorder.KindRequest); err != nil {
+			logger.Tracef(ctx, "error capturing flight recorder: %v", err)
+		}
+
+		// Guard against concurrent writes to the codec, but ensure that
+		// if there is a panic during WriteMessage we don't hold the lock.
 		conn.sending.Lock()
+		defer conn.sending.Unlock()
+
 		err = conn.codec.WriteMessage(hdr, rvi)
-		conn.sending.Unlock()
 	}
 	if err != nil {
 		// If the message failed due to the other end closing the socket, that
@@ -687,9 +740,20 @@ func (conn *Conn) callRequest(
 			// Record the second error, this is the one that will be recorded if
 			// we can't write the response to the client.
 			trace.SpanFromContext(ctx).RecordError(err)
-			logger.Errorf("error writing response: %T %+v", err, err)
+			logger.Errorf(ctx, "error writing response: %T %+v", err, err)
 		}
 	}
+}
+
+var noop = flightrecorder.NoopRecorder{}
+
+func (conn *Conn) getFlightRecorder() flightrecorder.FlightRecorder {
+	// For some asinine reason, the connection may not have a root. In that
+	// case we just return a noop flight recorder.
+	if conn.root == nil {
+		return noop
+	}
+	return conn.root.FlightRecorder()
 }
 
 type serverError struct {

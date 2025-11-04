@@ -4,9 +4,10 @@
 package maas
 
 import (
+	"testing"
+
 	"github.com/juju/gomaasapi/v2"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/network"
 )
@@ -15,14 +16,8 @@ type interfacesSuite struct {
 	maasSuite
 }
 
-var _ = gc.Suite(&interfacesSuite{})
-
-func newAddressOnSpaceWithId(
-	space string, id network.Id, address string, options ...func(network.AddressMutator),
-) network.ProviderAddress {
-	newAddress := network.NewMachineAddress(address, options...).AsProviderAddress(network.WithSpaceName(space))
-	newAddress.ProviderSpaceID = id
-	return newAddress
+func TestInterfacesSuite(t *testing.T) {
+	tc.Run(t, &interfacesSuite{})
 }
 
 const exampleInterfaceSetJSON = `
@@ -413,19 +408,19 @@ const exampleInterfaceSetJSON = `
         }
 ]`
 
-func (s *interfacesSuite) TestParseInterfacesNoJSON(c *gc.C) {
+func (s *interfacesSuite) TestParseInterfacesNoJSON(c *tc.C) {
 	result, err := parseInterfaces(nil)
-	c.Check(err, gc.ErrorMatches, "parsing interfaces: unexpected end of JSON input")
-	c.Check(result, gc.IsNil)
+	c.Check(err, tc.ErrorMatches, "parsing interfaces: unexpected end of JSON input")
+	c.Check(result, tc.IsNil)
 }
 
-func (s *interfacesSuite) TestParseInterfacesBadJSON(c *gc.C) {
+func (s *interfacesSuite) TestParseInterfacesBadJSON(c *tc.C) {
 	result, err := parseInterfaces([]byte("$bad"))
-	c.Check(err, gc.ErrorMatches, `parsing interfaces: invalid character '\$' .*`)
-	c.Check(result, gc.IsNil)
+	c.Check(err, tc.ErrorMatches, `parsing interfaces: invalid character '\$' .*`)
+	c.Check(result, tc.IsNil)
 }
 
-func (s *interfacesSuite) TestParseInterfacesExampleJSON(c *gc.C) {
+func (s *interfacesSuite) TestParseInterfacesExampleJSON(c *tc.C) {
 
 	vlan0 := maasVLAN{
 		ID:          5001,
@@ -624,11 +619,11 @@ func (s *interfacesSuite) TestParseInterfacesExampleJSON(c *gc.C) {
 	}}
 
 	result, err := parseInterfaces([]byte(exampleInterfaceSetJSON))
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(result, jc.DeepEquals, expected)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, expected)
 }
 
-func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
+func (s *interfacesSuite) TestMAASNetworkInterfaces(c *tc.C) {
 	vlan0 := fakeVLAN{
 		id:  5001,
 		vid: 0,
@@ -804,66 +799,63 @@ func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
 	subnetsMap["192.168.1.0/24"] = "0"
 
 	expected := network.InterfaceInfos{{
-		DeviceIndex:       0,
-		MACAddress:        "52:54:00:70:9b:fe",
-		ProviderId:        "91",
-		ProviderSubnetId:  "3",
-		AvailabilityZones: nil,
-		VLANTag:           0,
-		ProviderVLANId:    "5001",
-		ProviderAddressId: "436",
-		InterfaceName:     "eth0",
-		InterfaceType:     "ethernet",
-		Disabled:          false,
-		NoAutoStart:       false,
+		DeviceIndex:    0,
+		MACAddress:     "52:54:00:70:9b:fe",
+		ProviderId:     "91",
+		VLANTag:        0,
+		ProviderVLANId: "5001",
+		InterfaceName:  "eth0",
+		InterfaceType:  "ethernet",
+		Disabled:       false,
+		NoAutoStart:    false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.20.19.103", network.WithCIDR("10.20.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("default")),
+				"10.20.19.103",
+				network.WithCIDR("10.20.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("default"),
+				network.WithProviderSubnetID("3"),
+				network.WithProviderID("436"),
+			),
 		},
-		DNSServers: network.NewMachineAddresses([]string{
-			"10.20.19.2",
-			"10.20.19.3",
-		}).AsProviderAddresses(network.WithSpaceName("default")),
+		DNSServers:       []string{"10.20.19.2", "10.20.19.3"},
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(network.WithSpaceName("default")),
+		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
-		DeviceIndex:       0,
-		MACAddress:        "52:54:00:70:9b:fe",
-		ProviderId:        "91",
-		ProviderSubnetId:  "3",
-		AvailabilityZones: nil,
-		VLANTag:           0,
-		ProviderVLANId:    "5001",
-		ProviderAddressId: "437",
-		InterfaceName:     "eth0",
-		InterfaceType:     "ethernet",
-		Disabled:          false,
-		NoAutoStart:       false,
+		DeviceIndex:    0,
+		MACAddress:     "52:54:00:70:9b:fe",
+		ProviderId:     "91",
+		VLANTag:        0,
+		ProviderVLANId: "5001",
+		InterfaceName:  "eth0",
+		InterfaceType:  "ethernet",
+		Disabled:       false,
+		NoAutoStart:    false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.20.19.104", network.WithCIDR("10.20.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("default")),
+				"10.20.19.104",
+				network.WithCIDR("10.20.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("default"),
+				network.WithProviderSubnetID("3"),
+				network.WithProviderID("437"),
+			),
 		},
-		DNSServers: network.NewMachineAddresses([]string{
-			"10.20.19.2",
-			"10.20.19.3",
-		}).AsProviderAddresses(network.WithSpaceName("default")),
+		DNSServers:       []string{"10.20.19.2", "10.20.19.3"},
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(network.WithSpaceName("default")),
+		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
 		DeviceIndex:         1,
 		MACAddress:          "52:54:00:70:9b:fe",
 		ProviderId:          "150",
-		ProviderSubnetId:    "5",
-		AvailabilityZones:   nil,
 		VLANTag:             50,
 		ProviderVLANId:      "5004",
-		ProviderAddressId:   "517",
 		InterfaceName:       "eth0.50",
 		ParentInterfaceName: "eth0",
 		InterfaceType:       "802.1q",
@@ -871,23 +863,26 @@ func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
 		NoAutoStart:         false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.50.19.103", network.WithCIDR("10.50.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("admin")),
+				"10.50.19.103",
+				network.WithCIDR("10.50.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("admin"),
+				network.WithProviderSubnetID("5"),
+				network.WithProviderID("517"),
+			),
 		},
 		DNSServers:       nil,
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.50.19.2").AsProviderAddress(network.WithSpaceName("admin")),
+		GatewayAddress:   network.NewMachineAddress("10.50.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
 		DeviceIndex:         2,
 		MACAddress:          "52:54:00:70:9b:fe",
 		ProviderId:          "151",
-		ProviderSubnetId:    "6",
-		AvailabilityZones:   nil,
 		VLANTag:             100,
 		ProviderVLANId:      "5005",
-		ProviderAddressId:   "519",
 		InterfaceName:       "eth0.100",
 		ParentInterfaceName: "eth0",
 		InterfaceType:       "802.1q",
@@ -895,45 +890,55 @@ func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
 		NoAutoStart:         false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.100.19.103", network.WithCIDR("10.100.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("public")),
+				"10.100.19.103",
+				network.WithCIDR("10.100.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("public"),
+				network.WithProviderSubnetID("6"),
+				network.WithProviderID("519"),
+			),
 		},
 		DNSServers:       nil,
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.100.19.2").AsProviderAddress(network.WithSpaceName("public")),
+		GatewayAddress:   network.NewMachineAddress("10.100.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
 		DeviceIndex:         3,
 		MACAddress:          "52:54:00:70:9b:fe",
 		ProviderId:          "152",
-		ProviderSubnetId:    "8",
-		AvailabilityZones:   nil,
 		VLANTag:             250,
 		ProviderVLANId:      "5008",
-		ProviderAddressId:   "523",
 		ProviderSpaceId:     "3",
 		InterfaceName:       "eth0.250",
 		ParentInterfaceName: "eth0",
 		InterfaceType:       "802.1q",
 		Disabled:            false,
 		NoAutoStart:         false,
-		Addresses: network.ProviderAddresses{newAddressOnSpaceWithId(
-			"storage", "3", "10.250.19.103", network.WithCIDR("10.250.19.0/24"), network.WithConfigType(network.ConfigStatic),
-		)},
+		Addresses: network.ProviderAddresses{
+			network.NewMachineAddress(
+				"10.250.19.103",
+				network.WithCIDR("10.250.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("storage"),
+				network.WithProviderSubnetID("8"),
+				network.WithProviderID("523"),
+				network.WithProviderSpaceID("3"),
+			),
+		},
 		DNSServers:       nil,
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   newAddressOnSpaceWithId("storage", "3", "10.250.19.2"),
+		GatewayAddress:   network.NewMachineAddress("10.250.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
 		DeviceIndex:         4,
 		MACAddress:          "52:54:00:70:9b:ff",
 		ProviderId:          "92",
-		ProviderSubnetId:    "3",
 		VLANTag:             0,
 		ProviderVLANId:      "5001",
-		ProviderAddressId:   "436",
 		InterfaceName:       "eth1",
 		ParentInterfaceName: "irregular_bond0",
 		InterfaceType:       "ethernet",
@@ -941,25 +946,26 @@ func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
 		NoAutoStart:         false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.20.19.103", network.WithCIDR("10.20.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("default")),
+				"10.20.19.103",
+				network.WithCIDR("10.20.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("default"),
+				network.WithProviderSubnetID("3"),
+				network.WithProviderID("436"),
+			),
 		},
-		DNSServers: network.NewMachineAddresses([]string{
-			"10.20.19.2",
-			"10.20.19.3",
-		}).AsProviderAddresses(network.WithSpaceName("default")),
+		DNSServers:       []string{"10.20.19.2", "10.20.19.3"},
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(network.WithSpaceName("default")),
+		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
 		DeviceIndex:         4,
 		MACAddress:          "52:54:00:70:9b:ff",
 		ProviderId:          "92",
-		ProviderSubnetId:    "3",
 		VLANTag:             0,
 		ProviderVLANId:      "5001",
-		ProviderAddressId:   "437",
 		InterfaceName:       "eth1",
 		ParentInterfaceName: "irregular_bond0",
 		InterfaceType:       "ethernet",
@@ -967,44 +973,45 @@ func (s *interfacesSuite) TestMAASNetworkInterfaces(c *gc.C) {
 		NoAutoStart:         false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.20.19.104", network.WithCIDR("10.20.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("default")),
+				"10.20.19.104",
+				network.WithCIDR("10.20.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("default"),
+				network.WithProviderSubnetID("3"),
+				network.WithProviderID("437"),
+			),
 		},
-		DNSServers: network.NewMachineAddresses([]string{
-			"10.20.19.2",
-			"10.20.19.3",
-		}).AsProviderAddresses(network.WithSpaceName("default")),
+		DNSServers:       []string{"10.20.19.2", "10.20.19.3"},
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(network.WithSpaceName("default")),
+		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}, {
-		DeviceIndex:       5,
-		MACAddress:        "52:54:00:70:9b:ff",
-		ProviderId:        "101",
-		ProviderSubnetId:  "",
-		VLANTag:           0,
-		ProviderVLANId:    "",
-		ProviderAddressId: "",
-		InterfaceName:     "irregular_bond0",
-		InterfaceType:     "bond",
-		Disabled:          false,
-		NoAutoStart:       false,
-		Addresses:         nil,
-		DNSServers:        nil,
-		DNSSearchDomains:  nil,
-		MTU:               0,
-		Origin:            network.OriginProvider,
+		DeviceIndex:      5,
+		MACAddress:       "52:54:00:70:9b:ff",
+		ProviderId:       "101",
+		VLANTag:          0,
+		ProviderVLANId:   "",
+		InterfaceName:    "irregular_bond0",
+		InterfaceType:    "bond",
+		Disabled:         false,
+		NoAutoStart:      false,
+		Addresses:        nil,
+		DNSServers:       nil,
+		DNSSearchDomains: nil,
+		MTU:              0,
+		Origin:           network.OriginProvider,
 	}}
 	machine := &fakeMachine{interfaceSet: exampleInterfaces}
 	instance := &maasInstance{machine: machine}
 
-	infos, err := maasNetworkInterfaces(s.callCtx, instance, subnetsMap)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(infos, jc.DeepEquals, expected)
+	infos, err := maasNetworkInterfaces(c.Context(), instance, subnetsMap)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(infos, tc.DeepEquals, expected)
 }
 
-func (s *interfacesSuite) TestMAASInterfacesNilVLAN(c *gc.C) {
+func (s *interfacesSuite) TestMAASInterfacesNilVLAN(c *tc.C) {
 	vlan0 := fakeVLAN{
 		id:  5001,
 		vid: 0,
@@ -1042,34 +1049,34 @@ func (s *interfacesSuite) TestMAASInterfacesNilVLAN(c *gc.C) {
 	instance := &maasInstance{machine: machine}
 
 	expected := network.InterfaceInfos{{
-		DeviceIndex:       0,
-		MACAddress:        "52:54:00:70:9b:fe",
-		ProviderId:        "91",
-		ProviderSubnetId:  "3",
-		AvailabilityZones: nil,
-		VLANTag:           0,
-		ProviderVLANId:    "5001",
-		ProviderAddressId: "436",
-		InterfaceName:     "eth0",
-		InterfaceType:     "ethernet",
-		Disabled:          false,
-		NoAutoStart:       false,
+		DeviceIndex:    0,
+		MACAddress:     "52:54:00:70:9b:fe",
+		ProviderId:     "91",
+		VLANTag:        0,
+		ProviderVLANId: "5001",
+		InterfaceName:  "eth0",
+		InterfaceType:  "ethernet",
+		Disabled:       false,
+		NoAutoStart:    false,
 		Addresses: network.ProviderAddresses{
 			network.NewMachineAddress(
-				"10.20.19.103", network.WithCIDR("10.20.19.0/24"), network.WithConfigType(network.ConfigStatic),
-			).AsProviderAddress(network.WithSpaceName("default")),
+				"10.20.19.103",
+				network.WithCIDR("10.20.19.0/24"),
+				network.WithConfigType(network.ConfigStatic),
+			).AsProviderAddress(
+				network.WithSpaceName("default"),
+				network.WithProviderSubnetID("3"),
+				network.WithProviderID("436"),
+			),
 		},
-		DNSServers: network.NewMachineAddresses([]string{
-			"10.20.19.2",
-			"10.20.19.3",
-		}).AsProviderAddresses(network.WithSpaceName("default")),
+		DNSServers:       []string{"10.20.19.2", "10.20.19.3"},
 		DNSSearchDomains: nil,
 		MTU:              1500,
-		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(network.WithSpaceName("default")),
+		GatewayAddress:   network.NewMachineAddress("10.20.19.2").AsProviderAddress(),
 		Origin:           network.OriginProvider,
 	}}
 
-	infos, err := maasNetworkInterfaces(s.callCtx, instance, map[string]network.Id{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(infos, jc.DeepEquals, expected)
+	infos, err := maasNetworkInterfaces(c.Context(), instance, map[string]network.Id{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(infos, tc.DeepEquals, expected)
 }

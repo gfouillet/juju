@@ -22,17 +22,17 @@ type StatusParams struct {
 
 // FullStatus holds information about the status of a juju model.
 type FullStatus struct {
-	Model               ModelStatusInfo                    `json:"model"`
-	Machines            map[string]MachineStatus           `json:"machines"`
-	Applications        map[string]ApplicationStatus       `json:"applications"`
-	RemoteApplications  map[string]RemoteApplicationStatus `json:"remote-applications"`
-	Offers              map[string]ApplicationOfferStatus  `json:"offers"`
-	Relations           []RelationStatus                   `json:"relations"`
-	ControllerTimestamp *time.Time                         `json:"controller-timestamp"`
-	Branches            map[string]BranchStatus            `json:"branches"`
-	Storage             []StorageDetails                   `json:"storage,omitempty"`
-	Filesystems         []FilesystemDetails                `json:"filesystems,omitempty"`
-	Volumes             []VolumeDetails                    `json:"volumes,omitempty"`
+	Model                     ModelStatusInfo                    `json:"model"`
+	Machines                  map[string]MachineStatus           `json:"machines"`
+	Applications              map[string]ApplicationStatus       `json:"applications"`
+	RemoteApplicationOfferers map[string]RemoteApplicationStatus `json:"remote-applications"`
+	Offers                    map[string]ApplicationOfferStatus  `json:"offers"`
+	Relations                 []RelationStatus                   `json:"relations"`
+	ControllerTimestamp       *time.Time                         `json:"controller-timestamp"`
+	Branches                  map[string]BranchStatus            `json:"branches"`
+	Storage                   []StorageDetails                   `json:"storage,omitempty"`
+	Filesystems               []FilesystemDetails                `json:"filesystems,omitempty"`
+	Volumes                   []VolumeDetails                    `json:"volumes,omitempty"`
 }
 
 // IsEmpty checks all collections on FullStatus to determine if the status is empty.
@@ -41,7 +41,7 @@ func (fs *FullStatus) IsEmpty() bool {
 	return len(fs.Applications) == 0 &&
 		len(fs.Machines) == 0 &&
 		len(fs.Offers) == 0 &&
-		len(fs.RemoteApplications) == 0 &&
+		len(fs.RemoteApplicationOfferers) == 0 &&
 		len(fs.Relations) == 0
 }
 
@@ -145,6 +145,7 @@ type ApplicationStatus struct {
 	CharmVersion     string                     `json:"charm-version"`
 	CharmProfile     string                     `json:"charm-profile"`
 	CharmChannel     string                     `json:"charm-channel,omitempty"`
+	CharmRev         int                        `json:"charm-rev,omitempty"`
 	Base             Base                       `json:"base"`
 	Exposed          bool                       `json:"exposed"`
 	ExposedEndpoints map[string]ExposedEndpoint `json:"exposed-endpoints,omitempty"`
@@ -278,13 +279,6 @@ type StatusHistoryResult struct {
 // StatusHistoryResults holds a slice of StatusHistoryResult.
 type StatusHistoryResults struct {
 	Results []StatusHistoryResult `json:"results"`
-}
-
-// StatusHistoryPruneArgs holds arguments for status history
-// prunning process.
-type StatusHistoryPruneArgs struct {
-	MaxHistoryTime time.Duration `json:"max-history-time"`
-	MaxHistoryMB   int           `json:"max-history-mb"`
 }
 
 // StatusResult holds an entity status, extra information, or an

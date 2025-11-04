@@ -49,6 +49,7 @@ func NewWatchableDB(
 
 	mux, err := eventmultiplexer.New(stream, clock, metrics, logger)
 	if err != nil {
+		stream.Kill()
 		return nil, errors.Trace(err)
 	}
 
@@ -58,6 +59,7 @@ func NewWatchableDB(
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "watchable-db",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
@@ -95,13 +97,30 @@ func (w *WatchableDB) StdTxn(ctx context.Context, fn func(context.Context, *sql.
 	return w.db.StdTxn(ctx, fn)
 }
 
+// Dying returns a channel that is closed when the database connection
+// is no longer usable. This can be used to detect when the database is
+// shutting down or has been closed.
+func (w *WatchableDB) Dying() <-chan struct{} {
+	return w.db.Dying()
+}
+
 // Subscribe returns a subscription for the input options.
 // The subscription is then used to drive watchers.
-func (w *WatchableDB) Subscribe(opts ...changestream.SubscriptionOption) (changestream.Subscription, error) {
-	return w.mux.Subscribe(opts...)
+func (w *WatchableDB) Subscribe(summary string, opts ...changestream.SubscriptionOption) (changestream.Subscription, error) {
+	return w.mux.Subscribe(summary, opts...)
+}
+
+// Report returns the report from the stream muxer.
+func (w *WatchableDB) Report() map[string]any {
+	return w.mux.Report()
 }
 
 func (w *WatchableDB) loop() error {
-	<-w.catacomb.Dying()
-	return w.catacomb.ErrDying()
+	select {
+	case <-w.catacomb.Dying():
+		return w.catacomb.ErrDying()
+
+	case <-w.db.Dying():
+		return nil
+	}
 }

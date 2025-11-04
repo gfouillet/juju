@@ -4,19 +4,18 @@
 package azure
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"strconv"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v2"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 	"github.com/google/uuid"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/provider/azure/internal/azureauth"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
 	"github.com/juju/juju/internal/storage"
@@ -34,14 +33,14 @@ const (
 // diskEncryptionInfo creates the resources needed for encrypting a disk,
 // including disk encryption set and vault.
 func (env *azureEnviron) diskEncryptionInfo(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	rootDisk *storage.VolumeParams,
 	envTags map[string]string,
 ) (string, error) {
 	if rootDisk == nil {
 		return "", nil
 	}
-	logger.Debugf("creating root disk encryption with parameters: %#v", *rootDisk)
+	logger.Debugf(ctx, "creating root disk encryption with parameters: %#v", *rootDisk)
 	// The "encrypted" value may arrive as a bool or a string.
 	encryptedStr, ok := rootDisk.Attributes[encryptedKey].(string)
 	encrypted, _ := rootDisk.Attributes[encryptedKey].(bool)
@@ -49,7 +48,7 @@ func (env *azureEnviron) diskEncryptionInfo(
 		encrypted, _ = strconv.ParseBool(encryptedStr)
 	}
 	if !encrypted {
-		logger.Debugf("encryption not enabled for root disk")
+		logger.Debugf(ctx, "encryption not enabled for root disk")
 		return "", nil
 	}
 
@@ -115,7 +114,7 @@ func (env *azureEnviron) diskEncryptionInfo(
 	vaultName := fmt.Sprintf("%s-%s", vaultNamePrefix, env.config.Config.UUID()[:8])
 	vault, vaultParams, err := env.ensureVault(ctx, vaults, vaultName, userID, envTagPtr, desIdentity)
 	if err != nil {
-		return "", errorutils.HandleCredentialError(errors.Annotatef(err, "creating vault %q", vaultName), ctx)
+		return "", env.HandleCredentialError(ctx, errors.Annotatef(err, "creating vault %q", vaultName))
 	}
 
 	// Create a key in the vault.
@@ -124,7 +123,7 @@ func (env *azureEnviron) diskEncryptionInfo(
 	}
 	keyRef, err := env.createVaultKey(ctx, *vault.Properties.VaultURI, *vault.Name, keyName)
 	if err != nil {
-		return "", errorutils.HandleCredentialError(errors.Annotatef(err, "creating vault key in %q", vaultName), ctx)
+		return "", env.HandleCredentialError(ctx, errors.Annotatef(err, "creating vault key in %q", vaultName))
 	}
 
 	// We had an existing disk encryption set.
@@ -135,7 +134,7 @@ func (env *azureEnviron) diskEncryptionInfo(
 	// Create the disk encryption set.
 	desIdentity, err = env.ensureDiskEncryptionSet(ctx, encryptionSets, diskEncryptionSetName, envTagPtr, vault.ID, keyRef)
 	if err != nil {
-		return "", errorutils.HandleCredentialError(errors.Annotatef(err, "creating disk encryption set %q", diskEncryptionSetName), ctx)
+		return "", env.HandleCredentialError(ctx, errors.Annotatef(err, "creating disk encryption set %q", diskEncryptionSetName))
 	}
 
 	// Update the vault access policies to allow the disk encryption set to access the key.
@@ -147,7 +146,7 @@ func (env *azureEnviron) diskEncryptionInfo(
 		_, err = poller.PollUntilDone(ctx, nil)
 	}
 	if err != nil {
-		return "", errorutils.HandleCredentialError(errors.Annotatef(err, "updating vault %q access policies ", vaultName), ctx)
+		return "", env.HandleCredentialError(ctx, errors.Annotatef(err, "updating vault %q access policies ", vaultName))
 	}
 	return diskEncryptionSetID, nil
 }
@@ -177,13 +176,13 @@ func vaultAccessPolicy(desIdentity *armcompute.EncryptionSetIdentity) *armkeyvau
 // ensureDiskEncryptionSet creates or updates a disk encryption set
 // to use the specified vault and key.
 func (env *azureEnviron) ensureDiskEncryptionSet(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	encryptionSets *armcompute.DiskEncryptionSetsClient,
 	encryptionSetName string,
 	envTags map[string]*string,
 	vaultID, vaultKey *string,
 ) (*armcompute.EncryptionSetIdentity, error) {
-	logger.Debugf("ensure disk encryption set %q", encryptionSetName)
+	logger.Debugf(ctx, "ensure disk encryption set %q", encryptionSetName)
 	poller, err := encryptionSets.BeginCreateOrUpdate(ctx, env.resourceGroup, encryptionSetName, armcompute.DiskEncryptionSet{
 		Location: to.Ptr(env.location),
 		Tags:     envTags,
@@ -212,14 +211,14 @@ func (env *azureEnviron) ensureDiskEncryptionSet(
 // ensureVault creates a vault and adds an access policy for the
 // specified disk encryption set identity.
 func (env *azureEnviron) ensureVault(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	vaults *armkeyvault.VaultsClient,
 	vaultName string,
 	userID string,
 	envTags map[string]*string,
 	desIdentity *armcompute.EncryptionSetIdentity,
 ) (*armkeyvault.Vault, *armkeyvault.VaultCreateOrUpdateParameters, error) {
-	logger.Debugf("ensure vault key %q", vaultName)
+	logger.Debugf(ctx, "ensure vault key %q", vaultName)
 	vaultTenantID := fromStringOrNil(env.tenantId)
 	// Create the vault with full access for the tenant.
 	allKeyPermissions := armkeyvault.PossibleKeyPermissionsValues()
@@ -288,7 +287,7 @@ func (env *azureEnviron) ensureVault(
 		}
 	}
 	if !errorutils.IsNotFoundError(err) && !errorutils.IsForbiddenError(err) {
-		logger.Debugf("key vault %q has been soft deleted", vaultName)
+		logger.Debugf(ctx, "key vault %q has been soft deleted", vaultName)
 		vaultParams.Properties.CreateMode = to.Ptr(armkeyvault.CreateModeRecover)
 	}
 	var result armkeyvault.VaultsClientCreateOrUpdateResponse
@@ -302,16 +301,15 @@ func (env *azureEnviron) ensureVault(
 	return &result.Vault, &vaultParams, nil
 }
 
-func (env *azureEnviron) deleteVault(ctx envcontext.ProviderCallContext, vaultName string) error {
-	logger.Debugf("delete vault key %q", vaultName)
+func (env *azureEnviron) deleteVault(ctx context.Context, vaultName string) error {
+	logger.Debugf(ctx, "delete vault key %q", vaultName)
 	vaults, err := env.vaultsClient()
 	if err != nil {
 		return errors.Trace(err)
 	}
 	_, err = vaults.Delete(ctx, env.resourceGroup, vaultName, nil)
 	if err != nil {
-		err = errorutils.HandleCredentialError(err, ctx)
-		if !errorutils.IsNotFoundError(err) {
+		if !errorutils.IsNotFoundError(env.HandleCredentialError(ctx, err)) {
 			return errors.Annotatef(err, "deleting vault key %q", vaultName)
 		}
 	}
@@ -321,12 +319,12 @@ func (env *azureEnviron) deleteVault(ctx envcontext.ProviderCallContext, vaultNa
 // createVaultKey creates, or recovers a soft deleted key,
 // in the specified vault.
 func (env *azureEnviron) createVaultKey(
-	ctx stdcontext.Context,
+	ctx context.Context,
 	vaultBaseURI string,
 	vaultName string,
 	keyName string,
 ) (*string, error) {
-	logger.Debugf("create vault key %q in %q", keyName, vaultName)
+	logger.Debugf(ctx, "create vault key %q in %q", keyName, vaultName)
 	keyClient, err := azkeys.NewClient(vaultBaseURI, env.credential, &azkeys.ClientOptions{
 		ClientOptions: env.clientOptions})
 	if err != nil {

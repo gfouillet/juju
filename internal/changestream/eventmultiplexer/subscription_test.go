@@ -5,28 +5,31 @@ package eventmultiplexer
 
 import (
 	"context"
-	"sync/atomic"
+	stdtesting "testing"
 	"time"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/goleak"
 
-	"github.com/juju/juju/core/changestream"
-	"github.com/juju/juju/testing"
+	changestreamtesting "github.com/juju/juju/core/changestream/testing"
+	"github.com/juju/juju/core/testing"
 )
 
 type subscriptionSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&subscriptionSuite{})
+func TestSubscriptionSuite(t *stdtesting.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &subscriptionSuite{})
+}
 
-func (s *subscriptionSuite) TestSubscriptionIsDone(c *gc.C) {
+func (s *subscriptionSuite) TestSubscriptionIsDone(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	sub := newSubscription(0, func() {})
-	defer workertest.CleanKill(c, sub)
+	sub := newSubscription(0, "foo")
+	defer workertest.DirtyKill(c, sub)
 
 	workertest.CleanKill(c, sub)
 
@@ -37,36 +40,21 @@ func (s *subscriptionSuite) TestSubscriptionIsDone(c *gc.C) {
 	}
 }
 
-func (s *subscriptionSuite) TestSubscriptionUnsubscriptionIsCalled(c *gc.C) {
+func (s *subscriptionSuite) TestSubscriptionWitnessChanges(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	var called bool
-	sub := newSubscription(0, func() { called = true })
-	defer workertest.CleanKill(c, sub)
-
-	sub.Unsubscribe()
-	c.Assert(called, jc.IsTrue)
-
-	workertest.CleanKill(c, sub)
-}
-
-func (s *subscriptionSuite) TestSubscriptionWitnessChanges(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	sub := newSubscription(0, func() {
-		c.Fatalf("failed if called")
-	})
-	defer workertest.CleanKill(c, sub)
+	sub := newSubscription(0, "foo")
+	defer workertest.DirtyKill(c, sub)
 
 	changes := ChangeSet{changeEvent{
-		ctype:   changestream.Create,
+		ctype:   changestreamtesting.Create,
 		ns:      "foo",
 		changed: "1",
 	}}
 
 	go func() {
-		err := sub.dispatch(context.Background(), changes)
-		c.Assert(err, jc.ErrorIsNil)
+		err := sub.dispatch(c.Context(), changes)
+		c.Assert(err, tc.ErrorIsNil)
 	}()
 
 	var witnessed ChangeSet
@@ -76,22 +64,20 @@ func (s *subscriptionSuite) TestSubscriptionWitnessChanges(c *gc.C) {
 	case <-time.After(testing.ShortWait):
 	}
 
-	c.Assert(witnessed, gc.HasLen, len(changes))
-	c.Check(witnessed, jc.SameContents, changes)
+	c.Assert(witnessed, tc.HasLen, len(changes))
+	c.Check(witnessed, tc.SameContents, changes)
 
 	workertest.CleanKill(c, sub)
 }
 
-func (s *subscriptionSuite) TestSubscriptionDoesNoteWitnessChangesWithCancelledContext(c *gc.C) {
+func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithCancelledContext(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	sub := newSubscription(0, func() {
-		c.Fatalf("failed if called")
-	})
-	defer workertest.CleanKill(c, sub)
+	sub := newSubscription(0, "foo")
+	defer workertest.DirtyKill(c, sub)
 
 	changes := ChangeSet{changeEvent{
-		ctype:   changestream.Create,
+		ctype:   changestreamtesting.Create,
 		ns:      "foo",
 		changed: "1",
 	}}
@@ -100,11 +86,11 @@ func (s *subscriptionSuite) TestSubscriptionDoesNoteWitnessChangesWithCancelledC
 	go func() {
 		defer close(syncPoint)
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(c.Context())
 		cancel()
 
 		err := sub.dispatch(ctx, changes)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIs, context.Canceled)
 	}()
 
 	select {
@@ -122,17 +108,14 @@ func (s *subscriptionSuite) TestSubscriptionDoesNoteWitnessChangesWithCancelledC
 	workertest.CleanKill(c, sub)
 }
 
-func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithUnsub(c *gc.C) {
+func (s *subscriptionSuite) TestDispatchTimeoutKillsSubscription(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	var witnessed int64
-	sub := newSubscription(0, func() {
-		atomic.AddInt64(&witnessed, 1)
-	})
-	defer workertest.CleanKill(c, sub)
+	sub := newSubscription(0, "foo")
+	defer workertest.DirtyKill(c, sub)
 
 	changes := ChangeSet{changeEvent{
-		ctype:   changestream.Create,
+		ctype:   changestreamtesting.Create,
 		ns:      "foo",
 		changed: "1",
 	}}
@@ -141,13 +124,13 @@ func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithUnsub(c *gc
 	go func() {
 		defer close(syncPoint)
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		ctx, cancel := context.WithTimeout(c.Context(), time.Nanosecond)
 		defer cancel()
 
 		time.Sleep(time.Millisecond)
 
 		err := sub.dispatch(ctx, changes)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIs, context.DeadlineExceeded)
 	}()
 
 	select {
@@ -157,27 +140,22 @@ func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithUnsub(c *gc
 	}
 
 	select {
-	case <-sub.Changes():
-		c.Fatalf("unexpected changes witnessed")
+	case <-sub.Done():
 	case <-time.After(testing.ShortWait):
+		c.Fatalf("timed out waiting for subscription to be killed")
 	}
-
-	// We should have witnessed the unsubscribe
-	c.Check(atomic.LoadInt64(&witnessed), gc.Equals, int64(1))
 
 	workertest.CleanKill(c, sub)
 }
 
-func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithDying(c *gc.C) {
+func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithDying(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	sub := newSubscription(0, func() {
-		c.Fatalf("failed if called")
-	})
-	defer workertest.CleanKill(c, sub)
+	sub := newSubscription(0, "foo")
+	defer workertest.DirtyKill(c, sub)
 
 	changes := ChangeSet{changeEvent{
-		ctype:   changestream.Create,
+		ctype:   changestreamtesting.Create,
 		ns:      "foo",
 		changed: "1",
 	}}
@@ -186,11 +164,10 @@ func (s *subscriptionSuite) TestSubscriptionDoesNotWitnessChangesWithDying(c *gc
 	go func() {
 		defer close(syncPoint)
 
-		err := sub.close()
-		c.Assert(err, jc.ErrorIsNil)
+		sub.Kill()
 
-		err = sub.dispatch(context.Background(), changes)
-		c.Assert(err, gc.ErrorMatches, "tomb: dying")
+		err := sub.dispatch(c.Context(), changes)
+		c.Assert(err, tc.ErrorIs, ErrUnsubscribing)
 	}()
 
 	select {

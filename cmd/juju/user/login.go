@@ -5,6 +5,7 @@ package user
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -15,58 +16,57 @@ import (
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v4"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/httprequest.v1"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/authentication"
 	apibase "github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/loginprovider"
-	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/interact"
 	"github.com/juju/juju/cmd/modelcmd"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/pki"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
 	"github.com/juju/juju/rpc/params"
 )
 
 const loginDoc = `
-By default, the juju login command logs the user into a controller.
+By default, the ` + "`juju login`" + ` command logs the user into a controller.
 The argument to the command can be a public controller
 host name or alias (see Aliases below).
 
 If no argument is provided, the controller specified with
-the -c argument will be used, or the current controller
+the ` + "`-c`" + ` argument will be used, or the current controller
 if that's not provided.
 
 On success, the current controller is switched to the logged-in
 controller.
 
-If the user is already logged in, the juju login command does nothing
+If the user is already logged in, the ` + "`juju login`" + ` command does nothing
 except verify that fact.
 
-If the -u option is provided, the juju login command will attempt to log
+If the ` + "`-u`" + ` option is provided, the ` + "`juju login`" + ` command will attempt to log
 into the controller as that user.
 
-After login, a token ("macaroon") will become active. It has an expiration
-time of 24 hours. Upon expiration, no further Juju commands can be issued
+After login, a token ('macaroon') will become active. It has an expiration
+time of 24 hours. Upon expiration, no further ` + "`juju`" + ` commands can be issued
 and the user will be prompted to log in again.
 
-Aliases
--------
+### Aliases
 
 Public controller aliases are provided by a directory service
 that is queried to find the host name for a given alias.
 The URL for the directory service may be configured
-by setting the environment variable JUJU_DIRECTORY.
+by setting the environment variable ` + "`JUJU_DIRECTORY`" + `.
 `
 
 const loginExamples = `
@@ -79,8 +79,8 @@ const loginExamples = `
 var (
 	apiOpen          = (*modelcmd.CommandBase).APIOpen
 	newAPIConnection = juju.NewAPIConnection
-	listModels       = func(c api.Connection, userName string) ([]apibase.UserModel, error) {
-		return modelmanager.NewClient(c).ListModels(userName)
+	listModels       = func(ctx context.Context, c api.Connection, userName string) ([]apibase.UserModel, error) {
+		return modelmanager.NewClient(c).ListModels(ctx, userName)
 	}
 	// loginClientStore is used as the client store. When it is nil,
 	// the default client store will be used.
@@ -138,10 +138,10 @@ func (c *loginCommand) SetFlags(fset *gnuflag.FlagSet) {
 	c.ControllerCommandBase.SetFlags(fset)
 	fset.StringVar(&c.controllerName, "c", "", "Controller to operate in")
 	fset.StringVar(&c.controllerName, "controller", "", "")
-	fset.StringVar(&c.username, "u", "", "log in as this local user")
+	fset.StringVar(&c.username, "u", "", "Log in as this local user")
 	fset.StringVar(&c.username, "user", "", "")
-	fset.BoolVar(&c.noPrompt, "no-prompt", false, "don't prompt for password just read a line from stdin")
-	fset.BoolVar(&c.trust, "trust", false, "automatically trust controller CA certificate")
+	fset.BoolVar(&c.noPrompt, "no-prompt", false, "Don't prompt for password just read a line from `stdin`")
+	fset.BoolVar(&c.trust, "trust", false, "Automatically trust controller CA certificate")
 }
 
 // Init implements Command.Init.
@@ -210,6 +210,12 @@ func (c *loginCommand) run(ctx *cmd.Context) error {
 		err                     error
 	)
 	if controllerDetails != nil {
+		// On controllers with OIDC, providing a username is incorrect.
+		// The username is returned by the OIDC server.
+		if controllerDetails.OIDCLogin && c.username != "" {
+			return errors.Errorf("cannot specify a username during login to a controller with OIDC, remove the username and try again")
+		}
+
 		// Fetch current details for the specified controller name so we
 		// can tell if the logged in user has changed.
 		d, err := store.AccountDetails(c.controllerName)
@@ -218,6 +224,7 @@ func (c *loginCommand) run(ctx *cmd.Context) error {
 		}
 		oldAccountDetails = d
 	}
+
 	switch {
 	case c.domain != "":
 		// Check if user is trying to login to a registered controller
@@ -263,34 +270,25 @@ use "juju unregister %s" to remove the existing controller.`[1:], c.domain, c.co
 		}
 	}
 
-	// During the login process account details might have been updated so
-	// we fetch them from the store.
-	updatedAccountDetails, err := store.AccountDetails(c.controllerName)
-	if err != nil && !errors.Is(err, errors.NotFound) {
-		return errors.Trace(err)
+	if accountDetails == nil {
+		return errors.Trace(errors.New("failed to receive new account details"))
 	}
-	if updatedAccountDetails == nil {
-		updatedAccountDetails = accountDetails
-	} else {
-		updatedAccountDetails.User = accountDetails.User
-		updatedAccountDetails.Password = accountDetails.Password
-	}
-	updatedAccountDetails.LastKnownAccess = conn.ControllerAccess()
+	accountDetails.LastKnownAccess = conn.ControllerAccess()
 
-	if err := store.UpdateAccount(c.controllerName, *updatedAccountDetails); err != nil {
+	if err := store.UpdateAccount(c.controllerName, *accountDetails); err != nil {
 		return errors.Annotatef(err, "cannot update account information: %v", err)
 	}
 	if err := store.SetCurrentController(c.controllerName); err != nil {
 		return errors.Annotatef(err, "cannot switch")
 	}
-	if controllerDetails != nil && oldAccountDetails != nil && oldAccountDetails.User == updatedAccountDetails.User {
+	if controllerDetails != nil && oldAccountDetails != nil && oldAccountDetails.User == accountDetails.User {
 		// We're still using the same controller and the same user name,
 		// so no need to list models or set the current controller
 		return nil
 	}
 	// Now list the models available so we can show them and store their
 	// details locally.
-	models, err := listModels(conn, updatedAccountDetails.User)
+	models, err := listModels(ctx, conn, accountDetails.User)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -299,9 +297,9 @@ use "juju unregister %s" to remove the existing controller.`[1:], c.domain, c.co
 	}
 	fmt.Fprintf(
 		ctx.Stderr, "Welcome, %s. You are now logged into %q.\n",
-		friendlyUserName(updatedAccountDetails.User), c.controllerName,
+		friendlyUserName(accountDetails.User), c.controllerName,
 	)
-	return c.maybeSetCurrentModel(ctx, store, c.controllerName, updatedAccountDetails.User, models)
+	return c.maybeSetCurrentModel(ctx, store, c.controllerName, accountDetails.User, models)
 }
 
 func (c *loginCommand) existingControllerLogin(ctx *cmd.Context, store jujuclient.ClientStore, controllerName string, currentAccountDetails *jujuclient.AccountDetails) (api.Connection, *jujuclient.AccountDetails, error) {
@@ -310,8 +308,9 @@ func (c *loginCommand) existingControllerLogin(ctx *cmd.Context, store jujuclien
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		return newAPIConnection(args)
+		return newAPIConnection(ctx, args)
 	}
+
 	return c.login(ctx, currentAccountDetails, dial)
 }
 
@@ -383,20 +382,18 @@ func (c *loginCommand) publicControllerLogin(
 		sessionToken = currentAccountDetails.SessionToken
 	}
 
+	var oidcLogin bool
 	dialOpts.LoginProvider = loginprovider.NewTryInOrderLoginProvider(
-		loggo.GetLogger("juju.cmd.loginprovider"),
-		loginprovider.NewSessionTokenLoginProvider(
+		internallogger.GetLogger("juju.cmd.loginprovider"),
+		c.SessionTokenLoginFactory().NewLoginProvider(
 			sessionToken,
 			ctx.Stderr,
-			func(sessionToken string) error {
-				return c.ClientStore().UpdateAccount(controllerName, jujuclient.AccountDetails{
-					Type:         jujuclient.OAuth2DeviceFlowAccountDetailsType,
-					User:         "user",
-					SessionToken: sessionToken,
-				})
+			func(t string) {
+				oidcLogin = true
+				sessionToken = t
 			},
 		),
-		api.NewUserpassLoginProvider(names.UserTag{}, "", "", nil, bclient, cookieURL),
+		api.NewLegacyLoginProvider(nil, "", "", nil, bclient, cookieURL),
 	)
 
 	// Keep track of existing interactors as the dial callback will create
@@ -408,8 +405,8 @@ func (c *loginCommand) publicControllerLogin(
 
 	dial := func(d *jujuclient.AccountDetails) (api.Connection, error) {
 		// Attach an interactor which will be invoked if we attempt to
-		//login without a password and the remote controller does not
-		//support an external identity provider.
+		// login without a password and the remote controller does not
+		// support an external identity provider.
 		var tag names.Tag
 		if d.User != "" {
 			tag = names.NewUserTag(d.User)
@@ -446,7 +443,7 @@ func (c *loginCommand) publicControllerLogin(
 			return nil, errors.Annotatef(err, "getting sni host from host %q", host)
 		}
 
-		return apiOpen(&c.CommandBase, &api.Info{
+		return apiOpen(&c.CommandBase, ctx, &api.Info{
 			Tag:         tag,
 			Password:    d.Password,
 			Addrs:       []string{host},
@@ -457,15 +454,10 @@ func (c *loginCommand) publicControllerLogin(
 	if err != nil {
 		return fail(errors.Trace(err))
 	}
-	// If we get to here, then we have a cached macaroon for the registered
-	// user. If we encounter an error after here, we need to clear it.
-	c.onRunError = func() {
-		if err := c.ClearControllerMacaroons(c.ClientStore(), controllerName); err != nil {
-			logger.Errorf("failed to clear macaroon: %v", err)
-		}
-	}
 
 	ctrlDetails.ControllerUUID = conn.ControllerTag().Id()
+	ctrlDetails.OIDCLogin = oidcLogin
+	accountDetails.SessionToken = sessionToken
 	return conn, ctrlDetails, accountDetails, nil
 }
 
@@ -492,10 +484,25 @@ Run "juju logout" first before attempting to log in as a different user.`,
 			accountDetails.User)
 	}
 
+	safeDial := func(accountDetails *jujuclient.AccountDetails) (result api.Connection, err error) {
+		defer func() {
+			if err != nil {
+				// If we get to here, then we have a cached macaroon for the registered
+				// user. If we encounter an error after here, we need to clear it.
+				c.onRunError = func() {
+					if err := c.ClearControllerMacaroons(c.ClientStore(), c.controllerName); err != nil {
+						logger.Errorf(context.TODO(), "failed to clear macaroon: %v", err)
+					}
+				}
+			}
+		}()
+		return dial(accountDetails)
+	}
+
 	if accountDetails != nil && accountDetails.Password != "" {
 		// We've been provided some account details that
 		// contain a password, so try that first.
-		conn, err := dial(accountDetails)
+		conn, err := safeDial(accountDetails)
 		if err == nil {
 			return conn, accountDetails, nil
 		}
@@ -503,18 +510,19 @@ Run "juju logout" first before attempting to log in as a different user.`,
 			return nil, nil, errors.Trace(err)
 		}
 	}
+
 	if c.username == "" {
-		// No username specified, so try external-user login first.
-		conn, err := dial(&jujuclient.AccountDetails{})
+		// No username specified, so try external-user login.
+		accountDetails = &jujuclient.AccountDetails{}
+		conn, err := safeDial(accountDetails)
 		if err == nil {
 			user, ok := conn.AuthTag().(names.UserTag)
 			if !ok {
 				conn.Close()
 				return nil, nil, errors.Errorf("logged in as %v, not a user", conn.AuthTag())
 			}
-			return conn, &jujuclient.AccountDetails{
-				User: user.Id(),
-			}, nil
+			accountDetails.User = user.Id()
+			return conn, accountDetails, nil
 		}
 		if !params.IsCodeNoCreds(err) {
 			return nil, nil, errors.Trace(err)
@@ -541,7 +549,7 @@ Run "juju logout" first before attempting to log in as a different user.`,
 	accountDetails = &jujuclient.AccountDetails{
 		User: username,
 	}
-	conn, err := dial(accountDetails)
+	conn, err := safeDial(accountDetails)
 	if err != nil {
 		if strings.Contains(err.Error(), badCred) {
 			err = errors.New(badCred)
@@ -554,8 +562,8 @@ const badCred = "invalid entity name or password"
 
 const noModelsMessage = `
 There are no models available. You can add models with
-"juju add-model", or you can ask an administrator or owner
-of a model to grant access to that model with "juju grant".
+"juju add-model", or you can ask an administrator of a
+model to grant access to that model with "juju grant".
 `
 
 func (c *loginCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclient.ClientStore, controllerName, userName string, models []apibase.UserModel) error {
@@ -569,8 +577,7 @@ func (c *loginCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclient.C
 		// There is exactly one model shared,
 		// so set it as the current model.
 		model := models[0]
-		owner := names.NewUserTag(model.Owner)
-		modelName := jujuclient.JoinOwnerModelName(owner, model.Name)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		err := store.SetCurrentModel(controllerName, modelName)
 		if err != nil {
 			return errors.Trace(err)
@@ -583,18 +590,17 @@ There are %d models available. Use "juju switch" to select
 one of them:
 `, len(models))
 	user := names.NewUserTag(userName)
-	ownerModelNames := make(set.Strings)
+	userModelNames := make(set.Strings)
 	otherModelNames := make(set.Strings)
 	for _, model := range models {
-		if model.Owner == userName {
-			ownerModelNames.Add(model.Name)
+		if model.Qualifier == coremodel.QualifierFromUserTag(user) {
+			userModelNames.Add(model.Name)
 			continue
 		}
-		owner := names.NewUserTag(model.Owner)
-		modelName := common.OwnerQualifiedModelName(model.Name, owner, user)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		otherModelNames.Add(modelName)
 	}
-	for _, modelName := range ownerModelNames.SortedValues() {
+	for _, modelName := range userModelNames.SortedValues() {
 		fmt.Fprintf(ctx.Stderr, "  - juju switch %s\n", modelName)
 	}
 	for _, modelName := range otherModelNames.SortedValues() {

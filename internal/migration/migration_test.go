@@ -8,78 +8,132 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/url"
+	"strings"
+	"testing"
 
-	"github.com/juju/description/v6"
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/controller"
-	coremigration "github.com/juju/juju/core/migration"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/modelmigration"
-	"github.com/juju/juju/core/resources"
-	resourcetesting "github.com/juju/juju/core/resources/testing"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/core/resource"
+	resourcetesting "github.com/juju/juju/core/resource/testing"
+	"github.com/juju/juju/core/semversion"
+	corestorage "github.com/juju/juju/core/storage"
+	domaincharm "github.com/juju/juju/domain/application/charm"
 	"github.com/juju/juju/internal/charm"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/migration"
 	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/internal/storage/provider"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/tools"
-	"github.com/juju/juju/state"
-	jujutesting "github.com/juju/juju/testing"
 )
 
-type ImportSuite struct {
-	testing.IsolationSuite
-
-	controllerConfigService *MockControllerConfigService
-	serviceFactory          *MockServiceFactory
-	serviceFactoryGetter    *MockServiceFactoryGetter
+type ExportSuite struct {
+	storageRegistryGetter *MockModelStorageRegistryGetter
+	operationsExporter    *MockOperationExporter
+	coordinator           *MockCoordinator
+	model                 *MockModel
 }
 
-var _ = gc.Suite(&ImportSuite{})
-
-func (s *ImportSuite) SetUpSuite(c *gc.C) {
-	c.Skip(`
-TODO tlm: We are skipping these tests as they are currently relying heavily on
-mocks for how the importer is working internally. Now that we are trying to test
-model migration into DQlite we have hit the problem where this can no longer be
-an isolation suite and needs a full database. This is due to the fact that the
-Setup call to the import operations construct their own services and they're not
-something that can be injected as "mocks" from this layer.
-
-I have added this to the risk register for 4.0 and will discuss further with
-Simon. For the moment these tests can't continue as is due to DB dependencies
-that are needed now.
-`)
+func TestExportSuite(t *testing.T) {
+	tc.Run(t, &ExportSuite{})
 }
 
-func (s *ImportSuite) SetUpTest(c *gc.C) {
-	s.IsolationSuite.SetUpTest(c)
+func (s *ExportSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.storageRegistryGetter = NewMockModelStorageRegistryGetter(ctrl)
+	s.operationsExporter = NewMockOperationExporter(ctrl)
+	s.coordinator = NewMockCoordinator(ctrl)
+	s.model = NewMockModel(ctrl)
+
+	return ctrl
 }
 
-func (s *ImportSuite) TestBadBytes(c *gc.C) {
-	bytes := []byte("not a model")
-	scope := func(string) modelmigration.Scope { return modelmigration.NewScope(nil, nil, nil) }
-	controller := &fakeImporter{}
-	configSchemaSource := func(environs.CloudService) config.ConfigSchemaSourceGetter {
-		return state.NoopConfigSchemaSource
-	}
-	importer := migration.NewModelImporter(
-		controller, scope, s.controllerConfigService, s.serviceFactoryGetter, configSchemaSource,
-		func() (storage.ProviderRegistry, error) { return provider.CommonStorageProviders(), nil },
-		loggertesting.WrapCheckLog(c),
+func (s *ExportSuite) TestExportValidates(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	scope := modelmigration.NewScope(nil, nil, nil)
+
+	// The order of the expectations is important here. We expect that the
+	// validation is the last thing that happens.
+	gomock.InOrder(
+		s.operationsExporter.EXPECT().ExportOperations(s.storageRegistryGetter),
+		s.coordinator.EXPECT().Perform(gomock.Any(), scope, s.model).Return(nil),
+		s.model.EXPECT().Validate().Return(nil),
 	)
-	model, st, err := importer.ImportModel(context.Background(), bytes)
-	c.Check(st, gc.IsNil)
-	c.Check(model, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "yaml: unmarshal errors:\n.*")
+
+	exporter := migration.NewModelExporter(
+		s.operationsExporter,
+		scope,
+		s.storageRegistryGetter,
+		s.coordinator,
+		nil, nil,
+	)
+
+	_, err := exporter.Export(c.Context(), s.model)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *ExportSuite) TestExportValidationFails(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	scope := modelmigration.NewScope(nil, nil, nil)
+
+	s.operationsExporter.EXPECT().ExportOperations(s.storageRegistryGetter)
+	s.model.EXPECT().Validate().Return(errors.New("boom"))
+	s.coordinator.EXPECT().Perform(gomock.Any(), scope, s.model).Return(nil)
+
+	exporter := migration.NewModelExporter(
+		s.operationsExporter,
+		scope,
+		s.storageRegistryGetter,
+		s.coordinator,
+		nil, nil,
+	)
+
+	_, err := exporter.Export(c.Context(), s.model)
+	c.Assert(err, tc.ErrorMatches, "boom")
+}
+
+type ImportSuite struct {
+	testhelpers.IsolationSuite
+	charmService     *MockCharmService
+	agentBinaryStore *MockAgentBinaryStore
+}
+
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &ImportSuite{})
+}
+
+func (s *ImportSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.charmService = NewMockCharmService(ctrl)
+	s.agentBinaryStore = NewMockAgentBinaryStore(ctrl)
+
+	return ctrl
+}
+
+func (s *ImportSuite) TestBadBytes(c *tc.C) {
+	bytes := []byte("not a model")
+	scope := func(model.UUID) modelmigration.Scope { return modelmigration.NewScope(nil, nil, nil) }
+	importer := migration.NewModelImporter(
+		scope, nil, nil,
+		corestorage.ConstModelStorageRegistry(func() storage.ProviderRegistry {
+			return nil
+		}),
+		nil,
+		loggertesting.WrapCheckLog(c),
+		clock.WallClock,
+	)
+	err := importer.ImportModel(c.Context(), bytes)
+	c.Assert(err, tc.ErrorMatches, "yaml: unmarshal errors:\n.*")
 }
 
 const modelYaml = `
@@ -139,84 +193,71 @@ volumes:
 version: 1
 `
 
-func (s *ImportSuite) exportImport(c *gc.C, leaders map[string]string) {
-	bytes := []byte(modelYaml)
-	st := &state.State{}
-	m := &state.Model{}
-	controller := &fakeImporter{st: st, m: m}
-	scope := func(string) modelmigration.Scope { return modelmigration.NewScope(nil, nil, nil) }
-	configSchemaSource := func(environs.CloudService) config.ConfigSchemaSourceGetter {
-		return state.NoopConfigSchemaSource
-	}
-	importer := migration.NewModelImporter(
-		controller, scope, s.controllerConfigService, s.serviceFactoryGetter, configSchemaSource,
-		func() (storage.ProviderRegistry, error) { return provider.CommonStorageProviders(), nil },
-		loggertesting.WrapCheckLog(c),
-	)
-	gotM, gotSt, err := importer.ImportModel(context.Background(), bytes)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(controller.model.Tag().Id(), gc.Equals, "bd3fae18-5ea1-4bc5-8837-45400cf1f8f6")
-	c.Assert(gotM, gc.Equals, m)
-	c.Assert(gotSt, gc.Equals, st)
-}
-
-func (s *ImportSuite) TestImportModel(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.exportImport(c, map[string]string{})
-}
-
-func (s *ImportSuite) TestUploadBinariesConfigValidate(c *gc.C) {
+func (s *ImportSuite) TestUploadBinariesConfigValidate(c *tc.C) {
 	type T migration.UploadBinariesConfig // alias for brevity
 
 	check := func(modify func(*T), missing string) {
 		config := T{
-			CharmDownloader:    struct{ migration.CharmDownloader }{},
+			CharmService:       struct{ migration.CharmService }{},
 			CharmUploader:      struct{ migration.CharmUploader }{},
-			ToolsDownloader:    struct{ migration.ToolsDownloader }{},
+			AgentBinaryStore:   struct{ migration.AgentBinaryStore }{},
 			ToolsUploader:      struct{ migration.ToolsUploader }{},
 			ResourceDownloader: struct{ migration.ResourceDownloader }{},
 			ResourceUploader:   struct{ migration.ResourceUploader }{},
 		}
 		modify(&config)
 		realConfig := migration.UploadBinariesConfig(config)
-		c.Check(realConfig.Validate(), gc.ErrorMatches, fmt.Sprintf("missing %s not valid", missing))
+		c.Check(realConfig.Validate(), tc.ErrorMatches, fmt.Sprintf("missing %s not valid", missing))
 	}
 
-	check(func(c *T) { c.CharmDownloader = nil }, "CharmDownloader")
+	check(func(c *T) { c.CharmService = nil }, "CharmService")
 	check(func(c *T) { c.CharmUploader = nil }, "CharmUploader")
-	check(func(c *T) { c.ToolsDownloader = nil }, "ToolsDownloader")
+	check(func(c *T) { c.AgentBinaryStore = nil }, "AgentBinaryStore")
 	check(func(c *T) { c.ToolsUploader = nil }, "ToolsUploader")
 	check(func(c *T) { c.ResourceDownloader = nil }, "ResourceDownloader")
 	check(func(c *T) { c.ResourceUploader = nil }, "ResourceUploader")
 }
 
-func (s *ImportSuite) TestBinariesMigration(c *gc.C) {
+func (s *ImportSuite) TestBinariesMigration(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
 	downloader := &fakeDownloader{}
 	uploader := &fakeUploader{
-		tools:     make(map[version.Binary]string),
+		tools:     make(map[semversion.Binary]string),
 		resources: make(map[string]string),
 	}
 
-	toolsMap := map[version.Binary]string{
-		version.MustParseBinary("2.1.0-ubuntu-amd64"): "/tools/0",
-		version.MustParseBinary("2.0.0-ubuntu-amd64"): "/tools/1",
+	toolsMap := map[string]semversion.Binary{
+		"439c9ea02f8561c5a152d7cf4818d72cd5f2916b555d82c5eee599f5e8f3d09e": semversion.MustParseBinary("2.1.0-ubuntu-amd64"),
+		"c4e12eaa8a3bf7a1a3029e2cbfccb2d88f59e8efc19f2531c423ce515afcb436": semversion.MustParseBinary("2.0.0-ubuntu-amd64"),
+	}
+
+	dataStream := ioutil.NopCloser(strings.NewReader("test agent data"))
+
+	for sha := range toolsMap {
+		s.agentBinaryStore.EXPECT().GetAgentBinaryUsingSHA256(gomock.Any(), sha).Return(dataStream, 15, nil)
 	}
 
 	app0Res := resourcetesting.NewResource(c, nil, "blob0", "app0", "blob0").Resource
 	app1Res := resourcetesting.NewResource(c, nil, "blob1", "app1", "blob1").Resource
-	app1UnitRes := app1Res
-	app1UnitRes.Revision = 1
 	app2Res := resourcetesting.NewPlaceholderResource(c, "blob2", "app2")
-	resources := []coremigration.SerializedModelResource{
-		{ApplicationRevision: app0Res},
-		{
-			ApplicationRevision: app1Res,
-			UnitRevisions:       map[string]resources.Resource{"app1/99": app1UnitRes},
-		},
-		{ApplicationRevision: app2Res},
-	}
+	resources := []resource.Resource{app0Res, app1Res, app2Res}
 
+	s.charmService.EXPECT().GetCharmArchive(gomock.Any(), domaincharm.CharmLocator{
+		Name:     "postgresql",
+		Revision: 42,
+		Source:   domaincharm.CharmHubSource,
+	}).Return(ioutil.NopCloser(strings.NewReader("postgresql content")), "hash0123", nil)
+	s.charmService.EXPECT().GetCharmArchive(gomock.Any(), domaincharm.CharmLocator{
+		Name:     "magic",
+		Revision: 2,
+		Source:   domaincharm.LocalSource,
+	}).Return(ioutil.NopCloser(strings.NewReader("magic content")), "hash0123", nil)
+	s.charmService.EXPECT().GetCharmArchive(gomock.Any(), domaincharm.CharmLocator{
+		Name:     "magic",
+		Revision: 10,
+		Source:   domaincharm.LocalSource,
+	}).Return(ioutil.NopCloser(strings.NewReader("magic content")), "hash0123", nil)
 	config := migration.UploadBinariesConfig{
 		Charms: []string{
 			// These 2 are out of order. Rev 2 must be uploaded first.
@@ -224,17 +265,17 @@ func (s *ImportSuite) TestBinariesMigration(c *gc.C) {
 			"local:trusty/magic-2",
 			"ch:trusty/postgresql-42",
 		},
-		CharmDownloader:    downloader,
+		CharmService:       s.charmService,
 		CharmUploader:      uploader,
 		Tools:              toolsMap,
-		ToolsDownloader:    downloader,
+		AgentBinaryStore:   s.agentBinaryStore,
 		ToolsUploader:      uploader,
 		Resources:          resources,
 		ResourceDownloader: downloader,
 		ResourceUploader:   uploader,
 	}
-	err := migration.UploadBinaries(context.Background(), config, loggertesting.WrapCheckLog(c))
-	c.Assert(err, jc.ErrorIsNil)
+	err := migration.UploadBinaries(c.Context(), config, loggertesting.WrapCheckLog(c))
+	c.Assert(err, tc.ErrorIsNil)
 
 	expectedCurls := []string{
 		// Note ordering.
@@ -242,93 +283,61 @@ func (s *ImportSuite) TestBinariesMigration(c *gc.C) {
 		"local:trusty/magic-2",
 		"local:trusty/magic-10",
 	}
-	c.Assert(downloader.curls, jc.DeepEquals, expectedCurls)
-	c.Assert(uploader.curls, jc.DeepEquals, expectedCurls)
+	c.Assert(uploader.curls, tc.DeepEquals, expectedCurls)
 
 	expectedRefs := []string{
-		"postgresql-a77196f",
-		"magic-d348864",
-		"magic-5f44d22",
+		"postgresql-hash0123",
+		"magic-hash0123",
+		"magic-hash0123",
 	}
-	c.Assert(uploader.charmRefs, jc.DeepEquals, expectedRefs)
+	c.Assert(uploader.charmRefs, tc.DeepEquals, expectedRefs)
 
-	c.Assert(downloader.uris, jc.SameContents, []string{
-		"/tools/0",
-		"/tools/1",
-	})
-	c.Assert(uploader.tools, jc.DeepEquals, toolsMap)
+	c.Check(len(uploader.tools), tc.Equals, len(toolsMap))
+	for _, ver := range toolsMap {
+		_, exists := uploader.tools[ver]
+		c.Check(exists, tc.IsTrue)
+	}
 
-	c.Assert(downloader.resources, jc.SameContents, []string{
+	c.Assert(downloader.resources, tc.SameContents, []string{
 		"app0/blob0",
 		"app1/blob1",
 	})
-	c.Assert(uploader.resources, jc.DeepEquals, map[string]string{
+	c.Assert(uploader.resources, tc.DeepEquals, map[string]string{
 		"app0/blob0": "blob0",
 		"app1/blob1": "blob1",
 	})
-	c.Assert(uploader.unitResources, jc.SameContents, []string{"app1/99-blob1"})
 }
 
-func (s *ImportSuite) TestWrongCharmURLAssigned(c *gc.C) {
+func (s *ImportSuite) TestWrongCharmURLAssigned(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
 	downloader := &fakeDownloader{}
 	uploader := &fakeUploader{
 		reassignCharmURL: true,
 	}
 
+	s.charmService.EXPECT().GetCharmArchive(gomock.Any(), domaincharm.CharmLocator{
+		Name:     "bar",
+		Revision: 2,
+		Source:   domaincharm.CharmHubSource,
+	}).Return(ioutil.NopCloser(strings.NewReader("bar content")), "hash0123", nil)
 	config := migration.UploadBinariesConfig{
-		Charms:             []string{"local:foo/bar-2"},
-		CharmDownloader:    downloader,
+		Charms:             []string{"ch:foo/bar-2"},
+		CharmService:       s.charmService,
 		CharmUploader:      uploader,
-		ToolsDownloader:    downloader,
+		AgentBinaryStore:   s.agentBinaryStore,
 		ToolsUploader:      uploader,
 		ResourceDownloader: downloader,
 		ResourceUploader:   uploader,
 	}
-	err := migration.UploadBinaries(context.Background(), config, loggertesting.WrapCheckLog(c))
-	c.Assert(err, gc.ErrorMatches,
-		"cannot upload charms: charm local:foo/bar-2 unexpectedly assigned local:foo/bar-100")
-}
-
-func (s *ImportSuite) setupMocks(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-
-	s.controllerConfigService = NewMockControllerConfigService(ctrl)
-	s.controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).Return(jujutesting.FakeControllerConfig(), nil).AnyTimes()
-
-	s.serviceFactory = NewMockServiceFactory(ctrl)
-	s.serviceFactory.EXPECT().Cloud().Return(nil).AnyTimes()
-	s.serviceFactory.EXPECT().Credential().Return(nil).AnyTimes()
-	s.serviceFactory.EXPECT().Machine().Return(nil)
-	s.serviceFactory.EXPECT().Application(gomock.Any()).Return(nil)
-	s.serviceFactoryGetter = NewMockServiceFactoryGetter(ctrl)
-	s.serviceFactoryGetter.EXPECT().FactoryForModel("bd3fae18-5ea1-4bc5-8837-45400cf1f8f6").Return(s.serviceFactory)
-
-	return ctrl
-}
-
-type fakeImporter struct {
-	model            description.Model
-	st               *state.State
-	m                *state.Model
-	controllerConfig controller.Config
-}
-
-func (i *fakeImporter) Import(model description.Model, controllerConfig controller.Config, _ config.ConfigSchemaSourceGetter) (*state.Model, *state.State, error) {
-	i.model = model
-	i.controllerConfig = controllerConfig
-	return i.m, i.st, nil
+	err := migration.UploadBinaries(c.Context(), config, loggertesting.WrapCheckLog(c))
+	c.Assert(err, tc.ErrorMatches,
+		"cannot upload charms: charm ch:foo/bar-2 unexpectedly assigned ch:foo/bar-100")
 }
 
 type fakeDownloader struct {
-	curls     []string
 	uris      []string
 	resources []string
-}
-
-func (d *fakeDownloader) OpenCharm(_ context.Context, curl string) (io.ReadCloser, error) {
-	d.curls = append(d.curls, curl)
-	// Return the charm URL string as the fake charm content
-	return io.NopCloser(bytes.NewReader([]byte(curl + " content"))), nil
 }
 
 func (d *fakeDownloader) OpenURI(_ context.Context, uri string, query url.Values) (io.ReadCloser, error) {
@@ -347,15 +356,14 @@ func (d *fakeDownloader) OpenResource(_ context.Context, app, name string) (io.R
 }
 
 type fakeUploader struct {
-	tools            map[version.Binary]string
+	tools            map[semversion.Binary]string
 	curls            []string
 	charmRefs        []string
 	resources        map[string]string
-	unitResources    []string
 	reassignCharmURL bool
 }
 
-func (f *fakeUploader) UploadTools(_ context.Context, r io.ReadSeeker, v version.Binary) (tools.List, error) {
+func (f *fakeUploader) UploadTools(_ context.Context, r io.Reader, v semversion.Binary) (tools.List, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -364,12 +372,12 @@ func (f *fakeUploader) UploadTools(_ context.Context, r io.ReadSeeker, v version
 	return tools.List{&tools.Tools{Version: v}}, nil
 }
 
-func (f *fakeUploader) UploadCharm(_ context.Context, curl string, charmRef string, r io.ReadSeeker) (string, error) {
+func (f *fakeUploader) UploadCharm(_ context.Context, curl string, charmRef string, r io.Reader) (string, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	if string(data) != curl+" content" {
+	if string(data) != charm.MustParseURL(curl).Name+" content" {
 		panic(fmt.Sprintf("unexpected charm body for %s: %s", curl, data))
 	}
 	f.curls = append(f.curls, curl)
@@ -382,21 +390,11 @@ func (f *fakeUploader) UploadCharm(_ context.Context, curl string, charmRef stri
 	return outU, nil
 }
 
-func (f *fakeUploader) UploadResource(_ context.Context, res resources.Resource, r io.ReadSeeker) error {
+func (f *fakeUploader) UploadResource(_ context.Context, res resource.Resource, r io.Reader) error {
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	f.resources[res.ApplicationID+"/"+res.Name] = string(body)
-	return nil
-}
-
-func (f *fakeUploader) SetPlaceholderResource(_ context.Context, res resources.Resource) error {
-	f.resources[res.ApplicationID+"/"+res.Name] = "<placeholder>"
-	return nil
-}
-
-func (f *fakeUploader) SetUnitResource(_ context.Context, unit string, res resources.Resource) error {
-	f.unitResources = append(f.unitResources, unit+"-"+res.Name)
+	f.resources[res.ApplicationName+"/"+res.Name] = string(body)
 	return nil
 }

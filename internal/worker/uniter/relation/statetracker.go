@@ -5,12 +5,11 @@ package relation
 
 import (
 	stdcontext "context"
-	"os"
 	"strconv"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/kr/pretty"
 
@@ -59,7 +58,7 @@ type relationStateTracker struct {
 
 // NewRelationStateTracker returns a new RelationStateTracker instance.
 func NewRelationStateTracker(ctx stdcontext.Context, cfg RelationStateTrackerConfig) (RelationStateTracker, error) {
-	principalName, subordinate, err := cfg.Unit.PrincipalName()
+	principalName, subordinate, err := cfg.Unit.PrincipalName(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -92,7 +91,7 @@ func NewRelationStateTracker(ctx stdcontext.Context, cfg RelationStateTrackerCon
 // loadInitialState reconciles the local state with the remote
 // state of the corresponding relations.
 func (r *relationStateTracker) loadInitialState(ctx stdcontext.Context) error {
-	relationStatus, err := r.unit.RelationsStatus()
+	relationStatus, err := r.unit.RelationsStatus(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -122,7 +121,7 @@ func (r *relationStateTracker) loadInitialState(ctx stdcontext.Context) error {
 
 	if r.logger.IsLevelEnabled(logger.TRACE) {
 		if mgr, ok := r.stateMgr.(*stateManager); ok {
-			r.logger.Tracef("initialising relation state tracker: %# v", pretty.Formatter(mgr.relationState))
+			r.logger.Tracef(ctx, "initialising relation state tracker: %# v", pretty.Formatter(mgr.relationState))
 		}
 	}
 	knownUnits := make(map[string]bool)
@@ -167,7 +166,7 @@ func (r *relationStateTracker) relationGone(id int) {
 // case it will return resolver.ErrLoopAborted.
 func (r *relationStateTracker) joinRelation(ctx stdcontext.Context, rel api.Relation) (err error) {
 	unitName := r.unit.Name()
-	r.logger.Tracef("%q (re-)joining: %q", unitName, rel)
+	r.logger.Tracef(ctx, "%q (re-)joining: %q", unitName, rel)
 	ru, err := rel.Unit(ctx, r.unit.Tag())
 	if err != nil {
 		return errors.Trace(err)
@@ -182,7 +181,7 @@ func (r *relationStateTracker) joinRelation(ctx stdcontext.Context, rel api.Rela
 			if err == nil {
 				err = e
 			} else {
-				r.logger.Errorf("while stopping unit watcher: %v", e)
+				r.logger.Errorf(ctx, "while stopping unit watcher: %v", e)
 			}
 		}
 	}()
@@ -201,7 +200,7 @@ func (r *relationStateTracker) joinRelation(ctx stdcontext.Context, rel api.Rela
 			}
 			err := relationer.Join(ctx)
 			if params.IsCodeCannotEnterScopeYet(err) {
-				r.logger.Infof("cannot enter scope for relation %q; waiting for subordinate to be removed", rel)
+				r.logger.Infof(ctx, "cannot enter scope for relation %q; waiting for subordinate to be removed", rel)
 				continue
 			} else if err != nil {
 				return errors.Trace(err)
@@ -212,7 +211,7 @@ func (r *relationStateTracker) joinRelation(ctx stdcontext.Context, rel api.Rela
 			if err != nil {
 				return errors.Trace(err)
 			}
-			r.logger.Debugf("unit %q (leader=%v) entered scope for relation %q", unitName, isLeader, rel)
+			r.logger.Debugf(ctx, "unit %q (leader=%v) entered scope for relation %q", unitName, isLeader, rel)
 			if isLeader {
 				err = rel.SetStatus(ctx, relation.Joined)
 				if err != nil {
@@ -228,9 +227,9 @@ func (r *relationStateTracker) joinRelation(ctx stdcontext.Context, rel api.Rela
 func (r *relationStateTracker) SynchronizeScopes(ctx stdcontext.Context, remote remotestate.Snapshot) error {
 	isTraceEnabled := r.logger.IsLevelEnabled(logger.TRACE)
 	if isTraceEnabled {
-		r.logger.Tracef("%q synchronise scopes for remote relations %# v", r.unit.Name(), pretty.Formatter(remote.Relations))
+		r.logger.Tracef(ctx, "%q synchronise scopes for remote relations %# v", r.unit.Name(), pretty.Formatter(remote.Relations))
 	}
-	var charmSpec *charm.CharmDir
+	var charmMeta *charm.Meta
 	knownUnits := make(map[string]bool)
 	for id, relationSnapshot := range remote.Relations {
 		if relr, found := r.relationers[id]; found {
@@ -245,7 +244,7 @@ func (r *relationStateTracker) SynchronizeScopes(ctx stdcontext.Context, remote 
 				}
 			}
 			if isTraceEnabled {
-				r.logger.Tracef("already seen relation id %v", id)
+				r.logger.Tracef(ctx, "already seen relation id %v", id)
 			}
 			continue
 		}
@@ -259,7 +258,7 @@ func (r *relationStateTracker) SynchronizeScopes(ctx stdcontext.Context, remote 
 		if err != nil {
 			if params.IsCodeNotFoundOrCodeUnauthorized(err) {
 				r.relationGone(id)
-				r.logger.Tracef("relation id %v has been removed", id)
+				r.logger.Tracef(ctx, "relation id %v has been removed", id)
 				continue
 			}
 			return errors.Trace(err)
@@ -278,17 +277,17 @@ func (r *relationStateTracker) SynchronizeScopes(ctx stdcontext.Context, remote 
 
 		// Make sure we ignore relations not implemented by the unit's charm.
 		if !r.RelationCreated(id) {
-			if charmSpec == nil {
-				charmSpec, err = charm.ReadCharmDir(r.charmDir)
+			if charmMeta == nil {
+				charmMeta, err = charm.ReadCharmDirMetadata(r.charmDir)
 				if err != nil {
-					if !os.IsNotExist(errors.Cause(err)) {
+					if !errors.Is(err, charm.FileNotFound) {
 						return errors.Trace(err)
 					}
-					r.logger.Warningf("charm deleted, skipping relation endpoint check for %q", rel)
+					r.logger.Warningf(ctx, "charm deleted, skipping relation endpoint check for %q", rel)
 				}
 			}
-			if charmSpec != nil && !ep.ImplementedBy(charmSpec) {
-				r.logger.Warningf("skipping relation %q with unknown endpoint %q", rel, ep.Name)
+			if charmMeta != nil && !ep.ImplementedBy(charmMeta) {
+				r.logger.Warningf(ctx, "skipping relation %q with unknown endpoint %q", rel, ep.Name)
 				continue
 			}
 		}
@@ -306,13 +305,13 @@ func (r *relationStateTracker) SynchronizeScopes(ctx stdcontext.Context, remote 
 	}
 
 	if r.subordinate {
-		return r.maybeSetSubordinateDying()
+		return r.maybeSetSubordinateDying(ctx)
 	}
 
 	return nil
 }
 
-func (r *relationStateTracker) maybeSetSubordinateDying() error {
+func (r *relationStateTracker) maybeSetSubordinateDying(ctx stdcontext.Context) error {
 	// If no Alive relations remain between a subordinate unit's application
 	// and its principal's application, the subordinate must become Dying.
 	principalApp, err := names.UnitApplication(r.principalName)
@@ -329,7 +328,7 @@ func (r *relationStateTracker) maybeSetSubordinateDying() error {
 			return nil
 		}
 	}
-	return r.unit.Destroy()
+	return r.unit.Destroy(ctx)
 }
 
 // setDying notifies the relationer identified by the supplied id that the
@@ -418,7 +417,7 @@ func (r *relationStateTracker) PrepareHook(hookInfo hook.Info) (string, error) {
 		// and the relation has since been deleted.
 		// There's nothing to prepare so allow the uniter
 		// to continue with the next operation.
-		r.logger.Warningf("preparing hook %v for %v, relation %d has been removed", hookInfo.Kind, r.principalName, hookInfo.RelationId)
+		r.logger.Warningf(stdcontext.Background(), "preparing hook %v for %v, relation %d has been removed", hookInfo.Kind, r.principalName, hookInfo.RelationId)
 		return "", operation.ErrSkipExecute
 	}
 	return relationer.PrepareHook(hookInfo)
@@ -446,7 +445,7 @@ func (r *relationStateTracker) CommitHook(ctx stdcontext.Context, hookInfo hook.
 		// and the relation has since been deleted.
 		// There's nothing to commit so allow the uniter
 		// to continue with the next operation.
-		r.logger.Warningf("committing hook %v for %v, relation %d has been removed", hookInfo.Kind, r.principalName, hookInfo.RelationId)
+		r.logger.Warningf(ctx, "committing hook %v for %v, relation %d has been removed", hookInfo.Kind, r.principalName, hookInfo.RelationId)
 		return nil
 	}
 	return relationer.CommitHook(ctx, hookInfo)

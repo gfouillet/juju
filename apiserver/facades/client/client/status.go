@@ -5,1256 +5,799 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/collections/transform"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/storagecommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	corebase "github.com/juju/juju/core/base"
-	"github.com/juju/juju/core/container"
+	"github.com/juju/juju/apiserver/internal/charms"
+	"github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/blockdevice"
 	"github.com/juju/juju/core/crossmodel"
-	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/instance"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/lxdprofile"
+	coremachine "github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
+	corerelation "github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/application"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/domain/crossmodelrelation"
+	crossmodelrelationservice "github.com/juju/juju/domain/crossmodelrelation/service"
+	"github.com/juju/juju/domain/deployment"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	domainmodelerrors "github.com/juju/juju/domain/model/errors"
+	domainnetwork "github.com/juju/juju/domain/network"
+	"github.com/juju/juju/domain/port"
+	"github.com/juju/juju/domain/relation"
+	statusservice "github.com/juju/juju/domain/status/service"
+	"github.com/juju/juju/domain/storage"
+	"github.com/juju/juju/domain/storageprovisioning"
 	"github.com/juju/juju/internal/charm"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internalstorage "github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
-func agentStatusFromStatusInfo(s []status.StatusInfo, kind status.HistoryKind) []params.DetailedStatus {
-	result := []params.DetailedStatus{}
-	for _, v := range s {
-		result = append(result, params.DetailedStatus{
-			Status: string(v.Status),
-			Info:   v.Message,
-			Data:   v.Data,
-			Since:  v.Since,
-			Kind:   string(kind),
-		})
-	}
-	return result
-
-}
-
-type byTime []params.DetailedStatus
-
-func (s byTime) Len() int {
-	return len(s)
-}
-func (s byTime) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-func (s byTime) Less(i, j int) bool {
-	return s[i].Since.Before(*s[j].Since)
-}
-
-// applicationStatusHistory returns status history for the given (remote) application.
-func (c *Client) applicationStatusHistory(appTag names.ApplicationTag, filter status.StatusHistoryFilter,
-	kind status.HistoryKind) ([]params.DetailedStatus, error) {
-	var (
-		app status.StatusHistoryGetter
-		err error
-	)
-	if kind == status.KindApplication {
-		app, err = c.api.stateAccessor.Application(appTag.Name)
-	} else {
-		app, err = c.api.stateAccessor.RemoteApplication(appTag.Name)
-	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	sInfo, err := app.StatusHistory(filter)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return agentStatusFromStatusInfo(sInfo, kind), nil
-}
-
-// unitStatusHistory returns a list of status history entries for unit agents or workloads.
-func (c *Client) unitStatusHistory(unitTag names.UnitTag, filter status.StatusHistoryFilter,
-	kind status.HistoryKind) ([]params.DetailedStatus, error) {
-	unit, err := c.api.stateAccessor.Unit(unitTag.Id())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	statuses := []params.DetailedStatus{}
-	if kind == status.KindUnit || kind == status.KindWorkload {
-		unitStatuses, err := unit.StatusHistory(filter)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		statuses = agentStatusFromStatusInfo(unitStatuses, status.KindWorkload)
-
-	}
-	if kind == status.KindUnit || kind == status.KindUnitAgent {
-		agentStatuses, err := unit.AgentHistory().StatusHistory(filter)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		statuses = append(statuses, agentStatusFromStatusInfo(agentStatuses, status.KindUnitAgent)...)
-	}
-
-	sort.Sort(byTime(statuses))
-	if kind == status.KindUnit && filter.Size > 0 {
-		if len(statuses) > filter.Size {
-			statuses = statuses[len(statuses)-filter.Size:]
-		}
-	}
-
-	return statuses, nil
-}
-
-// machineStatusHistory returns status history for the given machine.
-func (c *Client) machineStatusHistory(machineTag names.MachineTag, filter status.StatusHistoryFilter,
-	kind status.HistoryKind) ([]params.DetailedStatus, error) {
-	machine, err := c.api.stateAccessor.Machine(machineTag.Id())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	var sInfo []status.StatusInfo
-	if kind == status.KindMachineInstance || kind == status.KindContainerInstance {
-		sInfo, err = machine.InstanceStatusHistory(filter)
-	} else {
-		sInfo, err = machine.StatusHistory(filter)
-	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return agentStatusFromStatusInfo(sInfo, kind), nil
-}
-
-// modelStatusHistory returns status history for the current model.
-func (c *Client) modelStatusHistory(filter status.StatusHistoryFilter) ([]params.DetailedStatus, error) {
-	m, err := c.api.stateAccessor.Model()
-	if err != nil {
-		return nil, errors.Annotate(err, "cannot get model")
-	}
-
-	sInfo, err := m.StatusHistory(filter)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return agentStatusFromStatusInfo(sInfo, status.KindModel), nil
-}
-
 // StatusHistory returns a slice of past statuses for several entities.
-func (c *Client) StatusHistory(request params.StatusHistoryRequests) params.StatusHistoryResults {
-	results := params.StatusHistoryResults{}
-	// TODO(perrito666) the contents of the loop could be split into
-	// a oneHistory method for clarity.
-	for _, request := range request.Requests {
-		filter := status.StatusHistoryFilter{
-			Size:     request.Filter.Size,
-			FromDate: request.Filter.Date,
-			Delta:    request.Filter.Delta,
-			Exclude:  set.NewStrings(request.Filter.Exclude...),
-		}
-		if err := c.checkCanRead(); err != nil {
-			history := params.StatusHistoryResult{
-				Error: apiservererrors.ServerError(err),
-			}
-			results.Results = append(results.Results, history)
-			continue
-
-		}
-
-		if err := filter.Validate(); err != nil {
-			history := params.StatusHistoryResult{
-				Error: apiservererrors.ServerError(errors.Annotate(err, "cannot validate status history filter")),
-			}
-			results.Results = append(results.Results, history)
-			continue
-		}
-
-		var (
-			err  error
-			hist []params.DetailedStatus
-		)
-		kind := status.HistoryKind(request.Kind)
-		switch kind {
-		case status.KindModel:
-			hist, err = c.modelStatusHistory(filter)
-		case status.KindUnit, status.KindWorkload, status.KindUnitAgent:
-			var u names.UnitTag
-			if u, err = names.ParseUnitTag(request.Tag); err == nil {
-				hist, err = c.unitStatusHistory(u, filter, kind)
-			}
-		case status.KindApplication, status.KindSAAS:
-			var app names.ApplicationTag
-			if app, err = names.ParseApplicationTag(request.Tag); err == nil {
-				hist, err = c.applicationStatusHistory(app, filter, kind)
-			}
-		default:
-			var m names.MachineTag
-			if m, err = names.ParseMachineTag(request.Tag); err == nil {
-				hist, err = c.machineStatusHistory(m, filter, kind)
-			}
-		}
-
-		if err == nil {
-			sort.Sort(byTime(hist))
-		}
-
-		results.Results = append(results.Results,
-			params.StatusHistoryResult{
-				History: params.History{Statuses: hist},
-				Error: apiservererrors.ServerError(errors.Annotatef(err, "fetching status history for %q",
-					request.Tag)),
-			})
+func (c *Client) StatusHistory(ctx context.Context, requests params.StatusHistoryRequests) params.StatusHistoryResults {
+	if err := c.checkCanRead(ctx); err != nil {
+		return statusHistoryResultsError(err, len(requests.Requests))
 	}
-	return results
+
+	// This API officially supports bulk requests, but the client only sends
+	// single requests. This prevents excessive memory usage in the server.
+	if num := len(requests.Requests); num == 0 {
+		return statusHistoryResultsError(nil, num)
+	} else if num != 1 {
+		return statusHistoryResultsError(internalerrors.Errorf("multiple requests").Add(errors.NotSupported), num)
+	}
+
+	// We know we only have one request, so we can just use the first one.
+	request := requests.Requests[0]
+
+	kind := status.HistoryKind(request.Kind)
+	if !kind.Valid() {
+		return statusHistoryResultError(internalerrors.Errorf("status history kind %q", request.Kind).Add(errors.NotValid))
+	}
+
+	tag, err := names.ParseTag(request.Tag)
+	if err != nil {
+		return statusHistoryResultError(err)
+	}
+
+	history, err := c.statusService.GetStatusHistory(ctx, statusservice.StatusHistoryRequest{
+		Kind: kind,
+		Filter: statusservice.StatusHistoryFilter{
+			Size:  request.Filter.Size,
+			Date:  request.Filter.Date,
+			Delta: request.Filter.Delta,
+		},
+		Tag: tag.Id(),
+	})
+	if err != nil {
+		return statusHistoryResultError(err)
+	}
+
+	results := make([]params.DetailedStatus, len(history))
+	for i, status := range history {
+		results[i] = params.DetailedStatus{
+			Status: status.Status.String(),
+			Info:   status.Info,
+			Since:  status.Since,
+			Kind:   status.Kind.String(),
+			Data:   status.Data,
+		}
+	}
+
+	return params.StatusHistoryResults{
+		Results: []params.StatusHistoryResult{{
+			History: params.History{
+				Statuses: results,
+			},
+		}},
+	}
+}
+
+func statusHistoryResultsError(err error, amount int) params.StatusHistoryResults {
+	results := make([]params.StatusHistoryResult, amount)
+	for i := range results {
+		results[i].Error = apiservererrors.ServerError(err)
+	}
+	return params.StatusHistoryResults{
+		Results: results,
+	}
+}
+
+func statusHistoryResultError(err error) params.StatusHistoryResults {
+	return statusHistoryResultsError(err, 1)
 }
 
 // FullStatus gives the information needed for juju status over the api
 func (c *Client) FullStatus(ctx context.Context, args params.StatusParams) (params.FullStatus, error) {
-	if err := c.checkCanRead(); err != nil {
+	if err := c.checkCanRead(ctx); err != nil {
 		return params.FullStatus{}, err
 	}
 
+	if len(args.Patterns) > 0 {
+		// Patterns have been disabled until we tackle the status epic. This
+		// will require pushing the patterns down through the status service.
+		// For now, just black hole the request.
+		return params.FullStatus{}, internalerrors.Errorf("patterns are not implemented").Add(
+			errors.NotImplemented,
+		)
+	}
+
+	machineJobFetcher := func(context.Context, coremachine.Name) []model.MachineJob {
+		return []model.MachineJob{model.JobHostUnits}
+	}
+	if c.isControllerModel {
+		machineJobFetcher = func(ctx context.Context, name coremachine.Name) []model.MachineJob {
+			jobs := []model.MachineJob{model.JobHostUnits}
+			if isController, err := c.machineService.IsMachineController(ctx, name); err != nil && !internalerrors.Is(err, machineerrors.MachineNotFound) {
+				logger.Errorf(ctx, "error checking if machine %q is controller: %v", name, err)
+			} else if isController {
+				jobs = append(jobs, model.JobManageModel)
+			}
+			return jobs
+		}
+	}
+
 	var noStatus params.FullStatus
-	var context statusContext
+	context := statusContext{
+		applicationService:        c.applicationService,
+		statusService:             c.statusService,
+		machineService:            c.machineService,
+		crossModelRelationService: c.crossModelRelationService,
 
-	m, err := c.api.stateAccessor.Model()
-	if err != nil {
-		return noStatus, errors.Annotate(err, "cannot get model")
+		machineJobFetcher: machineJobFetcher,
 	}
-	context.presence.Presence = c.api.presence.ModelPresence(m.UUID())
-	cfg, err := m.Config()
-	if err != nil {
-		return noStatus, errors.Annotate(err, "cannot obtain current model config")
-	}
-	context.providerType = cfg.Type()
 
-	if context.spaceInfos, err = c.api.networkService.GetAllSpaces(ctx); err != nil {
-		return noStatus, errors.Annotate(err, "cannot obtain space information")
+	var err error
+	if context.model, err = c.modelInfoService.GetModelInfo(ctx); err != nil {
+		return noStatus, fmt.Errorf("getting model info: %w", err)
 	}
-	if context.model, err = c.api.state().Model(); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch model")
+	context.providerType = context.model.CloudType
+
+	if context.spaceInfos, err = c.networkService.GetAllSpaces(ctx); err != nil {
+		return noStatus, internalerrors.Errorf("cannot obtain space information: %w", err)
 	}
-	if context.status, err = context.model.LoadModelStatus(); err != nil {
-		return noStatus, errors.Annotate(err, "could not load model status values")
-	}
-	if context.allAppsUnitsCharmBindings, err =
-		fetchAllApplicationsAndUnits(c.api.stateAccessor, context.model, context.spaceInfos); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch applications and units")
-	}
-	if context.consumerRemoteApplications, err =
-		fetchConsumerRemoteApplications(c.api.stateAccessor); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch remote applications")
+	if context.allAppsUnitsCharmBindings, context.units, err =
+		fetchAllApplicationsAndUnits(ctx, c.statusService, c.applicationService); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch applications and units: %w", err)
 	}
 	// Only admins can see offer details.
-	if err := c.checkIsAdmin(); err == nil {
-		if context.offers, err =
-			fetchOffers(c.api.stateAccessor, context.allAppsUnitsCharmBindings.applications); err != nil {
-			return noStatus, errors.Annotate(err, "could not fetch application offers")
+	if err := c.checkIsAdmin(ctx); err == nil {
+		context.offers, err = fetchOffers(ctx, c.crossModelRelationService)
+		if err != nil {
+			return noStatus, internalerrors.Errorf("could not fetch offers: %w", err)
 		}
 	}
-	if err = context.fetchMachines(c.api.stateAccessor); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch machines")
+	if context.remoteAppOfferers, err = c.statusService.GetRemoteApplicationOffererStatuses(ctx); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch remote application offerers: %w", err)
 	}
-	if err = context.fetchOpenPortRangesForAllMachines(c.api.stateAccessor); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch open port ranges")
+	if err = context.fetchMachines(ctx); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch machines: %w", err)
 	}
-	if context.controllerNodes, err = fetchControllerNodes(c.api.stateAccessor); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch controller nodes")
-	}
-	if len(context.controllerNodes) > 1 {
-		if primaryHAMachine, err := c.api.stateAccessor.HAPrimaryMachine(); err != nil {
-			// We do not want to return any errors here as they are all
-			// non-fatal for this call since we can still
-			// get FullStatus including machine info even if we could not get HA Primary determined.
-			// Also on some non-HA setups, i.e. where mongo was not run with --replSet,
-			// this call will return an error.
-			logger.Warningf("could not determine if there is a primary HA machine: %v", err)
-		} else {
-			context.primaryHAMachine = &primaryHAMachine
-		}
+	if err = context.fetchAllOpenPortRanges(ctx, c.portService); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch open port ranges: %w", err)
 	}
 	// These may be empty when machines have not finished deployment.
-	subnetInfos, err := c.api.networkService.GetAllSubnets(ctx)
-	if err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch subnets")
+	if context.ipAddresses, context.linkLayerDevices, err = fetchNetworkInterfaces(ctx,
+		c.networkService); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch IP addresses and link layer devices: %w", err)
 	}
-	if context.ipAddresses, context.spaces, context.linkLayerDevices, err =
-		fetchNetworkInterfaces(c.api.stateAccessor, subnetInfos, context.spaceInfos); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch IP addresses and link layer devices")
+	if context.relations, context.relationsByID, err = fetchRelations(ctx, c.relationService, c.statusService); err != nil {
+		return noStatus, internalerrors.Errorf("could not fetch relations: %w", err)
 	}
-	if context.relations, context.relationsById, err = fetchRelations(c.api.stateAccessor); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch relations")
+	if context.model.Type == model.CAAS {
+		if context.podsInfo, err = c.applicationService.GetUnitsK8sPodInfo(ctx); err != nil {
+			return noStatus, internalerrors.Errorf("could not fetch pods info: %w", err)
+		}
 	}
+
 	if len(context.allAppsUnitsCharmBindings.applications) > 0 {
-		if context.leaders, err = c.api.leadershipReader.Leaders(); err != nil {
+		if context.leaders, err = c.leadershipReader.Leaders(); err != nil {
 			// Leader information is additive for status.
 			// Given that it comes from Dqlite, which may be subject to
 			// reconfiguration when mutating the control plane, we would
 			// rather return as much status as possible over an error.
-			logger.Warningf("could not determine application leaders: %v", err)
+			logger.Warningf(ctx, "could not determine application leaders: %v", err)
 			context.leaders = make(map[string]string)
-		}
-	}
-	if context.controllerTimestamp, err = c.api.stateAccessor.ControllerTimestamp(); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch controller timestamp")
-	}
-	if context.branches, err = fetchBranches(context.model); err != nil {
-		return noStatus, errors.Annotate(err, "could not fetch branches")
-	}
-
-	if args.IncludeStorage {
-		context.storageInstances, err = c.api.storageAccessor.AllStorageInstances()
-		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot list all storage instances")
-		}
-		context.filesystems, err = c.api.storageAccessor.AllFilesystems()
-		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot list all filesystems")
-		}
-		context.volumes, err = c.api.storageAccessor.AllVolumes()
-		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot list all volumes")
 		}
 	}
 
 	if logger.IsLevelEnabled(corelogger.TRACE) {
-		logger.Tracef("Applications: %v", context.allAppsUnitsCharmBindings.applications)
-		logger.Tracef("Remote applications: %v", context.consumerRemoteApplications)
-		logger.Tracef("Offers: %v", context.offers)
-		logger.Tracef("Leaders", context.leaders)
-		logger.Tracef("Relations: %v", context.relations)
-		logger.Tracef("StorageInstances: %v", context.storageInstances)
-		logger.Tracef("Filesystems: %v", context.filesystems)
-		logger.Tracef("Volumes: %v", context.volumes)
+		logger.Tracef(ctx, "Applications: %v", context.allAppsUnitsCharmBindings.applications)
+		logger.Tracef(ctx, "Offers: %v", context.offers)
+		logger.Tracef(ctx, "Leaders: %v", context.leaders)
+		logger.Tracef(ctx, "Relations: %v", context.relations)
 	}
 
-	if len(args.Patterns) > 0 {
-		patterns := resolveLeaderUnits(args.Patterns, context.leaders)
-		predicate := BuildPredicateFor(patterns)
-		// First, attempt to match machines. Any units on those
-		// machines are implicitly matched.
-		matchedMachines := make(set.Strings)
-		for _, machineList := range context.machines {
-			for _, m := range machineList {
-				matches, err := predicate(m)
-				if err != nil {
-					return noStatus, errors.Annotate(
-						err, "could not filter machines",
-					)
-				}
-				if matches {
-					matchedMachines.Add(m.Id())
-				}
-			}
-		}
-
-		// Filter units
-		matchedApps := set.NewStrings()
-		matchedUnits := set.NewStrings()
-		unitChainPredicate := UnitChainPredicateFn(predicate, context.unitByName)
-		// It's possible that we will discover a unit that matches given filter
-		// half way through units collection. In that case, it may be that the machine
-		// for that unit has other applications' units on it that have already been examined
-		// prior. This means that we may miss these other application(s).
-		// This behavior has been inconsistent since we get units in a map where
-		// the order is not guaranteed.
-		// To cater for this scenario, we need to gather all units
-		// in a temporary collection keyed on machine to allow for the later
-		// pass. This fixes situations similar to inconsistencies
-		// observed in lp#1592872.
-		machineUnits := map[string][]string{}
-		for _, unitMap := range context.allAppsUnitsCharmBindings.units {
-			for name, unit := range unitMap {
-				machineId, err := unit.AssignedMachineId()
-				if err != nil {
-					machineId = ""
-				} else if matchedMachines.Contains(machineId) {
-					// Unit is on a matching machine.
-					matchedApps.Add(unit.ApplicationName())
-					continue
-				}
-				if machineId != "" {
-					machineUnits[machineId] = append(machineUnits[machineId], unit.ApplicationName())
-				}
-
-				// Always start examining at the top-level. This
-				// prevents a situation where we filter a subordinate
-				// before we discover its parent is a match.
-				if !unit.IsPrincipal() {
-					continue
-				} else if matches, err := unitChainPredicate(unit); err != nil {
-					return noStatus, errors.Annotate(err, "could not filter units")
-				} else if !matches {
-					delete(unitMap, name)
-					continue
-				}
-				matchedApps.Add(unit.ApplicationName())
-				matchedUnits.Add(unit.Name())
-				matchedUnits = matchedUnits.Union(set.NewStrings(unit.SubordinateNames()...))
-				if machineId != "" {
-					matchedMachines.Add(machineId)
-				}
-			}
-		}
-		for _, m := range matchedMachines.SortedValues() {
-			for _, a := range machineUnits[m] {
-				if !matchedApps.Contains(a) {
-					matchedApps.Add(a)
-				}
-			}
-		}
-
-		// Filter applications
-		for appName, app := range context.allAppsUnitsCharmBindings.applications {
-			matches, err := predicate(app)
-			if err != nil {
-				return noStatus, errors.Annotate(err, "could not filter applications")
-			}
-
-			// There are matched units for this application
-			// or the application matched the given criteria.
-			deleted := false
-			if !matchedApps.Contains(appName) && !matches {
-				delete(context.allAppsUnitsCharmBindings.applications, appName)
-				deleted = true
-			}
-
-			// Filter relations:
-			// Remove relations for applications that were deleted and
-			// for the applications that did not match the
-			// given criteria.
-			if deleted || !matches {
-				// delete relations for this app
-				if relations, ok := context.relations[appName]; ok {
-					for _, r := range relations {
-						delete(context.relationsById, r.Id())
-					}
-					delete(context.relations, appName)
-				}
-			}
-		}
-		// TODO(wallyworld) - filter remote applications
-
-		// Filter machines
-		for aStatus, machineList := range context.machines {
-			matched := make([]*state.Machine, 0, len(machineList))
-			for _, m := range machineList {
-				machineContainers, err := m.Containers()
-				if err != nil {
-					return noStatus, err
-				}
-				machineContainersSet := set.NewStrings(machineContainers...)
-
-				if matchedMachines.Contains(m.Id()) || !matchedMachines.Intersection(machineContainersSet).IsEmpty() {
-					// The machine is matched directly, or contains a unit
-					// or container that matches.
-					logger.Tracef("machine %s is hosting something.", m.Id())
-					matched = append(matched, m)
-					continue
-				}
-			}
-			context.machines[aStatus] = matched
-		}
-
-		// Filter branches
-		context.branches = filterBranches(context.branches, matchedApps,
-			matchedUnits.Union(set.NewStrings(args.Patterns...)))
-
-		// Filter storage
-		matchedStorageTags := set.NewStrings()
-		matchedStorageInstances := []state.StorageInstance{}
-		for _, storageInstance := range context.storageInstances {
-			owner, ok := storageInstance.Owner()
-			if !ok {
-				continue
-			}
-			matched := false
-			switch tag := owner.(type) {
-			case names.UnitTag:
-				matched = matchedUnits.Contains(tag.Id())
-			case names.ApplicationTag:
-				matched = matchedApps.Contains(tag.Id())
-			}
-			if !matched {
-				continue
-			}
-			matchedStorageInstances = append(matchedStorageInstances, storageInstance)
-			matchedStorageTags.Add(storageInstance.StorageTag().Id())
-		}
-		context.storageInstances = matchedStorageInstances
-
-		matchedFilesystems := []state.Filesystem{}
-		for _, filesystem := range context.filesystems {
-			storageTag, err := filesystem.Storage()
-			if errors.Is(err, errors.NotAssigned) {
-				continue
-			} else if err != nil {
-				return noStatus, errors.Trace(err)
-			}
-			if matchedStorageTags.Contains(storageTag.Id()) {
-				matchedFilesystems = append(matchedFilesystems, filesystem)
-			}
-		}
-		context.filesystems = matchedFilesystems
-
-		matchedVolumes := []state.Volume{}
-		for _, volume := range context.volumes {
-			storageTag, err := volume.StorageInstance()
-			if errors.Is(err, errors.NotAssigned) {
-				continue
-			} else if err != nil {
-				return noStatus, errors.Trace(err)
-			}
-			if matchedStorageTags.Contains(storageTag.Id()) {
-				matchedVolumes = append(matchedVolumes, volume)
-			}
-		}
-		context.volumes = matchedVolumes
-	}
-
-	modelStatus, err := c.modelStatus()
+	modelStatus, err := context.processModel(ctx)
 	if err != nil {
-		return noStatus, errors.Annotate(err, "cannot determine model status")
+		return noStatus, internalerrors.Errorf("cannot determine model status: %w", err)
 	}
 
-	var storageDetails []params.StorageDetails
-	var filesystemDetails []params.FilesystemDetails
-	var volumeDetails []params.VolumeDetails
+	var (
+		allStorage  []params.StorageDetails
+		filesystems []params.FilesystemDetails
+		volumes     []params.VolumeDetails
+	)
 	if args.IncludeStorage {
-		storageDetails, err = context.processStorage(ctx, c.api.storageAccessor, c.api.blockDeviceService)
+		allStorage, filesystems, volumes, err = processStorage(ctx,
+			c.statusService)
 		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot process storage instances")
-		}
-		filesystemDetails, err = context.processFilesystems(ctx, c.api.storageAccessor, c.api.blockDeviceService)
-		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot process filesystems")
-		}
-		volumeDetails, err = context.processVolumes(ctx, c.api.storageAccessor, c.api.blockDeviceService)
-		if err != nil {
-			return noStatus, errors.Annotate(err, "cannot process volumes")
+			return noStatus, internalerrors.Errorf("fetching storage: %w", err)
 		}
 	}
 
+	now := c.clock.Now()
 	return params.FullStatus{
-		Model:               modelStatus,
-		Machines:            context.processMachines(ctx),
-		Applications:        context.processApplications(ctx),
-		RemoteApplications:  context.processRemoteApplications(),
-		Offers:              context.processOffers(),
-		Relations:           context.processRelations(),
-		ControllerTimestamp: context.controllerTimestamp,
-		Branches:            context.processBranches(),
-		Storage:             storageDetails,
-		Filesystems:         filesystemDetails,
-		Volumes:             volumeDetails,
+		Model:                     modelStatus,
+		Machines:                  context.processMachines(ctx),
+		Applications:              context.processApplications(ctx),
+		Offers:                    context.processOffers(),
+		Relations:                 context.processRelations(ctx),
+		RemoteApplicationOfferers: context.processRemoteApplicationOfferers(ctx),
+		Storage:                   allStorage,
+		Filesystems:               filesystems,
+		Volumes:                   volumes,
+		ControllerTimestamp:       &now,
 	}, nil
-}
-
-// resolveLeaderUnits resolves the passed in leader pattern to an existing application leader unit
-// and then replaces it inplace in the patterns
-func resolveLeaderUnits(patterns []string, leaders map[string]string) []string {
-	for i, v := range patterns {
-		if strings.Contains(v, "leader") {
-			application := strings.Split(v, "/")[0]
-			unit, ok := leaders[application]
-			if ok {
-				patterns[i] = unit
-				continue
-			}
-		}
-	}
-	return patterns
-}
-
-func filterBranches(ctxBranches map[string]*state.Generation,
-	matchedApps, matchedForBranches set.Strings) map[string]*state.Generation {
-	// Filter branches based on matchedApps which contains
-	// the application name if matching on application or unit.
-	unmatchedBranches := set.NewStrings()
-	// Need a combination of the pattern strings and all units
-	// matched above, both principal and subordinate.
-	for bName, branch := range ctxBranches {
-		unmatchedBranches.Add(bName)
-		for appName, units := range branch.AssignedUnits() {
-			appMatch := matchedForBranches.Contains(appName)
-			// if the application is in the pattern, and this
-			// branch,
-			contains := matchedApps.Contains(appName)
-			if contains && appMatch {
-				unmatchedBranches.Remove(bName)
-				break
-			}
-			// if the application is in this branch, but not
-			// the pattern, check if any assigned units are in
-			// the pattern
-			if contains && !appMatch {
-				for _, u := range units {
-					if matchedForBranches.Contains(u) {
-						unmatchedBranches.Remove(bName)
-						break
-					}
-				}
-			}
-		}
-	}
-	for _, deleteBranch := range unmatchedBranches.Values() {
-		delete(ctxBranches, deleteBranch)
-	}
-	return ctxBranches
-}
-
-// newToolsVersionAvailable will return a string representing a tools
-// version only if the latest check is newer than current tools.
-func (c *Client) modelStatus() (params.ModelStatusInfo, error) {
-	var info params.ModelStatusInfo
-
-	m, err := c.api.stateAccessor.Model()
-	if err != nil {
-		return info, errors.Annotate(err, "cannot get model")
-	}
-	info.Name = m.Name()
-	info.Type = string(m.Type())
-	info.CloudTag = names.NewCloudTag(m.CloudName()).String()
-	info.CloudRegion = m.CloudRegion()
-
-	cfg, err := m.Config()
-	if err != nil {
-		return params.ModelStatusInfo{}, errors.Annotate(err, "cannot obtain current model config")
-	}
-
-	latestVersion := m.LatestToolsVersion()
-	current, ok := cfg.AgentVersion()
-	if ok {
-		info.Version = current.String()
-		if current.Compare(latestVersion) < 0 {
-			info.AvailableVersion = latestVersion.String()
-		}
-	}
-
-	aStatus, err := m.Status()
-	if err != nil {
-		return params.ModelStatusInfo{}, errors.Annotate(err, "cannot obtain model status info")
-	}
-
-	info.ModelStatus = params.DetailedStatus{
-		Status: aStatus.Status.String(),
-		Info:   aStatus.Message,
-		Since:  aStatus.Since,
-		Data:   aStatus.Data,
-	}
-
-	return info, nil
 }
 
 type applicationStatusInfo struct {
 	// application: application name -> application
-	applications map[string]*state.Application
+	applications map[string]statusservice.Application
 
-	// units: application name -> units name -> units
-	units map[string]map[string]*state.Unit
+	// applicationCharmURL holds the charm URL for a given application
+	applicationCharmURL map[string]string
 
-	// allUnits: unit name -> unit
-	allUnits map[string]*state.Unit
+	// endpointBindings: application name -> endpoint -> space
+	endpointBindings map[string]map[string]network.SpaceName
 
-	// latestcharm: charm URL -> charm
-	latestCharms map[charm.URL]*state.Charm
-
-	// endpointpointBindings: application name -> endpoint -> space
-	endpointBindings map[string]map[string]string
+	// latestCharms: charm locator (without revision) -> charm locator
+	latestCharms map[applicationcharm.CharmLocator]applicationcharm.CharmLocator
 
 	// lxdProfiles: lxd profile name -> lxd profile
 	lxdProfiles map[string]*charm.LXDProfile
 }
 
+type relationStatus struct {
+	ID        int
+	Key       corerelation.Key
+	Endpoints []relation.Endpoint
+	Status    status.StatusInfo
+}
+
+// Endpoint retrieves the relation endpoint associated with the specified application name from the relation status.
+// Returns an error if the endpoint is not found.
+func (s relationStatus) Endpoint(applicationName string) (relation.Endpoint, error) {
+	for _, ep := range s.Endpoints {
+		if ep.ApplicationName == applicationName {
+			return ep, nil
+		}
+	}
+	return relation.Endpoint{}, internalerrors.Errorf("endpoint for application %q: %w", applicationName, errors.NotFound)
+}
+
+// RelatedEndpoints returns the endpoints in the relation status that are related
+// to the specified application.
+// It filters endpoints based on the counterpart role of the specified
+// application's endpoint role.
+//
+// We can have several relations by endpoint, either as providers or as
+// requirers for different use case. An obvious one is a provider endpoint for
+// a database. We can have several services using this database through this
+// endpoint. Requirer endpoint with several provider are less obvious, but not
+// prevented.
+//
+// Returns an error if the specified application's endpoint is not found or no related endpoints exist.
+func (s relationStatus) RelatedEndpoints(applicationName string) ([]relation.Endpoint, error) {
+	local, err := s.Endpoint(applicationName)
+	if err != nil {
+		return nil, err
+	}
+	role := relation.CounterpartRole(local.Role)
+	var eps []relation.Endpoint
+	for _, ep := range s.Endpoints {
+		if ep.Role == role {
+			eps = append(eps, ep)
+		}
+	}
+	if eps == nil {
+		return nil, internalerrors.Errorf("fetching endpoints of %q related to application %q: %w", s,
+			applicationName, errors.NotFound)
+	}
+	return eps, nil
+}
+
+// MachineJobFetcherFunc is a function that fetches jobs for a given machine.
+type MachineJobFetcherFunc func(context.Context, coremachine.Name) []model.MachineJob
+
 type statusContext struct {
+	applicationService        ApplicationService
+	crossModelRelationService CrossModelRelationService
+	machineService            MachineService
+	statusService             StatusService
+
+	machineJobFetcher MachineJobFetcherFunc
+
 	providerType string
-	model        *state.Model
-	status       *state.ModelStatus
-	presence     common.ModelPresenceContext
+	model        model.ModelInfo
 
 	// machines: top-level machine id -> list of machines nested in
 	// this machine.
-	machines map[string][]*state.Machine
+	machines map[coremachine.Name][]statusservice.Machine
 	// allMachines: machine id -> machine
 	// The machine in this map is the same machine in the machines map.
-	allMachines    map[string]*state.Machine
-	allInstances   *state.ModelInstanceData
-	allConstraints *state.ModelConstraints
-
-	// controllerNodes: node id -> controller node
-	controllerNodes map[string]state.ControllerNode
+	allMachines map[coremachine.Name]statusservice.Machine
 
 	// ipAddresses: machine id -> list of ip.addresses
-	ipAddresses map[string][]*state.Address
-
-	// spaces: machine id -> deviceName -> list of spaceNames
-	spaces map[string]map[string]set.Strings
+	ipAddresses map[coremachine.Name][]domainnetwork.NetAddr
 
 	// linkLayerDevices: machine id -> list of linkLayerDevices
-	linkLayerDevices map[string][]*state.LinkLayerDevice
+	linkLayerDevices map[coremachine.Name][]domainnetwork.NetInterface
 
-	// remote applications: application name -> application
-	consumerRemoteApplications map[string]*state.RemoteApplication
-
-	// opened ports by machine.
-	openPortRangesByMachine map[string]state.MachinePortRanges
+	// allOpenPortRanges: all open port ranges in the model, grouped by unit name.
+	allOpenPortRanges port.UnitGroupedPortRanges
 
 	// offers: offer name -> offer
 	offers map[string]offerStatus
 
-	// controller current timestamp
-	controllerTimestamp *time.Time
+	// remoteAppOfferers: remote application name -> remote application offerer
+	remoteAppOfferers map[string]statusservice.RemoteApplicationOfferer
 
 	allAppsUnitsCharmBindings applicationStatusInfo
-	relations                 map[string][]*state.Relation
-	relationsById             map[int]*state.Relation
+	units                     map[coreunit.Name]statusservice.Unit
+	relations                 map[string][]relationStatus
+	relationsByID             map[int]relationStatus
 	leaders                   map[string]string
-	branches                  map[string]*state.Generation
+	podsInfo                  map[coreunit.Name]application.K8sPodInfo
 
 	// Information about all spaces.
 	spaceInfos network.SpaceInfos
-
-	primaryHAMachine *names.MachineTag
-
-	// Optional storage info.
-	storageInstances []state.StorageInstance
-	volumes          []state.Volume
-	filesystems      []state.Filesystem
 }
 
 // fetchMachines returns a map from top level machine id to machines, where machines[0] is the host
 // machine and machines[1..n] are any containers (including nested ones).
 //
 // If machineIds is non-nil, only machines whose IDs are in the set are returned.
-func (context *statusContext) fetchMachines(st Backend) error {
-	if context.model.Type() == state.ModelTypeCAAS {
+func (c *statusContext) fetchMachines(ctx context.Context) error {
+	if c.model.Type == model.CAAS {
 		return nil
 	}
-	context.machines = make(map[string][]*state.Machine)
-	context.allMachines = make(map[string]*state.Machine)
 
-	machines, err := st.AllMachines()
+	c.machines = make(map[coremachine.Name][]statusservice.Machine)
+	c.allMachines = make(map[coremachine.Name]statusservice.Machine)
+
+	machines, err := c.statusService.GetMachineFullStatuses(ctx)
 	if err != nil {
 		return err
 	}
-	// AllMachines gives us machines sorted by id.
-	for _, m := range machines {
-		context.allMachines[m.Id()] = m
-		_, ok := m.ParentId()
+
+	nameOrder := make([]coremachine.Name, 0, len(machines))
+	for name := range machines {
+		nameOrder = append(nameOrder, name)
+	}
+	sort.Slice(nameOrder, func(i, j int) bool {
+		// Sort by machine name, so that the host machines are first.
+		return nameOrder[i].String() < nameOrder[j].String()
+	})
+
+	for _, machineName := range nameOrder {
+		m, ok := machines[machineName]
 		if !ok {
+			// Something went terribly wrong, we should always have a machine
+			// for each name in the map.
+			continue
+		}
+
+		c.allMachines[machineName] = m
+
+		if !machineName.IsContainer() {
 			// Only top level host machines go directly into the machine map.
-			context.machines[m.Id()] = []*state.Machine{m}
+			c.machines[machineName] = []statusservice.Machine{m}
 		} else {
-			topParentId := container.TopParentId(m.Id())
-			machines := context.machines[topParentId]
-			context.machines[topParentId] = append(machines, m)
+			parentID := machineName.Parent()
+			machines := c.machines[parentID]
+			c.machines[parentID] = append(machines, m)
 		}
-	}
-
-	context.allInstances, err = context.model.AllInstanceData()
-	if err != nil {
-		return err
-	}
-	context.allConstraints, err = context.model.AllConstraints()
-	if err != nil {
-		return err
 	}
 
 	return nil
 }
 
-func (context *statusContext) fetchOpenPortRangesForAllMachines(st Backend) error {
-	if context.model.Type() == state.ModelTypeCAAS {
-		return nil
-	}
-
-	context.openPortRangesByMachine = make(map[string]state.MachinePortRanges)
-	allMachPortRanges, err := context.model.OpenedPortRangesForAllMachines()
-	if err != nil {
-		return err
-	}
-	for _, machPortRanges := range allMachPortRanges {
-		context.openPortRangesByMachine[machPortRanges.MachineID()] = machPortRanges
-	}
-	return nil
+func (c *statusContext) fetchAllOpenPortRanges(ctx context.Context, portService PortService) error {
+	var err error
+	c.allOpenPortRanges, err = portService.GetAllOpenedPorts(ctx)
+	return err
 }
 
-// fetchControllerNodes returns a map from node id to controller node.
-func fetchControllerNodes(st Backend) (map[string]state.ControllerNode, error) {
-	v := make(map[string]state.ControllerNode)
-	nodes, err := st.ControllerNodes()
+func fetchNetworkInterfaces(
+	ctx context.Context,
+	networkService NetworkService,
+) (
+	map[coremachine.Name][]domainnetwork.NetAddr,
+	map[coremachine.Name][]domainnetwork.NetInterface,
+	error,
+) {
+	devices, err := networkService.GetAllDevicesByMachineNames(ctx)
 	if err != nil {
-		return nil, err
-	}
-	for _, n := range nodes {
-		v[n.Id()] = n
-	}
-	return v, nil
-}
-
-// fetchNetworkInterfaces returns maps from machine id to ip.addresses, machine
-// id to a map of interface names from space names, and machine id to
-// linklayerdevices.
-//
-// All are required to determine a machine's network interfaces configuration,
-// so we want all or none.
-func fetchNetworkInterfaces(st Backend, subnetInfos network.SubnetInfos, spaceInfos network.SpaceInfos) (map[string][]*state.Address,
-	map[string]map[string]set.Strings, map[string][]*state.LinkLayerDevice, error) {
-	ipAddresses := make(map[string][]*state.Address)
-	spacesPerMachine := make(map[string]map[string]set.Strings)
-	subnetsByCIDR := make(map[string]network.SubnetInfo)
-	for _, subnet := range subnetInfos {
-		subnetsByCIDR[subnet.CIDR] = subnet
+		return nil, nil, internalerrors.Errorf("fetching devices: %w", err)
 	}
 
-	// For every machine, track what devices have addresses so we can filter linklayerdevices later
-	devicesWithAddresses := make(map[string]set.Strings)
-	ipAddrs, err := st.AllIPAddresses()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	for _, ipAddr := range ipAddrs {
-		if ipAddr.LoopbackConfigMethod() {
-			continue
-		}
-		machineID := ipAddr.MachineID()
-		ipAddresses[machineID] = append(ipAddresses[machineID], ipAddr)
-		if subnet, ok := subnetsByCIDR[ipAddr.SubnetCIDR()]; ok {
-			spaceName := network.AlphaSpaceName
-			spaceInfo := spaceInfos.GetByID(subnet.SpaceID)
-			if spaceInfo != nil {
-				spaceName = string(spaceInfo.Name)
-			}
-			if spaceName != "" {
-				devices, ok := spacesPerMachine[machineID]
-				if !ok {
-					devices = make(map[string]set.Strings)
-					spacesPerMachine[machineID] = devices
+	// Remove loopback addresses
+	devices = transform.Map(devices,
+		func(k coremachine.Name, v []domainnetwork.NetInterface) (coremachine.Name, []domainnetwork.NetInterface) {
+			var filtered []domainnetwork.NetInterface
+			for _, dev := range v {
+				var nonLoopBack []domainnetwork.NetAddr
+				for _, addr := range dev.Addrs {
+					if addr.ConfigType == network.ConfigLoopback {
+						continue
+					}
+					nonLoopBack = append(nonLoopBack, addr)
 				}
-				deviceName := ipAddr.DeviceName()
-				spacesSet, ok := devices[deviceName]
-				if !ok {
-					spacesSet = make(set.Strings)
-					devices[deviceName] = spacesSet
+				if len(nonLoopBack) > 0 {
+					dev.Addrs = nonLoopBack
+					filtered = append(filtered, dev)
 				}
-				spacesSet.Add(spaceName)
 			}
-		}
-		deviceSet, ok := devicesWithAddresses[machineID]
-		if ok {
-			deviceSet.Add(ipAddr.DeviceName())
-		} else {
-			devicesWithAddresses[machineID] = set.NewStrings(ipAddr.DeviceName())
-		}
-	}
+			return k, filtered
+		},
+	)
 
-	linkLayerDevices := make(map[string][]*state.LinkLayerDevice)
-	llDevs, err := st.AllLinkLayerDevices()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	for _, llDev := range llDevs {
-		if llDev.IsLoopbackDevice() {
-			continue
+	ipAddresses := transform.Map(devices, func(k coremachine.Name,
+		v []domainnetwork.NetInterface) (coremachine.Name, []domainnetwork.NetAddr) {
+		var allAddresses []domainnetwork.NetAddr
+		for _, dev := range v {
+			allAddresses = append(allAddresses, dev.Addrs...)
 		}
-		machineID := llDev.MachineID()
-		machineDevs, ok := devicesWithAddresses[machineID]
-		if !ok {
-			// This machine ID doesn't seem to have any devices with IP Addresses
-			continue
-		}
-		if !machineDevs.Contains(llDev.Name()) {
-			// this device did not have any IP Addresses
-			continue
-		}
-		// This device had an IP Address, so include it in the list of devices for this machine
-		linkLayerDevices[machineID] = append(linkLayerDevices[machineID], llDev)
-	}
+		return k, allAddresses
+	})
 
-	return ipAddresses, spacesPerMachine, linkLayerDevices, nil
+	return ipAddresses, devices, nil
 }
 
 // fetchAllApplicationsAndUnits returns a map from application name to application,
 // a map from application name to unit name to unit, and a map from base charm URL to latest URL.
-func fetchAllApplicationsAndUnits(st Backend, model *state.Model, spaceInfos network.SpaceInfos) (applicationStatusInfo,
-	error) {
-	appMap := make(map[string]*state.Application)
-	unitMap := make(map[string]map[string]*state.Unit)
-	latestCharms := make(map[charm.URL]*state.Charm)
-	applications, err := st.AllApplications()
-	if err != nil {
-		return applicationStatusInfo{}, err
-	}
-	units, err := model.AllUnits()
-	if err != nil {
-		return applicationStatusInfo{}, err
-	}
-	allUnitsByApp := make(map[string]map[string]*state.Unit)
-	allUnits := make(map[string]*state.Unit)
-	for _, unit := range units {
-		appName := unit.ApplicationName()
+func fetchAllApplicationsAndUnits(
+	ctx context.Context, statusService StatusService, applicationService ApplicationService,
+) (applicationStatusInfo, map[coreunit.Name]statusservice.Unit, error) {
+	var (
+		apps         = make(map[string]statusservice.Application)
+		units        = make(map[coreunit.Name]statusservice.Unit)
+		appCharmURL  = make(map[string]string)
+		latestCharms = make(map[applicationcharm.CharmLocator]applicationcharm.CharmLocator)
+	)
 
-		if inner, found := allUnitsByApp[appName]; found {
-			inner[unit.Name()] = unit
-		} else {
-			allUnitsByApp[appName] = map[string]*state.Unit{
-				unit.Name(): unit,
+	applications, err := statusService.GetApplicationAndUnitStatuses(ctx)
+	if err != nil {
+		return applicationStatusInfo{}, nil, err
+	}
+
+	allBindingsByApp, err := applicationService.GetAllEndpointBindings(ctx)
+	if err != nil {
+		return applicationStatusInfo{}, nil, err
+	}
+
+	// If the only binding is the default, and it's set to the
+	// default space, no need to print.
+	for app, bindings := range allBindingsByApp {
+		if len(bindings) == 1 {
+			if v, ok := bindings[""]; ok && v == network.AlphaSpaceName {
+				delete(allBindingsByApp, app)
 			}
 		}
-
-		allUnits[unit.Name()] = unit
-	}
-
-	endpointBindings, err := model.AllEndpointBindings()
-	if err != nil {
-		return applicationStatusInfo{}, err
-	}
-	allBindingsByApp := make(map[string]map[string]string)
-	for app, bindings := range endpointBindings {
-		// If the only binding is the default, and it's set to the
-		// default space, no need to print.
-		bindingMap, err := bindings.MapWithSpaceNames(spaceInfos)
-		if err != nil {
-			return applicationStatusInfo{}, err
-		}
-		if len(bindingMap) == 1 {
-			if v, ok := bindingMap[""]; ok && v == network.AlphaSpaceName {
-				continue
-			}
-		}
-		allBindingsByApp[app] = bindingMap
 	}
 
 	lxdProfiles := make(map[string]*charm.LXDProfile)
-	for _, app := range applications {
-		appMap[app.Name()] = app
-		appUnits := allUnitsByApp[app.Name()]
-		cURL, _ := app.CharmURL()
-		charmURL, err := charm.ParseURL(*cURL)
-		if err != nil {
-			continue
-		}
-		if len(appUnits) > 0 {
-			unitMap[app.Name()] = appUnits
-			// Record the base URL for the application's charm so that
-			// the latest store revision can be looked up.
-			switch {
-			case charm.CharmHub.Matches(charmURL.Schema):
-				latestCharms[*charmURL.WithRevision(-1)] = nil
-			default:
-				// Don't look up revision for local charms
-			}
-		}
+	for name, app := range applications {
+		apps[name] = app
 
-		ch, _, err := app.Charm()
+		charmURL, err := charms.CharmURLFromLocator(app.CharmLocator.Name, app.CharmLocator)
 		if err != nil {
+			logger.Warningf(ctx, "failed to get charm URL for %q: %v", app.CharmLocator.Name, err)
 			continue
 		}
-		chName := lxdprofile.Name(model.Name(), app.Name(), ch.Revision())
-		if profile := ch.LXDProfile(); profile != nil {
-			lxdProfiles[chName] = &charm.LXDProfile{
-				Description: profile.Description,
-				Config:      profile.Config,
-				Devices:     profile.Devices,
-			}
+		appCharmURL[name] = charmURL
+
+		if len(app.Units) == 0 {
+			continue
+		}
+		maps.Copy(units, app.Units)
+
+		// De-duplicate charms with the same name and architecture.
+		// Don't look up revision for local charms
+		if applicationcharm.CharmHubSource == app.CharmLocator.Source {
+			latestCharms[app.CharmLocator.WithoutRevision()] = applicationcharm.CharmLocator{}
 		}
 	}
 
+	// Latest charm lookup for all base URLs.
 	for baseURL := range latestCharms {
-		ch, err := st.LatestPlaceholderCharm(&baseURL)
-		if errors.Is(err, errors.NotFound) {
+		locator, err := applicationService.GetLatestPendingCharmhubCharm(ctx, baseURL.Name, baseURL.Architecture)
+		if internalerrors.Is(err, applicationerrors.CharmNotFound) {
 			continue
+		} else if err != nil {
+			return applicationStatusInfo{}, nil, err
 		}
-		if err != nil {
-			return applicationStatusInfo{}, err
-		}
-		latestCharms[baseURL] = ch
+
+		latestCharms[baseURL] = locator
 	}
 
 	return applicationStatusInfo{
-		applications:     appMap,
-		units:            unitMap,
-		allUnits:         allUnits,
-		latestCharms:     latestCharms,
-		endpointBindings: allBindingsByApp,
-		lxdProfiles:      lxdProfiles,
-	}, nil
-}
-
-// fetchConsumerRemoteApplications returns a map from application name to remote application.
-func fetchConsumerRemoteApplications(st Backend) (map[string]*state.RemoteApplication, error) {
-	appMap := make(map[string]*state.RemoteApplication)
-	applications, err := st.AllRemoteApplications()
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range applications {
-		if _, ok := a.URL(); !ok {
-			continue
-		}
-		appMap[a.Name()] = a
-	}
-	return appMap, nil
-}
-
-// fetchOfferConnections returns a map from relation id to offer connection.
-func fetchOffers(st Backend, applications map[string]*state.Application) (map[string]offerStatus, error) {
-	offersMap := make(map[string]offerStatus)
-	offers, err := st.AllApplicationOffers()
-	if err != nil {
-		return nil, err
-	}
-	for _, offer := range offers {
-		offerInfo := offerStatus{
-			ApplicationOffer: crossmodel.ApplicationOffer{
-				OfferName:       offer.OfferName,
-				OfferUUID:       offer.OfferUUID,
-				ApplicationName: offer.ApplicationName,
-				Endpoints:       offer.Endpoints,
-			},
-		}
-		app, ok := applications[offer.ApplicationName]
-		if !ok {
-			continue
-		}
-		curl, _ := app.CharmURL()
-		if curl == nil {
-			offerInfo.err = errors.NotValidf("application charm url nil")
-			continue
-		}
-		offerInfo.charmURL = *curl
-		rc, err := st.RemoteConnectionStatus(offer.OfferUUID)
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			offerInfo.err = err
-			continue
-		} else if err == nil {
-			offerInfo.totalConnectedCount = rc.TotalConnectionCount()
-			offerInfo.activeConnectedCount = rc.ActiveConnectionCount()
-		}
-		offersMap[offer.OfferName] = offerInfo
-	}
-	return offersMap, nil
+		applications:        apps,
+		applicationCharmURL: appCharmURL,
+		endpointBindings:    allBindingsByApp,
+		latestCharms:        latestCharms,
+		lxdProfiles:         lxdProfiles,
+	}, units, nil
 }
 
 // fetchRelations returns a map of all relations keyed by application name,
-// and another map keyed by id..
+// and another map keyed by id.
 //
 // This structure is useful for processApplicationRelations() which needs
 // to have the relations for each application. Reading them once here
 // avoids the repeated DB hits to retrieve the relations for each
 // application that used to happen in processApplicationRelations().
-func fetchRelations(st Backend) (map[string][]*state.Relation, map[int]*state.Relation, error) {
-	relations, err := st.AllRelations()
+func fetchRelations(ctx context.Context, relationService RelationService,
+	statusService StatusService) (map[string][]relationStatus,
+	map[int]relationStatus, error) {
+	details, err := relationService.GetAllRelationDetails(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, internalerrors.Errorf("fetching relations: %w", err)
 	}
-	out := make(map[string][]*state.Relation)
-	outById := make(map[int]*state.Relation)
-	for _, relation := range relations {
-		outById[relation.Id()] = relation
-		// If either end of the relation is a remote application
-		// on the offering side, exclude it here.
-		isRemote := false
-		for _, ep := range relation.Endpoints() {
-			if app, err := st.RemoteApplication(ep.ApplicationName); err == nil {
-				if app.IsConsumerProxy() {
-					isRemote = true
-					break
-				}
-			} else if !errors.Is(err, errors.NotFound) {
-				return nil, nil, err
-			}
+	out := make(map[string][]relationStatus)
+	outById := make(map[int]relationStatus)
+
+	// If there are no details, just return empty maps without error to avoid an
+	// useless call to the status service.
+	if len(details) == 0 {
+		return out, outById, nil
+	}
+
+	statuses, err := statusService.GetAllRelationStatuses(ctx)
+	if err != nil {
+		return nil, nil, internalerrors.Errorf("fetching relation statuses: %w", err)
+	}
+	// Protective code against nil map.
+	if statuses == nil {
+		statuses = make(map[corerelation.UUID]status.StatusInfo)
+	}
+	for _, detail := range details {
+		var identifiers []corerelation.EndpointIdentifier
+		for _, ep := range detail.Endpoints {
+			identifiers = append(identifiers, ep.EndpointIdentifier())
 		}
-		if isRemote {
+		key, err := corerelation.NewKey(identifiers)
+		if err != nil {
+			logger.Warningf(ctx, "failed to generate relation key for %q: %v", detail.UUID, err)
 			continue
 		}
-		for _, ep := range relation.Endpoints() {
-			out[ep.ApplicationName] = append(out[ep.ApplicationName], relation)
+
+		relStatus, ok := statuses[detail.UUID]
+		if !ok {
+			// This shouldn't happen, since a relation and its status are
+			// supposed to be added in the same transaction.
+			// However, if status command is run while removing a transaction, it
+			// may happen.
+			// It should be rare, and if it happens without above special
+			// circumstance it could be due to a design decision, db slowness
+			// or corrupted data, which would requires special attention.
+			logger.Warningf(ctx, "no status for relation %d %q", detail.ID,
+				key.String())
+		}
+		r := relationStatus{
+			ID:        detail.ID,
+			Endpoints: detail.Endpoints,
+			Key:       key,
+			Status:    relStatus,
+		}
+		outById[r.ID] = r
+		for _, ep := range r.Endpoints {
+			out[ep.ApplicationName] = append(out[ep.ApplicationName], r)
 		}
 	}
 	return out, outById, nil
 }
 
-func fetchBranches(m *state.Model) (map[string]*state.Generation, error) {
-	// m.Branches() returns only active branches.
-	b, err := m.Branches()
+func fetchOffers(ctx context.Context, service CrossModelRelationService) (map[string]offerStatus, error) {
+	modelOffers, err := service.GetOffers(ctx, []crossmodelrelationservice.OfferFilter{{}})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
-	branches := make(map[string]*state.Generation, len(b))
-	for _, branch := range b {
-		branches[branch.BranchName()] = branch
+
+	return transform.SliceToMap(modelOffers, func(in *crossmodelrelation.OfferDetail) (string, offerStatus) {
+		charmURL, err := charms.CharmURLFromLocator(in.CharmLocator.Name, in.CharmLocator)
+
+		endpoints := transform.SliceToMap(in.Endpoints, func(in crossmodelrelation.OfferEndpoint) (string, charm.Relation) {
+			return in.Name, charm.Relation{
+				Name:      in.Name,
+				Role:      charm.RelationRole(in.Role),
+				Interface: in.Interface,
+				Limit:     in.Limit,
+			}
+		})
+		out := offerStatus{
+			ApplicationOffer: crossmodel.ApplicationOffer{
+				OfferUUID:              in.OfferUUID,
+				OfferName:              in.OfferName,
+				ApplicationName:        in.ApplicationName,
+				ApplicationDescription: in.ApplicationDescription,
+				Endpoints:              endpoints,
+			},
+			err:                  err,
+			charmURL:             charmURL,
+			activeConnectedCount: in.TotalActiveConnections,
+			totalConnectedCount:  in.TotalConnections,
+		}
+		return in.OfferName, out
+	}), nil
+}
+
+func (s *statusContext) processModel(ctx context.Context) (params.ModelStatusInfo, error) {
+	var info params.ModelStatusInfo
+
+	info.Name = s.model.Name
+	info.Type = s.model.Type.String()
+	info.CloudTag = names.NewCloudTag(s.model.Cloud).String()
+	info.CloudRegion = s.model.CloudRegion
+
+	currentVersion := s.model.AgentVersion
+	info.Version = currentVersion.String()
+
+	// TODO: AvailableVersion being an empty string controls if the juju client
+	// tells the user that there is an upgrade available. How this should work
+	// is the controller should just report the version back to the client of
+	// the facade. Let the client do the calculation and work out if some
+	// information should be displayed.
+	latestVersion := s.model.LatestAgentVersion
+	if currentVersion.Compare(latestVersion) < 0 {
+		info.AvailableVersion = latestVersion.String()
 	}
-	return branches, nil
+
+	aStatus, err := s.statusService.GetModelStatus(ctx)
+	if internalerrors.Is(err, domainmodelerrors.NotFound) {
+		// This should never happen but just in case.
+		return params.ModelStatusInfo{}, internalerrors.Errorf("model status for %q: %w", s.model.Name, errors.NotFound)
+	}
+	if err != nil {
+		return params.ModelStatusInfo{}, internalerrors.Errorf("cannot obtain model status info: %w", err)
+	}
+
+	info.ModelStatus = params.DetailedStatus{
+		Status: aStatus.Status.String(),
+		Info:   aStatus.Message,
+		Since:  aStatus.Since,
+	}
+
+	return info, nil
 }
 
 func (c *statusContext) processMachines(ctx context.Context) map[string]params.MachineStatus {
 	machinesMap := make(map[string]params.MachineStatus)
-	aCache := make(map[string]params.MachineStatus)
-	for id, machines := range c.machines {
 
-		if len(machines) <= 0 {
+	for hostMachineName, machines := range c.machines {
+		if len(machines) == 0 {
 			continue
 		}
 
-		// Element 0 is assumed to be the top-level machine.
-		tlMachine := machines[0]
-		hostStatus := c.makeMachineStatus(ctx, tlMachine, c.allAppsUnitsCharmBindings)
-		machinesMap[id] = hostStatus
-		aCache[id] = hostStatus
+		// Element 0 is assumed to be the top-level (host) machine.
+		hostMachine := machines[0]
+		hostStatus := c.makeMachineStatus(ctx, hostMachine, c.allAppsUnitsCharmBindings)
 
 		for _, machine := range machines[1:] {
-			parent, ok := aCache[container.ParentId(machine.Id())]
-			if !ok {
-				logger.Errorf("programmer error, please file a bug, reference this whole log line: %q, %q", id,
-					machine.Id())
+			// It assumed that the first element of the slice is the top-level
+			// machine, and the rest are containers.
+			if !machine.Name.IsContainer() {
+				logger.Warningf(ctx, "expected machine %q to be a container, but it is not", machine.Name)
 				continue
 			}
 
 			aStatus := c.makeMachineStatus(ctx, machine, c.allAppsUnitsCharmBindings)
-			parent.Containers[machine.Id()] = aStatus
-			aCache[machine.Id()] = aStatus
+			hostStatus.Containers[machine.Name.String()] = aStatus
 		}
+
+		machinesMap[hostMachineName.String()] = hostStatus
 	}
 	return machinesMap
 }
 
 func (c *statusContext) makeMachineStatus(
 	ctx context.Context,
-	machine *state.Machine,
+	machine statusservice.Machine,
 	appStatusInfo applicationStatusInfo,
 ) (status params.MachineStatus) {
-	machineID := machine.Id()
-	ipAddresses := c.ipAddresses[machineID]
-	spaces := c.spaces[machineID]
-	linkLayerDevices := c.linkLayerDevices[machineID]
+	machineName := machine.Name
 
-	var err error
-	status.Id = machineID
-	agentStatus := c.processMachine(ctx, machine)
+	status.Id = machineName.String()
+	agentStatus, instanceStatus := c.processMachine(ctx, machine)
 	status.AgentStatus = agentStatus
+	status.InstanceStatus = instanceStatus
+	status.Hostname = machine.Hostname
+	status.DisplayName = machine.DisplayName
 
-	mBase := machine.Base()
-	status.Base = params.Base{Name: mBase.OS, Channel: mBase.Channel}
-	status.Jobs = paramsJobsFromJobs(machine.Jobs())
-	node, wantsVote := c.controllerNodes[machineID]
-	status.WantsVote = wantsVote
-	if wantsVote {
-		status.HasVote = node.HasVote()
-	}
-	if c.primaryHAMachine != nil {
-		if isPrimary := c.primaryHAMachine.Id() == machineID; isPrimary {
-			status.PrimaryControllerMachine = &isPrimary
-		}
-	}
+	status.DNSName = machine.DNSName
+	status.IPAddresses = machine.IPAddresses
 
-	// Fetch the machine instance status information
-	sInstInfo, err := c.status.MachineInstance(machineID)
-	populateStatusFromStatusInfoAndErr(&status.InstanceStatus, sInstInfo, err)
+	platform := machine.Platform
+	status.Base = params.Base{Name: platform.OSType.String(), Channel: platform.Channel}
+	status.Hardware = machine.HardwareCharacteristics.String()
+	status.Constraints = machine.Constraints.String()
+	status.Containers = make(map[string]params.MachineStatus)
 
-	// Fetch the machine modification status information
-	sModInfo, err := c.status.MachineModification(machineID)
-	populateStatusFromStatusInfoAndErr(&status.ModificationStatus, sModInfo, err)
+	status.Jobs = c.machineJobFetcher(ctx, machineName)
 
-	instid, displayName := c.allInstances.InstanceNames(machineID)
-	if instid != "" {
-		status.InstanceId = instid
-		status.DisplayName = displayName
-		addr, err := machine.PublicAddress()
-		if err != nil {
-			// Usually this indicates that no addresses have been set on the
-			// machine yet.
-			addr = network.SpaceAddress{}
-			logger.Debugf("error fetching public address: %q", err)
-		}
-		status.DNSName = addr.Value
-		status.Hostname = machine.Hostname()
-		mAddrs := machine.Addresses()
-		if len(mAddrs) == 0 {
-			logger.Debugf("no IP addresses fetched for machine %q", instid)
-			// At least give it the newly created DNSName address, if it exists.
-			if addr.Value != "" {
-				mAddrs = append(mAddrs, addr)
-			}
-		}
-		for _, mAddr := range mAddrs {
-			switch mAddr.Scope {
-			case network.ScopeMachineLocal, network.ScopeLinkLocal:
-				continue
-			}
-			status.IPAddresses = append(status.IPAddresses, mAddr.Value)
-		}
-		status.NetworkInterfaces = make(map[string]params.NetworkInterface, len(linkLayerDevices))
-		for _, llDev := range linkLayerDevices {
-			device := llDev.Name()
-			ips := []string{}
-			gw := []string{}
-			ns := []string{}
-			sp := make(set.Strings)
-			for _, ipAddress := range ipAddresses {
-				if ipAddress.DeviceName() != device {
-					continue
+	if instanceID := machine.InstanceID; instanceID != instance.UnknownId {
+		status.InstanceId = instanceID
+
+		// TODO (stickupkid): Return the public address of the unit's machine.
+		// addr, err := machine.PublicAddress()
+		// if err != nil {
+		// 	// Usually this indicates that no addresses have been set on the
+		// 	// machine yet.
+		// 	addr = network.SpaceAddress{}
+		// 	logger.Debugf(ctx, "error fetching public address: %q", err)
+		// }
+		// status.DNSName = addr.Value
+
+		// if len(status.IPAddresses) == 0 {
+		// 	logger.Debugf(ctx, "no IP addresses fetched for machine %q", instanceID)
+		// 	// At least give it the newly created DNSName address, if it exists.
+		// 	if addr.Value != "" {
+		// 		status.IPAddresses = append(status.IPAddresses, addr.Value)
+		// 	}
+		// }
+
+		linkLayerDevices := c.linkLayerDevices[machineName]
+		status.NetworkInterfaces = transform.SliceToMap(linkLayerDevices, func(llDev domainnetwork.NetInterface) (string, params.NetworkInterface) {
+			spaces := set.NewStrings()
+			for _, addr := range llDev.Addrs {
+				if addr.Space != "" {
+					spaces.Add(addr.Space)
 				}
-				ips = append(ips, ipAddress.Value())
-				// We don't expect to find more than one
-				// ipAddress on a device with a list of
-				// nameservers, but append in any case.
-				if len(ipAddress.DNSServers()) > 0 {
-					ns = append(ns, ipAddress.DNSServers()...)
-				}
-				// There should only be one gateway per device
-				// (per machine, in fact, as we don't store
-				// metrics). If we find more than one we should
-				// show them all.
-				if ipAddress.GatewayAddress() != "" {
-					gw = append(gw, ipAddress.GatewayAddress())
-				}
-				// There should only be one space per address,
-				// but it's technically possible to have more
-				// than one address on an interface. If we find
-				// that happens, we need to show all spaces, to
-				// be safe.
-				sp = spaces[device]
 			}
-			status.NetworkInterfaces[device] = params.NetworkInterface{
-				IPAddresses:    ips,
-				MACAddress:     llDev.MACAddress(),
-				Gateway:        strings.Join(gw, " "),
-				DNSNameservers: ns,
-				Space:          strings.Join(sp.Values(), " "),
-				IsUp:           llDev.IsUp(),
+			var mac, gw string
+			if llDev.MACAddress != nil {
+				mac = *llDev.MACAddress
 			}
-		}
-		logger.Tracef("NetworkInterfaces: %+v", status.NetworkInterfaces)
+			if llDev.GatewayAddress != nil {
+				gw = *llDev.GatewayAddress
+			}
+			return llDev.Name, params.NetworkInterface{
+				IPAddresses:    transform.Slice(llDev.Addrs, func(net domainnetwork.NetAddr) string { return net.AddressValue }),
+				MACAddress:     mac,
+				Gateway:        gw,
+				DNSNameservers: llDev.DNSAddresses,
+				Space:          strings.Join(spaces.Values(), " "),
+				IsUp:           llDev.IsEnabled}
+		})
+		logger.Tracef(ctx, "NetworkInterfaces: %+v", status.NetworkInterfaces)
 	} else {
 		status.InstanceId = "pending"
 	}
 
-	constraints := c.allConstraints.Machine(machineID)
-	status.Constraints = constraints.String()
-
-	hc := c.allInstances.HardwareCharacteristics(machineID)
-	if hc != nil {
-		status.Hardware = hc.String()
-	}
-	status.Containers = make(map[string]params.MachineStatus)
-
 	lxdProfiles := make(map[string]params.LXDProfile)
-	charmProfiles := c.allInstances.CharmProfiles(machineID)
-	if charmProfiles != nil {
-		for _, v := range charmProfiles {
-			if profile, ok := appStatusInfo.lxdProfiles[v]; ok {
-				lxdProfiles[v] = params.LXDProfile{
-					Config:      profile.Config,
-					Description: profile.Description,
-					Devices:     profile.Devices,
-				}
+	for _, v := range machine.LXDProfiles {
+		if profile, ok := appStatusInfo.lxdProfiles[v]; ok {
+			lxdProfiles[v] = params.LXDProfile{
+				Config:      profile.Config,
+				Description: profile.Description,
+				Devices:     profile.Devices,
 			}
 		}
 	}
@@ -1263,197 +806,169 @@ func (c *statusContext) makeMachineStatus(
 	return
 }
 
-func (context *statusContext) processRelations() []params.RelationStatus {
+func (c *statusContext) processRelations(ctx context.Context) []params.RelationStatus {
 	var out []params.RelationStatus
-	relations := context.getAllRelations()
-	for _, relation := range relations {
+	for _, current := range c.relationsByID {
 		var eps []params.EndpointStatus
 		var scope charm.RelationScope
 		var relationInterface string
-		for _, ep := range relation.Endpoints() {
+		for _, ep := range current.Endpoints {
 			eps = append(eps, params.EndpointStatus{
 				ApplicationName: ep.ApplicationName,
 				Name:            ep.Name,
 				Role:            string(ep.Role),
-				Subordinate:     context.isSubordinate(&ep),
+				Subordinate:     c.isSubordinate(&ep),
 			})
 			// these should match on both sides so use the last
 			relationInterface = ep.Interface
 			scope = ep.Scope
 		}
 		relStatus := params.RelationStatus{
-			Id:        relation.Id(),
-			Key:       relation.String(),
+			Id:        current.ID,
+			Key:       current.Key.String(),
 			Interface: relationInterface,
 			Scope:     string(scope),
 			Endpoints: eps,
+			Status: params.DetailedStatus{
+				Status: current.Status.Status.String(),
+				Info:   current.Status.Message,
+				Data:   filterStatusData(current.Status.Data),
+				Since:  current.Status.Since,
+			},
 		}
-		rStatus, err := relation.Status()
-		populateStatusFromStatusInfoAndErr(&relStatus.Status, rStatus, err)
 		out = append(out, relStatus)
 	}
 	return out
 }
 
-// This method exists only to dedup the loaded relations as they will
-// appear multiple times in context.relations.
-func (context *statusContext) getAllRelations() []*state.Relation {
-	var out []*state.Relation
-	seenRelations := make(map[int]bool)
-	for _, relations := range context.relations {
-		for _, relation := range relations {
-			if _, found := seenRelations[relation.Id()]; !found {
-				out = append(out, relation)
-				seenRelations[relation.Id()] = true
-			}
-		}
-	}
-	return out
-}
-
-func (context *statusContext) isSubordinate(ep *state.Endpoint) bool {
-	application := context.allAppsUnitsCharmBindings.applications[ep.ApplicationName]
-	if application == nil {
+func (c *statusContext) isSubordinate(ep *relation.Endpoint) bool {
+	application, ok := c.allAppsUnitsCharmBindings.applications[ep.ApplicationName]
+	if !ok {
 		return false
 	}
 	return isSubordinate(ep, application)
 }
 
-func isSubordinate(ep *state.Endpoint, application *state.Application) bool {
-	return ep.Scope == charm.ScopeContainer && !application.IsPrincipal()
+func isSubordinate(ep *relation.Endpoint, application statusservice.Application) bool {
+	return ep.Scope == charm.ScopeContainer && application.Subordinate
 }
 
-// paramsJobsFromJobs converts state jobs to params jobs.
-func paramsJobsFromJobs(jobs []state.MachineJob) []model.MachineJob {
-	paramsJobs := make([]model.MachineJob, len(jobs))
-	for i, machineJob := range jobs {
-		paramsJobs[i] = machineJob.ToParams()
-	}
-	return paramsJobs
-}
-
-func (context *statusContext) processApplications(ctx context.Context) map[string]params.ApplicationStatus {
+func (c *statusContext) processApplications(ctx context.Context) map[string]params.ApplicationStatus {
 	applicationsMap := make(map[string]params.ApplicationStatus)
-	for _, app := range context.allAppsUnitsCharmBindings.applications {
-		applicationsMap[app.Name()] = context.processApplication(ctx, app)
+	for name, app := range c.allAppsUnitsCharmBindings.applications {
+		applicationsMap[name] = c.processApplication(ctx, name, app)
 	}
 	return applicationsMap
 }
 
-func (context *statusContext) processApplication(ctx context.Context, application *state.Application) params.ApplicationStatus {
-	applicationCharm, _, err := application.Charm()
-	if err != nil {
-		return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
+func (c *statusContext) processApplicationExposedEndpoints(ctx context.Context, name string, application statusservice.Application) (map[string]params.ExposedEndpoint, error) {
+	// If the application is not exposed, then we don't need to try and get the
+	// exposed endpoints for the application. This reduces the number of default
+	// calls to the application service.
+	if !application.Exposed {
+		return nil, nil
 	}
 
-	var charmProfileName string
-	if lxdprofile.NotEmpty(lxdStateCharmProfiler{
-		Charm: applicationCharm,
-	}) {
-		charmProfileName = lxdprofile.Name(context.model.Name(), application.Name(), applicationCharm.Revision())
+	exposedEndpoints, err := c.applicationService.GetExposedEndpoints(ctx, name)
+	if err != nil {
+		return nil, err
 	}
+	return c.mapExposedEndpointsFromDomain(exposedEndpoints)
+}
 
-	mappedExposedEndpoints, err := context.mapExposedEndpointsFromState(application.ExposedEndpoints())
+func (c *statusContext) processApplication(ctx context.Context, name string, application statusservice.Application) params.ApplicationStatus {
+	exposedEndpoints, err := c.processApplicationExposedEndpoints(ctx, name, application)
 	if err != nil {
 		return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
+
 	}
 
 	var channel string
-	if origin := application.CharmOrigin(); origin != nil && origin.Channel != nil {
-		stChannel := origin.Channel
-		channel = (charm.Channel{
-			Track:  stChannel.Track,
-			Risk:   charm.Risk(stChannel.Risk),
-			Branch: stChannel.Branch,
-		}).Normalize().String()
+	if ch := application.Channel; ch != nil {
+		c := charm.Channel{
+			Track:  ch.Track,
+			Risk:   charm.Risk(ch.Risk),
+			Branch: ch.Branch,
+		}
+		channel = c.Normalize().String()
 	}
 
-	origin := application.CharmOrigin()
-	base, err := corebase.ParseBase(origin.Platform.OS, origin.Platform.Channel)
+	base, err := encodePlatform(application.Platform)
 	if err != nil {
 		return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
 	}
-	var processedStatus = params.ApplicationStatus{
-		Charm:        applicationCharm.URL(),
-		CharmVersion: applicationCharm.Version(),
-		CharmProfile: charmProfileName,
-		CharmChannel: channel,
-		Base: params.Base{
-			Name:    base.OS,
-			Channel: base.Channel.String(),
+
+	charmURL, err := charms.CharmURLFromLocator(application.CharmLocator.Name, application.CharmLocator)
+	if err != nil {
+		return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
+	}
+
+	appStatus := application.Status
+	processedStatus := params.ApplicationStatus{
+		Charm:            charmURL,
+		CharmVersion:     application.CharmVersion,
+		CharmRev:         application.CharmLocator.Revision,
+		CharmChannel:     channel,
+		Base:             base,
+		Exposed:          application.Exposed,
+		ExposedEndpoints: exposedEndpoints,
+		Life:             application.Life,
+		Status: params.DetailedStatus{
+			Status: appStatus.Status.String(),
+			Info:   appStatus.Message,
+			Data:   appStatus.Data,
+			Since:  appStatus.Since,
 		},
-		Exposed:          application.IsExposed(),
-		ExposedEndpoints: mappedExposedEndpoints,
-		Life:             processLife(application),
 	}
 
-	curl, err := charm.ParseURL(applicationCharm.URL())
-	if err != nil {
-		return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
-	}
-	if latestCharm, ok := context.allAppsUnitsCharmBindings.latestCharms[*curl.WithRevision(-1)]; ok && latestCharm != nil {
-		if latestCharm.Revision() > curl.Revision {
-			processedStatus.CanUpgradeTo = latestCharm.URL()
+	if latestCharm, ok := c.allAppsUnitsCharmBindings.latestCharms[application.CharmLocator.WithoutRevision()]; ok && !latestCharm.IsZero() {
+		processedStatus.CanUpgradeTo, err = charms.CharmURLFromLocator(latestCharm.Name, latestCharm)
+		if err != nil {
+			return params.ApplicationStatus{Err: apiservererrors.ServerError(err)}
 		}
 	}
 
-	processedStatus.Relations, processedStatus.SubordinateTo, err = context.processApplicationRelations(application)
+	processedStatus.Relations, processedStatus.SubordinateTo, err = c.processApplicationRelations(name, application)
 	if err != nil {
 		processedStatus.Err = apiservererrors.ServerError(err)
 		return processedStatus
 	}
-	units := context.allAppsUnitsCharmBindings.units[application.Name()]
-	if application.IsPrincipal() {
-		processedStatus.Units = context.processUnits(ctx, units, applicationCharm.URL())
+	units := application.Units
+	if !application.Subordinate {
+		processedStatus.Units = c.processUnits(ctx, units, charmURL)
 	}
 
-	applicationStatus := status.StatusInfo{Status: status.Unknown}
-	var appUnits []*state.Unit
-	for _, u := range units {
-		appUnits = append(appUnits, u)
-	}
-	displayStatus, err := common.ApplicationDisplayStatus(context.model, application, appUnits)
-	if err == nil {
-		applicationStatus = displayStatus
-	}
-	processedStatus.Status.Status = applicationStatus.Status.String()
-	processedStatus.Status.Info = applicationStatus.Message
-	processedStatus.Status.Data = applicationStatus.Data
-	processedStatus.Status.Since = applicationStatus.Since
-
-	versions := make([]status.StatusInfo, 0, len(units))
-	for _, unit := range units {
-		workloadVersion, err := context.status.FullUnitWorkloadVersion(unit.Name())
-		if err != nil {
-			processedStatus.Err = apiservererrors.ServerError(err)
-			return processedStatus
-		}
-		versions = append(versions, workloadVersion)
-	}
-	if len(versions) > 0 {
-		sort.Sort(bySinceDescending(versions))
-		processedStatus.WorkloadVersion = versions[0].Message
+	if application.WorkloadVersion != nil {
+		processedStatus.WorkloadVersion = *application.WorkloadVersion
 	}
 
-	modelType := context.model.Type()
-	if modelType == state.ModelTypeCAAS {
-		serviceInfo, err := application.ServiceInfo()
-		if err == nil {
-			processedStatus.ProviderId = serviceInfo.ProviderId()
-			if len(serviceInfo.Addresses()) > 0 {
-				processedStatus.PublicAddress = serviceInfo.Addresses()[0].Value
-			}
-		} else {
-			logger.Debugf("no service details for %v: %v", application.Name(), err)
-		}
-		processedStatus.Scale = application.GetScale()
+	processedStatus.EndpointBindings = transform.Map(
+		c.allAppsUnitsCharmBindings.endpointBindings[name],
+		func(k string, v network.SpaceName) (string, string) { return k, v.String() },
+	)
+
+	// IAAS applications have all the information they need in the application
+	// status. CAAS applications have some additional information.
+	if c.model.Type == model.IAAS {
+		return processedStatus
 	}
-	processedStatus.EndpointBindings = context.allAppsUnitsCharmBindings.endpointBindings[application.Name()]
+
+	// Handle CAAS applications fields independently of the IAAS ones.
+	if providerID := application.K8sProviderID; providerID != nil {
+		processedStatus.ProviderId = *providerID
+		// TODO (stickupkid): Add addresses to the status for k8s applications.
+	}
+
+	if scale := application.Scale; scale != nil {
+		processedStatus.Scale = *scale
+	}
+
 	return processedStatus
 }
 
-func (context *statusContext) mapExposedEndpointsFromState(exposedEndpoints map[string]state.ExposedEndpoint) (map[string]params.ExposedEndpoint,
-	error) {
+func (c *statusContext) mapExposedEndpointsFromDomain(
+	exposedEndpoints map[string]application.ExposedEndpoint,
+) (map[string]params.ExposedEndpoint, error) {
 	if len(exposedEndpoints) == 0 {
 		return nil, nil
 	}
@@ -1461,18 +976,18 @@ func (context *statusContext) mapExposedEndpointsFromState(exposedEndpoints map[
 	res := make(map[string]params.ExposedEndpoint, len(exposedEndpoints))
 	for endpointName, exposeDetails := range exposedEndpoints {
 		mappedParam := params.ExposedEndpoint{
-			ExposeToCIDRs: exposeDetails.ExposeToCIDRs,
+			ExposeToCIDRs: exposeDetails.ExposeToCIDRs.Values(),
 		}
 
 		if len(exposeDetails.ExposeToSpaceIDs) != 0 {
 			spaceNames := make([]string, len(exposeDetails.ExposeToSpaceIDs))
-			for i, spaceID := range exposeDetails.ExposeToSpaceIDs {
-				sp := context.spaceInfos.GetByID(spaceID)
+			for i, spaceID := range exposeDetails.ExposeToSpaceIDs.Values() {
+				sp := c.spaceInfos.GetByID(network.SpaceUUID(spaceID))
 				if sp == nil {
-					return nil, errors.NotFoundf("space with ID %q", spaceID)
+					return nil, internalerrors.Errorf("space with ID %q: %w", spaceID, errors.NotFound)
 				}
 
-				spaceNames[i] = string(sp.Name)
+				spaceNames[i] = sp.Name.String()
 			}
 			mappedParam.ExposeToSpaces = spaceNames
 		}
@@ -1483,42 +998,6 @@ func (context *statusContext) mapExposedEndpointsFromState(exposedEndpoints map[
 	return res, nil
 }
 
-func (context *statusContext) processRemoteApplications() map[string]params.RemoteApplicationStatus {
-	applicationsMap := make(map[string]params.RemoteApplicationStatus)
-	for _, app := range context.consumerRemoteApplications {
-		applicationsMap[app.Name()] = context.processRemoteApplication(app)
-	}
-	return applicationsMap
-}
-
-func (context *statusContext) processRemoteApplication(application *state.RemoteApplication) (status params.RemoteApplicationStatus) {
-	status.OfferURL, _ = application.URL()
-	status.OfferName = application.Name()
-	eps, err := application.Endpoints()
-	if err != nil {
-		status.Err = apiservererrors.ServerError(err)
-		return
-	}
-	status.Endpoints = make([]params.RemoteEndpoint, len(eps))
-	for i, ep := range eps {
-		status.Endpoints[i] = params.RemoteEndpoint{
-			Name:      ep.Name,
-			Interface: ep.Interface,
-			Role:      ep.Role,
-		}
-	}
-	status.Life = processLife(application)
-
-	status.Relations, err = context.processRemoteApplicationRelations(application)
-	if err != nil {
-		status.Err = apiservererrors.ServerError(err)
-		return
-	}
-	applicationStatus, err := application.Status()
-	populateStatusFromStatusInfoAndErr(&status.Status, applicationStatus, err)
-	return status
-}
-
 type offerStatus struct {
 	crossmodel.ApplicationOffer
 	err                  error
@@ -1527,9 +1006,9 @@ type offerStatus struct {
 	totalConnectedCount  int
 }
 
-func (context *statusContext) processOffers() map[string]params.ApplicationOfferStatus {
+func (c *statusContext) processOffers() map[string]params.ApplicationOfferStatus {
 	offers := make(map[string]params.ApplicationOfferStatus)
-	for name, offer := range context.offers {
+	for name, offer := range c.offers {
 		offerStatus := params.ApplicationOfferStatus{
 			Err:                  apiservererrors.ServerError(offer.err),
 			ApplicationName:      offer.ApplicationName,
@@ -1551,128 +1030,116 @@ func (context *statusContext) processOffers() map[string]params.ApplicationOffer
 	return offers
 }
 
-func (context *statusContext) processUnits(ctx context.Context, units map[string]*state.Unit, applicationCharm string) map[string]params.UnitStatus {
+func (c *statusContext) processUnits(ctx context.Context, units map[coreunit.Name]statusservice.Unit, applicationCharm string) map[string]params.UnitStatus {
 	unitsMap := make(map[string]params.UnitStatus)
-	for _, unit := range units {
-		unitsMap[unit.Name()] = context.processUnit(ctx, unit, applicationCharm)
+	for name, unit := range units {
+		unitsMap[name.String()] = c.processUnit(ctx, name, unit, applicationCharm)
 	}
 	return unitsMap
 }
 
-func (context *statusContext) unitMachineID(unit *state.Unit) string {
-	// This should never happen, but guarding against segfaults if for
-	// some reason the unit isn't in the context.
-	if unit == nil {
+func (c *statusContext) unitMachineID(unit statusservice.Unit) coremachine.Name {
+	if !unit.Subordinate {
+		// machineID will be empty if not currently assigned.
+		var machineName coremachine.Name
+		if unit.MachineName != nil {
+			machineName = *unit.MachineName
+		}
+		return machineName
+	}
+
+	// We're a subordinate, so we need to look at the principal unit. If it's
+	// not set, we can't do anything, so return early.
+	if unit.PrincipalName == nil {
 		return ""
 	}
-	principal, isSubordinate := unit.PrincipalName()
-	if isSubordinate {
-		return context.unitMachineID(context.unitByName(principal))
+
+	// Locate the principal unit.
+	if unit, ok := c.units[*unit.PrincipalName]; ok {
+		return c.unitMachineID(unit)
 	}
-	// machineID will be empty if not currently assigned.
-	machineID, _ := unit.AssignedMachineId()
-	return machineID
+	return ""
 }
 
-func (context *statusContext) unitPublicAddress(unit *state.Unit) string {
-	machine := context.allMachines[context.unitMachineID(unit)]
-	if machine == nil {
+func (c *statusContext) unitPublicAddress(unit statusservice.Unit) string {
+	m, ok := c.allMachines[c.unitMachineID(unit)]
+	if !ok {
 		return ""
 	}
-	// We don't care if the machine doesn't have an address yet.
-	addr, _ := machine.PublicAddress()
-	return addr.Value
+	if len(m.IPAddresses) > 0 {
+		return m.IPAddresses[0]
+	}
+	return ""
 }
 
-func (context *statusContext) processUnit(ctx context.Context, unit *state.Unit, applicationCharm string) params.UnitStatus {
+func (c *statusContext) processUnit(ctx context.Context, unitName coreunit.Name, unit statusservice.Unit, applicationCharm string) params.UnitStatus {
 	var result params.UnitStatus
-	if context.model.Type() == state.ModelTypeIAAS {
-		result.PublicAddress = context.unitPublicAddress(unit)
-
-		if machPortRanges, found := context.openPortRangesByMachine[context.unitMachineID(unit)]; found {
-			for _, pr := range machPortRanges.ForUnit(unit.Name()).UniquePortRanges() {
-				result.OpenedPorts = append(result.OpenedPorts, pr.String())
-			}
-		}
-	} else {
+	if prs, ok := c.allOpenPortRanges[unitName]; ok {
+		result.OpenedPorts = transform.Slice(prs, network.PortRange.String)
+	}
+	if c.model.Type == model.IAAS {
+		result.PublicAddress = c.unitPublicAddress(unit)
+	} else if unit.K8sProviderID != nil {
 		// For CAAS units we want to provide the container address.
-		// TODO: preload all the container info.
-		container, err := unit.ContainerInfo()
-		if err == nil {
-			if addr := container.Address(); addr != nil {
-				result.Address = addr.Value
-			}
-			result.ProviderId = container.ProviderId()
-			if len(result.OpenedPorts) == 0 {
-				result.OpenedPorts = container.Ports()
-			}
-
-		} else {
-			logger.Tracef("container info not yet available for unit: %v", err)
-		}
+		result.ProviderId = *unit.K8sProviderID
+		result.Address = c.podsInfo[unitName].Address
 	}
-	if unit.IsPrincipal() {
-		result.Machine, _ = unit.AssignedMachineId()
-	}
-	unitCharm := unit.CharmURL()
-	if applicationCharm != "" && unitCharm != nil && *unitCharm != applicationCharm {
-		result.Charm = *unitCharm
-	}
-	workloadVersion, err := context.status.UnitWorkloadVersion(unit.Name())
-	if err == nil {
-		result.WorkloadVersion = workloadVersion
-	} else {
-		logger.Debugf("error fetching workload version: %v", err)
+	if !unit.Subordinate && unit.MachineName != nil {
+		result.Machine = unit.MachineName.String()
 	}
 
-	result.AgentStatus, result.WorkloadStatus = context.processUnitAndAgentStatus(ctx, unit)
-
-	if subUnits := unit.SubordinateNames(); len(subUnits) > 0 {
-		result.Subordinates = make(map[string]params.UnitStatus)
-		for _, name := range subUnits {
-			subUnit := context.unitByName(name)
-			// subUnit may be nil if subordinate was filtered out.
-			if subUnit != nil {
-				subUnitAppCharm := ""
-				subUnitApp, err := subUnit.Application()
-				if err == nil {
-					if subUnitAppCh, _, err := subUnitApp.Charm(); err == nil {
-						subUnitAppCharm = subUnitAppCh.URL()
-					} else {
-						logger.Debugf("error fetching subordinate application charm for %q: %q", subUnit.ApplicationName(), err.Error())
-					}
-				} else {
-					// We can still run processUnit with an empty string for
-					// the ApplicationCharm.
-					logger.Debugf("error fetching subordinate application for %q: %q", subUnit.ApplicationName(), err.Error())
-				}
-				result.Subordinates[name] = context.processUnit(ctx, subUnit, subUnitAppCharm)
-			}
-		}
+	if unitCharm, err := charms.CharmURLFromLocator(unit.CharmLocator.Name, unit.CharmLocator); err == nil && unitCharm != applicationCharm {
+		result.Charm = unitCharm
 	}
-	if leader := context.leaders[unit.ApplicationName()]; leader == unit.Name() {
+	if unit.WorkloadVersion != nil {
+		result.WorkloadVersion = *unit.WorkloadVersion
+	}
+	result.AgentStatus, result.WorkloadStatus = c.processUnitAndAgentStatus(unit, unitName)
+
+	if leader := c.leaders[unit.ApplicationName]; leader == unitName.String() {
 		result.Leader = true
 	}
+
+	subUnits := unit.SubordinateNames
+	if len(subUnits) == 0 {
+		return result
+	}
+
+	// Handle any subordinate units.
+	result.Subordinates = make(map[string]params.UnitStatus)
+	for _, name := range subUnits {
+		subUnit, ok := c.units[name]
+		if !ok {
+			logger.Debugf(ctx, "missing subordinate unit %q", name)
+			continue
+		}
+
+		subCharmURL, ok := c.allAppsUnitsCharmBindings.applicationCharmURL[subUnit.ApplicationName]
+		if !ok {
+			logger.Debugf(ctx, "missing subordinate application %q", subUnit.ApplicationName)
+			continue
+		}
+
+		result.Subordinates[name.String()] = c.processUnit(ctx, name, subUnit, subCharmURL)
+	}
+
 	return result
 }
 
-func (context *statusContext) unitByName(name string) *state.Unit {
-	applicationName := strings.Split(name, "/")[0]
-	return context.allAppsUnitsCharmBindings.units[applicationName][name]
-}
-
-func (context *statusContext) processApplicationRelations(application *state.Application) (related map[string][]string,
-	subord []string, err error) {
+func (c *statusContext) processApplicationRelations(
+	name string,
+	application statusservice.Application,
+) (related map[string][]string, subord []string, err error) {
 	subordSet := make(set.Strings)
 	related = make(map[string][]string)
-	relations := context.relations[application.Name()]
+	relations := c.relations[name]
 	for _, relation := range relations {
-		ep, err := relation.Endpoint(application.Name())
+		ep, err := relation.Endpoint(name)
 		if err != nil {
 			return nil, nil, err
 		}
-		relationName := ep.Relation.Name
-		eps, err := relation.RelatedEndpoints(application.Name())
+		relationName := ep.Name
+		eps, err := relation.RelatedEndpoints(name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1690,17 +1157,71 @@ func (context *statusContext) processApplicationRelations(application *state.App
 	return related, subordSet.SortedValues(), nil
 }
 
-func (context *statusContext) processRemoteApplicationRelations(application *state.RemoteApplication) (related map[string][]string,
-	err error) {
-	related = make(map[string][]string)
-	relations := context.relations[application.Name()]
+// processUnitAndAgentStatus retrieves status information for both unit and
+// unitAgents.
+func (c *statusContext) processUnitAndAgentStatus(unit statusservice.Unit, unitName coreunit.Name) (params.DetailedStatus, params.DetailedStatus) {
+	detailedAgentStatus := params.DetailedStatus{
+		Status:  unit.AgentStatus.Status.String(),
+		Info:    unit.AgentStatus.Message,
+		Data:    filterStatusData(unit.AgentStatus.Data),
+		Since:   unit.AgentStatus.Since,
+		Life:    unit.Life,
+		Version: unit.AgentVersion,
+	}
+	detailedWorkloadStatus := params.DetailedStatus{
+		Status: unit.WorkloadStatus.Status.String(),
+		Info:   unit.WorkloadStatus.Message,
+		Data:   filterStatusData(unit.WorkloadStatus.Data),
+		Since:  unit.WorkloadStatus.Since,
+	}
+	return detailedAgentStatus, detailedWorkloadStatus
+}
+
+func (c *statusContext) processRemoteApplicationOfferers(ctx context.Context) map[string]params.RemoteApplicationStatus {
+	remoteApps := make(map[string]params.RemoteApplicationStatus)
+	for name, app := range c.remoteAppOfferers {
+		rels, err := c.processRemoteApplicationOffererRelations(ctx, name)
+		if err != nil {
+			remoteApps[name] = params.RemoteApplicationStatus{
+				Err: apiservererrors.ServerError(err),
+			}
+			continue
+		}
+		remoteApps[name] = params.RemoteApplicationStatus{
+			// We use the remote app name as the offer name
+			OfferName: name,
+			OfferURL:  app.OfferURL.String(),
+			Life:      app.Life,
+			Status: params.DetailedStatus{
+				Status: app.Status.Status.String(),
+				Info:   app.Status.Message,
+				Data:   filterStatusData(app.Status.Data),
+				Since:  app.Status.Since,
+			},
+			Endpoints: transform.Slice(app.Endpoints, func(ep statusservice.Endpoint) params.RemoteEndpoint {
+				return params.RemoteEndpoint{
+					Name:      ep.Name,
+					Role:      ep.Role,
+					Interface: ep.Interface,
+					Limit:     ep.Limit,
+				}
+			}),
+			Relations: rels,
+		}
+	}
+	return remoteApps
+}
+
+func (c *statusContext) processRemoteApplicationOffererRelations(ctx context.Context, name string) (map[string][]string, error) {
+	related := make(map[string][]string)
+	relations := c.relations[name]
 	for _, relation := range relations {
-		ep, err := relation.Endpoint(application.Name())
+		ep, err := relation.Endpoint(name)
 		if err != nil {
 			return nil, err
 		}
-		relationName := ep.Relation.Name
-		eps, err := relation.RelatedEndpoints(application.Name())
+		relationName := ep.Name
+		eps, err := relation.RelatedEndpoints(name)
 		if err != nil {
 			return nil, err
 		}
@@ -1708,153 +1229,38 @@ func (context *statusContext) processRemoteApplicationRelations(application *sta
 			related[relationName] = append(related[relationName], ep.ApplicationName)
 		}
 	}
-	for relationName, applicationNames := range related {
-		sn := set.NewStrings(applicationNames...)
-		related[relationName] = sn.SortedValues()
+	for _, applicationNames := range related {
+		sort.Strings(applicationNames)
 	}
 	return related, nil
 }
 
-func (c *statusContext) processBranches() map[string]params.BranchStatus {
-	branchMap := make(map[string]params.BranchStatus, len(c.branches))
-	for name, branch := range c.branches {
-		branchMap[name] = params.BranchStatus{
-			AssignedUnits: branch.AssignedUnits(),
-			Created:       branch.Created(),
-			CreatedBy:     branch.CreatedBy(),
-		}
-	}
-	return branchMap
-}
-
-func (c *statusContext) unitToMachine(unitTag names.UnitTag) (names.MachineTag, error) {
-	unit, ok := c.allAppsUnitsCharmBindings.allUnits[unitTag.Id()]
-	if !ok {
-		return names.MachineTag{}, errors.NotFoundf("unit %v", unitTag)
-	}
-	machine, err := unit.AssignedMachineId()
-	if err != nil {
-		return names.MachineTag{}, errors.Trace(err)
-	}
-	return names.NewMachineTag(machine), nil
-}
-
-func (c *statusContext) processStorage(ctx context.Context, storageAccessor StorageInterface, blockDeviceService BlockDeviceService) ([]params.StorageDetails, error) {
-	storageDetails := make([]params.StorageDetails, 0, len(c.storageInstances))
-	for _, storageInstance := range c.storageInstances {
-		storageDetail, err := storagecommon.StorageDetails(ctx, storageAccessor, blockDeviceService, c.unitToMachine, storageInstance)
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot convert storage details for %v", storageInstance.Tag())
-		}
-		storageDetails = append(storageDetails, *storageDetail)
-	}
-	return storageDetails, nil
-}
-
-func (c *statusContext) processFilesystems(ctx context.Context, storageAccessor StorageInterface, blockDeviceService BlockDeviceService) ([]params.FilesystemDetails, error) {
-	filesystemDetails := make([]params.FilesystemDetails, 0, len(c.filesystems))
-	for _, filesystem := range c.filesystems {
-		attachments, err := storageAccessor.FilesystemAttachments(filesystem.FilesystemTag())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		filesystemDetail, err := storagecommon.FilesystemDetails(ctx, storageAccessor, blockDeviceService, c.unitToMachine, filesystem, attachments)
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot convert filesystem details for %v", filesystem.Tag())
-		}
-		filesystemDetails = append(filesystemDetails, *filesystemDetail)
-	}
-	return filesystemDetails, nil
-}
-
-func (c *statusContext) processVolumes(ctx context.Context, storageAccessor StorageInterface, blockDeviceService BlockDeviceService) ([]params.VolumeDetails, error) {
-	volumeDetails := make([]params.VolumeDetails, 0, len(c.volumes))
-	for _, volume := range c.volumes {
-		attachments, err := storageAccessor.VolumeAttachments(volume.VolumeTag())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		volumeDetail, err := storagecommon.VolumeDetails(ctx, storageAccessor, blockDeviceService, c.unitToMachine, volume, attachments)
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot convert volume details for %v", volume.Tag())
-		}
-		volumeDetails = append(volumeDetails, *volumeDetail)
-	}
-	return volumeDetails, nil
-}
-
-type lifer interface {
-	Life() state.Life
-}
-
-// contextUnit overloads the AgentStatus and Status calls to use the cached
-// status values, and delegates everything else to the Unit.
-type contextUnit struct {
-	*state.Unit
-	context *statusContext
-}
-
-// AgentStatus implements UnitStatusGetter.
-func (c *contextUnit) AgentStatus() (status.StatusInfo, error) {
-	return c.context.status.UnitAgent(c.Name())
-}
-
-// Status implements UnitStatusGetter.
-func (c *contextUnit) Status() (status.StatusInfo, error) {
-	return c.context.status.UnitWorkload(c.Name())
-}
-
-// processUnitAndAgentStatus retrieves status information for both unit and unitAgents.
-func (c *statusContext) processUnitAndAgentStatus(ctx context.Context, unit *state.Unit) (agentStatus, workloadStatus params.DetailedStatus) {
-	wrapped := &contextUnit{Unit: unit, context: c}
-	agent, workload := c.presence.UnitStatus(ctx, wrapped)
-	populateStatusFromStatusInfoAndErr(&agentStatus, agent.Status, agent.Err)
-	populateStatusFromStatusInfoAndErr(&workloadStatus, workload.Status, workload.Err)
-
-	agentStatus.Life = processLife(unit)
-
-	if t, err := unit.AgentTools(); err == nil {
-		agentStatus.Version = t.Version.Number.String()
-	}
-	return
-}
-
-// populateStatusFromStatusInfoAndErr creates AgentStatus from the typical output
-// of a status getter.
-// TODO: make this a function that just returns a type.
-func populateStatusFromStatusInfoAndErr(agent *params.DetailedStatus, statusInfo status.StatusInfo, err error) {
-	agent.Err = apiservererrors.ServerError(err)
-	agent.Status = statusInfo.Status.String()
-	agent.Info = statusInfo.Message
-	agent.Data = filterStatusData(statusInfo.Data)
-	agent.Since = statusInfo.Since
-}
-
-// contextMachine overloads the Status call to use the cached status values,
-// and delegates everything else to the Machine.
-type contextMachine struct {
-	*state.Machine
-	context *statusContext
-}
-
-// Return the agent status for the machine.
-func (c *contextMachine) Status() (status.StatusInfo, error) {
-	return c.context.status.MachineAgent(c.Id())
-}
-
 // processMachine retrieves version and status information for the given machine.
 // It also returns deprecated legacy status information.
-func (c *statusContext) processMachine(ctx context.Context, machine *state.Machine) (out params.DetailedStatus) {
-	wrapped := &contextMachine{Machine: machine, context: c}
-	statusInfo, err := c.presence.MachineStatus(ctx, wrapped)
-	populateStatusFromStatusInfoAndErr(&out, statusInfo, err)
-
-	out.Life = processLife(machine)
-
-	if t, err := machine.AgentTools(); err == nil {
-		out.Version = t.Version.Number.String()
+func (c *statusContext) processMachine(ctx context.Context, m statusservice.Machine) (params.DetailedStatus, params.DetailedStatus) {
+	agentStatus := params.DetailedStatus{
+		Status: m.MachineStatus.Status.String(),
+		Info:   m.MachineStatus.Message,
+		Data:   filterStatusData(m.MachineStatus.Data),
+		Since:  m.MachineStatus.Since,
+		Life:   m.Life,
 	}
-	return
+
+	// TODO (stickupkid): Get the agent version from the machine service
+	// once the agent tools are available.
+	//if t, err := m.AgentTools(); err == nil {
+	// result.Version = t.Version.Number.String()
+	//}
+
+	instanceStatus := params.DetailedStatus{
+		Status: m.InstanceStatus.Status.String(),
+		Info:   m.InstanceStatus.Message,
+		Data:   filterStatusData(m.InstanceStatus.Data),
+		Since:  m.InstanceStatus.Since,
+		Life:   m.Life,
+	}
+
+	return agentStatus, instanceStatus
 }
 
 // filterStatusData limits what agent StatusData data is passed over
@@ -1870,39 +1276,276 @@ func filterStatusData(status map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func processLife(entity lifer) life.Value {
-	if aLife := entity.Life(); aLife != state.Alive {
-		// alive is the usual state so omit it by default.
-		return aLife.Value()
+func encodePlatform(platform deployment.Platform) (params.Base, error) {
+	os, err := encodeOSType(platform.OSType)
+	if err != nil {
+		return params.Base{}, err
 	}
-	return life.Value("")
+
+	base, err := base.ParseBase(os, platform.Channel)
+	if err != nil {
+		return params.Base{}, internalerrors.Errorf("parsing base %q: %w", os, err)
+	}
+
+	return params.Base{
+		Name:    base.OS,
+		Channel: base.Channel.String(),
+	}, nil
 }
 
-type bySinceDescending []status.StatusInfo
-
-// Len implements sort.Interface.
-func (s bySinceDescending) Len() int { return len(s) }
-
-// Swap implements sort.Interface.
-func (s bySinceDescending) Swap(a, b int) { s[a], s[b] = s[b], s[a] }
-
-// Less implements sort.Interface.
-func (s bySinceDescending) Less(a, b int) bool { return s[a].Since.After(*s[b].Since) }
-
-// lxdStateCharmProfiler massages a *state.Charm into a LXDProfiler
-// inside of the core package.
-type lxdStateCharmProfiler struct {
-	Charm *state.Charm
+func encodeOSType(ostype deployment.OSType) (string, error) {
+	switch ostype {
+	case deployment.Ubuntu:
+		return base.UbuntuOS, nil
+	default:
+		return "", internalerrors.Errorf("unknown os type %q", ostype)
+	}
 }
 
-// LXDProfile implements core.lxdprofile.LXDProfiler
-func (p lxdStateCharmProfiler) LXDProfile() lxdprofile.LXDProfile {
-	if p.Charm == nil {
-		return nil
+// processStorage produces status for all storage in the model.
+func processStorage(
+	ctx context.Context, statusService StatusService,
+) ([]params.StorageDetails, []params.FilesystemDetails, []params.VolumeDetails, error) {
+	storageInstances, err := statusService.GetStorageInstanceStatuses(ctx)
+	if err != nil {
+		return nil, nil, nil, internalerrors.Capture(err)
 	}
-	profile := p.Charm.LXDProfile()
-	if profile == nil {
-		return nil
+	// This prevents a panic in clients due to a storage instance after 4.0
+	// possibly having no filesystem or volume to get a status from. This is
+	// poor API design anyway, since a storage instance does not have a status,
+	// instead, we've pulled one from the provisioned entities.
+	zeroTime := time.UnixMicro(0).UTC()
+	storageMap := map[string]*params.StorageDetails{}
+	for _, v := range storageInstances {
+		details := params.StorageDetails{
+			StorageTag: names.NewStorageTag(v.ID).String(),
+			Life:       v.Life,
+			Status: params.EntityStatus{
+				Status: status.Unknown,
+				Since:  &zeroTime,
+			},
+		}
+		if v.Owner != nil {
+			details.OwnerTag = names.NewUnitTag(v.Owner.String()).String()
+		}
+		switch v.Kind {
+		case storage.StorageKindBlock:
+			details.Kind = params.StorageKindBlock
+		case storage.StorageKindFilesystem:
+			details.Kind = params.StorageKindFilesystem
+		default:
+			details.Kind = params.StorageKindUnknown
+		}
+		for unit, sa := range v.Attachments {
+			unitTag := names.NewUnitTag(unit.String())
+			sad := params.StorageAttachmentDetails{
+				StorageTag: details.StorageTag,
+				UnitTag:    names.NewUnitTag(sa.Unit.String()).String(),
+			}
+			if sa.Machine != nil {
+				sad.MachineTag = names.NewMachineTag(sa.Machine.String()).String()
+			}
+			if details.Attachments == nil {
+				details.Attachments = map[string]params.StorageAttachmentDetails{}
+			}
+			details.Attachments[unitTag.String()] = sad
+		}
+		// Store in a map to get the status and location from either the
+		// filesystem or volumes. These are a facade concern, hence why it
+		// is done here.
+		storageMap[v.ID] = &details
 	}
-	return profile
+
+	filesystems, err := statusService.GetFilesystemStatuses(ctx)
+	if err != nil {
+		return nil, nil, nil, internalerrors.Capture(err)
+	}
+	filesystemResult := make([]params.FilesystemDetails, 0, len(filesystems))
+	for _, v := range filesystems {
+		details := params.FilesystemDetails{
+			FilesystemTag: names.NewFilesystemTag(v.ID).String(),
+			Life:          v.Life,
+			Info: params.FilesystemInfo{
+				ProviderId: v.ProviderID,
+				SizeMiB:    v.SizeMiB,
+			},
+			Status: params.EntityStatus{
+				Status: v.Status.Status,
+				Info:   v.Status.Message,
+				Data:   v.Status.Data,
+				Since:  v.Status.Since,
+			},
+		}
+		if v.VolumeID != nil {
+			details.VolumeTag = names.NewVolumeTag(*v.VolumeID).String()
+		}
+		unitAttachmentLocations := map[string]string{}
+		for unit, fa := range v.UnitAttachments {
+			fad := params.FilesystemAttachmentDetails{
+				Life: fa.Life,
+				FilesystemAttachmentInfo: params.FilesystemAttachmentInfo{
+					MountPoint: fa.MountPoint,
+					ReadOnly:   fa.ReadOnly,
+				},
+			}
+			if details.UnitAttachments == nil {
+				details.UnitAttachments = map[string]params.FilesystemAttachmentDetails{}
+			}
+			unitTag := names.NewUnitTag(unit.String()).String()
+			details.UnitAttachments[unitTag] = fad
+			unitAttachmentLocations[unitTag] = fa.MountPoint
+		}
+		for machine, fa := range v.MachineAttachments {
+			fad := params.FilesystemAttachmentDetails{
+				Life: fa.Life,
+				FilesystemAttachmentInfo: params.FilesystemAttachmentInfo{
+					MountPoint: fa.MountPoint,
+					ReadOnly:   fa.ReadOnly,
+				},
+			}
+			if details.MachineAttachments == nil {
+				details.MachineAttachments = map[string]params.FilesystemAttachmentDetails{}
+			}
+			machineTag := names.NewMachineTag(machine.String()).String()
+			details.MachineAttachments[machineTag] = fad
+		}
+		if storage, ok := storageMap[v.StorageID]; ok {
+			if storage.Kind == params.StorageKindFilesystem {
+				storage.Status = details.Status
+
+				// give the storage instance attachment the unit's attachment
+				// location.
+				for k, v := range unitAttachmentLocations {
+					ad, ok := storage.Attachments[k]
+					if !ok {
+						continue
+					}
+					ad.Location = v
+					storage.Attachments[k] = ad
+				}
+			}
+			details.Storage = storage
+		}
+		filesystemResult = append(filesystemResult, details)
+	}
+
+	volumes, err := statusService.GetVolumeStatuses(ctx)
+	if err != nil {
+		return nil, nil, nil, internalerrors.Capture(err)
+	}
+	volumeResult := make([]params.VolumeDetails, 0, len(volumes))
+	for _, v := range volumes {
+		details := params.VolumeDetails{
+			VolumeTag: names.NewVolumeTag(v.ID).String(),
+			Life:      v.Life,
+			Info: params.VolumeInfo{
+				ProviderId: v.ProviderID,
+				HardwareId: v.HardwareID,
+				WWN:        v.WWN,
+				SizeMiB:    v.SizeMiB,
+				Persistent: v.Persistent,
+			},
+			Status: params.EntityStatus{
+				Status: v.Status.Status,
+				Info:   v.Status.Message,
+				Data:   v.Status.Data,
+				Since:  v.Status.Since,
+			},
+		}
+		unitAttachmentLocations := map[string]string{}
+		for unit, va := range v.UnitAttachments {
+			vad := params.VolumeAttachmentDetails{
+				Life: va.Life,
+				VolumeAttachmentInfo: params.VolumeAttachmentInfo{
+					DeviceName: va.DeviceName,
+					DeviceLink: va.DeviceLink,
+					BusAddress: va.BusAddress,
+					ReadOnly:   va.ReadOnly,
+				},
+			}
+			if vap := va.VolumeAttachmentPlan; vap != nil {
+				pi := params.VolumeAttachmentPlanInfo{
+					DeviceAttributes: vap.DeviceAttributes,
+				}
+				switch vap.DeviceType {
+				case storageprovisioning.PlanDeviceTypeLocal:
+					pi.DeviceType = internalstorage.DeviceTypeLocal
+				case storageprovisioning.PlanDeviceTypeISCSI:
+					pi.DeviceType = internalstorage.DeviceTypeISCSI
+				}
+				vad.VolumeAttachmentInfo.PlanInfo = &pi
+			}
+			if details.UnitAttachments == nil {
+				details.UnitAttachments = map[string]params.VolumeAttachmentDetails{}
+			}
+			unitTag := names.NewUnitTag(unit.String()).String()
+			details.UnitAttachments[unitTag] = vad
+
+			var deviceLinks []string
+			if va.DeviceLink != "" {
+				deviceLinks = append(deviceLinks, vad.DeviceLink)
+			}
+			blockDevicePath, _ := blockdevice.BlockDevicePath(blockdevice.BlockDevice{
+				HardwareId:  v.HardwareID,
+				WWN:         v.WWN,
+				DeviceName:  va.DeviceName,
+				DeviceLinks: deviceLinks,
+			})
+			unitAttachmentLocations[unitTag] = blockDevicePath
+		}
+		for machine, va := range v.MachineAttachments {
+			vad := params.VolumeAttachmentDetails{
+				Life: va.Life,
+				VolumeAttachmentInfo: params.VolumeAttachmentInfo{
+					DeviceName: va.DeviceName,
+					DeviceLink: va.DeviceLink,
+					BusAddress: va.BusAddress,
+					ReadOnly:   va.ReadOnly,
+				},
+			}
+			if vap := va.VolumeAttachmentPlan; vap != nil {
+				pi := params.VolumeAttachmentPlanInfo{
+					DeviceAttributes: vap.DeviceAttributes,
+				}
+				switch vap.DeviceType {
+				case storageprovisioning.PlanDeviceTypeLocal:
+					pi.DeviceType = internalstorage.DeviceTypeLocal
+				case storageprovisioning.PlanDeviceTypeISCSI:
+					pi.DeviceType = internalstorage.DeviceTypeISCSI
+				}
+				vad.VolumeAttachmentInfo.PlanInfo = &pi
+			}
+			if details.MachineAttachments == nil {
+				details.MachineAttachments = map[string]params.VolumeAttachmentDetails{}
+			}
+			machineTag := names.NewMachineTag(machine.String()).String()
+			details.MachineAttachments[machineTag] = vad
+		}
+		if storage, ok := storageMap[v.StorageID]; ok {
+			if storage.Kind == params.StorageKindBlock {
+				storage.Status = details.Status
+				storage.Persistent = details.Info.Persistent
+				// give the storage instance attachment the unit's attachment
+				// location.
+				for k, v := range unitAttachmentLocations {
+					ad, ok := storage.Attachments[k]
+					if !ok {
+						continue
+					}
+					ad.Location = v
+					storage.Attachments[k] = ad
+				}
+			}
+			details.Storage = storage
+		}
+		volumeResult = append(volumeResult, details)
+	}
+
+	storageResult := make([]params.StorageDetails, 0, len(storageInstances))
+	for _, v := range storageInstances {
+		if storage, ok := storageMap[v.ID]; ok {
+			storageResult = append(storageResult, *storage)
+		}
+	}
+	return storageResult, filesystemResult, volumeResult, nil
 }

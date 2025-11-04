@@ -5,6 +5,7 @@ package introspection
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path"
 	"runtime"
@@ -47,9 +48,10 @@ func WriteProfileFunctions(profileDir string) error {
 // introspection worker.
 func UpdateProfileFunctions(io FileReaderWriter, profileDir string) error {
 	if runtime.GOOS != "linux" {
-		logger.Debugf("skipping profile funcs install")
+		logger.Debugf(context.Background(), "skipping profile funcs install")
 		return nil
 	}
+
 	filename := profileFilename(profileDir)
 	shellFuncsBytes := []byte(shellFuncs)
 	if currentBytes, err := io.ReadFile(filename); err == nil {
@@ -77,7 +79,11 @@ const shellFuncs = `
 juju_agent_call () {
   local agent=$1
   shift
-  juju-introspect --agent=$agent $@
+  if [ -x "$(which sudo)" ]; then
+    sudo juju-introspect --agent=$agent $@
+  else
+    juju-introspect --agent=$agent $@
+  fi
 }
 
 juju_machine_agent_name () {
@@ -86,7 +92,10 @@ juju_machine_agent_name () {
 }
 
 juju_controller_agent_name () {
-  local controller=$(find /var/lib/juju/agents -maxdepth 1 -type d -name 'controller-*' -printf %f)
+  local controller=$(juju_machine_agent_name)
+  if [ -z "$controller" ]; then
+    controller=$(find /var/lib/juju/agents -maxdepth 1 -type d -name 'controller-*' -printf %f)
+  fi
   echo $controller
 }
 
@@ -140,20 +149,8 @@ juju_statepool_report () {
   juju_agent statepool
 }
 
-juju_pubsub_report () {
-  juju_agent pubsub
-}
-
 juju_metrics () {
   juju_agent metrics
-}
-
-juju_presence_report () {
-  juju_agent presence
-}
-
-juju_statetracker_report () {
-  juju_agent debug/pprof/juju/state/tracker?debug=1
 }
 
 juju_machine_lock () {
@@ -166,91 +163,81 @@ juju_unit_status () {
   juju_agent units?action=status
 }
 
-juju_stop_unit () {
-  # This requires some arguments.
-  if [ "$#" -lt 1 ]; then
-    echo "usage: juju_stop_unit <unit-name> [<unit-name>...]"
+juju_db_repl () {
+  local agent=$(juju_controller_agent_name)
+  if [ -z "${agent}" ]; then
+    echo "cannot identify agent"
     return 1
   fi
-  args=""
-  for i in "$@"; do
-    args="$args unit=$i"
-  done
-  juju_agent --post units action=stop $args
-}
 
-juju_start_unit () {
-  # This requires some arguments.
-  if [ "$#" -lt 1 ]; then
-    echo "usage: juju_start_unit <unit-name> [<unit-name>...]"
-    return 1
-  fi
-  args=""
-  for i in "$@"; do
-    args="$args unit=$i"
-  done
-  juju_agent --post units action=start $args
-}
+  local type=$(printf ${agent} | cut -d- -f1)
+  local id=$(printf ${agent} | cut -d- -f2)
+  local flag="--${type}-id=${id}"
 
-juju_leases () {
-  # This requires some arguments.
-  local query
-  local model
-  if [ "$1" = "-m" ]; then
-    if [ "$#" -lt 2 ]; then
-      echo "usage: juju_leases [-m <partial-model-uuid>] [<partial-app-name>...]"
-      return 1
-    fi
-    shift
-    model=$1
-    shift
-    query="&model=$model"
-  fi
-  for i in "$@"; do
-    query="$query&app=$i"
-  done
-  if [ -z "$query" ]; then
-    juju_agent leases
+  if [ -x "$(which sudo)" ]; then
+    sudo /var/lib/juju/tools/$agent/jujud db-repl ${flag}
   else
-    juju_agent "leases?q=y&$query"
+    /var/lib/juju/tools/$agent/jujud db-repl ${flag}
   fi
 }
 
-juju_revoke_lease () {
-  # This requires some arguments.
-  local model
-  local lease
-  local ns
-
-  while [[ $# -gt 0 ]]
-  do
-    key="$1"
-
-    case $key in
-      -m|--model)
-        model="$2"; shift; shift
-      ;;
-      -n|--ns)
-        ns="$2"; shift; shift
-      ;;
-      -l|--lease)
-        lease="$2"; shift; shift
-      ;;
-      *)
-        echo "usage: juju_revoke_lease -m <model-uuid> -l <lease> [-n <namespace>]"
-        return 1
-      ;;
-    esac
-  done
-
-  if [ -z "$model" ] | [ -z "$lease" ]; then
-    echo "usage: juju_revoke_lease -m <model-uuid> -l <lease> [-n <namespace>]"
-    return 1
-  fi  
-
-  juju_agent --post leases/revoke model="$model" lease="$lease" ns="$ns"
+juju_object_store_contents () {
+  res=$(juju_object_store_contents_ "/var/lib/juju/objectstore")
+  res="Model    Name\n$res"
+  echo -e $res | column -t
 }
 
+juju_object_store_contents_ () {
+  target=${1:-.}
+  for i in "$target"; do
+    if [ -d "$i" ]; then
+      for sub in "$i"/*; do
+        s=$(juju_object_store_contents_ "$sub")
+        if [ -n "$s" ]; then
+           echo $s
+        fi
+      done
+    elif [ -f "$i" ]; then
+      m=$(dirname "$i" | xargs basename)
+      f=$(basename "$i")
+      echo "$m  $f\n"
+    fi
+  done
+}
+
+juju_api_connection_sources () {
+  if [ -x "$(which sudo)" ]; then
+    local num=${1:-10}
+    local port=${2:-17070}
+    echo "Selecting top $num IPs connected to port $port" >&2
+
+    sudo lsof -iTCP -sTCP:ESTABLISHED -nP \
+      | awk '{print $9}' \
+      | awk -F'->' -v port="$port" '{local=$1; remote=$2; split(local,l,":"); split(remote,r,":"); if (l[2]==port) print r[1]}' \
+      | sort \
+      | uniq -c \
+      | sort -nr \
+      | head -$num
+  else
+    echo "requires sudo to run"
+    return 1
+  fi
+}
+
+juju_flightrecorder_start () {
+  duration=${1:-"0s"}
+  kind=${2:-"error"}
+  juju_agent "flightrecorder/start?kind=$kind&duration=$duration"
+}
+
+juju_flightrecorder_stop () {
+  juju_agent flightrecorder/stop
+}
+
+juju_flightrecorder_capture () {
+  kind=${1:-}
+  juju_agent flightrecorder/capture?kind=$kind
+}
 
 # This asks for the command of the current pid.
 # Can't use $0 nor $SHELL due to this being wrong in various situations.
@@ -267,14 +254,12 @@ if [ "$shell" = "bash" ]; then
   export -f juju_engine_report
   export -f juju_metrics
   export -f juju_statepool_report
-  export -f juju_statetracker_report
-  export -f juju_pubsub_report
-  export -f juju_presence_report
   export -f juju_machine_lock
   export -f juju_unit_status
-  export -f juju_start_unit
-  export -f juju_stop_unit
-  export -f juju_leases
-  export -f juju_revoke_lease
+  export -f juju_db_repl
+  export -f juju_api_connection_sources
+  export -f juju_flightrecorder_start
+  export -f juju_flightrecorder_stop
+  export -f juju_flightrecorder_capture
 fi
 `

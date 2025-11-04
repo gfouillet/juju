@@ -6,18 +6,25 @@ package migration
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/juju/collections/set"
+	"github.com/juju/collections/transform"
+	"github.com/juju/description/v10"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
 
-	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/core/credential"
+	corelife "github.com/juju/juju/core/life"
 	coremigration "github.com/juju/juju/core/migration"
-	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/internal/tools"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/semversion"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/modelmigration"
+	domainrelation "github.com/juju/juju/domain/relation"
+	"github.com/juju/juju/environs/config"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/upgrades/upgradevalidation"
-	"github.com/juju/juju/state"
 )
 
 // SourcePrecheck checks the state of the source controller to make
@@ -25,13 +32,57 @@ import (
 // backend provided must be for the model to be migrated.
 func SourcePrecheck(
 	ctx context.Context,
-	backend PrecheckBackend,
-	modelPresence ModelPresence, controllerPresence ModelPresence,
-	environscloudspecGetter environsCloudSpecGetter,
-	credentialService CredentialService,
-	upgradeService UpgradeService,
+	modelUUID coremodel.UUID,
+	controllerModelUUID coremodel.UUID,
+	modelService ModelService,
+	modelMigrationServiceGetter func(context.Context, coremodel.UUID) (ModelMigrationService, error),
+	credentialServiceGetter func(context.Context, coremodel.UUID) (CredentialService, error),
+	upgradeServiceGetter func(context.Context, coremodel.UUID) (UpgradeService, error),
+	applicationServiceGetter func(context.Context, coremodel.UUID) (ApplicationService, error),
+	relationServiceGetter func(context.Context, coremodel.UUID) (RelationService, error),
+	statusServiceGetter func(context.Context, coremodel.UUID) (StatusService, error),
+	modelAgentServiceGetter func(context.Context, coremodel.UUID) (ModelAgentService, error),
+	machineServiceGetter func(context.Context, coremodel.UUID) (MachineService, error),
 ) error {
-	c := newPrecheckSource(backend, modelPresence, environscloudspecGetter, credentialService, upgradeService)
+	modelMigrationService, err := modelMigrationServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	modelCredentialService, err := credentialServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	modelApplicationService, err := applicationServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	modelRelationService, err := relationServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	modelStatusService, err := statusServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	} else if modelStatusService == nil {
+		return errors.Errorf("status service for model %q not found", modelUUID)
+	}
+	modelModelAgentService, err := modelAgentServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	machineService, err := machineServiceGetter(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	model, err := modelService.Model(ctx, modelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	c := newPrecheckModel(model, modelMigrationService, modelCredentialService,
+		modelApplicationService, modelRelationService, modelStatusService,
+		modelModelAgentService, machineService)
 	if err := c.checkModel(ctx); err != nil {
 		return errors.Trace(err)
 	}
@@ -40,61 +91,88 @@ func SourcePrecheck(
 		return errors.Trace(err)
 	}
 
-	appUnits, err := c.checkApplications(ctx)
-	if err != nil {
+	if err := c.checkApplications(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	if err := c.checkRelations(appUnits); err != nil {
+	if err := c.checkRelations(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	if cleanupNeeded, err := backend.NeedsCleanup(); err != nil {
-		return errors.Annotate(err, "checking cleanups")
-	} else if cleanupNeeded {
-		return errors.New("cleanup needed")
-	}
+	// TODO(modelmigration): add check before migration can start that the model
+	// does not have any queued removal.
+	//if cleanupNeeded, err := backend.NeedsCleanup(); err != nil {
+	//	return errors.Annotate(err, "checking cleanups")
+	//} else if cleanupNeeded {
+	//	return errors.New("cleanup needed")
+	//}
 
 	// Check the source controller.
-	controllerBackend, err := backend.ControllerBackend()
+	controllerUpgradeService, err := upgradeServiceGetter(ctx, controllerModelUUID)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	controllerCtx := newPrecheckTarget(controllerBackend, controllerPresence, upgradeService)
+	controllerStatusService, err := statusServiceGetter(ctx, controllerModelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	controllerModelAgentService, err := modelAgentServiceGetter(ctx, controllerModelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	controllerMachineService, err := machineServiceGetter(ctx, controllerModelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	controllerCtx := newPrecheckController(
+		controllerUpgradeService,
+		controllerStatusService,
+		controllerModelAgentService,
+		controllerMachineService)
 	if err := controllerCtx.checkController(ctx); err != nil {
 		return errors.Annotate(err, "controller")
 	}
 	return nil
 }
 
+// ImportDescriptionPrecheck checks the data being imported to make sure
+// preconditions for importing are met. This performs static checks on the
+// received model description, without requiring a connection to state.
+func ImportDescriptionPrecheck(
+	ctx context.Context,
+	model description.Model,
+) error {
+	err := checkForCharmsWithNoManifest(model)
+	if err != nil {
+		return internalerrors.Errorf("checking model for charms without manifest.yaml: %w", err)
+	}
+
+	if err := checkNoFanConfig(model.Config()); err != nil {
+		return internalerrors.Errorf("checking model config for fan config: %w", err)
+	}
+
+	return nil
+}
+
 // TargetPrecheck checks the state of the target controller to make
 // sure that the preconditions for model migration are met. The
 // backend provided must be for the target controller.
-func TargetPrecheck(ctx context.Context,
-	backend PrecheckBackend,
-	pool Pool,
+func TargetPrecheck(
+	ctx context.Context,
 	modelInfo coremigration.ModelInfo,
-	presence ModelPresence,
+	modelService ModelService,
 	upgradeService UpgradeService,
+	statusService StatusService,
+	modelAgentService ModelAgentService,
+	machineService MachineService,
+	modelMigrationServiceGetter func(context.Context, coremodel.UUID) (ModelMigrationService, error),
 ) error {
 	if err := modelInfo.Validate(); err != nil {
 		return errors.Trace(err)
 	}
 
-	// This check is necessary because there is a window between the
-	// REAP phase and then end of the DONE phase where a model's
-	// documents have been deleted but the migration isn't quite done
-	// yet. Migrating a model back into the controller during this
-	// window can upset the migrationmaster worker.
-	//
-	// See also https://lpad.tv/1611391
-	if migrating, err := backend.IsMigrationActive(modelInfo.UUID); err != nil {
-		return errors.Annotate(err, "checking for active migration")
-	} else if migrating {
-		return errors.New("model is being migrated out of target controller")
-	}
-
-	controllerVersion, err := backend.AgentVersion()
+	controllerVersion, err := modelAgentService.GetModelTargetAgentVersion(ctx)
 	if err != nil {
 		return errors.Annotate(err, "retrieving model version")
 	}
@@ -109,70 +187,131 @@ func TargetPrecheck(ctx context.Context,
 			modelInfo.ControllerAgentVersion, controllerVersion)
 	}
 
-	controllerCtx := newPrecheckTarget(backend, presence, upgradeService)
+	controllerCtx := newPrecheckController(
+		upgradeService,
+		statusService,
+		modelAgentService,
+		machineService)
 	if err := controllerCtx.checkController(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
 	// Check for conflicts with existing models
-	modelUUIDs, err := backend.AllModelUUIDs()
+	models, err := modelService.ListAllModels(ctx)
 	if err != nil {
 		return errors.Annotate(err, "retrieving models")
 	}
-	for _, modelUUID := range modelUUIDs {
-		model, release, err := pool.GetModel(modelUUID)
+	for _, model := range models {
+		migrationService, err := modelMigrationServiceGetter(ctx, model.UUID)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		defer release()
-
+		mode, err := migrationService.ModelMigrationMode(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
 		// If the model is importing then it's probably left behind
 		// from a previous migration attempt. It will be removed
 		// before the next import.
-		if model.UUID() == modelInfo.UUID && model.MigrationMode() != state.MigrationModeImporting {
-			return errors.Errorf("model with same UUID already exists (%s)", modelInfo.UUID)
+		if model.UUID.String() == modelInfo.UUID {
+			switch mode {
+			case modelmigration.MigrationModeExporting:
+				// This check is necessary because there is a window between the
+				// REAP phase and then end of the DONE phase where a model's
+				// documents have been deleted but the migration isn't quite done
+				// yet. Migrating a model back into the controller during this
+				// window can upset the migrationmaster worker.
+				//
+				// See also https://lpad.tv/1611391
+				return errors.New("model is being migrated out of target controller")
+			case modelmigration.MigrationModeNone:
+				return errors.Errorf("model with same UUID already exists (%s)", modelInfo.UUID)
+			case modelmigration.MigrationModeImporting:
+				// Idempotency for models that are the same, we continue importing.
+				return nil
+			}
 		}
-		if model.Name() == modelInfo.Name && model.Owner() == modelInfo.Owner {
-			return errors.Errorf("model named %q already exists", model.Name())
+		// This logic needs to be handled in the model domain.
+		if model.Name == modelInfo.Name && model.Qualifier == modelInfo.Qualifier {
+			return errors.Errorf("model named %q already exists", modelInfo.Name)
 		}
 	}
 
 	return nil
 }
 
-type precheckTarget struct {
-	precheckContext
-}
-
-func newPrecheckTarget(
-	backend PrecheckBackend,
-	presence ModelPresence,
-	upgradeService UpgradeService,
-) *precheckTarget {
-	return &precheckTarget{
-		precheckContext: precheckContext{
-			backend:        backend,
-			presence:       presence,
-			upgradeService: upgradeService,
-		},
-	}
-}
-
 type precheckContext struct {
-	backend        PrecheckBackend
-	presence       ModelPresence
+	statusService     StatusService
+	modelAgentService ModelAgentService
+	machineService    MachineService
+}
+
+func (c *precheckContext) checkMachines(ctx context.Context) error {
+	agentLaggingMachines, err := c.modelAgentService.GetMachinesNotAtTargetAgentVersion(ctx)
+	if err != nil {
+		return internalerrors.Errorf(
+			"getting machines that are not running the target agent version of the model: %w",
+			err,
+		)
+	}
+	if len(agentLaggingMachines) > 0 {
+		return internalerrors.Errorf(
+			"there exists machines in the model that are not running the target agent version of the model %v",
+			agentLaggingMachines,
+		)
+	}
+
+	if err := c.statusService.CheckMachineStatusesReadyForMigration(ctx); err != nil {
+		return internalerrors.Errorf("pre-checking machine statuses for migration: %w", err)
+	}
+
+	// TODO(modelmigration): this should be a single service call.
+	machineNames, err := c.machineService.AllMachineNames(ctx)
+	if err != nil {
+		return errors.Annotate(err, "retrieving machines")
+	}
+	for _, machineName := range machineNames {
+		machineLife, err := c.machineService.GetMachineLife(ctx, machineName)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if machineLife != corelife.Alive {
+			return errors.Errorf("machine %s is %s", machineName, machineLife)
+		}
+
+		// TODO(gfouillet): Restore this once machine fully migrated to dqlite
+		// if rebootAction, err := machine.ShouldRebootOrShutdown(); err != nil {
+		// 	return errors.Annotatef(err, "retrieving machine %s reboot status", machine.Id())
+		// } else if rebootAction != state.ShouldDoNothing {
+		// 	return errors.Errorf("machine %s is scheduled to %s", machine.Id(), rebootAction)
+		// }
+	}
+	return nil
+}
+
+type precheckController struct {
+	precheckContext
 	upgradeService UpgradeService
 }
 
-func (c *precheckContext) checkController(ctx context.Context) error {
-	model, err := c.backend.Model()
-	if err != nil {
-		return errors.Annotate(err, "retrieving model")
+func newPrecheckController(
+	upgradeService UpgradeService,
+	statusService StatusService,
+	modelAgentService ModelAgentService,
+	machineService MachineService,
+) *precheckController {
+	return &precheckController{
+		precheckContext: precheckContext{
+			statusService:     statusService,
+			modelAgentService: modelAgentService,
+			machineService:    machineService,
+		},
+		upgradeService: upgradeService,
 	}
-	if model.Life() != state.Alive {
-		return errors.Errorf("model is %s", model.Life())
-	}
+}
 
+func (c *precheckController) checkController(ctx context.Context) error {
+	// TODO(modelmigration): check the model is alive?
 	if upgrading, err := c.upgradeService.IsUpgrading(ctx); err != nil {
 		return errors.Annotate(err, "checking for upgrades")
 	} else if upgrading {
@@ -182,180 +321,106 @@ func (c *precheckContext) checkController(ctx context.Context) error {
 	return errors.Trace(c.checkMachines(ctx))
 }
 
-func (c *precheckContext) checkMachines(ctx context.Context) error {
-	modelVersion, err := c.backend.AgentVersion()
+type precheckModel struct {
+	precheckContext
+	model                 coremodel.Model
+	modelMigrationService ModelMigrationService
+	credentialService     CredentialService
+	applicationService    ApplicationService
+	relationService       RelationService
+}
+
+func newPrecheckModel(
+	model coremodel.Model,
+	modelMigrationService ModelMigrationService,
+	credentialService CredentialService,
+	applicationService ApplicationService,
+	relationService RelationService,
+	statusService StatusService,
+	modelAgentService ModelAgentService,
+	machineService MachineService,
+) *precheckModel {
+	return &precheckModel{
+		model: model,
+		precheckContext: precheckContext{
+			statusService:     statusService,
+			modelAgentService: modelAgentService,
+			machineService:    machineService,
+		},
+		modelMigrationService: modelMigrationService,
+		applicationService:    applicationService,
+		credentialService:     credentialService,
+		relationService:       relationService,
+	}
+}
+
+func (c *precheckModel) checkApplications(ctx context.Context) error {
+	// We check all units in the model for every application. This checks to see
+	// that there agent versions are what we expect.
+	agentLaggingUnits, err := c.modelAgentService.GetUnitsNotAtTargetAgentVersion(ctx)
 	if err != nil {
-		return errors.Annotate(err, "retrieving model version")
+		return internalerrors.Errorf(
+			"getting units that are not running the target agent version for the model: %w", err,
+		)
+	}
+	if len(agentLaggingUnits) > 0 {
+		return internalerrors.Errorf(
+			"there exists units in the model that are not running the target agent version of the model %v",
+			agentLaggingUnits,
+		)
 	}
 
-	machines, err := c.backend.AllMachines()
-	if err != nil {
-		return errors.Annotate(err, "retrieving machines")
+	if err := c.statusService.CheckUnitStatusesReadyForMigration(ctx); err != nil {
+		return errors.Trace(err)
 	}
-	modelPresenceContext := common.ModelPresenceContext{Presence: c.presence}
-	for _, machine := range machines {
-		if machine.Life() != state.Alive {
-			return errors.Errorf("machine %s is %s", machine.Id(), machine.Life())
-		}
 
-		if statusInfo, err := machine.InstanceStatus(); err != nil {
-			return errors.Annotatef(err, "retrieving machine %s instance status", machine.Id())
-		} else if statusInfo.Status != status.Running {
-			return newStatusError("machine %s not running", machine.Id(), statusInfo.Status)
-		}
-
-		if statusInfo, err := modelPresenceContext.MachineStatus(ctx, machine); err != nil {
-			return errors.Annotatef(err, "retrieving machine %s status", machine.Id())
-		} else if statusInfo.Status != status.Started {
-			return newStatusError("machine %s agent not functioning at this time",
-				machine.Id(), statusInfo.Status)
-		}
-
-		if rebootAction, err := machine.ShouldRebootOrShutdown(); err != nil {
-			return errors.Annotatef(err, "retrieving machine %s reboot status", machine.Id())
-		} else if rebootAction != state.ShouldDoNothing {
-			return errors.Errorf("machine %s is scheduled to %s", machine.Id(), rebootAction)
-		}
-
-		if err := checkAgentTools(modelVersion, machine, "machine "+machine.Id()); err != nil {
-			return errors.Trace(err)
-		}
+	if err := c.applicationService.CheckAllApplicationsAndUnitsAreAlive(ctx); err != nil {
+		return internalerrors.Errorf("pre-checking applications for migration: %w", err)
 	}
+
+	// TODO(aflynn): 2025-05-24 check if any units are mid-upgrade.
+
 	return nil
 }
 
-func (c *precheckContext) checkApplications(ctx context.Context) (map[string][]PrecheckUnit, error) {
-	modelVersion, err := c.backend.AgentVersion()
-	if err != nil {
-		return nil, errors.Annotate(err, "retrieving model version")
-	}
-	apps, err := c.backend.AllApplications()
-	if err != nil {
-		return nil, errors.Annotate(err, "retrieving applications")
-	}
+// checkRelations verify that all units involved in a relation are actually in
+// scope and valid.
+func (c *precheckModel) checkRelations(ctx context.Context) error {
+	// TODO(gfouillet): Handle crossmodel relation
+	//  This code doesn't rely on future crossmodel domain, but similar check
+	//  would be required on remote units.
 
-	model, err := c.backend.Model()
-	if err != nil {
-		return nil, errors.Annotate(err, "retrieving model")
-	}
-	appUnits := make(map[string][]PrecheckUnit, len(apps))
-	for _, app := range apps {
-		if app.Life() != state.Alive {
-			return nil, errors.Errorf("application %s is %s", app.Name(), app.Life())
-		}
-		units, err := app.AllUnits()
-		if err != nil {
-			return nil, errors.Annotatef(err, "retrieving units for %s", app.Name())
-		}
-		err = c.checkUnits(ctx, app, units, modelVersion, model.Type())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		appUnits[app.Name()] = units
-	}
-	return appUnits, nil
-}
-
-func (c *precheckContext) checkUnits(ctx context.Context, app PrecheckApplication, units []PrecheckUnit, modelVersion version.Number, modelType state.ModelType) error {
-	if len(units) < app.MinUnits() {
-		return errors.Errorf("application %s is below its minimum units threshold", app.Name())
-	}
-
-	appCharmURL, _ := app.CharmURL()
-	if appCharmURL == nil {
-		return errors.Errorf("application charm url is nil")
-	}
-
-	for _, unit := range units {
-		if unit.Life() != state.Alive {
-			return errors.Errorf("unit %s is %s", unit.Name(), unit.Life())
-		}
-
-		if err := c.checkUnitAgentStatus(ctx, unit); err != nil {
-			return errors.Trace(err)
-		}
-
-		if modelType == state.ModelTypeIAAS {
-			if err := checkAgentTools(modelVersion, unit, "unit "+unit.Name()); err != nil {
-				return errors.Trace(err)
-			}
-		}
-
-		unitCharmURL := unit.CharmURL()
-		if unitCharmURL == nil || *appCharmURL != *unitCharmURL {
-			return errors.Errorf("unit %s is upgrading", unit.Name())
-		}
-	}
-	return nil
-}
-
-func (c *precheckContext) checkUnitAgentStatus(ctx context.Context, unit PrecheckUnit) error {
-	modelPresenceContext := common.ModelPresenceContext{Presence: c.presence}
-	statusData, _ := modelPresenceContext.UnitStatus(ctx, unit)
-	if statusData.Err != nil {
-		return errors.Annotatef(statusData.Err, "retrieving unit %s status", unit.Name())
-	}
-	agentStatus := statusData.Status.Status
-	switch agentStatus {
-	case status.Idle, status.Executing:
-		// These two are fine.
-	default:
-		return newStatusError("unit %s not idle or executing", unit.Name(), agentStatus)
-	}
-	return nil
-}
-
-func (c *precheckContext) checkRelations(appUnits map[string][]PrecheckUnit) error {
-	relations, err := c.backend.AllRelations()
+	// TODO(jack-w-shaw): Push this entire check into a service method
+	relations, err := c.relationService.GetAllRelationDetails(ctx)
 	if err != nil {
 		return errors.Annotate(err, "retrieving model relations")
 	}
+
+	unitsCache := make(map[string][]coreunit.Name)
+
 	for _, rel := range relations {
-		remoteAppName, crossModel, err := rel.RemoteApplication()
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			return errors.Annotatef(err, "checking whether relation %s is cross-model", rel)
-		}
-
-		checkRelationUnit := func(ru PrecheckRelationUnit) error {
-			valid, err := ru.Valid()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if !valid {
-				return nil
-			}
-			inScope, err := ru.InScope()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if !inScope {
-				return errors.Errorf("unit %s hasn't joined relation %q yet", ru.UnitName(), rel)
-			}
-			return nil
-		}
-
-		for _, ep := range rel.Endpoints() {
-			// The endpoint app is either local or cross model.
-			// Handle each one as appropriate.
-			if crossModel && ep.ApplicationName == remoteAppName {
-				remoteUnits, err := rel.AllRemoteUnits(remoteAppName)
+		for _, ep := range rel.Endpoints {
+			unitNames, ok := unitsCache[ep.ApplicationName]
+			if !ok {
+				unitNames, err = c.applicationService.GetUnitNamesForApplication(ctx, ep.ApplicationName)
 				if err != nil {
-					return errors.Trace(err)
+					return errors.Annotatef(err, "retrieving unit names for application %s", ep.ApplicationName)
 				}
-				for _, ru := range remoteUnits {
-					if err := checkRelationUnit(ru); err != nil {
-						return errors.Trace(err)
-					}
+				unitsCache[ep.ApplicationName] = unitNames
+			}
+			for _, unitName := range unitNames {
+				ok, err := c.relationService.RelationUnitInScopeByID(ctx, rel.ID, unitName)
+				if err != nil {
+					return errors.Annotatef(err, "retrieving relation unit %s", unitName)
 				}
-			} else {
-				for _, unit := range appUnits[ep.ApplicationName] {
-					ru, err := rel.Unit(unit)
+				if !ok {
+					// means the unit is not in scope
+					key, err := relation.NewKey(transform.Slice(rel.Endpoints,
+						domainrelation.Endpoint.EndpointIdentifier))
 					if err != nil {
 						return errors.Trace(err)
 					}
-					if err := checkRelationUnit(ru); err != nil {
-						return errors.Trace(err)
-					}
+					return errors.Errorf("unit %s hasn't joined relation %q yet", unitName, key)
 				}
 			}
 		}
@@ -363,41 +428,21 @@ func (c *precheckContext) checkRelations(appUnits map[string][]PrecheckUnit) err
 	return nil
 }
 
-type precheckSource struct {
-	precheckContext
-	environscloudspecGetter environsCloudSpecGetter
-	credentialService       CredentialService
-}
-
-func newPrecheckSource(
-	backend PrecheckBackend, presence ModelPresence, environscloudspecGetter environsCloudSpecGetter,
-	credentialService CredentialService,
-	upgradeService UpgradeService,
-) *precheckSource {
-	return &precheckSource{
-		precheckContext: precheckContext{
-			backend:        backend,
-			presence:       presence,
-			upgradeService: upgradeService,
-		},
-		environscloudspecGetter: environscloudspecGetter,
-		credentialService:       credentialService,
+func (ctx *precheckModel) checkModel(stdCtx context.Context) error {
+	// TODO(modelmigration): wire through model life?
+	if ctx.model.Life != corelife.Alive {
+		return errors.Errorf("model is %s", ctx.model.Life)
 	}
-}
-
-func (ctx *precheckSource) checkModel(stdCtx context.Context) error {
-	model, err := ctx.backend.Model()
+	mode, err := ctx.modelMigrationService.ModelMigrationMode(stdCtx)
 	if err != nil {
-		return errors.Annotate(err, "retrieving model")
+		return errors.Trace(err)
 	}
-	if model.Life() != state.Alive {
-		return errors.Errorf("model is %s", model.Life())
-	}
-	if model.MigrationMode() == state.MigrationModeImporting {
+	if mode == modelmigration.MigrationModeImporting {
 		return errors.New("model is being imported as part of another migration")
 	}
-	if credTag, found := model.CloudCredentialTag(); found {
-		creds, err := ctx.credentialService.CloudCredential(stdCtx, credential.KeyFromTag(credTag))
+
+	if ctx.model.Credential != (credential.Key{}) {
+		creds, err := ctx.credentialService.CloudCredential(stdCtx, ctx.model.Credential)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -406,13 +451,15 @@ func (ctx *precheckSource) checkModel(stdCtx context.Context) error {
 		}
 	}
 
-	cloudspec, err := ctx.environscloudspecGetter(stdCtx, names.NewModelTag(model.UUID()))
-	if err != nil {
-		return errors.Trace(err)
+	validators := upgradevalidation.ValidatorsForModelMigrationSource()
+	modelGroupedName := fmt.Sprintf("%s/%s", ctx.model.Qualifier, ctx.model.Name)
+
+	validationServices := upgradevalidation.ValidatorServices{
+		ModelAgentService: ctx.modelAgentService,
+		MachineService:    ctx.machineService,
 	}
-	validators := upgradevalidation.ValidatorsForModelMigrationSource(cloudspec)
-	checker := upgradevalidation.NewModelUpgradeCheck(model.UUID(), nil, ctx.backend, model, validators...)
-	blockers, err := checker.Validate()
+	checker := upgradevalidation.NewModelUpgradeCheck(modelGroupedName, validationServices, validators...)
+	blockers, err := checker.Validate(stdCtx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -422,32 +469,23 @@ func (ctx *precheckSource) checkModel(stdCtx context.Context) error {
 	return errors.NewNotSupported(nil, fmt.Sprintf("cannot migrate to controller due to issues:\n%s", blockers))
 }
 
-type agentToolsGetter interface {
-	AgentTools() (*tools.Tools, error)
-}
+const (
+	fanConfigKey = "fan-config"
+)
 
-func checkAgentTools(modelVersion version.Number, agent agentToolsGetter, agentLabel string) error {
-	tools, err := agent.AgentTools()
-	if err != nil {
-		return errors.Annotatef(err, "retrieving agent binaries for %s", agentLabel)
+// checkNoFanConfig makes sure that no fan config was used in the config of the
+// model being migrated.
+func checkNoFanConfig(modelConfig map[string]interface{}) error {
+	if modelConfig[fanConfigKey] != nil && modelConfig[fanConfigKey] != "" {
+		return errors.Errorf("fan networking not supported, remove fan-config %q from migrating model config", modelConfig[fanConfigKey])
 	}
-	agentVersion := tools.Version.Number
-	if agentVersion != modelVersion {
-		return errors.Errorf("%s agent binaries don't match model (%s != %s)",
-			agentLabel, agentVersion, modelVersion)
+	if modelConfig[config.ContainerNetworkingMethodKey] != nil && modelConfig[config.ContainerNetworkingMethodKey] == "fan" {
+		return errors.Errorf("fan networking not supported, remove container-networking-method %q from migrating model config", modelConfig[config.ContainerNetworkingMethodKey])
 	}
 	return nil
 }
 
-func newStatusError(format, id string, s status.Status) error {
-	msg := fmt.Sprintf(format, id)
-	if s != status.Empty {
-		msg += fmt.Sprintf(" (%s)", s)
-	}
-	return errors.New(msg)
-}
-
-func controllerVersionCompatible(sourceVersion, targetVersion version.Number) bool {
+func controllerVersionCompatible(sourceVersion, targetVersion semversion.Number) bool {
 	// Compare source controller version to target controller version, only
 	// considering major and minor version numbers. Downgrades between
 	// patch, build releases for a given major.minor release are
@@ -457,9 +495,35 @@ func controllerVersionCompatible(sourceVersion, targetVersion version.Number) bo
 	return sourceVersion.Compare(targetVersion) <= 0
 }
 
-func versionToMajMin(ver version.Number) version.Number {
+func versionToMajMin(ver semversion.Number) semversion.Number {
 	ver.Patch = 0
 	ver.Build = 0
 	ver.Tag = ""
 	return ver
+}
+
+// checkForCharmsWithNoManifest checks the model for applications that use charms
+// with no bases listed in the manifest.
+func checkForCharmsWithNoManifest(model description.Model) error {
+	result := set.NewStrings()
+	for _, app := range model.Applications() {
+		if app == nil {
+			return internalerrors.Errorf("model contains nil application")
+		}
+
+		manifest := app.CharmManifest()
+		if manifest == nil {
+			result.Add(app.Name())
+			continue
+		}
+		if len(manifest.Bases()) == 0 {
+			result.Add(app.Name())
+		}
+	}
+	if !result.IsEmpty() {
+		return internalerrors.Errorf("all charms now require a manifest.yaml file, this model hosts charm(s) with no manifest.yaml file: %s",
+			strings.Join(result.SortedValues(), ", "),
+		)
+	}
+	return nil
 }

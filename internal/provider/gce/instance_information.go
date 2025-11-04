@@ -4,6 +4,7 @@
 package gce
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -13,9 +14,8 @@ import (
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
-	"github.com/juju/juju/internal/provider/gce/google"
+	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 var (
@@ -41,12 +41,12 @@ func ensureDefaultConstraints(c constraints.Value) constraints.Value {
 }
 
 // InstanceTypes implements InstanceTypesFetcher
-func (env *environ) InstanceTypes(ctx envcontext.ProviderCallContext, c constraints.Value) (instances.InstanceTypesWithCostMetadata, error) {
+func (env *environ) InstanceTypes(ctx context.Context, c constraints.Value) (instances.InstanceTypesWithCostMetadata, error) {
 	allInstanceTypes, err := env.getAllInstanceTypes(ctx, clock.WallClock)
 	if err != nil {
 		return instances.InstanceTypesWithCostMetadata{}, errors.Trace(err)
 	}
-	matches, err := instances.MatchingInstanceTypes(allInstanceTypes, "", ensureDefaultConstraints(c))
+	matches, err := instances.MatchingInstanceTypes(allInstanceTypes, env.cloud.Region, ensureDefaultConstraints(c))
 	if err != nil {
 		return instances.InstanceTypesWithCostMetadata{}, errors.Trace(err)
 	}
@@ -55,7 +55,7 @@ func (env *environ) InstanceTypes(ctx envcontext.ProviderCallContext, c constrai
 
 // getAllInstanceTypes fetches and memoizes the list of available GCE instances
 // for the AZs associated with the current region.
-func (env *environ) getAllInstanceTypes(ctx envcontext.ProviderCallContext, clock clock.Clock) ([]instances.InstanceType, error) {
+func (env *environ) getAllInstanceTypes(ctx context.Context, clock clock.Clock) ([]instances.InstanceType, error) {
 	env.instTypeListLock.Lock()
 	defer env.instTypeListLock.Unlock()
 
@@ -63,35 +63,31 @@ func (env *environ) getAllInstanceTypes(ctx envcontext.ProviderCallContext, cloc
 		return env.cachedInstanceTypes, nil
 	}
 
-	reg, err := env.Region()
+	zones, err := env.gce.AvailabilityZones(ctx, env.cloud.Region)
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	zones, err := env.gce.AvailabilityZones(reg.Region)
-	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
 	resultUnique := map[string]instances.InstanceType{}
 
 	for _, z := range zones {
-		if !z.Available() {
+		if z.GetStatus() != google.StatusUp {
 			continue
 		}
-		machines, err := env.gce.ListMachineTypes(z.Name())
+		machines, err := env.gce.ListMachineTypes(ctx, z.GetName())
 		if err != nil {
-			return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+			return nil, env.HandleCredentialError(ctx, err)
 		}
 		for _, m := range machines {
 			i := instances.InstanceType{
-				Id:       strconv.FormatUint(m.Id, 10),
-				Name:     m.Name,
-				CpuCores: uint64(m.GuestCpus),
-				Mem:      uint64(m.MemoryMb),
+				Id:       strconv.FormatUint(m.GetId(), 10),
+				Name:     m.GetName(),
+				CpuCores: uint64(m.GetGuestCpus()),
+				Mem:      uint64(m.GetMemoryMb()),
 				// TODO: support arm64 once the API can report arch.
 				Arch:     arch.AMD64,
 				VirtType: &virtType,
 			}
-			resultUnique[m.Name] = i
+			resultUnique[m.GetName()] = i
 		}
 	}
 

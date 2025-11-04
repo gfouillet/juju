@@ -9,16 +9,17 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"sync"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/agent/keyupdater"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/semversion"
 	jujuproxy "github.com/juju/juju/internal/proxy"
 	"github.com/juju/juju/rpc/jsoncodec"
 )
@@ -29,8 +30,8 @@ type conn struct {
 	conn   jsoncodec.JSONConn
 	clock  clock.Clock
 
-	// addr is the address used to connect to the API server.
-	addr string
+	// addr is the URL used to connect to the root of the API server.
+	addr *url.URL
 
 	// ipAddr is the IP address used to connect to the API server.
 	ipAddr string
@@ -49,7 +50,7 @@ type conn struct {
 	// serverVersion holds the version of the API server that we are
 	// connected to.  It is possible that this version is 0 if the
 	// server does not report this during login.
-	serverVersion version.Number
+	serverVersion semversion.Number
 
 	// hostPorts is the API server addresses returned from Login,
 	// which the client may cache and use for fail-over.
@@ -85,21 +86,19 @@ type conn struct {
 	// closed is a channel that gets closed when State.Close is called.
 	closed chan struct{}
 
+	// done is true when the connection was already closed.
+	done bool
+
+	// closeMutex protects the closed channel and done boolean.
+	closeMutex sync.Mutex
+
 	// loggedIn holds whether the client has successfully logged
 	// in. It's a int32 so that the atomic package can be used to
 	// access it safely.
 	loggedIn int32
 
-	// tag, password, macaroons and nonce hold the cached login
-	// credentials. These are only valid if loggedIn is 1.
-	tag       string
-	password  string
-	macaroons []macaroon.Slice
-	nonce     string
-
-	// serverRootAddress holds the cached API server address and port used
-	// to login.
-	serverRootAddress string
+	// loginProvider holds the provider used for login.
+	loginProvider LoginProvider
 
 	// serverScheme is the URI scheme of the API Server
 	serverScheme string
@@ -124,7 +123,7 @@ type conn struct {
 // TODO (alesstimec, wallyworld): This method should be removed and
 // a login provider should be used instead.
 func (c *conn) Login(ctx context.Context, name names.Tag, password, nonce string, ms []macaroon.Slice) error {
-	lp := NewUserpassLoginProvider(name, password, nonce, ms, c.bakeryClient, c.cookieURL)
+	lp := NewLegacyLoginProvider(name, password, nonce, ms, c.bakeryClient, c.cookieURL)
 	result, err := lp.Login(ctx, c)
 	if err != nil {
 		return errors.Trace(err)
@@ -155,10 +154,12 @@ func (c *conn) setLoginResult(p *LoginResultParams) error {
 	c.modelAccess = p.modelAccess
 
 	hostPorts := p.servers
-	// if the connection is not proxied then we will add the connection address
-	// to host ports
-	if !c.IsProxied() {
-		hostPorts, err = addAddress(p.servers, c.addr)
+	// If the connection is not proxied then we will add the connection address
+	// to host ports. Additionally if the connection address includes a path,
+	// it can't be added to host ports as it will lose the path so skip the
+	// address in scenarios where we connect through a load-balancer.
+	if !c.IsProxied() && c.addr.Path == "" {
+		hostPorts, err = addAddress(p.servers, c.addr.Host)
 		if err != nil {
 			if clerr := c.Close(); clerr != nil {
 				err = errors.Annotatef(err, "error closing conn: %v", clerr)
@@ -167,15 +168,6 @@ func (c *conn) setLoginResult(p *LoginResultParams) error {
 		}
 	}
 	c.hostPorts = hostPorts
-
-	if err != nil {
-		if clerr := c.Close(); clerr != nil {
-			err = errors.Annotatef(err, "error closing conn: %v", clerr)
-		}
-		return err
-	}
-	c.hostPorts = hostPorts
-
 	c.publicDNSName = p.publicDNSName
 
 	c.facadeVersions = make(map[string][]int, len(p.facades))
@@ -255,6 +247,6 @@ func (c *conn) KeyUpdater() *keyupdater.Client {
 // It is possible that this version is Zero if the server does not report this
 // during login. The second result argument indicates if the version number is
 // set.
-func (c *conn) ServerVersion() (version.Number, bool) {
-	return c.serverVersion, c.serverVersion != version.Zero
+func (c *conn) ServerVersion() (semversion.Number, bool) {
+	return c.serverVersion, c.serverVersion != semversion.Zero
 }

@@ -4,14 +4,13 @@
 package maas
 
 import (
-	"context"
+	stdtesting "testing"
 
 	"github.com/juju/gomaasapi/v2"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 // Ensure MAAS provider supports the expected interfaces.
@@ -23,10 +22,12 @@ type configSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&configSuite{})
+func TestConfigSuite(t *stdtesting.T) {
+	tc.Run(t, &configSuite{})
+}
 
 // newConfig creates a MAAS environment config from attributes.
-func newConfig(values map[string]interface{}) (*maasModelConfig, error) {
+func newConfig(c *tc.C, values map[string]interface{}) (*maasModelConfig, error) {
 	attrs := testing.FakeConfig().Merge(testing.Attrs{
 		"name": "testmodel",
 		"type": "maas",
@@ -35,40 +36,40 @@ func newConfig(values map[string]interface{}) (*maasModelConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return providerInstance.newConfig(context.Background(), cfg)
+	return providerInstance.newConfig(c.Context(), cfg)
 }
 
-func (s *configSuite) SetUpTest(c *gc.C) {
+func (s *configSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
-	mockGetController := func(string, string) (gomaasapi.Controller, error) {
+	mockGetController := func(gomaasapi.ControllerArgs) (gomaasapi.Controller, error) {
 		return nil, gomaasapi.NewUnsupportedVersionError("oops")
 	}
 	s.PatchValue(&GetMAASController, mockGetController)
 }
 
-func (*configSuite) TestValidateUpcallsEnvironsConfigValidate(c *gc.C) {
+func (*configSuite) TestValidateUpcallsEnvironsConfigValidate(c *tc.C) {
 	// The base Validate() function will not allow an environment to
 	// change its name.  Trigger that error so as to prove that the
 	// environment provider's Validate() calls the base Validate().
-	oldCfg, err := newConfig(nil)
-	c.Assert(err, jc.ErrorIsNil)
+	oldCfg, err := newConfig(c, nil)
+	c.Assert(err, tc.ErrorIsNil)
 	newName := oldCfg.Name() + "-but-different"
 	newCfg, err := oldCfg.Apply(map[string]interface{}{"name": newName})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = EnvironProvider{}.Validate(context.Background(), newCfg, oldCfg.Config)
+	_, err = EnvironProvider{}.Validate(c.Context(), newCfg, oldCfg.Config)
 
-	c.Assert(err, gc.NotNil)
-	c.Check(err, gc.ErrorMatches, ".*cannot change name.*")
+	c.Assert(err, tc.NotNil)
+	c.Check(err, tc.ErrorMatches, ".*cannot change name.*")
 }
 
-func (*configSuite) TestSchema(c *gc.C) {
+func (*configSuite) TestSchema(c *tc.C) {
 	fields := providerInstance.Schema()
 	// Check that all the fields defined in environs/config
 	// are in the returned schema.
 	globalFields, err := config.Schema(nil)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 	for name, field := range globalFields {
-		c.Check(fields[name], jc.DeepEquals, field)
+		c.Check(fields[name], tc.DeepEquals, field)
 	}
 }

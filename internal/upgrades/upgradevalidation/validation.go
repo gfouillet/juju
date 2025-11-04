@@ -4,26 +4,32 @@
 package upgradevalidation
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/replicaset/v3"
-	"github.com/juju/version/v2"
 
 	corebase "github.com/juju/juju/core/base"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/semversion"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/internal/provider/lxd"
 	"github.com/juju/juju/internal/provider/lxd/lxdnames"
-	"github.com/juju/juju/state"
 )
 
+// ValidatorServices is a set of required services to perform upgrade validation.
+// Nothing in this list can be unused. If they are no longer required, remove them.
+type ValidatorServices struct {
+	ModelAgentService ModelAgentService
+	MachineService    MachineService
+}
+
 // Validator returns a blocker.
-type Validator func(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error)
+type Validator func(ctx context.Context, services ValidatorServices) (*Blocker, error)
 
 // Blocker describes a model upgrade blocker.
 type Blocker struct {
@@ -100,32 +106,29 @@ func (e ModelUpgradeBlockers) string() string {
 
 // ModelUpgradeCheck sumarizes a list of blockers for upgrading the provided model.
 type ModelUpgradeCheck struct {
-	modelUUID  string
-	pool       StatePool
-	state      State
-	model      Model
+	modelName  string
+	services   ValidatorServices
 	validators []Validator
 }
 
 // NewModelUpgradeCheck returns a ModelUpgradeCheck instance.
 func NewModelUpgradeCheck(
-	modelUUID string, pool StatePool, state State, model Model,
+	modelName string,
+	services ValidatorServices,
 	validators ...Validator,
 ) *ModelUpgradeCheck {
 	return &ModelUpgradeCheck{
-		modelUUID:  modelUUID,
-		pool:       pool,
-		state:      state,
-		model:      model,
+		modelName:  modelName,
+		services:   services,
 		validators: validators,
 	}
 }
 
 // Validate runs the provided validators and returns blocks.
-func (m *ModelUpgradeCheck) Validate() (*ModelUpgradeBlockers, error) {
+func (m *ModelUpgradeCheck) Validate(ctx context.Context) (*ModelUpgradeBlockers, error) {
 	var blockers []Blocker
 	for _, validator := range m.validators {
-		if blocker, err := validator(m.modelUUID, m.pool, m.state, m.model); err != nil {
+		if blocker, err := validator(ctx, m.services); err != nil {
 			return nil, errors.Trace(err)
 		} else if blocker != nil {
 			blockers = append(blockers, *blocker)
@@ -135,21 +138,8 @@ func (m *ModelUpgradeCheck) Validate() (*ModelUpgradeBlockers, error) {
 		return nil, nil
 	}
 	return NewModelUpgradeBlockers(
-		fmt.Sprintf("%s/%s", m.model.Owner().Name(), m.model.Name()), blockers...,
+		m.modelName, blockers...,
 	), nil
-}
-
-func getCheckUpgradeSeriesLockForModel(force bool) Validator {
-	return func(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
-		locked, err := st.HasUpgradeSeriesLocks()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		if locked && !force {
-			return NewBlocker("unexpected upgrade series lock found"), nil
-		}
-		return nil, nil
-	}
 }
 
 // For testing.
@@ -157,27 +147,39 @@ func getCheckUpgradeSeriesLockForModel(force bool) Validator {
 var SupportedJujuBases = corebase.WorkloadBases
 
 func checkForDeprecatedUbuntuSeriesForModel(
-	_ string, _ StatePool, st State, _ Model,
+	ctx context.Context,
+	services ValidatorServices,
 ) (*Blocker, error) {
 	supportedBases := SupportedJujuBases()
-	stateBases := transform.Slice(supportedBases, func(b corebase.Base) state.Base {
-		return state.Base{OS: b.OS, Channel: b.Channel.String()}
-	})
-	baseCountMap, err := st.MachineCountForBase(stateBases...)
+
+	// TODO(modelmigrations): this should be one call to machine domain.
+	machineNames, err := services.MachineService.AllMachineNames(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "cannot count deprecated ubuntu machines")
+		return nil, errors.Annotate(err, "cannot get machine names")
 	}
-	allSupportedCount := 0
-	for _, v := range baseCountMap {
-		allSupportedCount += v
+	baseCounts := map[corebase.Base]int{}
+	for _, machineName := range machineNames {
+		base, err := services.MachineService.GetMachineBase(ctx, machineName)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		baseCounts[base]++
+	}
+	totalUnsupported := 0
+	for base, count := range baseCounts {
+		supported := false
+		for _, supportedBase := range supportedBases {
+			if supportedBase.IsCompatible(base) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			totalUnsupported += count
+		}
 	}
 
-	allMachinesCount, err := st.AllMachinesCount()
-	if err != nil {
-		return nil, errors.Annotate(err, "cannot get all machines count")
-	}
-
-	if totalUnsupported := allMachinesCount - allSupportedCount; totalUnsupported > 0 {
+	if totalUnsupported > 0 {
 		return NewBlocker("the model hosts %d ubuntu machine(s) with an unsupported base. The supported bases are: %v",
 			totalUnsupported,
 			strings.Join(transform.Slice(supportedBases, func(b corebase.Base) string { return b.DisplayString() }), ", "),
@@ -187,10 +189,10 @@ func checkForDeprecatedUbuntuSeriesForModel(
 }
 
 func getCheckTargetVersionForControllerModel(
-	targetVersion version.Number,
+	targetVersion semversion.Number,
 ) Validator {
-	return func(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
-		agentVersion, err := model.AgentVersion()
+	return func(ctx context.Context, services ValidatorServices) (*Blocker, error) {
+		agentVersion, err := services.ModelAgentService.GetModelTargetAgentVersion(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -206,11 +208,11 @@ func getCheckTargetVersionForControllerModel(
 }
 
 func getCheckTargetVersionForModel(
-	targetVersion version.Number,
-	versionChecker func(from, to version.Number) (bool, version.Number, error),
+	targetVersion semversion.Number,
+	versionChecker func(from, to semversion.Number) (bool, semversion.Number, error),
 ) Validator {
-	return func(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
-		agentVersion, err := model.AgentVersion()
+	return func(ctx context.Context, services ValidatorServices) (*Blocker, error) {
+		agentVersion, err := services.ModelAgentService.GetModelTargetAgentVersion(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -228,59 +230,11 @@ func getCheckTargetVersionForModel(
 	}
 }
 
-func checkModelMigrationModeForControllerUpgrade(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
-	if mode := model.MigrationMode(); mode != state.MigrationModeNone {
-		return NewBlocker("model is under %q mode, upgrade blocked", mode), nil
-	}
-	return nil, nil
-}
-
-func checkMongoStatusForControllerUpgrade(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
-	replicaStatus, err := st.MongoCurrentStatus()
-	if err != nil {
-		return nil, errors.Annotate(err, "cannot check replicaset status")
-	}
-
-	// Iterate over the replicaset, and record any nodes that aren't either
-	// primary or secondary.
-	var notes []string
-	for _, member := range replicaStatus.Members {
-		switch member.State {
-		case replicaset.PrimaryState:
-			// All good.
-		case replicaset.SecondaryState:
-			// Also good.
-		default:
-			msg := fmt.Sprintf("node %d (%s) has state %s", member.Id, member.Address, member.State)
-			notes = append(notes, msg)
-		}
-	}
-	if len(notes) > 0 {
-		return NewBlocker("unable to upgrade, database %s", strings.Join(notes, ", ")), nil
-	}
-	return nil, nil
-}
-
-func checkMongoVersionForControllerModel(_ string, pool StatePool, _ State, _ Model) (*Blocker, error) {
-	v, err := pool.MongoVersion()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	if !strings.Contains(v, "4.4") {
-		// Controllers with mongo version != 4.4 are not able to be upgraded further.
-		return NewBlocker(
-			`mongo version has to be "4.4" at least, but current version is %q`, v,
-		), nil
-	}
-	return nil, nil
-}
-
 // For testing.
 var NewServerFactory = lxd.NewServerFactory
 
 func getCheckForLXDVersion(cloudspec environscloudspec.CloudSpec) Validator {
-	return func(modelUUID string, pool StatePool, st State, model Model) (*Blocker, error) {
+	return func(ctx context.Context, services ValidatorServices) (*Blocker, error) {
 		if !lxdnames.IsDefaultCloud(cloudspec.Type) {
 			return nil, nil
 		}
@@ -294,7 +248,7 @@ func getCheckForLXDVersion(cloudspec environscloudspec.CloudSpec) Validator {
 		}
 		err = lxd.ValidateAPIVersion(server.ServerVersion())
 		if errors.Is(err, errors.NotSupported) {
-			return NewBlocker(err.Error()), nil
+			return NewBlocker("%s", err.Error()), nil
 		}
 		return nil, errors.Trace(err)
 	}

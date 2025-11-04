@@ -4,15 +4,15 @@
 package testing
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/worker/v4"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/changestream"
 	coredatabase "github.com/juju/juju/core/database"
 	"github.com/juju/juju/domain/schema/testing"
-	jujutesting "github.com/juju/juju/testing"
+	jujutesting "github.com/juju/juju/internal/testing"
 )
 
 // ControllerSuite is used to provide a sql.DB reference to tests.
@@ -23,53 +23,48 @@ type ControllerSuite struct {
 	watchableDB *TestWatchableDB
 }
 
+// DB shadows [testing.ControllerSuite] DB to ensure that change stream testing
+// is performed through a txn runner.
+func (s *ControllerSuite) DB() {}
+
 // SetUpTest is responsible for setting up a testing database suite initialised
 // with the controller schema.
-func (s *ControllerSuite) SetUpTest(c *gc.C) {
+func (s *ControllerSuite) SetUpTest(c *tc.C) {
 	s.ControllerSuite.SetUpTest(c)
 
 	s.watchableDB = NewTestWatchableDB(c, coredatabase.ControllerNS, s.TxnRunner())
-}
-
-func (s *ControllerSuite) TearDownTest(c *gc.C) {
-	if s.watchableDB != nil {
+	c.Cleanup(func() {
 		// We could use workertest.DirtyKill here, but some workers are already
 		// dead when we get here and it causes unwanted logs. This just ensures
 		// that we don't have any addition workers running.
-		killAndWait(c, s.watchableDB)
-	}
-	s.ControllerSuite.TearDownTest(c)
+		if s.watchableDB != nil {
+			s.watchableDB.Kill()
+			_ = s.watchableDB.Wait()
+			s.watchableDB = nil
+		}
+	})
 }
 
 // GetWatchableDB allows the ControllerSuite to be a WatchableDBGetter
-func (s *ControllerSuite) GetWatchableDB(namespace string) (changestream.WatchableDB, error) {
+func (s *ControllerSuite) GetWatchableDB(ctx context.Context, namespace string) (changestream.WatchableDB, error) {
 	return s.watchableDB, nil
 }
 
 // AssertChangeStreamIdle returns if and when the change stream is idle.
 // This is useful to ensure that the change stream is not processing any
 // events before running a test.
-func (w *ControllerSuite) AssertChangeStreamIdle(c *gc.C) {
+func (w *ControllerSuite) AssertChangeStreamIdle(c *tc.C) {
 	timeout := time.After(jujutesting.LongWait)
 	for {
 		select {
-		case state := <-w.watchableDB.states:
-			if state == stateIdle {
-				return
+		case states := <-w.watchableDB.states:
+			for _, state := range states {
+				if state == stateIdle {
+					return
+				}
 			}
 		case <-timeout:
 			c.Fatalf("timed out waiting for idle state")
 		}
-	}
-}
-
-func killAndWait(_ *gc.C, w worker.Worker) {
-	wait := make(chan error, 1)
-	go func() {
-		wait <- w.Wait()
-	}()
-	select {
-	case <-wait:
-	case <-time.After(jujutesting.LongWait):
 	}
 }

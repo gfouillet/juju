@@ -4,56 +4,59 @@
 package service
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	gomock "go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type serviceSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	state *MockState
 }
 
-var _ = gc.Suite(&serviceSuite{})
+func TestServiceSuite(t *testing.T) {
+	tc.Run(t, &serviceSuite{})
+}
 
-func (s *serviceSuite) TestSetFlag(c *gc.C) {
+func (s *serviceSuite) TestSetFlag(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().SetFlag(gomock.Any(), "foo", true, "foo set to true").Return(nil)
 
 	service := NewService(s.state)
-	err := service.SetFlag(context.Background(), "foo", true, "foo set to true")
-	c.Assert(err, jc.ErrorIsNil)
+	err := service.SetFlag(c.Context(), "foo", true, "foo set to true")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestGetFlag(c *gc.C) {
+func (s *serviceSuite) TestGetFlag(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.state.EXPECT().GetFlag(gomock.Any(), "foo").Return(true, nil)
 
 	service := NewService(s.state)
-	value, err := service.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(value, jc.IsTrue)
+	value, err := service.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(value, tc.IsTrue)
 }
 
-func (s *serviceSuite) TestGetFlagNotFound(c *gc.C) {
+func (s *serviceSuite) TestGetFlagNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.state.EXPECT().GetFlag(gomock.Any(), "foo").Return(false, errors.NotFoundf("flag"))
+	s.state.EXPECT().GetFlag(gomock.Any(), "foo").Return(false, errors.Errorf("flag %w", coreerrors.NotFound))
 
 	service := NewService(s.state)
-	value, err := service.GetFlag(context.Background(), "foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(value, jc.IsFalse)
+	value, err := service.GetFlag(c.Context(), "foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(value, tc.IsFalse)
 }
 
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *serviceSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.state = NewMockState(ctrl)

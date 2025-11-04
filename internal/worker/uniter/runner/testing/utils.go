@@ -4,12 +4,12 @@
 package testing
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v4"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/secrets"
@@ -28,12 +28,12 @@ type RealPaths struct {
 	metricsspool string
 }
 
-func osDependentSockPath(c *gc.C) sockets.Socket {
+func osDependentSockPath(c *tc.C) sockets.Socket {
 	sockPath := filepath.Join(c.MkDir(), "test.sock")
 	return sockets.Socket{Network: "unix", Address: sockPath}
 }
 
-func NewRealPaths(c *gc.C) RealPaths {
+func NewRealPaths(c *tc.C) RealPaths {
 	return RealPaths{
 		tools:        c.MkDir(),
 		charm:        c.MkDir(),
@@ -59,11 +59,11 @@ func (p RealPaths) GetBaseDir() string {
 	return p.base
 }
 
-func (p RealPaths) GetJujucClientSocket(remote bool) sockets.Socket {
+func (p RealPaths) GetJujucClientSocket() sockets.Socket {
 	return p.socket
 }
 
-func (p RealPaths) GetJujucServerSocket(remote bool) sockets.Socket {
+func (p RealPaths) GetJujucServerSocket() sockets.Socket {
 	return p.socket
 }
 
@@ -91,7 +91,6 @@ func (c *ContextStorage) Location() string {
 
 type FakeTracker struct {
 	leadership.Tracker
-	worker.Worker
 
 	AllowClaimLeader bool
 }
@@ -125,31 +124,29 @@ type SecretsContextAccessor struct {
 	jujusecrets.BackendsClient
 }
 
-func (s SecretsContextAccessor) CreateSecretURIs(int) ([]*secrets.URI, error) {
+func (s SecretsContextAccessor) CreateSecretURIs(context.Context, int) ([]*secrets.URI, error) {
 	return []*secrets.URI{{
 		ID: "8m4e2mr0ui3e8a215n4g",
 	}}, nil
 }
 
-func (s SecretsContextAccessor) SecretMetadata() ([]secrets.SecretOwnerMetadata, error) {
+func (s SecretsContextAccessor) SecretMetadata(context.Context) ([]secrets.SecretMetadata, error) {
 	uri, _ := secrets.ParseURI("secret:9m4e2mr0ui3e8a215n4g")
-	return []secrets.SecretOwnerMetadata{{
-		Metadata: secrets.SecretMetadata{
-			URI:            uri,
-			LatestRevision: 666,
-			Owner:          secrets.Owner{Kind: secrets.ApplicationOwner, ID: "mariadb"},
-			Description:    "description",
-			RotatePolicy:   secrets.RotateHourly,
-			Label:          "label",
-		},
-		Revisions: []int{666},
+	return []secrets.SecretMetadata{{
+		URI:                    uri,
+		LatestRevision:         666,
+		LatestRevisionChecksum: "deadbeef",
+		Owner:                  secrets.Owner{Kind: secrets.ApplicationOwner, ID: "mariadb"},
+		Description:            "description",
+		RotatePolicy:           secrets.RotateHourly,
+		Label:                  "label",
 	}}, nil
 }
 
-func (s SecretsContextAccessor) SaveContent(uri *secrets.URI, revision int, value secrets.SecretValue) (secrets.ValueRef, error) {
+func (s SecretsContextAccessor) SaveContent(_ context.Context, uri *secrets.URI, revision int, value secrets.SecretValue) (secrets.ValueRef, error) {
 	return secrets.ValueRef{}, errors.NotSupportedf("")
 }
 
-func (s SecretsContextAccessor) DeleteContent(uri *secrets.URI, revision int) error {
+func (s SecretsContextAccessor) DeleteContent(_ context.Context, uri *secrets.URI, revision int) error {
 	return errors.NotSupportedf("")
 }

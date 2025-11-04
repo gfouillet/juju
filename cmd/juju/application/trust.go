@@ -4,9 +4,9 @@
 package application
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -16,15 +16,16 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	coreapplication "github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
 	trustSummary = `Sets the trust status of a deployed application to true.`
 	trustDetails = `Sets the trust configuration value to true.
 
-On k8s models, the trust operation currently grants the charm full access to the cluster.
-Until the permissions model is refined to grant more granular role based access, the use of
-'--scope=cluster' is required to confirm this choice.
+On Kubernetes models, the ` + "`trust`" + ` operation currently grants the charm full access to the cluster.
+Until the permissions model is refined to grant more granular role-based access, the use of
+` + "`--scope=cluster`" + ` is required to confirm this choice.
 `
 
 	trustExamples = `
@@ -67,16 +68,16 @@ func (c *trustCommand) Info() *cmd.Info {
 func (c *trustCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	f.BoolVar(&c.removeTrust, "remove", false, "Remove trusted access from a trusted application")
-	f.StringVar(&c.scope, "scope", "", "k8s models only - needs to be set to 'cluster'")
+	f.StringVar(&c.scope, "scope", "", "(Kubernetes models only) Needs to be set to `cluster`")
 }
 
 // getAPI either uses the fake API set at test time or that is nil, gets a real
 // API and sets that as the API.
-func (c *trustCommand) getAPI() (ApplicationAPI, error) {
+func (c *trustCommand) getAPI(ctx context.Context) (ApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -94,7 +95,7 @@ func (c *trustCommand) Init(args []string) error {
 }
 
 func (c *trustCommand) Run(ctx *cmd.Context) error {
-	modelType, err := c.ModelType()
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -108,13 +109,13 @@ func (c *trustCommand) Run(ctx *cmd.Context) error {
 	}
 
 	// Set trust config value
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer func() { _ = client.Close() }()
 
-	err = client.SetConfig("", c.applicationName, "",
+	err = client.SetConfig(ctx, c.applicationName, "",
 		map[string]string{coreapplication.TrustConfigOptionName: fmt.Sprint(!c.removeTrust)},
 	)
 	return errors.Trace(block.ProcessBlockedError(err, block.BlockChange))

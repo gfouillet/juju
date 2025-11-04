@@ -4,11 +4,13 @@
 package controller
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewEnableDestroyControllerCommand returns a command that allows a controller admin
@@ -24,15 +26,15 @@ type enableDestroyController struct {
 
 type removeBlocksAPI interface {
 	Close() error
-	RemoveBlocks() error
+	RemoveBlocks(ctx context.Context) error
 }
 
 var enableDestroyDoc = `
 Any model in the controller that has disabled commands will block a controller
 from being destroyed.
 
-A controller administrator is able to enable all the commands across all the models
-in a Juju controller so that the controller can be destoyed if desired.
+A controller administrator can enable all the commands across all the models
+in a Juju controller so that the controller can be destroyed if desired.
 `
 
 // Info implements Command.Info
@@ -49,19 +51,19 @@ func (c *enableDestroyController) Info() *cmd.Info {
 	})
 }
 
-func (c *enableDestroyController) getAPI() (removeBlocksAPI, error) {
+func (c *enableDestroyController) getAPI(ctx context.Context) (removeBlocksAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.NewControllerAPIClient()
+	return c.NewControllerAPIClient(ctx)
 }
 
 // Run implements Command.Run
 func (c *enableDestroyController) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer client.Close()
-	return errors.Trace(client.RemoveBlocks())
+	return errors.Trace(client.RemoveBlocks(ctx))
 }

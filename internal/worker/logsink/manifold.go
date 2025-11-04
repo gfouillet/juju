@@ -5,58 +5,55 @@ package logsink
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/lumberjack/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
-	"github.com/juju/juju/agent"
-	"github.com/juju/juju/core/logger"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/paths"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/worker/common"
 )
+
+// NewModelLoggerFunc is a function that creates a new model logger.
+type NewModelLoggerFunc func(corelogger.LogSink, model.UUID, names.Tag) (worker.Worker, error)
 
 // ManifoldConfig defines the names of the manifolds on which a
 // Manifold will depend.
 type ManifoldConfig struct {
-	// DebugLogger is used to emit debug messages.
-	DebugLogger logger.Logger
+	// AgentTag is the tag of the agent, this is used for setting the entity
+	// tag on the logs.
+	AgentTag names.Tag
+
+	// LogSink is the log sink for all models.
+	LogSink corelogger.LogSink
 
 	// NewWorker creates a log sink worker.
 	NewWorker func(cfg Config) (worker.Worker, error)
 
-	// These attributes are the named workers this worker depends on.
+	// NewModelLogger creates a new model logger.
+	NewModelLogger NewModelLoggerFunc
 
-	ClockName          string
-	ServiceFactoryName string
-	AgentName          string
+	// Clock is the clock used by the worker.
+	Clock clock.Clock
 }
 
 // Validate validates the manifold configuration.
 func (config ManifoldConfig) Validate() error {
-	if config.DebugLogger == nil {
-		return errors.NotValidf("nil Logger")
+	if config.LogSink == nil {
+		return errors.NotValidf("nil LogSink")
 	}
 	if config.NewWorker == nil {
 		return errors.NotValidf("nil NewWorker")
 	}
-	if config.ClockName == "" {
-		return errors.NotValidf("empty ClockName")
+	if config.NewModelLogger == nil {
+		return errors.NotValidf("nil NewModelLogger")
 	}
-	if config.ServiceFactoryName == "" {
-		return errors.NotValidf("empty ServiceFactoryName")
+	if config.Clock == nil {
+		return errors.NotValidf("nil Clock")
 	}
-	if config.AgentName == "" {
-		return errors.NotValidf("empty AgentName")
-	}
-
 	return nil
 }
 
@@ -64,56 +61,18 @@ func (config ManifoldConfig) Validate() error {
 // worker, using the resource names defined in the supplied config.
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
-		Inputs: []string{
-			config.ServiceFactoryName,
-			config.AgentName,
-			config.ClockName,
-		},
+		Inputs: []string{},
 		Output: outputFunc,
 		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
-			var controllerServiceFactory servicefactory.ControllerServiceFactory
-			if err := getter.Get(config.ServiceFactoryName, &controllerServiceFactory); err != nil {
+			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
-			}
-			controllerCfg, err := controllerServiceFactory.ControllerConfig().ControllerConfig(ctx)
-			if err != nil {
-				return nil, errors.Annotate(err, "cannot read controller config")
-			}
-
-			var clock clock.Clock
-			if err := getter.Get(config.ClockName, &clock); err != nil {
-				return nil, errors.Trace(err)
-			}
-
-			var agent agent.Agent
-			if err := getter.Get(config.AgentName, &agent); err != nil {
-				return nil, errors.Trace(err)
-			}
-			currentConfig := agent.CurrentConfig()
-			logSinkConfig, err := getLogSinkConfig(currentConfig)
-			if err != nil {
-				return nil, errors.Annotate(err, "getting log sink config")
-			}
-
-			modelsDir := filepath.Join(currentConfig.LogDir(), "models")
-			if err := os.MkdirAll(modelsDir, 0755); err != nil {
-				return nil, errors.Annotate(err, "unable to create models log directory")
-			}
-			if err := paths.SetSyslogOwner(modelsDir); err != nil && !errors.Is(err, os.ErrPermission) {
-				// If we don't have permission to chown this, it means we are running rootless.
-				return nil, errors.Annotate(err, "unable to set owner for log directory")
 			}
 
 			w, err := config.NewWorker(Config{
-				Logger:        config.DebugLogger,
-				Clock:         clock,
-				LogSinkConfig: logSinkConfig,
-				LogWriterForModelFunc: getLoggerForModelFunc(
-					controllerCfg.ModelLogfileMaxSizeMB(),
-					controllerCfg.ModelLogfileMaxBackups(),
-					config.DebugLogger,
-					currentConfig.LogDir(),
-				),
+				AgentTag:       config.AgentTag,
+				LogSink:        config.LogSink,
+				Clock:          config.Clock,
+				NewModelLogger: NewModelLogger,
 			})
 			if err != nil {
 				return nil, errors.Trace(err)
@@ -135,34 +94,13 @@ func outputFunc(in worker.Worker, out interface{}) error {
 
 	switch outPointer := out.(type) {
 	case *corelogger.ModelLogger:
-		*outPointer = inWorker.logSink
+		*outPointer = inWorker
+	case *corelogger.LoggerContextGetter:
+		*outPointer = inWorker
+	case *corelogger.ModelLogSinkGetter:
+		*outPointer = inWorker
 	default:
-		return errors.Errorf("out should be *corelogger.Logger; got %T", out)
+		return errors.Errorf("out should be *logger.Logger; got %T", out)
 	}
 	return nil
-}
-
-// getLoggerForModelFunc returns a function which can be called to get a logger which can store
-// logs for a specified model.
-func getLoggerForModelFunc(maxSize, maxBackups int, debugLogger logger.Logger, logDir string) corelogger.LogWriterForModelFunc {
-	return func(modelUUID, modelName string) (corelogger.LogWriterCloser, error) {
-		if !names.IsValidModel(modelUUID) {
-			return nil, errors.NotValidf("model UUID %q", modelUUID)
-		}
-		logFilename := corelogger.ModelLogFile(logDir, modelUUID, modelName)
-		if err := paths.PrimeLogFile(logFilename); err != nil && !errors.Is(err, os.ErrPermission) {
-			// If we don't have permission to chown this, it means we are running rootless.
-			return nil, errors.Annotate(err, "unable to prime log file")
-		}
-		ljLogger := &lumberjack.Logger{
-			Filename:   logFilename,
-			MaxSize:    maxSize,
-			MaxBackups: maxBackups,
-			Compress:   true,
-		}
-		debugLogger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
-			ljLogger.Filename, ljLogger.MaxSize, ljLogger.MaxBackups)
-		modelFileLogger := &logWriter{WriteCloser: ljLogger}
-		return modelFileLogger, nil
-	}
 }

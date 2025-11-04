@@ -10,7 +10,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/juju/juju/caas/kubernetes/provider/constants"
 	"github.com/juju/juju/cloud"
 )
 
@@ -100,7 +99,7 @@ func CloudFromKubeConfigContext(
 ) (cloud.Cloud, error) {
 	newCloud := cloud.Cloud{
 		Name:            params.Name,
-		Type:            constants.CAASProviderType,
+		Type:            cloud.CloudTypeKubernetes,
 		HostCloudRegion: params.HostCloudRegion,
 		Regions:         params.Regions,
 		Description:     params.Description,
@@ -116,7 +115,8 @@ func CloudFromKubeConfigContext(
 		return newCloud, errors.NotFoundf("kubernetes cluster %q associated with context %q",
 			context.Cluster, ctxName)
 	}
-	return newCloud, buildCloudFromCluster(&newCloud, cluster)
+	err := buildCloudFromCluster(&newCloud, cluster)
+	return newCloud, err
 }
 
 // CloudFromKubeConfigContextReader constructs a Juju cloud object using the
@@ -146,7 +146,7 @@ func CloudFromKubeConfigCluster(
 ) (cloud.Cloud, error) {
 	newCloud := cloud.Cloud{
 		Name:            params.Name,
-		Type:            constants.CAASProviderType,
+		Type:            cloud.CloudTypeKubernetes,
 		HostCloudRegion: params.HostCloudRegion,
 		Regions:         params.Regions,
 		Description:     params.Description,
@@ -156,8 +156,8 @@ func CloudFromKubeConfigCluster(
 	if !exists {
 		return newCloud, errors.NotFoundf("kubernetes cluster %q not found", clusterName)
 	}
-
-	return newCloud, buildCloudFromCluster(&newCloud, cluster)
+	err := buildCloudFromCluster(&newCloud, cluster)
+	return newCloud, err
 }
 
 // CloudFromKubeConfigClusterReader attempts to construct a Juju cloud object

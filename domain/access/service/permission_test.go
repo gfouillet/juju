@@ -4,40 +4,43 @@
 package service
 
 import (
-	"context"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
 	corepermission "github.com/juju/juju/core/permission"
+	usertesting "github.com/juju/juju/core/user/testing"
 	"github.com/juju/juju/domain/access"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/uuid"
 )
 
 type serviceSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
-	state *MockPermissionState
+	state *MockState
 }
 
-var _ = gc.Suite(&serviceSuite{})
+func TestServiceSuite(t *testing.T) {
+	tc.Run(t, &serviceSuite{})
+}
 
-func (s *serviceSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *serviceSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
-	s.state = NewMockPermissionState(ctrl)
+	s.state = NewMockState(ctrl)
 	return ctrl
 }
 
-func (s *serviceSuite) TestCreatePermission(c *gc.C) {
+func (s *serviceSuite) TestCreatePermission(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.state.EXPECT().CreatePermission(gomock.Any(), gomock.AssignableToTypeOf(uuid.UUID{}), gomock.AssignableToTypeOf(corepermission.UserAccessSpec{})).Return(corepermission.UserAccess{}, nil)
 
 	spec := corepermission.UserAccessSpec{
-		User: "testme",
+		User: usertesting.GenNewName(c, "testme"),
 		AccessSpec: corepermission.AccessSpec{
 			Target: corepermission.ID{
 				ObjectType: corepermission.Cloud,
@@ -46,15 +49,15 @@ func (s *serviceSuite) TestCreatePermission(c *gc.C) {
 			Access: corepermission.AddModelAccess,
 		},
 	}
-	_, err := NewPermissionService(s.state).CreatePermission(context.Background(), spec)
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := NewService(s.state).CreatePermission(c.Context(), spec)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestCreatePermissionError(c *gc.C) {
+func (s *serviceSuite) TestCreatePermissionError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	spec := corepermission.UserAccessSpec{
-		User: "testme",
+		User: usertesting.GenNewName(c, "testme"),
 		AccessSpec: corepermission.AccessSpec{
 			Target: corepermission.ID{
 				ObjectType: corepermission.Cloud,
@@ -63,36 +66,36 @@ func (s *serviceSuite) TestCreatePermissionError(c *gc.C) {
 			Access: corepermission.ReadAccess,
 		},
 	}
-	_, err := NewPermissionService(s.state).CreatePermission(context.Background(), spec)
-	c.Assert(err, jc.ErrorIs, errors.NotValid)
+	_, err := NewService(s.state).CreatePermission(c.Context(), spec)
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid)
 }
 
-func (s *serviceSuite) TestDeletePermission(c *gc.C) {
+func (s *serviceSuite) TestDeletePermission(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().DeletePermission(gomock.Any(), "testme", gomock.AssignableToTypeOf(corepermission.ID{})).Return(nil)
-	err := NewPermissionService(s.state).DeletePermission(context.Background(), "testme", corepermission.ID{
+	s.state.EXPECT().DeletePermission(gomock.Any(), usertesting.GenNewName(c, "testme"), gomock.AssignableToTypeOf(corepermission.ID{})).Return(nil)
+	err := NewService(s.state).DeletePermission(c.Context(), usertesting.GenNewName(c, "testme"), corepermission.ID{
 		ObjectType: corepermission.Cloud,
 		Key:        "aws",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestDeletePermissionError(c *gc.C) {
+func (s *serviceSuite) TestDeletePermissionError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	err := NewPermissionService(s.state).DeletePermission(context.Background(), "testme", corepermission.ID{
+	err := NewService(s.state).DeletePermission(c.Context(), usertesting.GenNewName(c, "testme"), corepermission.ID{
 		ObjectType: "faileme",
 		Key:        "aws",
 	})
-	c.Assert(err, jc.ErrorIs, errors.NotValid, gc.Commentf("%+v", err))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid, tc.Commentf("%+v", err))
 }
 
-func (s *serviceSuite) TestUpsertPermission(c *gc.C) {
+func (s *serviceSuite) TestUpsertPermission(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().UpsertPermission(gomock.Any(), gomock.AssignableToTypeOf(access.UpdatePermissionArgs{})).Return(nil)
+	s.state.EXPECT().UpdatePermission(gomock.Any(), gomock.AssignableToTypeOf(access.UpdatePermissionArgs{})).Return(nil)
 
-	err := NewPermissionService(s.state).UpdatePermission(
-		context.Background(),
+	err := NewService(s.state).UpdatePermission(
+		c.Context(),
 		access.UpdatePermissionArgs{
 			AccessSpec: corepermission.AccessSpec{
 				Access: corepermission.AddModelAccess,
@@ -101,131 +104,163 @@ func (s *serviceSuite) TestUpsertPermission(c *gc.C) {
 					Key:        "aws",
 				},
 			},
-			AddUser: false,
-			ApiUser: "admin",
 			Change:  corepermission.Grant,
-			Subject: "testme",
+			Subject: usertesting.GenNewName(c, "testme"),
 		},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadUserAccessForTarget(c *gc.C) {
+func (s *serviceSuite) TestReadUserAccessForTarget(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().ReadUserAccessForTarget(gomock.Any(), "testme", gomock.AssignableToTypeOf(corepermission.ID{})).Return(corepermission.UserAccess{}, nil)
+	s.state.EXPECT().ReadUserAccessForTarget(gomock.Any(), usertesting.GenNewName(c, "testme"), gomock.AssignableToTypeOf(corepermission.ID{})).Return(corepermission.UserAccess{}, nil)
 
-	_, err := NewPermissionService(s.state).ReadUserAccessForTarget(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadUserAccessForTarget(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		corepermission.ID{
 			ObjectType: corepermission.Cloud,
 			Key:        "aws",
 		})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadUserAccessForTargetError(c *gc.C) {
+func (s *serviceSuite) TestReadUserAccessForTargetError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	_, err := NewPermissionService(s.state).ReadUserAccessForTarget(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadUserAccessForTarget(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		corepermission.ID{
 			ObjectType: "faileme",
 			Key:        "aws",
 		})
-	c.Assert(errors.Is(err, errors.NotValid), jc.IsTrue, gc.Commentf("%+v", err))
+	c.Assert(errors.Is(err, coreerrors.NotValid), tc.IsTrue, tc.Commentf("%+v", err))
 }
 
-func (s *serviceSuite) TestReadUserAccessLevelForTarget(c *gc.C) {
+func (s *serviceSuite) TestReadUserAccessLevelForTarget(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().ReadUserAccessLevelForTarget(gomock.Any(), "testme", gomock.AssignableToTypeOf(corepermission.ID{})).Return(corepermission.NoAccess, nil)
+	s.state.EXPECT().ReadUserAccessLevelForTarget(gomock.Any(), usertesting.GenNewName(c, "testme"), gomock.AssignableToTypeOf(corepermission.ID{})).Return(corepermission.NoAccess, nil)
 
-	_, err := NewPermissionService(s.state).ReadUserAccessLevelForTarget(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadUserAccessLevelForTarget(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		corepermission.ID{
 			ObjectType: corepermission.Cloud,
 			Key:        "aws",
 		})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadUserAccessLevelForTargetError(c *gc.C) {
+func (s *serviceSuite) TestReadUserAccessLevelForTargetError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	_, err := NewPermissionService(s.state).ReadUserAccessForTarget(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadUserAccessForTarget(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		corepermission.ID{
 			ObjectType: "faileme",
 			Key:        "aws",
 		})
-	c.Assert(err, jc.ErrorIs, errors.NotValid, gc.Commentf("%+v", err))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid, tc.Commentf("%+v", err))
 }
 
-func (s *serviceSuite) TestReadAllUserAccessForTarget(c *gc.C) {
+func (s *serviceSuite) TestReadAllUserAccessForTarget(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.state.EXPECT().ReadAllUserAccessForTarget(gomock.Any(), gomock.AssignableToTypeOf(corepermission.ID{})).Return(nil, nil)
 
-	_, err := NewPermissionService(s.state).ReadAllUserAccessForTarget(
-		context.Background(),
+	_, err := NewService(s.state).ReadAllUserAccessForTarget(
+		c.Context(),
 		corepermission.ID{
 			ObjectType: corepermission.Cloud,
 			Key:        "aws",
 		})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadAllUserAccessForTargetError(c *gc.C) {
+func (s *serviceSuite) TestReadAllUserAccessForTargetError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	_, err := NewPermissionService(s.state).ReadAllUserAccessForTarget(
-		context.Background(),
+	_, err := NewService(s.state).ReadAllUserAccessForTarget(
+		c.Context(),
 		corepermission.ID{
 			ObjectType: "faileme",
 			Key:        "aws",
 		})
-	c.Assert(err, jc.ErrorIs, errors.NotValid, gc.Commentf("%+v", err))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid, tc.Commentf("%+v", err))
 }
 
-func (s *serviceSuite) TestReadAllUserAccessForUser(c *gc.C) {
+func (s *serviceSuite) TestReadAllUserAccessForUser(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().ReadAllUserAccessForUser(gomock.Any(), "testme").Return(nil, nil)
+	s.state.EXPECT().ReadAllUserAccessForUser(gomock.Any(), usertesting.GenNewName(c, "testme")).Return(nil, nil)
 
-	_, err := NewPermissionService(s.state).ReadAllUserAccessForUser(
-		context.Background(),
-		"testme")
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := NewService(s.state).ReadAllUserAccessForUser(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"))
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadAllAccessForUserAndObjectType(c *gc.C) {
+func (s *serviceSuite) TestReadAllAccessForUserAndObjectType(c *tc.C) {
 	defer s.setupMocks(c).Finish()
-	s.state.EXPECT().ReadAllAccessForUserAndObjectType(gomock.Any(), "testme", corepermission.Cloud).Return(nil, nil)
+	s.state.EXPECT().ReadAllAccessForUserAndObjectType(gomock.Any(), usertesting.GenNewName(c, "testme"), corepermission.Cloud).Return(nil, nil)
 
-	_, err := NewPermissionService(s.state).ReadAllAccessForUserAndObjectType(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadAllAccessForUserAndObjectType(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		corepermission.Cloud)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *serviceSuite) TestReadAllAccessForUserAndObjectTypeError(c *gc.C) {
+func (s *serviceSuite) TestReadAllAccessForUserAndObjectTypeError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	_, err := NewPermissionService(s.state).ReadAllAccessForUserAndObjectType(
-		context.Background(),
-		"testme",
+	_, err := NewService(s.state).ReadAllAccessForUserAndObjectType(
+		c.Context(),
+		usertesting.GenNewName(c, "testme"),
 		"failme")
-	c.Assert(err, jc.ErrorIs, errors.NotValid, gc.Commentf("%+v", err))
+	c.Assert(err, tc.ErrorIs, coreerrors.NotValid, tc.Commentf("%+v", err))
 }
 
-func (s *serviceSuite) TestAllModelAccessForCloudCredential(c *gc.C) {
+func (s *serviceSuite) TestAllModelAccessForCloudCredential(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.state.EXPECT().AllModelAccessForCloudCredential(gomock.Any(), gomock.AssignableToTypeOf(credential.Key{})).Return(nil, nil)
 
-	_, err := NewPermissionService(s.state).AllModelAccessForCloudCredential(
-		context.Background(),
+	_, err := NewService(s.state).AllModelAccessForCloudCredential(
+		c.Context(),
 		credential.Key{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *serviceSuite) TestImportOfferAccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	importAccess := []access.OfferImportAccess{
+		{
+			UUID: uuid.MustNewUUID(),
+			Access: map[string]corepermission.Access{
+				"george": corepermission.ConsumeAccess,
+			},
+		},
+	}
+	s.state.EXPECT().ImportOfferAccess(gomock.Any(), importAccess).Return(nil)
+
+	err := NewService(s.state).ImportOfferAccess(c.Context(), importAccess)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *serviceSuite) TestImportOfferAccessFail(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	importAccess := []access.OfferImportAccess{
+		{
+			UUID: uuid.MustNewUUID(),
+			Access: map[string]corepermission.Access{
+				"george": corepermission.ConsumeAccess,
+			},
+		},
+	}
+	s.state.EXPECT().ImportOfferAccess(gomock.Any(), importAccess).Return(errors.Errorf("boom"))
+
+	err := NewService(s.state).ImportOfferAccess(c.Context(), importAccess)
+	c.Assert(err, tc.ErrorMatches, "boom")
 }

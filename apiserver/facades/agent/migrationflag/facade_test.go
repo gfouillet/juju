@@ -5,85 +5,146 @@ package migrationflag_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/apiserver/facades/agent/migrationflag"
+	"github.com/juju/juju/core/migration"
+	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/domain/modelmigration"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
+//go:generate go run go.uber.org/mock/mockgen -typed -package migrationflag_test -destination mocks_test.go github.com/juju/juju/apiserver/facades/agent/migrationflag ModelMigrationService
+
 type FacadeSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
+
+	modelMigrationService *MockModelMigrationService
+	watcherRegistry       *facademocks.MockWatcherRegistry
 }
 
-var _ = gc.Suite(&FacadeSuite{})
-
-func (*FacadeSuite) TestAcceptsMachineAgent(c *gc.C) {
-	facade, err := migrationflag.New(nil, nil, agentAuth{machine: true})
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(facade, gc.NotNil)
+func TestFacadeSuite(t *testing.T) {
+	tc.Run(t, &FacadeSuite{})
 }
 
-func (*FacadeSuite) TestAcceptsUnitAgent(c *gc.C) {
-	facade, err := migrationflag.New(nil, nil, agentAuth{machine: true})
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(facade, gc.NotNil)
+func (s *FacadeSuite) setUpMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.modelMigrationService = NewMockModelMigrationService(ctrl)
+	s.watcherRegistry = facademocks.NewMockWatcherRegistry(ctrl)
+
+	c.Cleanup(func() {
+		s.modelMigrationService = nil
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
 }
 
-func (*FacadeSuite) TestAcceptsApplicationAgent(c *gc.C) {
-	facade, err := migrationflag.New(nil, nil, agentAuth{application: true})
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(facade, gc.NotNil)
-}
-
-func (*FacadeSuite) TestRejectsNonAgent(c *gc.C) {
-	facade, err := migrationflag.New(nil, nil, agentAuth{})
-	c.Check(err, gc.Equals, apiservererrors.ErrPerm)
-	c.Check(facade, gc.IsNil)
-}
-
-func (*FacadeSuite) TestPhaseSuccess(c *gc.C) {
-	stub := &testing.Stub{}
-	backend := newMockBackend(stub)
-	facade, err := migrationflag.New(backend, nil, authOK)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results := facade.Phase(context.Background(), entities(
-		coretesting.ModelTag.String(),
-		coretesting.ModelTag.String(),
-	))
-	c.Assert(results.Results, gc.HasLen, 2)
-	stub.CheckCallNames(c, "MigrationPhase", "MigrationPhase")
-
-	for _, result := range results.Results {
-		c.Check(result.Error, gc.IsNil)
-		c.Check(result.Phase, gc.Equals, "REAP")
+func (s *FacadeSuite) modelAuthorisation(c *tc.C) common.GetAuthFunc {
+	return func(ctx context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			c.Check(tag, tc.FitsTypeOf, names.ModelTag{})
+			return tag.Id() == coretesting.ModelTag.Id()
+		}, nil
 	}
 }
 
-func (*FacadeSuite) TestPhaseErrors(c *gc.C) {
-	stub := &testing.Stub{}
-	stub.SetErrors(errors.New("ouch"))
-	backend := newMockBackend(stub)
-	facade, err := migrationflag.New(backend, nil, authOK)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *FacadeSuite) TestAcceptsMachineAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		agentAuth{machine: true},
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(facade, tc.NotNil)
+}
+
+func (s *FacadeSuite) TestAcceptsUnitAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		agentAuth{machine: true},
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(facade, tc.NotNil)
+}
+
+func (s *FacadeSuite) TestRejectsNonAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		agentAuth{},
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Check(err, tc.Equals, apiservererrors.ErrPerm)
+	c.Check(facade, tc.IsNil)
+}
+
+func (s *FacadeSuite) TestPhaseSuccess(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	mig := modelmigration.Migration{
+		Phase: migration.REAP,
+	}
+	s.modelMigrationService.EXPECT().Migration(gomock.Any()).Return(mig, nil).Times(2)
+
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		authOK,
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Assert(err, tc.ErrorIsNil)
+
+	results := facade.Phase(c.Context(), entities(
+		coretesting.ModelTag.String(),
+		coretesting.ModelTag.String(),
+	))
+	c.Assert(results.Results, tc.HasLen, 2)
+
+	for _, result := range results.Results {
+		c.Check(result.Error, tc.IsNil)
+		c.Check(result.Phase, tc.Equals, "REAP")
+	}
+}
+
+func (s *FacadeSuite) TestPhaseErrors(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	mig := modelmigration.Migration{}
+	s.modelMigrationService.EXPECT().Migration(gomock.Any()).Return(mig, errors.New("ouch"))
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		authOK,
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// 3 entities: unparseable, unauthorized, call error.
-	results := facade.Phase(context.Background(), entities(
+	results := facade.Phase(c.Context(), entities(
 		"urgle",
 		unknownModel,
 		coretesting.ModelTag.String(),
 	))
-	c.Assert(results.Results, gc.HasLen, 3)
-	stub.CheckCallNames(c, "MigrationPhase")
+	c.Assert(results.Results, tc.HasLen, 3)
 
-	c.Check(results.Results, jc.DeepEquals, []params.PhaseResult{{
+	c.Check(results.Results, tc.DeepEquals, []params.PhaseResult{{
 		Error: &params.Error{
 			Message: `"urgle" is not a valid tag`,
 		}}, {
@@ -97,50 +158,54 @@ func (*FacadeSuite) TestPhaseErrors(c *gc.C) {
 	}})
 }
 
-func (*FacadeSuite) TestWatchSuccess(c *gc.C) {
-	stub := &testing.Stub{}
-	backend := newMockBackend(stub)
-	resources := common.NewResources()
-	facade, err := migrationflag.New(backend, resources, authOK)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *FacadeSuite) TestWatchSuccess(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
 
-	results := facade.Watch(context.Background(), entities(
-		coretesting.ModelTag.String(),
+	ch := make(chan struct{}, 1)
+	ch <- struct{}{}
+	w := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.CleanKill(c, w)
+
+	s.modelMigrationService.EXPECT().WatchMigrationPhase(gomock.Any()).Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("123", nil)
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		authOK,
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Assert(err, tc.ErrorIsNil)
+
+	results := facade.Watch(c.Context(), entities(
 		coretesting.ModelTag.String(),
 	))
-	c.Assert(results.Results, gc.HasLen, 2)
-	stub.CheckCallNames(c, "WatchMigrationPhase", "WatchMigrationPhase")
+	c.Assert(results.Results, tc.HasLen, 1)
 
-	check := func(result params.NotifyWatchResult) {
-		c.Check(result.Error, gc.IsNil)
-		resource := resources.Get(result.NotifyWatcherId)
-		c.Check(resource, gc.NotNil)
-	}
-	first := results.Results[0]
-	second := results.Results[1]
-	check(first)
-	check(second)
-	c.Check(first.NotifyWatcherId, gc.Not(gc.Equals), second.NotifyWatcherId)
+	result := results.Results[0]
+	c.Check(result.Error, tc.IsNil)
+	c.Check(result.NotifyWatcherId, tc.Equals, "123")
 }
 
-func (*FacadeSuite) TestWatchErrors(c *gc.C) {
-	stub := &testing.Stub{}
-	stub.SetErrors(errors.New("blort")) // trigger channel closed error
-	backend := newMockBackend(stub)
-	resources := common.NewResources()
-	facade, err := migrationflag.New(backend, resources, authOK)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *FacadeSuite) TestWatchErrors(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	s.modelMigrationService.EXPECT().WatchMigrationPhase(gomock.Any()).Return(nil, errors.New("blort"))
+
+	facade, err := migrationflag.New(
+		s.watcherRegistry,
+		authOK,
+		s.modelAuthorisation(c),
+		s.modelMigrationService)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// 3 entities: unparseable, unauthorized, closed channel.
-	results := facade.Watch(context.Background(), entities(
+	results := facade.Watch(c.Context(), entities(
 		"urgle",
 		unknownModel,
 		coretesting.ModelTag.String(),
 	))
-	c.Assert(results.Results, gc.HasLen, 3)
-	stub.CheckCallNames(c, "WatchMigrationPhase")
+	c.Assert(results.Results, tc.HasLen, 3)
 
-	c.Check(results.Results, jc.DeepEquals, []params.NotifyWatchResult{{
+	c.Check(results.Results, tc.DeepEquals, []params.NotifyWatchResult{{
 		Error: &params.Error{
 			Message: `"urgle" is not a valid tag`,
 		}}, {
@@ -152,5 +217,4 @@ func (*FacadeSuite) TestWatchErrors(c *gc.C) {
 			Message: "blort",
 		}},
 	})
-	c.Check(resources.Count(), gc.Equals, 0)
 }

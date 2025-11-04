@@ -13,24 +13,32 @@ import (
 
 	"github.com/juju/juju/api/base"
 	apicaasapplicationprovisioner "github.com/juju/juju/api/controller/caasapplicationprovisioner"
-	caasunitprovisionerapi "github.com/juju/juju/api/controller/caasunitprovisioner"
 	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/application"
 	"github.com/juju/juju/core/logger"
+	coreresource "github.com/juju/juju/core/resource"
+	"github.com/juju/juju/internal/resource"
+	"github.com/juju/juju/internal/resource/charmhub"
+	"github.com/juju/juju/internal/services"
 )
 
 // ManifoldConfig defines a CAAS operator provisioner's dependencies.
 type ManifoldConfig struct {
-	APICallerName string
-	BrokerName    string
-	ClockName     string
-	NewWorker     func(Config) (worker.Worker, error)
-	Logger        logger.Logger
+	APICallerName      string
+	DomainServicesName string
+	BrokerName         string
+	ClockName          string
+	NewWorker          func(Config) (worker.Worker, error)
+	Logger             logger.Logger
 }
 
 // Validate is called by start to check for bad configuration.
 func (config ManifoldConfig) Validate() error {
 	if config.APICallerName == "" {
 		return errors.NotValidf("empty APICallerName")
+	}
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.BrokerName == "" {
 		return errors.NotValidf("empty BrokerName")
@@ -47,13 +55,18 @@ func (config ManifoldConfig) Validate() error {
 	return nil
 }
 
-func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
+func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var apiCaller base.APICaller
 	if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var domainServices services.ModelDomainServices
+	if err := getter.Get(config.DomainServicesName, &domainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -67,19 +80,28 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 		return nil, errors.Trace(err)
 	}
 
-	modelTag, ok := apiCaller.ModelTag()
-	if !ok {
-		return nil, errors.New("API connection is controller-only (should never happen)")
+	resourceOpenerArgs := resource.ResourceOpenerArgs{
+		ResourceService:      domainServices.Resource(),
+		ApplicationService:   domainServices.Application(),
+		CharmhubClientGetter: charmhub.NewCharmHubOpener(domainServices.Config()),
 	}
-
+	var rog ResourceOpenerGetterFunc = func(
+		ctx context.Context, appID application.UUID, appName string,
+	) (coreresource.Opener, error) {
+		return resource.NewResourceOpenerForApplication(ctx, resourceOpenerArgs,
+			appName, appID)
+	}
 	w, err := config.NewWorker(Config{
-		Facade:       apicaasapplicationprovisioner.NewClient(apiCaller),
-		Broker:       broker,
-		ModelTag:     modelTag,
-		Clock:        clock,
-		Logger:       config.Logger,
-		NewAppWorker: NewAppWorker,
-		UnitFacade:   caasunitprovisionerapi.NewClient(apiCaller),
+		ApplicationService:         domainServices.Application(),
+		StatusService:              domainServices.Status(),
+		AgentPasswordService:       domainServices.AgentPassword(),
+		StorageProvisioningService: domainServices.StorageProvisioning(),
+		ResourceOpenerGetter:       rog,
+		Facade:                     apicaasapplicationprovisioner.NewClient(apiCaller),
+		Broker:                     broker,
+		Clock:                      clock,
+		Logger:                     config.Logger,
+		NewAppWorker:               NewAppWorker,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -93,6 +115,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
 			config.APICallerName,
+			config.DomainServicesName,
 			config.BrokerName,
 			config.ClockName,
 		},

@@ -7,18 +7,17 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/state/mgo"
 )
 
 // LoggerAPI represents the API calls the logger makes.
 type LoggerAPI interface {
-	LoggingConfig(agentTag names.Tag) (string, error)
-	WatchLoggingConfig(agentTag names.Tag) (watcher.NotifyWatcher, error)
+	LoggingConfig(ctx context.Context, agentTag names.Tag) (string, error)
+	WatchLoggingConfig(ctx context.Context, agentTag names.Tag) (watcher.NotifyWatcher, error)
 }
 
 // WorkerConfig contains the information required for the Logger worker
@@ -64,7 +63,7 @@ func NewLogger(config WorkerConfig) (worker.Worker, error) {
 		config:     config,
 		lastConfig: config.Context.Config().String(),
 	}
-	config.Logger.Debugf("initial log config: %q", logger.lastConfig)
+	config.Logger.Debugf(context.Background(), "initial log config: %q", logger.lastConfig)
 
 	w, err := watcher.NewNotifyWorker(watcher.NotifyConfig{
 		Handler: logger,
@@ -75,41 +74,40 @@ func NewLogger(config WorkerConfig) (worker.Worker, error) {
 	return w, nil
 }
 
-func (l *loggerWorker) setLogging() {
+func (l *loggerWorker) setLogging(ctx context.Context) {
 	loggingConfig := ""
 	logger := l.config.Logger
 
 	if override := l.config.Override; override != "" {
-		logger.Debugf("overriding logging config with override from agent.conf %q", override)
+		logger.Debugf(ctx, "overriding logging config with override from agent.conf %q", override)
 		loggingConfig = override
 	} else {
-		modelLoggingConfig, err := l.config.API.LoggingConfig(l.config.Tag)
+		modelLoggingConfig, err := l.config.API.LoggingConfig(ctx, l.config.Tag)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(ctx, "%v", err)
 			return
 		}
 		loggingConfig = modelLoggingConfig
 	}
 
 	if loggingConfig != l.lastConfig {
-		logger.Debugf("reconfiguring logging from %q to %q", l.lastConfig, loggingConfig)
-		context := l.config.Context
-		context.ResetLoggerLevels()
-		if err := context.ConfigureLoggers(loggingConfig); err != nil {
+		logger.Debugf(ctx, "reconfiguring logging from %q to %q", l.lastConfig, loggingConfig)
+		loggerContext := l.config.Context
+		loggerContext.ResetLoggerLevels()
+		if err := loggerContext.ConfigureLoggers(loggingConfig); err != nil {
 			// This shouldn't occur as the loggingConfig should be
 			// validated by the original Config before it gets here.
-			logger.Warningf("configure loggers failed: %v", err)
+			logger.Warningf(ctx, "configure loggers failed: %v", err)
 			// Try to reset to what we had before
-			_ = context.ConfigureLoggers(l.lastConfig)
+			_ = loggerContext.ConfigureLoggers(l.lastConfig)
 			return
 		}
-		mgo.ConfigureMgoLogging()
 		l.lastConfig = loggingConfig
 		// Save the logging config in the agent.conf file.
 		if callback := l.config.Callback; callback != nil {
 			err := callback(loggingConfig)
 			if err != nil {
-				logger.Errorf("%v", err)
+				logger.Errorf(ctx, "%v", err)
 			}
 		}
 	}
@@ -118,23 +116,23 @@ func (l *loggerWorker) setLogging() {
 // SetUp is called by the NotifyWorker when the worker starts, and it is
 // required to return a notify watcher that is used as the event source
 // for the Handle method.
-func (l *loggerWorker) SetUp(_ context.Context) (watcher.NotifyWatcher, error) {
-	l.config.Logger.Infof("logger worker started")
+func (l *loggerWorker) SetUp(ctx context.Context) (watcher.NotifyWatcher, error) {
+	l.config.Logger.Infof(ctx, "logger worker started")
 	// We need to set this up initially as the NotifyWorker sucks up the first
 	// event.
-	l.setLogging()
-	return l.config.API.WatchLoggingConfig(l.config.Tag)
+	l.setLogging(ctx)
+	return l.config.API.WatchLoggingConfig(ctx, l.config.Tag)
 }
 
 // Handle is called by the NotifyWorker whenever the notify event is fired.
-func (l *loggerWorker) Handle(_ context.Context) error {
-	l.setLogging()
+func (l *loggerWorker) Handle(ctx context.Context) error {
+	l.setLogging(ctx)
 	return nil
 }
 
 // TearDown is called by the NotifyWorker when the worker is being stopped.
 func (l *loggerWorker) TearDown() error {
 	// Nothing to cleanup, only state is the watcher
-	l.config.Logger.Infof("logger worker stopped")
+	l.config.Logger.Infof(context.Background(), "logger worker stopped")
 	return nil
 }

@@ -6,14 +6,14 @@ package cloud
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type setDefaultRegionCommand struct {
@@ -26,21 +26,22 @@ type setDefaultRegionCommand struct {
 }
 
 var usageSetDefaultRegionSummary = `
-Sets the default region for a cloud.`[1:]
+Gets, sets, or unsets the default region for a cloud on this client.`[1:]
 
 var usageSetDefaultRegionDetails = `
-The default region is specified directly as an argument.
-
-To unset previously set default region for a cloud, use --reset option.
-
-To confirm what region is currently set to be default for a cloud, 
-use the command without region argument.
-
 `[1:]
 
 const usageSetDefaultRegionnExamples = `
+Set the default region for the ` + "`azure-china`" + ` cloud to ` + "`chinaeast`" + `:
+
     juju default-region azure-china chinaeast
+
+Get the default region for the ` + "`azure-china`" + ` cloud:
+
     juju default-region azure-china
+
+Unset the default region for the ` + "`azure-china`" + ` cloud:
+
     juju default-region azure-china --reset
 `
 
@@ -122,6 +123,6 @@ func (c *setDefaultRegionCommand) Run(ctxt *cmd.Context) error {
 	if err := c.store.UpdateCredential(c.cloud, *cred); err != nil {
 		return err
 	}
-	ctxt.Infof(msg)
+	ctxt.Infof("%s", msg)
 	return nil
 }

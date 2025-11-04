@@ -89,6 +89,7 @@ type Client interface {
 	DescribeVpcs(context.Context, *ec2.DescribeVpcsInput, ...func(*ec2.Options)) (*ec2.DescribeVpcsOutput, error)
 	DescribeInternetGateways(context.Context, *ec2.DescribeInternetGatewaysInput, ...func(*ec2.Options)) (*ec2.DescribeInternetGatewaysOutput, error)
 	DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesInput, ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
+	ModifyNetworkInterfaceAttribute(ctx context.Context, params *ec2.ModifyNetworkInterfaceAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyNetworkInterfaceAttributeOutput, error)
 }
 
 type awsLogger struct {
@@ -96,7 +97,7 @@ type awsLogger struct {
 }
 
 func (l awsLogger) Write(p []byte) (n int, err error) {
-	logger.Tracef("awsLogger %p: %s", l.cfg, p)
+	logger.Tracef(context.Background(), "awsLogger %p: %s", l.cfg, p)
 	return len(p), nil
 }
 

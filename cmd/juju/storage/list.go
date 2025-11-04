@@ -4,29 +4,44 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
 // NewListCommand returns a command for listing storage instances.
 func NewListCommand() cmd.Command {
 	cmd := &listCommand{}
-	cmd.newAPIFunc = func() (StorageListAPI, error) {
-		return cmd.NewStorageAPI()
+	cmd.newAPIFunc = func(ctx context.Context) (StorageListAPI, error) {
+		return cmd.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(cmd)
 }
 
 const listCommandDoc = `
 List information about storage.
+`
+
+const listCommandExample = `
+List all storage:
+
+    juju storage
+
+List only filesystem storage:
+
+    juju storage --filesystem
+
+List only volume storage:
+
+    juju storage --volume
 `
 
 // listCommand returns storage instances.
@@ -36,17 +51,23 @@ type listCommand struct {
 	ids        []string
 	filesystem bool
 	volume     bool
-	newAPIFunc func() (StorageListAPI, error)
+	newAPIFunc func(ctx context.Context) (StorageListAPI, error)
 }
 
 // Info implements Command.Info.
 func (c *listCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "storage",
-		Args:    "<filesystem|volume> ...",
-		Purpose: "Lists storage details.",
-		Doc:     listCommandDoc,
-		Aliases: []string{"list-storage"},
+		Name:     "storage",
+		Args:     "<filesystem|volume> ...",
+		Purpose:  "Lists storage details.",
+		Doc:      listCommandDoc,
+		Aliases:  []string{"list-storage"},
+		Examples: listCommandExample,
+		SeeAlso: []string{
+			"show-storage",
+			"add-storage",
+			"remove-storage",
+		},
 	})
 }
 
@@ -60,8 +81,8 @@ func (c *listCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 	// TODO(axw) deprecate these flags, and introduce separate commands
 	// for listing just filesystems or volumes.
-	f.BoolVar(&c.filesystem, "filesystem", false, "List filesystem storage")
-	f.BoolVar(&c.volume, "volume", false, "List volume storage")
+	f.BoolVar(&c.filesystem, "filesystem", false, "List filesystem storage (deprecated)")
+	f.BoolVar(&c.volume, "volume", false, "List volume storage (deprecated)")
 }
 
 // Init implements Command.Init.
@@ -78,7 +99,7 @@ func (c *listCommand) Init(args []string) (err error) {
 
 // Run implements Command.Run.
 func (c *listCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
@@ -173,14 +194,14 @@ func CombinedStorageFromParams(
 // StorageListAPI defines the API methods that the storage commands use.
 type StorageListAPI interface {
 	Close() error
-	ListStorageDetails() ([]params.StorageDetails, error)
-	ListFilesystems(machines []string) ([]params.FilesystemDetailsListResult, error)
-	ListVolumes(machines []string) ([]params.VolumeDetailsListResult, error)
+	ListStorageDetails(ctx context.Context) ([]params.StorageDetails, error)
+	ListFilesystems(ctx context.Context, machines []string) ([]params.FilesystemDetailsListResult, error)
+	ListVolumes(ctx context.Context, machines []string) ([]params.VolumeDetailsListResult, error)
 }
 
 // generateListStorageOutput returns a map of storage details
 func generateListStorageOutput(ctx *cmd.Context, api StorageListAPI) (map[string]StorageInfo, error) {
-	results, err := api.ListStorageDetails()
+	results, err := api.ListStorageDetails(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

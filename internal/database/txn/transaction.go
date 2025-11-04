@@ -6,25 +6,26 @@ package txn
 import (
 	"context"
 	"database/sql"
-	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/canonical/go-dqlite/tracing"
+	"github.com/canonical/go-dqlite/v3/tracing"
 	"github.com/canonical/sqlair"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/retry"
-	"golang.org/x/sync/semaphore"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/database/drivererrors"
 	internallogger "github.com/juju/juju/internal/logger"
 )
 
-// txn represents a transaction interface that can be used for committing
-// a transaction.
-type txn interface {
+// committable represents a transaction interface that can be used for
+// committing a transaction.
+type committable interface {
 	Commit() error
 }
 
@@ -61,25 +62,10 @@ func WithRetryStrategy(retryStrategy RetryStrategy) Option {
 	}
 }
 
-// WithSemaphore defines a semaphore for limiting the number of transactions
-// that can be executed at any given time.
-//
-// If nil is passed, then no semaphore is used.
-func WithSemaphore(sem Semaphore) Option {
-	return func(o *option) {
-		if sem == nil {
-			o.semaphore = noopSemaphore{}
-			return
-		}
-		o.semaphore = sem
-	}
-}
-
 type option struct {
 	timeout       time.Duration
 	logger        logger.Logger
 	retryStrategy RetryStrategy
-	semaphore     Semaphore
 }
 
 func newOptions() *option {
@@ -87,16 +73,8 @@ func newOptions() *option {
 	return &option{
 		timeout:       DefaultTimeout,
 		logger:        logger,
-		retryStrategy: defaultRetryStrategy(clock.WallClock, logger),
-		semaphore:     semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0))),
+		retryStrategy: DefaultRetryStrategy(clock.WallClock, logger),
 	}
-}
-
-// Semaphore defines a semaphore interface for limiting the number of
-// transactions that can be executed at any given time.
-type Semaphore interface {
-	Acquire(context.Context, int64) error
-	Release(int64)
 }
 
 // RetryingTxnRunner defines a generic runner for applying transactions
@@ -107,8 +85,9 @@ type RetryingTxnRunner struct {
 	timeout       time.Duration
 	logger        logger.Logger
 	retryStrategy RetryStrategy
-	semaphore     Semaphore
 	tracePool     sync.Pool
+	loggerPool    sync.Pool
+	txnID         uint64
 }
 
 // NewRetryingTxnRunner returns a new RetryingTxnRunner.
@@ -130,12 +109,19 @@ func NewRetryingTxnRunner(opts ...Option) *RetryingTxnRunner {
 		timeout:       o.timeout,
 		logger:        o.logger,
 		retryStrategy: o.retryStrategy,
-		semaphore:     o.semaphore,
 
 		tracePool: sync.Pool{
 			New: func() any {
 				return &dqliteTracer{
-					pool: spanPool,
+					pool:   spanPool,
+					logger: o.logger,
+				}
+			},
+		},
+		loggerPool: sync.Pool{
+			New: func() any {
+				return &logTracer{
+					logger: o.logger,
 				}
 			},
 		},
@@ -160,7 +146,7 @@ func (t *RetryingTxnRunner) Txn(ctx context.Context, db *sqlair.DB, fn func(cont
 
 		if err := fn(ctx, tx); err != nil {
 			if rErr := t.retryStrategy(ctx, tx.Rollback); rErr != nil {
-				t.logger.Warningf("failed to rollback transaction: %v", rErr)
+				t.logger.Warningf(ctx, "failed to rollback transaction: %v", rErr)
 			}
 			return errors.Trace(err)
 		}
@@ -186,7 +172,7 @@ func (t *RetryingTxnRunner) StdTxn(ctx context.Context, db *sql.DB, fn func(cont
 
 		if err := fn(ctx, tx); err != nil {
 			if rErr := t.retryStrategy(ctx, tx.Rollback); rErr != nil {
-				t.logger.Warningf("failed to rollback transaction: %v", rErr)
+				t.logger.Warningf(ctx, "failed to rollback transaction: %v", rErr)
 			}
 			return errors.Trace(err)
 		}
@@ -198,7 +184,11 @@ func (t *RetryingTxnRunner) StdTxn(ctx context.Context, db *sql.DB, fn func(cont
 // Commit is split out as we can't pass a context directly to the commit. To
 // enable tracing, we need to just wrap the commit call. All other traces are
 // done at the dqlite level.
-func (t *RetryingTxnRunner) commit(ctx context.Context, tx txn) (err error) {
+func (t *RetryingTxnRunner) commit(ctx context.Context, tx committable) (err error) {
+	if t.logger.IsLevelEnabled(logger.TRACE) {
+		t.logger.Tracef(ctx, "running txn (id: %d) with query: COMMIT", ctx.Value(txnIDKey))
+	}
+
 	// Hardcode the name of the span
 	_, span := trace.Start(ctx, traceName("commit"))
 	defer func() {
@@ -221,6 +211,12 @@ func (t *RetryingTxnRunner) Retry(ctx context.Context, fn func() error) error {
 
 // run will execute the input function if there is a semaphore slot available.
 func (t *RetryingTxnRunner) run(ctx context.Context, fn func(context.Context) error) (err error) {
+	// If the context is already done then return early to prevent doing any
+	// work.
+	if err := ctx.Err(); err != nil {
+		return errors.Trace(err)
+	}
+
 	ctx, span := trace.Start(ctx, traceName("run"))
 	defer func() {
 		span.RecordError(err)
@@ -230,78 +226,113 @@ func (t *RetryingTxnRunner) run(ctx context.Context, fn func(context.Context) er
 	ctx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	if err := t.semaphore.Acquire(ctx, 1); err != nil {
-		return errors.Trace(err)
-	}
-	defer t.semaphore.Release(1)
+	// Txn ID is used to track the whole transaction, from the start to the end.
+	// This also includes the BEGIN, COMMIT and ROLLBACK.
+	// As these are processed in real-time, it will require the user of the
+	// logging infrastructure to be able to track the txnID and to patch the
+	// log lines together. The alternative is to use the tracing infrastructure
+	// which will give it a context, but that's a lot of overhead to run in
+	// production for every query.
+	txnID := atomic.AddUint64(&t.txnID, 1)
 
-	// If the context is already done then return early. This is because the
-	// semaphore.Acquire call above will only cancel and return if it's waiting.
-	// Otherwise it will just allow the function to continue. So check here
-	// early before we start the function.
-	// https://pkg.go.dev/golang.org/x/sync/semaphore#Weighted.Acquire
-	if err := ctx.Err(); err != nil {
-		return errors.Trace(err)
-	}
+	// Put the txnID onto the context, so we can the retrieve it later on for
+	// the commit transaction logging. Without it, we'll have BEGIN, queries,
+	// but no COMMIT.
+	ctx = context.WithValue(ctx, txnIDKey, txnID)
 
 	// This is the last generic place that we can place a trace for the
 	// dqlite library. Ideally we would push this into the dqlite only code,
 	// but that requires a lot of abstractions, that I'm unsure is worth it.
+	var queryable queryable
 	if tracer, enabled := trace.TracerFromContext(ctx); enabled {
 		dtracer := t.tracePool.Get().(*dqliteTracer)
 		defer t.tracePool.Put(dtracer)
 
-		// Force the tracer onto the pooled object. We guarantee that the trace
-		// should be done once the run has been completed.
-		dtracer.tracer = tracer
+		dtracer.prepare(tracer, txnID)
 
 		ctx = tracing.WithTracer(ctx, dtracer)
+
+		queryable = dtracer
+	} else {
+		// If the logger is trace enabled, then we can use the log tracer. The
+		// log tracer is a light weight tracer that just logs the query and the
+		// txnID. This is useful for debugging.
+		ltrace := t.loggerPool.Get().(*logTracer)
+		defer t.loggerPool.Put(ltrace)
+
+		ltrace.prepare(txnID)
+
+		ctx = tracing.WithTracer(ctx, ltrace)
+
+		queryable = ltrace
 	}
-	return fn(ctx)
+
+	err = fn(ctx)
+	if err == nil {
+		return nil
+	}
+
+	// If there is any constraint error then we should log it as an error.
+	if drivererrors.IsConstraintError(err) {
+		t.logger.Errorf(ctx, "constraint error %v - running queries:\n %v", err, queryable.Queries())
+	}
+
+	return errors.Trace(err)
 }
 
-// defaultRetryStrategy returns a function that can be used to apply a default
+// DefaultRetryStrategy returns a function that can be used to apply a default
 // retry strategy to its input operation. It will retry in cases of transient
 // known database errors.
-func defaultRetryStrategy(clock clock.Clock, log logger.Logger) func(context.Context, func() error) error {
+func DefaultRetryStrategy(clock clock.Clock, log logger.Logger) func(context.Context, func() error) error {
 	return func(ctx context.Context, fn func() error) error {
+		metrics := MetricsFromContext(ctx)
 		err := retry.Call(retry.CallArgs{
-			Func: fn,
+			Func: func() error {
+				err := fn()
+
+				// Record the success if there is no error.
+				if err == nil {
+					metrics.RecordSuccess()
+					return nil
+				}
+
+				// Recording of the error is done in the IsFatalError function.
+				return errors.Trace(err)
+			},
 			IsFatalError: func(err error) bool {
 				// No point in re-trying or logging a no-row error.
 				if errors.Is(err, sql.ErrNoRows) {
+					metrics.RecordError(noRowsError)
 					return true
 				}
 
 				// If the error is potentially retryable then keep going.
-				if IsErrRetryable(err) {
+				if drivererrors.IsErrRetryable(err) {
+					// Record the error for the metrics. We could potentially
+					// record the error type here, but it's not clear what
+					// value that would provide.
+					metrics.RecordError(retryableError)
+
 					if log.IsLevelEnabled(logger.TRACE) {
-						log.Tracef("retrying transaction: %v", err)
+						log.Tracef(ctx, "retrying transaction: %v", err)
 					}
 					return false
 				}
 
+				metrics.RecordError(unknownError)
 				return true
 			},
 			Attempts:    250,
 			Delay:       time.Millisecond,
 			MaxDelay:    time.Millisecond * 100,
 			MaxDuration: time.Second * 25,
-			BackoffFunc: retry.ExpBackoff(time.Millisecond, time.Millisecond*100, 0.8, true),
+			BackoffFunc: retry.ExpBackoff(time.Millisecond, time.Millisecond*100, 1.2, true),
 			Clock:       clock,
 			Stop:        ctx.Done(),
 		})
 		return err
 	}
 }
-
-type noopSemaphore struct{}
-
-func (s noopSemaphore) Acquire(context.Context, int64) error {
-	return nil
-}
-
-func (s noopSemaphore) Release(int64) {}
 
 const (
 	// rootTraceName is used to define the root trace name for all transaction
@@ -315,6 +346,59 @@ func traceName(name string) trace.Name {
 	return trace.Name(rootTraceName + name)
 }
 
+type queryable interface {
+	Queries() string
+}
+
+// logTracer is a pooled object for implementing a log tracing from a
+// per-transaction trace. This works by piggy backing off the OTEL tracing
+// implementation in go-dqlite package. The OTEL tracing already exposes the
+// query, we can create a log tracer that just logs the query and the txnID.
+type logTracer struct {
+	logger logger.Logger
+
+	mu           sync.Mutex
+	txnID        uint64
+	traceEnabled bool
+	queries      []string
+}
+
+func (d *logTracer) prepare(txnID uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.txnID = txnID
+	d.queries = d.queries[:0]
+	d.traceEnabled = d.logger.IsLevelEnabled(logger.TRACE)
+}
+
+func (d *logTracer) Start(ctx context.Context, name string, query string) (context.Context, tracing.Span) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Log the start of the transaction.
+	if d.traceEnabled {
+		d.logger.Tracef(ctx, "running txn (id: %d) with query: %s", d.txnID, query)
+	}
+
+	// This is less than ideal, it might be better to bulk create an array
+	// of strings (maybe 256) as a ballast and then wipe them out when preparing
+	// them. We could then just insert them into the array, rather than
+	// appending them.
+	d.queries = append(d.queries, query)
+
+	return ctx, d
+}
+
+func (d *logTracer) End() {}
+
+// Queries returns the queries that have been run in the transaction.
+func (d *logTracer) Queries() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return strings.Join(d.queries, "\n")
+}
+
 // dqliteTracer is a pooled object for implementing a dqlite tracing from a
 // juju tracing trace. The dqlite trace is just the lightest touch for
 // implementing tracing. The library doesn't need to include the full OTEL
@@ -322,14 +406,38 @@ func traceName(name string) trace.Name {
 // As there are going to thousands of these in flight, it's wise to pool these
 // as much as possible, to provide compatibility.
 type dqliteTracer struct {
+	logger logger.Logger
+
 	tracer trace.Tracer
 	pool   *sync.Pool
+
+	mu      sync.Mutex
+	txnID   uint64
+	queries []string
+}
+
+func (d *dqliteTracer) prepare(tracer trace.Tracer, txnID uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.txnID = txnID
+	d.queries = d.queries[:0]
+	d.tracer = tracer
 }
 
 // Start creates a span and a context.Context containing the newly-created
 // span.
 func (d *dqliteTracer) Start(ctx context.Context, name string, query string) (context.Context, tracing.Span) {
+	// Log the start of the transaction.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.logger.Tracef(ctx, "running txn (id: %d) with query: %s", d.txnID, query)
+
+	// Start the span.
 	ctx, span := d.tracer.Start(ctx, name, trace.WithAttributes(trace.StringAttr("query", query)))
+
+	// Track the event, so it's possible to tie this back to the logs.
+	span.AddEvent("txn", trace.Int64Attr("id", int64(d.txnID)))
 
 	dspan := d.pool.Get().(*dqliteSpan)
 	defer d.pool.Put(dspan)
@@ -338,7 +446,21 @@ func (d *dqliteTracer) Start(ctx context.Context, name string, query string) (co
 	// should be done once the run has been completed.
 	dspan.span = span
 
+	// This is less than ideal, it might be better to bulk create an array
+	// of strings (maybe 256) as a ballast and then wipe them out when preparing
+	// them. We could then just insert them into the array, rather than
+	// appending them.
+	d.queries = append(d.queries, query)
+
 	return ctx, dspan
+}
+
+// Queries returns the queries that have been run in the transaction.
+func (d *dqliteTracer) Queries() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return strings.Join(d.queries, "\n")
 }
 
 type dqliteSpan struct {

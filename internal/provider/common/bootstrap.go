@@ -32,7 +32,6 @@ import (
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/models"
@@ -43,6 +42,7 @@ import (
 	"github.com/juju/juju/internal/cloudconfig/sshinit"
 	internallogger "github.com/juju/juju/internal/logger"
 	pkissh "github.com/juju/juju/internal/pki/ssh"
+	jujussh "github.com/juju/juju/internal/ssh"
 	"github.com/juju/juju/internal/storage"
 	coretools "github.com/juju/juju/internal/tools"
 )
@@ -55,10 +55,9 @@ var logger = internallogger.GetLogger("juju.provider.common")
 func Bootstrap(
 	ctx environs.BootstrapContext,
 	env environs.Environ,
-	callCtx envcontext.ProviderCallContext,
 	args environs.BootstrapParams,
 ) (*environs.BootstrapResult, error) {
-	result, base, finalizer, err := BootstrapInstance(ctx, env, callCtx, args)
+	result, base, finalizer, err := BootstrapInstance(ctx, env, args)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -79,9 +78,8 @@ func Bootstrap(
 // This method is called by Bootstrap above, which implements environs.Bootstrap, but
 // is also exported so that providers can manipulate the started instance.
 func BootstrapInstance(
-	ctx environs.BootstrapContext,
+	bootstrapContext environs.BootstrapContext,
 	env environs.Environ,
-	callCtx envcontext.ProviderCallContext,
 	args environs.BootstrapParams,
 ) (_ *environs.StartInstanceResult, resultBase *corebase.Base, _ environs.CloudBootstrapFinalizer, err error) {
 	// TODO make safe in the case of racing Bootstraps
@@ -146,6 +144,9 @@ func BootstrapInstance(
 		return nil, nil, nil, err
 	}
 
+	ak := jujussh.MakeAuthorizedKeysString(args.AuthorizedKeys)
+	instanceConfig.AuthorizedKeys = ak
+
 	envCfg := env.Config()
 	instanceConfig.EnableOSRefreshUpdate = envCfg.EnableOSRefreshUpdate()
 	instanceConfig.EnableOSUpgrade = envCfg.EnableOSUpgrade()
@@ -164,13 +165,13 @@ func BootstrapInstance(
 	if args.CloudRegion != "" {
 		cloudRegion += "/" + args.CloudRegion
 	}
-	ctx.Infof("Launching controller instance(s) on %s...", cloudRegion)
+	bootstrapContext.Infof("Launching controller instance(s) on %s...", cloudRegion)
 	// Print instance status reports status changes during provisioning.
 	// Note the carriage returns, meaning subsequent prints are to the same
 	// line of stderr, not a new line.
 	lastLength := 0
 	statusCleanedUp := false
-	instanceStatus := func(settableStatus status.Status, info string, data map[string]interface{}) error {
+	instanceStatus := func(ctx context.Context, settableStatus status.Status, info string, data map[string]interface{}) error {
 		// The data arg is not expected to be used in this case, but
 		// print it, rather than ignore it, if we get something.
 		dataString := ""
@@ -184,7 +185,7 @@ func BootstrapInstance(
 		}
 		lastLength = length
 		statusCleanedUp = false
-		fmt.Fprintf(ctx.GetStderr(), " - %s%s%s\r", info, dataString, padding)
+		fmt.Fprintf(bootstrapContext.GetStderr(), " - %s%s%s\r", info, dataString, padding)
 		return nil
 	}
 	// Likely used after the final instanceStatus call to white-out the
@@ -198,7 +199,7 @@ func BootstrapInstance(
 		// The leading spaces account for the leading characters
 		// emitted by instanceStatus above.
 		padding := strings.Repeat(" ", lastLength)
-		fmt.Fprintf(ctx.GetStderr(), "   %s\r", padding)
+		fmt.Fprintf(bootstrapContext.GetStderr(), "   %s\r", padding)
 		return nil
 	}
 
@@ -227,13 +228,13 @@ func BootstrapInstance(
 		}
 	}
 
-	zones, err := startInstanceZones(env, callCtx, startInstanceArgs)
+	zones, err := startInstanceZones(env, bootstrapContext, startInstanceArgs)
 	if errors.Is(err, errors.NotImplemented) {
 		// No zone support, so just call StartInstance with
 		// a blank StartInstanceParams.AvailabilityZone.
 		zones = []string{""}
 		if args.BootstrapConstraints.HasZones() {
-			logger.Debugf("environ doesn't support zones: ignoring bootstrap zone constraints")
+			logger.Debugf(bootstrapContext, "environ doesn't support zones: ignoring bootstrap zone constraints")
 		}
 	} else if err != nil {
 		return nil, nil, nil, errors.Annotate(err, "cannot start bootstrap instance")
@@ -263,14 +264,14 @@ func BootstrapInstance(
 	zoneErrors := []error{} // is a collection of errors we encounter for each zone.
 	for i, zone := range zones {
 		startInstanceArgs.AvailabilityZone = zone
-		result, err = env.StartInstance(callCtx, startInstanceArgs)
+		result, err = env.StartInstance(bootstrapContext, startInstanceArgs)
 		if err == nil {
 			break
 		}
 		zoneErrors = append(zoneErrors, fmt.Errorf("starting bootstrap instance in zone %q: %w", zone, err))
 
 		select {
-		case <-ctx.Done():
+		case <-bootstrapContext.Done():
 			return nil, nil, nil, errors.Annotate(err, "starting controller (cancelled)")
 		default:
 		}
@@ -281,7 +282,7 @@ func BootstrapInstance(
 
 		if i < len(zones)-1 {
 			// Try the next zone.
-			logger.Debugf("failed to start instance in availability zone %q: %s", zone, err)
+			logger.Debugf(bootstrapContext, "failed to start instance in availability zone %q: %s", zone, err)
 			continue
 		}
 		// This is the last zone in the list, error.
@@ -295,7 +296,14 @@ func BootstrapInstance(
 	}
 	modelFw, ok := env.(models.ModelFirewaller)
 	if ok {
-		if err := openControllerModelPorts(callCtx, modelFw, args.ControllerConfig, env.Config()); err != nil {
+		envIPV6CIDRSupport := false
+		if featQuerier, ok := env.(environs.FirewallFeatureQuerier); ok {
+			var err error
+			if envIPV6CIDRSupport, err = featQuerier.SupportsRulesWithIPV6CIDRs(bootstrapContext); err != nil {
+				return nil, nil, nil, errors.Annotate(err, "checking IPV6 CIDRs support to cloud provider")
+			}
+		}
+		if err := openControllerModelPorts(bootstrapContext, modelFw, args.ControllerConfig, env.Config(), envIPV6CIDRSupport); err != nil {
 			return nil, nil, nil, errors.Annotate(err, "cannot open SSH")
 		}
 	}
@@ -310,7 +318,7 @@ func BootstrapInstance(
 		padding := make([]string, 40-len(msg))
 		msg += strings.Join(padding, " ")
 	}
-	ctx.Infof(msg)
+	bootstrapContext.Infof(msg)
 
 	finalizer := func(ctx environs.BootstrapContext, icfg *instancecfg.InstanceConfig, opts environs.BootstrapDialOpts) error {
 		icfg.Bootstrap.BootstrapMachineInstanceId = result.Instance.Id()
@@ -328,12 +336,12 @@ func BootstrapInstance(
 		if err := instancecfg.FinishInstanceConfig(icfg, envConfig); err != nil {
 			return err
 		}
-		return FinishBootstrap(ctx, client, env, callCtx, result.Instance, icfg, opts)
+		return FinishBootstrap(bootstrapContext, client, env, result.Instance, icfg, opts)
 	}
 	return result, &requestedBootstrapBase, finalizer, nil
 }
 
-func startInstanceZones(env environs.Environ, ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
+func startInstanceZones(env environs.Environ, ctx context.Context, args environs.StartInstanceParams) ([]string, error) {
 	zonedEnviron, ok := env.(ZonedEnviron)
 	if !ok {
 		return nil, errors.NotImplementedf("ZonedEnviron")
@@ -367,15 +375,16 @@ func startInstanceZones(env environs.Environ, ctx envcontext.ProviderCallContext
 // openControllerModelPorts opens port 22 and apiports on the controller to the configured allow list.
 // This is all that is required for the bootstrap to continue. Further configured
 // rules will be opened by the firewaller, Once it has started
-func openControllerModelPorts(callCtx envcontext.ProviderCallContext,
-	modelFw models.ModelFirewaller, controllerConfig controller.Config, cfg *config.Config) error {
+func openControllerModelPorts(bootstrapContext context.Context,
+	modelFw models.ModelFirewaller, controllerConfig controller.Config, cfg *config.Config, envIPV6CIDRSupport bool) error {
+	defaultCIDRs := []string{firewall.AllNetworksIPV4CIDR, firewall.AllNetworksIPV6CIDR}
 	rules := firewall.IngressRules{
 		firewall.NewIngressRule(network.MustParsePortRange("22"), cfg.SSHAllow()...),
 		firewall.NewIngressRule(network.PortRange{
 			Protocol: "tcp",
 			FromPort: controllerConfig.APIPort(),
 			ToPort:   controllerConfig.APIPort(),
-		}),
+		}, defaultCIDRs...),
 	}
 
 	if controllerConfig.AutocertDNSName() != "" {
@@ -385,11 +394,16 @@ func openControllerModelPorts(callCtx envcontext.ProviderCallContext,
 				Protocol: "tcp",
 				FromPort: 80,
 				ToPort:   80,
-			}),
+			}, defaultCIDRs...),
 		)
 	}
 
-	return modelFw.OpenModelPorts(callCtx, rules)
+	// Strip IPV6 CIDRS from the collected ingress rule list if substrates do not support IPV6 CIDRs.
+	if !envIPV6CIDRSupport {
+		rules = rules.RemoveCIDRsMatchingAddressType(network.IPv6Address)
+	}
+
+	return modelFw.OpenModelPorts(bootstrapContext, rules)
 }
 
 func formatHardware(hw *instance.HardwareCharacteristics) string {
@@ -429,7 +443,6 @@ var FinishBootstrap = func(
 	ctx environs.BootstrapContext,
 	client ssh.Client,
 	env environs.Environ,
-	callCtx envcontext.ProviderCallContext,
 	inst instances.Instance,
 	instanceConfig *instancecfg.InstanceConfig,
 	opts environs.BootstrapDialOpts,
@@ -445,7 +458,6 @@ var FinishBootstrap = func(
 		client,
 		GetCheckNonceCommand(instanceConfig),
 		&RefreshableInstance{inst, env},
-		callCtx,
 		opts,
 		hostSSHOptions,
 	)
@@ -616,16 +628,16 @@ func hostBootstrapSSHOptions(
 // for waiting for SSH access to become available.
 type InstanceRefresher interface {
 	// Refresh refreshes the addresses for the instance.
-	Refresh(ctx envcontext.ProviderCallContext) error
+	Refresh(ctx context.Context) error
 
 	// Addresses returns the addresses for the instance.
 	// To ensure that the results are up to date, call
 	// Refresh first.
-	Addresses(ctx envcontext.ProviderCallContext) (network.ProviderAddresses, error)
+	Addresses(ctx context.Context) (network.ProviderAddresses, error)
 
 	// Status returns the provider-specific status for the
 	// instance.
-	Status(ctx envcontext.ProviderCallContext) instance.Status
+	Status(ctx context.Context) instance.Status
 }
 
 type RefreshableInstance struct {
@@ -634,7 +646,7 @@ type RefreshableInstance struct {
 }
 
 // Refresh refreshes the addresses for the instance.
-func (i *RefreshableInstance) Refresh(ctx envcontext.ProviderCallContext) error {
+func (i *RefreshableInstance) Refresh(ctx context.Context) error {
 	instances, err := i.Env.Instances(ctx, []instance.Id{i.Id()})
 	if err != nil {
 		return errors.Trace(err)
@@ -694,7 +706,7 @@ func (hc *hostChecker) loop(dying <-chan struct{}) (io.Closer, error) {
 			if lastErr == nil {
 				return hc, nil
 			}
-			logger.Debugf("connection attempt for %s failed: %v", address, lastErr)
+			logger.Debugf(context.TODO(), "connection attempt for %s failed: %v", address, lastErr)
 		}
 		select {
 		case <-hc.closed:
@@ -789,7 +801,6 @@ func WaitSSH(
 	client ssh.Client,
 	checkHostScript string,
 	inst InstanceRefresher,
-	callCtx envcontext.ProviderCallContext,
 	opts environs.BootstrapDialOpts,
 	hostSSHOptions HostSSHOptionsFunc,
 ) (addr string, err error) {
@@ -816,17 +827,17 @@ func WaitSSH(
 		select {
 		case <-pollAddresses.C:
 			pollAddresses.Reset(opts.AddressesDelay)
-			if err := inst.Refresh(callCtx); err != nil {
+			if err := inst.Refresh(ctx); err != nil {
 				return "", fmt.Errorf("refreshing addresses: %v", err)
 			}
-			instanceStatus := inst.Status(callCtx)
+			instanceStatus := inst.Status(ctx)
 			if instanceStatus.Status == status.ProvisioningError {
 				if instanceStatus.Message != "" {
 					return "", errors.Errorf("instance provisioning failed (%v)", instanceStatus.Message)
 				}
 				return "", errors.Errorf("instance provisioning failed")
 			}
-			addresses, err := inst.Addresses(callCtx)
+			addresses, err := inst.Addresses(ctx)
 			if err != nil {
 				return "", fmt.Errorf("getting addresses: %v", err)
 			}

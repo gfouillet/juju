@@ -1,15 +1,6 @@
-// Copyright 2016 Canonical Ltd.
-// Copyright 2016 Cloudbase Solutions
+// Copyright 2025 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package machineactions_test
+package machineactions
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func Test(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package machineactions -destination package_mock_test.go github.com/juju/juju/apiserver/facades/agent/machineactions OperationService

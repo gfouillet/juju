@@ -11,7 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
 	"go.opentelemetry.io/otel"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/juju/juju/core/logger"
 	coretrace "github.com/juju/juju/core/trace"
+	internalworker "github.com/juju/juju/internal/worker"
 )
 
 const (
@@ -43,10 +44,11 @@ type WorkerConfig struct {
 	Tag  names.Tag
 	Kind coretrace.Kind
 
-	Endpoint           string
-	InsecureSkipVerify bool
-	StackTracesEnabled bool
-	SampleRatio        float64
+	Endpoint              string
+	InsecureSkipVerify    bool
+	StackTracesEnabled    bool
+	SampleRatio           float64
+	TailSamplingThreshold time.Duration
 }
 
 // Validate ensures that the config values are valid.
@@ -103,21 +105,28 @@ func newWorker(cfg WorkerConfig, internalStates chan string) (*tracerWorker, err
 		return nil, errors.Trace(err)
 	}
 
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:  "tracer",
+		Clock: cfg.Clock,
+		IsFatal: func(err error) bool {
+			return false
+		},
+		RestartDelay: time.Second * 10,
+		Logger:       internalworker.WrapLogger(cfg.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w := &tracerWorker{
 		internalStates: internalStates,
 		cfg:            cfg,
-		tracerRunner: worker.NewRunner(worker.RunnerParams{
-			Clock: cfg.Clock,
-			IsFatal: func(err error) bool {
-				return false
-			},
-			RestartDelay: time.Second * 10,
-			Logger:       cfg.Logger,
-		}),
+		tracerRunner:   runner,
 		tracerRequests: make(chan traceRequest),
 	}
 
 	if err = catacomb.Invoke(catacomb.Plan{
+		Name: "tracer",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
@@ -139,12 +148,15 @@ func (w *tracerWorker) loop() (err error) {
 	// Report the initial started state.
 	w.reportInternalState(stateStarted)
 
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	for {
 		select {
 		// The following ensures that all tracerRequests are serialised and
 		// processed in order.
 		case req := <-w.tracerRequests:
-			if err := w.initTracer(req.namespace); err != nil {
+			if err := w.initTracer(ctx, req.namespace); err != nil {
 				select {
 				case req.done <- errors.Trace(err):
 				case <-w.catacomb.Dying():
@@ -180,7 +192,7 @@ func (w *tracerWorker) GetTracer(ctx context.Context, namespace coretrace.Tracer
 	ns := namespace.WithTagAndKind(w.cfg.Tag, w.cfg.Kind)
 	// First check if we've already got the tracer worker already running. If
 	// we have, then return out quickly. The tracerRunner is the cache, so there
-	// is no need to have a in-memory cache here.
+	// is no need to have an in-memory cache here.
 	if tracer, err := w.workerFromCache(ns); err != nil {
 		if errors.Is(err, w.catacomb.ErrDying()) {
 			return nil, coretrace.ErrTracerDying
@@ -195,7 +207,7 @@ func (w *tracerWorker) GetTracer(ctx context.Context, namespace coretrace.Tracer
 	// or it's not running and we need to start it.
 	req := traceRequest{
 		namespace: ns,
-		done:      make(chan error),
+		done:      make(chan error, 1),
 	}
 	select {
 	case w.tracerRequests <- req:
@@ -251,11 +263,8 @@ func (w *tracerWorker) workerFromCache(namespace coretrace.TaggedTracerNamespace
 	return nil, nil
 }
 
-func (w *tracerWorker) initTracer(namespace coretrace.TaggedTracerNamespace) error {
-	err := w.tracerRunner.StartWorker(namespace.String(), func() (worker.Worker, error) {
-		ctx, cancel := w.scopedContext()
-		defer cancel()
-
+func (w *tracerWorker) initTracer(ctx context.Context, namespace coretrace.TaggedTracerNamespace) error {
+	err := w.tracerRunner.StartWorker(ctx, namespace.String(), func(ctx context.Context) (worker.Worker, error) {
 		return w.cfg.NewTracerWorker(
 			ctx,
 			namespace,
@@ -263,6 +272,7 @@ func (w *tracerWorker) initTracer(namespace coretrace.TaggedTracerNamespace) err
 			w.cfg.InsecureSkipVerify,
 			w.cfg.StackTracesEnabled,
 			w.cfg.SampleRatio,
+			w.cfg.TailSamplingThreshold,
 			w.cfg.Logger,
 			NewClient,
 		)
@@ -282,6 +292,9 @@ func (w *tracerWorker) scopedContext() (context.Context, context.CancelFunc) {
 }
 
 func (w *tracerWorker) reportInternalState(state string) {
+	if w.internalStates == nil {
+		return
+	}
 	select {
 	case <-w.catacomb.Dying():
 	case w.internalStates <- state:
@@ -374,15 +387,22 @@ func (s *loggerSink) Enabled(level int) bool {
 // only be called when Enabled(level) is true. See Logger.Info for more
 // details.
 func (s *loggerSink) Info(level int, msg string, keysAndValues ...any) {
+	// OpenTelemetry is very chatty, so we're going to log info statements
+	// as trace statements. We can up the level if it becomes a problem.
+
+	if !s.Logger.IsLevelEnabled(logger.TRACE) {
+		return
+	}
+
 	format, args := s.formatKeysAndValues([]any{level, msg}, keysAndValues)
-	s.Logger.Infof("%d: %s"+format, args...)
+	s.Logger.Tracef(context.Background(), "%d: %s"+format, args...)
 }
 
 // Error logs an error, with the given message and key/value pairs as
 // context.  See Logger.Error for more details.
 func (s *loggerSink) Error(err error, msg string, keysAndValues ...any) {
 	format, args := s.formatKeysAndValues([]any{msg, err}, keysAndValues)
-	s.Logger.Errorf("%s: %v"+format, args...)
+	s.Logger.Errorf(context.Background(), "%s: %v"+format, args...)
 }
 
 // WithValues returns a new LogSink with additional key/value pairs.  See
@@ -416,7 +436,7 @@ func (s *loggerSink) formatKeysAndValues(init []any, keysAndValues []any) (strin
 		args = append(args, v)
 	}
 	if len(exprs) == 0 {
-		return "", nil
+		return "", args
 	}
 
 	format := ": " + strings.Join(exprs, " ")

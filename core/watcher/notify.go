@@ -6,9 +6,11 @@ package watcher
 import (
 	"context"
 
-	"github.com/juju/errors"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // NotifyChannel is a channel that receives a single value to indicate that the
@@ -52,7 +54,7 @@ type NotifyConfig struct {
 // Validate returns an error if the config cannot start a NotifyWorker.
 func (config NotifyConfig) Validate() error {
 	if config.Handler == nil {
-		return errors.NotValidf("nil Handler")
+		return errors.Errorf("nil Handler %w", coreerrors.NotValid)
 	}
 	return nil
 }
@@ -60,17 +62,18 @@ func (config NotifyConfig) Validate() error {
 // NewNotifyWorker starts a new worker that runs a NotifyHandler.
 func NewNotifyWorker(config NotifyConfig) (*NotifyWorker, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	nw := &NotifyWorker{
 		config: config,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "notify-worker",
 		Site: &nw.catacomb,
 		Work: nw.loop,
 	})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return nw, nil
 }
@@ -95,7 +98,7 @@ func (nw *NotifyWorker) loop() (err error) {
 			}
 
 			if err := nw.dispatchChange(); err != nil {
-				return errors.Trace(err)
+				return errors.Capture(err)
 			}
 		}
 	}
@@ -141,7 +144,7 @@ func (nw *NotifyWorker) dispatchChange() error {
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 // Kill is part of the worker.Worker interface.
@@ -156,10 +159,14 @@ func (nw *NotifyWorker) Wait() error {
 
 // Report implements dependency.Reporter.
 func (nw *NotifyWorker) Report() map[string]interface{} {
-	if r, ok := nw.config.Handler.(worker.Reporter); ok {
-		return r.Report()
+	report := map[string]interface{}{
+		"type": "NotifyWorker",
 	}
-	return nil
+
+	if r, ok := nw.config.Handler.(worker.Reporter); ok {
+		report["handler"] = r.Report()
+	}
+	return report
 }
 
 func (nw *NotifyWorker) scopedContext() (context.Context, context.CancelFunc) {

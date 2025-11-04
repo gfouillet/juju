@@ -6,9 +6,8 @@ package domain
 import (
 	"database/sql"
 
-	"github.com/juju/errors"
-
-	"github.com/juju/juju/internal/database"
+	"github.com/juju/juju/internal/database/drivererrors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // CoerceError converts all sql, sqlite and dqlite errors into an error that
@@ -24,7 +23,7 @@ func CoerceError(err error) error {
 	// If the error is a sql error, a dqlite error or a database error, we mask
 	// the error to prevent it from being unwrapped.
 	if isDatabaseError(err) {
-		return errors.Trace(maskError{error: err})
+		return errors.Capture(maskError{error: err})
 	}
 
 	return err
@@ -44,7 +43,7 @@ type maskError struct {
 // As implements standard errors As interface. As will check if the target type
 // is a sql error that is trying to be retrieved and return false.
 func (e maskError) As(target any) bool {
-	if database.IsError(target) {
+	if drivererrors.IsErrorTarget(target) {
 		return false
 	}
 
@@ -64,7 +63,7 @@ func (e maskError) Is(target error) bool {
 // isDatabaseError checks if the error is a sql, sqlite or dqlite error.
 func isDatabaseError(err error) bool {
 	return errors.Is(err, sql.ErrNoRows) ||
-		database.IsError(err) ||
+		drivererrors.IsError(err) ||
 		errors.Is(err, sql.ErrTxDone) ||
 		errors.Is(err, sql.ErrConnDone)
 }

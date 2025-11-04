@@ -4,19 +4,22 @@
 package quota_test
 
 import (
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/quota"
 )
 
-var _ = gc.Suite(&MultiCheckerSuite{})
+func TestMultiCheckerSuite(t *testing.T) {
+	tc.Run(t, &MultiCheckerSuite{})
+}
 
 type MultiCheckerSuite struct {
 }
 
-func (s *MultiCheckerSuite) TestSuccessfulCheck(c *gc.C) {
+func (s *MultiCheckerSuite) TestSuccessfulCheck(c *tc.C) {
 	chk := quota.NewMultiChecker(
 		quota.NewMapKeyValueSizeChecker(5, 10),
 		quota.NewBSONTotalSizeChecker(50),
@@ -27,10 +30,10 @@ func (s *MultiCheckerSuite) TestSuccessfulCheck(c *gc.C) {
 	})
 
 	err := chk.Outcome()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *MultiCheckerSuite) TestExceedMaxSize(c *gc.C) {
+func (s *MultiCheckerSuite) TestExceedMaxSize(c *tc.C) {
 	chk := quota.NewMultiChecker(
 		quota.NewMapKeyValueSizeChecker(5, 10),
 		quota.NewBSONTotalSizeChecker(24),
@@ -42,5 +45,5 @@ func (s *MultiCheckerSuite) TestExceedMaxSize(c *gc.C) {
 	})
 
 	err := chk.Outcome()
-	c.Assert(err, jc.ErrorIs, errors.QuotaLimitExceeded)
+	c.Assert(err, tc.ErrorIs, coreerrors.QuotaLimitExceeded)
 }

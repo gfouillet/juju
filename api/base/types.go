@@ -6,11 +6,10 @@ package base
 import (
 	"time"
 
-	"github.com/juju/version/v2"
-
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 )
 
@@ -18,10 +17,10 @@ import (
 // time the model was accessed for a particular user. This is a client
 // side structure that translates the owner tag into a user facing string.
 type UserModel struct {
-	Name           string
 	UUID           string
+	Name           string
+	Qualifier      model.Qualifier
 	Type           model.ModelType
-	Owner          string
 	LastConnection *time.Time
 }
 
@@ -30,7 +29,7 @@ type ModelStatus struct {
 	UUID               string
 	Life               life.Value
 	ModelType          model.ModelType
-	Owner              string
+	Qualifier          model.Qualifier
 	TotalMachineCount  int
 	CoreCount          int
 	HostedMachineCount int
@@ -48,14 +47,9 @@ type Machine struct {
 	Id          string
 	InstanceId  string
 	DisplayName string
-	HasVote     bool
-	WantsVote   bool
 	Status      string
 	Message     string
 	Hardware    *instance.HardwareCharacteristics
-	// HAPrimary indicates whether this machine has a primary mongo instance in replicaset and,
-	// thus, can be considered a primary controller machine in HA setup.
-	HAPrimary *bool
 }
 
 // Application holds information about an application in a juju model.
@@ -65,8 +59,9 @@ type Application struct {
 
 // ModelInfo holds information about a model.
 type ModelInfo struct {
-	Name            string
 	UUID            string
+	Name            string
+	Qualifier       model.Qualifier
 	Type            model.ModelType
 	ControllerUUID  string
 	IsController    bool
@@ -74,12 +69,11 @@ type ModelInfo struct {
 	Cloud           string
 	CloudRegion     string
 	CloudCredential string
-	Owner           string
 	Life            life.Value
 	Status          Status
 	Users           []UserInfo
 	Machines        []Machine
-	AgentVersion    *version.Number
+	AgentVersion    *semversion.Number
 }
 
 // Status represents the status of a machine, application, or unit.
@@ -118,8 +112,9 @@ type Filesystem struct {
 
 // UserModelSummary holds summary about a model for a user.
 type UserModelSummary struct {
-	Name               string
 	UUID               string
+	Name               string
+	Qualifier          model.Qualifier
 	Type               model.ModelType
 	ControllerUUID     string
 	IsController       bool
@@ -127,13 +122,12 @@ type UserModelSummary struct {
 	Cloud              string
 	CloudRegion        string
 	CloudCredential    string
-	Owner              string
 	Life               life.Value
 	Status             Status
 	ModelUserAccess    string
 	UserLastConnection *time.Time
 	Counts             []EntityCount
-	AgentVersion       *version.Number
+	AgentVersion       *semversion.Number
 	Error              error
 	Migration          *MigrationSummary
 }

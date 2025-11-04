@@ -4,12 +4,11 @@
 package context
 
 import (
-	"context"
-
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"k8s.io/client-go/rest"
 
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/model"
@@ -52,7 +51,7 @@ func (stub *stubLeadershipContext) IsLeader() (bool, error) {
 	return stub.isLeader, nil
 }
 
-func NewHookContext(c *gc.C, hcParams HookContextParams) (*HookContext, error) {
+func NewHookContext(c *tc.C, hcParams HookContextParams) (*HookContext, error) {
 	ctx := &HookContext{
 		unit:                   hcParams.Unit,
 		uniter:                 hcParams.Uniter,
@@ -80,24 +79,24 @@ func NewHookContext(c *gc.C, hcParams HookContextParams) (*HookContext, error) {
 	}
 	// Get and cache the addresses.
 	var err error
-	ctx.publicAddress, err = hcParams.Unit.PublicAddress()
+	ctx.publicAddress, err = hcParams.Unit.PublicAddress(c.Context())
 	if err != nil && !params.IsCodeNoAddressSet(err) {
 		return nil, err
 	}
-	ctx.privateAddress, err = hcParams.Unit.PrivateAddress()
+	ctx.privateAddress, err = hcParams.Unit.PrivateAddress(c.Context())
 	if err != nil && !params.IsCodeNoAddressSet(err) {
 		return nil, err
 	}
-	ctx.availabilityZone, err = hcParams.Unit.AvailabilityZone()
+	ctx.availabilityZone, err = hcParams.Unit.AvailabilityZone(c.Context())
 	if err != nil {
 		return nil, err
 	}
-	machPorts, err := hcParams.Uniter.OpenedMachinePortRangesByEndpoint(context.Background(), ctx.assignedMachineTag)
+	machPorts, err := hcParams.Uniter.OpenedMachinePortRangesByEndpoint(c.Context(), ctx.assignedMachineTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	appPortRanges, err := hcParams.Uniter.OpenedPortRangesByEndpoint(context.Background())
+	appPortRanges, err := hcParams.Uniter.OpenedPortRangesByEndpoint(c.Context())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -108,7 +107,7 @@ func NewHookContext(c *gc.C, hcParams HookContextParams) (*HookContext, error) {
 	return ctx, nil
 }
 
-func NewMockUnitHookContext(c *gc.C, mockUnit *api.MockUnit, modelType model.ModelType, leadership LeadershipContext) *HookContext {
+func NewMockUnitHookContext(c *tc.C, mockUnit *api.MockUnit, modelType model.ModelType, leadership LeadershipContext) *HookContext {
 	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unit:              mockUnit,
@@ -125,24 +124,25 @@ func NewMockUnitHookContext(c *gc.C, mockUnit *api.MockUnit, modelType model.Mod
 		),
 		secretChanges:          newSecretsChangeRecorder(logger),
 		storageAttachmentCache: make(map[names.StorageTag]jujuc.ContextStorageAttachment),
+		secretMetadata:         make(map[string]jujuc.SecretMetadata),
 	}
 }
 
-func NewMockUnitHookContextWithUniter(c *gc.C, mockUnit *api.MockUnit, uniterClient *api.MockUniterClient) *HookContext {
+func NewMockUnitHookContextWithUniter(c *tc.C, modelType model.ModelType, mockUnit *api.MockUnit, uniterClient *api.MockUniterClient) *HookContext {
 	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unitName:               mockUnit.Tag().Id(), //unitName used by the action finaliser method.
 		unit:                   mockUnit,
 		uniter:                 uniterClient,
 		logger:                 logger,
-		modelType:              model.IAAS,
+		modelType:              modelType,
 		portRangeChanges:       newPortRangeChangeRecorder(logger, mockUnit.Tag(), model.IAAS, nil, nil),
 		secretChanges:          newSecretsChangeRecorder(logger),
 		storageAttachmentCache: make(map[names.StorageTag]jujuc.ContextStorageAttachment),
 	}
 }
 
-func NewMockUnitHookContextWithStateAndStorage(c *gc.C, unitName string, unit HookUnit, uniterClient api.UniterClient, storageTag names.StorageTag) *HookContext {
+func NewMockUnitHookContextWithStateAndStorage(c *tc.C, unitName string, unit HookUnit, uniterClient api.UniterClient, storageTag names.StorageTag) *HookContext {
 	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unitName:               unit.Tag().Id(), //unitName used by the action finaliser method.
@@ -188,17 +188,24 @@ func SetEnvironmentHookContextStorage(context *HookContext, storageTag names.Sto
 	context.storageTag = storageTag
 }
 
+// SetEnvironmentHookContextWorkload exists purely to set the fields used in hookVars.
+// It makes no assumptions about the validity of context.
+func SetEnvironmentHookContextWorkload(context *HookContext, workloadName string) {
+	context.workloadName = workloadName
+}
+
 // SetEnvironmentHookContextNotice exists purely to set the fields used in hookVars.
 // It makes no assumptions about the validity of context.
-func SetEnvironmentHookContextNotice(context *HookContext, workloadName, noticeID, noticeType, noticeKey string) {
-	context.workloadName = workloadName
+func SetEnvironmentHookContextNotice(context *HookContext, noticeID, noticeType, noticeKey string) {
 	context.noticeID = noticeID
 	context.noticeType = noticeType
 	context.noticeKey = noticeKey
 }
 
-func SetEnvironmentHookContextTargetBase(context *HookContext, baseStr string) {
-	context.baseUpgradeTarget = baseStr
+// SetEnvironmentHookContextCheck exists purely to set the fields used in hookVars.
+// It makes no assumptions about the validity of context.
+func SetEnvironmentHookContextCheck(context *HookContext, checkName string) {
+	context.checkName = checkName
 }
 
 // SetRelationBroken sets the relation as broken.
@@ -258,7 +265,7 @@ type ModelHookContextParams struct {
 
 // NewModelHookContext exists purely to set the fields used in rs.
 // The returned value is not otherwise valid.
-func NewModelHookContext(c *gc.C, p ModelHookContextParams) *HookContext {
+func NewModelHookContext(c *tc.C, p ModelHookContextParams) *HookContext {
 	return &HookContext{
 		id:                     p.ID,
 		hookName:               p.HookName,
@@ -352,4 +359,8 @@ func (ctx *HookContext) PendingSecretRevokes() map[string][]uniter.SecretGrantRe
 
 func (ctx *HookContext) PendingSecretTrackLatest() map[string]bool {
 	return ctx.secretChanges.pendingTrackLatest
+}
+
+func (ctx *HookContext) SetInClusterConfig(inClusterConfig func() (*rest.Config, error)) {
+	ctx.inClusterConfig = inClusterConfig
 }

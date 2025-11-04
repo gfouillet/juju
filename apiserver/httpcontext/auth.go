@@ -47,7 +47,7 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		var httpError apiservererrors.HTTPWritableError
 		if errors.As(err, &httpError) {
 			if err := httpError.SendError(w); err != nil {
-				logger.Warningf("failed sending http error %v", err)
+				logger.Warningf(req.Context(), "failed sending http error %v", err)
 			}
 		} else {
 			http.Error(w,
@@ -59,7 +59,7 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if h.Authorizer != nil {
-		if err := h.Authorizer.Authorize(authInfo); err != nil {
+		if err := h.Authorizer.Authorize(req.Context(), authInfo); err != nil {
 			http.Error(w,
 				fmt.Sprintf("authorization failed: %s", err),
 				http.StatusForbidden,
@@ -75,10 +75,33 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 type authInfoKey struct{}
 
-// RequestAuthInfo returns the AuthInfo associated with the request,
-// if any, and a boolean indicating whether or not the request was
-// authenticated.
-func RequestAuthInfo(req *http.Request) (authentication.AuthInfo, bool) {
-	authInfo, ok := req.Context().Value(authInfoKey{}).(authentication.AuthInfo)
+// RequestAuthInfo returns the AuthInfo associated with the context form a
+// request. If the context has no auth information associated with it false is
+// returned.
+func RequestAuthInfo(ctx context.Context) (authentication.AuthInfo, bool) {
+	authInfo, ok := ctx.Value(authInfoKey{}).(authentication.AuthInfo)
 	return authInfo, ok
+}
+
+// CompositeAuthorizer invokes the underlying authorizers and
+// returns success (nil) when the first one succeeds.
+// If none are successful, returns [apiservererrors.ErrPerm].
+type CompositeAuthorizer []authentication.Authorizer
+
+// Authorize is part of the [Authorizer] interface.
+func (c CompositeAuthorizer) Authorize(ctx context.Context, authInfo authentication.AuthInfo) error {
+	for _, a := range c {
+		if err := a.Authorize(ctx, authInfo); err == nil {
+			return nil
+		}
+	}
+	return apiservererrors.ErrPerm
+}
+
+// AuthorizerFunc is a function type implementing Authorizer.
+type AuthorizerFunc func(authentication.AuthInfo) error
+
+// Authorize is part of the Authorizer interface.
+func (f AuthorizerFunc) Authorize(info authentication.AuthInfo) error {
+	return f(info)
 }

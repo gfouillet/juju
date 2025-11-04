@@ -10,10 +10,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	jujustorage "github.com/juju/juju/internal/storage"
 )
@@ -38,19 +38,19 @@ func InstanceSDKEC2(inst instances.Instance) types.Instance {
 	return inst.(*sdkInstance).i
 }
 
-func TerminatedInstances(e environs.Environ) ([]instances.Instance, error) {
-	return e.(*environ).allInstancesByState(envcontext.WithoutCredentialInvalidator(context.Background()), "shutting-down", "terminated")
+func TerminatedInstances(c *tc.C, e environs.Environ) ([]instances.Instance, error) {
+	return e.(*environ).allInstancesByState(c.Context(), "shutting-down", "terminated")
 }
 
-func InstanceSecurityGroups(e environs.Environ, ctx envcontext.ProviderCallContext, ids []instance.Id, states ...string) ([]types.GroupIdentifier, error) {
+func InstanceSecurityGroups(e environs.Environ, ctx context.Context, ids []instance.Id, states ...string) ([]types.GroupIdentifier, error) {
 	return e.(*environ).instanceSecurityGroups(ctx, ids, states...)
 }
 
-func AllModelVolumes(e environs.Environ, ctx envcontext.ProviderCallContext) ([]string, error) {
+func AllModelVolumes(e environs.Environ, ctx context.Context) ([]string, error) {
 	return e.(*environ).allModelVolumes(ctx, true)
 }
 
-func AllModelGroups(e environs.Environ, ctx envcontext.ProviderCallContext) ([]string, error) {
+func AllModelGroups(e environs.Environ, ctx context.Context) ([]string, error) {
 	groups, err := e.(*environ).modelSecurityGroups(ctx)
 	if err != nil {
 		return nil, err
@@ -71,7 +71,9 @@ var (
 	DestroyVolumeAttempt           = &destroyVolumeAttempt
 	DeleteSecurityGroupInsistently = &deleteSecurityGroupInsistently
 	TerminateInstancesById         = &terminateInstancesById
-	MaybeConvertCredentialError    = maybeConvertCredentialError
+
+	IsAuthorizationError      = isAuthorizationError
+	ConvertAuthorizationError = convertAuthorizationError
 )
 
 const (
@@ -91,6 +93,6 @@ func (s *stubAccountAPIClient) DescribeAccountAttributes(
 	return nil, errors.New("boom")
 }
 
-func VerifyCredentials(ctx envcontext.ProviderCallContext) error {
-	return verifyCredentials(&stubAccountAPIClient{}, ctx)
+func VerifyCredentials(ctx context.Context, invalidator environs.CredentialInvalidator) error {
+	return verifyCredentials(ctx, invalidator, &stubAccountAPIClient{})
 }

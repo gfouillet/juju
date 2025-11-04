@@ -5,14 +5,15 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/juju/collections/transform"
 
 	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/errors"
 )
 
 // ProviderState defines the state methods required by the ProviderService.
@@ -22,6 +23,9 @@ type ProviderState interface {
 	AllKeysQuery() string
 	// ModelConfig returns the currently set config for the model.
 	ModelConfig(context.Context) (map[string]string, error)
+	// NamespaceForWatchModelConfig returns the namespace identifier used for
+	// watching model configuration changes.
+	NamespaceForWatchModelConfig() string
 }
 
 // ProviderService defines the service for interacting with ModelConfig.
@@ -44,9 +48,12 @@ func NewProviderService(
 
 // ModelConfig returns the current config for the model.
 func (s *ProviderService) ModelConfig(ctx context.Context) (*config.Config, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	stConfig, err := s.st.ModelConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("getting model config from state: %w", err)
+		return nil, errors.Errorf("getting model config from state: %w", err)
 	}
 
 	altConfig := transform.Map(stConfig, func(k, v string) (string, any) { return k, v })
@@ -76,9 +83,14 @@ func NewWatchableProviderService(
 
 // Watch returns a watcher that returns keys for any changes to model
 // config.
-func (s *WatchableProviderService) Watch() (watcher.StringsWatcher, error) {
+func (s *WatchableProviderService) Watch(ctx context.Context) (watcher.StringsWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	return s.watcherFactory.NewNamespaceWatcher(
-		"model_config", changestream.All,
+		ctx,
 		eventsource.InitialNamespaceChanges(s.st.AllKeysQuery()),
+		"provider model config watcher",
+		eventsource.NamespaceFilter(s.st.NamespaceForWatchModelConfig(), changestream.All),
 	)
 }

@@ -6,18 +6,19 @@ package eventsource
 import (
 	"context"
 	"database/sql"
-	"errors"
+	stdtesting "testing"
 	"time"
 
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
+	"go.uber.org/goleak"
 
 	"github.com/juju/juju/core/changestream"
 	"github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/database/schema"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/testing"
 )
 
 var _ watcher.StringsWatcher = &NamespaceWatcher{}
@@ -26,14 +27,17 @@ type namespaceSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&namespaceSuite{})
+func TestNamespaceSuite(t *stdtesting.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &namespaceSuite{})
+}
 
-func (s *namespaceSuite) SetUpTest(c *gc.C) {
-	s.baseSuite.SetUpTest(c)
+func (s *namespaceSuite) SetUpTest(c *tc.C) {
+	s.DqliteSuite.SetUpTest(c)
 	s.ApplyDDL(c, schemaDDLApplier{})
 }
 
-func (s *namespaceSuite) TestInitialStateSent(c *gc.C) {
+func (s *namespaceSuite) TestInitialStateSent(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -47,35 +51,40 @@ func (s *namespaceSuite) TestInitialStateSent(c *gc.C) {
 	// read mode, we will have the in channel assigned.
 	deltas := make(chan []changestream.ChangeEvent)
 	subExp.Changes().Return(deltas)
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"random_namespace",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
 	// The EventQueue is mocked, but we use a real Sqlite DB from which the
 	// initial state is read. Insert some data to verify.
-	err := s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "CREATE TABLE random_namespace (key_name TEXT PRIMARY KEY)"); err != nil {
+	err := s.DqliteSuite.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "CREATE TABLE random_namespace (key_name TEXT NOT NULL PRIMARY KEY)"); err != nil {
 			return err
 		}
 
 		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace(key_name) VALUES ('some-key')")
 		return err
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(err, jc.ErrorIsNil)
-	w := NewNamespaceWatcher(
-		s.newBaseWatcher(c), "random_namespace", changestream.All, InitialNamespaceChanges("SELECT key_name FROM random_namespace"))
-	defer workertest.CleanKill(c, w)
+	w, err := NewNamespaceWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT key_name FROM random_namespace"),
+		"test watcher",
+		NamespaceFilter("random_namespace", changestream.All),
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 1)
-		c.Check(changes[0], gc.Equals, "some-key")
+		c.Assert(changes, tc.HasLen, 1)
+		c.Check(changes[0], tc.Equals, "some-key")
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for initial watcher changes")
 	}
@@ -83,7 +92,7 @@ func (s *namespaceSuite) TestInitialStateSent(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *namespaceSuite) TestInitialStateSentByMapper(c *gc.C) {
+func (s *namespaceSuite) TestInitialStateSentByMapper(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -97,42 +106,46 @@ func (s *namespaceSuite) TestInitialStateSentByMapper(c *gc.C) {
 	// read mode, we will have the in channel assigned.
 	deltas := make(chan []changestream.ChangeEvent)
 	subExp.Changes().Return(deltas)
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"random_namespace",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
 	// The EventQueue is mocked, but we use a real Sqlite DB from which the
 	// initial state is read. Insert some data to verify.
-	err := s.TxnRunner().StdTxn(context.Background(), func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "CREATE TABLE random_namespace (key_name TEXT PRIMARY KEY)"); err != nil {
+	err := s.DqliteSuite.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "CREATE TABLE random_namespace (key_name TEXT NOT NULL PRIMARY KEY)"); err != nil {
 			return err
 		}
 
 		_, err := tx.ExecContext(ctx, "INSERT INTO random_namespace(key_name) VALUES ('some-key')")
 		return err
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Notice that even if the mapper returns an empty list of change events,
 	// the initial state is still sent. This is a hard requirement of the API.
 
-	c.Assert(err, jc.ErrorIsNil)
-	w := NewNamespaceMapperWatcher(
-		s.newBaseWatcher(c), "random_namespace", changestream.All, InitialNamespaceChanges("SELECT key_name FROM random_namespace"),
-		func(ctx context.Context, runner database.TxnRunner, e []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
+	w, err := NewNamespaceMapperWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT key_name FROM random_namespace"),
+		"test watcher",
+		func(ctx context.Context, e []changestream.ChangeEvent) ([]string, error) {
 			return nil, nil
 		},
+		NamespaceFilter("random_namespace", changestream.All),
 	)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 1)
-		c.Check(changes[0], gc.Equals, "some-key")
+		c.Assert(changes, tc.HasLen, 1)
+		c.Check(changes[0], tc.Equals, "some-key")
 	case <-time.After(time.Second):
 		c.Fatal("timed out waiting for initial watcher changes")
 	}
@@ -140,7 +153,7 @@ func (s *namespaceSuite) TestInitialStateSentByMapper(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *namespaceSuite) TestDeltasSent(c *gc.C) {
+func (s *namespaceSuite) TestDeltasSent(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -157,25 +170,30 @@ func (s *namespaceSuite) TestDeltasSent(c *gc.C) {
 	deltas := make(chan []changestream.ChangeEvent)
 	subExp.Changes().Return(deltas).Times(2)
 
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	// The specific table doesn't matter here. Only that exists to read from.
 	// We don't need any initial data.
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"external_controller",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
-	w := NewNamespaceWatcher(
-		s.newBaseWatcher(c), "external_controller", changestream.All, InitialNamespaceChanges("SELECT uuid FROM external_controller"))
-	defer workertest.CleanKill(c, w)
+	w, err := NewNamespaceWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		NamespaceFilter("external_controller", changestream.All),
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	// No initial data.
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 0)
+		c.Assert(changes, tc.HasLen, 0)
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for initial watcher changes")
 	}
@@ -192,8 +210,8 @@ func (s *namespaceSuite) TestDeltasSent(c *gc.C) {
 
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 1)
-		c.Check(changes[0], gc.Equals, "some-ec-uuid")
+		c.Assert(changes, tc.HasLen, 1)
+		c.Check(changes[0], tc.Equals, "some-ec-uuid")
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for watcher delta")
 	}
@@ -201,7 +219,7 @@ func (s *namespaceSuite) TestDeltasSent(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *namespaceSuite) TestDeltasSentByMapper(c *gc.C) {
+func (s *namespaceSuite) TestDeltasSentByMapper(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -219,32 +237,36 @@ func (s *namespaceSuite) TestDeltasSentByMapper(c *gc.C) {
 	deltas := make(chan []changestream.ChangeEvent)
 	subExp.Changes().Return(deltas).Times(2)
 
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	// The specific table doesn't matter here. Only that exists to read from.
 	// We don't need any initial data.
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"external_controller",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
-	w := NewNamespaceMapperWatcher(
-		s.newBaseWatcher(c), "external_controller", changestream.All, InitialNamespaceChanges("SELECT uuid FROM external_controller"),
-		func(ctx context.Context, runner database.TxnRunner, e []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
-			if e[0].Changed() == "some-ec-uuid" {
-				return e, nil
+	w, err := NewNamespaceMapperWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		func(ctx context.Context, e []changestream.ChangeEvent) ([]string, error) {
+			if s := e[0].Changed(); s == "some-ec-uuid" {
+				return singleton(s), nil
 			}
 			return nil, nil
 		},
+		NamespaceFilter("external_controller", changestream.All),
 	)
-	defer workertest.CleanKill(c, w)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
 	// No initial data.
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 0)
+		c.Assert(changes, tc.HasLen, 0)
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for initial watcher changes")
 	}
@@ -261,8 +283,8 @@ func (s *namespaceSuite) TestDeltasSentByMapper(c *gc.C) {
 
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 1)
-		c.Check(changes[0], gc.Equals, "some-ec-uuid")
+		c.Assert(changes, tc.HasLen, 1)
+		c.Check(changes[0], tc.Equals, "some-ec-uuid")
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for watcher delta")
 	}
@@ -286,7 +308,7 @@ func (s *namespaceSuite) TestDeltasSentByMapper(c *gc.C) {
 	workertest.CleanKill(c, w)
 }
 
-func (s *namespaceSuite) TestDeltasSentByMapperError(c *gc.C) {
+func (s *namespaceSuite) TestDeltasSentByMapperError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -298,29 +320,33 @@ func (s *namespaceSuite) TestDeltasSentByMapperError(c *gc.C) {
 	deltas := make(chan []changestream.ChangeEvent)
 	subExp.Changes().Return(deltas).AnyTimes()
 
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	// The specific table doesn't matter here. Only that exists to read from.
 	// We don't need any initial data.
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"external_controller",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
-	w := NewNamespaceMapperWatcher(
-		s.newBaseWatcher(c), "external_controller", changestream.All, InitialNamespaceChanges("SELECT uuid FROM external_controller"),
-		func(ctx context.Context, runner database.TxnRunner, e []changestream.ChangeEvent) ([]changestream.ChangeEvent, error) {
+	w, err := NewNamespaceMapperWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		func(ctx context.Context, e []changestream.ChangeEvent) ([]string, error) {
 			return nil, errors.New("boom")
 		},
+		NamespaceFilter("external_controller", changestream.All),
 	)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.DirtyKill(c, w)
 
 	// No initial data.
 	select {
 	case changes := <-w.Changes():
-		c.Assert(changes, gc.HasLen, 0)
+		c.Assert(changes, tc.HasLen, 0)
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for initial watcher changes")
 	}
@@ -338,16 +364,16 @@ func (s *namespaceSuite) TestDeltasSentByMapperError(c *gc.C) {
 	select {
 	case _, ok := <-w.Changes():
 		// Ensure the channel is closed, when the mapper dies.
-		c.Assert(ok, jc.IsFalse)
+		c.Assert(ok, tc.IsFalse)
 	case <-time.After(testing.LongWait):
 		c.Fatal("timed out waiting for watcher delta")
 	}
 
-	err := workertest.CheckKill(c, w)
-	c.Assert(err, gc.ErrorMatches, "boom")
+	err = workertest.CheckKill(c, w)
+	c.Assert(err, tc.ErrorMatches, "boom")
 }
 
-func (s *namespaceSuite) TestSubscriptionDoneKillsWorker(c *gc.C) {
+func (s *namespaceSuite) TestSubscriptionDoneKillsWorker(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	subExp := s.sub.EXPECT()
@@ -356,45 +382,66 @@ func (s *namespaceSuite) TestSubscriptionDoneKillsWorker(c *gc.C) {
 	close(done)
 	subExp.Done().Return(done)
 
-	subExp.Unsubscribe()
+	subExp.Kill()
 
 	// The specific table doesn't matter here. Only that exists to read from.
 	// We don't need any initial data.
 	s.eventsource.EXPECT().Subscribe(
-		subscriptionOptionMatcher{changestream.Namespace(
+		"test watcher",
+		subscriptionOptionMatcher{opt: changestream.Namespace(
 			"external_controller",
-			changestream.Create|changestream.Update|changestream.Delete,
+			changestream.All,
 		)},
 	).Return(s.sub, nil)
 
-	w := NewNamespaceWatcher(
-		s.newBaseWatcher(c), "external_controller", changestream.All, InitialNamespaceChanges("SELECT uuid FROM external_controller"))
+	w, err := NewNamespaceWatcher(
+		s.newBaseWatcher(c), InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		NamespaceFilter("external_controller", changestream.All),
+	)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.DirtyKill(c, w)
 
-	err := workertest.CheckKilled(c, w)
-	c.Check(err, jc.ErrorIs, ErrSubscriptionClosed)
+	err = workertest.CheckKilled(c, w)
+	c.Check(err, tc.ErrorIs, ErrSubscriptionClosed)
 }
 
-func (s *namespaceSuite) TestInvalidChangeMask(c *gc.C) {
-	w := NewNamespaceWatcher(s.newBaseWatcher(c), "external_controller", 0, InitialNamespaceChanges("SELECT uuid FROM external_controller"))
-	defer workertest.DirtyKill(c, w)
+func (s *namespaceSuite) TestNilOption(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	err := workertest.CheckKilled(c, w)
-	c.Assert(err, gc.ErrorMatches, "changeMask value: 0 not valid")
+	_, err := NewNamespaceWatcher(
+		s.newBaseWatcher(c),
+		InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		nil,
+	)
+	c.Assert(err, tc.Not(tc.ErrorIsNil))
+}
+
+func (s *namespaceSuite) TestNilPredicate(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	_, err := NewNamespaceWatcher(
+		s.newBaseWatcher(c),
+		InitialNamespaceChanges("SELECT uuid FROM external_controller"),
+		"test watcher",
+		PredicateFilter("random_namespace", changestream.All, nil),
+	)
+	c.Assert(err, tc.Not(tc.ErrorIsNil))
 }
 
 type schemaDDLApplier struct{}
 
-func (schemaDDLApplier) Apply(c *gc.C, ctx context.Context, runner database.TxnRunner) {
+func (schemaDDLApplier) Apply(c *tc.C, ctx context.Context, runner database.TxnRunner) {
 	schema := schema.New(
 		schema.MakePatch(`
 CREATE TABLE external_controller (
-	uuid            TEXT PRIMARY KEY,
+	uuid            TEXT NOT NULL PRIMARY KEY,
 	alias           TEXT,
 	ca_cert         TEXT NOT NULL
 );
 		`),
 	)
 	_, err := schema.Ensure(ctx, runner)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

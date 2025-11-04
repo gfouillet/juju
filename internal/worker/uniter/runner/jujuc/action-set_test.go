@@ -5,17 +5,19 @@ package jujuc_test
 
 import (
 	"fmt"
+	"testing"
 
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc/jujuctesting"
 )
 
-var _ = gc.Suite(&ActionSetSuite{})
+func TestActionSetSuite(t *testing.T) {
+	tc.Run(t, &ActionSetSuite{})
+}
 
 type ActionSetSuite struct {
 	jujuctesting.ContextSuite
@@ -43,19 +45,19 @@ func (a *nonActionSettingContext) UpdateActionResults(keys []string, value inter
 	return fmt.Errorf("not running an action")
 }
 
-func (s *ActionSetSuite) TestActionSetOnNonActionContextFails(c *gc.C) {
+func (s *ActionSetSuite) TestActionSetOnNonActionContextFails(c *tc.C) {
 	hctx := &nonActionSettingContext{}
 	com, err := jujuc.NewCommand(hctx, "action-set")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"oops=nope"})
-	c.Check(code, gc.Equals, 1)
-	c.Check(bufferString(ctx.Stdout), gc.Equals, "")
+	c.Check(code, tc.Equals, 1)
+	c.Check(bufferString(ctx.Stdout), tc.Equals, "")
 	expect := fmt.Sprintf(`(\n)*ERROR %s\n`, "not running an action")
-	c.Check(bufferString(ctx.Stderr), gc.Matches, expect)
+	c.Check(bufferString(ctx.Stderr), tc.Matches, expect)
 }
 
-func (s *ActionSetSuite) TestActionSet(c *gc.C) {
+func (s *ActionSetSuite) TestActionSet(c *tc.C) {
 	var actionSetTests = []struct {
 		summary  string
 		command  []string
@@ -70,7 +72,7 @@ func (s *ActionSetSuite) TestActionSet(c *gc.C) {
 	}, {
 		summary: "invalid keys are an error",
 		command: []string{"result-Value=5"},
-		errMsg:  "ERROR key \"result-Value\" must start and end with lowercase alphanumeric, and contain only lowercase alphanumeric, hyphens and periods\n",
+		errMsg:  "ERROR key \"result-Value\" must start and end with lowercase alphanumeric, and contain only lowercase alphanumeric and hyphens\n",
 		code:    2,
 	}, {
 		summary: "reserved key is an error",
@@ -132,50 +134,12 @@ func (s *ActionSetSuite) TestActionSet(c *gc.C) {
 		c.Logf("test %d: %s", i, t.summary)
 		hctx := &actionSettingContext{}
 		com, err := jujuc.NewCommand(hctx, "action-set")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		c.Logf("  command list: %#v", t.command)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.command)
-		c.Check(code, gc.Equals, t.code)
-		c.Check(bufferString(ctx.Stderr), gc.Equals, t.errMsg)
-		c.Check(hctx.commands, jc.DeepEquals, t.expected)
+		c.Check(code, tc.Equals, t.code)
+		c.Check(bufferString(ctx.Stderr), tc.Equals, t.errMsg)
+		c.Check(hctx.commands, tc.DeepEquals, t.expected)
 	}
-}
-
-func (s *ActionSetSuite) TestHelp(c *gc.C) {
-	hctx := &actionSettingContext{}
-	com, err := jujuc.NewCommand(hctx, "action-set")
-	c.Assert(err, jc.ErrorIsNil)
-	ctx := cmdtesting.Context(c)
-	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"--help"})
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(bufferString(ctx.Stdout), gc.Equals, `Usage: action-set <key>=<value> [<key>=<value> ...]
-
-Summary:
-set action results
-
-Details:
-action-set adds the given values to the results map of the Action. This map
-is returned to the user after the completion of the Action. Keys must start
-and end with lowercase alphanumeric, and contain only lowercase alphanumeric,
-hyphens and periods.  The following special keys are reserved for internal use: 
-"stdout", "stdout-encoding", "stderr", "stderr-encoding".
-
-Example usage:
- action-set outfile.size=10G
- action-set foo.bar=2
- action-set foo.baz.val=3
- action-set foo.bar.zab=4
- action-set foo.baz=1
-
- will yield:
-
- outfile:
-   size: "10G"
- foo:
-   bar:
-     zab: "4"
-   baz: "1"
-`)
-	c.Assert(bufferString(ctx.Stderr), gc.Equals, "")
 }

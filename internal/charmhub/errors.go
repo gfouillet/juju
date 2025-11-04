@@ -4,6 +4,8 @@
 package charmhub
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	corelogger "github.com/juju/juju/core/logger"
@@ -11,7 +13,7 @@ import (
 )
 
 // Handle some of the basic error messages.
-func handleBasicAPIErrors(list transport.APIErrors, logger corelogger.Logger) error {
+func handleBasicAPIErrors(ctx context.Context, list transport.APIErrors, logger corelogger.Logger) error {
 	if len(list) == 0 {
 		return nil
 	}
@@ -23,7 +25,7 @@ func handleBasicAPIErrors(list transport.APIErrors, logger corelogger.Logger) er
 		// We do this because the original error message can be huge and
 		// verbose, like a java stack trace!
 		if masked {
-			logger.Errorf("charmhub API error %s:%s", list[0].Code, list[0].Message)
+			logger.Errorf(ctx, "charmhub API error %s:%s", list[0].Code, list[0].Message)
 		}
 	}()
 

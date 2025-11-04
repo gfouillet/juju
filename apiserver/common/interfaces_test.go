@@ -4,25 +4,28 @@
 package common_test
 
 import (
-	"github.com/juju/names/v5"
-	coretesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/common/mocks"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type AuthFuncSuite struct {
-	coretesting.IsolationSuite
+	testhelpers.IsolationSuite
 
 	authorizer common.Authorizer
 }
 
-var _ = gc.Suite(&AuthFuncSuite{})
+func TestAuthFuncSuite(t *testing.T) {
+	tc.Run(t, &AuthFuncSuite{})
+}
 
-func (s *AuthFuncSuite) setup(c *gc.C, machineTag names.Tag) func() {
+func (s *AuthFuncSuite) setup(c *tc.C, machineTag names.Tag) func() {
 	ctrl := gomock.NewController(c)
 
 	authorizer := mocks.NewMockAuthorizer(ctrl)
@@ -38,19 +41,19 @@ func (s *AuthFuncSuite) setup(c *gc.C, machineTag names.Tag) func() {
 	return ctrl.Finish
 }
 
-func (s *AuthFuncSuite) TestAuthFuncForMachineAgent(c *gc.C) {
+func (s *AuthFuncSuite) TestAuthFuncForMachineAgent(c *tc.C) {
 	machineTag := names.NewMachineTag("machine-test/0")
 	finish := s.setup(c, machineTag)
 	defer finish()
 
 	authFunc := common.AuthFuncForMachineAgent(s.authorizer)
 
-	fn, err := authFunc()
-	c.Assert(err, gc.IsNil)
-	c.Assert(fn(machineTag), jc.IsTrue)
+	fn, err := authFunc(c.Context())
+	c.Assert(err, tc.IsNil)
+	c.Assert(fn(machineTag), tc.IsTrue)
 }
 
-func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidMachineTag(c *gc.C) {
+func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidMachineTag(c *tc.C) {
 	machineTag := names.NewMachineTag("machine-test/0")
 	finish := s.setup(c, machineTag)
 	defer finish()
@@ -58,12 +61,12 @@ func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidMachineTag(c *gc.C) {
 	authFunc := common.AuthFuncForMachineAgent(s.authorizer)
 	invalidTag := names.NewUserTag("user-bob@foo")
 
-	fn, err := authFunc()
-	c.Assert(err, gc.IsNil)
-	c.Assert(fn(invalidTag), jc.IsFalse)
+	fn, err := authFunc(c.Context())
+	c.Assert(err, tc.IsNil)
+	c.Assert(fn(invalidTag), tc.IsFalse)
 }
 
-func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidAuthTag(c *gc.C) {
+func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidAuthTag(c *tc.C) {
 	invalidTag := names.NewUserTag("user-bob@foo")
 	finish := s.setup(c, invalidTag)
 	defer finish()
@@ -71,7 +74,7 @@ func (s *AuthFuncSuite) TestAuthFuncForMachineAgentInvalidAuthTag(c *gc.C) {
 	authFunc := common.AuthFuncForMachineAgent(s.authorizer)
 	machineTag := names.NewMachineTag("machine-test/0")
 
-	fn, err := authFunc()
-	c.Assert(err, gc.IsNil)
-	c.Assert(fn(machineTag), jc.IsFalse)
+	fn, err := authFunc(c.Context())
+	c.Assert(err, tc.IsNil)
+	c.Assert(fn(machineTag), tc.IsFalse)
 }

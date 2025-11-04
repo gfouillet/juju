@@ -8,7 +8,7 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"gopkg.in/tomb.v2"
 
@@ -16,10 +16,10 @@ import (
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/status"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/upgrades"
 	"github.com/juju/juju/internal/upgradesteps"
 	"github.com/juju/juju/internal/worker/gate"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // NewMachineWorker returns a new instance of the machineWorker. It
@@ -102,8 +102,8 @@ func (w *machineWorker) run() error {
 	}
 
 	// Upgrade succeeded - signal that the upgrade is complete.
-	w.logger.Infof("upgrade to %v completed successfully.", w.base.ToVersion)
-	_ = w.base.StatusSetter.SetStatus(status.Started, "", nil)
+	w.logger.Infof(ctx, "upgrade to %v completed successfully.", w.base.ToVersion)
+	_ = w.base.StatusSetter.SetStatus(ctx, status.Started, "", nil)
 	w.base.UpgradeCompleteLock.Unlock()
 	return nil
 }
@@ -112,12 +112,12 @@ func (w *machineWorker) run() error {
 // updates the updatedToVersion on success.
 func (w *machineWorker) runUpgrades(ctx context.Context) error {
 	// Every upgrade needs to prepare the environment for the upgrade.
-	w.logger.Infof("checking that upgrade can proceed")
+	w.logger.Infof(ctx, "checking that upgrade can proceed")
 	if err := w.base.PreUpgradeSteps(w.base.Agent.CurrentConfig(), false); err != nil {
 		return errors.Annotatef(err, "%s cannot be upgraded", names.ReadableString(w.base.Tag))
 	}
 
-	w.logger.Infof("running upgrade steps for %q", w.base.Tag)
+	w.logger.Infof(ctx, "running upgrade steps for %q", w.base.Tag)
 	if err := w.base.Agent.ChangeConfig(w.base.RunUpgradeSteps(ctx, []upgrades.Target{
 		upgrades.HostMachine,
 	})); err != nil {

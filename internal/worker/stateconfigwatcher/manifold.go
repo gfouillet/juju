@@ -74,7 +74,7 @@ func outputFunc(in worker.Worker, out interface{}) error {
 	}
 	switch outPointer := out.(type) {
 	case *bool:
-		*outPointer = inWorker.isStateServer()
+		*outPointer = inWorker.isControllerAgent()
 	default:
 		return errors.Errorf("out should be *bool; got %T", out)
 	}
@@ -87,17 +87,20 @@ type stateConfigWatcher struct {
 	agentConfigChanged *voyeur.Value
 }
 
-func (w *stateConfigWatcher) isStateServer() bool {
+func (w *stateConfigWatcher) isControllerAgent() bool {
 	config := w.agent.CurrentConfig()
-	_, ok := config.StateServingInfo()
+	_, ok := config.ControllerAgentInfo()
 	return ok
 }
 
 func (w *stateConfigWatcher) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	watch := w.agentConfigChanged.Watch()
 	defer watch.Close()
 
-	lastValue := w.isStateServer()
+	lastValue := w.isControllerAgent()
 
 	watchCh := make(chan bool)
 	go func() {
@@ -119,17 +122,17 @@ func (w *stateConfigWatcher) loop() error {
 	for {
 		select {
 		case <-w.tomb.Dying():
-			logger.Infof("tomb dying")
+			logger.Infof(ctx, "tomb dying")
 			return tomb.ErrDying
 		case _, ok := <-watchCh:
 			if !ok {
 				return errors.New("config changed value closed")
 			}
-			if w.isStateServer() != lastValue {
-				// State serving info has been set or unset so restart
-				// so that dependents get notified. ErrBounce ensures
-				// that the manifold is restarted quickly.
-				logger.Debugf("state serving info change in agent config")
+			if w.isControllerAgent() != lastValue {
+				// Controller agent info has been set or unset so restart so
+				// that dependents get notified. ErrBounce ensures that the
+				// manifold is restarted quickly.
+				logger.Debugf(ctx, "controller agent info change in agent config")
 				return dependency.ErrBounce
 			}
 		}
@@ -144,4 +147,8 @@ func (w *stateConfigWatcher) Kill() {
 // Wait implements worker.Worker.
 func (w *stateConfigWatcher) Wait() error {
 	return w.tomb.Wait()
+}
+
+func (w *stateConfigWatcher) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }

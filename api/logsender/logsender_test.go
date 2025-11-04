@@ -8,70 +8,72 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"testing"
 	"time"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/logsender"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type LogSenderSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&LogSenderSuite{})
+func TestLogSenderSuite(t *testing.T) {
+	tc.Run(t, &LogSenderSuite{})
+}
 
-func (s *LogSenderSuite) TestNewAPI(c *gc.C) {
+func (s *LogSenderSuite) TestNewAPI(c *tc.C) {
 	conn := &mockConnector{
 		c: c,
 	}
 	a := logsender.NewAPI(conn)
-	w, err := a.LogWriter(context.Background())
-	c.Assert(err, gc.IsNil)
+	w, err := a.LogWriter(c.Context())
+	c.Assert(err, tc.IsNil)
 
 	msg := new(params.LogRecord)
 	err = w.WriteLog(msg)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
-	c.Assert(conn.written, gc.HasLen, 1)
-	c.Assert(conn.written[0], gc.Equals, msg)
+	c.Assert(conn.written, tc.HasLen, 1)
+	c.Assert(conn.written[0], tc.Equals, msg)
 
 	err = w.Close()
-	c.Assert(err, gc.IsNil)
-	c.Assert(conn.closeCount, gc.Equals, 1)
+	c.Assert(err, tc.IsNil)
+	c.Assert(conn.closeCount, tc.Equals, 1)
 }
 
-func (s *LogSenderSuite) TestNewAPIWriteLogError(c *gc.C) {
+func (s *LogSenderSuite) TestNewAPIWriteLogError(c *tc.C) {
 	conn := &mockConnector{
 		c:            c,
 		connectError: errors.New("foo"),
 	}
 	a := logsender.NewAPI(conn)
-	w, err := a.LogWriter(context.Background())
-	c.Assert(err, gc.ErrorMatches, "cannot connect to /logsink: foo")
-	c.Assert(w, gc.Equals, nil)
+	w, err := a.LogWriter(c.Context())
+	c.Assert(err, tc.ErrorMatches, "cannot connect to /logsink: foo")
+	c.Assert(w, tc.Equals, nil)
 }
 
-func (s *LogSenderSuite) TestNewAPIWriteError(c *gc.C) {
+func (s *LogSenderSuite) TestNewAPIWriteError(c *tc.C) {
 	conn := &mockConnector{
 		c:          c,
 		writeError: errors.New("foo"),
 	}
 	a := logsender.NewAPI(conn)
-	w, err := a.LogWriter(context.Background())
-	c.Assert(err, gc.IsNil)
+	w, err := a.LogWriter(c.Context())
+	c.Assert(err, tc.IsNil)
 
 	err = w.WriteLog(new(params.LogRecord))
-	c.Assert(err, gc.ErrorMatches, "sending log message: foo")
-	c.Assert(conn.written, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorMatches, "sending log message: foo")
+	c.Assert(conn.written, tc.HasLen, 0)
 }
 
-func (s *LogSenderSuite) TestNewAPIReadError(c *gc.C) {
+func (s *LogSenderSuite) TestNewAPIReadError(c *tc.C) {
 	conn := &mockConnector{
 		c:          c,
 		closed:     make(chan bool),
@@ -79,21 +81,21 @@ func (s *LogSenderSuite) TestNewAPIReadError(c *gc.C) {
 		writeError: errors.New("closed yo"),
 	}
 	a := logsender.NewAPI(conn)
-	w, err := a.LogWriter(context.Background())
-	c.Assert(err, gc.IsNil)
+	w, err := a.LogWriter(c.Context())
+	c.Assert(err, tc.IsNil)
 	select {
 	case <-conn.closed:
-	case <-time.After(testing.LongWait):
+	case <-time.After(testhelpers.LongWait):
 		c.Fatal("timeout waiting for connection to close")
 	}
 
 	err = w.WriteLog(new(params.LogRecord))
-	c.Assert(err, gc.ErrorMatches, "sending log message: read foo: closed yo")
-	c.Assert(conn.written, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorMatches, "sending log message: read foo: closed yo")
+	c.Assert(conn.written, tc.HasLen, 0)
 }
 
 type mockConnector struct {
-	c *gc.C
+	c *tc.C
 
 	connectError error
 	writeError   error
@@ -105,8 +107,8 @@ type mockConnector struct {
 }
 
 func (c *mockConnector) ConnectStream(_ context.Context, path string, values url.Values) (base.Stream, error) {
-	c.c.Assert(path, gc.Equals, "/logsink")
-	c.c.Assert(values, jc.DeepEquals, url.Values{
+	c.c.Assert(path, tc.Equals, "/logsink")
+	c.c.Assert(values, tc.DeepEquals, url.Values{
 		"version": []string{"1"},
 	})
 

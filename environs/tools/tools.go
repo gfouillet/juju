@@ -9,24 +9,26 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/simplestreams"
 	internallogger "github.com/juju/juju/internal/logger"
 	coretools "github.com/juju/juju/internal/tools"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var logger = internallogger.GetLogger("juju.environs.tools")
 
-func makeToolsConstraint(cloudSpec simplestreams.CloudSpec, stream string, majorVersion, minorVersion int,
-	filter coretools.Filter) (*ToolsConstraint, error) {
+func makeToolsConstraint(ctx context.Context,
+	cloudSpec simplestreams.CloudSpec, stream string, majorVersion, minorVersion int,
+	filter coretools.Filter,
+) (*ToolsConstraint, error) {
 
 	var toolsConstraint *ToolsConstraint
-	if filter.Number != version.Zero {
+	if filter.Number != semversion.Zero {
 		// A specific tools version is required, however, a general match based on major/minor
 		// version may also have been requested. This is used to ensure any agent version currently
 		// recorded in the environment matches the Juju cli version.
@@ -46,7 +48,7 @@ func makeToolsConstraint(cloudSpec simplestreams.CloudSpec, stream string, major
 	if filter.Arch != "" {
 		toolsConstraint.Arches = []string{filter.Arch}
 	} else {
-		logger.Tracef("no architecture specified when finding agent binaries, looking for any")
+		logger.Tracef(ctx, "no architecture specified when finding agent binaries, looking for any")
 		toolsConstraint.Arches = arch.AllSupportedArches
 	}
 	var osToSearch []string
@@ -54,7 +56,7 @@ func makeToolsConstraint(cloudSpec simplestreams.CloudSpec, stream string, major
 		osToSearch = []string{filter.OSType}
 	} else {
 		osToSearch = []string{corebase.UbuntuOS}
-		logger.Tracef("no os type specified when finding agent binaries, looking for ubuntu")
+		logger.Tracef(ctx, "no os type specified when finding agent binaries, looking for ubuntu")
 	}
 	toolsConstraint.Releases = osToSearch
 	return toolsConstraint, nil
@@ -81,24 +83,24 @@ func FindTools(ctx context.Context, ss SimplestreamsFetcher, env environs.Bootst
 		return nil, errors.New("cannot find agent binaries without a complete cloud configuration")
 	}
 
-	logger.Debugf("finding agent binaries in stream: %q", strings.Join(streams, ", "))
+	logger.Debugf(ctx, "finding agent binaries in stream: %q", strings.Join(streams, ", "))
 	if minorVersion >= 0 {
-		logger.Debugf("reading agent binaries with major.minor version %d.%d", majorVersion, minorVersion)
+		logger.Debugf(ctx, "reading agent binaries with major.minor version %d.%d", majorVersion, minorVersion)
 	} else if majorVersion > 0 {
-		logger.Debugf("reading agent binaries with major version %d", majorVersion)
+		logger.Debugf(ctx, "reading agent binaries with major version %d", majorVersion)
 	}
 	defer convertToolsError(&err)
 
 	// Construct a tools filter.
 	// Discard all that are known to be irrelevant.
-	if filter.Number != version.Zero {
-		logger.Debugf("filtering agent binaries by version: %s", filter.Number)
+	if filter.Number != semversion.Zero {
+		logger.Debugf(ctx, "filtering agent binaries by version: %s", filter.Number)
 	}
 	if filter.OSType != "" {
-		logger.Debugf("filtering agent binaries by os type: %s", filter.OSType)
+		logger.Debugf(ctx, "filtering agent binaries by os type: %s", filter.OSType)
 	}
 	if filter.Arch != "" {
-		logger.Debugf("filtering agent binaries by architecture: %s", filter.Arch)
+		logger.Debugf(ctx, "filtering agent binaries by architecture: %s", filter.Arch)
 	}
 
 	sources, err := GetMetadataSources(env, ss)
@@ -120,10 +122,10 @@ func FindToolsForCloud(ctx context.Context, ss SimplestreamsFetcher,
 		list         coretools.List
 		noToolsCount int
 
-		seenBinary = make(map[version.Binary]bool)
+		seenBinary = make(map[semversion.Binary]bool)
 	)
 	for _, stream := range streams {
-		toolsConstraint, err := makeToolsConstraint(cloudSpec, stream, majorVersion, minorVersion, filter)
+		toolsConstraint, err := makeToolsConstraint(ctx, cloudSpec, stream, majorVersion, minorVersion, filter)
 		if err != nil {
 			return nil, err
 		}
@@ -169,8 +171,8 @@ func FindToolsForCloud(ctx context.Context, ss SimplestreamsFetcher,
 }
 
 // FindExactTools returns only the tools that match the supplied version.
-func FindExactTools(ctx context.Context, ss SimplestreamsFetcher, env environs.Environ, vers version.Number, osType string, arch string) (_ *coretools.Tools, err error) {
-	logger.Debugf("finding exact version %s", vers)
+func FindExactTools(ctx context.Context, ss SimplestreamsFetcher, env environs.Environ, vers semversion.Number, osType string, arch string) (_ *coretools.Tools, err error) {
+	logger.Debugf(ctx, "finding exact version %s", vers)
 	// Construct a tools filter.
 	// Discard all that are known to be irrelevant.
 	filter := coretools.Filter{
@@ -179,7 +181,7 @@ func FindExactTools(ctx context.Context, ss SimplestreamsFetcher, env environs.E
 		Arch:   arch,
 	}
 	streams := PreferredStreams(&vers, env.Config().Development(), env.Config().AgentStream())
-	logger.Debugf("looking for agent binaries in streams %v", streams)
+	logger.Debugf(ctx, "looking for agent binaries in streams %v", streams)
 	availableTools, err := FindTools(ctx, ss, env, vers.Major, vers.Minor, streams, filter)
 	if err != nil {
 		return nil, err
@@ -229,7 +231,7 @@ var streamFallbacks = map[string][]string{
 // required, and any user specified stream. The streams are in
 // fallback order - if there are no matching tools in one stream the
 // next should be checked.
-func PreferredStreams(vers *version.Number, forceDevel bool, stream string) []string {
+func PreferredStreams(vers *semversion.Number, forceDevel bool, stream string) []string {
 	// If the use has already nominated a specific stream, we'll use that.
 	if stream != "" && stream != ReleasedStream {
 		if fallbacks, ok := streamFallbacks[stream]; ok {

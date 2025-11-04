@@ -5,54 +5,58 @@ package crossmodelsecrets
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 
-	"github.com/juju/errors"
-
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/crossmodel"
 	"github.com/juju/juju/apiserver/facade"
-	corelogger "github.com/juju/juju/core/logger"
-	coremodel "github.com/juju/juju/core/model"
-	"github.com/juju/juju/internal/secrets/provider"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
 	registry.MustRegisterForMultiModel("CrossModelSecrets", 1, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
-		return newStateCrossModelSecretsAPI(stdCtx, ctx)
+		return makeStateCrossModelSecretsAPIV1(stdCtx, ctx)
+	}, reflect.TypeOf((*CrossModelSecretsAPIV1)(nil)))
+	registry.MustRegisterForMultiModel("CrossModelSecrets", 2, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+		return makeStateCrossModelSecretsAPI(stdCtx, ctx)
 	}, reflect.TypeOf((*CrossModelSecretsAPI)(nil)))
 }
 
-// newStateCrossModelSecretsAPI creates a new server-side CrossModelSecrets API facade
-// backed by global state.
-func newStateCrossModelSecretsAPI(stdCtx context.Context, ctx facade.MultiModelContext) (*CrossModelSecretsAPI, error) {
-	authCtxt := ctx.Resources().Get("offerAccessAuthContext").(*common.ValueResource).Value
-
-	model, err := ctx.State().Model()
+// makeStateCrossModelSecretsAPIV1 creates a new server-side CrossModelSecrets V1 API facade.
+func makeStateCrossModelSecretsAPIV1(stdCtx context.Context, ctx facade.MultiModelContext) (*CrossModelSecretsAPIV1, error) {
+	api, err := makeStateCrossModelSecretsAPI(stdCtx, ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, fmt.Errorf("creating CrossModelSecrets V1 facade: %w", err)
 	}
-	serviceFactory := ctx.ServiceFactory()
+	return &CrossModelSecretsAPIV1{CrossModelSecretsAPI: api}, nil
+}
 
-	backendService := serviceFactory.SecretBackend()
-	secretBackendAdminConfigGetter := func(stdCtx context.Context) (*provider.ModelBackendConfigInfo, error) {
-		return backendService.GetSecretBackendConfigForAdmin(stdCtx, coremodel.UUID(model.UUID()))
+// makeStateCrossModelSecretsAPI creates a new server-side CrossModelSecrets API facade
+// backed by global state.
+func makeStateCrossModelSecretsAPI(stdCtx context.Context, ctx facade.MultiModelContext) (*CrossModelSecretsAPI, error) {
+	secretsServiceGetter := func(c context.Context, modelUUID model.UUID) (SecretService, error) {
+		domainServices, err := ctx.DomainServicesForModel(stdCtx, modelUUID)
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
+		return domainServices.Secret(), nil
 	}
-	secretInfoGetter := func(modelUUID string) SecretService {
-		return ctx.ServiceFactoryForModel(coremodel.UUID(modelUUID)).Secret(secretBackendAdminConfigGetter)
+	crossModelRelationServiceGetter := func(c context.Context, modelUUID model.UUID) (CrossModelRelationService, error) {
+		domainServices, err := ctx.DomainServicesForModel(stdCtx, modelUUID)
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
+		return domainServices.CrossModelRelation(), nil
 	}
 
-	st := ctx.State()
 	return NewCrossModelSecretsAPI(
-		ctx.Resources(),
-		authCtxt.(*crossmodel.AuthContext),
 		ctx.ControllerUUID(),
-		st.ModelUUID(),
-		secretInfoGetter,
-		backendService,
-		&crossModelShim{st.RemoteEntities()},
-		&stateBackendShim{st},
-		ctx.Logger().Child("crossmodelsecrets", corelogger.SECRETS),
+		ctx.ModelUUID(),
+		ctx.CrossModelAuthContext(),
+		ctx.DomainServices().SecretBackend(),
+		secretsServiceGetter,
+		crossModelRelationServiceGetter,
+		ctx.Logger().Child("crossmodelsecrets"),
 	)
 }

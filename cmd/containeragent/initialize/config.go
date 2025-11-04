@@ -9,17 +9,17 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/shell"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/mongo"
+	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 )
 
 type configFromEnv struct {
@@ -69,7 +69,7 @@ func (c *configFromEnv) WriteCommands(renderer shell.Renderer) ([]string, error)
 	panic("not implemented")
 }
 
-func (c *configFromEnv) StateServingInfo() (controller.StateServingInfo, bool) {
+func (c *configFromEnv) ControllerAgentInfo() (controller.ControllerAgentInfo, bool) {
 	panic("not implemented")
 }
 
@@ -92,7 +92,7 @@ func (c *configFromEnv) OldPassword() string {
 	return os.Getenv("JUJU_K8S_APPLICATION_PASSWORD")
 }
 
-func (c *configFromEnv) UpgradedToVersion() version.Number {
+func (c *configFromEnv) UpgradedToVersion() semversion.Number {
 	panic("not implemented")
 }
 
@@ -113,10 +113,6 @@ func (c *configFromEnv) Controller() names.ControllerTag {
 }
 
 func (c *configFromEnv) MetricsSpoolDir() string {
-	panic("not implemented")
-}
-
-func (c *configFromEnv) MongoMemoryProfile() mongo.MemoryProfile {
 	panic("not implemented")
 }
 
@@ -157,6 +153,10 @@ func (c *configFromEnv) OpenTelemetryStackTraces() bool {
 }
 
 func (c *configFromEnv) OpenTelemetrySampleRatio() float64 {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryTailSamplingThreshold() time.Duration {
 	panic("not implemented")
 }
 

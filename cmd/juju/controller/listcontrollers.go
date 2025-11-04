@@ -9,26 +9,25 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/bootstrap"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var helpControllersSummary = `
 Lists all controllers.`[1:]
 
 var helpControllersDetails = `
-The output format may be selected with the '--format' option. In the
-default tabular output, the current controller is marked with an asterisk.
+In the default tabular output, the current controller is marked with an asterisk.
 
 `[1:]
 
@@ -61,10 +60,20 @@ func (c *listControllersCommand) Info() *cmd.Info {
 	})
 }
 
+// Init implements Command.
+func (c *listControllersCommand) Init(args []string) error {
+	if c.managed {
+		return cmd.ErrCommandMissing
+	}
+
+	return cmd.CheckEmpty(args)
+}
+
 // SetFlags implements Command.SetFlags.
 func (c *listControllersCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.CommandBase.SetFlags(f)
 	f.BoolVar(&c.refresh, "refresh", false, "Connect to each controller to download the latest details")
+	f.BoolVar(&c.managed, "managed", false, "Show controllers managed by JAAS")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
 		"yaml":    cmd.FormatYaml,
 		"json":    cmd.FormatJson,
@@ -77,11 +86,11 @@ func (c *listControllersCommand) SetClientStore(store jujuclient.ClientStore) {
 	c.store = store
 }
 
-func (c *listControllersCommand) getAPI(controllerName string) (ControllerAccessAPI, error) {
+func (c *listControllersCommand) getAPI(ctx context.Context, controllerName string) (ControllerAccessAPI, error) {
 	if c.api != nil {
 		return c.api(controllerName), nil
 	}
-	api, err := c.NewAPIRoot(c.store, controllerName, "")
+	api, err := c.NewAPIRoot(ctx, c.store, controllerName, "")
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
@@ -104,7 +113,7 @@ func (c *listControllersCommand) Run(ctx *cmd.Context) error {
 			name := controllerName
 			go func() {
 				defer wg.Done()
-				client, err := c.getAPI(name)
+				client, err := c.getAPI(ctx, name)
 				if err != nil {
 					fmt.Fprintf(ctx.GetStderr(), "error connecting to api for %q: %v\n", name, err)
 					return
@@ -141,7 +150,7 @@ func (c *listControllersCommand) Run(ctx *cmd.Context) error {
 
 func (c *listControllersCommand) refreshControllerDetails(ctx context.Context, client ControllerAccessAPI, controllerName string) error {
 	// First, get all the models the user can see, and their details.
-	allModels, err := client.AllModels()
+	allModels, err := client.AllModels(ctx)
 	if err != nil {
 		return err
 	}
@@ -199,11 +208,8 @@ func ControllerMachineCounts(controllerModelUUID string, modelStatusResults []ba
 			continue
 		}
 		for _, m := range s.Machines {
-			if !m.WantsVote {
-				continue
-			}
 			totalCount++
-			if m.Status != string(status.Down) && m.HasVote {
+			if m.Status != string(status.Down) {
 				activeCount++
 			}
 		}
@@ -219,4 +225,7 @@ type listControllersCommand struct {
 	api     func(controllerName string) ControllerAccessAPI
 	refresh bool
 	mu      sync.Mutex
+	// managed is useful when JAAS is available and lists
+	// controllers managed by JAAS.
+	managed bool
 }

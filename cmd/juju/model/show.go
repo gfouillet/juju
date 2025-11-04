@@ -4,12 +4,12 @@
 package model
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/client/modelmanager"
@@ -17,6 +17,7 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -40,14 +41,14 @@ type showModelCommand struct {
 // users command calls.
 type ShowModelAPI interface {
 	Close() error
-	ModelInfo([]names.ModelTag) ([]params.ModelInfoResult, error)
+	ModelInfo(context.Context, []names.ModelTag) ([]params.ModelInfoResult, error)
 }
 
-func (c *showModelCommand) getAPI() (ShowModelAPI, error) {
+func (c *showModelCommand) getAPI(ctx context.Context) (ShowModelAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	api, err := c.NewControllerAPIRoot()
+	api, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -61,6 +62,9 @@ func (c *showModelCommand) Info() *cmd.Info {
 		Args:    "<model name>",
 		Purpose: "Shows information about the current or specified model.",
 		Doc:     showModelCommandDoc,
+		SeeAlso: []string{
+			"add-model",
+		},
 	})
 }
 
@@ -92,19 +96,19 @@ func (c *showModelCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, modelDetails, err := c.ModelDetails()
+	_, modelDetails, err := c.ModelDetails(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	modelTag := names.NewModelTag(modelDetails.ModelUUID)
 
-	api, err := c.getAPI()
+	api, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
-	results, err := api.ModelInfo([]names.ModelTag{modelTag})
+	results, err := api.ModelInfo(ctx, []names.ModelTag{modelTag})
 	if err != nil {
 		return err
 	}

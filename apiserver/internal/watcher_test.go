@@ -4,17 +4,16 @@
 package internal_test
 
 import (
-	"context"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/tomb.v2"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/internal"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type suite struct {
@@ -24,9 +23,11 @@ type suite struct {
 	watcherRegistry *MockWatcherRegistry
 }
 
-var _ = gc.Suite(&suite{})
+func TestSuite(t *stdtesting.T) {
+	tc.Run(t, &suite{})
+}
 
-func (s *suite) TestFirstResultReturnsChanges(c *gc.C) {
+func (s *suite) TestFirstResultReturnsChanges(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	contents := []string{"a", "b"}
@@ -34,12 +35,12 @@ func (s *suite) TestFirstResultReturnsChanges(c *gc.C) {
 	changes <- contents
 	s.watcher.EXPECT().Changes().Return(changes)
 
-	res, err := internal.FirstResult[[]string](context.Background(), s.watcher)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res, jc.SameContents, contents)
+	res, err := internal.FirstResult(c.Context(), s.watcher)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res, tc.SameContents, contents)
 }
 
-func (s *suite) TestFirstResultWorkerKilled(c *gc.C) {
+func (s *suite) TestFirstResultWorkerKilled(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	changes := make(chan []string, 1)
@@ -50,12 +51,12 @@ func (s *suite) TestFirstResultWorkerKilled(c *gc.C) {
 	s.watcher.EXPECT().Kill()
 	s.watcher.EXPECT().Wait().Return(tomb.ErrDying)
 
-	res, err := internal.FirstResult[[]string](context.Background(), s.watcher)
-	c.Assert(err, gc.ErrorMatches, tomb.ErrDying.Error())
-	c.Assert(res, gc.IsNil)
+	res, err := internal.FirstResult(c.Context(), s.watcher)
+	c.Assert(err, tc.ErrorMatches, tomb.ErrDying.Error())
+	c.Assert(res, tc.IsNil)
 }
 
-func (s *suite) TestFirstResultWatcherStoppedNilErr(c *gc.C) {
+func (s *suite) TestFirstResultWatcherStoppedNilErr(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	changes := make(chan []string, 1)
@@ -66,13 +67,13 @@ func (s *suite) TestFirstResultWatcherStoppedNilErr(c *gc.C) {
 	s.watcher.EXPECT().Kill()
 	s.watcher.EXPECT().Wait().Return(nil)
 
-	res, err := internal.FirstResult[[]string](context.Background(), s.watcher)
-	c.Assert(err, gc.ErrorMatches, "expected an error from .* got nil.*")
-	c.Assert(errors.Cause(err), gc.Equals, apiservererrors.ErrStoppedWatcher)
-	c.Assert(res, gc.IsNil)
+	res, err := internal.FirstResult(c.Context(), s.watcher)
+	c.Assert(err, tc.ErrorMatches, "expected an error from .* got nil.*")
+	c.Assert(errors.Cause(err), tc.Equals, apiservererrors.ErrStoppedWatcher)
+	c.Assert(res, tc.IsNil)
 }
 
-func (s *suite) TestEnsureRegisterWatcher(c *gc.C) {
+func (s *suite) TestEnsureRegisterWatcher(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	contents := []string{"a", "b"}
@@ -80,29 +81,35 @@ func (s *suite) TestEnsureRegisterWatcher(c *gc.C) {
 	changes <- contents
 
 	s.watcher.EXPECT().Changes().Return(changes)
-	s.watcherRegistry.EXPECT().Register(s.watcher).Return("id", nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), s.watcher).Return("id", nil)
 
-	id, res, err := internal.EnsureRegisterWatcher[[]string](context.Background(), s.watcherRegistry, s.watcher)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(id, gc.Equals, "id")
-	c.Assert(res, jc.SameContents, contents)
+	id, res, err := internal.EnsureRegisterWatcher(c.Context(), s.watcherRegistry, s.watcher)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(id, tc.Equals, "id")
+	c.Assert(res, tc.SameContents, contents)
 }
 
-func (s *suite) TestEnsureRegisterWatcherWithError(c *gc.C) {
+func (s *suite) TestEnsureRegisterWatcherWithError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
+
+	// If the watcher returns changes but the registration fails,
+	// we should still return the changes and the error.
+	// The watcher should be killed in this case.
 
 	contents := []string{"a", "b"}
 	changes := make(chan []string, 1)
 	changes <- contents
 
 	s.watcher.EXPECT().Changes().Return(changes)
-	s.watcherRegistry.EXPECT().Register(s.watcher).Return("id", errors.New("boom"))
+	s.watcher.EXPECT().Kill()
 
-	_, _, err := internal.EnsureRegisterWatcher[[]string](context.Background(), s.watcherRegistry, s.watcher)
-	c.Assert(err, gc.ErrorMatches, "boom")
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), s.watcher).Return("id", errors.New("boom"))
+
+	_, _, err := internal.EnsureRegisterWatcher(c.Context(), s.watcherRegistry, s.watcher)
+	c.Assert(err, tc.ErrorMatches, "boom")
 }
 
-func (s *suite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *suite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.watcher = NewMockWatcher[[]string](ctrl)

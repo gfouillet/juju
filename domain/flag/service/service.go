@@ -6,7 +6,9 @@ package service
 import (
 	"context"
 
-	"github.com/juju/errors"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/errors"
 )
 
 // State describes retrieval and persistence methods for storage.
@@ -30,13 +32,19 @@ func NewService(st State) *Service {
 // SetFlag sets the value of a flag.
 // Description is used to describe the flag and it's potential state.
 func (s *Service) SetFlag(ctx context.Context, flag string, value bool, description string) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	return s.st.SetFlag(ctx, flag, value, description)
 }
 
 // GetFlag returns the value of a flag.
 func (s *Service) GetFlag(ctx context.Context, flag string) (bool, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	value, err := s.st.GetFlag(ctx, flag)
-	if err != nil && !errors.Is(err, errors.NotFound) {
+	if err != nil && !errors.Is(err, coreerrors.NotFound) {
 		return false, err
 	}
 	return value, nil

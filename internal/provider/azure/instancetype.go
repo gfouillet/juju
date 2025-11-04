@@ -4,16 +4,16 @@
 package azure
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v2"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/core/arch"
+	corearch "github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/provider/azure/internal/imageutils"
 )
@@ -441,7 +441,7 @@ var machineSizeCost = []string{
 }
 
 // newInstanceType creates an InstanceType based on a VirtualMachineSize.
-func newInstanceType(size armcompute.VirtualMachineSize) instances.InstanceType {
+func newInstanceType(arch corearch.Arch, size armcompute.VirtualMachineSize) instances.InstanceType {
 	sizeName := toValue(size.Name)
 	// Actual instance type names often are suffixed with _v3, _v4 etc. We always
 	// prefer the highest version number.
@@ -477,17 +477,16 @@ func newInstanceType(size armcompute.VirtualMachineSize) instances.InstanceType 
 	// Anything not in the list is more expensive that is in the list.
 	if !found {
 		if !isPromo && instType != "Basic" {
-			logger.Debugf("got VM for which we don't have relative cost data: %q", sizeName)
+			logger.Debugf(context.TODO(), "got VM for which we don't have relative cost data: %q", sizeName)
 		}
 		cost = 100 * len(machineSizeCost)
 	}
 
 	vtype := "Hyper-V"
 	return instances.InstanceType{
-		Id:   sizeName,
-		Name: sizeName,
-		// TODO(wallyworld) - add arm64 once supported
-		Arch:     arch.AMD64,
+		Id:       sizeName,
+		Name:     sizeName,
+		Arch:     arch,
 		CpuCores: uint64(toValue(size.NumberOfCores)),
 		Mem:      uint64(toValue(size.MemoryInMB)),
 		// NOTE(axw) size.OsDiskSizeInMB is the *maximum*
@@ -521,22 +520,21 @@ func mbToMib(mb uint64) uint64 {
 // NOTE(axw) for now we ignore simplestreams altogether, and go straight to
 // Azure's image registry.
 func (env *azureEnviron) findInstanceSpec(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	instanceTypesMap map[string]instances.InstanceType,
 	constraint *instances.InstanceConstraint,
 	imageStream string,
+	preferGen1Image bool,
 ) (*instances.InstanceSpec, error) {
-
-	if constraint.Arch != arch.AMD64 {
-		// Azure only supports AMD64.
-		return nil, errors.NotFoundf("%s in arch constraints", arch.AMD64)
+	if !constraint.Constraints.HasArch() && constraint.Arch != "" {
+		constraint.Constraints.Arch = &constraint.Arch
 	}
 
 	client, err := env.imagesClient()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	image, err := imageutils.BaseImage(ctx, constraint.Base, imageStream, constraint.Region, client)
+	image, err := imageutils.BaseImage(ctx, env.CredentialInvalidator, constraint.Base, imageStream, constraint.Region, constraint.Arch, client, preferGen1Image)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

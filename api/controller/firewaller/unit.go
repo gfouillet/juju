@@ -6,11 +6,9 @@ package firewaller
 import (
 	"context"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/rpc/params"
 )
 
 // Unit represents a juju unit as seen by a firewaller worker.
@@ -23,11 +21,6 @@ type Unit struct {
 // Name returns the name of the unit.
 func (u *Unit) Name() string {
 	return u.tag.Id()
-}
-
-// Tag returns the unit tag.
-func (u *Unit) Tag() names.UnitTag {
-	return u.tag
 }
 
 // Life returns the unit's life cycle value.
@@ -57,26 +50,4 @@ func (u *Unit) Application() (*Application, error) {
 		tag:    applicationTag,
 	}
 	return app, nil
-}
-
-// AssignedMachine returns the tag of this unit's assigned machine (if
-// any), or a CodeNotAssigned error.
-func (u *Unit) AssignedMachine() (names.MachineTag, error) {
-	var results params.StringResults
-	args := params.Entities{
-		Entities: []params.Entity{{Tag: u.tag.String()}},
-	}
-	emptyTag := names.NewMachineTag("")
-	err := u.client.facade.FacadeCall(context.TODO(), "GetAssignedMachine", args, &results)
-	if err != nil {
-		return emptyTag, err
-	}
-	if len(results.Results) != 1 {
-		return emptyTag, errors.Errorf("expected 1 result, got %d", len(results.Results))
-	}
-	result := results.Results[0]
-	if result.Error != nil {
-		return emptyTag, result.Error
-	}
-	return names.ParseMachineTag(result.Result)
 }

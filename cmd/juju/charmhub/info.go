@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -16,6 +15,7 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
@@ -24,10 +24,18 @@ const (
 The charm can be specified by name or by path.
 
 Channels displayed are supported by any base.
-To see channels supported for only a specific base, use the --base flag.
---base can be specified using the OS name and the version of the OS, 
-separated by @. For example, --base ubuntu@22.04.
+To see channels supported for only a specific base, use the ` + "`--base`" + ` flag.
+` + "`--base`" + ` can be specified using the OS name and the version of the OS,
+separated by ` + "`@`" + `.
+For example: ` + "`--base ubuntu@22.04`" + `.
 
+Use ` + "`--revision`" + ` to display information about a specific revision of the charm,
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
+For example: ` + "`--revision 42`" + `.
+
+Use ` + "`--track `" + ` to display information about a specific track of the charm,
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
+For example: ` + "`--track 14`" + `.
 `
 	infoExamples = `
     juju info postgresql
@@ -52,6 +60,8 @@ type infoCommand struct {
 	config        bool
 	channel       string
 	charmOrBundle string
+	revision      int
+	track         string
 
 	unicode string
 }
@@ -78,11 +88,13 @@ func (c *infoCommand) Info() *cmd.Info {
 func (c *infoCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.charmHubCommand.SetFlags(f)
 
-	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.base, "base", "", "specify a base")
-	f.StringVar(&c.channel, "channel", "", "specify a channel to use instead of the default release")
-	f.BoolVar(&c.config, "config", false, "display config for this charm")
-	f.StringVar(&c.unicode, "unicode", "auto", "display output using unicode <auto|never|always>")
+	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("Specify an arch <%s>", c.archArgumentList()))
+	f.StringVar(&c.base, "base", "", "Specify a base")
+	f.StringVar(&c.channel, "channel", "", "Specify a channel to use instead of the default release")
+	f.BoolVar(&c.config, "config", false, "Display config for this charm")
+	f.IntVar(&c.revision, "revision", -1, "Specify a revision number")
+	f.StringVar(&c.track, "track", "", "Specify a track to use instead of the default track")
+	f.StringVar(&c.unicode, "unicode", "auto", "Display output using unicode <auto|never|always>")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
 		"yaml":    cmd.FormatYaml,
 		"json":    cmd.FormatJson,
@@ -93,6 +105,17 @@ func (c *infoCommand) SetFlags(f *gnuflag.FlagSet) {
 // Init initializes the info command, including validating the provided
 // flags. It implements part of the cmd.Command interface.
 func (c *infoCommand) Init(args []string) error {
+	hasArch := c.arch != ArchAll && c.arch != ""
+	hasBase := c.base != ""
+	hasChannel := c.channel != ""
+	if c.revision != -1 && (hasArch || hasBase || hasChannel) {
+		return errors.New("--revision cannot be specified together with --arch, --base or --channel")
+	}
+
+	if c.track != "" && (hasArch || hasBase || hasChannel) {
+		return errors.New("--track cannot be specified together with --arch, --base or --channel")
+	}
+
 	if err := c.charmHubCommand.Init(args); err != nil {
 		return errors.Trace(err)
 	}
@@ -119,7 +142,7 @@ func (c *infoCommand) Init(args []string) error {
 func (c *infoCommand) validateCharmOrBundle(charmOrBundle string) error {
 	curl, err := charm.ParseURL(charmOrBundle)
 	if err != nil {
-		logger.Debugf("%s", err)
+		logger.Debugf(context.TODO(), "%s", err)
 		return errors.NotValidf("charm or bundle name, %q, is", charmOrBundle)
 	}
 	if !charm.CharmHub.Matches(curl.Schema) {
@@ -155,12 +178,14 @@ func (c *infoCommand) Run(cmdContext *cmd.Context) error {
 	defer cancel()
 
 	var options []charmhub.InfoOption
+	var risk charm.Risk
 	if c.channel != "" {
 		charmChannel, err := charm.ParseChannelNormalize(c.channel)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		options = append(options, charmhub.WithInfoChannel(charmChannel.String()))
+		risk = charmChannel.Risk
+		c.track = charmChannel.Track
 	}
 
 	info, err := client.Info(ctx, c.charmOrBundle, options...)
@@ -170,7 +195,7 @@ func (c *infoCommand) Run(cmdContext *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	view, err := convertInfoResponse(info, c.arch, base)
+	view, err := convertInfoResponse(info, c.arch, risk, c.revision, c.track, base)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -204,7 +229,7 @@ func (c *infoCommand) formatter(writer io.Writer, value interface{}) error {
 		mode = baseModeArches
 	}
 
-	if err := makeInfoWriter(writer, c.warningLog, c.config, c.unicode, mode, results).Print(); err != nil {
+	if err := makeInfoWriter(writer, c.warningLog, c.config, c.unicode, mode, results, c.revision).Print(); err != nil {
 		return errors.Trace(err)
 	}
 

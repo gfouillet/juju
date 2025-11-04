@@ -4,14 +4,16 @@
 package controller_test
 
 import (
-	"github.com/juju/cmd/v4"
-	"github.com/juju/cmd/v4/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/api/jujuclient"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/cmd/juju/controller"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 )
 
 type enableDestroyControllerSuite struct {
@@ -20,9 +22,10 @@ type enableDestroyControllerSuite struct {
 	store *jujuclient.MemStore
 }
 
-var _ = gc.Suite(&enableDestroyControllerSuite{})
-
-func (s *enableDestroyControllerSuite) SetUpTest(c *gc.C) {
+func TestEnableDestroyControllerSuite(t *testing.T) {
+	tc.Run(t, &enableDestroyControllerSuite{})
+}
+func (s *enableDestroyControllerSuite) SetUpTest(c *tc.C) {
 	s.baseControllerSuite.SetUpTest(c)
 
 	s.api = &fakeRemoveBlocksAPI{}
@@ -35,22 +38,22 @@ func (s *enableDestroyControllerSuite) newCommand() cmd.Command {
 	return controller.NewEnableDestroyControllerCommandForTest(s.api, s.store)
 }
 
-func (s *enableDestroyControllerSuite) TestRemove(c *gc.C) {
+func (s *enableDestroyControllerSuite) TestRemove(c *tc.C) {
 	_, err := cmdtesting.RunCommand(c, s.newCommand())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.api.called, jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(s.api.called, tc.IsTrue)
 }
 
-func (s *enableDestroyControllerSuite) TestUnrecognizedArg(c *gc.C) {
+func (s *enableDestroyControllerSuite) TestUnrecognizedArg(c *tc.C) {
 	_, err := cmdtesting.RunCommand(c, s.newCommand(), "whoops")
-	c.Assert(err, gc.ErrorMatches, `unrecognized args: \["whoops"\]`)
-	c.Assert(s.api.called, jc.IsFalse)
+	c.Assert(err, tc.ErrorMatches, `unrecognized args: \["whoops"\]`)
+	c.Assert(s.api.called, tc.IsFalse)
 }
 
-func (s *enableDestroyControllerSuite) TestEnvironmentsError(c *gc.C) {
+func (s *enableDestroyControllerSuite) TestEnvironmentsError(c *tc.C) {
 	s.api.err = apiservererrors.ErrPerm
 	_, err := cmdtesting.RunCommand(c, s.newCommand())
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
 type fakeRemoveBlocksAPI struct {
@@ -62,7 +65,7 @@ func (f *fakeRemoveBlocksAPI) Close() error {
 	return nil
 }
 
-func (f *fakeRemoveBlocksAPI) RemoveBlocks() error {
+func (f *fakeRemoveBlocksAPI) RemoveBlocks(ctx context.Context) error {
 	f.called = true
 	return f.err
 }

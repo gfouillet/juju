@@ -4,65 +4,52 @@
 package agent
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/ssh"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/agent/agentbootstrap"
 	agentconfig "github.com/juju/juju/agent/config"
 	"github.com/juju/juju/caas"
-	k8sprovider "github.com/juju/juju/caas/kubernetes/provider"
-	k8sconstants "github.com/juju/juju/caas/kubernetes/provider/constants"
-	jujucloud "github.com/juju/juju/cloud"
+	"github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/agent/agentconf"
-	cmdutil "github.com/juju/juju/cmd/jujud-controller/util"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/arch"
-	"github.com/juju/juju/core/credential"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	coreos "github.com/juju/juju/core/os"
 	coreuser "github.com/juju/juju/core/user"
-	storageerrors "github.com/juju/juju/domain/storage/errors"
+	jujuversion "github.com/juju/juju/core/version"
+	controllerdomain "github.com/juju/juju/domain/controller"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/envcontext"
-	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/simplestreams"
 	envtools "github.com/juju/juju/environs/tools"
 	"github.com/juju/juju/internal/cloudconfig"
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/database"
 	internallogger "github.com/juju/juju/internal/logger"
-	"github.com/juju/juju/internal/mongo"
-	"github.com/juju/juju/internal/storage"
+	pkissh "github.com/juju/juju/internal/pki/ssh"
+	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/tools"
-	"github.com/juju/juju/internal/worker/peergrouper"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/cloudimagemetadata"
-	"github.com/juju/juju/state/stateenvirons"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var (
-	initiateMongoServer = peergrouper.InitiateMongoServer
-	sshGenerateKey      = ssh.GenerateKey
-	minSocketTimeout    = 1 * time.Minute
+	sshGenerateKey     = ssh.GenerateKey
+	checkJWKSReachable = agentbootstrap.CheckJWKSReachable
 )
 
 type BootstrapAgentFunc func(agentbootstrap.AgentBootstrapArgs) (*agentbootstrap.AgentBootstrap, error)
@@ -127,7 +114,7 @@ func copyFile(dest, source string) error {
 
 func copyFileFromTemplate(to, from string) (err error) {
 	if _, err := os.Stat(to); os.IsNotExist(err) {
-		logger.Debugf("copying file from %q to %s", from, to)
+		logger.Debugf(context.TODO(), "copying file from %q to %s", from, to)
 		if err := copyFile(to, from); err != nil {
 			return errors.Trace(err)
 		}
@@ -150,11 +137,6 @@ func (c *BootstrapCommand) ensureConfigFilesForCaas() error {
 				k8sconstants.TemplateFileNameAgentConf,
 			),
 		},
-		{
-			// ensure server.pem
-			to:   filepath.Join(c.AgentConf.DataDir(), mongo.FileNameDBSSLKey),
-			from: filepath.Join(c.AgentConf.DataDir(), k8sprovider.TemplateFileNameServerPEM),
-		},
 	} {
 		if err := copyFileFromTemplate(v.to, v.from); err != nil {
 			return errors.Trace(err)
@@ -167,40 +149,6 @@ var (
 	environsNewIAAS = environs.New
 	environsNewCAAS = caas.New
 )
-
-// credentialGetter serves a fixed credential as a CredentialService instance.
-// It is needed by the state policy to create an environ when validating the
-// ops needed to set up the initial controller model.
-type credentialGetter struct {
-	cred *jujucloud.Credential
-}
-
-func (c credentialGetter) CloudCredential(_ stdcontext.Context, key credential.Key) (jujucloud.Credential, error) {
-	if c.cred == nil {
-		return jujucloud.Credential{}, errors.NotFoundf("credential %q", key)
-	}
-	return *c.cred, nil
-}
-
-// cloudGetter serves a fixed cloud as a CloudService instance.
-// It is needed by the state policy to create an environ when validating the
-// ops needed to set up the initial controller model.
-type cloudGetter struct {
-	cloud *jujucloud.Cloud
-}
-
-func (c cloudGetter) Cloud(_ stdcontext.Context, name string) (*jujucloud.Cloud, error) {
-	if c.cloud == nil {
-		return nil, errors.NotFoundf("cloud %q", name)
-	}
-	return c.cloud, nil
-}
-
-type noopStoragePoolGetter struct{}
-
-func (noopStoragePoolGetter) GetStoragePoolByName(ctx stdcontext.Context, name string) (*storage.Config, error) {
-	return nil, fmt.Errorf("storage pool %q not found%w", name, errors.Hide(storageerrors.PoolNotFoundError))
-}
 
 // Run initializes state for an environment.
 func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
@@ -218,7 +166,17 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 	// Fixes: lp2040947
 	args.ControllerCloud.IsControllerCloud = true
 
-	isCAAS := args.ControllerCloud.Type == k8sconstants.CAASProviderType
+	// The JWKS refresh URL is a public key that we trust for federated
+	// auth. This is conventionally a JIMM controller. Check that JIMM
+	// is reachable to fail fast and validate the URL.
+	jwksRefreshURL := args.ControllerConfig.LoginTokenRefreshURL()
+	if jwksRefreshURL != "" {
+		if err := checkJWKSReachable(jwksRefreshURL); err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	isCAAS := args.ControllerCloud.Type == cloud.CloudTypeKubernetes
 
 	if isCAAS {
 		if err := c.ensureConfigFilesForCaas(); err != nil {
@@ -245,9 +203,9 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 
 	var env environs.BootstrapEnviron
 	if isCAAS {
-		env, err = environsNewCAAS(ctx, openParams)
+		env, err = environsNewCAAS(ctx, openParams, environs.NoopCredentialInvalidator())
 	} else {
-		env, err = environsNewIAAS(ctx, openParams)
+		env, err = environsNewIAAS(ctx, openParams, environs.NoopCredentialInvalidator())
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -278,7 +236,7 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 			// If we have been asked for a newer version, ensure the newer
 			// tools can actually be found, or else bootstrap won't complete.
 			streams := envtools.PreferredStreams(&desiredVersion, args.ControllerModelConfig.Development(), args.ControllerModelConfig.AgentStream())
-			logger.Infof("newer agent binaries requested, looking for %v in streams: %v", desiredVersion, strings.Join(streams, ","))
+			logger.Infof(context.TODO(), "newer agent binaries requested, looking for %v in streams: %v", desiredVersion, strings.Join(streams, ","))
 			filter := tools.Filter{
 				Number: desiredVersion,
 				Arch:   arch.HostArch(),
@@ -287,15 +245,15 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 			ss := simplestreams.NewSimpleStreams(simplestreams.DefaultDataSourceFactory())
 			_, toolsErr := envtools.FindTools(ctx, ss, env, -1, -1, streams, filter)
 			if toolsErr == nil {
-				logger.Infof("agent binaries are available, upgrade will occur after bootstrap")
+				logger.Infof(context.TODO(), "agent binaries are available, upgrade will occur after bootstrap")
 			}
 			if errors.Is(toolsErr, errors.NotFound) {
 				// Newer tools not available, so revert to using the tools
 				// matching the current agent version.
-				logger.Warningf("newer agent binaries for %q not available, sticking with version %q", desiredVersion, jujuversion.Current)
+				logger.Warningf(context.TODO(), "newer agent binaries for %q not available, sticking with version %q", desiredVersion, jujuversion.Current)
 				controllerModelConfigAttrs["agent-version"] = jujuversion.Current.String()
 			} else if toolsErr != nil {
-				logger.Errorf("cannot find newer agent binaries: %v", toolsErr)
+				logger.Errorf(context.TODO(), "cannot find newer agent binaries: %v", toolsErr)
 				return errors.Trace(toolsErr)
 			}
 		}
@@ -305,11 +263,14 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 		return errors.Annotate(err, "cannot read config")
 	}
 	agentConfig := c.CurrentConfig()
-	info, ok := agentConfig.StateServingInfo()
+	info, ok := agentConfig.ControllerAgentInfo()
 	if !ok {
 		return fmt.Errorf("bootstrap machine config has no state serving info")
 	}
-	if err := ensureKeys(isCAAS, args, &info); err != nil {
+	if err := ensureKeys(isCAAS, &args, &info); err != nil {
+		return errors.Trace(err)
+	}
+	if err := ensureSSHServerHostKey(&args); err != nil {
 		return errors.Trace(err)
 	}
 	addrs, err := getAddressesForMongo(isCAAS, env, ctx, args)
@@ -318,21 +279,8 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if err = c.ChangeConfig(func(agentConfig agent.ConfigSetter) error {
-		agentConfig.SetStateServingInfo(info)
+		agentConfig.SetControllerAgentInfo(info)
 
-		// Force the controller API port to be set upon startup.
-		if args.ControllerConfig.ControllerAPIPort() != 0 {
-			agentConfig.SetControllerAPIPort(args.ControllerConfig.ControllerAPIPort())
-		}
-
-		mmprof, err := mongo.NewMemoryProfile(args.ControllerConfig.MongoMemoryProfile())
-		if err != nil {
-			logger.Errorf("could not set requested memory profile: %v", err)
-		} else {
-			agentConfig.SetMongoMemoryProfile(mmprof)
-		}
-
-		agentConfig.SetJujuDBSnapChannel(args.ControllerConfig.JujuDBSnapChannel())
 		agentConfig.SetQueryTracingEnabled(args.ControllerConfig.QueryTracingEnabled())
 		agentConfig.SetQueryTracingThreshold(args.ControllerConfig.QueryTracingThreshold())
 		agentConfig.SetOpenTelemetryEnabled(args.ControllerConfig.OpenTelemetryEnabled())
@@ -340,6 +288,7 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 		agentConfig.SetOpenTelemetryInsecure(args.ControllerConfig.OpenTelemetryInsecure())
 		agentConfig.SetOpenTelemetryStackTraces(args.ControllerConfig.OpenTelemetryStackTraces())
 		agentConfig.SetOpenTelemetrySampleRatio(args.ControllerConfig.OpenTelemetrySampleRatio())
+		agentConfig.SetOpenTelemetryTailSamplingThreshold(args.ControllerConfig.OpenTelemetryTailSamplingThreshold())
 		agentConfig.SetObjectStoreType(args.ControllerConfig.ObjectStoreType())
 
 		return nil
@@ -354,141 +303,80 @@ func (c *BootstrapCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	if err := c.startMongo(ctx, isCAAS, addrs, agentConfig); err != nil {
-		return errors.Annotate(err, "failed to start mongo")
-	}
-
 	controllerModelCfg, err := env.Config().Apply(controllerModelConfigAttrs)
 	if err != nil {
 		return errors.Annotate(err, "failed to update model config")
 	}
 	args.ControllerModelConfig = controllerModelCfg
 
-	configSchemaSource := environs.ProviderConfigSchemaSource(cloudGetter{cloud: &args.ControllerCloud})
-
 	// Initialise state, and store any agent config (e.g. password) changes.
-	var controller *state.Controller
 	err = c.ChangeConfig(func(agentConfig agent.ConfigSetter) error {
-		dialOpts := mongo.DefaultDialOpts()
-
-		// Set a longer socket timeout than usual, as the machine
-		// will be starting up and disk I/O slower than usual. This
-		// has been known to cause timeouts in queries.
-		dialOpts.SocketTimeout = c.Timeout
-		if dialOpts.SocketTimeout < minSocketTimeout {
-			dialOpts.SocketTimeout = minSocketTimeout
-		}
-
-		// We shouldn't attempt to dial peers until we have some.
-		dialOpts.Direct = true
-
-		adminTag := names.NewLocalUserTag(coreuser.AdminUserName)
+		adminTag := names.NewLocalUserTag(coreuser.AdminUserName.Name())
 		bootstrap, err := c.BootstrapAgent(agentbootstrap.AgentBootstrapArgs{
 			AgentConfig:               agentConfig,
 			BootstrapEnviron:          env,
 			AdminUser:                 adminTag,
 			StateInitializationParams: args,
 			BootstrapMachineAddresses: addrs,
-			BootstrapMachineJobs:      agentConfig.Jobs(),
-			SharedSecret:              info.SharedSecret,
-			StorageProviderRegistry:   stateenvirons.NewStorageProviderRegistry(env),
-			MongoDialOpts:             dialOpts,
-			StateNewPolicy: stateenvirons.GetNewPolicyFunc(
-				cloudGetter{cloud: &args.ControllerCloud},
-				credentialGetter{cred: args.ControllerCloudCredential},
-				// We don't need the storage service at bootstrap.
-				func(modelUUID string, registry storage.ProviderRegistry) state.StoragePoolGetter {
-					return noopStoragePoolGetter{}
-				},
-			),
-			BootstrapDqlite: c.DqliteInitializer,
-			Provider:        environs.Provider,
-			Logger:          internallogger.GetLogger("juju.agent.bootstrap"),
-			InstancePrecheckerGetter: func(st *state.State) (environs.InstancePrechecker, error) {
-				return stateenvirons.NewInstancePrechecker(
-					st,
-					cloudGetter{cloud: &args.ControllerCloud},
-					credentialGetter{cred: args.ControllerCloudCredential},
-				)
-			},
-			ConfigSchemaSourceGetter: configSchemaSource,
+			BootstrapDqlite:           c.DqliteInitializer,
+			Logger:                    internallogger.GetLogger("juju.agent.bootstrap"),
 		})
 		if err != nil {
 			return errors.Trace(err)
 		}
-		controller, err = bootstrap.Initialize(ctx)
-		return err
+		return bootstrap.Initialize(ctx)
 	})
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer func() { _ = controller.Close() }()
-	st, err := controller.SystemState()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	// Set up default container networking mode
-	model, err := st.Model()
-	if err != nil {
-		return err
-	}
-	if err = model.AutoConfigureContainerNetworking(env, configSchemaSource); err != nil {
-		if errors.Is(err, errors.NotSupported) {
-			logger.Debugf("Not performing container networking auto-configuration on a non-networking environment")
-		} else {
-			return err
-		}
-	}
-
-	if !isCAAS {
-		// Add custom image metadata to environment storage.
-		if len(args.CustomImageMetadata) > 0 {
-			if err := c.saveCustomImageMetadata(st, env, args.CustomImageMetadata); err != nil {
-				return err
-			}
-		}
-	}
-
-	// bootstrap nodes always get the vote
-	node, err := st.ControllerNode(agent.BootstrapControllerId)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return node.SetHasVote(true)
+	return nil
 }
 
 func getAddressesForMongo(
 	isCAAS bool,
 	env environs.BootstrapEnviron,
-	ctx stdcontext.Context,
+	ctx context.Context,
 	args instancecfg.StateInitializationParams,
 ) (network.ProviderAddresses, error) {
 	if isCAAS {
 		return network.NewMachineAddresses([]string{"localhost"}).AsProviderAddresses(), nil
 	}
 
-	callCtx := envcontext.WithoutCredentialInvalidator(ctx)
 	instanceLister, ok := env.(environs.InstanceLister)
 	if !ok {
 		// this should never happened.
 		return nil, errors.NotValidf("InstanceLister missing for IAAS controller provider")
 	}
-	instances, err := instanceLister.Instances(callCtx, []instance.Id{args.BootstrapMachineInstanceId})
+	instances, err := instanceLister.Instances(ctx, []instance.Id{args.BootstrapMachineInstanceId})
 	if err != nil {
 		return nil, errors.Annotate(err, "getting bootstrap instance")
 	}
-	addrs, err := instances[0].Addresses(callCtx)
+	addrs, err := instances[0].Addresses(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "getting bootstrap instance addresses")
 	}
 	return addrs, nil
 }
 
+// ensureSSHServerHostKey ensures that either a) a user has provided a host key
+// or b) one has been generated for the controller.
+func ensureSSHServerHostKey(args *instancecfg.StateInitializationParams) error {
+	if args.SSHServerHostKey != "" {
+		return nil
+	}
+	// Generate the embedded SSH server host key and store it within StateInitializationParams.
+	hostKey, err := pkissh.NewMarshalledED25519()
+	if err != nil {
+		return errors.Annotatef(err, "failed to ensure ssh server host key")
+	}
+	args.SSHServerHostKey = string(hostKey)
+	return nil
+}
+
 func ensureKeys(
 	isCAAS bool,
-	args instancecfg.StateInitializationParams,
-	info *controller.StateServingInfo,
+	args *instancecfg.StateInitializationParams,
+	info *controller.ControllerAgentInfo,
 ) error {
 	if isCAAS {
 		return nil
@@ -496,7 +384,7 @@ func ensureKeys(
 	// Generate a private SSH key for the controllers, and add
 	// the public key to the environment config. We'll add the
 	// private key to StateServingInfo below.
-	privateKey, publicKey, err := sshGenerateKey(config.JujuSystemKey)
+	privateKey, publicKey, err := sshGenerateKey(controllerdomain.ControllerSSHKeyComment)
 	if err != nil {
 		return errors.Annotate(err, "failed to generate system key")
 	}
@@ -504,108 +392,5 @@ func ensureKeys(
 
 	args.ControllerConfig[controller.SystemSSHKeys] = publicKey
 
-	// Generate a shared secret for the Mongo replica set, and write it out.
-	sharedSecret, err := mongo.GenerateSharedSecret()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	info.SharedSecret = sharedSecret
-	return nil
-}
-
-func (c *BootstrapCommand) startMongo(ctx stdcontext.Context, isCAAS bool, addrs network.ProviderAddresses, agentConfig agent.Config) error {
-	logger.Debugf("starting mongo")
-
-	info, ok := agentConfig.MongoInfo()
-	if !ok {
-		return fmt.Errorf("no state info available")
-	}
-	// When bootstrapping, we need to allow enough time for mongo
-	// to start as there's no retry loop in place.
-	// 5 minutes should suffice.
-	mongoDialOpts := mongo.DialOpts{Timeout: 5 * time.Minute}
-	dialInfo, err := mongo.DialInfo(info.Info, mongoDialOpts)
-	if err != nil {
-		return err
-	}
-	servingInfo, ok := agentConfig.StateServingInfo()
-	if !ok {
-		return fmt.Errorf("agent config has no state serving info")
-	}
-	// Use localhost to dial the mongo server, because it's running in
-	// auth mode and will refuse to perform any operations unless
-	// we dial that address.
-	// TODO(macgreagoir) IPv6. Ubuntu still always provides IPv4 loopback,
-	// and when/if this changes localhost should resolve to IPv6 loopback
-	// in any case (lp:1644009). Review.
-	dialInfo.Addrs = []string{
-		net.JoinHostPort("localhost", fmt.Sprint(servingInfo.StatePort)),
-	}
-
-	if !isCAAS {
-		logger.Debugf("calling EnsureMongoServerInstalled")
-		ensureServerParams, err := cmdutil.NewEnsureMongoParams(agentConfig)
-		if err != nil {
-			return err
-		}
-		if err := cmdutil.EnsureMongoServerInstalled(ctx, ensureServerParams); err != nil {
-			return err
-		}
-	}
-
-	peerAddr := mongo.SelectPeerAddress(addrs)
-	if peerAddr == "" {
-		return fmt.Errorf("no appropriate peer address found in %q", addrs)
-	}
-	peerHostPort := net.JoinHostPort(peerAddr, fmt.Sprint(servingInfo.StatePort))
-
-	if err := initiateMongoServer(peergrouper.InitiateMongoParams{
-		DialInfo:       dialInfo,
-		MemberHostPort: peerHostPort,
-	}); err != nil {
-		return err
-	}
-	logger.Infof("started mongo")
-	return nil
-}
-
-// saveCustomImageMetadata stores the custom image metadata to the database,
-func (c *BootstrapCommand) saveCustomImageMetadata(st *state.State, env environs.BootstrapEnviron, imageMetadata []*imagemetadata.ImageMetadata) error {
-	logger.Debugf("saving custom image metadata")
-	return storeImageMetadataInState(st, env, "custom", simplestreams.CUSTOM_CLOUD_DATA, imageMetadata)
-}
-
-// storeImageMetadataInState writes image metadata into state store.
-func storeImageMetadataInState(st *state.State, env environs.BootstrapEnviron, source string, priority int, existingMetadata []*imagemetadata.ImageMetadata) error {
-	if len(existingMetadata) == 0 {
-		return nil
-	}
-	cfg := env.Config()
-	metadataState := make([]cloudimagemetadata.Metadata, len(existingMetadata))
-	for i, one := range existingMetadata {
-		m := cloudimagemetadata.Metadata{
-			MetadataAttributes: cloudimagemetadata.MetadataAttributes{
-				Stream:          one.Stream,
-				Region:          one.RegionName,
-				Arch:            one.Arch,
-				VirtType:        one.VirtType,
-				RootStorageType: one.Storage,
-				Source:          source,
-				Version:         one.Version,
-			},
-			Priority: priority,
-			ImageId:  one.Id,
-		}
-		if m.Stream == "" {
-			m.Stream = cfg.ImageStream()
-		}
-		if m.Source == "" {
-			m.Source = "custom"
-		}
-		metadataState[i] = m
-	}
-	if err := st.CloudImageMetadataStorage.SaveMetadata(metadataState); err != nil {
-		return errors.Annotatef(err, "cannot cache image metadata")
-	}
 	return nil
 }

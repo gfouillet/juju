@@ -4,18 +4,20 @@
 package main
 
 import (
-	"github.com/juju/cmd/v4"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func newDeleteImageMetadataCommand() cmd.Command {
 	deleteCmd := &deleteImageMetadataCommand{}
-	deleteCmd.newAPIFunc = func() (MetadataDeleteAPI, error) {
-		return deleteCmd.NewImageMetadataAPI()
+	deleteCmd.newAPIFunc = func(ctx context.Context) (MetadataDeleteAPI, error) {
+		return deleteCmd.NewImageMetadataAPI(ctx)
 	}
 	return modelcmd.Wrap(deleteCmd)
 }
@@ -28,7 +30,7 @@ Delete image metadata from Juju environment.
 type deleteImageMetadataCommand struct {
 	cloudImageMetadataCommandBase
 
-	newAPIFunc func() (MetadataDeleteAPI, error)
+	newAPIFunc func(ctx context.Context) (MetadataDeleteAPI, error)
 
 	ImageId string
 }
@@ -51,6 +53,11 @@ func (c *deleteImageMetadataCommand) Info() *cmd.Info {
 		Name:    "delete-image",
 		Purpose: "deletes image metadata from environment",
 		Doc:     deleteImageCommandDoc,
+		SeeAlso: []string{
+			"add-image",
+			"list-images",
+			"model-config",
+		},
 	})
 }
 
@@ -61,13 +68,13 @@ func (c *deleteImageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Run implements Command.Run.
 func (c *deleteImageMetadataCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
-	err = api.Delete(c.ImageId)
+	err = api.Delete(ctx, c.ImageId)
 	if err != nil {
 		return err
 	}
@@ -77,5 +84,5 @@ func (c *deleteImageMetadataCommand) Run(ctx *cmd.Context) (err error) {
 // MetadataDeleteAPI defines the API methods that delete image metadata command uses.
 type MetadataDeleteAPI interface {
 	Close() error
-	Delete(imageId string) error
+	Delete(ctx context.Context, imageId string) error
 }

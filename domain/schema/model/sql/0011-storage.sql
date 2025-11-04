@@ -1,17 +1,45 @@
+CREATE TABLE storage_pool_origin (
+    id INT NOT NULL PRIMARY KEY,
+    origin TEXT NOT NULL UNIQUE,
+    CONSTRAINT chk_storage_pool_origin_not_empty
+    CHECK (origin <> '')
+);
+
+INSERT INTO storage_pool_origin (id, origin) VALUES
+(0, 'user'),
+(1, 'provider-default');
+
 CREATE TABLE storage_pool (
     uuid TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     -- Types are provider sourced, so we do not use a lookup with ID.
-    -- This constitutes "repeating data" and would tend to indicate 
-    -- bad relational design. However we choose that here over the
-    -- burden of:
+    -- This constitutes "repeating data" and would tend to indicate
+    -- bad relational design. However we choose that here over the burden of:
     --   - Knowing every possible type up front to populate a look-up or;
-    --   - Sourcing the lookup from the provider and keeping it updated. 
-    type TEXT NOT NULL
+    --   - Sourcing the lookup from the provider and keeping it updated.
+    type TEXT NOT NULL,
+    -- The origin sets to "user" by default for user created pools.
+    -- The "built-in" and "provider-default" origins are used
+    -- for pools that are created by the system when a model is created.
+    origin_id INT NOT NULL DEFAULT 0,
+    CONSTRAINT chk_storage_pool_name_not_empty
+    CHECK (name <> ''),
+    CONSTRAINT chk_storage_pool_type_not_empty
+    CHECK (type <> ''),
+    CONSTRAINT fk_storage_pool_origin
+    FOREIGN KEY (origin_id)
+    REFERENCES storage_pool_origin (id)
 );
 
+-- It is important that the name is unique and speed up access by name.
 CREATE UNIQUE INDEX idx_storage_pool_name
 ON storage_pool (name);
+
+-- This index is used to speed up access by type, type and name.
+-- Warning: if the "type" is not the first column in the composite query condition,
+-- then the index will not be used.
+CREATE INDEX idx_storage_pool_type_name
+ON storage_pool (type, name);
 
 CREATE TABLE storage_pool_attribute (
     storage_pool_uuid TEXT NOT NULL,
@@ -23,18 +51,36 @@ CREATE TABLE storage_pool_attribute (
     PRIMARY KEY (storage_pool_uuid, "key")
 );
 
+-- storage_kind defines what type Juju considers a storage instance in the model
+-- to be of. While we have the concept of charm storage kind it is not
+-- necessarily the same as the storage instance. This is even more true when we
+-- are trying to understand the composition of a storage_instance and not the
+-- purpose it may be fulfilling.
 CREATE TABLE storage_kind (
     id INT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    description TEXT
+    kind TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX idx_storage_kind
+CREATE UNIQUE INDEX idx_storage_kind_kind
 ON storage_kind (kind);
 
 INSERT INTO storage_kind VALUES
-(0, 'block', 'Allows for the creation of raw storage volumes'),
-(1, 'filesystem', 'Provides a hierarchical file storage system');
+(0, 'block'),
+(1, 'filesystem');
+
+-- model_storage_pool instructs the model what is considered the default
+-- storage pool to use for a given storage kind.
+CREATE TABLE model_storage_pool (
+    storage_kind_id INT NOT NULL,
+    storage_pool_uuid TEXT NOT NULL,
+    PRIMARY KEY (storage_kind_id, storage_pool_uuid),
+    CONSTRAINT fk_model_storage_pool_storage_kind
+    FOREIGN KEY (storage_kind_id)
+    REFERENCES storage_kind (id),
+    CONSTRAINT fk_model_storage_pool_storage_pool_uuid
+    FOREIGN KEY (storage_pool_uuid)
+    REFERENCES storage_pool (uuid)
+);
 
 -- This table stores storage directive values for each named storage item
 -- defined by the application's current charm. If the charm is updated, then
@@ -44,25 +90,15 @@ CREATE TABLE application_storage_directive (
     application_uuid TEXT NOT NULL,
     charm_uuid TEXT NOT NULL,
     storage_name TEXT NOT NULL,
-    -- These attributes are filled in by sourcing data from:
-    -- user supplied, model config, charm config, opinionated fallbacks.
-    -- By the time the row is written, all values are known.
-    -- Directive value attributes (pool, size, count) hitherto have
-    -- been fixed (since first implemented). We don't envisage
-    -- any change to how these are modelled.
-    --
-    -- Note: one might wonder why storage_pool below is not a
-    -- FK to a row defined in the storage pool table. This value
-    -- can also be one of the pool types. As with the comment on the
-    -- type column in the storage pool table, it's problematic to use a lookup
-    -- with an ID. Storage pools, once created, cannot be renamed so
-    -- this will not be able to become "orphaned".
-    storage_pool TEXT NOT NULL,
-    size INT NOT NULL,
+    storage_pool_uuid TEXT NOT NULL,
+    size_mib INT NOT NULL,
     count INT NOT NULL,
     CONSTRAINT fk_application_storage_directive_application
     FOREIGN KEY (application_uuid)
     REFERENCES application (uuid),
+    CONSTRAINT fk_application_storage_directive_storage_pool
+    FOREIGN KEY (storage_pool_uuid)
+    REFERENCES storage_pool (uuid),
     CONSTRAINT fk_application_storage_directive_charm_storage
     FOREIGN KEY (charm_uuid, storage_name)
     REFERENCES charm_storage (charm_uuid, name),
@@ -84,22 +120,15 @@ CREATE TABLE unit_storage_directive (
     unit_uuid TEXT NOT NULL,
     charm_uuid TEXT NOT NULL,
     storage_name TEXT NOT NULL,
-    -- These attributes are filled in by sourcing data from:
-    -- user supplied, model config, charm config, opinionated fallbacks.
-    -- By the time the row is written, all values are known.
-    -- Directive value attributes (pool, size, count) hitherto have
-    -- been fixed (since first implemented). We don't envisage
-    -- any change to how these are modelled.
-    --
-    -- Note: one might wonder why storage_pool below is not a
-    -- FK to a row defined in the storage pool table. This value
-    -- can also be one of the pool types. As with the comment on the
-    -- type column in the storage pool table, it's problematic to use a lookup
-    -- with an ID. Storage pools, once created, cannot be renamed so
-    -- this will not be able to become "orphaned".
-    storage_pool TEXT NOT NULL,
-    size INT NOT NULL,
+    storage_pool_uuid TEXT NOT NULL,
+    size_mib INT NOT NULL,
     count INT NOT NULL,
+    CONSTRAINT fk_unit_storage_directive_unit
+    FOREIGN KEY (unit_uuid)
+    REFERENCES unit (uuid),
+    CONSTRAINT fk_unit_storage_directive_storage_pool
+    FOREIGN KEY (storage_pool_uuid)
+    REFERENCES storage_pool (uuid),
     CONSTRAINT fk_unit_storage_directive_charm_storage
     FOREIGN KEY (charm_uuid, storage_name)
     REFERENCES charm_storage (charm_uuid, name),
@@ -110,25 +139,36 @@ CREATE TABLE unit_storage_directive (
 CREATE INDEX idx_unit_storage_directive
 ON unit_storage_directive (unit_uuid);
 
+
+
 CREATE TABLE storage_instance (
     uuid TEXT NOT NULL PRIMARY KEY,
+    -- charm_name is the charm name that this storage instance serves. This
+    -- storage instance MUST never be used with any other charm that doesn't
+    -- match on charm and storage names.
+    -- When NULL then the storage instance has never been used. The first
+    -- attachment of this storage instance MUST make this association.
+    charm_name TEXT,
+    storage_name TEXT NOT NULL,
     storage_kind_id INT NOT NULL,
-    name TEXT NOT NULL,
+    -- storage_id is created from the storage name and a unique id number.
+    storage_id TEXT NOT NULL,
     life_id INT NOT NULL,
-    -- Note: one might wonder why storage_pool below is not a
-    -- FK to a row defined in the storage pool table. This value
-    -- can also be one of the pool types. As with the comment on the
-    -- type column in the storage pool table, it's problematic to use a lookup
-    -- with an ID. Storage pools, once created, cannot be renamed so
-    -- this will not be able to become "orphaned".
-    storage_pool TEXT NOT NULL,
-    CONSTRAINT fk_storage_instance_kind
+    storage_pool_uuid TEXT NOT NULL,
+    requested_size_mib INT NOT NULL,
+    CONSTRAINT fk_storage_instance_storage_kind
     FOREIGN KEY (storage_kind_id)
     REFERENCES storage_kind (id),
     CONSTRAINT fk_storage_instance_life
     FOREIGN KEY (life_id)
-    REFERENCES life (id)
+    REFERENCES life (id),
+    CONSTRAINT fk_storage_instance_storage_pool
+    FOREIGN KEY (storage_pool_uuid)
+    REFERENCES storage_pool (uuid)
 );
+
+CREATE UNIQUE INDEX idx_storage_instance_id
+ON storage_instance (storage_id);
 
 -- storage_unit_owner is used to indicate when
 -- a unit is the owner of a storage instance.
@@ -136,7 +176,7 @@ CREATE TABLE storage_instance (
 CREATE TABLE storage_unit_owner (
     storage_instance_uuid TEXT NOT NULL PRIMARY KEY,
     unit_uuid TEXT NOT NULL,
-    CONSTRAINT fk_storage_owner_storage
+    CONSTRAINT fk_storage_owner_storage_instance
     FOREIGN KEY (storage_instance_uuid)
     REFERENCES storage_instance (uuid),
     CONSTRAINT fk_storage_owner_unit
@@ -145,13 +185,14 @@ CREATE TABLE storage_unit_owner (
 );
 
 CREATE TABLE storage_attachment (
-    storage_instance_uuid TEXT NOT NULL PRIMARY KEY,
+    uuid TEXT NOT NULL PRIMARY KEY,
+    storage_instance_uuid TEXT NOT NULL,
     unit_uuid TEXT NOT NULL,
     life_id INT NOT NULL,
-    CONSTRAINT fk_storage_owner_storage
+    CONSTRAINT fk_storage_attachment_storage_instance
     FOREIGN KEY (storage_instance_uuid)
     REFERENCES storage_instance (uuid),
-    CONSTRAINT fk_storage_owner_unit
+    CONSTRAINT fk_storage_attachment_unit
     FOREIGN KEY (unit_uuid)
     REFERENCES unit (uuid),
     CONSTRAINT fk_storage_attachment_life
@@ -159,45 +200,90 @@ CREATE TABLE storage_attachment (
     REFERENCES life (id)
 );
 
+-- Order of columns is important for this index. The storage_instance_uuid MUST
+-- come first so that an index exists for this column. A seperate index
+-- idx_storage_attachment_unit already exists for the unit_uuid.
+CREATE UNIQUE INDEX idx_storage_attachment_unit_uuid_storage_instance_uuid
+ON storage_attachment (storage_instance_uuid, unit_uuid);
+
 -- Note that this is not unique; it speeds access by unit.
 CREATE INDEX idx_storage_attachment_unit
 ON storage_attachment (unit_uuid);
 
-CREATE TABLE storage_provisioning_status (
+CREATE TABLE storage_volume_status_value (
     id INT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT
+    status TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX idx_storage_provisioning_status
-ON storage_provisioning_status (name);
+CREATE UNIQUE INDEX idx_storage_volume_status_value
+ON storage_volume_status_value (status);
 
-INSERT INTO storage_provisioning_status VALUES
-(0, 'pending', 'Creation or attachment is awaiting completion'),
-(1, 'provisioned', 'Requested creation or attachment has been completed'),
-(2, 'error', 'An error was encountered during creation or attachment');
+INSERT INTO storage_volume_status_value VALUES
+(0, 'pending'),
+(1, 'error'),
+(2, 'attaching'),
+(3, 'attached'),
+(4, 'detaching'),
+(5, 'detached'),
+(6, 'destroying'),
+(7, 'tombstone');
 
+CREATE TABLE storage_volume_status (
+    volume_uuid TEXT NOT NULL PRIMARY KEY,
+    status_id INT NOT NULL,
+    message TEXT,
+    updated_at DATETIME,
+    CONSTRAINT fk_storage_volume_status_storage_volume
+    FOREIGN KEY (volume_uuid)
+    REFERENCES storage_volume (uuid),
+    CONSTRAINT fk_storage_volume_status_status
+    FOREIGN KEY (status_id)
+    REFERENCES storage_volume_status_value (id)
+);
+
+CREATE TABLE storage_provision_scope (
+    id INT PRIMARY KEY,
+    scope TEXT NOT NULL UNIQUE,
+    CONSTRAINT chk_storage_provision_scope_scope_not_empty
+    CHECK (scope <> '')
+);
+
+INSERT INTO storage_provision_scope (id, scope) VALUES
+(0, 'model'),
+(1, 'machine');
+
+-- storage_volume describes a volume held by a storage_instance.
+--
+-- obliterate_on_cleanup can only be set when life_id is not-alive(>0), to
+-- ensure it is only set with intent to cause volume death.
 CREATE TABLE storage_volume (
     uuid TEXT NOT NULL PRIMARY KEY,
+    volume_id TEXT NOT NULL,
     life_id INT NOT NULL,
-    name TEXT NOT NULL,
+    provision_scope_id INT NOT NULL,
     provider_id TEXT,
-    storage_pool_uuid TEXT,
     size_mib INT,
     hardware_id TEXT,
     wwn TEXT,
     persistent BOOLEAN,
-    provisioning_status_id INT NOT NULL,
+    obliterate_on_cleanup BOOLEAN,
+    CONSTRAINT chk_storage_volume_obliterate_on_cleanup_set_when_not_alive
+    CHECK (obliterate_on_cleanup IS NULL OR life_id <> 0),
     CONSTRAINT fk_storage_instance_life
     FOREIGN KEY (life_id)
     REFERENCES life (id),
-    CONSTRAINT fk_storage_volume_pool
-    FOREIGN KEY (storage_pool_uuid)
-    REFERENCES storage_pool (uuid),
-    CONSTRAINT fk_storage_vol_provisioning_status
-    FOREIGN KEY (provisioning_status_id)
-    REFERENCES storage_provisioning_status (id)
+    CONSTRAINT fk_storage_volume_provision_scope_id
+    FOREIGN KEY (provision_scope_id)
+    REFERENCES storage_provision_scope (id)
 );
+
+CREATE UNIQUE INDEX idx_storage_volume_id
+ON storage_volume (volume_id);
+
+-- index is required on provider_id because this is how we associate what we
+-- find in the environ and re-attach it to a unit.
+CREATE INDEX idx_storage_volume_provider_id
+ON storage_volume (provider_id);
 
 -- An instance can have at most one volume.
 -- A volume can have at most one instance.
@@ -220,9 +306,9 @@ CREATE TABLE storage_volume_attachment (
     storage_volume_uuid TEXT NOT NULL,
     net_node_uuid TEXT NOT NULL,
     life_id INT NOT NULL,
+    provision_scope_id INT NOT NULL,
     block_device_uuid TEXT,
     read_only BOOLEAN,
-    provisioning_status_id INT NOT NULL,
     CONSTRAINT fk_storage_volume_attachment_vol
     FOREIGN KEY (storage_volume_uuid)
     REFERENCES storage_volume (uuid),
@@ -235,28 +321,82 @@ CREATE TABLE storage_volume_attachment (
     CONSTRAINT fk_storage_volume_attachment_block
     FOREIGN KEY (block_device_uuid)
     REFERENCES block_device (uuid),
-    CONSTRAINT fk_storage_vol_att_provisioning_status
-    FOREIGN KEY (provisioning_status_id)
-    REFERENCES storage_provisioning_status (id)
+    CONSTRAINT fk_storage_volume_attachment_provision_scope_id
+    FOREIGN KEY (provision_scope_id)
+    REFERENCES storage_provision_scope (id)
 );
 
+-- Until the storage provisioner can handle multi-attachment of volumes,
+-- this will prevent that.
+CREATE UNIQUE INDEX idx_storage_volume_attachment_volume_uuid
+ON storage_volume_attachment (storage_volume_uuid);
+
+CREATE INDEX idx_storage_volume_attachment_net_node_uuid
+ON storage_volume_attachment (net_node_uuid);
+
+CREATE INDEX idx_storage_volume_attachment_block_device_uuid
+ON storage_volume_attachment (block_device_uuid);
+
+CREATE TABLE storage_filesystem_status_value (
+    id INT PRIMARY KEY,
+    status TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_storage_filesystem_status_value
+ON storage_filesystem_status_value (status);
+
+INSERT INTO storage_filesystem_status_value VALUES
+(0, 'pending'),
+(1, 'error'),
+(2, 'attaching'),
+(3, 'attached'),
+(4, 'detaching'),
+(5, 'detached'),
+(6, 'destroying'),
+(7, 'tombstone');
+
+CREATE TABLE storage_filesystem_status (
+    filesystem_uuid TEXT NOT NULL PRIMARY KEY,
+    status_id INT NOT NULL,
+    message TEXT,
+    updated_at DATETIME,
+    CONSTRAINT fk_storage_filesystem_status_storage_filesystem
+    FOREIGN KEY (filesystem_uuid)
+    REFERENCES storage_filesystem (uuid),
+    CONSTRAINT fk_storage_filesystem_status_status
+    FOREIGN KEY (status_id)
+    REFERENCES storage_filesystem_status_value (id)
+);
+
+-- storage_filesystem describes a filsystem held by a storage_instance.
+--
+-- obliterate_on_cleanup can only be set when life_id is not-alive(>0), to
+-- ensure it is only set with intent to cause fileystem death.
 CREATE TABLE storage_filesystem (
     uuid TEXT NOT NULL PRIMARY KEY,
+    filesystem_id TEXT NOT NULL,
     life_id INT NOT NULL,
+    provision_scope_id INT NOT NULL,
     provider_id TEXT,
-    storage_pool_uuid TEXT,
     size_mib INT,
-    provisioning_status_id INT NOT NULL,
-    CONSTRAINT fk_storage_instance_life
+    obliterate_on_cleanup BOOLEAN,
+    CONSTRAINT chk_storage_filesystem_obliterate_on_cleanup_set_when_not_alive
+    CHECK (obliterate_on_cleanup IS NULL OR life_id <> 0),
+    CONSTRAINT fk_storage_filesystem_life
     FOREIGN KEY (life_id)
     REFERENCES life (id),
-    CONSTRAINT fk_storage_filesystem_pool
-    FOREIGN KEY (storage_pool_uuid)
-    REFERENCES storage_pool (uuid),
-    CONSTRAINT fk_storage_fs_provisioning_status
-    FOREIGN KEY (provisioning_status_id)
-    REFERENCES storage_provisioning_status (id)
+    CONSTRAINT fk_storage_filesystem_provision_scope_id
+    FOREIGN KEY (provision_scope_id)
+    REFERENCES storage_provision_scope (id)
 );
+
+CREATE UNIQUE INDEX idx_storage_filesystem_id
+ON storage_filesystem (filesystem_id);
+
+-- index is required on provider_id because this is how we associate what we
+-- find in the environ and re-attach it to a unit.
+CREATE INDEX idx_storage_filesystem_provider_id
+ON storage_filesystem (provider_id);
 
 -- An instance can have at most one filesystem.
 -- A filesystem can have at most one instance.
@@ -278,10 +418,10 @@ CREATE TABLE storage_filesystem_attachment (
     uuid TEXT NOT NULL PRIMARY KEY,
     storage_filesystem_uuid TEXT NOT NULL,
     net_node_uuid TEXT NOT NULL,
+    provision_scope_id INT NOT NULL,
     life_id INT NOT NULL,
     mount_point TEXT,
     read_only BOOLEAN,
-    provisioning_status_id INT NOT NULL,
     CONSTRAINT fk_storage_filesystem_attachment_fs
     FOREIGN KEY (storage_filesystem_uuid)
     REFERENCES storage_filesystem (uuid),
@@ -291,10 +431,13 @@ CREATE TABLE storage_filesystem_attachment (
     CONSTRAINT fk_storage_filesystem_attachment_life
     FOREIGN KEY (life_id)
     REFERENCES life (id),
-    CONSTRAINT fk_storage_fs_provisioning_status
-    FOREIGN KEY (provisioning_status_id)
-    REFERENCES storage_provisioning_status (id)
+    CONSTRAINT fk_storage_filesystem_attachment_provision_scope_id
+    FOREIGN KEY (provision_scope_id)
+    REFERENCES storage_provision_scope (id)
 );
+
+CREATE INDEX idx_storage_filesystem_attachment_net_node_uuid
+ON storage_filesystem_attachment (net_node_uuid);
 
 CREATE TABLE storage_volume_device_type (
     id INT PRIMARY KEY,
@@ -314,9 +457,8 @@ CREATE TABLE storage_volume_attachment_plan (
     storage_volume_uuid TEXT NOT NULL,
     net_node_uuid TEXT NOT NULL,
     life_id INT NOT NULL,
+    provision_scope_id INT NOT NULL,
     device_type_id INT,
-    block_device_uuid TEXT,
-    provisioning_status_id INT NOT NULL,
     CONSTRAINT fk_storage_volume_attachment_plan_vol
     FOREIGN KEY (storage_volume_uuid)
     REFERENCES storage_volume (uuid),
@@ -329,22 +471,23 @@ CREATE TABLE storage_volume_attachment_plan (
     CONSTRAINT fk_storage_volume_attachment_plan_device
     FOREIGN KEY (device_type_id)
     REFERENCES storage_volume_device_type (id),
-    CONSTRAINT fk_storage_volume_attachment_plan_block
-    FOREIGN KEY (block_device_uuid)
-    REFERENCES block_device (uuid),
-    CONSTRAINT fk_storage_fs_provisioning_status
-    FOREIGN KEY (provisioning_status_id)
-    REFERENCES storage_provisioning_status (id)
+    CONSTRAINT fk_storage_volume_attachment_plan_provision_scope_id
+    FOREIGN KEY (provision_scope_id)
+    REFERENCES storage_provision_scope (id)
 );
 
+-- There should only one volume attachment plan per net node and volume tuple.
+CREATE UNIQUE INDEX idx_storage_volume_attachment_plan_net_node_uuid_volume_uuid
+ON storage_volume_attachment_plan (storage_volume_uuid, net_node_uuid);
+
 CREATE TABLE storage_volume_attachment_plan_attr (
-    uuid TEXT NOT NULL PRIMARY KEY,
     attachment_plan_uuid TEXT NOT NULL,
     "key" TEXT NOT NULL,
     value TEXT NOT NULL,
+    PRIMARY KEY (attachment_plan_uuid, "key"),
     CONSTRAINT fk_storage_vol_attach_plan_attr_plan
     FOREIGN KEY (attachment_plan_uuid)
-    REFERENCES storage_volume_attachment_plan (attachment_plan_uuid)
+    REFERENCES storage_volume_attachment_plan (uuid)
 );
 
 CREATE UNIQUE INDEX idx_storage_vol_attachment_plan_attr

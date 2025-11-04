@@ -8,12 +8,12 @@ import (
 	"database/sql"
 
 	"github.com/canonical/sqlair"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/controller"
 	coredatabase "github.com/juju/juju/core/database"
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/domain/controllerconfig/bootstrap"
 )
 
@@ -22,21 +22,26 @@ type ControllerTxnProvider interface {
 }
 
 func SeedControllerConfig(
-	c *gc.C,
+	c *tc.C,
 	config controller.Config,
+	controllerModelUUID coremodel.UUID,
 	provider ControllerTxnProvider,
 ) controller.Config {
-	err := bootstrap.InsertInitialControllerConfig(config)(context.Background(), provider.ControllerTxnRunner(), noopTxnRunner{})
-	c.Assert(err, jc.ErrorIsNil)
+	err := bootstrap.InsertInitialControllerConfig(config, controllerModelUUID)(c.Context(), provider.ControllerTxnRunner(), noopTxnRunner{})
+	c.Assert(err, tc.ErrorIsNil)
 	return config
 }
 
 type noopTxnRunner struct{}
 
 func (noopTxnRunner) Txn(context.Context, func(context.Context, *sqlair.TX) error) error {
-	return errors.NotImplemented
+	return coreerrors.NotImplemented
 }
 
 func (noopTxnRunner) StdTxn(context.Context, func(context.Context, *sql.Tx) error) error {
-	return errors.NotImplemented
+	return coreerrors.NotImplemented
+}
+
+func (noopTxnRunner) Dying() <-chan struct{} {
+	return make(<-chan struct{})
 }

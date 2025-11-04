@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/core/watcher"
@@ -37,11 +37,11 @@ type UpdateStatusTimerFunc func(duration time.Duration) Waiter
 type UniterClient interface {
 	Charm(url string) (api.Charm, error)
 	Relation(ctx context.Context, tag names.RelationTag) (api.Relation, error)
-	StorageAttachment(names.StorageTag, names.UnitTag) (params.StorageAttachment, error)
-	StorageAttachmentLife([]params.StorageAttachmentId) ([]params.LifeResult, error)
+	StorageAttachment(context.Context, names.StorageTag, names.UnitTag) (params.StorageAttachment, error)
+	StorageAttachmentLife(context.Context, []params.StorageAttachmentId) ([]params.LifeResult, error)
 	Unit(context.Context, names.UnitTag) (api.Unit, error)
 	WatchRelationUnits(context.Context, names.RelationTag, names.UnitTag) (watcher.RelationUnitsWatcher, error)
-	WatchStorageAttachment(names.StorageTag, names.UnitTag) (watcher.NotifyWatcher, error)
+	WatchStorageAttachment(context.Context, names.StorageTag, names.UnitTag) (watcher.NotifyWatcher, error)
 	WatchUpdateStatusHookInterval(context.Context) (watcher.NotifyWatcher, error)
 	UpdateStatusHookInterval(context.Context) (time.Duration, error)
 }

@@ -4,59 +4,60 @@
 package auditconfigupdater
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	dt "github.com/juju/worker/v4/dependency/testing"
 	"github.com/juju/worker/v4/workertest"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/auditlog"
 	controllerconfigservice "github.com/juju/juju/domain/controllerconfig/service"
-	"github.com/juju/juju/internal/servicefactory"
+	"github.com/juju/juju/internal/services"
 )
 
 type manifoldSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
 
 	cfg.AgentName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
-	cfg.ServiceFactoryName = ""
-	c.Check(cfg.Validate(), jc.ErrorIs, errors.NotValid)
+	cfg.DomainServicesName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
-var expectedInputs = []string{"agent", "service-factory"}
+var expectedInputs = []string{"agent", "domain-services"}
 
-func (s *manifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(Manifold(s.getConfig()).Inputs, jc.SameContents, expectedInputs)
+func (s *manifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.getConfig()).Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *manifoldSuite) TestStart(c *gc.C) {
+func (s *manifoldSuite) TestStart(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	s.expectAgentConfig(c)
 	s.expectControllerConfig()
 
-	w, err := Manifold(s.getConfig()).Start(context.Background(), s.newGetter())
-	c.Assert(err, jc.ErrorIsNil)
+	w, err := Manifold(s.getConfig()).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CleanKill(c, w)
 }
 
-func (s *manifoldSuite) expectAgentConfig(c *gc.C) {
+func (s *manifoldSuite) expectAgentConfig(c *tc.C) {
 	s.agentConfig.EXPECT().LogDir().Return(c.MkDir())
 	s.agent.EXPECT().CurrentConfig().Return(s.agentConfig)
 }
@@ -64,7 +65,7 @@ func (s *manifoldSuite) expectAgentConfig(c *gc.C) {
 func (s *manifoldSuite) getConfig() ManifoldConfig {
 	return ManifoldConfig{
 		AgentName:          "agent",
-		ServiceFactoryName: "service-factory",
+		DomainServicesName: "domain-services",
 		GetControllerConfigService: func(getter dependency.Getter, name string) (ControllerConfigService, error) {
 			return s.controllerConfigService, nil
 		},
@@ -77,18 +78,18 @@ func (s *manifoldSuite) getConfig() ManifoldConfig {
 func (s *manifoldSuite) newGetter() dependency.Getter {
 	resources := map[string]interface{}{
 		"agent":           s.agent,
-		"service-factory": &stubServiceFactoryGetter{},
+		"domain-services": &stubDomainServicesGetter{},
 	}
 	return dt.StubGetter(resources)
 }
 
-// Note: This replicates the ability to get a controller service factory and
-// a model service factory from the service factory getter.
-type stubServiceFactoryGetter struct {
-	servicefactory.ServiceFactory
+// Note: This replicates the ability to get a controller domain services and
+// a model domain services from the domain services getter.
+type stubDomainServicesGetter struct {
+	services.DomainServices
 }
 
-func (s *stubServiceFactoryGetter) ControllerConfig() *controllerconfigservice.Service {
+func (s *stubDomainServicesGetter) ControllerConfig() *controllerconfigservice.Service {
 	return nil
 }
 

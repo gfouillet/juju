@@ -4,14 +4,16 @@
 package model_test
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 // ModelConfig related fake environment for testing.
@@ -21,7 +23,7 @@ type fakeEnvSuite struct {
 	fake *fakeEnvAPI
 }
 
-func (s *fakeEnvSuite) SetUpTest(c *gc.C) {
+func (s *fakeEnvSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	s.fake = &fakeEnvAPI{
 		values: map[string]interface{}{
@@ -38,17 +40,18 @@ func (s *fakeEnvSuite) SetUpTest(c *gc.C) {
 }
 
 type fakeEnvAPI struct {
-	values    map[string]interface{}
-	defaults  config.ConfigValues
-	err       error
-	resetKeys []string
+	values      map[string]interface{}
+	defaults    config.ConfigValues
+	err         error
+	resetKeys   []string
+	bestVersion int
 }
 
 func (f *fakeEnvAPI) Close() error {
 	return nil
 }
 
-func (f *fakeEnvAPI) ModelGet() (map[string]interface{}, error) {
+func (f *fakeEnvAPI) ModelGet(ctx context.Context) (map[string]interface{}, error) {
 	// We need to deep copy f.values first, because verifyKnownKeys() will
 	// alter the returned values of ModelGet(), hence breaking the tests.
 	valuesCopy := make(map[string]interface{})
@@ -58,7 +61,7 @@ func (f *fakeEnvAPI) ModelGet() (map[string]interface{}, error) {
 	return valuesCopy, nil
 }
 
-func (f *fakeEnvAPI) ModelGetWithMetadata() (config.ConfigValues, error) {
+func (f *fakeEnvAPI) ModelGetWithMetadata(ctx context.Context) (config.ConfigValues, error) {
 	result := make(config.ConfigValues)
 	for name, val := range f.values {
 		result[name] = config.ConfigValue{Value: val, Source: "model"}
@@ -66,7 +69,7 @@ func (f *fakeEnvAPI) ModelGetWithMetadata() (config.ConfigValues, error) {
 	return result, nil
 }
 
-func (f *fakeEnvAPI) ModelSet(config map[string]interface{}) error {
+func (f *fakeEnvAPI) ModelSet(ctx context.Context, config map[string]interface{}) error {
 	if f.values == nil {
 		f.values = config
 	} else {
@@ -78,9 +81,13 @@ func (f *fakeEnvAPI) ModelSet(config map[string]interface{}) error {
 	return f.err
 }
 
-func (f *fakeEnvAPI) ModelUnset(keys ...string) error {
+func (f *fakeEnvAPI) ModelUnset(ctx context.Context, keys ...string) error {
 	f.resetKeys = keys
 	return f.err
+}
+
+func (f *fakeEnvAPI) BestAPIVersion() int {
+	return f.bestVersion
 }
 
 // ModelDefaults related fake environment for testing.
@@ -92,7 +99,7 @@ type fakeModelDefaultEnvSuite struct {
 	fakeCloudAPI    *fakeCloudAPI
 }
 
-func (s *fakeModelDefaultEnvSuite) SetUpTest(c *gc.C) {
+func (s *fakeModelDefaultEnvSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	s.fakeAPIRoot = &fakeAPIConnection{}
 	s.fakeDefaultsAPI = &fakeModelDefaultsAPI{
@@ -148,16 +155,16 @@ func (f *fakeModelDefaultsAPI) Close() error {
 	return nil
 }
 
-func (f *fakeModelDefaultsAPI) ModelGet() (map[string]interface{}, error) {
+func (f *fakeModelDefaultsAPI) ModelGet(ctx context.Context) (map[string]interface{}, error) {
 	return f.values, nil
 }
 
-func (f *fakeModelDefaultsAPI) ModelDefaults(cloud string) (config.ModelDefaultAttributes, error) {
+func (f *fakeModelDefaultsAPI) ModelDefaults(ctx context.Context, cloud string) (config.ModelDefaultAttributes, error) {
 	f.cloud = cloud
 	return f.defaults, nil
 }
 
-func (f *fakeModelDefaultsAPI) SetModelDefaults(cloud, region string, cfg map[string]interface{}) error {
+func (f *fakeModelDefaultsAPI) SetModelDefaults(ctx context.Context, cloud, region string, cfg map[string]interface{}) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -183,7 +190,7 @@ func (f *fakeModelDefaultsAPI) SetModelDefaults(cloud, region string, cfg map[st
 	return nil
 }
 
-func (f *fakeModelDefaultsAPI) UnsetModelDefaults(cloud, region string, keys ...string) error {
+func (f *fakeModelDefaultsAPI) UnsetModelDefaults(ctx context.Context, cloud, region string, keys ...string) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -195,12 +202,12 @@ func (f *fakeModelDefaultsAPI) UnsetModelDefaults(cloud, region string, keys ...
 	return nil
 }
 
-func (f *fakeModelDefaultsAPI) ModelSet(config map[string]interface{}) error {
+func (f *fakeModelDefaultsAPI) ModelSet(ctx context.Context, config map[string]interface{}) error {
 	f.values = config
 	return f.err
 }
 
-func (f *fakeModelDefaultsAPI) ModelUnset(keys ...string) error {
+func (f *fakeModelDefaultsAPI) ModelUnset(ctx context.Context, keys ...string) error {
 	f.keys = keys
 	return f.err
 }
@@ -210,10 +217,10 @@ type fakeCloudAPI struct {
 }
 
 func (f *fakeCloudAPI) Close() error { return nil }
-func (f *fakeCloudAPI) Clouds() (map[names.CloudTag]jujucloud.Cloud, error) {
+func (f *fakeCloudAPI) Clouds(ctx context.Context) (map[names.CloudTag]jujucloud.Cloud, error) {
 	return f.clouds, nil
 }
-func (f *fakeCloudAPI) Cloud(cloud names.CloudTag) (jujucloud.Cloud, error) {
+func (f *fakeCloudAPI) Cloud(ctx context.Context, cloud names.CloudTag) (jujucloud.Cloud, error) {
 	var (
 		c  jujucloud.Cloud
 		ok bool

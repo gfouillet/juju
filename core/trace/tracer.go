@@ -9,13 +9,16 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+
+	"github.com/juju/juju/internal/errors"
 )
 
 const (
 	// OTELTraceID is the trace ID key used in the go label.
 	OTELTraceID = "otel.traceid"
+
+	controllerNamespace = "controller"
 )
 
 const (
@@ -25,10 +28,6 @@ const (
 	// This error indicates to consuming workers that their dependency has
 	// become unmet and a restart by the dependency engine is imminent.
 	ErrTracerDying = errors.ConstError("tracer worker is dying")
-)
-
-const (
-	controllerNamespace = "controller"
 )
 
 // Option are options that can be passed to the Tracer.Start() method.

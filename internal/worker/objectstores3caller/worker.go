@@ -4,7 +4,7 @@
 package objectstores3caller
 
 import (
-	context "context"
+	"context"
 	"sync"
 	"time"
 
@@ -20,6 +20,7 @@ import (
 	coretrace "github.com/juju/juju/core/trace"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/s3client"
 )
 
@@ -44,7 +45,7 @@ type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
 	// WatchControllerConfig returns a watcher that returns keys for any changes
 	// to controller config.
-	WatchControllerConfig() (watcher.StringsWatcher, error)
+	WatchControllerConfig(context.Context) (watcher.StringsWatcher, error)
 }
 
 type workerConfig struct {
@@ -109,6 +110,7 @@ func newWorker(config workerConfig, internalStates chan string) (*s3Worker, erro
 
 	// Now start the catacomb once we have the initial session.
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "object-strore-s3",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -130,6 +132,11 @@ func (w *s3Worker) Session(ctx context.Context, fn func(context.Context, objects
 		Func: func() error {
 			w.mutex.Lock()
 			defer w.mutex.Unlock()
+
+			if w.session == nil {
+				return internalerrors.Errorf("no session available").Add(errors.NotSupported)
+			}
+
 			return fn(ctx, w.session)
 		},
 		IsFatalError: func(err error) bool {
@@ -157,13 +164,13 @@ func (w *s3Worker) Wait() error {
 }
 
 func (w *s3Worker) loop() (err error) {
-	watcher, err := w.config.ControllerConfigService.WatchControllerConfig()
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	watcher, err := w.config.ControllerConfigService.WatchControllerConfig(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-
-	ctx, cancel := w.scopedContext()
-	defer cancel()
 
 	if err := w.addWatcher(ctx, watcher); err != nil {
 		return errors.Trace(err)
@@ -203,6 +210,12 @@ func (w *s3Worker) makeNewClient(ctx context.Context) (objectstore.Session, erro
 	controllerConfig, err := w.config.ControllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+
+	if controllerConfig.ObjectStoreType() != objectstore.S3Backend {
+		// If the object store type is file, then we don't need to create
+		// a new S3 client, just return a noop worker.
+		return nil, nil
 	}
 
 	client, err := w.config.NewClient(

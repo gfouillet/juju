@@ -5,42 +5,49 @@ package application
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/clock"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/common"
+	coreassumes "github.com/juju/juju/core/assumes"
 	corecharm "github.com/juju/juju/core/charm"
-	"github.com/juju/juju/core/config"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/instance"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/objectstore"
+	coreresource "github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/application"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
 	applicationservice "github.com/juju/juju/domain/application/service"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/charm/assumes"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/storage"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
-var (
-	// Overridden by tests.
-	SupportedFeaturesGetter = stateenvirons.SupportedFeatures
-)
+// ModelService provides access to the model state.
+type ModelService interface {
+	// GetSupportedFeatures returns the set of features that the model makes
+	// available for charms to use.
+	GetSupportedFeatures(ctx context.Context) (coreassumes.FeatureSet, error)
+}
 
 // DeployApplicationParams contains the arguments required to deploy the referenced
 // charm.
 type DeployApplicationParams struct {
 	ApplicationName   string
-	Charm             *state.Charm
+	Charm             *domainCharm
 	CharmOrigin       corecharm.Origin
-	ApplicationConfig *config.Config
-	CharmConfig       charm.Settings
+	Trust             bool
+	ApplicationConfig charm.Config
 	Constraints       constraints.Value
 	NumUnits          int
 	// Placement is a list of placement directives which may be used
@@ -49,7 +56,7 @@ type DeployApplicationParams struct {
 	Storage          map[string]storage.Directive
 	Devices          map[string]devices.Constraints
 	AttachStorage    []names.StorageTag
-	EndpointBindings map[string]string
+	EndpointBindings map[string]network.SpaceName
 	// Resources is a map of resource name to IDs of pending resources.
 	Resources map[string]string
 
@@ -58,259 +65,270 @@ type DeployApplicationParams struct {
 	Force bool
 }
 
-type ApplicationDeployer interface {
-	AddApplication(state.AddApplicationArgs, objectstore.ObjectStore) (Application, error)
+// handleApplicationDomainError is a first low pass effort to start handling
+// some of the errors that will come out of the application domain. If a handler
+// does not exist then the original error will be returned.
+func handleApplicationDomainError(err error) error {
+	switch {
+	// When the supplied storage directive overrides violates the chamrs
+	// storage.
+	case errors.HasType[applicationerrors.StorageCountLimitExceeded](err):
+		limitErr, _ := errors.AsType[applicationerrors.StorageCountLimitExceeded](err)
+		if limitErr.Requested < limitErr.Minimum {
+			return errors.Errorf(
+				"storage directive %q request count %d insufficient for the charms minimum count of %d",
+				limitErr.StorageName, limitErr.Requested, limitErr.Minimum,
+			).Add(coreerrors.NotValid)
+		} else if limitErr.Maximum != nil && limitErr.Requested > *limitErr.Maximum {
+			return errors.Errorf(
+				"storage directive %q request count %d exceeds the charms maximum count of %d",
+				limitErr.StorageName, limitErr.Requested, *limitErr.Maximum,
+			).Add(coreerrors.NotValid)
+		}
 
-	// ReadSequence is a stop gap to allow the next unit number to be read from mongo
-	// so that correctly matching units can be written to dqlite.
-	ReadSequence(name string) (int, error)
-}
+	// When the charm storage location violateds a prohibited filesystem mount
+	// point.
+	case errors.HasType[applicationerrors.CharmStorageLocationProhibited](err):
+		prohibitErr, _ := errors.AsType[applicationerrors.CharmStorageLocationProhibited](err)
+		return errors.Errorf(
+			"charm storage %q wants to use a prohibited location %q, must not be in %q",
+			prohibitErr.CharmStorageName,
+			prohibitErr.CharmStorageLocation,
+			prohibitErr.ProhibitedLocation,
+		).Add(coreerrors.NotValid)
+	}
 
-type UnitAdder interface {
-	AddUnit(state.AddUnitParams) (Unit, error)
-}
-
-// MachineService instances save a machine to dqlite state.
-type MachineService interface {
-	CreateMachine(context.Context, machine.Name) (string, error)
-}
-
-// ApplicationService instances save an application to dqlite state.
-type ApplicationService interface {
-	CreateApplication(ctx context.Context, name string, params applicationservice.AddApplicationParams, units ...applicationservice.AddUnitParams) error
-	AddUnits(ctx context.Context, name string, units ...applicationservice.AddUnitParams) error
-	UpdateApplicationCharm(ctx context.Context, name string, params applicationservice.UpdateCharmParams) error
+	return err
 }
 
 // DeployApplication takes a charm and various parameters and deploys it.
 func DeployApplication(
-	ctx context.Context, st ApplicationDeployer, model Model, cloudService common.CloudService,
-	credentialService common.CredentialService,
+	ctx context.Context,
+	modelType coremodel.ModelType,
 	applicationService ApplicationService,
+	storageService StorageService,
 	store objectstore.ObjectStore,
 	args DeployApplicationParams,
 	logger corelogger.Logger,
-) (Application, error) {
-	charmConfig, err := args.Charm.Config().ValidateSettings(args.CharmConfig)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+	clock clock.Clock,
+) error {
 	if args.Charm.Meta().Name == bootstrap.ControllerCharmName {
-		return nil, errors.NotSupportedf("manual deploy of the controller charm")
+		return errors.New("manual deploy of the controller charm not supported").
+			Add(coreerrors.NotSupported)
 	}
 	if args.Charm.Meta().Subordinate {
 		if args.NumUnits != 0 {
-			return nil, fmt.Errorf("subordinate application must be deployed without units")
+			return errors.New("subordinate application must be deployed without units")
 		}
 		if !constraints.IsEmpty(&args.Constraints) {
-			return nil, fmt.Errorf("subordinate application must be deployed without constraints")
+			return errors.Errorf("subordinate application must be deployed without constraints, not %q", args.Constraints)
 		}
 	}
 
 	// Enforce "assumes" requirements.
-	if err := assertCharmAssumptions(ctx, args.Charm.Meta().Assumes, model, cloudService, credentialService); err != nil {
-		if !errors.Is(err, errors.NotSupported) || !args.Force {
-			return nil, errors.Trace(err)
+	if err := assertCharmAssumptions(ctx, applicationService, args.Charm.Meta().Assumes); err != nil {
+		if !errors.Is(err, coreerrors.NotSupported) || !args.Force {
+			return errors.Capture(err)
 		}
 
-		logger.Warningf("proceeding with deployment of application %q even though the charm feature requirements could not be met as --force was specified", args.ApplicationName)
+		logger.Warningf(ctx, "proceeding with deployment of application %q even though the charm feature requirements could not be met as --force was specified", args.ApplicationName)
 	}
 
-	if model.Type() == state.ModelTypeCAAS {
+	if modelType == coremodel.CAAS {
 		if charm.MetaFormat(args.Charm) == charm.FormatV1 {
-			return nil, errors.NotSupportedf("deploying format v1 charm %q", args.Charm.URL())
+			return errors.Errorf(
+				"deploying format v1 charm %q not supported",
+				args.ApplicationName,
+			).Add(coreerrors.NotSupported)
 		}
 	}
 
-	// TODO(fwereade): transactional State.AddApplication including settings, constraints
-	// (minimumUnitCount, initialMachineIds?).
-
-	origin, err := StateCharmOrigin(args.CharmOrigin)
-	if err != nil {
-		return nil, errors.Trace(err)
+	var downloadInfo *applicationcharm.DownloadInfo
+	if args.CharmOrigin.Source == corecharm.CharmHub {
+		var err error
+		downloadInfo, err = applicationService.GetCharmDownloadInfo(ctx, args.Charm.locator)
+		if err != nil {
+			return errors.Capture(err)
+		}
 	}
-	asa := state.AddApplicationArgs{
-		Name:              args.ApplicationName,
-		Charm:             args.Charm,
-		CharmOrigin:       origin,
-		Storage:           stateStorageDirectives(args.Storage),
-		Devices:           stateDeviceConstraints(args.Devices),
-		AttachStorage:     args.AttachStorage,
+
+	pendingResources, err := transformToPendingResources(args.Resources)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	sdo, err := storageDirectives(ctx, storageService, args.Storage)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	applicationArg := applicationservice.AddApplicationArgs{
+		ReferenceName:    args.Charm.locator.Name,
+		DownloadInfo:     downloadInfo,
+		PendingResources: pendingResources,
+		EndpointBindings: args.EndpointBindings,
+		Devices:          args.Devices,
+		ApplicationStatus: &status.StatusInfo{
+			Status: status.Unset,
+			Since:  ptr(clock.Now()),
+		},
 		ApplicationConfig: args.ApplicationConfig,
-		CharmConfig:       charmConfig,
-		NumUnits:          args.NumUnits,
-		Placement:         args.Placement,
-		Resources:         args.Resources,
-		EndpointBindings:  args.EndpointBindings,
+		ApplicationSettings: application.ApplicationSettings{
+			Trust: args.Trust,
+		},
+		Constraints:               args.Constraints,
+		StorageDirectiveOverrides: sdo,
+	}
+	if modelType == coremodel.CAAS {
+		unitArgs, err := makeCAASUnitArgs(args)
+		if err != nil {
+			return errors.Capture(err)
+		}
+
+		_, err = applicationService.CreateCAASApplication(
+			ctx,
+			args.ApplicationName,
+			args.Charm,
+			args.CharmOrigin,
+			applicationArg,
+			unitArgs...,
+		)
+		if err != nil {
+			return handleApplicationDomainError(errors.Capture(err))
+		}
+		return nil
 	}
 
-	if !args.Charm.Meta().Subordinate {
-		asa.Constraints = args.Constraints
-	}
-
-	// TODO(dqlite) - remove mongo AddApplication call.
-	// To ensure dqlite unit names match those created in mongo, grab the next unit
-	// sequence number before writing the mongo units.
-	nextUnitNum, err := st.ReadSequence(args.ApplicationName)
+	unitArgs, err := makeIAASUnitArgs(args)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return errors.Capture(err)
 	}
-	unitArgs := make([]applicationservice.AddUnitParams, args.NumUnits)
-	for i := 0; i < args.NumUnits; i++ {
-		n := fmt.Sprintf("%s/%d", args.ApplicationName, nextUnitNum+i)
-		unitArgs[i].UnitName = &n
-	}
-	app, err := st.AddApplication(asa, store)
 
-	// Dual write storage directives to dqlite.
-	if err == nil {
-		err = applicationService.CreateApplication(ctx, args.ApplicationName, applicationservice.AddApplicationParams{
-			Charm:   args.Charm,
-			Storage: args.Storage,
-		}, unitArgs...)
+	_, err = applicationService.CreateIAASApplication(
+		ctx,
+		args.ApplicationName,
+		args.Charm,
+		args.CharmOrigin,
+		applicationArg,
+		unitArgs...,
+	)
+	if err != nil {
+		return handleApplicationDomainError(err)
 	}
-	return app, errors.Trace(err)
+
+	return nil
+}
+
+func makeIAASUnitArgs(args DeployApplicationParams) ([]applicationservice.AddIAASUnitArg, error) {
+	unitArgs := make([]applicationservice.AddIAASUnitArg, args.NumUnits)
+	for i := range args.NumUnits {
+		var unitPlacement *instance.Placement
+		if i < len(args.Placement) {
+			unitPlacement = args.Placement[i]
+		}
+		unitArgs[i] = applicationservice.AddIAASUnitArg{
+			AddUnitArg: applicationservice.AddUnitArg{
+				Placement: unitPlacement,
+			},
+		}
+	}
+
+	return unitArgs, nil
+}
+
+func makeCAASUnitArgs(args DeployApplicationParams) ([]applicationservice.AddUnitArg, error) {
+	unitArgs := make([]applicationservice.AddUnitArg, args.NumUnits)
+	for i := range args.NumUnits {
+		var unitPlacement *instance.Placement
+		if i < len(args.Placement) {
+			unitPlacement = args.Placement[i]
+		}
+		unitArgs[i] = applicationservice.AddUnitArg{
+			Placement: unitPlacement,
+		}
+	}
+
+	return unitArgs, nil
+}
+
+func transformBindings(endpointBindings map[string]string) map[string]network.SpaceName {
+	bindings := make(map[string]network.SpaceName)
+	for endpoint, space := range endpointBindings {
+		bindings[endpoint] = network.SpaceName(space)
+	}
+	return bindings
+}
+
+func transformToPendingResources(argResources map[string]string) ([]coreresource.UUID, error) {
+	var pendingResources []coreresource.UUID
+	for _, res := range argResources {
+		resUUID, err := coreresource.ParseUUID(res)
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
+		pendingResources = append(pendingResources, resUUID)
+	}
+	return pendingResources, nil
 }
 
 // addUnits starts n units of the given application using the specified placement
 // directives to allocate the machines.
 func (api *APIBase) addUnits(
 	ctx context.Context,
-	unitAdder UnitAdder,
 	appName string,
 	n int,
 	placement []*instance.Placement,
 	attachStorage []names.StorageTag,
 	assignUnits bool,
-) ([]Unit, error) {
-	units := make([]Unit, n)
-	policy := state.AssignNew
-
-	allSpaces, err := api.networkService.GetAllSpaces(ctx)
-	if err != nil {
-		return nil, err
-	}
+	charmMeta *charm.Meta,
+) ([]coreunit.Name, error) {
+	units := make([]coreunit.Name, 0, n)
 
 	// TODO what do we do if we fail half-way through this process?
 	for i := 0; i < n; i++ {
-		unit, err := unitAdder.AddUnit(state.AddUnitParams{
-			AttachStorage: attachStorage,
-		})
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot add unit %d/%d to application %q", i+1, n, appName)
-		}
-		unitName := unit.Name()
-		if err := api.applicationService.AddUnits(ctx, appName, applicationservice.AddUnitParams{UnitName: &unitName}); err != nil {
-			return nil, errors.Annotatef(err, "cannot add unit %q to application %q", unitName, appName)
-		}
-		units[i] = unit
-		if !assignUnits {
-			continue
+		var unitPlacement *instance.Placement
+		if i < len(placement) {
+			unitPlacement = placement[i]
 		}
 
-		// Are there still placement directives to use?
-		if i > len(placement)-1 {
-			if err := unit.AssignWithPolicy(policy); err != nil {
-				return nil, errors.Trace(err)
-			}
+		unitArg := applicationservice.AddUnitArg{
+			Placement: unitPlacement,
+		}
+
+		var unitNames []coreunit.Name
+		var err error
+		if api.modelType == coremodel.CAAS {
+			unitNames, err = api.applicationService.AddCAASUnits(ctx, appName, unitArg)
 		} else {
-			if err := unit.AssignWithPlacement(placement[i], allSpaces); err != nil {
-				return nil, errors.Annotatef(err, "acquiring machine to host unit %q", unit.UnitTag().Id())
-			}
+			unitNames, _, err = api.applicationService.AddIAASUnits(ctx, appName, applicationservice.AddIAASUnitArg{
+				AddUnitArg: unitArg,
+			})
 		}
-
-		// Get assigned machine and ensure it exists in dqlite.
-		id, err := unit.AssignedMachineId()
 		if err != nil {
-			return nil, errors.Annotatef(err, "getting assigned machine for unit: %q", unit.Name())
+			return nil, errors.Errorf("adding unit to application %q: %w", appName, err)
 		}
-		if err := saveMachineInfo(ctx, api.machineService, id); err != nil {
-			return nil, errors.Annotatef(err, "saving assigned machine %q for unit: %q", id, unit.Name())
-		}
+		units = append(units, unitNames...)
 	}
+
 	return units, nil
 }
 
-func saveMachineInfo(ctx context.Context, machineService MachineService, machineName string) error {
-	// This is temporary - just insert the machine id all al the parent ones.
-	for machineName != "" {
-		if _, err := machineService.CreateMachine(ctx, machine.Name(machineName)); err != nil {
-			return errors.Annotatef(err, "saving info for machine %q", machineName)
-		}
-		parent := names.NewMachineTag(machineName).Parent()
-		if parent == nil {
-			break
-		}
-		machineName = parent.Id()
-	}
-	return nil
-}
-
-func stateStorageDirectives(cons map[string]storage.Directive) map[string]state.StorageConstraints {
-	result := make(map[string]state.StorageConstraints)
-	for name, cons := range cons {
-		result[name] = state.StorageConstraints{
-			Pool:  cons.Pool,
-			Size:  cons.Size,
-			Count: cons.Count,
-		}
-	}
-	return result
-}
-
-func stateDeviceConstraints(cons map[string]devices.Constraints) map[string]state.DeviceConstraints {
-	result := make(map[string]state.DeviceConstraints)
-	for name, cons := range cons {
-		result[name] = state.DeviceConstraints{
-			Type:       state.DeviceType(cons.Type),
-			Count:      cons.Count,
-			Attributes: cons.Attributes,
-		}
-	}
-	return result
-}
-
-// StateCharmOrigin returns a state layer CharmOrigin given a core Origin.
-func StateCharmOrigin(origin corecharm.Origin) (*state.CharmOrigin, error) {
-	var ch *state.Channel
-	if c := origin.Channel; c != nil {
-		normalizedC := c.Normalize()
-		ch = &state.Channel{
-			Track:  normalizedC.Track,
-			Risk:   string(normalizedC.Risk),
-			Branch: normalizedC.Branch,
-		}
-	}
-	return &state.CharmOrigin{
-		Type:     origin.Type,
-		Source:   string(origin.Source),
-		ID:       origin.ID,
-		Hash:     origin.Hash,
-		Revision: origin.Revision,
-		Channel:  ch,
-		Platform: &state.Platform{
-			Architecture: origin.Platform.Architecture,
-			OS:           origin.Platform.OS,
-			Channel:      origin.Platform.Channel,
-		},
-	}, nil
-}
-
 func assertCharmAssumptions(
-	ctx context.Context, assumesExprTree *assumes.ExpressionTree, model Model, cloudService common.CloudService,
-	credentialService common.CredentialService,
+	ctx context.Context,
+	applicationService ApplicationService,
+	assumesExprTree *assumes.ExpressionTree,
 ) error {
 	if assumesExprTree == nil {
 		return nil
 	}
 
-	featureSet, err := SupportedFeaturesGetter(model, cloudService, credentialService)
+	featureSet, err := applicationService.GetSupportedFeatures(ctx)
 	if err != nil {
-		return errors.Annotate(err, "querying feature set supported by the model")
+		return errors.Errorf("querying feature set supported by the model: %w", err)
 	}
 
 	if err = featureSet.Satisfies(assumesExprTree); err != nil {
-		return errors.NewNotSupported(err, "")
+		return errors.Errorf("not supported %w", err).Add(coreerrors.NotSupported)
 	}
 
 	return nil

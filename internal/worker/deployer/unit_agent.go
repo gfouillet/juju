@@ -12,9 +12,8 @@ import (
 	"github.com/juju/errors"
 	"github.com/juju/loggo/v2"
 	"github.com/juju/lumberjack/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/utils/v4/voyeur"
-	"github.com/juju/version/v2"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,14 +24,17 @@ import (
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/arch"
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
 	coreos "github.com/juju/juju/core/os"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	internaldependency "github.com/juju/juju/internal/dependency"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/worker/introspection"
 	"github.com/juju/juju/internal/worker/logsender"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // UnitAgent wraps the agent config for this unit.
@@ -50,6 +52,7 @@ type UnitAgent struct {
 	unitEngineConfig   func() dependency.EngineConfig
 	unitManifolds      func(UnitManifoldsConfig) dependency.Manifolds
 	prometheusRegistry *prometheus.Registry
+	flightRecorder     flightrecorder.FlightRecorder
 
 	// Able to disable running units.
 	workerRunning bool
@@ -60,6 +63,7 @@ type UnitAgent struct {
 type UnitAgentConfig struct {
 	Name             string
 	DataDir          string
+	FlightRecorder   flightrecorder.FlightRecorder
 	Clock            clock.Clock
 	Logger           logger.Logger
 	UnitEngineConfig func() dependency.EngineConfig
@@ -74,6 +78,9 @@ func (u *UnitAgentConfig) Validate() error {
 	}
 	if u.DataDir == "" {
 		return errors.NotValidf("missing DataDir")
+	}
+	if u.FlightRecorder == nil {
+		return errors.NotValidf("missing FlightRecorder")
 	}
 	if u.Clock == nil {
 		return errors.NotValidf("missing Clock")
@@ -108,8 +115,8 @@ func NewUnitAgent(config UnitAgentConfig) (*UnitAgent, error) {
 	// Create a symlink for the unit "agent" binaries.
 	// This is used because the uniter is still using the tools directory
 	// for the unit agent for creating the jujuc symlinks.
-	config.Logger.Tracef("creating symlink for %q to tools directory for jujuc", config.Name)
-	current := version.Binary{
+	config.Logger.Tracef(context.Background(), "creating symlink for %q to tools directory for jujuc", config.Name)
+	current := semversion.Binary{
 		Number:  jujuversion.Current,
 		Arch:    arch.HostArch(),
 		Release: coreos.HostOSTypeName(),
@@ -125,7 +132,7 @@ func NewUnitAgent(config UnitAgentConfig) (*UnitAgent, error) {
 		return nil, errors.Trace(err)
 	}
 
-	config.Logger.Infof("creating new agent config for %q", config.Name)
+	config.Logger.Infof(context.Background(), "creating new agent config for %q", config.Name)
 	conf, err := agent.ReadConfig(agent.ConfigPath(config.DataDir, tag))
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -145,6 +152,7 @@ func NewUnitAgent(config UnitAgentConfig) (*UnitAgent, error) {
 		unitEngineConfig:   config.UnitEngineConfig,
 		unitManifolds:      config.UnitManifolds,
 		prometheusRegistry: prometheusRegistry,
+		flightRecorder:     config.FlightRecorder,
 	}
 	// Update the 'upgradedToVersion' in the agent.conf file if it is
 	// different to the current version.
@@ -159,11 +167,11 @@ func NewUnitAgent(config UnitAgentConfig) (*UnitAgent, error) {
 	return unit, nil
 }
 
-func (a *UnitAgent) start() (worker.Worker, error) {
-	a.logger.Tracef("starting workers for %q", a.name)
+func (a *UnitAgent) start(ctx context.Context) (worker.Worker, error) {
+	a.logger.Tracef(ctx, "starting workers for %q", a.name)
 	loggerContext, bufferedLogger, closeLogging, err := a.initLogging()
 	if err != nil {
-		a.logger.Tracef("init logging failed %s", err)
+		a.logger.Tracef(ctx, "init logging failed %s", err)
 		return nil, errors.Trace(err)
 	}
 
@@ -183,12 +191,12 @@ func (a *UnitAgent) start() (worker.Worker, error) {
 	// There will only be an error if the required configuration
 	// values are not passed in.
 	if err != nil {
-		a.logger.Tracef("creating machine lock failed %s", err)
+		a.logger.Tracef(ctx, "creating machine lock failed %s", err)
 		return nil, errors.Trace(err)
 	}
 
 	// construct unit agent manifold
-	a.logger.Tracef("creating unit manifolds for %q", a.name)
+	a.logger.Tracef(ctx, "creating unit manifolds for %q", a.name)
 	manifolds := a.unitManifolds(UnitManifoldsConfig{
 		LoggerContext:       loggerContext,
 		Agent:               a,
@@ -202,17 +210,17 @@ func (a *UnitAgent) start() (worker.Worker, error) {
 	})
 	depEngineConfig := a.unitEngineConfig()
 	// TODO: tweak IsFatal error func, maybe?
-	depEngineConfig.Logger = loggerContext.GetLogger("juju.worker.dependency")
+	depEngineConfig.Logger = internaldependency.WrapLogger(loggerContext.GetLogger("juju.worker.dependency"))
 	// Tweak as necessary.
 	engine, err := dependency.NewEngine(depEngineConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	a.logger.Tracef("installing manifolds for %q", a.name)
+	a.logger.Tracef(ctx, "installing manifolds for %q", a.name)
 	if err := dependency.Install(engine, manifolds); err != nil {
 		if err := worker.Stop(engine); err != nil {
-			a.logger.Errorf("while stopping engine with bad manifolds: %v", err)
+			a.logger.Errorf(ctx, "while stopping engine with bad manifolds: %v", err)
 		}
 		return nil, err
 	}
@@ -228,10 +236,10 @@ func (a *UnitAgent) start() (worker.Worker, error) {
 		a.mu.Unlock()
 	}()
 	if err := addons.StartIntrospection(addons.IntrospectionConfig{
-		AgentTag:           a.CurrentConfig().Tag(),
+		AgentDir:           a.CurrentConfig().Dir(),
 		Engine:             engine,
-		NewSocketName:      addons.DefaultIntrospectionSocketName,
 		PrometheusGatherer: a.prometheusRegistry,
+		FlightRecorder:     a.flightRecorder,
 		MachineLock:        machineLock,
 		WorkerFunc:         introspection.NewWorker,
 		Logger:             a.logger,
@@ -240,9 +248,9 @@ func (a *UnitAgent) start() (worker.Worker, error) {
 		// but continue. It is very unlikely to happen in the real world
 		// as the only issue is connecting to the abstract domain socket
 		// and the agent is controlled by by the OS to only have one.
-		a.logger.Errorf("failed to start introspection worker: %v", err)
+		a.logger.Errorf(ctx, "failed to start introspection worker: %v", err)
 	}
-	a.logger.Tracef("engine for %q running", a.name)
+	a.logger.Tracef(ctx, "engine for %q running", a.name)
 	return engine, nil
 }
 
@@ -259,7 +267,7 @@ func (a *UnitAgent) initLogging() (logger.LoggerContext, *logsender.BufferedLogW
 	if err := paths.PrimeLogFile(logFilename); err != nil {
 		// This isn't a fatal error so log and continue if priming
 		// fails.
-		a.logger.Errorf("unable to prime %s (proceeding anyway): %v", logFilename, err)
+		a.logger.Errorf(context.TODO(), "unable to prime %s (proceeding anyway): %v", logFilename, err)
 	}
 	ljLogger := &lumberjack.Logger{
 		Filename:   logFilename, // eg: "/var/log/juju/unit-mysql-0.log"
@@ -267,11 +275,11 @@ func (a *UnitAgent) initLogging() (logger.LoggerContext, *logsender.BufferedLogW
 		MaxBackups: a.CurrentConfig().AgentLogfileMaxBackups(),
 		Compress:   true,
 	}
-	a.logger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
+	a.logger.Debugf(context.TODO(), "created rotating log file %q with max size %d MB and max backups %d",
 		ljLogger.Filename, ljLogger.MaxSize, ljLogger.MaxBackups)
 	if err := loggerContext.AddWriter(
 		"file", loggo.NewSimpleWriter(ljLogger, loggo.DefaultFormatter)); err != nil {
-		a.logger.Errorf("unable to configure file logging for unit %q: %v", a.name, err)
+		a.logger.Errorf(context.TODO(), "unable to configure file logging for unit %q: %v", a.name, err)
 	}
 
 	bufferedLogger, err := logsender.InstallBufferedLogWriter(loggerContext, 1048576)
@@ -281,18 +289,18 @@ func (a *UnitAgent) initLogging() (logger.LoggerContext, *logsender.BufferedLogW
 
 	closeLogging := func() {
 		if _, err = loggerContext.RemoveWriter("file"); err != nil {
-			a.logger.Errorf("%q remove writer: %s", a.name, err)
+			a.logger.Errorf(context.TODO(), "%q remove writer: %s", a.name, err)
 		}
 		bufferedLogger.Close()
 		if err = ljLogger.Close(); err != nil {
-			a.logger.Errorf("%q lumberjack logger close: %s", a.name, err)
+			a.logger.Errorf(context.TODO(), "%q lumberjack logger close: %s", a.name, err)
 		}
 	}
 
 	// Add line for starting agent to logging context.
 	// TODO(logging) - add unit labels
 	ctx := internallogger.WrapLoggoContext(loggerContext)
-	ctx.GetLogger("juju").Infof("Starting unit workers for %q", a.name)
+	ctx.GetLogger("juju").Infof(context.TODO(), "Starting unit workers for %q", a.name)
 
 	a.setupLogging(ctx, a.agentConf)
 

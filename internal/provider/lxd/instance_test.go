@@ -4,13 +4,11 @@
 package lxd_test
 
 import (
-	"context"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/internal/provider/lxd"
 )
 
@@ -18,33 +16,47 @@ type instanceSuite struct {
 	lxd.BaseSuite
 }
 
-var _ = gc.Suite(&instanceSuite{})
+func TestInstanceSuite(t *testing.T) {
+	tc.Run(t, &instanceSuite{})
+}
 
-func (s *instanceSuite) TestNewInstance(c *gc.C) {
+func (s *instanceSuite) TestNewInstance(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
 	inst := lxd.NewInstance(s.Container, s.Env)
 
-	c.Check(lxd.ExposeInstContainer(inst), gc.Equals, s.Container)
-	c.Check(lxd.ExposeInstEnv(inst), gc.Equals, s.Env)
+	c.Check(lxd.ExposeInstContainer(inst), tc.Equals, s.Container)
+	c.Check(lxd.ExposeInstEnv(inst), tc.Equals, s.Env)
 	s.CheckNoAPI(c)
 }
 
-func (s *instanceSuite) TestID(c *gc.C) {
+func (s *instanceSuite) TestID(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
 	id := s.Instance.Id()
 
-	c.Check(id, gc.Equals, instance.Id("spam"))
+	c.Check(id, tc.Equals, instance.Id("spam"))
 	s.CheckNoAPI(c)
 }
 
-func (s *instanceSuite) TestStatus(c *gc.C) {
-	instanceStatus := s.Instance.Status(envcontext.WithoutCredentialInvalidator(context.Background()))
+func (s *instanceSuite) TestStatus(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	c.Check(instanceStatus.Message, gc.Equals, "Running")
+	instanceStatus := s.Instance.Status(c.Context())
+
+	c.Check(instanceStatus.Message, tc.Equals, "Running")
 	s.CheckNoAPI(c)
 }
 
-func (s *instanceSuite) TestAddresses(c *gc.C) {
-	addresses, err := s.Instance.Addresses(envcontext.WithoutCredentialInvalidator(context.Background()))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *instanceSuite) TestAddresses(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
 
-	c.Check(addresses, jc.DeepEquals, s.Addresses)
+	addresses, err := s.Instance.Addresses(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Check(addresses, tc.DeepEquals, s.Addresses)
 }

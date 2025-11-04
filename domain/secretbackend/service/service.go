@@ -11,22 +11,22 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/collections/transform"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
-	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/changestream"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/logger"
 	coremodel "github.com/juju/juju/core/model"
 	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/trace"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/eventsource"
 	secretservice "github.com/juju/juju/domain/secret/service"
 	"github.com/juju/juju/domain/secretbackend"
 	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
-	"github.com/juju/juju/environs/cloudspec"
+	"github.com/juju/juju/internal/errors"
 	internalsecrets "github.com/juju/juju/internal/secrets"
 	"github.com/juju/juju/internal/secrets/provider"
 	"github.com/juju/juju/internal/secrets/provider/juju"
@@ -43,6 +43,15 @@ type Service struct {
 	registry SecretProviderRegistry
 }
 
+// NewService creates a new Service for interacting with the secret backend state.
+func NewService(
+	st State, logger logger.Logger,
+) *Service {
+	return newService(
+		st, logger, clock.WallClock, provider.Provider,
+	)
+}
+
 func newService(
 	st State, logger logger.Logger,
 	clk clock.Clock,
@@ -56,55 +65,44 @@ func newService(
 	}
 }
 
-// For testing.
-var (
-	GetProvider = provider.Provider
-)
-
-// GetSecretBackendConfigForAdmin returns the secret backend configuration for the given backend ID for an admin user.
+// GetSecretBackendConfigForAdmin returns the secret backend configuration for the given backend ID for an admin user,
+// returning an error satisfying [secretbackenderrors.NotFound] if the backend is not found.
 func (s *Service) GetSecretBackendConfigForAdmin(ctx context.Context, modelUUID coremodel.UUID) (*provider.ModelBackendConfigInfo, error) {
-	m, err := s.st.GetModelSecretBackendDetails(ctx, modelUUID)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	modelSecretBackend, err := s.st.GetModelSecretBackendDetails(ctx, modelUUID)
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	currentBackend, err := s.st.GetSecretBackend(ctx, secretbackend.BackendIdentifier{ID: m.SecretBackendID})
-	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	var info provider.ModelBackendConfigInfo
-	info.Configs = make(map[string]provider.ModelBackendConfig)
-
+	// We need to include builtin backends for secret draining and accessing those secrets while drain is in progress.
 	// TODO(secrets) - only use those in use by model
 	// For now, we'll return all backends on the controller.
 	backends, err := s.st.ListSecretBackendsForModel(ctx, modelUUID, true)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
+	currentBackendName := modelSecretBackend.SecretBackendName
+
+	var info provider.ModelBackendConfigInfo
+	info.Configs = make(map[string]provider.ModelBackendConfig)
 	for _, b := range backends {
-		if b.Name == currentBackend.Name {
+		if b.Name == currentBackendName {
 			info.ActiveID = b.ID
 		}
-
-		cfg := convertConfigToAny(b.Config)
-		if b.Name == kubernetes.BackendName {
-			var err error
-			if cfg, err = s.tryControllerModelK8sBackendConfig(ctx); err != nil {
-				return nil, errors.Trace(err)
-			}
-		}
 		info.Configs[b.ID] = provider.ModelBackendConfig{
-			ControllerUUID: m.ControllerUUID,
-			ModelUUID:      m.ID.String(),
-			ModelName:      m.Name,
+			ControllerUUID: modelSecretBackend.ControllerUUID,
+			ModelUUID:      modelSecretBackend.ModelID.String(),
+			ModelName:      modelSecretBackend.ModelName,
 			BackendConfig: provider.BackendConfig{
 				BackendType: b.BackendType,
-				Config:      cfg,
+				Config:      b.Config,
 			},
 		}
 	}
 	if info.ActiveID == "" {
-		return nil, fmt.Errorf("%w: %q", secretbackenderrors.NotFound, currentBackend.Name)
+		return nil, errors.Errorf("%w: %q", secretbackenderrors.NotFound, currentBackendName)
 	}
 	return &info, nil
 }
@@ -113,13 +111,16 @@ func (s *Service) GetSecretBackendConfigForAdmin(ctx context.Context, modelUUID 
 func (s *Service) DrainBackendConfigInfo(
 	ctx context.Context, p DrainBackendConfigParams,
 ) (*provider.ModelBackendConfigInfo, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if p.Accessor.Kind != secretservice.UnitAccessor && p.Accessor.Kind != secretservice.ModelAccessor {
-		return nil, errors.NotSupportedf("secret accessor kind %q", p.Accessor.Kind)
+		return nil, errors.Errorf("secret accessor kind %q %w", p.Accessor.Kind, coreerrors.NotSupported)
 	}
 
 	adminModelCfg, err := s.GetSecretBackendConfigForAdmin(ctx, p.ModelUUID)
 	if err != nil {
-		return nil, errors.Annotatef(err, "getting admin config for secret backend %q", p.BackendID)
+		return nil, errors.Errorf("getting admin config for secret backend %q: %w", p.BackendID, err)
 	}
 	result := provider.ModelBackendConfigInfo{
 		ActiveID: adminModelCfg.ActiveID,
@@ -136,7 +137,7 @@ func (s *Service) DrainBackendConfigInfo(
 	backendCfg, err := s.backendConfigInfo(ctx,
 		p.GrantedSecretsGetter, p.BackendID, &cfg, p.Accessor, p.LeaderToken, true, true)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	result.Configs[p.BackendID] = *backendCfg
 	return &result, nil
@@ -153,13 +154,16 @@ func (s *Service) DrainBackendConfigInfo(
 func (s *Service) BackendConfigInfo(
 	ctx context.Context, p BackendConfigParams,
 ) (*provider.ModelBackendConfigInfo, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if p.Accessor.Kind != secretservice.UnitAccessor && p.Accessor.Kind != secretservice.ModelAccessor {
-		return nil, errors.NotSupportedf("secret accessor kind %q", p.Accessor.Kind)
+		return nil, errors.Errorf("secret accessor kind %q %w", p.Accessor.Kind, coreerrors.NotSupported)
 	}
 
 	adminModelCfg, err := s.GetSecretBackendConfigForAdmin(ctx, p.ModelUUID)
 	if err != nil {
-		return nil, errors.Annotate(err, "getting configured secrets providers")
+		return nil, errors.Errorf("getting configured secrets providers: %w", err)
 	}
 	result := provider.ModelBackendConfigInfo{
 		ActiveID: adminModelCfg.ActiveID,
@@ -176,7 +180,7 @@ func (s *Service) BackendConfigInfo(
 		backendCfg, err := s.backendConfigInfo(ctx,
 			p.GrantedSecretsGetter, backendID, &cfg, p.Accessor, p.LeaderToken, p.SameController, false)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		result.Configs[backendID] = *backendCfg
 	}
@@ -185,21 +189,21 @@ func (s *Service) BackendConfigInfo(
 
 func (s *Service) backendConfigInfo(
 	ctx context.Context,
-	grantedSecretsGetter GrantedSecretsGetter,
-	backendID string, adminCfg *provider.ModelBackendConfig,
+	grantedSecretsGetter secretservice.GrantedSecretsGetter,
+	backendID string, cfg *provider.ModelBackendConfig,
 	accessor secretservice.SecretAccessor, token leadership.Token, sameController, forDrain bool,
 ) (*provider.ModelBackendConfig, error) {
 	if grantedSecretsGetter == nil {
 		return nil, errors.Errorf("unexpected nil value for GrantedSecretsGetter")
 	}
 
-	p, err := GetProvider(adminCfg.BackendType)
+	p, err := s.registry(cfg.BackendType)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-	err = p.Initialise(adminCfg)
+	err = p.Initialise(cfg)
 	if err != nil {
-		return nil, errors.Annotate(err, "initialising secrets provider")
+		return nil, errors.Errorf("initialising secrets provider: %w", err)
 	}
 
 	ownedRevisions := provider.SecretRevisions{}
@@ -211,18 +215,21 @@ func (s *Service) backendConfigInfo(
 	case secretservice.UnitAccessor:
 		// Find secretService owned by the agent
 		// (or its app if the agent is a leader).
-		unitName := accessor.ID
+		unitName, err := unit.NewName(accessor.ID)
+		if err != nil {
+			return nil, errors.Capture(err)
+		}
 		coreAccessor = coresecrets.Accessor{
 			Kind: coresecrets.UnitAccessor,
-			ID:   unitName,
+			ID:   unitName.String(),
 		}
 		owners := []secretservice.SecretAccessor{accessor}
-		appName, _ := names.UnitApplication(unitName)
+		appName := unitName.Application()
 		isLeader := false
 		if token != nil {
 			err := token.Check()
 			if err != nil && !leadership.IsNotLeaderError(err) {
-				return nil, errors.Trace(err)
+				return nil, errors.Capture(err)
 			}
 			isLeader = err == nil
 		}
@@ -241,7 +248,7 @@ func (s *Service) backendConfigInfo(
 			}
 			revInfo, err := grantedSecretsGetter(ctx, backendID, coresecrets.RoleView, readOnlyOwner)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.Capture(err)
 			}
 			for _, r := range revInfo {
 				readRevisions.Add(r.URI, r.RevisionID)
@@ -249,7 +256,7 @@ func (s *Service) backendConfigInfo(
 		}
 		revInfo, err := grantedSecretsGetter(ctx, backendID, coresecrets.RoleManage, owners...)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		for _, r := range revInfo {
 			ownedRevisions.Add(r.URI, r.RevisionID)
@@ -259,14 +266,14 @@ func (s *Service) backendConfigInfo(
 		// We include secretService shared with the app or just the specified unit.
 		consumers := []secretservice.SecretAccessor{{
 			Kind: secretservice.UnitAccessor,
-			ID:   unitName,
+			ID:   unitName.String(),
 		}, {
 			Kind: secretservice.ApplicationAccessor,
 			ID:   appName,
 		}}
 		revInfo, err = grantedSecretsGetter(ctx, backendID, coresecrets.RoleView, consumers...)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		for _, r := range revInfo {
 			readRevisions.Add(r.URI, r.RevisionID)
@@ -278,36 +285,27 @@ func (s *Service) backendConfigInfo(
 		}
 		revInfo, err := grantedSecretsGetter(ctx, backendID, coresecrets.RoleManage, accessor)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		for _, r := range revInfo {
 			ownedRevisions.Add(r.URI, r.RevisionID)
 		}
 	default:
-		return nil, errors.NotSupportedf("secret accessor kind %q", accessor.Kind)
+		return nil, errors.Errorf("secret accessor kind %q %w", accessor.Kind, coreerrors.NotSupported)
 	}
 
-	s.logger.Debugf("secrets for %s:\nowned: %v\nconsumed:%v", accessor, ownedRevisions, readRevisions)
-	cfg, err := p.RestrictedConfig(ctx, adminCfg, sameController, forDrain, coreAccessor, ownedRevisions, readRevisions)
+	s.logger.Debugf(ctx, "secrets for %s:\nowned: %v\nconsumed:%v", accessor, ownedRevisions, readRevisions)
+	restrictedConfig, err := p.RestrictedConfig(ctx, cfg, sameController, forDrain, coreAccessor, ownedRevisions, readRevisions)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	info := &provider.ModelBackendConfig{
-		ControllerUUID: adminCfg.ControllerUUID,
-		ModelUUID:      adminCfg.ModelUUID,
-		ModelName:      adminCfg.ModelName,
-		BackendConfig:  *cfg,
+		ControllerUUID: cfg.ControllerUUID,
+		ModelUUID:      cfg.ModelUUID,
+		ModelName:      cfg.ModelName,
+		BackendConfig:  *restrictedConfig,
 	}
 	return info, nil
-}
-
-func convertConfigToAny(config map[string]string) map[string]interface{} {
-	if len(config) == 0 {
-		return nil
-	}
-	return transform.Map(config, func(k string, v string) (string, any) {
-		return k, v
-	})
 }
 
 func convertConfigToString(config map[string]interface{}) map[string]string {
@@ -319,45 +317,15 @@ func convertConfigToString(config map[string]interface{}) map[string]string {
 	})
 }
 
-// GetSecretBackendConfig returns the secret backend configuration for the given backend ID.
-func (s *Service) GetSecretBackendConfig(
-	ctx context.Context, modelUUID coremodel.UUID, cloud cloud.Cloud, cred cloud.Credential,
-) (*provider.ModelBackendConfigInfo, error) {
-	// TODO: implement once we have secret service in place.
-	return nil, nil
-}
-
-func getK8sBackendConfig(cloud cloud.Cloud, cred cloud.Credential) (*provider.BackendConfig, error) {
-	spec, err := cloudspec.MakeCloudSpec(cloud, "", &cred)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	k8sConfig, err := kubernetes.BuiltInConfig(spec)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return k8sConfig, nil
-}
-
-// tryControllerModelK8sBackendConfig returns the k8s backend info for the controller model UUID if it's possible.
-func (s *Service) tryControllerModelK8sBackendConfig(ctx context.Context) (provider.ConfigAttrs, error) {
-	cloud, cred, err := s.st.GetControllerModelCloudAndCredential(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	k8sConfig, err := getK8sBackendConfig(cloud, cred)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return k8sConfig.Config, nil
-}
-
 // BackendSummaryInfoForModel returns a summary of the secret backends
 // which contain secrets from the specified model.
 func (s *Service) BackendSummaryInfoForModel(ctx context.Context, modelUUID coremodel.UUID) ([]*SecretBackendInfo, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	backends, err := s.st.ListSecretBackendsForModel(ctx, modelUUID, false)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	backendInfos := make([]*SecretBackendInfo, 0, len(backends))
 	for _, b := range backends {
@@ -367,21 +335,22 @@ func (s *Service) BackendSummaryInfoForModel(ctx context.Context, modelUUID core
 				Name:                b.Name,
 				BackendType:         b.BackendType,
 				TokenRotateInterval: b.TokenRotateInterval,
-				Config:              convertConfigToAny(b.Config),
+				Config:              b.Config,
 			},
+			NumSecrets: b.NumSecrets,
 		})
 	}
-	return s.composeBackendInfoResults(ctx, backendInfos, false)
+	return s.composeBackendInfoResults(backendInfos, false)
 }
 
 // BackendSummaryInfo returns a summary of the secret backends.
 // If names are specified, just those backends are included, else all.
 func (s *Service) BackendSummaryInfo(ctx context.Context, reveal bool, names ...string) ([]*SecretBackendInfo, error) {
-	// TODO(secrets) - we need to look up secrets grouped by model
-	// For now, the best we can do is just list the secret backends directly.
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 	backends, err := s.st.ListSecretBackends(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	backendInfos := make([]*SecretBackendInfo, 0, len(backends))
 	for _, b := range backends {
@@ -391,24 +360,15 @@ func (s *Service) BackendSummaryInfo(ctx context.Context, reveal bool, names ...
 				Name:                b.Name,
 				BackendType:         b.BackendType,
 				TokenRotateInterval: b.TokenRotateInterval,
-				Config:              convertConfigToAny(b.Config),
+				Config:              b.Config,
 			},
+			NumSecrets: b.NumSecrets,
 		})
 	}
-	results, err := s.composeBackendInfoResults(ctx, backendInfos, reveal, names...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// TODO(secrets) - this will change when we can track secrets for backends
-	for _, b := range results {
-		if b.Name == kubernetes.BackendName {
-			b.Name = kubernetes.BuiltInName("model")
-		}
-	}
-	return results, nil
+	return s.composeBackendInfoResults(backendInfos, reveal, names...)
 }
 
-func (s *Service) composeBackendInfoResults(ctx context.Context, backendInfos []*SecretBackendInfo, reveal bool, names ...string) ([]*SecretBackendInfo, error) {
+func (s *Service) composeBackendInfoResults(backendInfos []*SecretBackendInfo, reveal bool, names ...string) ([]*SecretBackendInfo, error) {
 	wanted := set.NewStrings(names...)
 	for i := 0; i < len(backendInfos); {
 		b := backendInfos[i]
@@ -418,16 +378,9 @@ func (s *Service) composeBackendInfoResults(ctx context.Context, backendInfos []
 		} else {
 			i++
 		}
-		if b.Name == kubernetes.BackendName {
-			cfg, err := s.tryControllerModelK8sBackendConfig(ctx)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			b.Config = cfg
-		}
 		p, err := s.registry(b.BackendType)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		b.Status = status.Active.String()
 		if b.BackendType != juju.BackendType && b.BackendType != kubernetes.BackendType {
@@ -453,30 +406,13 @@ func (s *Service) composeBackendInfoResults(ctx context.Context, backendInfos []
 	return backendInfos, nil
 }
 
-// PingSecretBackend checks the secret backend for the given backend name.
-func (s *Service) PingSecretBackend(ctx context.Context, name string) error {
-	backend, err := s.st.GetSecretBackend(ctx, secretbackend.BackendIdentifier{Name: name})
-	if err != nil {
-		return errors.Trace(err)
-	}
-	p, err := s.registry(backend.BackendType)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	err = pingBackend(p, convertConfigToAny(backend.Config))
-	if err != nil {
-		return fmt.Errorf("cannot ping secret backend %q: %w", name, err)
-	}
-	return nil
-}
-
 // pingBackend instantiates a backend and pings it.
 func pingBackend(p provider.SecretBackendProvider, cfg provider.ConfigAttrs) error {
 	b, err := p.NewBackend(&provider.ModelBackendConfig{
 		BackendConfig: provider.BackendConfig{BackendType: p.Type(), Config: cfg},
 	})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return b.Ping()
 }
@@ -486,25 +422,40 @@ func validateExternalBackendName(name string) error {
 		name == kubernetes.BackendName ||
 		name == provider.Auto ||
 		name == provider.Internal {
-		return fmt.Errorf("%w: reserved name %q", secretbackenderrors.NotValid, name)
+		return errors.Errorf("%w: reserved name %q", secretbackenderrors.NotValid, name)
 	}
 	return nil
 }
 
+// ListBackendIDs returns the IDs of all the secret backends.
+func (s *Service) ListBackendIDs(ctx context.Context) ([]string, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	result, err := s.st.ListSecretBackendIDs(ctx)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return result, nil
+}
+
 // CreateSecretBackend creates a new secret backend.
 func (s *Service) CreateSecretBackend(ctx context.Context, backend coresecrets.SecretBackend) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if backend.ID == "" {
-		return fmt.Errorf("%w: missing ID", secretbackenderrors.NotValid)
+		return errors.Errorf("%w: missing ID", secretbackenderrors.NotValid)
 	}
 	if backend.Name == "" {
-		return fmt.Errorf("%w: missing name", secretbackenderrors.NotValid)
+		return errors.Errorf("%w: missing name", secretbackenderrors.NotValid)
 	}
 	if err := validateExternalBackendName(backend.Name); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	p, err := s.registry(backend.BackendType)
 	if err != nil {
-		return fmt.Errorf("getting backend provider type %q: %w", backend.BackendType, err)
+		return errors.Errorf("getting backend provider type %q: %w", backend.BackendType, err)
 	}
 	configValidator, ok := p.(provider.ProviderConfig)
 	if ok {
@@ -517,23 +468,23 @@ func (s *Service) CreateSecretBackend(ctx context.Context, backend coresecrets.S
 				backend.Config[k] = v
 			}
 		}
-		err = configValidator.ValidateConfig(nil, backend.Config)
+		err = configValidator.ValidateConfig(nil, backend.Config, backend.TokenRotateInterval)
 		if err != nil {
-			return fmt.Errorf("%w: config for provider %q: %w", secretbackenderrors.NotValid, backend.BackendType, err)
+			return errors.Errorf("%w: config for provider %q: %w", secretbackenderrors.NotValid, backend.BackendType, err)
 		}
 	}
 	if err := pingBackend(p, backend.Config); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	var nextRotateTime *time.Time
 	if backend.TokenRotateInterval != nil && *backend.TokenRotateInterval > 0 {
 		if !provider.HasAuthRefresh(p) {
-			return fmt.Errorf("%w: token refresh on secret backend of type %q", secretbackenderrors.NotSupported, p.Type())
+			return errors.Errorf("%w: token refresh on secret backend of type %q", secretbackenderrors.NotSupported, p.Type())
 		}
 		nextRotateTime, err = coresecrets.NextBackendRotateTime(s.clock.Now(), *backend.TokenRotateInterval)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	_, err = s.st.CreateSecretBackend(
@@ -548,31 +499,32 @@ func (s *Service) CreateSecretBackend(ctx context.Context, backend coresecrets.S
 			NextRotateTime:      nextRotateTime,
 		},
 	)
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 // UpdateSecretBackend updates an existing secret backend.
 func (s *Service) UpdateSecretBackend(ctx context.Context, params UpdateSecretBackendParams) error {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
 	if err := params.Validate(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	if params.NewName != nil {
 		if err := validateExternalBackendName(*params.NewName); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 
-	// TODO: we should get the latest existing backend, merge the config then validate inside
-	// the update operation transaction.
 	existing, err := s.st.GetSecretBackend(ctx, params.BackendIdentifier)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	p, err := s.registry(existing.BackendType)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	cfgToApply := make(map[string]interface{})
@@ -593,93 +545,75 @@ func (s *Service) UpdateSecretBackend(ctx context.Context, params UpdateSecretBa
 				cfgToApply[k] = defaultVal
 			}
 		}
-		err = configValidator.ValidateConfig(convertConfigToAny(existing.Config), cfgToApply)
+		err = configValidator.ValidateConfig(existing.Config, cfgToApply, params.TokenRotateInterval)
 		if err != nil {
-			return fmt.Errorf("%w: config for provider %q: %w", secretbackenderrors.NotValid, existing.BackendType, err)
+			return errors.Errorf("%w: config for provider %q: %w", secretbackenderrors.NotValid, existing.BackendType, err)
 		}
 	}
 	if !params.SkipPing {
 		if err := pingBackend(p, cfgToApply); err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	params.Config = convertConfigToString(cfgToApply)
 
 	if params.TokenRotateInterval != nil && *params.TokenRotateInterval > 0 {
 		if !provider.HasAuthRefresh(p) {
-			return errors.NotSupportedf("token refresh on secret backend of type %q", p.Type())
+			return errors.Errorf("token refresh on secret backend of type %q %w", p.Type(), coreerrors.NotSupported)
 		}
 		params.NextRotateTime, err = coresecrets.NextBackendRotateTime(s.clock.Now(), *params.TokenRotateInterval)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	_, err = s.st.UpdateSecretBackend(ctx, params.UpdateSecretBackendParams)
-	return errors.Trace(err)
+	return errors.Capture(err)
 }
 
 // DeleteSecretBackend deletes a secret backend.
 func (s *Service) DeleteSecretBackend(ctx context.Context, params DeleteSecretBackendParams) error {
-	return s.st.DeleteSecretBackend(ctx, params.BackendIdentifier, params.DeleteInUse)
-}
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
 
-// GetSecretBackendByName returns the secret backend for the given backend name.
-func (s *Service) GetSecretBackendByName(ctx context.Context, name string) (*coresecrets.SecretBackend, error) {
-	sb, err := s.st.GetSecretBackend(ctx, secretbackend.BackendIdentifier{Name: name})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	cfg := convertConfigToAny(sb.Config)
-	if name == kubernetes.BackendName {
-		var err error
-		if cfg, err = s.tryControllerModelK8sBackendConfig(ctx); err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
-	return &coresecrets.SecretBackend{
-		ID:                  sb.ID,
-		Name:                sb.Name,
-		BackendType:         sb.BackendType,
-		TokenRotateInterval: sb.TokenRotateInterval,
-		Config:              cfg,
-	}, nil
+	return s.st.DeleteSecretBackend(ctx, params.BackendIdentifier, params.DeleteInUse)
 }
 
 // RotateBackendToken rotates the token for the given secret backend.
 func (s *Service) RotateBackendToken(ctx context.Context, backendID string) error {
-	backendInfo, err := s.st.GetSecretBackend(ctx,
-		secretbackend.BackendIdentifier{ID: backendID},
-	)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	backendInfo, err := s.st.GetSecretBackend(ctx, secretbackend.BackendIdentifier{ID: backendID})
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	p, err := s.registry(backendInfo.BackendType)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	if !provider.HasAuthRefresh(p) {
 		return nil
 	}
 
 	if backendInfo.TokenRotateInterval == nil || *backendInfo.TokenRotateInterval == 0 {
-		s.logger.Debugf("not rotating token for secret backend %q", backendInfo.Name)
+		s.logger.Debugf(ctx, "not rotating token for secret backend %q", backendInfo.Name)
 		return nil
 	}
 
-	s.logger.Debugf("refresh token for backend %v", backendInfo.Name)
+	s.logger.Debugf(ctx, "refresh token for backend %v", backendInfo.Name)
 	cfg := provider.BackendConfig{
 		BackendType: backendInfo.BackendType,
-		Config:      convertConfigToAny(backendInfo.Config),
+		Config:      backendInfo.Config,
 	}
 	// Ideally, we should do this in a transaction, but it's not critical.
 	// Because it's called by a single worker at a time.
 	var nextRotateTime time.Time
-	auth, err := p.(provider.SupportAuthRefresh).RefreshAuth(cfg, *backendInfo.TokenRotateInterval)
+	auth, err := p.(provider.SupportAuthRefresh).RefreshAuth(ctx, cfg, *backendInfo.TokenRotateInterval)
 	if err != nil {
-		s.logger.Debugf("refreshing auth token for %q: %v", backendInfo.Name, err)
+		s.logger.Debugf(ctx, "refreshing auth token for %q: %v", backendInfo.Name, err)
 		// If there's a permission error, we can't recover from that.
 		if errors.Is(err, internalsecrets.PermissionDenied) {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	} else {
 		_, err = s.st.UpdateSecretBackend(ctx, secretbackend.UpdateSecretBackendParams{
@@ -695,36 +629,33 @@ func (s *Service) RotateBackendToken(ctx context.Context, backendID string) erro
 	if nextRotateTime.IsZero() {
 		nextRotateTime = s.clock.Now().Add(2 * time.Minute)
 	}
-	s.logger.Debugf("updating token rotation for %q, next: %s", backendInfo.Name, nextRotateTime)
+	s.logger.Debugf(ctx, "updating token rotation for %q, next: %s", backendInfo.Name, nextRotateTime)
 	err = s.st.SecretBackendRotated(ctx, backendID, nextRotateTime)
-	return errors.Trace(err)
-}
-
-// SetModelSecretBackend sets the secret backend for the given model UUID.
-func (s *Service) SetModelSecretBackend(ctx context.Context, modelUUID coremodel.UUID, backendName string) error {
-	return s.st.SetModelSecretBackend(ctx, modelUUID, backendName)
+	return errors.Capture(err)
 }
 
 // GetRevisionsToDrain looks at the supplied revisions and returns any which should be
 // drained to a different backend for the specified model.
 func (s *Service) GetRevisionsToDrain(ctx context.Context, modelUUID coremodel.UUID, revs []coresecrets.SecretExternalRevision) ([]RevisionInfo, error) {
-	activeBackendDetails, err := s.st.GetModelSecretBackendDetails(ctx, modelUUID)
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	internalBackendUUID, activeBackendUUID, err := s.st.GetInternalAndActiveBackendUUIDs(ctx, modelUUID)
 	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	jujuBackend, err := s.st.GetSecretBackend(ctx, secretbackend.BackendIdentifier{Name: juju.BackendName})
-	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	var result []RevisionInfo
 	for _, r := range revs {
 		if r.ValueRef != nil {
-			if r.ValueRef.BackendID == activeBackendDetails.SecretBackendID {
+			if r.ValueRef.BackendID == activeBackendUUID {
+				// The secret is in the active backend, so we don't need to drain.
 				continue
 			}
 		} else {
 			// Only internal backend secrets have nil ValueRef.
-			if jujuBackend.ID == activeBackendDetails.SecretBackendID {
+			if internalBackendUUID == activeBackendUUID {
+				// The nil valueRef means the secret is in the internal backend,
+				// and if the internal backend is already the active backend, we don't need to drain.
 				continue
 			}
 		}
@@ -734,6 +665,31 @@ func (s *Service) GetRevisionsToDrain(ctx context.Context, modelUUID coremodel.U
 		})
 	}
 	return result, nil
+}
+
+// WatcherFactory describes methods for creating watchers.
+type WatcherFactory interface {
+	// NewNamespaceWatcher returns a new watcher that filters changes from the
+	// input base watcher's db/queue. Change-log events will be emitted only if
+	// the filter accepts them, and dispatching the notifications via the
+	// Changes channel. A filter option is required, though additional filter
+	// options can be provided.
+	NewNamespaceWatcher(
+		ctx context.Context,
+		initialQuery eventsource.NamespaceQuery,
+		summary string,
+		filterOption eventsource.FilterOption, filterOptions ...eventsource.FilterOption,
+	) (watcher.StringsWatcher, error)
+
+	// NewNotifyWatcher returns a new watcher that filters changes from the input
+	// base watcher's db/queue. A single filter option is required, though
+	// additional filter options can be provided.
+	NewNotifyWatcher(
+		ctx context.Context,
+		summary string,
+		filter eventsource.FilterOption,
+		filterOpts ...eventsource.FilterOption,
+	) (watcher.NotifyWatcher, error)
 }
 
 // WatchableService defines a service that can be watched for changes.
@@ -773,11 +729,39 @@ func newWatchableService(
 var InitialNamespaceChanges = eventsource.InitialNamespaceChanges
 
 // WatchSecretBackendRotationChanges returns a watcher for secret backend rotation changes.
-func (s *WatchableService) WatchSecretBackendRotationChanges() (watcher.SecretBackendRotateWatcher, error) {
-	tableName, initialQ := s.st.InitialWatchStatement()
-	w, err := s.watcherFactory.NewNamespaceWatcher(tableName, changestream.All, InitialNamespaceChanges(initialQ))
+func (s *WatchableService) WatchSecretBackendRotationChanges(ctx context.Context) (watcher.SecretBackendRotateWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	tableName, initialQ := s.st.InitialWatchStatementForSecretBackendRotationChanges()
+	w, err := s.watcherFactory.NewNamespaceWatcher(
+		ctx,
+		InitialNamespaceChanges(initialQ),
+		"secret backend rotation watcher",
+		eventsource.NamespaceFilter(tableName, changestream.All),
+	)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return newSecretBackendRotateWatcher(w, s.logger, s.st.GetSecretBackendRotateChanges)
+}
+
+// WatchSecretBackendChanged notifies when the model secret backend has changed.
+func (s *WatchableService) WatchModelSecretBackendChanged(ctx context.Context, modelUUID coremodel.UUID) (watcher.NotifyWatcher, error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc())
+	defer span.End()
+
+	w, err := s.watcherFactory.NewNotifyWatcher(
+		ctx,
+		"model secret backend changed watcher",
+		eventsource.PredicateFilter(
+			s.st.NamespaceForWatchModelSecretBackend(),
+			changestream.Changed,
+			eventsource.EqualsPredicate(modelUUID.String()),
+		),
+	)
+	if err != nil {
+		return nil, errors.Capture(err)
+	}
+	return w, nil
 }

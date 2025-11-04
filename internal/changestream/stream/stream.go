@@ -37,7 +37,8 @@ const (
 
 const (
 	// States which report the state of the worker.
-	stateIdle = "idle"
+	stateIdle  = "idle"
+	stateBegin = "begin"
 )
 
 var (
@@ -45,7 +46,7 @@ var (
 	// from the database. This is used to prevent the worker from polling
 	// the database too frequently and allow us to attempt to coalesce
 	// changes when there is less activity.
-	backOffStrategy = retry.ExpBackoff(time.Millisecond*10, time.Millisecond*250, 1.5, false)
+	backOffStrategy = retry.ExpBackoff(time.Millisecond*100, time.Second*10, 1.4, false)
 )
 
 // MetricsCollector represents the metrics methods called.
@@ -107,7 +108,7 @@ func (v *termView) String() string {
 
 // Stream defines a worker that will poll the database for change events.
 type Stream struct {
-	internalStates chan string
+	internalStates chan []string
 	tomb           tomb.Tomb
 
 	id           string
@@ -144,7 +145,7 @@ func NewInternalStates(
 	clock clock.Clock,
 	metrics MetricsCollector,
 	logger logger.Logger,
-	internalStates chan string,
+	internalStates chan []string,
 ) *Stream {
 	stream := &Stream{
 		id:             id,
@@ -228,6 +229,12 @@ func (s *Stream) loop() error {
 		return errors.Trace(err)
 	}
 
+	ctx, cancel := s.scopedContext()
+	defer cancel()
+
+	// Report the begin state after the watermark has been created.
+	s.reportState(stateBegin)
+
 	var attempt int
 	for {
 		select {
@@ -249,7 +256,7 @@ func (s *Stream) loop() error {
 				continue
 			}
 
-			s.logger.Infof("Change stream has been blocked")
+			s.logger.Infof(ctx, "Change stream has been blocked")
 
 			// Create an inner loop, that will block the outer loop until we
 			// receive a change fileCreated event from the file notifier.
@@ -265,11 +272,11 @@ func (s *Stream) loop() error {
 					// If we get a fileCreated event, and we're already waiting
 					// for a fileRemoved event, then we're in the middle of a
 					// block, so just continue.
-					s.logger.Debugf("ignoring file change event")
+					s.logger.Debugf(ctx, "ignoring file change event")
 				}
 			}
 
-			s.logger.Infof("Change stream has been unblocked")
+			s.logger.Infof(ctx, "Change stream has been unblocked")
 
 		case <-watermarkTimer.Chan():
 			// Every interval we'll write the last ID to the database. This
@@ -284,7 +291,7 @@ func (s *Stream) loop() error {
 				// let the worker die.
 				return errors.Trace(err)
 			} else if err != nil {
-				s.logger.Infof("failed to record last ID: %v", err)
+				s.logger.Infof(ctx, "failed to record last ID: %v", err)
 			}
 
 			// Jitter the watermark interval to prevent all workers from
@@ -292,8 +299,7 @@ func (s *Stream) loop() error {
 			watermarkTimer.Reset(jitter(defaultWatermarkInterval, 0.1))
 
 		default:
-
-			begin := s.clock.Now()
+			begin := s.clock.Now().UTC()
 			changes, err := s.readChanges()
 			if err != nil {
 				// If the context was canceled, we're unsure if it's because
@@ -308,9 +314,15 @@ func (s *Stream) loop() error {
 				// we can do, so we just return an error.
 				return errors.Annotate(err, "reading change")
 			}
+
+			traceEnabled := s.logger.IsLevelEnabled(logger.TRACE)
+			if traceEnabled {
+				s.logger.Tracef(ctx, "read %d changes", len(changes))
+			}
+
 			// We only want to record successful changes retrieve
 			// queries on the metrics.
-			s.metrics.ChangesRequestDurationObserve(s.clock.Now().Sub(begin).Seconds())
+			s.metrics.ChangesRequestDurationObserve(s.clock.Now().UTC().Sub(begin).Seconds())
 
 			if len(changes) == 0 {
 				// The following uses the back-off strategy for polling the
@@ -319,11 +331,16 @@ func (s *Stream) loop() error {
 				// stuttering and should allow use to coalesce in the large
 				// case when nothing is happening.
 				attempt++
+
+				if traceEnabled {
+					s.logger.Tracef(ctx, "no changes, with attempt %d", attempt)
+				}
+
 				select {
 				case <-s.tomb.Dying():
 					return tomb.ErrDying
 				case <-s.clock.After(backOffStrategy(0, attempt)):
-					if err := s.reportIdleState(attempt); err != nil {
+					if err := s.reportIdleState(ctx, attempt); err != nil {
 						return errors.Trace(err)
 					}
 					continue
@@ -341,12 +358,10 @@ func (s *Stream) loop() error {
 
 				lower = int64(math.MaxInt64)
 				upper = int64(math.MinInt64)
-
-				traceEnabled = s.logger.IsLevelEnabled(logger.TRACE)
 			)
 			for _, change := range changes {
 				if traceEnabled {
-					s.logger.Tracef("change event: %v", change)
+					s.logger.Tracef(ctx, "change event: %v", change)
 				}
 				term.changes = append(term.changes, change)
 
@@ -359,7 +374,7 @@ func (s *Stream) loop() error {
 			}
 			if lower == math.MaxInt64 || upper == math.MinInt64 {
 				// This should never happen, but if it does, just continue.
-				s.logger.Infof("invalid lower or upper bound: lower: %d, upper: %d", lower, upper)
+				s.logger.Infof(ctx, "invalid lower or upper bound: lower: %d, upper: %d", lower, upper)
 				continue
 			}
 
@@ -368,6 +383,11 @@ func (s *Stream) loop() error {
 			// been completed. It is the responsibility of the consumer of the
 			// terms channel to ensure that the term is completed in the
 			// fastest possible time.
+
+			if traceEnabled {
+				s.logger.Tracef(ctx, "term start: processing changes %d", len(changes))
+			}
+
 			select {
 			case <-s.tomb.Dying():
 				return tomb.ErrDying
@@ -391,7 +411,7 @@ func (s *Stream) loop() error {
 					// aborted, so we just continue. This is likely the case
 					// when the worker is dying. We don't want to block the
 					// change stream, so we just continue.
-					s.logger.Infof("term has been aborted")
+					s.logger.Infof(ctx, "term has been aborted")
 					continue
 				}
 
@@ -412,6 +432,11 @@ func (s *Stream) loop() error {
 				// when there is less activity.
 				if empty {
 					attempt++
+
+					if traceEnabled {
+						s.logger.Tracef(ctx, "empty term, with attempt %d", attempt)
+					}
+
 					select {
 					case <-s.tomb.Dying():
 						return tomb.ErrDying
@@ -423,6 +448,10 @@ func (s *Stream) loop() error {
 				// Reset the attempt counter if we get changes, so the
 				// back=off strategy is reset.
 				attempt = 0
+
+				if traceEnabled {
+					s.logger.Tracef(ctx, "term done: processed changes %d", len(changes))
+				}
 			}
 		}
 	}
@@ -512,7 +541,7 @@ const (
 INSERT INTO change_log_witness
 	(controller_id, lower_bound, upper_bound, updated_at)
 VALUES
-	(?, -1, -1, datetime())
+	(?, -1, -1, DATETIME('now', 'utc'))
 ON CONFLICT (controller_id) DO NOTHING;
 `
 )
@@ -543,7 +572,7 @@ UPDATE change_log_witness
 SET
 	lower_bound = ?,
 	upper_bound = ?,
-	updated_at = datetime()
+	updated_at = DATETIME('now', 'utc')
 WHERE controller_id = ?;
 `
 )
@@ -583,8 +612,7 @@ func (s *Stream) updateWatermark() error {
 // It returns a cancellable context that is cancelled when the action has
 // completed.
 func (s *Stream) scopedContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	return s.tomb.Context(ctx), cancel
+	return context.WithCancel(s.tomb.Context(context.Background()))
 }
 
 func (s *Stream) upperBound() int64 {
@@ -671,7 +699,7 @@ func (s *Stream) processWatermark(fn func(*termView) error) error {
 }
 
 // reportIdleState reports the idle state to the internal states channel.
-func (s *Stream) reportIdleState(attempt int) error {
+func (s *Stream) reportIdleState(ctx context.Context, attempt int) error {
 	// If there are no internal states, then we don't need to report the idle
 	// state. This is only used for testing.
 	if s.internalStates == nil {
@@ -684,17 +712,34 @@ func (s *Stream) reportIdleState(attempt int) error {
 	}
 
 	if bound := s.upperBound(); bound > 0 && maxChangeLogID > 0 && bound == maxChangeLogID {
-		s.logger.Tracef("no changes, backing off after %d attempt", attempt)
+		s.logger.Tracef(ctx, "no changes, backing off after %d attempt", attempt)
 
 		// Report the idle state to the internal states channel.
-		select {
-		case <-s.tomb.Dying():
-		case s.internalStates <- stateIdle:
-		default:
-		}
+		s.reportState(stateIdle)
 	}
 
 	return nil
+}
+
+// reportState reports the specified state to the internal states channel.
+func (s *Stream) reportState(state string) {
+	// If there are no internal states, then we don't need to report the begin
+	// state. This is only used for testing.
+	if s.internalStates == nil {
+		return
+	}
+
+	states := []string(nil)
+	select {
+	// Take existing states off the channel and append the next state.
+	case states = <-s.internalStates:
+	default:
+	}
+	select {
+	case <-s.tomb.Dying():
+	case s.internalStates <- append(states, state):
+	default:
+	}
 }
 
 // latestChangeLogID returns the latest change log ID and is used to determine

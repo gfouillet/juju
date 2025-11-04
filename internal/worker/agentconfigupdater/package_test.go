@@ -3,12 +3,4 @@
 
 package agentconfigupdater_test
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package agentconfigupdater_test -destination service_mock_test.go github.com/juju/juju/internal/worker/agentconfigupdater ControllerDomainServices,ControllerConfigService

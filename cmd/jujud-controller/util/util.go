@@ -4,6 +4,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -33,12 +34,12 @@ func AgentDone(logger logger.Logger, err error) error {
 		if err := ug.ChangeAgentTools(logger); err != nil {
 			// Return and let the init system deal with the restart.
 			err = errors.Annotate(err, "cannot change agent binaries")
-			logger.Infof(err.Error())
+			logger.Infof(context.TODO(), err.Error())
 			return err
 		}
 	}
 	if err == jworker.ErrRestartAgent {
-		logger.Warningf("agent restarting")
+		logger.Warningf(context.TODO(), "agent restarting")
 	}
 	return err
 }
@@ -70,25 +71,20 @@ func newEnsureMongoParams(agentConfig agent.Config) (mongo.EnsureServerParams, e
 		}
 	}
 
-	si, ok := agentConfig.StateServingInfo()
+	si, ok := agentConfig.ControllerAgentInfo()
 	if !ok {
-		return mongo.EnsureServerParams{}, fmt.Errorf("agent config has no state serving info")
+		return mongo.EnsureServerParams{}, fmt.Errorf("agent config has no controller agent info")
 	}
 
 	params := mongo.EnsureServerParams{
 		APIPort:        si.APIPort,
-		StatePort:      si.StatePort,
 		Cert:           si.Cert,
 		PrivateKey:     si.PrivateKey,
 		CAPrivateKey:   si.CAPrivateKey,
-		SharedSecret:   si.SharedSecret,
 		SystemIdentity: si.SystemIdentity,
 
 		OplogSize:            oplogSize,
 		SetNUMAControlPolicy: numaCtlPolicy,
-
-		MemoryProfile:     agentConfig.MongoMemoryProfile(),
-		JujuDBSnapChannel: agentConfig.JujuDBSnapChannel(),
 	}
 	return params, nil
 }

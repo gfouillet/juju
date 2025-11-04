@@ -9,10 +9,9 @@ import (
 
 	"github.com/canonical/sqlair"
 	"github.com/juju/clock"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/catacomb"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/changestream"
@@ -39,18 +38,18 @@ type TestWatchableDB struct {
 	stream *stream.Stream
 	mux    *eventmultiplexer.EventMultiplexer
 
-	states chan string
+	states chan []string
 }
 
 // NewTestWatchableDB creates a test changestream based on the id and
 // runnner.
-func NewTestWatchableDB(c *gc.C, id string, db database.TxnRunner) *TestWatchableDB {
-	states := make(chan string, 1)
+func NewTestWatchableDB(c *tc.C, id string, db database.TxnRunner) *TestWatchableDB {
+	states := make(chan []string, 1)
 
 	logger := loggertesting.WrapCheckLog(c)
 	stream := stream.NewInternalStates(id, db, newNoopFileWatcher(), clock.WallClock, noopMetrics{}, logger, states)
 	mux, err := eventmultiplexer.New(stream, clock.WallClock, noopMetrics{}, logger)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	h := TestWatchableDB{
 		db:     db,
@@ -60,6 +59,7 @@ func NewTestWatchableDB(c *gc.C, id string, db database.TxnRunner) *TestWatchabl
 	}
 
 	err = catacomb.Invoke(catacomb.Plan{
+		Name: "test-changestream",
 		Site: &h.catacomb,
 		Work: h.loop,
 		Init: []worker.Worker{
@@ -67,7 +67,7 @@ func NewTestWatchableDB(c *gc.C, id string, db database.TxnRunner) *TestWatchabl
 			h.mux,
 		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return &h
 }
@@ -97,9 +97,16 @@ func (w *TestWatchableDB) StdTxn(ctx context.Context, fn func(context.Context, *
 	return w.db.StdTxn(ctx, fn)
 }
 
+// Dying returns a channel that is closed when the database connection
+// is no longer usable. This can be used to detect when the database is
+// shutting down or has been closed.
+func (w *TestWatchableDB) Dying() <-chan struct{} {
+	return w.catacomb.Dying()
+}
+
 // EventSource returns the event source for this worker.
-func (w *TestWatchableDB) Subscribe(opts ...changestream.SubscriptionOption) (changestream.Subscription, error) {
-	return w.mux.Subscribe(opts...)
+func (w *TestWatchableDB) Subscribe(summary string, opts ...changestream.SubscriptionOption) (changestream.Subscription, error) {
+	return w.mux.Subscribe(summary, opts...)
 }
 
 // Kill stops the test change stream.

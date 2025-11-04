@@ -1,1793 +1,1905 @@
-// Copyright 2015 Canonical Ltd.
+// Copyright 2024 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package uniter_test
+package uniter
 
 import (
 	"context"
-	"fmt"
+	"testing"
 	"time"
 
-	"github.com/juju/collections/set"
-	"github.com/juju/errors"
-	"github.com/juju/mgo/v3/bson"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v4/workertest"
-	"github.com/kr/pretty"
-	gc "gopkg.in/check.v1"
-	"gopkg.in/juju/environschema.v1"
+	"github.com/juju/clock/testclock"
+	"github.com/juju/collections/transform"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	apiuniter "github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/apiserver/facade/facadetest"
-	"github.com/juju/juju/apiserver/facades/agent/uniter"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/controller"
-	coreconfig "github.com/juju/juju/core/config"
+	coreapplication "github.com/juju/juju/core/application"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/model"
+	coremachine "github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/secrets"
+	corerelation "github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/environs/config"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/domain/application/architecture"
+	domaincharm "github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	domainnetwork "github.com/juju/juju/domain/network"
+	"github.com/juju/juju/domain/operation"
+	operationerrors "github.com/juju/juju/domain/operation/errors"
+	"github.com/juju/juju/domain/relation"
+	relationerrors "github.com/juju/juju/domain/relation/errors"
+	"github.com/juju/juju/domain/removal"
+	"github.com/juju/juju/domain/resolve"
+	resolveerrors "github.com/juju/juju/domain/resolve/errors"
 	"github.com/juju/juju/internal/charm"
+	internalerrors "github.com/juju/juju/internal/errors"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
-	"github.com/juju/juju/internal/password"
-	_ "github.com/juju/juju/internal/secrets/provider/all"
-	"github.com/juju/juju/internal/uuid"
-	"github.com/juju/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	"github.com/juju/juju/testcharms"
-	coretesting "github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
 )
 
-const allEndpoints = ""
-
 type uniterSuite struct {
-	uniterSuiteBase
+	testhelpers.IsolationSuite
+
+	badTag names.Tag
+
+	applicationService *MockApplicationService
+	machineService     *MockMachineService
+	operationService   *MockOperationService
+	networkService     *MockNetworkService
+	resolveService     *MockResolveService
+	removalService     *MockRemovalService
+	watcherRegistry    *MockWatcherRegistry
+
+	uniter *UniterAPI
 }
 
-var _ = gc.Suite(&uniterSuite{})
-
-func (s *uniterSuite) controllerConfig(c *gc.C) (controller.Config, error) {
-	controllerServiceFactory := s.ControllerServiceFactory(c)
-	controllerConfigService := controllerServiceFactory.ControllerConfig()
-	return controllerConfigService.ControllerConfig(context.Background())
+func TestUniterSuite(t *testing.T) {
+	tc.Run(t, &uniterSuite{})
 }
 
-func (s *uniterSuite) TestUniterFailsWithNonUnitAgentUser(c *gc.C) {
-	anAuthorizer := s.authorizer
-	anAuthorizer.Tag = names.NewMachineTag("9")
-	ctx := s.facadeContext(c)
-	ctx.Auth_ = anAuthorizer
-	_, err := uniter.NewUniterAPI(context.Background(), ctx)
-	c.Assert(err, gc.NotNil)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+func (s *uniterSuite) SetUpTest(c *tc.C) {
+	s.IsolationSuite.SetUpTest(c)
+
+	s.badTag = nil
 }
 
-func (s *uniterSuite) TestSetStatus(c *gc.C) {
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Executing,
-		Message: "blah",
-		Since:   &now,
-	}
-	err := s.wordpressUnit.SetAgentStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	sInfo = status.StatusInfo{
-		Status:  status.Executing,
-		Message: "foo",
-		Since:   &now,
-	}
-	err = s.mysqlUnit.SetAgentStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterSuite) TestEnsureDeadUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	args := params.SetStatus{
-		Entities: []params.EntityStatusArgs{
-			{Tag: "unit-mysql-0", Status: status.Error.String(), Info: "not really"},
-			{Tag: "unit-wordpress-0", Status: status.Rebooting.String(), Info: "foobar"},
-			{Tag: "unit-foo-42", Status: status.Active.String(), Info: "blah"},
-		}}
-	result, err := s.uniter.SetStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
 
-	// Verify mysqlUnit - no change.
-	statusInfo, err := s.mysqlUnit.AgentStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Executing)
-	c.Assert(statusInfo.Message, gc.Equals, "foo")
-	// ...wordpressUnit is fine though.
-	statusInfo, err = s.wordpressUnit.AgentStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Rebooting)
-	c.Assert(statusInfo.Message, gc.Equals, "foobar")
-}
-
-func (s *uniterSuite) TestSetAgentStatus(c *gc.C) {
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Executing,
-		Message: "blah",
-		Since:   &now,
-	}
-	err := s.wordpressUnit.SetAgentStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	sInfo = status.StatusInfo{
-		Status:  status.Executing,
-		Message: "foo",
-		Since:   &now,
-	}
-	err = s.mysqlUnit.SetAgentStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.SetStatus{
-		Entities: []params.EntityStatusArgs{
-			{Tag: "unit-mysql-0", Status: status.Error.String(), Info: "not really"},
-			{Tag: "unit-wordpress-0", Status: status.Executing.String(), Info: "foobar"},
-			{Tag: "unit-foo-42", Status: status.Rebooting.String(), Info: "blah"},
-		}}
-	result, err := s.uniter.SetAgentStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify mysqlUnit - no change.
-	statusInfo, err := s.mysqlUnit.AgentStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Executing)
-	c.Assert(statusInfo.Message, gc.Equals, "foo")
-	// ...wordpressUnit is fine though.
-	statusInfo, err = s.wordpressUnit.AgentStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Executing)
-	c.Assert(statusInfo.Message, gc.Equals, "foobar")
-}
-
-func (s *uniterSuite) TestSetUnitStatus(c *gc.C) {
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Active,
-		Message: "blah",
-		Since:   &now,
-	}
-	err := s.wordpressUnit.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	sInfo = status.StatusInfo{
-		Status:  status.Terminated,
-		Message: "foo",
-		Since:   &now,
-	}
-	err = s.mysqlUnit.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.SetStatus{
-		Entities: []params.EntityStatusArgs{
-			{Tag: "unit-mysql-0", Status: status.Error.String(), Info: "not really"},
-			{Tag: "unit-wordpress-0", Status: status.Terminated.String(), Info: "foobar"},
-			{Tag: "unit-foo-42", Status: status.Active.String(), Info: "blah"},
-		}}
-	result, err := s.uniter.SetUnitStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify mysqlUnit - no change.
-	statusInfo, err := s.mysqlUnit.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Terminated)
-	c.Assert(statusInfo.Message, gc.Equals, "foo")
-	// ...wordpressUnit is fine though.
-	statusInfo, err = s.wordpressUnit.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Terminated)
-	c.Assert(statusInfo.Message, gc.Equals, "foobar")
-}
-
-func (s *uniterSuite) TestLife(c *gc.C) {
-	// Add a relation wordpress-mysql.
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rel.Life(), gc.Equals, state.Alive)
-	relStatus, err := rel.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(relStatus.Status, gc.Equals, status.Joining)
-
-	// Make the wordpressUnit dead.
-	err = s.wordpressUnit.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.wordpressUnit.Life(), gc.Equals, state.Dead)
-
-	// Add another unit, so the service will stay dying when we
-	// destroy it later.
-	extraUnit, err := s.wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(extraUnit, gc.NotNil)
-
-	// Make the wordpress service dying.
-	err = s.wordpress.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.wordpress.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.wordpress.Life(), gc.Equals, state.Dying)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "application-mysql"},
-		{Tag: "application-wordpress"},
-		{Tag: "machine-0"},
-		{Tag: "machine-1"},
-		{Tag: "machine-42"},
-		{Tag: "application-foo"},
-		// TODO(dfc) these aren't valid tags any more
-		// but I hope to restore this test when params.Entity takes
-		// tags, not strings, which is coming soon.
-		// {Tag: "just-foo"},
-		{Tag: rel.Tag().String()},
-		{Tag: "relation-svc1.rel1#svc2.rel2"},
-		// {Tag: "relation-blah"},
-	}}
-	result, err := s.uniter.Life(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.LifeResults{
-		Results: []params.LifeResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Life: "dead"},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Life: "dying"},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			// TODO(dfc) see above
-			// {Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			// {Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestEnsureDead(c *gc.C) {
-	c.Assert(s.wordpressUnit.Life(), gc.Equals, state.Alive)
-	c.Assert(s.mysqlUnit.Life(), gc.Equals, state.Alive)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.EnsureDead(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.wordpressUnit.Life(), gc.Equals, state.Dead)
-	err = s.mysqlUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.mysqlUnit.Life(), gc.Equals, state.Alive)
-
-	// Try it again on a Dead unit; should work.
-	args = params.Entities{
-		Entities: []params.Entity{{Tag: "unit-wordpress-0"}},
-	}
-	result, err = s.uniter.EnsureDead(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{nil}},
-	})
-	c.Assert(s.leadershipRevoker.revoked.Contains(s.wordpressUnit.Name()), jc.IsTrue)
-
-	// Verify Life is unchanged.
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.wordpressUnit.Life(), gc.Equals, state.Dead)
-}
-
-func (s *uniterSuite) TestWatch(c *gc.C) {
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "application-mysql"},
-		{Tag: "application-wordpress"},
-		{Tag: "application-foo"},
-		// TODO(dfc) these aren't valid tags any more
-		// but I hope to restore this test when params.Entity takes
-		// tags, not strings, which is coming soon.
-		// {Tag: "just-foo"},
-	}}
-	result, err := s.uniter.Watch(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.NotifyWatchResults{
-		Results: []params.NotifyWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{NotifyWatcherId: "1"},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{NotifyWatcherId: "2"},
-			{Error: apiservertesting.ErrUnauthorized},
-			// see above
-			// {Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 2)
-	resource1 := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource1)
-	resource2 := s.resources.Get("2")
-	defer workertest.CleanKill(c, resource2)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewNotifyWatcherC(c, resource1.(state.NotifyWatcher))
-	wc.AssertNoChange()
-	wc = statetesting.NewNotifyWatcherC(c, resource2.(state.NotifyWatcher))
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestPublicAddress(c *gc.C) {
-	// Try first without setting an address.
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	expectErr := &params.Error{
-		Code:    params.CodeNoAddressSet,
-		Message: `"unit-wordpress-0" has no public address set`,
-	}
-	result, err := s.uniter.PublicAddress(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
-		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: expectErr},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Now set it and try again.
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine0.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopePublic)),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	address, err := s.wordpressUnit.PublicAddress()
-	c.Assert(address.Value, gc.Equals, "1.2.3.4")
-	c.Assert(err, jc.ErrorIsNil)
-
-	result, err = s.uniter.PublicAddress(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
-		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: "1.2.3.4"},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestPrivateAddress(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	expectErr := &params.Error{
-		Code:    params.CodeNoAddressSet,
-		Message: `"unit-wordpress-0" has no private address set`,
-	}
-	result, err := s.uniter.PrivateAddress(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
-		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: expectErr},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Now set it and try again.
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine0.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	address, err := s.wordpressUnit.PrivateAddress()
-	c.Assert(address.Value, gc.Equals, "1.2.3.4")
-	c.Assert(err, jc.ErrorIsNil)
-
-	result, err = s.uniter.PrivateAddress(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
-		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: "1.2.3.4"},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-// TestNetworkInfoSpaceless is in uniterSuite and not uniterNetworkInfoSuite since we don't want
-// all the spaces set up.
-func (s *uniterSuite) TestNetworkInfoSpaceless(c *gc.C) {
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine0.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.ControllerServiceFactory(c).Config().UpdateModelConfig(context.Background(), map[string]interface{}{config.EgressSubnets: "10.0.0.0/8"}, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.NetworkInfoParams{
-		Unit:      s.wordpressUnit.Tag().String(),
-		Endpoints: []string{"db", "juju-info"},
-	}
-
-	privateAddress, err := s.machine0.PrivateAddress()
-	c.Assert(err, jc.ErrorIsNil)
-
-	expectedInfo := params.NetworkInfoResult{
-		Info: []params.NetworkInfo{
+	// Act
+	res, err := s.uniter.EnsureDead(c.Context(), params.Entities{
+		Entities: []params.Entity{
 			{
-				Addresses: []params.InterfaceAddress{
-					{Address: privateAddress.Value},
-				},
+				Tag: s.badTag.String(),
 			},
 		},
-		EgressSubnets:    []string{"10.0.0.0/8"},
-		IngressAddresses: []string{privateAddress.Value},
-	}
+	})
 
-	result, err := s.uniter.NetworkInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(result, jc.DeepEquals, params.NetworkInfoResults{
-		Results: map[string]params.NetworkInfoResult{
-			"db":        expectedInfo,
-			"juju-info": expectedInfo,
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestEnsureDead(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	unitName := coreunit.Name("foo/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), unitName).Return(unitUUID, nil)
+	s.removalService.EXPECT().MarkUnitAsDead(gomock.Any(), unitUUID).Return(nil)
+
+	// Act
+	res, err := s.uniter.EnsureDead(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: names.NewUnitTag(unitName.String()).String(),
+			},
 		},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *uniterSuite) TestEnsureDeadNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.applicationService.EXPECT().GetUnitUUID(c.Context(), coreunit.Name("foo/0")).Return("", applicationerrors.UnitNotFound)
+
+	// Act
+	res, err := s.uniter.EnsureDead(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: names.NewUnitTag("foo/0").String(),
+			},
+		},
+	})
+
+	// Assert
+	c.Assert(err, tc.IsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestDestroyUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.badTag = names.NewUnitTag("foo/0")
+
+	// Act:
+	res, err := s.uniter.Destroy(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: s.badTag.String(),
+			},
+		},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestDestroy(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	unitName := coreunit.Name("foo/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), unitName).Return(unitUUID, nil)
+	s.removalService.EXPECT().RemoveUnit(gomock.Any(), unitUUID, false, false, time.Duration(0)).Return("", nil)
+
+	// Act
+	res, err := s.uniter.Destroy(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: names.NewUnitTag(unitName.String()).String(),
+			},
+		},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *uniterSuite) TestDestroyNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.applicationService.EXPECT().GetUnitUUID(c.Context(), coreunit.Name("foo/0")).Return("", applicationerrors.UnitNotFound)
+
+	// Act
+	res, err := s.uniter.Destroy(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: names.NewUnitTag("foo/0").String(),
+			},
+		},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestDestroyAllSubordinatesUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.badTag = names.NewUnitTag("foo/0")
+
+	// Act:
+	res, err := s.uniter.DestroyAllSubordinates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: s.badTag.String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestDestroyAllSubordinates(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange: a unit with some suboridnates
+	principalUnitName := coreunit.Name("foo/0")
+
+	subordinateUnitName1 := coreunit.Name("bar/1")
+	subordinateUnitUUID1 := tc.Must(c, coreunit.NewUUID)
+	subordinateUnitName2 := coreunit.Name("bar/2")
+	subordinateUnitUUID2 := tc.Must(c, coreunit.NewUUID)
+
+	s.applicationService.EXPECT().GetUnitSubordinates(gomock.Any(), principalUnitName).Return([]coreunit.Name{subordinateUnitName1, subordinateUnitName2}, nil)
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), subordinateUnitName1).Return(subordinateUnitUUID1, nil)
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), subordinateUnitName2).Return(subordinateUnitUUID2, nil)
+
+	s.removalService.EXPECT().RemoveUnit(
+		gomock.Any(), subordinateUnitUUID1, false, false, time.Duration(0)).Return(removal.UUID(""), nil)
+	s.removalService.EXPECT().RemoveUnit(
+		gomock.Any(), subordinateUnitUUID2, false, false, time.Duration(0)).Return(removal.UUID(""), nil)
+
+	// Act:
+	res, err := s.uniter.DestroyAllSubordinates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(principalUnitName.String()).String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *uniterSuite) TestDestroyAllSubordinatesNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	unitName := coreunit.Name("foo/0")
+	s.applicationService.EXPECT().GetUnitSubordinates(gomock.Any(), unitName).Return(nil, applicationerrors.UnitNotFound)
+
+	// Act:
+	res, err := s.uniter.DestroyAllSubordinates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestWatchUnitResolveModeUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/0")
+
+	res, err := s.uniter.WatchUnitResolveMode(c.Context(), params.Entity{
+		Tag: names.NewUnitTag("foo/0").String(),
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestWatchUnitResolveModeNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().WatchUnitResolveMode(gomock.Any(), unitName).Return(nil, resolveerrors.UnitNotFound)
+
+	res, err := s.uniter.WatchUnitResolveMode(c.Context(), params.Entity{
+		Tag: names.NewUnitTag(unitName.String()).String(),
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestWatchUnitResolveMode(c *tc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.expectWatchUnitResolveMode(ctrl, unitName, "1")
+
+	res, err := s.uniter.WatchUnitResolveMode(c.Context(), params.Entity{
+		Tag: names.NewUnitTag(unitName.String()).String(),
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Error, tc.IsNil)
+	c.Check(res.NotifyWatcherId, tc.Equals, "1")
+}
+
+func (s *uniterSuite) TestResolvedUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/0")
+	res, err := s.uniter.Resolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag("foo/0").String(),
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestResolvedNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().UnitResolveMode(gomock.Any(), unitName).Return("", resolveerrors.UnitNotFound)
+
+	res, err := s.uniter.Resolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestResolvedNotResolved(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().UnitResolveMode(gomock.Any(), unitName).Return("", resolveerrors.UnitNotResolved)
+
+	res, err := s.uniter.Resolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Mode, tc.Equals, params.ResolvedNone)
+}
+
+func (s *uniterSuite) TestResolvedRetryHooks(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().UnitResolveMode(gomock.Any(), unitName).Return(resolve.ResolveModeRetryHooks, nil)
+
+	res, err := s.uniter.Resolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Mode, tc.Equals, params.ResolvedRetryHooks)
+}
+
+func (s *uniterSuite) TestResolvedNoRetry(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().UnitResolveMode(gomock.Any(), unitName).Return(resolve.ResolveModeNoHooks, nil)
+
+	res, err := s.uniter.Resolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Mode, tc.Equals, params.ResolvedNoHooks)
+}
+
+func (s *uniterSuite) TestClearResolvedUnauthorised(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/0")
+	res, err := s.uniter.ClearResolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag("foo/0").String(),
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeUnauthorized)
+}
+
+func (s *uniterSuite) TestClearResolvedNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().ClearResolved(gomock.Any(), unitName).Return(resolveerrors.UnitNotFound)
+
+	res, err := s.uniter.ClearResolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestClearResolved(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	unitName := coreunit.Name("foo/0")
+	s.resolveService.EXPECT().ClearResolved(gomock.Any(), unitName).Return(nil)
+
+	res, err := s.uniter.ClearResolved(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *uniterSuite) TestCharmArchiveSha256Local(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().GetAvailableCharmArchiveSHA256(gomock.Any(), domaincharm.CharmLocator{
+		Source:   domaincharm.LocalSource,
+		Name:     "foo",
+		Revision: 1,
+	}).Return("sha256:foo", nil)
+
+	results, err := s.uniter.CharmArchiveSha256(c.Context(), params.CharmURLs{
+		URLs: []params.CharmURL{
+			{URL: "local:foo-1"},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{{
+			Result: "sha256:foo",
+		}},
 	})
 }
 
-func (s *uniterSuite) TestAvailabilityZone(c *gc.C) {
-	s.PatchValue(uniter.GetZone, func(st *state.State, tag names.Tag) (string, error) {
-		return "a_zone", nil
+func (s *uniterSuite) TestCharmArchiveSha256Charmhub(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().GetAvailableCharmArchiveSHA256(gomock.Any(), domaincharm.CharmLocator{
+		Source:   domaincharm.CharmHubSource,
+		Name:     "foo",
+		Revision: 1,
+	}).Return("sha256:foo", nil)
+
+	results, err := s.uniter.CharmArchiveSha256(c.Context(), params.CharmURLs{
+		URLs: []params.CharmURL{
+			{URL: "foo-1"},
+		},
 	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{{
+			Result: "sha256:foo",
+		}},
+	})
+}
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-wordpress-0"},
-	}}
-	result, err := s.uniter.AvailabilityZone(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterSuite) TestCharmArchiveSha256Errors(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	c.Check(result, gc.DeepEquals, params.StringResults{
+	s.applicationService.EXPECT().GetAvailableCharmArchiveSHA256(gomock.Any(), domaincharm.CharmLocator{
+		Source:   domaincharm.CharmHubSource,
+		Name:     "foo",
+		Revision: 1,
+	}).Return("", applicationerrors.CharmNotFound)
+	s.applicationService.EXPECT().GetAvailableCharmArchiveSHA256(gomock.Any(), domaincharm.CharmLocator{
+		Source:   domaincharm.CharmHubSource,
+		Name:     "foo",
+		Revision: 2,
+	}).Return("", applicationerrors.CharmNotFound)
+	s.applicationService.EXPECT().GetAvailableCharmArchiveSHA256(gomock.Any(), domaincharm.CharmLocator{
+		Source:   domaincharm.CharmHubSource,
+		Name:     "foo",
+		Revision: 3,
+	}).Return("", applicationerrors.CharmNotResolved)
+
+	results, err := s.uniter.CharmArchiveSha256(c.Context(), params.CharmURLs{
+		URLs: []params.CharmURL{
+			{URL: "foo-1"},
+			{URL: "ch:foo-2"},
+			{URL: "ch:foo-3"},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringResults{
 		Results: []params.StringResult{
-			{Result: "a_zone"},
+			{Error: &params.Error{Message: `charm "foo-1" not found`, Code: params.CodeNotFound}},
+			{Error: &params.Error{Message: `charm "ch:foo-2" not found`, Code: params.CodeNotFound}},
+			{Error: &params.Error{Message: `charm "ch:foo-3" not available`, Code: params.CodeNotYetAvailable}},
 		},
 	})
 }
 
-func (s *uniterSuite) TestResolvedAPIV6(c *gc.C) {
-	err := s.wordpressUnit.SetResolved(state.ResolvedRetryHooks)
-	c.Assert(err, jc.ErrorIsNil)
-	mode := s.wordpressUnit.Resolved()
-	c.Assert(mode, gc.Equals, state.ResolvedRetryHooks)
+func (s *uniterSuite) TestLeadershipSettings(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.Resolved(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ResolvedModeResults{
-		Results: []params.ResolvedModeResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Mode: params.ResolvedMode(mode)},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
+	s.uniter.Merge(c.Context(), struct{}{}, struct{}{})
+	s.uniter.Read(c.Context(), struct{}{}, struct{}{})
+	s.uniter.WatchLeadershipSettings(c.Context(), struct{}{}, struct{}{})
 }
 
-func (s *uniterSuite) TestClearResolved(c *gc.C) {
-	err := s.wordpressUnit.SetResolved(state.ResolvedRetryHooks)
-	c.Assert(err, jc.ErrorIsNil)
-	mode := s.wordpressUnit.Resolved()
-	c.Assert(mode, gc.Equals, state.ResolvedRetryHooks)
+func (s *uniterSuite) TestGetPrincipal(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
+	s.badTag = names.NewUnitTag("mysql/0")
 	args := params.Entities{Entities: []params.Entity{
 		{Tag: "unit-mysql-0"},
 		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-subordinate-0"},
 		{Tag: "unit-foo-42"},
 	}}
-	result, err := s.uniter.ClearResolved(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
 
-	// Verify wordpressUnit's resolved mode has changed.
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	mode = s.wordpressUnit.Resolved()
-	c.Assert(mode, gc.Equals, state.ResolvedNone)
-}
+	boom := internalerrors.New("boom")
+	s.expectGetUnitPrincipal("wordpress/0", "", false, nil)
+	s.expectGetUnitPrincipal("subordinate/0", "principal/0", true, nil)
+	s.expectGetUnitPrincipal("foo/42", "", false, boom)
 
-func (s *uniterSuite) TestGetPrincipal(c *gc.C) {
-	// Add a subordinate to wordpressUnit.
-	_, _, subordinate := s.addRelatedApplication(c, "wordpress", "logging", s.wordpressUnit)
-
-	principal, ok := subordinate.PrincipalName()
-	c.Assert(principal, gc.Equals, s.wordpressUnit.Name())
-	c.Assert(ok, jc.IsTrue)
-
-	// First try it as wordpressUnit's agent.
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: subordinate.Tag().String()},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.GetPrincipal(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringBoolResults{
+	result, err := s.uniter.GetPrincipal(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringBoolResults{
 		Results: []params.StringBoolResult{
 			{Error: apiservertesting.ErrUnauthorized},
 			{Result: "", Ok: false, Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+			{Result: "unit-principal-0", Ok: true, Error: nil},
+			{Result: "", Ok: false, Error: apiservererrors.ServerError(boom)},
 		},
 	})
+}
 
-	// Now try as subordinate's agent.
-	subAuthorizer := s.authorizer
-	subAuthorizer.Tag = subordinate.Tag()
-	subUniter := s.newUniterAPI(c, s.ControllerModel(c).State(), subAuthorizer)
+func (s *uniterSuite) TestAvailabilityZone(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	result, err = subUniter.GetPrincipal(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringBoolResults{
-		Results: []params.StringBoolResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: "unit-wordpress-0", Ok: true, Error: nil},
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-postgresql-0"},
+		{Tag: "unit-foo-0"},
+	}}
+
+	machineUUID := tc.Must(c, coremachine.NewUUID)
+	s.expectGetUnitMachineUUID("wordpress/0", machineUUID, nil)
+	s.expectedGetAvailabilityZone(machineUUID, "a_zone", nil)
+
+	s.expectGetUnitMachineUUID("postgresql/0", machineUUID, applicationerrors.UnitNotFound)
+
+	s.badTag = names.NewUnitTag("foo/0")
+
+	// Act:
+	result, err := s.uniter.AvailabilityZone(c.Context(), args)
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Check(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: "a_zone"},
+			{Error: apiservertesting.NotFoundError(`unit "postgresql/0"`)},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
 }
 
-func (s *uniterSuite) TestHasSubordinates(c *gc.C) {
-	// Try first without any subordinates for wordpressUnit.
+// TestAvailabilityZoneUnitNotOnMachine tests that when a unit's AZ is requested
+// but the unit is not assigned to a machine, the AZ reported is an empty
+// string.
+func (s *uniterSuite) TestAvailabilityZoneUnitNotOnMachine(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-wordpress-0"},
+	}}
+
+	appSvcExp := s.applicationService.EXPECT()
+	appSvcExp.GetUnitMachineUUID(gomock.Any(), coreunit.Name("wordpress/0")).Return(
+		"", applicationerrors.UnitMachineNotAssigned,
+	)
+
+	result, err := s.uniter.AvailabilityZone(c.Context(), args)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: ""},
+		},
+	})
+}
+
+// TestAvailabilityZoneNotSetForMachine tests that when a unit's AZ is requested
+// but the underlying machine does not have the value set the facade returns an
+// empty string. This is epxected behaviour as not all clouds support AZ's.
+func (s *uniterSuite) TestAvailabilityZoneNotSetForMachine(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-wordpress-0"},
+	}}
+	machineUUID := tc.Must(c, coremachine.NewUUID)
+
+	appSvcExp := s.applicationService.EXPECT()
+	appSvcExp.GetUnitMachineUUID(gomock.Any(), coreunit.Name("wordpress/0")).Return(
+		machineUUID, nil,
+	)
+
+	machineSvcExp := s.machineService.EXPECT()
+	machineSvcExp.AvailabilityZone(gomock.Any(), machineUUID).Return(
+		"", machineerrors.AvailabilityZoneNotFound,
+	)
+
+	result, err := s.uniter.AvailabilityZone(c.Context(), args)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: ""},
+		},
+	})
+}
+
+// TestAvailabilityZoneMachineNotFound tests that when translating a unit's AZ
+// from a machine and the machine is not found the caller gets back an a
+// [params.CodeNotFound]. This is a very contrived case that will most likely
+// never exist but we check the case for the sake of contract completeness.
+func (s *uniterSuite) TestAvailabilityZoneMachineNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-wordpress-0"},
+	}}
+	machineUUID := tc.Must(c, coremachine.NewUUID)
+
+	appSvcExp := s.applicationService.EXPECT()
+	appSvcExp.GetUnitMachineUUID(gomock.Any(), coreunit.Name("wordpress/0")).Return(
+		machineUUID, nil,
+	)
+
+	machineSvcExp := s.machineService.EXPECT()
+	machineSvcExp.AvailabilityZone(gomock.Any(), machineUUID).Return(
+		"", machineerrors.MachineNotFound,
+	)
+
+	result, err := s.uniter.AvailabilityZone(c.Context(), args)
+	c.Check(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *uniterSuite) TestAssignedMachine(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	// Arrange:
 	args := params.Entities{Entities: []params.Entity{
 		{Tag: "unit-mysql-0"},
 		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-logging-0"},
+		{Tag: "unit-postgresql-0"},
 		{Tag: "unit-foo-42"},
 	}}
-	result, err := s.uniter.HasSubordinates(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.BoolResults{
-		Results: []params.BoolResult{
+
+	machineName := coremachine.Name("0")
+	s.expectGetUnitMachineName("mysql/0", machineName, nil)
+	s.expectGetUnitMachineName("wordpress/0", "", applicationerrors.UnitMachineNotAssigned)
+	s.expectGetUnitMachineName("postgresql/0", "", applicationerrors.UnitNotFound)
+	s.badTag = names.NewUnitTag("foo/42")
+
+	// Act:
+	result, err := s.uniter.AssignedMachine(c.Context(), args)
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: "machine-0"},
+			{Error: &params.Error{
+				Code:    params.CodeNotAssigned,
+				Message: applicationerrors.UnitMachineNotAssigned.Error(),
+			}},
+			{Error: apiservertesting.NotFoundError(`unit "postgresql/0"`)},
 			{Error: apiservertesting.ErrUnauthorized},
-			{Result: false},
+		},
+	})
+}
+
+func (s *uniterSuite) TestWatchConfiSettingsHash(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-postgresql-0"},
+	}}
+
+	// Arrange: expect a watcher for mysql
+	ch := make(chan []string, 1)
+	w := watchertest.NewMockStringsWatcher(ch)
+	s.applicationService.EXPECT().WatchApplicationConfigHash(gomock.Any(), "mysql").Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), w).Return("1", nil)
+	ch <- []string{"change1"}
+
+	// Arrange: wordpress/0 is unauthorised.
+	s.badTag = names.NewUnitTag("wordpress/0")
+
+	// Arrange: expect a state error for postgresql
+	s.applicationService.EXPECT().WatchApplicationConfigHash(gomock.Any(), "postgresql").Return(nil, applicationerrors.UnitNotFound)
+
+	result, err := s.uniter.WatchConfigSettingsHash(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
+			{
+				StringsWatcherId: "1",
+				Changes:          []string{"change1"},
+			},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.NotFoundError(`unit "postgresql/0"`)},
+		},
+	})
+}
+
+func (s *uniterSuite) TestWatchTrustConfiSettingsHash(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-postgresql-0"},
+	}}
+
+	// Arrange: expect a watcher for mysql
+	ch := make(chan []string, 1)
+	w := watchertest.NewMockStringsWatcher(ch)
+	s.applicationService.EXPECT().WatchApplicationConfigHash(gomock.Any(), "mysql").Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), w).Return("1", nil)
+	ch <- []string{"change1"}
+
+	// Arrange: wordpress/0 is unauthorised.
+	s.badTag = names.NewUnitTag("wordpress/0")
+
+	// Arrange: expect a state error for postgresql
+	s.applicationService.EXPECT().WatchApplicationConfigHash(gomock.Any(), "postgresql").Return(nil, applicationerrors.UnitNotFound)
+
+	result, err := s.uniter.WatchTrustConfigSettingsHash(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
+			{
+				StringsWatcherId: "1",
+				Changes:          []string{"change1"},
+			},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.NotFoundError(`unit "postgresql/0"`)},
+		},
+	})
+}
+
+func (s *uniterSuite) TestWatchUnitAddressesHash(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-postgresql-0"},
+	}}
+
+	// Arrange: expect a watcher for mysql/0
+	ch := make(chan []string, 1)
+	w := watchertest.NewMockStringsWatcher(ch)
+	s.applicationService.EXPECT().WatchUnitAddressesHash(gomock.Any(), coreunit.Name("mysql/0")).Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), w).Return("1", nil)
+	ch <- []string{"change1"}
+
+	// Arrange: wordpress/0 is unauthorised.
+	s.badTag = names.NewUnitTag("wordpress/0")
+
+	// Arrange: expect a state error for postgresql/0
+	s.applicationService.EXPECT().WatchUnitAddressesHash(gomock.Any(), coreunit.Name("postgresql/0")).Return(nil, applicationerrors.UnitNotFound)
+
+	result, err := s.uniter.WatchUnitAddressesHash(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
+			{
+				StringsWatcherId: "1",
+				Changes:          []string{"change1"},
+			},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.NotFoundError(`unit "postgresql/0"`)},
+		},
+	})
+}
+
+func (s *uniterSuite) TestCharmURL(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-foo-42"},
+		{Tag: "application-mysql"},
+		{Tag: "application-wordpress"},
+		{Tag: "application-foo"},
+		{Tag: "application-bar"},
+	}}
+	locator := domaincharm.CharmLocator{
+		Source:       domaincharm.CharmHubSource,
+		Revision:     42,
+		Architecture: architecture.AMD64,
+	}
+	// Arrange: expected unit calls
+	s.expectGetCharmLocatorByApplicationName(c, "mysql", locator, nil)
+
+	s.expectGetCharmLocatorByApplicationName(c, "wordpress", locator, nil)
+
+	boom := internalerrors.New("boom")
+	s.expectGetCharmLocatorByApplicationName(c, "foo", locator, boom)
+
+	// Arrange: expected application calls
+	s.expectShouldAllowCharmUpgradeOnError(c, "mysql", true, nil)
+	s.expectGetCharmLocatorByApplicationName(c, "mysql", locator, nil)
+
+	s.expectShouldAllowCharmUpgradeOnError(c, "wordpress", false, nil)
+	s.expectGetCharmLocatorByApplicationName(c, "wordpress", locator, nil)
+
+	s.expectShouldAllowCharmUpgradeOnError(c, "foo", false, boom)
+	s.badTag = names.NewApplicationTag("bar")
+
+	// Act:
+	result, err := s.uniter.CharmURL(c.Context(), args)
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringBoolResults{
+		Results: []params.StringBoolResult{
+			{Result: "ch:amd64/-42", Ok: true},
+			{Result: "ch:amd64/-42", Ok: true},
+			{Error: apiservererrors.ServerError(boom)},
+			{Result: "ch:amd64/-42", Ok: true},
+			{Result: "ch:amd64/-42", Ok: false},
+			{Error: apiservererrors.ServerError(boom)},
+			{Error: apiservertesting.ErrUnauthorized},
+		},
+	})
+}
+
+func (s *uniterSuite) TestSetCharm(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	charmURL := "local:foo-43"
+	locator := domaincharm.CharmLocator{
+		Name:     "foo",
+		Source:   domaincharm.LocalSource,
+		Revision: 43,
+	}
+	unitName := coreunit.Name("foo/0")
+
+	s.applicationService.EXPECT().UpdateUnitCharm(gomock.Any(), unitName, locator).Return(nil)
+
+	res, err := s.uniter.SetCharm(c.Context(), params.EntitiesCharmURL{
+		Entities: []params.EntityCharmURL{{
+			Tag:      names.NewUnitTag(unitName.String()).String(),
+			CharmURL: charmURL,
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *uniterSuite) TestSetCharmUnitNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	charmURL := "local:foo-43"
+	locator := domaincharm.CharmLocator{
+		Name:     "foo",
+		Source:   domaincharm.LocalSource,
+		Revision: 43,
+	}
+	unitName := coreunit.Name("foo/0")
+
+	s.applicationService.EXPECT().UpdateUnitCharm(gomock.Any(), unitName, locator).Return(applicationerrors.UnitNotFound)
+
+	res, err := s.uniter.SetCharm(c.Context(), params.EntitiesCharmURL{
+		Entities: []params.EntityCharmURL{{
+			Tag:      names.NewUnitTag(unitName.String()).String(),
+			CharmURL: charmURL,
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) TestSetCharmCharmNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	charmURL := "local:foo-43"
+	locator := domaincharm.CharmLocator{
+		Name:     "foo",
+		Source:   domaincharm.LocalSource,
+		Revision: 43,
+	}
+	unitName := coreunit.Name("foo/0")
+
+	s.applicationService.EXPECT().UpdateUnitCharm(gomock.Any(), unitName, locator).Return(applicationerrors.CharmNotFound)
+
+	res, err := s.uniter.SetCharm(c.Context(), params.EntitiesCharmURL{
+		Entities: []params.EntityCharmURL{{
+			Tag:      names.NewUnitTag(unitName.String()).String(),
+			CharmURL: charmURL,
+		}},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *uniterSuite) expectGetCharmLocatorByApplicationName(c *tc.C, appName string, charmLocator domaincharm.CharmLocator, err error) {
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), appName).Return(charmLocator, err)
+}
+
+func (s *uniterSuite) expectShouldAllowCharmUpgradeOnError(c *tc.C, appName string, v bool, err error) {
+	s.applicationService.EXPECT().ShouldAllowCharmUpgradeOnError(gomock.Any(), appName).Return(v, err)
+}
+
+func (s *uniterSuite) TestConfigSettings(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-postgresql-0"},
+		{Tag: "unit-foo-42"},
+	}}
+
+	settings := map[string]any{
+		"foo": "bar",
+	}
+	s.expectedGetConfigSettings("mysql/0", settings, nil)
+	s.expectedGetConfigSettings("wordpress/0", nil, nil)
+	s.expectedGetConfigSettings("postgresql/0", nil, applicationerrors.UnitNotFound)
+	s.badTag = names.NewUnitTag("foo/42")
+
+	// Act:
+	result, err := s.uniter.ConfigSettings(c.Context(), args)
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ConfigSettingsResults{
+		Results: []params.ConfigSettingsResult{
+			{Settings: settings},
+			{Settings: nil},
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
+}
 
-	// Add two subordinates to wordpressUnit and try again.
-	s.addRelatedApplication(c, "wordpress", "logging", s.wordpressUnit)
-	s.addRelatedApplication(c, "wordpress", "monitoring", s.wordpressUnit)
+func (s *uniterSuite) TestHasSubordinates(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	result, err = s.uniter.HasSubordinates(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.BoolResults{
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+		{Tag: "unit-wordpress-0"},
+		{Tag: "unit-subordinate-0"},
+		{Tag: "unit-foo-42"},
+	}}
+
+	s.badTag = names.NewUnitTag("mysql/0")
+	s.expectGetHasSubordinates(c, "wordpress/0", []coreunit.Name{"sub0/0", "sub1/0"}, nil)
+	s.expectGetHasSubordinates(c, "subordinate/0", nil, nil)
+	boom := internalerrors.New("boom")
+	s.expectGetHasSubordinates(c, "foo/42", nil, boom)
+
+	result, err := s.uniter.HasSubordinates(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.BoolResults{
 		Results: []params.BoolResult{
 			{Error: apiservertesting.ErrUnauthorized},
 			{Result: true},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+			{Result: false},
+			{Error: apiservererrors.ServerError(boom)},
 		},
 	})
 }
 
-func (s *uniterSuite) TestDestroy(c *gc.C) {
-	c.Assert(s.wordpressUnit.Life(), gc.Equals, state.Alive)
+func (s *uniterSuite) TestPublicAddressFailCanAccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
+	s.badTag = names.NewUnitTag("foo/42")
 	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
 		{Tag: "unit-foo-42"},
 	}}
-	result, err := s.uniter.Destroy(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify wordpressUnit is destroyed and removed.
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
-}
-
-func (s *uniterSuite) TestDestroyAllSubordinates(c *gc.C) {
-	// Add two subordinates to wordpressUnit.
-	_, _, loggingSub := s.addRelatedApplication(c, "wordpress", "logging", s.wordpressUnit)
-	_, _, monitoringSub := s.addRelatedApplication(c, "wordpress", "monitoring", s.wordpressUnit)
-	c.Assert(loggingSub.Life(), gc.Equals, state.Alive)
-	c.Assert(monitoringSub.Life(), gc.Equals, state.Alive)
-
-	err := s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	subordinates := s.wordpressUnit.SubordinateNames()
-	c.Assert(subordinates, gc.DeepEquals, []string{"logging/0", "monitoring/0"})
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.DestroyAllSubordinates(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify wordpressUnit's subordinates were destroyed.
-	err = loggingSub.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(loggingSub.Life(), gc.Equals, state.Dying)
-	err = monitoringSub.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(monitoringSub.Life(), gc.Equals, state.Dying)
-}
-
-func (s *uniterSuite) TestCharmURL(c *gc.C) {
-	// Set wordpressUnit's charm URL first.
-	err := s.wordpressUnit.SetCharmURL(s.wpCharm.URL())
-	c.Assert(err, jc.ErrorIsNil)
-	curl := s.wordpressUnit.CharmURL()
-	c.Assert(curl, gc.NotNil)
-	c.Assert(*curl, gc.Equals, s.wpCharm.URL())
-
-	// Make sure wordpress application's charm is what we expect.
-	curlStr, force := s.wordpress.CharmURL()
-	c.Assert(*curlStr, gc.Equals, s.wpCharm.URL())
-	c.Assert(force, jc.IsFalse)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "application-mysql"},
-		{Tag: "application-wordpress"},
-		{Tag: "application-foo"},
-		// TODO(dfc) these aren't valid tags any more
-		// but I hope to restore this test when params.Entity takes
-		// tags, not strings, which is coming soon.
-		// {Tag: "just-foo"},
-	}}
-	result, err := s.uniter.CharmURL(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringBoolResults{
-		Results: []params.StringBoolResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: s.wpCharm.URL(), Ok: true},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: s.wpCharm.URL(), Ok: force},
-			{Error: apiservertesting.ErrUnauthorized},
-			// see above
-			// {Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestSetCharmURL(c *gc.C) {
-	charmURL := s.wordpressUnit.CharmURL()
-	c.Assert(charmURL, gc.IsNil)
-
-	args := params.EntitiesCharmURL{Entities: []params.EntityCharmURL{
-		{Tag: "unit-mysql-0", CharmURL: "ch:amd64/quantal/application-42"},
-		{Tag: "unit-wordpress-0", CharmURL: s.wpCharm.URL()},
-		{Tag: "unit-foo-42", CharmURL: "ch:amd64/quantal/foo-321"},
-	}}
-	result, err := s.uniter.SetCharmURL(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the charm URL was set.
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-
-	charmURL = s.wordpressUnit.CharmURL()
-	c.Assert(charmURL, gc.NotNil)
-	c.Assert(*charmURL, gc.Equals, s.wpCharm.URL())
-}
-
-func (s *uniterSuite) TestWorkloadVersion(c *gc.C) {
-	// Set wordpressUnit's workload version first.
-	err := s.wordpressUnit.SetWorkloadVersion("capulet")
-	c.Assert(err, jc.ErrorIsNil)
-	version, err := s.wordpressUnit.WorkloadVersion()
-	c.Assert(version, gc.Equals, "capulet")
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "application-wordpress"},
-		{Tag: "just-foo"},
-	}}
-
-	result, err := s.uniter.WorkloadVersion(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
+	result, err := s.uniter.PublicAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
 		Results: []params.StringResult{
 			{Error: apiservertesting.ErrUnauthorized},
-			{Result: "capulet"},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservererrors.ServerError(errors.New(`"application-wordpress" is not a valid unit tag`))},
-			{Error: apiservererrors.ServerError(errors.New(`"just-foo" is not a valid tag`))},
 		},
 	})
 }
 
-func (s *uniterSuite) TestSetWorkloadVersion(c *gc.C) {
-	currentVersion, err := s.wordpressUnit.WorkloadVersion()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(currentVersion, gc.Equals, "")
-
-	args := params.EntityWorkloadVersions{Entities: []params.EntityWorkloadVersion{
-		{Tag: "unit-mysql-0", WorkloadVersion: "allura"},
-		{Tag: "unit-wordpress-0", WorkloadVersion: "shiro"},
-		{Tag: "unit-foo-42", WorkloadVersion: "pidge"},
-	}}
-	result, err := s.uniter.SetWorkloadVersion(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the workload version was set.
-	err = s.wordpressUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	newVersion, err := s.wordpressUnit.WorkloadVersion()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(newVersion, gc.Equals, "shiro")
-}
-
-func (s *uniterSuite) TestCharmModifiedVersion(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "application-mysql"},
-		{Tag: "application-wordpress"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "application-foo"},
-	}}
-	result, err := s.uniter.CharmModifiedVersion(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.IntResults{
-		Results: []params.IntResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: s.wordpress.CharmModifiedVersion()},
-			{Result: s.wordpress.CharmModifiedVersion()},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestWatchConfigSettingsHash(c *gc.C) {
-	err := s.wordpressUnit.SetCharmURL(s.wpCharm.URL())
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.wordpress.UpdateCharmConfig(model.GenerationMaster, charm.Settings{"blog-title": "sauceror central"})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+func (s *uniterSuite) TestPublicAddressErrorFromDomain(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
 	args := params.Entities{Entities: []params.Entity{
 		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
 	}}
-	result, err := s.uniter.WatchConfigSettingsHash(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{
-				StringsWatcherId: "1",
-				Changes:          []string{"7579d9a32a0af2e5459c21b9a6ada743db4ed33662f5230d3ca8283518268746"},
-			},
-			{Error: apiservertesting.ErrUnauthorized},
+	boom := internalerrors.New("boom")
+	s.networkService.EXPECT().GetUnitPublicAddress(gomock.Any(), coreunit.Name("mysql/0")).Return(network.SpaceAddress{}, boom)
+
+	result, err := s.uniter.PublicAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Error: apiservererrors.ServerError(boom)},
 		},
 	})
-
-	// Verify the resource was registered and stop when done.
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
 }
 
-func (s *uniterSuite) TestWatchTrustConfigSettingsHash(c *gc.C) {
-	schema := environschema.Fields{
-		"trust": environschema.Attr{Type: environschema.Tbool},
+func (s *uniterSuite) TestPublicAddress(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+	}}
+	addr := network.SpaceAddress{
+		MachineAddress: network.MachineAddress{
+			Value: "192.168.0.1",
+		},
 	}
-	err := s.wordpress.UpdateApplicationConfig(coreconfig.ConfigAttributes{
-		"trust": true,
-	}, nil, schema, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	s.networkService.EXPECT().GetUnitPublicAddress(gomock.Any(), coreunit.Name("mysql/0")).Return(addr, nil)
 
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+	result, err := s.uniter.PublicAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: "192.168.0.1"},
+		},
+	})
+}
 
+func (s *uniterSuite) TestPrivateAddressFailCanAccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/42")
 	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
 		{Tag: "unit-foo-42"},
 	}}
-	result, err := s.uniter.WatchTrustConfigSettingsHash(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{
-				StringsWatcherId: "1",
-				Changes:          []string{"2f1368bde39be8106dcdca15e35cc3b5f7db5b8e429806369f621a47fb938519"},
-			},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestLogActionMessage(c *gc.C) {
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	anAction, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(anAction.Messages(), gc.HasLen, 0)
-	_, err = anAction.Begin()
-	c.Assert(err, jc.ErrorIsNil)
-
-	wrongAction, err := s.ControllerModel(c).AddAction(s.mysqlUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.ActionMessageParams{Messages: []params.EntityString{
-		{Tag: anAction.Tag().String(), Value: "hello"},
-		{Tag: wrongAction.Tag().String(), Value: "world"},
-		{Tag: "foo-42", Value: "mars"},
-	}}
-	result, err := s.uniter.LogActionsMessages(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: &params.Error{Message: `"foo-42" is not a valid tag`}},
-		},
-	})
-	anAction, err = s.ControllerModel(c).Action(anAction.Id())
-	c.Assert(err, jc.ErrorIsNil)
-	messages := anAction.Messages()
-	c.Assert(messages, gc.HasLen, 1)
-	c.Assert(messages[0].Message(), gc.Equals, "hello")
-	c.Assert(messages[0].Timestamp(), gc.NotNil)
-}
-
-func (s *uniterSuite) TestLogActionMessageAborting(c *gc.C) {
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	anAction, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(anAction.Messages(), gc.HasLen, 0)
-	_, err = anAction.Begin()
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = anAction.Cancel()
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.ActionMessageParams{Messages: []params.EntityString{
-		{Tag: anAction.Tag().String(), Value: "hello"},
-	}}
-	result, err := s.uniter.LogActionsMessages(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{},
-		},
-	})
-	anAction, err = s.ControllerModel(c).Action(anAction.Id())
-	c.Assert(err, jc.ErrorIsNil)
-	messages := anAction.Messages()
-	c.Assert(messages, gc.HasLen, 1)
-	c.Assert(messages[0].Message(), gc.Equals, "hello")
-	c.Assert(messages[0].Timestamp(), gc.NotNil)
-}
-
-func (s *uniterSuite) TestWatchActionNotifications(c *gc.C) {
-	err := s.wordpressUnit.SetCharmURL(s.wpCharm.URL())
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{StringsWatcherId: "1"},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	addedAction, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	wc.AssertChange(addedAction.Id())
-
-	_, err = addedAction.Begin()
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-
-	_, err = addedAction.Cancel()
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChange(addedAction.Id())
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchPreexistingActions(c *gc.C) {
-	err := s.wordpressUnit.SetCharmURL(s.wpCharm.URL())
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action1, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	action2, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-wordpress-0"},
-	}}
-
-	results, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	checkUnorderedActionIdsEqual(c, []string{action1.Id(), action2.Id()}, results)
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	addedAction, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChange(addedAction.Id())
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchActionNotificationsMalformedTag(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "ewenit-mysql-0"},
-	}}
-	results, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.NotNil)
-	c.Assert(len(results.Results), gc.Equals, 1)
-	result := results.Results[0]
-	c.Assert(result.Error, gc.NotNil)
-	c.Assert(result.Error.Message, gc.Equals, `invalid actionreceiver tag "ewenit-mysql-0"`)
-}
-
-func (s *uniterSuite) TestWatchActionNotificationsMalformedUnitName(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-01"},
-	}}
-	results, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.NotNil)
-	c.Assert(len(results.Results), gc.Equals, 1)
-	result := results.Results[0]
-	c.Assert(result.Error, gc.NotNil)
-	c.Assert(result.Error.Message, gc.Equals, `invalid actionreceiver tag "unit-mysql-01"`)
-}
-
-func (s *uniterSuite) TestWatchActionNotificationsNotUnit(c *gc.C) {
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action, err := s.ControllerModel(c).AddAction(s.mysqlUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: action.Tag().String()},
-	}}
-	results, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.NotNil)
-	c.Assert(len(results.Results), gc.Equals, 1)
-	result := results.Results[0]
-	c.Assert(result.Error, gc.NotNil)
-	c.Assert(result.Error.Message, gc.Equals, `invalid actionreceiver tag "action-`+action.Id()+`"`)
-}
-
-func (s *uniterSuite) TestWatchActionNotificationsPermissionDenied(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-nonexistentgarbage-0"},
-	}}
-	results, err := s.uniter.WatchActionNotifications(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.NotNil)
-	c.Assert(len(results.Results), gc.Equals, 1)
-	result := results.Results[0]
-	c.Assert(result.Error, gc.NotNil)
-	c.Assert(result.Error.Message, gc.Equals, "permission denied")
-}
-
-func (s *uniterSuite) TestConfigSettings(c *gc.C) {
-	res, err := s.uniter.SetCharmURL(context.Background(), params.EntitiesCharmURL{
-		Entities: []params.EntityCharmURL{
-			{
-				Tag:      s.wordpressUnit.Tag().String(),
-				CharmURL: s.wpCharm.URL(),
-			},
-		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res.OneError(), jc.ErrorIsNil)
-
-	c.Assert(s.wordpressUnit.Refresh(), jc.ErrorIsNil)
-	settings, err := s.wordpressUnit.ConfigSettings()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settings, gc.DeepEquals, charm.Settings{"blog-title": "My Title"})
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-	}}
-	result, err := s.uniter.ConfigSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ConfigSettingsResults{
-		Results: []params.ConfigSettingsResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Settings: params.ConfigSettings{"blog-title": "My Title"}},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestWatchUnitRelations(c *gc.C) {
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-0"},
-	}}
-	result, err := s.uniter.WatchUnitRelations(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 3)
-	c.Assert(result.Results[0].Error, gc.DeepEquals, apiservertesting.ErrUnauthorized)
-	c.Assert(result.Results[1].StringsWatcherId, gc.Equals, "1")
-	c.Assert(result.Results[1].Changes, gc.NotNil)
-	c.Assert(result.Results[1].Error, gc.IsNil)
-	c.Assert(result.Results[2].Error, gc.DeepEquals, apiservertesting.ErrUnauthorized)
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchSubordinateUnitRelations(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	// The logging charm is subordinate (and the info endpoint is scope=container).
-	loggingCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "logging",
-		URL:  "ch:amd64/quantal/logging-1",
-	})
-	loggingApp := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: loggingCharm,
-	})
-
-	mysqlRel := s.makeSubordinateRelation(c, loggingApp, s.mysql, s.mysqlUnit)
-	wpRel := s.makeSubordinateRelation(c, loggingApp, s.wordpress, s.wordpressUnit)
-	mysqlLogUnit := findSubordinateUnit(c, loggingApp, s.mysqlUnit)
-
-	subAuthorizer := s.authorizer
-	subAuthorizer.Tag = mysqlLogUnit.Tag()
-	uniterAPI := s.newUniterAPI(c, s.ControllerModel(c).State(), subAuthorizer)
-
-	result, err := uniterAPI.WatchUnitRelations(context.Background(), params.Entities{
-		Entities: []params.Entity{{Tag: mysqlLogUnit.Tag().String()}},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
-	c.Assert(result.Results[0].Error, gc.IsNil)
-	c.Assert(result.Results[0].StringsWatcherId, gc.Equals, "1")
-	c.Assert(result.Results[0].Changes, gc.NotNil)
-
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	// We get notified about the mysql relation going away but not the
-	// wordpress one.
-	err = mysqlRel.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	err = mysqlRel.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-
-	wc.AssertChange(mysqlRel.Tag().Id())
-	wc.AssertNoChange()
-
-	err = wpRel.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	err = wpRel.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchUnitRelationsSubordinateWithGlobalEndpoint(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	// A subordinate unit should still be notified about changes to
-	// relations with applications that aren't the one this unit is
-	// attached to if they have global scope.
-	// The logging charm is subordinate (and the info endpoint is scope=container).
-	loggingCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "logging",
-		URL:  "ch:amd64/quantal/logging-1",
-	})
-	loggingApp := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: loggingCharm,
-	})
-
-	uiCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "logging-frontend",
-		URL:  "ch:amd64/quantal/logging-frontend-1",
-	})
-	uiApp := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging-frontend",
-		Charm: uiCharm,
-	})
-
-	_ = s.makeSubordinateRelation(c, loggingApp, s.mysql, s.mysqlUnit)
-	mysqlLogUnit := findSubordinateUnit(c, loggingApp, s.mysqlUnit)
-
-	subAuthorizer := s.authorizer
-	subAuthorizer.Tag = mysqlLogUnit.Tag()
-	uniterAPI := s.newUniterAPI(c, s.ControllerModel(c).State(), subAuthorizer)
-
-	result, err := uniterAPI.WatchUnitRelations(context.Background(), params.Entities{
-		Entities: []params.Entity{{Tag: mysqlLogUnit.Tag().String()}},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
-	c.Assert(result.Results[0].Error, gc.IsNil)
-	c.Assert(result.Results[0].StringsWatcherId, gc.Equals, "1")
-	c.Assert(result.Results[0].Changes, gc.NotNil)
-
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	// Should be notified about the relation to logging frontend, since it's global scope.
-	subEndpoint, err := loggingApp.Endpoint("logging-client")
-	c.Assert(err, jc.ErrorIsNil)
-	uiEndpoint, err := uiApp.Endpoint("logging-client")
-	c.Assert(err, jc.ErrorIsNil)
-	rel := f.MakeRelation(c, &factory.RelationParams{
-		Endpoints: []state.Endpoint{subEndpoint, uiEndpoint},
-	})
-
-	wc.AssertChange(rel.Tag().Id())
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchUnitRelationsWithSubSubRelation(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	// We should be notified about relations to other subordinates
-	// (since it's possible that they'll be colocated in the same
-	// container).
-	loggingCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "logging",
-		URL:  "ch:amd64/quantal/logging-1",
-	})
-	loggingApp := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: loggingCharm,
-	})
-	monitoringCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "monitoring",
-		URL:  "ch:amd64/quantal/monitoring-1",
-	})
-	monitoringApp := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "monitoring",
-		Charm: monitoringCharm,
-	})
-
-	s.makeSubordinateRelation(c, loggingApp, s.mysql, s.mysqlUnit)
-	mysqlMonitoring := s.makeSubordinateRelation(c, monitoringApp, s.mysql, s.mysqlUnit)
-
-	monUnit := findSubordinateUnit(c, monitoringApp, s.mysqlUnit)
-
-	subAuthorizer := s.authorizer
-	subAuthorizer.Tag = monUnit.Tag()
-	uniterAPI := s.newUniterAPI(c, s.ControllerModel(c).State(), subAuthorizer)
-
-	result, err := uniterAPI.WatchUnitRelations(context.Background(), params.Entities{
-		Entities: []params.Entity{{Tag: monUnit.Tag().String()}},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Results, gc.HasLen, 1)
-	c.Assert(result.Results[0].Error, gc.IsNil)
-	c.Assert(result.Results[0].StringsWatcherId, gc.Equals, "1")
-	c.Assert(result.Results[0].Changes, gc.DeepEquals, []string{mysqlMonitoring.Tag().Id()})
-
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	// Now we relate logging and monitoring together.
-	monEp, err := monitoringApp.Endpoint("info")
-	c.Assert(err, jc.ErrorIsNil)
-
-	logEp, err := loggingApp.Endpoint("juju-info")
-	c.Assert(err, jc.ErrorIsNil)
-	rel := f.MakeRelation(c, &factory.RelationParams{
-		Endpoints: []state.Endpoint{monEp, logEp},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	// We should be told about the new logging-monitoring relation.
-	wc.AssertChange(rel.Tag().Id())
-	wc.AssertNoChange()
-
-	err = rel.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-
-	wc.AssertChange(rel.Tag().Id())
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) makeSubordinateRelation(c *gc.C, subApp, principalApp *state.Application, principalUnit *state.Unit) *state.Relation {
-	subEndpoint, err := subApp.Endpoint("info")
-	c.Assert(err, jc.ErrorIsNil)
-
-	principalEndpoint, err := principalApp.Endpoint("juju-info")
-	c.Assert(err, jc.ErrorIsNil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	rel := f.MakeRelation(c, &factory.RelationParams{
-		Endpoints: []state.Endpoint{subEndpoint, principalEndpoint},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	// Trigger the creation of the subordinate unit by entering scope
-	// on the principal unit.
-	ru, err := rel.Unit(principalUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	return rel
-}
-
-func findSubordinateUnit(c *gc.C, subApp *state.Application, principalUnit *state.Unit) *state.Unit {
-	subUnits, err := subApp.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	for _, subUnit := range subUnits {
-		principal, ok := subUnit.PrincipalName()
-		c.Assert(ok, jc.IsTrue)
-		if principal == principalUnit.Name() {
-			return subUnit
-		}
-	}
-	c.Fatalf("couldn't find subordinate unit for %q", principalUnit.Name())
-	return nil
-}
-
-func (s *uniterSuite) TestCharmArchiveSha256(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	dummyCharm := f.MakeCharm(c, &factory.CharmParams{Name: "dummy"})
-
-	args := params.CharmURLs{URLs: []params.CharmURL{
-		{URL: "something-invalid"},
-		{URL: s.wpCharm.URL()},
-		{URL: dummyCharm.URL()},
-	}}
-	result, err := s.uniter.CharmArchiveSha256(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
+	result, err := s.uniter.PrivateAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
 		Results: []params.StringResult{
 			{Error: apiservertesting.ErrUnauthorized},
-			{Result: s.wpCharm.BundleSha256()},
-			{Result: dummyCharm.BundleSha256()},
 		},
 	})
 }
 
-func (s *uniterSuite) TestCharmArchiveSha256Pending(c *gc.C) {
-	st := s.ControllerModel(c).State()
+func (s *uniterSuite) TestPrivateAddressErrorFromDomain(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	curl := charm.MustParseURL("ch:amd64/dummy-666")
-	err := st.AddCharmPlaceholder(curl)
-	c.Assert(err, jc.ErrorIsNil)
-
-	bundleSHA256 := fmt.Sprintf("%d", time.Now().Unix())
-	go func() {
-		// TODO - the base suite uses a state pool with a wallclock
-		// This is go away as an issue once we move off mongo.
-		// The first retry happens after 3 seconds so wait longer than that.
-		time.Sleep(5 * time.Second)
-		ch := testcharms.Hub.CharmDir("dummy")
-		info := state.CharmInfo{
-			Charm:       ch,
-			ID:          curl.String(),
-			StoragePath: "fake-storage-path",
-			SHA256:      bundleSHA256,
-		}
-		_, err := st.AddCharm(info)
-		c.Assert(err, jc.ErrorIsNil)
-	}()
-
-	args := params.CharmURLs{URLs: []params.CharmURL{
-		{URL: "something-invalid"},
-		{URL: s.wpCharm.URL()},
-		{URL: curl.String()},
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
 	}}
-	result, err := s.uniter.CharmArchiveSha256(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResults{
+	boom := internalerrors.New("boom")
+	s.networkService.EXPECT().GetUnitPrivateAddress(gomock.Any(), coreunit.Name("mysql/0")).Return(network.SpaceAddress{}, boom)
+
+	result, err := s.uniter.PrivateAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
 		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: s.wpCharm.BundleSha256()},
-			{Result: bundleSHA256},
+			{Error: apiservererrors.ServerError(boom)},
 		},
 	})
 }
 
-func (s *uniterSuite) TestCurrentModel(c *gc.C) {
-	model := s.ControllerModel(c)
-	result, err := s.uniter.CurrentModel(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	expected := params.ModelResult{
-		Name: model.Name(),
-		UUID: model.UUID(),
-		Type: "iaas",
+func (s *uniterSuite) TestPrivateAddress(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.Entities{Entities: []params.Entity{
+		{Tag: "unit-mysql-0"},
+	}}
+	addr := network.SpaceAddress{
+		MachineAddress: network.MachineAddress{
+			Value: "192.168.0.1/24",
+		},
 	}
-	c.Assert(result, gc.DeepEquals, expected)
+	s.networkService.EXPECT().GetUnitPrivateAddress(gomock.Any(), coreunit.Name("mysql/0")).Return(addr, nil)
+
+	result, err := s.uniter.PrivateAddress(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: addr.IP().String()},
+		},
+	})
 }
 
-func (s *uniterSuite) TestActions(c *gc.C) {
-	parallel := false
-	executionGroup := "group"
-	var actionTests = []struct {
-		description string
-		action      params.ActionResult
-	}{{
-		description: "A simple action.",
-		action: params.ActionResult{
-			Action: &params.Action{
-				Name: "fakeaction",
-				Parameters: map[string]interface{}{
-					"outfile": "foo.txt",
-				},
-				Parallel:       &parallel,
-				ExecutionGroup: &executionGroup,
-			},
-		},
+func (s *uniterSuite) TestNetworkInfoFailCanAccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/42")
+	args := params.NetworkInfoParams{
+		Unit:      "unit-foo-42",
+		Endpoints: []string{"endpoint-0", "endpoint-1"},
+	}
+
+	_, err := s.uniter.NetworkInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *uniterSuite) TestNetworkInfoErrorFromDomain(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.NetworkInfoParams{
+		Unit:      "unit-foo-42",
+		Endpoints: []string{"endpoint-0", "endpoint-1"},
+	}
+	boom := internalerrors.New("boom")
+
+	s.networkService.EXPECT().GetUnitEndpointNetworks(gomock.Any(), coreunit.Name("foo/42"),
+		args.Endpoints).Return(nil, boom)
+
+	_, err := s.uniter.NetworkInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorMatches, "boom")
+}
+
+func (s *uniterSuite) TestNetworkInfo(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	args := params.NetworkInfoParams{
+		Unit:      "unit-foo-42",
+		Endpoints: []string{"endpoint-0", "endpoint-1"},
+	}
+	addr := "192.168.0.1"
+
+	s.networkService.EXPECT().GetUnitEndpointNetworks(gomock.Any(), coreunit.Name("foo/42"),
+		args.Endpoints).Return([]domainnetwork.UnitNetwork{{
+		EndpointName:     "endpoint-0",
+		IngressAddresses: []string{addr},
 	}, {
-		description: "An action with nested parameters.",
-		action: params.ActionResult{
-			Action: &params.Action{
-				Name: "fakeaction",
-				Parameters: map[string]interface{}{
-					"outfile": "foo.bz2",
-					"compression": map[string]interface{}{
-						"kind":    "bzip",
-						"quality": 5,
+		EndpointName:     "endpoint-1",
+		IngressAddresses: []string{addr},
+	}}, nil)
+
+	result, err := s.uniter.NetworkInfo(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.NetworkInfoResults{
+		Results: map[string]params.NetworkInfoResult{
+			"endpoint-0": {IngressAddresses: []string{addr}},
+			"endpoint-1": {IngressAddresses: []string{addr}},
+		},
+	})
+}
+
+func (s *uniterSuite) TestGoalStatesUnauthorized(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.badTag = names.NewUnitTag("foo/0")
+	res, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag("foo/0").String(),
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{Error: apiservertesting.ErrUnauthorized}},
+	})
+}
+
+func (s *uniterSuite) TestBeginActions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "42").Return("bar/0", nil)
+	s.operationService.EXPECT().StartTask(gomock.Any(), "42").Return(nil)
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "47").Return("bar/0", nil)
+	s.operationService.EXPECT().StartTask(gomock.Any(), "47").Return(nil)
+
+	// Act
+	results, err := s.uniter.BeginActions(c.Context(), params.Entities{Entities: []params.Entity{
+		{Tag: "action-42"},
+		{Tag: "action-47"},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{{}, {}}})
+}
+
+func (s *uniterSuite) TestFinishActions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "42").Return("bar/0", nil)
+	taskOne := operation.CompletedTaskResult{
+		TaskID: "42",
+		Status: status.Completed.String(),
+	}
+	s.operationService.EXPECT().FinishTask(gomock.Any(), taskOne).Return(nil)
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "47").Return("bar/0", nil)
+	taskTwo := operation.CompletedTaskResult{
+		TaskID: "47",
+		Status: status.Cancelled.String(),
+	}
+	s.operationService.EXPECT().FinishTask(gomock.Any(), taskTwo).Return(nil)
+
+	// Act
+	results, err := s.uniter.FinishActions(c.Context(), params.ActionExecutionResults{Results: []params.ActionExecutionResult{
+		{ActionTag: "action-42", Status: status.Completed.String()},
+		{ActionTag: "action-47", Status: status.Cancelled.String()},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{{}, {}}})
+}
+
+func (s *uniterSuite) TestActions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+
+	tagOne := names.NewActionTag("42")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), tagOne.Id()).Return("bar/0", nil)
+	taskOne := operation.TaskArgs{
+		ActionName: "one",
+		Parameters: map[string]interface{}{"foo": "bar"},
+	}
+	s.operationService.EXPECT().GetPendingTaskByTaskID(gomock.Any(), tagOne.Id()).Return(taskOne, nil)
+
+	tagTwo := names.NewActionTag("47")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), tagTwo.Id()).Return("bar/0", nil)
+	taskTwo := operation.TaskArgs{
+		ActionName: "two",
+		Parameters: map[string]interface{}{"baz": "bar"},
+	}
+	s.operationService.EXPECT().GetPendingTaskByTaskID(gomock.Any(), tagTwo.Id()).Return(taskTwo, nil)
+
+	// Act
+	results, err := s.uniter.Actions(c.Context(), params.Entities{Entities: []params.Entity{
+		{Tag: tagOne.String()},
+		{Tag: tagTwo.String()},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 2)
+	c.Check(results.Results[0].Action, tc.DeepEquals, &params.Action{
+		Name:       "one",
+		Parameters: map[string]interface{}{"foo": "bar"},
+	})
+	c.Check(results.Results[1].Action, tc.DeepEquals, &params.Action{
+		Name:       "two",
+		Parameters: map[string]interface{}{"baz": "bar"},
+	})
+}
+
+func (s *uniterSuite) TestActionsTaskNotPending(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+
+	tagOne := names.NewActionTag("42")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), tagOne.Id()).Return("bar/0", nil)
+
+	s.operationService.EXPECT().GetPendingTaskByTaskID(gomock.Any(), tagOne.Id()).Return(operation.TaskArgs{}, operationerrors.TaskNotPending)
+
+	// Act
+	results, err := s.uniter.Actions(c.Context(), params.Entities{Entities: []params.Entity{
+		{Tag: tagOne.String()},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Check(results.Results[0].Error, tc.ErrorMatches, "action no longer available")
+}
+
+func (s *uniterSuite) TestActionStatus(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange, 3 task status with one authentication failure.
+	s.badTag = names.NewUnitTag("foo/0")
+
+	taskIDOne := "42"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDOne).Return("bar/0", nil)
+	s.operationService.EXPECT().GetTaskStatusByID(gomock.Any(), taskIDOne).Return(status.Pending.String(), nil)
+
+	taskIDTwo := "47"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDTwo).Return("bar/0", nil)
+	s.operationService.EXPECT().GetTaskStatusByID(gomock.Any(), taskIDTwo).Return(status.Running.String(), nil)
+
+	taskIDThree := "8"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDThree).Return("", coreerrors.NotFound)
+
+	// Act
+	results, err := s.uniter.ActionStatus(c.Context(), params.Entities{Entities: []params.Entity{
+		{Tag: "action-42"},
+		{Tag: "action-47"},
+		{Tag: "action-8"},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.StringResults{Results: []params.StringResult{
+		{Result: status.Pending.String()},
+		{Result: status.Running.String()},
+		{Error: &params.Error{Message: "not found", Code: "not found"}},
+	}})
+}
+
+func (s *uniterSuite) TestAuthTaskID(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "42").Return("bar/0", nil)
+	canAccess, _ := s.uniter.accessUnit(c.Context())
+
+	// Act
+	id, err := s.uniter.authTaskID(c.Context(), canAccess, "action-42")
+
+	// Assert
+	c.Assert(err, tc.IsNil)
+	c.Assert(id, tc.Equals, "42")
+}
+
+func (s *uniterSuite) TestAuthTaskIDUnitErrPerm(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.badTag = names.NewUnitTag("foo/0")
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), "42").Return(s.badTag.Id(), nil)
+	canAccess, _ := s.uniter.accessUnit(c.Context())
+
+	// Act
+	_, err := s.uniter.authTaskID(c.Context(), canAccess, "action-42")
+
+	// Assert
+	c.Assert(err, tc.ErrorMatches, "permission denied")
+}
+
+func (s *uniterSuite) TestLogActionsMessages(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange, 3 task logs with one authentication failure.
+	s.badTag = names.NewUnitTag("foo/0")
+
+	taskIDOne := "42"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDOne).Return("bar/0", nil)
+	msgOne := "message one"
+	s.operationService.EXPECT().LogTaskMessage(gomock.Any(), taskIDOne, msgOne).Return(nil)
+
+	taskIDTwo := "47"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDTwo).Return("bar/0", nil)
+	msgTwo := "message two"
+	s.operationService.EXPECT().LogTaskMessage(gomock.Any(), taskIDTwo, msgTwo).Return(nil)
+
+	taskIDThree := "8"
+	s.operationService.EXPECT().GetReceiverFromTaskID(gomock.Any(), taskIDThree).Return("", coreerrors.NotFound)
+	msgThree := "message three"
+
+	// Act
+	results, err := s.uniter.LogActionsMessages(c.Context(), params.ActionMessageParams{Messages: []params.EntityString{
+		{Tag: "action-42", Value: msgOne},
+		{Tag: "action-47", Value: msgTwo},
+		{Tag: "action-8", Value: msgThree},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{
+		{},
+		{},
+		{Error: &params.Error{Message: "not found", Code: "not found"}},
+	}})
+}
+
+func (s *uniterSuite) expectedGetConfigSettings(unitName coreunit.Name, settings map[string]any, err error) {
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(coreapplication.UUID(unitName.Application()), err)
+	if err == nil {
+		s.applicationService.EXPECT().GetApplicationConfigWithDefaults(
+			gomock.Any(), coreapplication.UUID(unitName.Application()),
+		).Return(settings, nil)
+	}
+}
+
+func (s *uniterSuite) expectGetUnitPrincipal(unitName, principalName coreunit.Name, ok bool, err error) {
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return(principalName, ok, err)
+}
+
+func (s *uniterSuite) expectGetUnitMachineUUID(unitName coreunit.Name, machineUUID coremachine.UUID, err error) {
+	s.applicationService.EXPECT().GetUnitMachineUUID(gomock.Any(), unitName).Return(machineUUID, err)
+}
+
+func (s *uniterSuite) expectGetUnitMachineName(unitName coreunit.Name, machineName coremachine.Name, err error) {
+	s.applicationService.EXPECT().GetUnitMachineName(gomock.Any(), unitName).Return(machineName, err)
+}
+
+func (s *uniterSuite) expectedGetAvailabilityZone(machineUUID coremachine.UUID, az string, err error) {
+	s.machineService.EXPECT().AvailabilityZone(gomock.Any(), machineUUID).Return(az, err)
+}
+
+func (s *uniterSuite) expectGetHasSubordinates(c *tc.C, unitName coreunit.Name, subordinateNames []coreunit.Name, err error) {
+	s.applicationService.EXPECT().GetUnitSubordinates(gomock.Any(), unitName).Return(subordinateNames, err)
+}
+
+func (s *uniterSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.machineService = NewMockMachineService(ctrl)
+	s.networkService = NewMockNetworkService(ctrl)
+	s.operationService = NewMockOperationService(ctrl)
+	s.resolveService = NewMockResolveService(ctrl)
+	s.removalService = NewMockRemovalService(ctrl)
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+
+	authFunc := func(ctx context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			return tag != s.badTag
+		}, nil
+	}
+	s.uniter = &UniterAPI{
+		applicationService: s.applicationService,
+		machineService:     s.machineService,
+		networkService:     s.networkService,
+		operationService:   s.operationService,
+		resolveService:     s.resolveService,
+		removalService:     s.removalService,
+		accessUnit:         authFunc,
+		accessApplication:  authFunc,
+		watcherRegistry:    s.watcherRegistry,
+	}
+
+	c.Cleanup(func() {
+		s.applicationService = nil
+		s.machineService = nil
+		s.networkService = nil
+		s.operationService = nil
+		s.resolveService = nil
+		s.removalService = nil
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
+}
+
+func (s *uniterSuite) expectWatchUnitResolveMode(
+	ctrl *gomock.Controller,
+	unitName coreunit.Name,
+	watcherID string,
+) {
+	mockWatcher := NewMockNotifyWatcher(ctrl)
+	channel := make(chan struct{}, 1)
+	channel <- struct{}{}
+	mockWatcher.EXPECT().Changes().Return(channel).AnyTimes()
+	s.resolveService.EXPECT().WatchUnitResolveMode(gomock.Any(), unitName).Return(mockWatcher, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return(watcherID, nil).AnyTimes()
+}
+
+type leadershipSettings interface {
+	// Merge merges in the provided leadership settings. Only leaders for
+	// the given service may perform this operation.
+	Merge(ctx context.Context, bulkArgs params.MergeLeadershipSettingsBulkParams) (params.ErrorResults, error)
+
+	// Read reads leadership settings for the provided service ID. Any
+	// unit of the service may perform this operation.
+	Read(ctx context.Context, bulkArgs params.Entities) (params.GetLeadershipSettingsBulkResults, error)
+
+	// WatchLeadershipSettings will block the caller until leadership settings
+	// for the given service ID change.
+	WatchLeadershipSettings(ctx context.Context, bulkArgs params.Entities) (params.NotifyWatchResults, error)
+}
+
+type leadershipUniterSuite struct {
+	testhelpers.IsolationSuite
+
+	watcherRegistry *MockWatcherRegistry
+
+	uniter leadershipSettings
+
+	setupMocks func(c *tc.C) *gomock.Controller
+}
+
+func (s *leadershipUniterSuite) TestLeadershipSettingsMerge(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	results, err := s.uniter.Merge(c.Context(), params.MergeLeadershipSettingsBulkParams{
+		Params: []params.MergeLeadershipSettingsParam{
+			{
+				ApplicationTag: "app1",
+				Settings: params.Settings{
+					"key1": "value1",
+				},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	})
+}
+
+func (s *leadershipUniterSuite) TestLeadershipSettingsRead(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	results, err := s.uniter.Read(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: "app1",
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.GetLeadershipSettingsBulkResults{
+		Results: []params.GetLeadershipSettingsResult{{}},
+	})
+}
+
+func (s *leadershipUniterSuite) TestLeadershipSettingsWatchLeadershipSettings(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	results, err := s.uniter.WatchLeadershipSettings(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{
+				Tag: "app1",
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.NotifyWatchResults{
+		Results: []params.NotifyWatchResult{{
+			NotifyWatcherId: "watcher1",
+		}},
+	})
+}
+
+type uniterv19Suite struct {
+	leadershipUniterSuite
+}
+
+func TestUniterv19Suite(t *testing.T) {
+	tc.Run(t, &uniterv19Suite{})
+}
+
+func (s *uniterv19Suite) SetUpTest(c *tc.C) {
+	s.setupMocks = func(c *tc.C) *gomock.Controller {
+		ctrl := gomock.NewController(c)
+
+		s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+		s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("watcher1", nil).AnyTimes()
+
+		s.uniter = &UniterAPIv19{
+			UniterAPIv20: &UniterAPIv20{
+				UniterAPI: &UniterAPI{
+					watcherRegistry: s.watcherRegistry,
+				},
+			},
+		}
+
+		return ctrl
+	}
+}
+
+type uniterv20Suite struct {
+	leadershipUniterSuite
+}
+
+func TestUniterv20Suite(t *testing.T) {
+	tc.Run(t, &uniterv20Suite{})
+}
+
+func (s *uniterv20Suite) SetUpTest(c *tc.C) {
+	s.setupMocks = func(c *tc.C) *gomock.Controller {
+		ctrl := gomock.NewController(c)
+
+		s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+		s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("watcher1", nil).AnyTimes()
+
+		s.uniter = &UniterAPIv20{
+			UniterAPI: &UniterAPI{
+				modelUUID:       tc.Must(c, coremodel.NewUUID),
+				modelType:       coremodel.IAAS,
+				watcherRegistry: s.watcherRegistry,
+			},
+		}
+
+		return ctrl
+	}
+}
+
+type uniterRelationSuite struct {
+	testhelpers.IsolationSuite
+
+	wordpressAppTag  names.ApplicationTag
+	authTag          names.Tag
+	wordpressUnitTag names.UnitTag
+
+	applicationService *MockApplicationService
+	networkService     *MockNetworkService
+	relationService    *MockRelationService
+	statusService      *MockStatusService
+	watcherRegistry    *MockWatcherRegistry
+
+	uniter *UniterAPI
+}
+
+func TestUniterRelationSuite(t *testing.T) {
+	tc.Run(t, &uniterRelationSuite{})
+}
+
+func (s *uniterRelationSuite) SetUpSuite(c *tc.C) {
+	s.IsolationSuite.SetUpSuite(c)
+	s.wordpressAppTag = names.NewApplicationTag("wordpress")
+	s.wordpressUnitTag = names.NewUnitTag("wordpress/0")
+	s.authTag = s.wordpressUnitTag
+}
+
+func (s *uniterRelationSuite) TestRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relID := 42
+
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	s.expectGetRelationDetails(c, relUUID, relID, relTag)
+
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: "unit-wordpress-0"},
+	}}
+	result, err := s.uniter.Relation(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.RelationResultsV2{
+		Results: []params.RelationResultV2{
+			{
+				Id:        relID,
+				Key:       relTag.Id(),
+				Life:      life.Alive,
+				Suspended: false,
+				Endpoint: params.Endpoint{
+					ApplicationName: "wordpress",
+					Relation: params.CharmRelation{
+						Name:      "database",
+						Role:      string(charm.RoleRequirer),
+						Interface: "mysql",
+						Optional:  false,
+						Limit:     0,
+						Scope:     string(charm.ScopeGlobal),
 					},
 				},
-				Parallel:       &parallel,
-				ExecutionGroup: &executionGroup,
+				OtherApplication: params.RelatedApplicationDetails{
+					ApplicationName: "mysql",
+					ModelUUID:       s.uniter.modelUUID.String(),
+				},
 			},
 		},
-	}}
-
-	for i, actionTest := range actionTests {
-		c.Logf("test %d: %s", i, actionTest.description)
-
-		operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-		c.Assert(err, jc.ErrorIsNil)
-		a, err := s.ControllerModel(c).AddAction(s.wordpressUnit,
-			operationID,
-			actionTest.action.Action.Name,
-			actionTest.action.Action.Parameters, &parallel, &executionGroup)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(names.IsValidAction(a.Id()), gc.Equals, true)
-		actionTag := names.NewActionTag(a.Id())
-		c.Assert(a.ActionTag(), gc.Equals, actionTag)
-
-		args := params.Entities{
-			Entities: []params.Entity{{
-				Tag: actionTag.String(),
-			}},
-		}
-		results, err := s.uniter.Actions(context.Background(), args)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(results.Results, gc.HasLen, 1)
-
-		actionsQueryResult := results.Results[0]
-
-		c.Assert(actionsQueryResult, jc.DeepEquals, actionTest.action)
-	}
+	})
 }
 
-func (s *uniterSuite) TestActionsNotPresent(c *gc.C) {
-	uuid, err := uuid.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{
-		Entities: []params.Entity{{
-			Tag: names.NewActionTag(uuid.String()).String(),
-		}},
-	}
-	results, err := s.uniter.Actions(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterRelationSuite) TestRelationSuspended(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
 
-	c.Assert(results.Results, gc.HasLen, 1)
-	actionsQueryResult := results.Results[0]
-	c.Assert(actionsQueryResult.Error, gc.NotNil)
-	c.Assert(actionsQueryResult.Error, gc.ErrorMatches, `action "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" not found`)
-}
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relID := 42
 
-func (s *uniterSuite) TestActionsWrongUnit(c *gc.C) {
-	// Action doesn't match unit.
-	mysqlUnitAuthorizer := apiservertesting.FakeAuthorizer{
-		Tag: s.mysqlUnit.Tag(),
-	}
-	mysqlUnitFacade := s.newUniterAPI(c, s.ControllerModel(c).State(), mysqlUnitAuthorizer)
-
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{
-		Entities: []params.Entity{{
-			Tag: action.Tag().String(),
-		}},
-	}
-	actions, err := mysqlUnitFacade.Actions(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(actions.Results), gc.Equals, 1)
-	c.Assert(actions.Results[0].Error, jc.Satisfies, params.IsCodeUnauthorized)
-}
-
-func (s *uniterSuite) TestActionsPermissionDenied(c *gc.C) {
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action, err := s.ControllerModel(c).AddAction(s.mysqlUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.Entities{
-		Entities: []params.Entity{{
-			Tag: action.Tag().String(),
-		}},
-	}
-	actions, err := s.uniter.Actions(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(actions.Results), gc.Equals, 1)
-	c.Assert(actions.Results[0].Error, jc.Satisfies, params.IsCodeUnauthorized)
-}
-
-func (s *uniterSuite) TestFinishActionsSuccess(c *gc.C) {
-	testName := "fakeaction"
-	testOutput := map[string]interface{}{"output": "completed fakeaction successfully"}
-
-	results, err := s.wordpressUnit.CompletedActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, ([]state.Action)(nil))
-
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, testName, nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	actionResults := params.ActionExecutionResults{
-		Results: []params.ActionExecutionResult{{
-			ActionTag: action.ActionTag().String(),
-			Status:    params.ActionCompleted,
-			Results:   testOutput,
-		}},
-	}
-	res, err := s.uniter.FinishActions(context.Background(), actionResults)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res, gc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{{Error: nil}}})
-
-	results, err = s.wordpressUnit.CompletedActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 1)
-	c.Assert(results[0].Status(), gc.Equals, state.ActionCompleted)
-	res2, errstr := results[0].Results()
-	c.Assert(errstr, gc.Equals, "")
-	c.Assert(res2, gc.DeepEquals, testOutput)
-	c.Assert(results[0].Name(), gc.Equals, testName)
-}
-
-func (s *uniterSuite) TestFinishActionsFailure(c *gc.C) {
-	testName := "fakeaction"
-	testError := "fakeaction was a dismal failure"
-
-	results, err := s.wordpressUnit.CompletedActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, ([]state.Action)(nil))
-
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	action, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, testName, nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	actionResults := params.ActionExecutionResults{
-		Results: []params.ActionExecutionResult{{
-			ActionTag: action.ActionTag().String(),
-			Status:    params.ActionFailed,
-			Results:   nil,
-			Message:   testError,
-		}},
-	}
-	res, err := s.uniter.FinishActions(context.Background(), actionResults)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res, gc.DeepEquals, params.ErrorResults{Results: []params.ErrorResult{{Error: nil}}})
-
-	results, err = s.wordpressUnit.CompletedActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 1)
-	c.Assert(results[0].Status(), gc.Equals, state.ActionFailed)
-	res2, errstr := results[0].Results()
-	c.Assert(errstr, gc.Equals, testError)
-	c.Assert(res2, gc.DeepEquals, map[string]interface{}{})
-	c.Assert(results[0].Name(), gc.Equals, testName)
-}
-
-func (s *uniterSuite) TestFinishActionsAuthAccess(c *gc.C) {
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 2)
-	c.Assert(err, jc.ErrorIsNil)
-	good, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	bad, err := s.ControllerModel(c).AddAction(s.mysqlUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	var tests = []struct {
-		actionTag names.ActionTag
-		err       error
-	}{
-		{actionTag: good.ActionTag(), err: nil},
-		{actionTag: bad.ActionTag(), err: apiservererrors.ErrPerm},
-	}
-
-	// Queue up actions from tests
-	actionResults := params.ActionExecutionResults{Results: make([]params.ActionExecutionResult, len(tests))}
-	for i, test := range tests {
-		actionResults.Results[i] = params.ActionExecutionResult{
-			ActionTag: test.actionTag.String(),
-			Status:    params.ActionCompleted,
-			Results:   map[string]interface{}{},
-		}
-	}
-
-	// Invoke FinishActions
-	res, err := s.uniter.FinishActions(context.Background(), actionResults)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Verify permissions errors for actions queued on different unit
-	for i, result := range res.Results {
-		expected := tests[i].err
-		if expected != nil {
-			c.Assert(result.Error, gc.NotNil)
-			c.Assert(result.Error.Error(), gc.Equals, expected.Error())
-		} else {
-			c.Assert(result.Error, gc.IsNil)
-		}
-	}
-}
-
-func (s *uniterSuite) TestBeginActions(c *gc.C) {
-	ten_seconds_ago := time.Now().Add(-10 * time.Second)
-	operationID, err := s.ControllerModel(c).EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	good, err := s.ControllerModel(c).AddAction(s.wordpressUnit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	running, err := s.wordpressUnit.RunningActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(running), gc.Equals, 0, gc.Commentf("expected no running actions, got %d", len(running)))
-
-	args := params.Entities{Entities: []params.Entity{{Tag: good.ActionTag().String()}}}
-	res, err := s.uniter.BeginActions(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(res.Results), gc.Equals, 1)
-	c.Assert(res.Results[0].Error, gc.IsNil)
-
-	running, err = s.wordpressUnit.RunningActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(running), gc.Equals, 1, gc.Commentf("expected one running action, got %d", len(running)))
-	c.Assert(running[0].ActionTag(), gc.Equals, good.ActionTag())
-	enqueued, started := running[0].Enqueued(), running[0].Started()
-	c.Assert(ten_seconds_ago.Before(enqueued), jc.IsTrue, gc.Commentf("enqueued time should be after 10 seconds ago"))
-	c.Assert(ten_seconds_ago.Before(started), jc.IsTrue, gc.Commentf("started time should be after 10 seconds ago"))
-	c.Assert(started.After(enqueued) || started.Equal(enqueued), jc.IsTrue, gc.Commentf("started should be after or equal to enqueued time"))
-}
-
-func (s *uniterSuite) TestRelation(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	wpEp, err := rel.Endpoint("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	// Expect a suspended relation
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{
+		Life:      life.Alive,
+		UUID:      relUUID,
+		ID:        relID,
+		Key:       relKey,
+		Suspended: true,
+		Endpoints: []relation.Endpoint{
+			{
+				ApplicationName: "wordpress",
+				Relation: charm.Relation{
+					Name:      "database",
+					Role:      charm.RoleRequirer,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+			{
+				ApplicationName: "mysql",
+				Relation: charm.Relation{
+					Name:      "mysql",
+					Role:      charm.RoleProvider,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+		},
+	}, nil)
 
 	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: "relation-42", Unit: "unit-foo-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-foo-0"},
-		{Relation: "relation-blah", Unit: "unit-wordpress-0"},
-		{Relation: "application-foo", Unit: "user-foo"},
-		{Relation: "foo", Unit: "bar"},
-		{Relation: "unit-wordpress-0", Unit: rel.Tag().String()},
+		{Relation: relTag.String(), Unit: "unit-wordpress-0"},
 	}}
-	result, err := s.uniter.Relation(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.RelationResults{
-		Results: []params.RelationResult{
-			{Error: apiservertesting.ErrUnauthorized},
+	result, err := s.uniter.Relation(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.RelationResultsV2{
+		Results: []params.RelationResultV2{
 			{
-				Id:        rel.Id(),
-				Key:       rel.String(),
-				Life:      life.Value(rel.Life().String()),
-				Suspended: rel.Suspended(),
+				Id:        relID,
+				Key:       relTag.Id(),
+				Life:      life.Alive,
+				Suspended: true,
 				Endpoint: params.Endpoint{
-					ApplicationName: wpEp.ApplicationName,
-					Relation:        params.NewCharmRelation(wpEp.Relation),
+					ApplicationName: "wordpress",
+					Relation: params.CharmRelation{
+						Name:      "database",
+						Role:      string(charm.RoleRequirer),
+						Interface: "mysql",
+						Optional:  false,
+						Limit:     0,
+						Scope:     string(charm.ScopeGlobal),
+					},
 				},
-				OtherApplication: s.mysql.Name(),
+				OtherApplication: params.RelatedApplicationDetails{
+					ApplicationName: "mysql",
+					ModelUUID:       s.uniter.modelUUID.String(),
+				},
 			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestPeerRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("wordpress:self")
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relID := 42
+
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{
+		Life: life.Alive,
+		UUID: relUUID,
+		ID:   relID,
+		Key:  relKey,
+		Endpoints: []relation.Endpoint{
+			{
+				ApplicationName: "wordpress",
+				Relation: charm.Relation{
+					Name:      "self",
+					Role:      charm.RolePeer,
+					Interface: "me",
+					Scope:     charm.ScopeContainer,
+				},
+			},
+		},
+	}, nil)
+
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: "unit-wordpress-0"},
+	}}
+	result, err := s.uniter.Relation(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.RelationResultsV2{
+		Results: []params.RelationResultV2{
+			{
+				Id:        relID,
+				Key:       relTag.Id(),
+				Life:      life.Alive,
+				Suspended: false,
+				Endpoint: params.Endpoint{
+					ApplicationName: "wordpress",
+					Relation: params.CharmRelation{
+						Name:      "self",
+						Role:      string(charm.RolePeer),
+						Interface: "me",
+						Optional:  false,
+						Limit:     0,
+						Scope:     string(charm.ScopeContainer),
+					},
+				},
+				OtherApplication: params.RelatedApplicationDetails{
+					ApplicationName: "wordpress",
+					ModelUUID:       s.uniter.modelUUID.String(),
+				},
+			},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestInvalidPeerRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("wordpress:self")
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relID := 42
+
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{
+		Life: life.Alive,
+		UUID: relUUID,
+		ID:   relID,
+		Key:  relKey,
+		Endpoints: []relation.Endpoint{
+			{
+				ApplicationName: "wordpress",
+				Relation: charm.Relation{
+					Name:      "self",
+					Role:      charm.RoleRequirer, // invalid role for peer relation
+					Interface: "me",
+					Scope:     charm.ScopeContainer,
+				},
+			},
+		},
+	}, nil)
+
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: "unit-wordpress-0"},
+	}}
+	result, err := s.uniter.Relation(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.ErrorMatches, ".*no other application found.*")
+}
+
+// TestRelationUnauthorized tests the different scenarios where
+// ErrUnauthorized will be returned. It also tests the bulk
+// functionality of the Relation facade method.
+func (s *uniterRelationSuite) TestRelationUnauthorized(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	// arrange
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relTagFail := names.NewRelationTag("foo:database wordpress:mysql")
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTagFail.Id()),
+		"",
+		relationerrors.RelationNotFound,
+	)
+
+	// act
+	args := params.RelationUnits{
+		RelationUnits: []params.RelationUnit{
+			// "relation-42" is not a valid relation key.
+			{Relation: "relation-42", Unit: "unit-wordpress-0"},
+			// "user-foo" is not a parsable unit tag.
+			{Unit: "user-foo"},
+			// "unit-mysql-0" is not the authorizing tag, though
+			// is part of the relation.
+			{Relation: relTag.String(), Unit: "unit-mysql-0"},
+			// Not found relation with correct unit.
+			{Relation: relTagFail.String(), Unit: "unit-wordpress-0"},
+		},
+	}
+	result, err := s.uniter.Relation(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.RelationResultsV2{
+		Results: []params.RelationResultV2{
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
@@ -1796,1945 +1908,1333 @@ func (s *uniterSuite) TestRelation(c *gc.C) {
 	})
 }
 
-func (s *uniterSuite) TestRelationById(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	c.Assert(rel.Id(), gc.Equals, 0)
-	wpEp, err := rel.Endpoint("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterRelationSuite) TestRelationById(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relIDNotFound := -1
+	relID := 31
+	relIDUnexpectedAppName := 42
 
-	// Add another relation to mysql application, so we can see we can't
-	// get it.
-	otherRel, _, _ := s.addRelatedApplication(c, "mysql", "logging", s.mysqlUnit)
+	s.expectGetRelationUUIDByID(relIDNotFound, relUUID, nil)
+	s.expectGetRelationDetailsNotFound(relUUID)
+
+	s.expectGetRelationUUIDByID(relID, relUUID, nil)
+	s.expectGetRelationDetails(c, relUUID, relID, relTag)
+
+	s.expectGetRelationUUIDByID(relIDUnexpectedAppName, relUUID, nil)
+	s.expectGetRelationDetailsUnexpectedAppName(c, relUUID)
 
 	args := params.RelationIds{
-		RelationIds: []int{-1, rel.Id(), otherRel.Id(), 42, 234},
+		RelationIds: []int{
+			// The relation ID does not exist: ErrUnauthorized.
+			relIDNotFound,
+			// Successful result.
+			relID,
+			// The auth application is not part of the relation: ErrUnauthorized.
+			relIDUnexpectedAppName,
+		},
 	}
-	result, err := s.uniter.RelationById(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.RelationResults{
-		Results: []params.RelationResult{
+	result, err := s.uniter.RelationById(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.RelationResultsV2{
+		Results: []params.RelationResultV2{
 			{Error: apiservertesting.ErrUnauthorized},
 			{
-				Id:        rel.Id(),
-				Key:       rel.String(),
-				Life:      life.Value(rel.Life().String()),
-				Suspended: rel.Suspended(),
+				Id:        relID,
+				Key:       relTag.Id(),
+				Life:      life.Alive,
+				Suspended: false,
 				Endpoint: params.Endpoint{
-					ApplicationName: wpEp.ApplicationName,
-					Relation:        params.NewCharmRelation(wpEp.Relation),
+					ApplicationName: "wordpress",
+					Relation: params.CharmRelation{
+						Name:      "database",
+						Role:      string(charm.RoleRequirer),
+						Interface: "mysql",
+						Optional:  false,
+						Limit:     0,
+						Scope:     string(charm.ScopeGlobal),
+					},
 				},
-				OtherApplication: s.mysql.Name(),
+				OtherApplication: params.RelatedApplicationDetails{
+					ApplicationName: "mysql",
+					ModelUUID:       s.uniter.modelUUID.String(),
+				},
 			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
 }
 
-func (s *uniterSuite) TestProviderType(c *gc.C) {
-	modelInfo, err := s.ControllerServiceFactory(c).ModelInfo().GetModelInfo(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterRelationSuite) TestReadSettingsApplication(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	appID := tc.Must(c, coreapplication.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
 
-	result, err := s.uniter.ProviderType(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringResult{Result: modelInfo.CloudType})
-}
-
-func (s *uniterSuite) TestEnterScope(c *gc.C) {
-	// Set wordpressUnit's private address first.
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine0.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	s.expectGetApplicationUUIDByName(s.wordpressAppTag.Id(), appID)
+	s.expectGetRelationApplicationSettingsWithLeader(coreunit.Name(s.wordpressUnitTag.Id()), relUUID, appID, settings)
 
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, false)
-
+	// act
 	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: "relation-42", Unit: "unit-foo-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: "relation-42", Unit: "unit-wordpress-0"},
-		{Relation: "relation-foo", Unit: "unit-wordpress-0"},
-		{Relation: "application-wordpress", Unit: "unit-foo-0"},
-		{Relation: "foo", Unit: "bar"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), Unit: "application-wordpress"},
-		{Relation: rel.Tag().String(), Unit: "application-mysql"},
-		{Relation: rel.Tag().String(), Unit: "user-foo"},
+		{Relation: relTag.String(), Unit: s.wordpressAppTag.String()},
 	}}
-	result, err := s.uniter.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-		},
-	})
+	result, err := s.uniter.ReadSettings(c.Context(), args)
 
-	// Verify the scope changes and settings.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.wordpressUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"private-address": "1.2.3.4",
-		"ingress-address": "1.2.3.4",
-		"egress-subnets":  "1.2.3.4/32",
-	})
-}
-
-func (s *uniterSuite) TestEnterScopeIgnoredForInvalidPrincipals(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	loggingCharm := f.MakeCharm(c, &factory.CharmParams{
-		Name: "logging",
-		URL:  "ch:amd64/quantal/logging-1",
-	})
-	logging := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: loggingCharm,
-	})
-	mysqlRel := s.addRelation(c, "logging", "mysql")
-	wpRel := s.addRelation(c, "logging", "wordpress")
-
-	// Create logging units for each of the mysql and wp units.
-	mysqlRU, err := mysqlRel.Unit(s.mysqlUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = mysqlRU.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	mysqlLoggingU := findSubordinateUnit(c, logging, s.mysqlUnit)
-	mysqlLoggingRU, err := mysqlRel.Unit(mysqlLoggingU)
-	c.Assert(err, jc.ErrorIsNil)
-	err = mysqlLoggingRU.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	wpRU, err := wpRel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = wpRU.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	wpLoggingU := findSubordinateUnit(c, logging, s.wordpressUnit)
-	_, err = wpRel.Unit(wpLoggingU)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Sanity check - a mysqlRel RU for wpLoggingU is invalid.
-	ru, err := mysqlRel.Unit(wpLoggingU)
-	c.Assert(err, jc.ErrorIsNil)
-	valid, err := ru.Valid()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(valid, jc.IsFalse)
-
-	subAuthorizer := s.authorizer
-	subAuthorizer.Tag = wpLoggingU.Tag()
-	st := s.ControllerModel(c).State()
-	uniterAPI := s.newUniterAPI(c, st, subAuthorizer)
-
-	// Count how many relationscopes records there are beforehand.
-	scopesBefore := countRelationScopes(c, st, mysqlRel)
-	// One for each unit of mysql and the logging subordinate.
-	c.Assert(scopesBefore, gc.Equals, 2)
-
-	// Asking the API to add wpLoggingU to mysqlRel silently
-	// fails. This means that we'll drop incorrect requests from
-	// uniters to re-enter the relation scope after the upgrade step
-	// has cleaned them up.
-	// See https://bugs.launchpad.net/juju/+bug/1699050
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{{
-		Relation: mysqlRel.Tag().String(),
-		Unit:     wpLoggingU.Tag().String(),
-	}}}
-	result, err := uniterAPI.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
-
-	scopesAfter := countRelationScopes(c, st, mysqlRel)
-	c.Assert(scopesAfter, gc.Equals, scopesBefore)
-}
-
-func countRelationScopes(c *gc.C, st *state.State, rel *state.Relation) int {
-	coll := st.MongoSession().DB("juju").C("relationscopes")
-	count, err := coll.Find(bson.M{"key": bson.M{
-		"$regex": fmt.Sprintf(`^r#%d#`, rel.Id()),
-	}}).Count()
-	c.Assert(err, jc.ErrorIsNil)
-	return count
-}
-
-func (s *uniterSuite) TestLeaveScope(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: "relation-42", Unit: "unit-foo-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: "relation-42", Unit: "unit-wordpress-0"},
-		{Relation: "relation-foo", Unit: "unit-wordpress-0"},
-		{Relation: "application-wordpress", Unit: "unit-foo-0"},
-		{Relation: "foo", Unit: "bar"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), Unit: "application-wordpress"},
-		{Relation: rel.Tag().String(), Unit: "application-mysql"},
-		{Relation: rel.Tag().String(), Unit: "user-foo"},
-	}}
-	result, err := s.uniter.LeaveScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{apiservertesting.ErrUnauthorized},
-			{nil},
-			{nil},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{apiservertesting.ErrUnauthorized},
-			{&params.Error{Message: `"bar" is not a valid tag`}},
-			{apiservertesting.ErrUnauthorized},
-			{&params.Error{Message: `"application-wordpress" is not a valid unit tag`}},
-			{&params.Error{Message: `"application-mysql" is not a valid unit tag`}},
-			{&params.Error{Message: `"user-foo" is not a valid unit tag`}},
-		},
-	})
-
-	// Verify the scope changes.
-	s.assertInScope(c, relUnit, false)
-	readSettings, err := relUnit.ReadSettings(s.wordpressUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, settings)
-}
-
-func (s *uniterSuite) TestRelationsSuspended(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "logging"}),
-	})
-
-	rel2 := s.addRelation(c, "wordpress", "logging")
-	err = rel2.SetSuspended(true, "")
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{
-		Entities: []params.Entity{
-			{s.wordpressUnit.Tag().String()},
-			{s.mysqlUnit.Tag().String()},
-			{"unit-unknown-1"},
-			{"application-wordpress"},
-			{"machine-0"},
-			{rel.Tag().String()},
-		},
-	}
-	expect := params.RelationUnitStatusResults{
-		Results: []params.RelationUnitStatusResult{
-			{RelationResults: []params.RelationUnitStatus{{
-				RelationTag: rel.Tag().String(),
-				InScope:     true,
-				Suspended:   false,
-			}, {
-				RelationTag: rel2.Tag().String(),
-				InScope:     false,
-				Suspended:   true,
-			}},
-			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	}
-	check := func() {
-		result, err := s.uniter.RelationsStatus(context.Background(), args)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(result, gc.DeepEquals, expect)
-	}
-	check()
-	err = relUnit.PrepareLeaveScope()
-	c.Assert(err, jc.ErrorIsNil)
-	check()
-}
-
-func (s *uniterSuite) TestSetRelationsStatusNotLeader(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.leadershipChecker.isLeader = false
-	args := params.RelationStatusArgs{
-		Args: []params.RelationStatusArg{
-			{s.wordpressUnit.Tag().String(), rel.Id(), params.Suspended, "message"},
-		},
-	}
-	result, err := s.uniter.SetRelationStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.OneError(), gc.ErrorMatches, `"wordpress/0" is not leader of "wordpress"`)
-}
-
-func (s *uniterSuite) TestSetRelationsStatusLeader(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	err := rel.SetStatus(status.StatusInfo{Status: status.Suspending, Message: "going, going"})
-	c.Assert(err, jc.ErrorIsNil)
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "logging"}),
-	})
-	rel2 := s.addRelation(c, "wordpress", "logging")
-	err = rel2.SetSuspended(true, "")
-	c.Assert(err, jc.ErrorIsNil)
-	err = rel.SetStatus(status.StatusInfo{Status: status.Suspending, Message: ""})
-	c.Assert(err, jc.ErrorIsNil)
-
-	f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "wp2",
-		Charm: s.wpCharm,
-	})
-	rel3 := s.addRelation(c, "wp2", "logging")
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.RelationStatusArgs{
-		Args: []params.RelationStatusArg{
-			{s.wordpressUnit.Tag().String(), rel.Id(), params.Suspended, "message"},
-			// This arg omits the explicit unit tag to test older servers.
-			{RelationId: rel2.Id(), Status: params.Suspended, Message: "gone"},
-			{s.wordpressUnit.Tag().String(), rel3.Id(), params.Broken, ""},
-			{RelationId: 4},
-		},
-	}
-	expect := params.ErrorResults{
-		Results: []params.ErrorResult{
-			{},
-			{},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	}
-	check := func(rel *state.Relation, expectedStatus status.Status, expectedMessage string) {
-		err = rel.Refresh()
-		c.Assert(err, jc.ErrorIsNil)
-		relStatus, err := rel.Status()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(relStatus.Status, gc.Equals, expectedStatus)
-		c.Assert(relStatus.Message, gc.Equals, expectedMessage)
-	}
-
-	s.leadershipChecker.isLeader = true
-
-	result, err := s.uniter.SetRelationStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, expect)
-	check(rel, status.Suspended, "message")
-	check(rel2, status.Suspended, "gone")
-}
-
-func (s *uniterSuite) TestReadSettings(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	err = rel.UpdateApplicationSettings("wordpress", &token{isLeader: true}, map[string]interface{}{
-		"wanda": "firebaugh",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.leadershipChecker.isLeader = true
-
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: "relation-42", Unit: "unit-foo-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: "relation-42", Unit: "unit-wordpress-0"},
-		{Relation: "relation-foo", Unit: ""},
-		{Relation: "application-wordpress", Unit: "unit-foo-0"},
-		{Relation: "foo", Unit: "bar"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), Unit: "application-wordpress"},
-		{Relation: rel.Tag().String(), Unit: "application-mysql"},
-		{Relation: rel.Tag().String(), Unit: "user-foo"},
-	}}
-	result, err := s.uniter.ReadSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
 		Results: []params.SettingsResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Settings: params.Settings{
-				"some": "settings",
-			}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
 			{Settings: params.Settings{
 				"wanda": "firebaugh",
 			}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
 }
 
-func (s *uniterSuite) TestReadSettingsForApplicationWhenNotLeader(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
+func (s *uniterRelationSuite) TestReadSettingsUnit(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
 
-	err = rel.UpdateApplicationSettings("wordpress", &token{isLeader: true}, map[string]interface{}{
-		"wanda": "firebaugh",
-	})
-	c.Assert(err, jc.ErrorIsNil)
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+	)
+	s.relationService.EXPECT().GetRelationUnitSettings(
+		gomock.Any(), relUUID, coreunit.Name(s.wordpressUnitTag.Id())).Return(settings, nil)
 
-	s.leadershipChecker.isLeader = false
-
+	// act
 	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: rel.Tag().String(), Unit: "application-wordpress"},
+		{Relation: relTag.String(), Unit: s.wordpressUnitTag.String()},
 	}}
-	result, err := s.uniter.ReadSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
-		Results: []params.SettingsResult{
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
+	result, err := s.uniter.ReadSettings(c.Context(), args)
 
-func (s *uniterSuite) TestReadSettingsForApplicationInPeerRelation(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	riak := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "riak",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "riak"}),
-	})
-	ep, err := riak.Endpoint("ring")
-	c.Assert(err, jc.ErrorIsNil)
-	st := s.ControllerModel(c).State()
-	rel, err := st.EndpointsRelation(ep)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = rel.UpdateApplicationSettings("riak", &fakeToken{}, map[string]interface{}{
-		"deerhoof": "little hollywood",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	riakUnit := f.MakeUnit(c, &factory.UnitParams{
-		Application: riak,
-		Machine:     s.machine0,
-	})
-
-	relUnit, err := rel.Unit(riakUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	auth := apiservertesting.FakeAuthorizer{Tag: riakUnit.Tag()}
-	uniter := s.newUniterAPI(c, st, auth)
-
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{{
-		Relation: rel.Tag().String(),
-		Unit:     "application-riak",
-	}}}
-	result, err := uniter.ReadSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
 		Results: []params.SettingsResult{
 			{Settings: params.Settings{
-				"deerhoof": "little hollywood",
+				"wanda": "firebaugh",
 			}},
 		},
 	})
 }
 
-func (s *uniterSuite) TestReadLocalApplicationSettingsWhenNotLeader(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
+func (s *uniterRelationSuite) TestReadSettingsErrUnauthorized(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
 
-	// This is a unit that doesn't exist.
-	err = rel.UpdateApplicationSettings("wordpress", &token{isLeader: true}, map[string]interface{}{
-		"wanda": "firebaugh",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	arg := params.RelationUnit{
-		Relation: rel.Tag().String(),
-		Unit:     "unit-wordpress-1",
-	}
-	_, err = s.uniter.ReadLocalApplicationSettings(context.Background(), arg)
-	c.Assert(errors.Cause(err), gc.Equals, apiservererrors.ErrPerm)
-}
-
-func (s *uniterSuite) TestReadLocalApplicationSettingsInPeerRelation(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	riak := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "riak",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "riak"}),
-	})
-	ep, err := riak.Endpoint("ring")
-	c.Assert(err, jc.ErrorIsNil)
-	st := s.ControllerModel(c).State()
-	rel, err := st.EndpointsRelation(ep)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = rel.UpdateApplicationSettings("riak", &fakeToken{}, map[string]interface{}{
-		"deerhoof": "little hollywood",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	riakUnit := f.MakeUnit(c, &factory.UnitParams{
-		Application: riak,
-		Machine:     s.machine0,
-	})
-
-	relUnit, err := rel.Unit(riakUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	auth := apiservertesting.FakeAuthorizer{Tag: riakUnit.Tag()}
-	uniter := s.newUniterAPI(c, st, auth)
-
-	arg := params.RelationUnit{
-		Relation: rel.Tag().String(),
-		Unit:     "unit-riak-0",
-	}
-	result, err := uniter.ReadLocalApplicationSettings(context.Background(), arg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResult{
-		Settings: params.Settings{
-			"deerhoof": "little hollywood",
+	errAuthTests := []struct {
+		description string
+		arg         params.RelationUnit
+		arrange     func()
+	}{
+		{
+			description: "unauthorized unit",
+			arg:         params.RelationUnit{Relation: "relation-42", Unit: "unit-foo-0"},
+			arrange:     func() {},
+		}, {
+			description: "remote unit, valid in relation, not this call",
+			arg:         params.RelationUnit{Relation: relTag.String(), Unit: "unit-mysql-0"},
+			arrange: func() {
+				s.expectGetRelationUUIDByKey(
+					tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+				)
+			},
+		}, {
+			description: "relation tag parsing fail",
+			arg:         params.RelationUnit{Relation: "application-wordpress", Unit: "unit-foo-0"},
+			arrange:     func() {},
+		}, {
+			description: "unit arg not unit nor application",
+			arg:         params.RelationUnit{Relation: relTag.String(), Unit: "user-foo"},
+			arrange: func() {
+				s.expectGetRelationUUIDByKey(
+					tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+				)
+			},
 		},
-	})
+	}
+
+	for i, testCase := range errAuthTests {
+		c.Logf("test %d: %s", i, testCase.description)
+		testCase.arrange()
+		args := params.RelationUnits{RelationUnits: []params.RelationUnit{testCase.arg}}
+		result, err := s.uniter.ReadSettings(c.Context(), args)
+		if c.Check(err, tc.ErrorIsNil) {
+			if !c.Check(result.Results, tc.HasLen, 1) {
+				continue
+			}
+			c.Check(result.Results[0].Error, tc.DeepEquals, apiservertesting.ErrUnauthorized)
+		}
+	}
 }
 
-func (s *uniterSuite) TestReadSettingsWithNonStringValuesFails(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"other":        "things",
-		"invalid-bool": false,
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
+func (s *uniterRelationSuite) TestReadSettingsForLocalApplication(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	appID := tc.Must(c, coreapplication.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
 
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+	)
+	s.expectGetApplicationUUIDByName(s.wordpressAppTag.Id(), appID)
+	s.expectGetRelationApplicationSettingsWithLeader(coreunit.Name(s.wordpressUnitTag.Id()), relUUID, appID, settings)
+
+	// act
 	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
+		{Relation: relTag.String(), Unit: s.wordpressAppTag.String()},
 	}}
-	expectErr := `unexpected relation setting "invalid-bool": expected string, got bool`
-	result, err := s.uniter.ReadSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
+	result, err := s.uniter.ReadSettings(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
 		Results: []params.SettingsResult{
-			{Error: &params.Error{Message: expectErr}},
+			{Settings: params.Settings{
+				"wanda": "firebaugh",
+			}},
 		},
 	})
 }
 
-func (s *uniterSuite) TestReadRemoteSettings(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
+func (s *uniterRelationSuite) TestReadRemoteSettingsErrUnauthorized(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
 
-	// First test most of the invalid args tests and try to read the
-	// (unset) remote unit settings.
+	errAuthTests := []struct {
+		description string
+		arg         params.RelationUnitPair
+		arrange     func()
+	}{
+		{
+			description: "local unit fails parsing",
+			arg:         params.RelationUnitPair{LocalUnit: "foo-0"},
+			arrange:     func() {},
+		}, {
+			description: "remote unit fails parsing",
+			arg:         params.RelationUnitPair{LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: ""},
+			arrange:     func() {},
+		}, {
+			description: "local unit cannot access",
+			arg:         params.RelationUnitPair{LocalUnit: "unit-foo-0"},
+			arrange:     func() {},
+		}, {
+			description: "bad relation tag",
+			arg:         params.RelationUnitPair{Relation: "failme-76", LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: "unit-one-2"},
+			arrange:     func() {},
+		}, {
+			description: "remote unit tag not unit nor application kinds",
+			arg:         params.RelationUnitPair{Relation: relTag.String(), LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: "machine-2"},
+			arrange: func() {
+				s.expectGetRelationUUIDByKey(
+					tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+				)
+			},
+		},
+	}
+
+	for i, testCase := range errAuthTests {
+		c.Logf("test %d: %s", i, testCase.description)
+		testCase.arrange()
+		args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{testCase.arg}}
+		result, err := s.uniter.ReadRemoteSettings(c.Context(), args)
+		if c.Check(err, tc.ErrorIsNil) {
+			if !c.Check(result.Results, tc.HasLen, 1) {
+				continue
+			}
+			c.Check(result.Results[0].Error, tc.DeepEquals, apiservertesting.ErrUnauthorized)
+		}
+	}
+}
+
+// TestReadRemoteSettingsForUnit tests a local unit's ability to read the
+// unit settings from the unit at the other end of the relation.
+// local = wordpress
+// remote = mysql
+func (s *uniterRelationSuite) TestReadRemoteSettingsForUnit(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	remoteUnitTag := names.NewUnitTag("mysql/2")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
+
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+	)
+	s.relationService.EXPECT().GetRelationUnitSettings(
+		gomock.Any(), relUUID, coreunit.Name(remoteUnitTag.Id())).Return(settings, nil)
+
+	// act
 	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{
-		{Relation: "relation-42", LocalUnit: "unit-foo-0", RemoteUnit: "foo"},
-		{Relation: rel.Tag().String(), LocalUnit: "unit-wordpress-0", RemoteUnit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), LocalUnit: "unit-wordpress-0", RemoteUnit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), LocalUnit: "unit-wordpress-0", RemoteUnit: "application-mysql"},
-		{Relation: "relation-42", LocalUnit: "unit-wordpress-0", RemoteUnit: ""},
-		{Relation: "relation-foo", LocalUnit: "", RemoteUnit: ""},
-		{Relation: "application-wordpress", LocalUnit: "unit-foo-0", RemoteUnit: "user-foo"},
-		{Relation: "foo", LocalUnit: "bar", RemoteUnit: "baz"},
-		{Relation: rel.Tag().String(), LocalUnit: "unit-mysql-0", RemoteUnit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), LocalUnit: "application-wordpress", RemoteUnit: "application-mysql"},
-		{Relation: rel.Tag().String(), LocalUnit: "application-mysql", RemoteUnit: "foo"},
-		{Relation: rel.Tag().String(), LocalUnit: "user-foo", RemoteUnit: "unit-wordpress-0"},
+		{Relation: relTag.String(), LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: remoteUnitTag.String()},
 	}}
-	result, err := s.uniter.ReadRemoteSettings(context.Background(), args)
+	result, err := s.uniter.ReadRemoteSettings(c.Context(), args)
 
-	// We don't set the remote unit settings on purpose
-	// to test the error.
-	expectErr := `cannot read settings for unit "mysql/0" in relation "wordpress:db mysql:server": unit "mysql/0": settings`
-
-	// The application settings are always initialised to empty when
-	// the relation is created.
-	c.Assert(err, jc.ErrorIsNil)
-	c.Logf("%s", pretty.Sprint(result))
-	c.Assert(result, jc.DeepEquals, params.SettingsResults{
-		Results: []params.SettingsResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.NotFoundError(expectErr)},
-			{Settings: params.Settings{}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Now leave the mysqlUnit and re-enter with new settings.
-	relUnit, err = rel.Unit(s.mysqlUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings = map[string]interface{}{
-		"other": "things",
-	}
-	err = relUnit.LeaveScope()
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, false)
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	// Test the remote unit settings can be read.
-	args = params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-wordpress-0",
-		RemoteUnit: "unit-mysql-0",
-	}}}
-	expect := params.SettingsResults{
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
 		Results: []params.SettingsResult{
 			{Settings: params.Settings{
-				"other": "things",
-			}},
-		},
-	}
-	result, err = s.uniter.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, expect)
-
-	// Now destroy the remote unit, and check its settings can still be read.
-	err = s.mysqlUnit.Destroy(s.store)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.mysqlUnit.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.mysqlUnit.Remove(testing.NewObjectStore(c, s.ControllerModelUUID()))
-	c.Assert(err, jc.ErrorIsNil)
-	result, err = s.uniter.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, expect)
-}
-
-func (s *uniterSuite) TestReadRemoteSettingsForApplication(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "logging"}),
-	})
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.wordpressUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"some": "settings",
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	// Set some application settings for mysql and check that we can
-	// see them.
-	err = rel.UpdateApplicationSettings("mysql", &fakeToken{}, map[string]interface{}{
-		"problem thinker": "fireproof",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-wordpress-0",
-		RemoteUnit: "application-mysql",
-	}, {
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-wordpress-0",
-		RemoteUnit: "application-wordpress",
-	}, {
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-wordpress-0",
-		RemoteUnit: "application-logging",
-	}}}
-	expect := params.SettingsResults{
-		Results: []params.SettingsResult{
-			{Settings: params.Settings{
-				"problem thinker": "fireproof",
-			}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	}
-	result, err := s.uniter.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, expect)
-}
-
-func (s *uniterSuite) TestReadRemoteSettingsWithNonStringValuesFails(c *gc.C) {
-	rel := s.addRelation(c, "wordpress", "mysql")
-	relUnit, err := rel.Unit(s.mysqlUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	settings := map[string]interface{}{
-		"other":        "things",
-		"invalid-bool": false,
-	}
-	err = relUnit.EnterScope(settings)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, true)
-
-	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-wordpress-0",
-		RemoteUnit: "unit-mysql-0",
-	}}}
-	expectErr := `unexpected relation setting "invalid-bool": expected string, got bool`
-	result, err := s.uniter.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
-		Results: []params.SettingsResult{
-			{Error: &params.Error{Message: expectErr}},
-		},
-	})
-}
-
-func (s *uniterSuite) TestReadRemoteApplicationSettingsForPeerRelation(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	riak := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "riak",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "riak"}),
-	})
-	ep, err := riak.Endpoint("ring")
-	c.Assert(err, jc.ErrorIsNil)
-	st := s.ControllerModel(c).State()
-	rel, err := st.EndpointsRelation(ep)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = rel.UpdateApplicationSettings("riak", &fakeToken{}, map[string]interface{}{
-		"black midi": "ducter",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	riakUnit := f.MakeUnit(c, &factory.UnitParams{
-		Application: riak,
-		Machine:     s.machine0,
-	})
-
-	relUnit, err := rel.Unit(riakUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	auth := apiservertesting.FakeAuthorizer{Tag: riakUnit.Tag()}
-	uniter := s.newUniterAPI(c, st, auth)
-
-	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
-		Relation:   rel.Tag().String(),
-		LocalUnit:  "unit-riak-0",
-		RemoteUnit: "application-riak",
-	}}}
-	result, err := uniter.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
-		Results: []params.SettingsResult{
-			{Settings: params.Settings{
-				"black midi": "ducter",
+				"wanda": "firebaugh",
 			}},
 		},
 	})
 }
 
-func (s *uniterSuite) TestReadRemoteSettingsForCAASApplicationInPeerRelationSidecar(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+// TestReadRemoteSettingsForApplication tests a local unit's ability to read the
+// application settings from the application at the other end of the relation.
+// local = wordpress
+// remote = mysql
+func (s *uniterRelationSuite) TestReadRemoteSettingsForApplication(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	remoteAppTag := names.NewApplicationTag("mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	appID := tc.Must(c, coreapplication.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
 
-	ep, err := app.Endpoint("ring")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := cm.State().EndpointsRelation(ep)
-	c.Assert(err, jc.ErrorIsNil)
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+	)
+	s.expectGetApplicationUUIDByName(remoteAppTag.Id(), appID)
+	s.expectGetRelationApplicationSettings(relUUID, appID, settings)
 
-	unit2, err := app.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
+	// act
+	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{
+		{Relation: relTag.String(), LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: remoteAppTag.String()},
+	}}
+	result, err := s.uniter.ReadRemoteSettings(c.Context(), args)
 
-	relUnit, err := rel.Unit(unit2)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(map[string]interface{}{
-		"black midi": "ducter",
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	uniterAPI := s.newUniterAPI(c, cm.State(), s.authorizer)
-	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{{
-		Relation:   rel.Tag().String(),
-		LocalUnit:  unit.Tag().String(),
-		RemoteUnit: unit2.Tag().String(),
-	}}}
-	result, err := uniterAPI.ReadRemoteSettings(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.SettingsResults{
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
 		Results: []params.SettingsResult{
 			{Settings: params.Settings{
-				"black midi": "ducter",
+				"wanda": "firebaugh",
 			}},
 		},
 	})
 }
 
-func (s *uniterSuite) TestWatchRelationUnits(c *gc.C) {
-	// Add a relation between wordpress and mysql and enter scope with
-	// mysqlUnit.
-	rel := s.addRelation(c, "wordpress", "mysql")
-	myRelUnit, err := rel.Unit(s.mysqlUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = myRelUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, myRelUnit, true)
+// TestReadRemoteApplicationSettingsWithLocalApplication tests a local unit's
+// ability to read the application settings of its own application via the
+// ReadRemoteSettings method .
+// local = wordpress
+func (s *uniterRelationSuite) TestReadRemoteApplicationSettingsWithLocalApplication(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	appID := tc.Must(c, coreapplication.NewUUID)
+	settings := map[string]string{"wanda": "firebaugh"}
 
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()), relUUID, nil,
+	)
+	s.expectGetApplicationUUIDByName(s.wordpressAppTag.Id(), appID)
+	s.expectGetRelationApplicationSettings(relUUID, appID, settings)
 
+	// act
+	args := params.RelationUnitPairs{RelationUnitPairs: []params.RelationUnitPair{
+		{Relation: relTag.String(), LocalUnit: s.wordpressUnitTag.String(), RemoteUnit: s.wordpressAppTag.String()},
+	}}
+	result, err := s.uniter.ReadRemoteSettings(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.SettingsResults{
+		Results: []params.SettingsResult{
+			{Settings: params.Settings{
+				"wanda": "firebaugh",
+			}},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestRelationStatus(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	s.expectGetUnitUUID(s.wordpressUnitTag.Id(), unitUUID, nil)
+	relTagOne := names.NewRelationTag("mysql:database wordpress:mysql")
+	relTagTwo := names.NewRelationTag("redis:endpoint wordpress:endpoint")
+	expectedRelationUnitStatus := []params.RelationUnitStatus{
+		{
+			RelationTag: relTagOne.String(),
+			InScope:     true,
+			Suspended:   false,
+		}, {
+			RelationTag: relTagTwo.String(),
+			InScope:     true,
+			Suspended:   true,
+		},
+	}
+	s.expectedGetRelationsStatusForUnit(c, unitUUID, expectedRelationUnitStatus)
+
+	// act
+	args := params.Entities{Entities: []params.Entity{{Tag: s.wordpressUnitTag.String()}}}
+	result, err := s.uniter.RelationsStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.RelationUnitStatusResults{
+		Results: []params.RelationUnitStatusResult{
+			{RelationResults: expectedRelationUnitStatus},
+		},
+	})
+}
+
+// TestRelationsStatusUnitTagNotUnitNorApplication test that a valid tag not of
+// the type application nor unit fails with unauthorized.
+func (s *uniterRelationSuite) TestRelationsStatusUnitTagNotUnitNorApplication(c *tc.C) {
+	// act
+	args := params.Entities{Entities: []params.Entity{{Tag: "machine-0"}}}
+	result, err := s.uniter.RelationsStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.DeepEquals, apiservertesting.ErrUnauthorized)
+}
+
+// TestRelationsStatusUnitTagCannotAccess tests that a valid unit tag which is not
+// the authorized one will fail.
+func (s *uniterRelationSuite) TestRelationsStatusUnitTagCannotAccess(c *tc.C) {
+	// act
+	args := params.Entities{Entities: []params.Entity{{Tag: "unit-mysql-0"}}}
+	result, err := s.uniter.RelationsStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.DeepEquals, apiservertesting.ErrUnauthorized)
+}
+
+func (s *uniterRelationSuite) TestSetRelationStatus(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relID := 42
+	relationUUID := tc.Must(c, corerelation.NewUUID)
+	s.expectGetRelationUUIDByID(relID, relationUUID, nil)
+	relStatus := status.StatusInfo{
+		Status: status.Joined,
+		Since:  ptr(s.uniter.clock.Now()),
+	}
+	s.expectSetRelationStatus(s.wordpressUnitTag.Id(), relationUUID, relStatus)
+
+	// act
+	args := params.RelationStatusArgs{
+		Args: []params.RelationStatusArg{
+			{UnitTag: s.wordpressUnitTag.String(), RelationId: relID, Status: params.Joined},
+		},
+	}
+	result, err := s.uniter.SetRelationStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	emptyErrorResults := params.ErrorResults{Results: []params.ErrorResult{{}}}
+	c.Assert(result, tc.DeepEquals, emptyErrorResults)
+}
+
+func (s *uniterRelationSuite) TestSetRelationStatusUnitTagNotValid(c *tc.C) {
+	// act
+	args := params.RelationStatusArgs{Args: []params.RelationStatusArg{{UnitTag: "foo"}}}
+	result, err := s.uniter.SetRelationStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.ErrorMatches, "\"foo\" is not a valid tag")
+}
+
+func (s *uniterRelationSuite) TestSetRelationStatusRelationNotFound(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relID := 42
+	relationUUID := tc.Must(c, corerelation.NewUUID)
+	s.expectGetRelationUUIDByID(relID, relationUUID, relationerrors.RelationNotFound)
+
+	// act
+	args := params.RelationStatusArgs{Args: []params.RelationStatusArg{{
+		UnitTag:    s.wordpressUnitTag.String(),
+		RelationId: relID,
+		Status:     params.Joined,
+	}}}
+	result, err := s.uniter.SetRelationStatus(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.DeepEquals, apiservertesting.ErrUnauthorized)
+}
+
+func (s *uniterRelationSuite) TestEnterScopeErrUnauthorized(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	failRelTag := names.NewRelationTag("postgresql:database wordpress:mysql")
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, failRelTag.Id()),
+		"",
+		relationerrors.RelationNotFound,
+	)
+
+	// act
 	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: "relation-42", Unit: "unit-foo-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-wordpress-0"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
+		// relation tag not parsable
 		{Relation: "relation-42", Unit: "unit-wordpress-0"},
-		{Relation: "relation-foo", Unit: ""},
-		{Relation: "application-wordpress", Unit: "unit-foo-0"},
-		{Relation: "foo", Unit: "bar"},
-		{Relation: rel.Tag().String(), Unit: "unit-mysql-0"},
-		{Relation: rel.Tag().String(), Unit: "application-wordpress"},
-		{Relation: rel.Tag().String(), Unit: "application-mysql"},
-		{Relation: rel.Tag().String(), Unit: "user-foo"},
+		// not found relation key
+		{Relation: failRelTag.String(), Unit: "unit-wordpress-0"},
+		// authorization on unit tag fails
+		{Relation: relTag.String(), Unit: "unit-mysql-0"},
 	}}
-	result, err := s.uniter.WatchRelationUnits(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	// UnitSettings versions are volatile, so we don't check them.
-	// We just make sure the keys of the Changed field are as
-	// expected.
-	c.Assert(result.Results, gc.HasLen, len(args.RelationUnits))
-	mysqlChanges := result.Results[1].Changes
-	c.Assert(mysqlChanges, gc.NotNil)
-	changed, ok := mysqlChanges.Changed["mysql/0"]
-	c.Assert(ok, jc.IsTrue)
-	expectChanges := params.RelationUnitsChange{
-		Changed: map[string]params.UnitSettings{
-			"mysql/0": {changed.Version},
+	result, err := s.uniter.EnterScope(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.ErrUnauthorized},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestEnterScope(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	addr := "x.x.x.x"
+	unitName := coreunit.Name(s.wordpressUnitTag.Id())
+	settings := map[string]string{"ingress-address": addr}
+	s.expectEnterScope(relUUID, unitName, settings, nil)
+
+	s.networkService.EXPECT().GetUnitRelationNetwork(gomock.Any(), unitName, relKey).Return(domainnetwork.UnitNetwork{
+		EndpointName:     "mysql",
+		IngressAddresses: []string{addr},
+	}, nil)
+
+	// act
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: s.wordpressUnitTag.String()},
+	}}
+	result, err := s.uniter.EnterScope(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	emptyErrorResults := params.ErrorResults{Results: []params.ErrorResult{{}}}
+	c.Assert(result, tc.DeepEquals, emptyErrorResults)
+}
+
+// TestEnterScopeReturnsPotentialRelationUnitNotValid tests that if EnterScope
+// returns PotentialRelationUnitNotValid the facade method still returns no
+// error.
+func (s *uniterRelationSuite) TestEnterScopeReturnsPotentialRelationUnitNotValid(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	addr := "x.x.x.x"
+	unitName := coreunit.Name(s.wordpressUnitTag.Id())
+	settings := map[string]string{"ingress-address": addr}
+	s.expectEnterScope(relUUID, unitName, settings,
+		relationerrors.PotentialRelationUnitNotValid)
+	s.networkService.EXPECT().GetUnitRelationNetwork(gomock.Any(), unitName, relKey).Return(domainnetwork.UnitNetwork{
+		EndpointName:     "mysql",
+		IngressAddresses: []string{addr},
+	}, nil)
+
+	// act
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: s.wordpressUnitTag.String()},
+	}}
+	result, err := s.uniter.EnterScope(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	emptyErrorResults := params.ErrorResults{Results: []params.ErrorResult{{}}}
+	c.Assert(result, tc.DeepEquals, emptyErrorResults)
+}
+
+// TestLeaveScopeFails tests for unauthorized errors, unit tag
+// validation, and ensures the method works in bulk.
+func (s *uniterRelationSuite) TestLeaveScopeFails(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	failRelTag := names.NewRelationTag("postgresql:database wordpress:mysql")
+	s.expectGetRelationUUIDByKey(
+		tc.Must1(c, corerelation.NewKeyFromString, failRelTag.Id()),
+		"",
+		relationerrors.RelationNotFound,
+	)
+
+	// act
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		// Not the authorized unit
+		{Relation: "relation-42", Unit: "unit-foo-0"},
+		// Invalid relation tag
+		{Relation: "relation-42", Unit: s.wordpressUnitTag.String()},
+		// Relation key not found
+		{Relation: failRelTag.String(), Unit: s.wordpressUnitTag.String()},
+		// Invalid unit tag
+		{Relation: relTag.String(), Unit: "application-wordpress"},
+	}}
+	result, err := s.uniter.LeaveScope(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: apiservertesting.ErrUnauthorized},
+			{Error: &params.Error{Message: `"application-wordpress" is not a valid unit tag`}},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestWatchRelationUnits(c *tc.C) {
+	// arrange
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+	relKey, err := corerelation.ParseKeyFromTagString(relTag.String())
+	c.Assert(err, tc.ErrorIsNil)
+	s.expectGetRelationUUIDByKey(relKey, relUUID, nil)
+	watcherID := "watch1"
+	unitUUIDs := []coreunit.UUID{
+		tc.Must(c, coreunit.NewUUID),
+		tc.Must(c, coreunit.NewUUID),
+	}
+	appUUIDs := []coreapplication.UUID{
+		tc.Must(c, coreapplication.NewUUID),
+	}
+
+	unitName := coreunit.Name(s.wordpressUnitTag.Id())
+	watchedUUID := tc.Must(c, coreunit.NewUUID)
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), unitName).Return(watchedUUID, nil)
+
+	// Changes and expected results should match.
+	changes := relation.RelationUnitsChange{
+		Changed: map[coreunit.Name]int64{
+			"wordpress/0": 42,
 		},
 		AppChanged: map[string]int64{
-			"mysql": 0,
+			"wordpress": 47,
 		},
+		Departed: []coreunit.Name{"mysql/0"},
 	}
-	c.Assert(result, gc.DeepEquals, params.RelationUnitsWatchResults{
+	s.expectWatchRelatedUnitsChange(watchedUUID, relUUID, unitUUIDs, appUUIDs, watcherID, changes)
+
+	// act
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		{Relation: relTag.String(), Unit: s.wordpressUnitTag.String()}},
+	}
+	result, err := s.uniter.WatchRelationUnits(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+
+	expectedResult := params.RelationUnitsWatchResults{Results: []params.RelationUnitsWatchResult{
+		{
+			RelationUnitsWatcherId: watcherID,
+			Changes: params.RelationUnitsChange{
+				Changed: map[string]params.UnitSettings{
+					"wordpress/0": {Version: 42},
+				},
+				AppChanged: map[string]int64{
+					"wordpress": 47,
+				},
+				Departed: []string{"mysql/0"},
+			},
+		},
+	}}
+	c.Assert(result, tc.DeepEquals, expectedResult)
+}
+
+// TestWatchRelationUnitsFails tests for unauthorized errors, unit tag
+// validation, and ensures the method works in bulk.
+func (s *uniterRelationSuite) TestWatchRelationUnitsFails(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	relTag := names.NewRelationTag("mysql:database wordpress:mysql")
+
+	// act
+	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
+		// Not the authorized unit
+		{Relation: "relation-42", Unit: "unit-foo-0"},
+		// Invalid relation tag
+		{Relation: "relation-42", Unit: s.wordpressUnitTag.String()},
+		// Invalid unit tag
+		{Relation: relTag.String(), Unit: "application-wordpress"},
+	}}
+	result, err := s.uniter.WatchRelationUnits(c.Context(), args)
+
+	// assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.RelationUnitsWatchResults{
 		Results: []params.RelationUnitsWatchResult{
 			{Error: apiservertesting.ErrUnauthorized},
+			{Error: &params.Error{Message: `"relation-42" is not a valid relation tag`}},
+			{Error: apiservertesting.ErrUnauthorized},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestWatchUnitRelations(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	watcherID := "watcher-id"
+	relationKey := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relationChanges := make(chan []string, 1)
+	change := []string{relationKey.String()}
+	relationChanges <- change
+	watch := watchertest.NewMockStringsWatcher(relationChanges)
+	s.expectGetUnitUUID(s.wordpressUnitTag.Id(), unitUUID, nil)
+	s.expectWatchRelationUnitApplicationLifeSuspendedStatus(unitUUID, watch, nil)
+	s.expectWatcherRegistry(watcherID, watch, nil)
+
+	// Act
+	results, err := s.uniter.WatchUnitRelations(c.Context(),
+		params.Entities{
+			Entities: []params.Entity{
+				{Tag: s.wordpressUnitTag.String()},
+			}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
 			{
-				RelationUnitsWatcherId: "1",
-				Changes:                expectChanges,
+				StringsWatcherId: watcherID,
+				Changes:          change,
+				Error:            nil,
 			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
+		},
+	})
+}
+
+func (s *uniterRelationSuite) TestWatchUnitRelationsErrUnauthorized(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+	args := params.Entities{Entities: []params.Entity{
+		// Bad unit tag.
+		{Tag: "application"},
+		// Not the authorized unit
+		{Tag: "unit-mysql-4"},
+	}}
+
+	// Act
+	results, err := s.uniter.WatchUnitRelations(c.Context(), args)
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
 			{Error: apiservertesting.ErrUnauthorized},
 			{Error: apiservertesting.ErrUnauthorized},
 		},
 	})
 
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	w, ok := resource.(common.RelationUnitsWatcher)
-	c.Assert(ok, gc.Equals, true)
-	select {
-	case actual, ok := <-w.Changes():
-		c.Fatalf("watcher sent unexpected change: (%v, %v)", actual, ok)
-	case <-time.After(coretesting.ShortWait):
-	}
-
-	// Leave scope with mysqlUnit and check it's detected.
-	err = myRelUnit.LeaveScope()
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, myRelUnit, false)
-
-	s.assertRUWChange(c, w, nil, nil, []string{"mysql/0"})
-	// TODO(jam): 2019-10-21 this test is getting a bit unweildy, but maybe we
-	//  should test that changing application data triggers a change here
 }
 
-func (s *uniterSuite) assertRUWChange(c *gc.C, w common.RelationUnitsWatcher, changed []string, appChanged []string, departed []string) {
-	// Cloned from state/testing.RelationUnitsWatcherC - we can't use
-	// that anymore since the change type is different between the
-	// state and apiserver watchers. Hacked out the code to maintain
-	// state between events, since it's not needed for this test.
+func (s *uniterRelationSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
 
-	// Get all items in changed in a map for easy lookup.
-	changedNames := set.NewStrings(changed...)
-	appChangedNames := set.NewStrings(appChanged...)
-	timeout := time.After(coretesting.LongWait)
-	select {
-	case actual, ok := <-w.Changes():
-		c.Logf("Watcher.Changes() => %# v", actual)
-		c.Assert(ok, jc.IsTrue)
-		c.Check(actual.Changed, gc.HasLen, len(changed))
-		c.Check(actual.AppChanged, gc.HasLen, len(appChanged))
-		// Because the versions can change, we only need to make sure
-		// the keys match, not the contents (UnitSettings == txnRevno).
-		for k := range actual.Changed {
-			c.Check(changedNames.Contains(k), jc.IsTrue)
-		}
-		for k := range actual.AppChanged {
-			c.Check(appChangedNames.Contains(k), jc.IsTrue)
-		}
-		c.Check(actual.Departed, jc.SameContents, departed)
-	case <-timeout:
-		c.Fatalf("watcher did not send change")
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.networkService = NewMockNetworkService(ctrl)
+	s.relationService = NewMockRelationService(ctrl)
+	s.statusService = NewMockStatusService(ctrl)
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+
+	unitAuthFunc := func(ctx context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			return tag.Id() == s.wordpressUnitTag.Id()
+		}, nil
 	}
+
+	appAuthFunc := func(ctx context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			return tag.Id() == s.wordpressAppTag.Id()
+		}, nil
+	}
+
+	authorizer := &apiservertesting.FakeAuthorizer{
+		Tag:        s.authTag,
+		Controller: true,
+	}
+
+	s.uniter = &UniterAPI{
+		modelUUID:         tc.Must(c, coremodel.NewUUID),
+		modelType:         coremodel.IAAS,
+		accessApplication: appAuthFunc,
+		accessUnit:        unitAuthFunc,
+		auth:              authorizer,
+		clock:             testclock.NewClock(time.Now()),
+		logger:            loggertesting.WrapCheckLog(c),
+
+		applicationService: s.applicationService,
+		networkService:     s.networkService,
+		relationService:    s.relationService,
+		statusService:      s.statusService,
+		watcherRegistry:    s.watcherRegistry,
+	}
+
+	c.Cleanup(func() {
+		s.applicationService = nil
+		s.networkService = nil
+		s.relationService = nil
+		s.statusService = nil
+		s.watcherRegistry = nil
+
+	})
+	return ctrl
 }
 
-func (s *uniterSuite) TestAPIAddresses(c *gc.C) {
-	hostPorts := []network.SpaceHostPorts{
-		network.NewSpaceHostPorts(1234, "0.1.2.3"),
+func (s *uniterRelationSuite) expectGetRelationUUIDByKey(key corerelation.Key, relUUID corerelation.UUID, err error) {
+	s.relationService.EXPECT().GetRelationUUIDByKey(gomock.Any(), key).Return(relUUID, err)
+}
+
+func (s *uniterRelationSuite) expectGetRelationDetails(c *tc.C, relUUID corerelation.UUID, relID int, relTag names.RelationTag) {
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{
+		Life: life.Alive,
+		UUID: relUUID,
+		ID:   relID,
+		Key:  tc.Must1(c, corerelation.NewKeyFromString, relTag.Id()),
+		Endpoints: []relation.Endpoint{
+			{
+				ApplicationName: "wordpress",
+				Relation: charm.Relation{
+					Name:      "database",
+					Role:      charm.RoleRequirer,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+			{
+				ApplicationName: "mysql",
+				Relation: charm.Relation{
+					Name:      "mysql",
+					Role:      charm.RoleProvider,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+		},
+	}, nil)
+}
+
+func (s *uniterRelationSuite) expectGetRelationDetailsNotFound(relUUID corerelation.UUID) {
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{}, relationerrors.RelationNotFound)
+}
+
+func (s *uniterRelationSuite) expectGetRelationDetailsUnexpectedAppName(c *tc.C, relUUID corerelation.UUID) {
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relUUID).Return(relation.RelationDetails{
+		Life: life.Alive,
+		UUID: tc.Must(c, corerelation.NewUUID),
+		ID:   101,
+		Endpoints: []relation.Endpoint{
+			{
+				ApplicationName: "failure-application",
+				Relation: charm.Relation{
+					Name:      "database",
+					Role:      charm.RoleRequirer,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+			{
+				ApplicationName: "mysql",
+				Relation: charm.Relation{
+					Name:      "mysql",
+					Role:      charm.RoleProvider,
+					Interface: "mysql",
+					Scope:     charm.ScopeGlobal,
+				},
+			},
+		},
+	}, nil)
+}
+
+func (s *uniterRelationSuite) expectGetApplicationUUIDByName(appName string, id coreapplication.UUID) {
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), appName).Return(id, nil)
+}
+
+func (s *uniterRelationSuite) expectGetRelationApplicationSettingsWithLeader(unitName coreunit.Name, uuid corerelation.UUID, id coreapplication.UUID, settings map[string]string) {
+	s.relationService.EXPECT().GetRelationApplicationSettingsWithLeader(gomock.Any(), unitName, uuid, id).Return(settings, nil)
+}
+
+func (s *uniterRelationSuite) expectGetRelationApplicationSettings(uuid corerelation.UUID, id coreapplication.UUID, settings map[string]string) {
+	s.relationService.EXPECT().GetRelationApplicationSettings(gomock.Any(), uuid, id).Return(settings, nil)
+}
+
+func (s *uniterRelationSuite) expectGetUnitUUID(name string, unitUUID coreunit.UUID, err error) {
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), coreunit.Name(name)).Return(unitUUID, err)
+}
+
+func (s *uniterRelationSuite) expectedGetRelationsStatusForUnit(c *tc.C, uuid coreunit.UUID, input []params.RelationUnitStatus) {
+	expectedStatuses := make([]relation.RelationUnitStatus, len(input))
+	for i, in := range input {
+		// The caller created the tag, programing error if this fails.
+		tag, _ := names.ParseRelationTag(in.RelationTag)
+		expectedStatuses[i] = relation.RelationUnitStatus{
+			Key:       tc.Must1(c, corerelation.NewKeyFromString, tag.Id()),
+			InScope:   in.InScope,
+			Suspended: in.Suspended,
+		}
+	}
+	s.relationService.EXPECT().GetRelationsStatusForUnit(gomock.Any(), uuid).Return(expectedStatuses, nil)
+}
+
+func (s *uniterRelationSuite) expectGetRelationUUIDByID(relID int, relUUID corerelation.UUID, err error) {
+	s.relationService.EXPECT().GetRelationUUIDByID(gomock.Any(), relID).Return(relUUID, err)
+}
+
+func (s *uniterRelationSuite) expectSetRelationStatus(unitName string, relUUID corerelation.UUID, relStatus status.StatusInfo) {
+	name, _ := coreunit.NewName(unitName)
+	s.statusService.EXPECT().SetRelationStatus(gomock.Any(), name, relUUID, relStatus).Return(nil)
+}
+
+func (s *uniterRelationSuite) expectEnterScope(uuid corerelation.UUID, name coreunit.Name, settings map[string]string, err error) {
+	s.relationService.EXPECT().EnterScope(gomock.Any(), uuid, name, settings, gomock.Any()).Return(err)
+}
+
+func (s *uniterRelationSuite) expectWatchRelationUnitApplicationLifeSuspendedStatus(unitUUID coreunit.UUID, watch watcher.StringsWatcher, err error) {
+	s.relationService.EXPECT().WatchRelationUnitApplicationLifeSuspendedStatus(gomock.Any(), unitUUID).Return(watch, err)
+}
+
+func (s *uniterRelationSuite) expectWatcherRegistry(watchID string, watch *watchertest.MockStringsWatcher, err error) {
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), watch).Return(watchID, err).AnyTimes()
+}
+
+func (s *uniterRelationSuite) expectWatchRelatedUnitsChange(
+	watchedUnitUUID coreunit.UUID,
+	relUUID corerelation.UUID,
+	unitUUIDs []coreunit.UUID,
+	appUUIDS []coreapplication.UUID,
+	watcherID string,
+	changes relation.RelationUnitsChange,
+) {
+	channel := make(chan []string, 1)
+	mockWatcher := watchertest.NewMockStringsWatcher(channel)
+	channel <- append(transform.Slice(unitUUIDs, encodeUnitFromUUID), transform.Slice(appUUIDS, encodeAppFromUUID)...)
+	close(channel)
+
+	s.relationService.EXPECT().WatchRelatedUnits(gomock.Any(), watchedUnitUUID, relUUID).Return(mockWatcher, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return(watcherID, nil)
+	s.relationService.EXPECT().GetRelationUnitChanges(gomock.Any(), unitUUIDs, appUUIDS).Return(changes, nil)
+}
+
+func encodeUnitFromUUID(uuid coreunit.UUID) string {
+	return relation.EncodeUnitUUID(uuid.String())
+}
+
+func encodeAppFromUUID(uuid coreapplication.UUID) string {
+	return relation.EncodeApplicationUUID(uuid.String())
+}
+
+type commitHookChangesSuite struct {
+	testhelpers.IsolationSuite
+
+	applicationService *MockApplicationService
+	networkService     *MockNetworkService
+	relationService    *MockRelationService
+
+	uniter *UniterAPI
+}
+
+func TestCommitHookChangesSuite(t *testing.T) {
+	tc.Run(t, &commitHookChangesSuite{})
+}
+
+func (s *commitHookChangesSuite) TestUpdateUnitAndApplicationSettings(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitTag := names.NewUnitTag("wordpress/0")
+	relTag := names.NewRelationTag("wordpress:db mysql:db")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	appSettings := map[string]string{"wanda": "firebaugh", "deleteme": ""}
+	unitSettings := map[string]string{"wanda": "firebaugh", "deleteme": ""}
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, relTag.Id())
+	s.expectGetRelationUUIDByKey(relKey, relUUID)
+	s.expectedSetRelationApplicationAndUnitSettings(coreunit.Name(unitTag.Id()), relUUID, appSettings, unitSettings)
+
+	canAccess := func(tag names.Tag) bool {
+		return true
+	}
+	arg := params.RelationUnitSettings{
+		Relation:            relTag.String(),
+		Unit:                unitTag.String(),
+		Settings:            unitSettings,
+		ApplicationSettings: appSettings,
 	}
 
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
+	// act
+	err := s.uniter.updateUnitAndApplicationSettings(c.Context(), arg, canAccess)
 
-	st := s.ControllerModel(c).State()
-	err = st.SetAPIHostPorts(controllerConfig, hostPorts, hostPorts)
-	c.Assert(err, jc.ErrorIsNil)
+	// assert
+	c.Assert(err, tc.IsNil)
+}
 
-	result, err := s.uniter.APIAddresses(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsResult{
+func (s *commitHookChangesSuite) TestUpdateUnitAndApplicationSettingsBadUnitTag(c *tc.C) {
+	// arrange
+	arg := params.RelationUnitSettings{
+		Unit: "machine-9",
+	}
+
+	// act
+	err := s.uniter.updateUnitAndApplicationSettings(c.Context(), arg, nil)
+
+	// assert
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *commitHookChangesSuite) TestUpdateUnitAndApplicationSettingsFailCanAccess(c *tc.C) {
+	// arrange
+	canAccess := func(tag names.Tag) bool {
+		return false
+	}
+	arg := params.RelationUnitSettings{
+		Unit: "unit-failauth-2",
+	}
+
+	// act
+	err := s.uniter.updateUnitAndApplicationSettings(c.Context(), arg, canAccess)
+
+	// assert
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *commitHookChangesSuite) TestUpdateUnitAndApplicationSettingsBadRelationTag(c *tc.C) {
+	// arrange
+	canAccess := func(tag names.Tag) bool {
+		return true
+	}
+	arg := params.RelationUnitSettings{
+		Unit:     "unit-wordpress-2",
+		Relation: "failme",
+	}
+
+	// act
+	err := s.uniter.updateUnitAndApplicationSettings(c.Context(), arg, canAccess)
+
+	// assert
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworks(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	relKey1 := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relKey2 := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relUUID1 := tc.Must(c, corerelation.NewUUID)
+	relUUID2 := tc.Must(c, corerelation.NewUUID)
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, []relation.RelationUnitStatus{
+		{Key: relKey1, InScope: true},
+		{Key: relKey2, InScope: true},
+	}, nil)
+
+	// For relation 1
+	s.expectGetRelationUUIDByKey(relKey1, relUUID1)
+	s.expectGetUnitRelationNetworkWithEgress(unitName, relKey1, "10.0.0.1", "192.168.0.0/24")
+	s.expectedSetRelationUnitSettings(unitName, relUUID1, map[string]string{
+		"ingress-address": "10.0.0.1",
+		"egress-subnets":  "192.168.0.0/24",
+	})
+
+	// For relation 2
+	s.expectGetRelationUUIDByKey(relKey2, relUUID2)
+	s.expectGetUnitRelationNetwork(unitName, relKey2, "10.0.0.2")
+	s.expectedSetRelationUnitSettings(unitName, relUUID2, map[string]string{
+		"ingress-address": "10.0.0.2",
+	})
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.IsNil)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksGetUnitUUIDError(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	expectedErr := internalerrors.New("unit not found")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, coreunit.UUID(""), expectedErr)
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.NotNil)
+	c.Assert(err.Error(), tc.Matches, `getting UUID of unit "wordpress/0": unit not found`)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksGetRelationsStatusError(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	expectedErr := internalerrors.New("failed to get relations")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, nil, expectedErr)
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.NotNil)
+	c.Assert(err.Error(), tc.Matches, `getting relations for unit "wordpress/0": failed to get relations`)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksGetRelationUUIDError(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	expectedErr := internalerrors.New("relation not found")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, []relation.RelationUnitStatus{
+		{Key: relKey, InScope: true},
+	}, nil)
+	// Mock the error return
+	s.relationService.EXPECT().GetRelationUUIDByKey(gomock.Any(), relKey).Return(corerelation.UUID(""), expectedErr)
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.NotNil)
+	c.Assert(err.Error(), tc.Matches, `getting relation UUID: relation not found`)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksGetUnitRelationNetworkError(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	expectedErr := internalerrors.New("network not found")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, []relation.RelationUnitStatus{
+		{Key: relKey, InScope: true},
+	}, nil)
+	s.expectGetRelationUUIDByKey(relKey, relUUID)
+	s.expectGetUnitRelationNetworkError(unitName, relKey, expectedErr)
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.NotNil)
+	c.Assert(err.Error(), tc.Matches, `getting relation network: network not found`)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksSetRelationSettingsError(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	relKey := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relUUID := tc.Must(c, corerelation.NewUUID)
+	expectedErr := internalerrors.New("failed to set settings")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, []relation.RelationUnitStatus{
+		{Key: relKey, InScope: true},
+	}, nil)
+	s.expectGetRelationUUIDByKey(relKey, relUUID)
+	s.expectGetUnitRelationNetwork(unitName, relKey, "10.0.0.1")
+	s.relationService.EXPECT().SetRelationUnitSettings(
+		gomock.Any(),
+		unitName,
+		relUUID,
+		map[string]string{"ingress-address": "10.0.0.1"},
+	).Return(expectedErr)
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.ErrorMatches, `.*failed to set settings`)
+}
+
+func (s *commitHookChangesSuite) TestSetUnitRelationNetworksSkipsRelationsNotInScope(c *tc.C) {
+	// arrange
+	defer s.setupMocks(c).Finish()
+	unitName := coreunit.Name("wordpress/0")
+	unitUUID := tc.Must(c, coreunit.NewUUID)
+	relKey1 := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db mysql:db")
+	relKey2 := tc.Must1(c, corerelation.NewKeyFromString, "wordpress:db nginx:web")
+
+	// Set up expectations
+	s.expectGetUnitUUID(unitName, unitUUID, nil)
+	s.expectGetRelationsStatusForUnit(unitUUID, []relation.RelationUnitStatus{
+		{Key: relKey1, InScope: false}, // This relation is not in scope and should be skipped
+		{Key: relKey2, InScope: true},
+	}, nil)
+
+	// Only relation 2 should be processed
+	relUUID2 := tc.Must(c, corerelation.NewUUID)
+	s.expectGetRelationUUIDByKey(relKey2, relUUID2)
+	s.expectGetUnitRelationNetwork(unitName, relKey2, "10.0.0.2")
+	s.expectedSetRelationUnitSettings(unitName, relUUID2, map[string]string{
+		"ingress-address": "10.0.0.2",
+	})
+
+	// act
+	err := s.uniter.setUnitRelationNetworks(c.Context(), unitName)
+
+	// assert
+	c.Assert(err, tc.IsNil)
+}
+
+func (s *commitHookChangesSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.relationService = NewMockRelationService(ctrl)
+	s.networkService = NewMockNetworkService(ctrl)
+
+	s.uniter = &UniterAPI{
+		logger: loggertesting.WrapCheckLog(c),
+
+		applicationService: s.applicationService,
+		networkService:     s.networkService,
+		relationService:    s.relationService,
+	}
+
+	c.Cleanup(func() {
+		s.applicationService = nil
+		s.networkService = nil
+		s.relationService = nil
+		s.uniter = nil
+	})
+
+	return ctrl
+}
+
+func (s *commitHookChangesSuite) expectGetRelationUUIDByKey(key corerelation.Key, relUUID corerelation.UUID) {
+	s.relationService.EXPECT().GetRelationUUIDByKey(gomock.Any(), key).Return(relUUID, nil)
+}
+
+func (s *commitHookChangesSuite) expectedSetRelationUnitSettings(unitName coreunit.Name, uuid corerelation.UUID, unitSettings map[string]string) {
+	s.relationService.EXPECT().SetRelationUnitSettings(gomock.Any(), unitName, uuid, unitSettings).Return(nil)
+}
+
+func (s *commitHookChangesSuite) expectedSetRelationApplicationAndUnitSettings(unitName coreunit.Name, uuid corerelation.UUID, appSettings, unitSettings map[string]string) {
+	s.relationService.EXPECT().SetRelationApplicationAndUnitSettings(gomock.Any(), unitName, uuid, appSettings, unitSettings).Return(nil)
+}
+
+func (s *commitHookChangesSuite) expectGetUnitRelationNetwork(unitName coreunit.Name, key corerelation.Key,
+	ingress string) {
+	s.networkService.EXPECT().GetUnitRelationNetwork(gomock.Any(), unitName, key).Return(domainnetwork.UnitNetwork{
+		IngressAddresses: []string{ingress},
+	}, nil)
+}
+
+func (s *commitHookChangesSuite) expectGetUnitRelationNetworkWithEgress(unitName coreunit.Name, key corerelation.Key,
+	ingress, egress string) {
+	s.networkService.EXPECT().GetUnitRelationNetwork(gomock.Any(), unitName, key).Return(domainnetwork.UnitNetwork{
+		IngressAddresses: []string{ingress},
+		EgressSubnets:    []string{egress},
+	}, nil)
+}
+
+func (s *commitHookChangesSuite) expectGetUnitRelationNetworkError(unitName coreunit.Name, key corerelation.Key, err error) {
+	s.networkService.EXPECT().GetUnitRelationNetwork(gomock.Any(), unitName, key).Return(domainnetwork.UnitNetwork{}, err)
+}
+
+func (s *commitHookChangesSuite) expectGetUnitUUID(unitName coreunit.Name, unitUUID coreunit.UUID, err error) {
+	s.applicationService.EXPECT().GetUnitUUID(gomock.Any(), unitName).Return(unitUUID, err)
+}
+
+func (s *commitHookChangesSuite) expectGetRelationsStatusForUnit(unitUUID coreunit.UUID, relations []relation.RelationUnitStatus, err error) {
+	s.relationService.EXPECT().GetRelationsStatusForUnit(gomock.Any(), unitUUID).Return(relations, err)
+}
+
+type apiAddresserSuite struct {
+	watcherRegistry    *MockWatcherRegistry
+	apiAddressAccessor *MockAPIAddressAccessor
+}
+
+func TestAPIAddresserSuite(t *testing.T) {
+	tc.Run(t, &apiAddresserSuite{})
+}
+
+// TestAPIAddresses ensures that the APIAddresser is wired up within the uniter.
+// Functionality of the APIAddresser is tested in apiserver/common.
+func (s *apiAddresserSuite) TestAPIAddresses(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	s.apiAddressAccessor.EXPECT().GetAllAPIAddressesForAgents(gomock.Any()).Return([]string{"0.1.2.3:1234"}, nil)
+
+	uniter := &UniterAPI{
+		APIAddresser: common.NewAPIAddresser(s.apiAddressAccessor, s.watcherRegistry),
+	}
+
+	// Act
+	result, err := uniter.APIAddresses(c.Context())
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.StringsResult{
 		Result: []string{"0.1.2.3:1234"},
 	})
 }
 
-func (s *uniterSuite) TestWatchUnitAddressesHash(c *gc.C) {
-	c.Assert(s.resources.Count(), gc.Equals, 0)
+func (s *apiAddresserSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.apiAddressAccessor = NewMockAPIAddressAccessor(ctrl)
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "machine-0"},
-		{Tag: "application-wordpress"},
-	}}
-	result, err := s.uniter.WatchUnitAddressesHash(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{
-				StringsWatcherId: "1",
-				// The unit's machine has no network addresses
-				// so the expected hash only contains the
-				// sorted endpoint to space ID bindings for the
-				// wordpress application.
-				Changes: []string{"6048d9d417c851eddf006fa5b5435549313ee3046cf45a8223f47244d8c73e03"},
-			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
+	c.Cleanup(func() {
+		s.apiAddressAccessor = nil
+		s.watcherRegistry = nil
 	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) TestWatchCAASUnitAddressesHash(c *gc.C) {
-	_, cm, _, _ := s.setupCAASModel(c)
-	c.Assert(s.resources.Count(), gc.Equals, 0)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-gitlab-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "machine-0"},
-		{Tag: "application-gitlab"},
-	}}
-
-	uniterAPI := s.newUniterAPI(c, cm.State(), s.authorizer)
-
-	result, err := uniterAPI.WatchUnitAddressesHash(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{
-				StringsWatcherId: "1",
-				// The container doesn't have an address.
-				Changes: []string{""},
-			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer workertest.CleanKill(c, resource)
-
-	// Check that the Watch has consumed the initial event ("returned" in
-	// the Watch call)
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-}
-
-func (s *uniterSuite) addRelatedApplication(c *gc.C, firstSvc, relatedApp string, unit *state.Unit) (*state.Relation, *state.Application, *state.Unit) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	relatedApplication := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  relatedApp,
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: relatedApp}),
-	})
-	rel := s.addRelation(c, firstSvc, relatedApp)
-	relUnit, err := rel.Unit(unit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = relUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	relatedUnit, err := s.ControllerModel(c).State().Unit(relatedApp + "/0")
-	c.Assert(err, jc.ErrorIsNil)
-	return rel, relatedApplication, relatedUnit
-}
-
-func (s *uniterSuite) TestRequestReboot(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: s.machine0.Tag().String()},
-		{Tag: s.machine1.Tag().String()},
-		{Tag: "bogus"},
-		{Tag: "nasty-tag"},
-	}}
-	errResult, err := s.uniter.RequestReboot(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(errResult, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		}})
-
-	rFlag, err := s.machine0.GetRebootFlag()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rFlag, jc.IsTrue)
-
-	rFlag, err = s.machine1.GetRebootFlag()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(rFlag, jc.IsFalse)
-}
-
-func checkUnorderedActionIdsEqual(c *gc.C, ids []string, results params.StringsWatchResults) {
-	c.Assert(results, gc.NotNil)
-	content := results.Results
-	c.Assert(len(content), gc.Equals, 1)
-	result := content[0]
-	c.Assert(result.StringsWatcherId, gc.Equals, "1")
-	obtainedIds := map[string]int{}
-	expectedIds := map[string]int{}
-	for _, id := range ids {
-		expectedIds[id]++
-	}
-	// The count of each ID that has been seen.
-	for _, change := range result.Changes {
-		obtainedIds[change]++
-	}
-	c.Check(obtainedIds, jc.DeepEquals, expectedIds)
-}
-
-func (s *uniterSuite) TestStorageAttachments(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	// We need to set up a unit that has storage metadata defined.
-	sCons := map[string]state.StorageConstraints{
-		"data": {Pool: "", Size: 1024, Count: 1},
-	}
-	application := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:    "storage-block",
-		Charm:   f.MakeCharm(c, &factory.CharmParams{Name: "storage-block"}),
-		Storage: sCons,
-	})
-	unit, err := application.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	st := s.ControllerModel(c).State()
-	err = st.AssignUnit(s.InstancePrechecker(c, st), unit, state.AssignNew)
-	c.Assert(err, jc.ErrorIsNil)
-	assignedMachineId, err := unit.AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	machine, err := st.Machine(assignedMachineId)
-	c.Assert(err, jc.ErrorIsNil)
-
-	volumeAttachments, err := machine.VolumeAttachments()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(volumeAttachments, gc.HasLen, 1)
-
-	err = machine.SetProvisioned("inst-id", "", "fake_nonce", nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	sb, err := state.NewStorageBackend(st)
-	c.Assert(err, jc.ErrorIsNil)
-	err = sb.SetVolumeInfo(
-		volumeAttachments[0].Volume(),
-		state.VolumeInfo{VolumeId: "vol-123", Size: 456},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = sb.SetVolumeAttachmentInfo(
-		machine.MachineTag(),
-		volumeAttachments[0].Volume(),
-		state.VolumeAttachmentInfo{DeviceName: "xvdf1"},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	password, err := password.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = unit.SetPassword(password)
-	c.Assert(err, jc.ErrorIsNil)
-	api := s.OpenModelAPIAs(c, s.ControllerModelUUID(), unit.Tag(), password, "nonce")
-	uniter, err := apiuniter.NewFromConnection(api)
-	c.Assert(err, jc.ErrorIsNil)
-
-	attachments, err := uniter.UnitStorageAttachments(unit.UnitTag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(attachments, gc.DeepEquals, []params.StorageAttachmentId{{
-		StorageTag: "storage-data-0",
-		UnitTag:    unit.Tag().String(),
-	}})
-}
-
-func (s *uniterSuite) TestUnitStatus(c *gc.C) {
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Maintenance,
-		Message: "blah",
-		Since:   &now,
-	}
-	err := s.wordpressUnit.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	sInfo = status.StatusInfo{
-		Status:  status.Terminated,
-		Message: "foo",
-		Since:   &now,
-	}
-	err = s.mysqlUnit.SetStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{
-		Entities: []params.Entity{
-			{Tag: "unit-mysql-0"},
-			{Tag: "unit-wordpress-0"},
-			{Tag: "unit-foo-42"},
-			{Tag: "machine-1"},
-			{Tag: "invalid"},
-		}}
-	result, err := s.uniter.UnitStatus(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	// Zero out the updated timestamps so we can easily check the results.
-	for i, statusResult := range result.Results {
-		r := statusResult
-		if r.Status != "" {
-			c.Assert(r.Since, gc.NotNil)
-		}
-		r.Since = nil
-		result.Results[i] = r
-	}
-	c.Assert(result, gc.DeepEquals, params.StatusResults{
-		Results: []params.StatusResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Status: status.Maintenance.String(), Info: "blah", Data: map[string]interface{}{}},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ServerError(`"invalid" is not a valid tag`)},
-		},
-	})
-}
-
-func (s *uniterSuite) TestAssignedMachine(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-		{Tag: "unit-foo-42"},
-		{Tag: "application-mysql"},
-		{Tag: "application-wordpress"},
-		{Tag: "machine-0"},
-		{Tag: "machine-1"},
-		{Tag: "machine-42"},
-		{Tag: "application-foo"},
-		{Tag: "relation-svc1.rel1#svc2.rel2"},
-	}}
-	result, err := s.uniter.AssignedMachine(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, params.StringResults{
-		Results: []params.StringResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{Result: "machine-0"},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) TestOpenedMachinePortRangesByEndpoint(c *gc.C) {
-	// Verify no ports are opened yet on the machine (or unit).
-	machinePortRanges, err := s.machine0.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machinePortRanges.UniquePortRanges(), gc.HasLen, 0)
-
-	// Add another mysql unit on machine 0.
-	mysqlUnit1, err := s.mysql.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	err = mysqlUnit1.AssignToMachine(s.machine0)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Open some ports on both units using different endpoints.
-	wpPortRanges := machinePortRanges.ForUnit(s.wordpressUnit.Name())
-	wpPortRanges.Open(allEndpoints, network.MustParsePortRange("100-200/tcp"))
-	wpPortRanges.Open("monitoring-port", network.MustParsePortRange("10-20/udp"))
-
-	msPortRanges := machinePortRanges.ForUnit(mysqlUnit1.Name())
-	msPortRanges.Open("server", network.MustParsePortRange("3306/tcp"))
-
-	c.Assert(s.ControllerModel(c).State().ApplyOperation(machinePortRanges.Changes()), jc.ErrorIsNil)
-
-	// Get the open port ranges
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "machine-0"},
-		{Tag: "machine-1"},
-		{Tag: "unit-foo-42"},
-		{Tag: "machine-42"},
-		{Tag: "application-wordpress"},
-	}}
-	expectPortRanges := map[string][]params.OpenUnitPortRangesByEndpoint{
-		"unit-mysql-1": {
-			{
-				Endpoint:   "server",
-				PortRanges: []params.PortRange{{3306, 3306, "tcp"}},
-			},
-		},
-		"unit-wordpress-0": {
-			{
-				Endpoint:   "",
-				PortRanges: []params.PortRange{{100, 200, "tcp"}},
-			},
-			{
-				Endpoint:   "monitoring-port",
-				PortRanges: []params.PortRange{{10, 20, "udp"}},
-			},
-		},
-	}
-	result, err := s.uniter.OpenedMachinePortRangesByEndpoint(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.OpenPortRangesByEndpointResults{
-		Results: []params.OpenPortRangesByEndpointResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{
-				UnitPortRanges: expectPortRanges,
-			},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	})
-}
-
-func (s *uniterSuite) setupRemoteRelationScenario(c *gc.C) (names.Tag, *state.RelationUnit) {
-	s.makeRemoteWordpress(c)
-
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Set mysql's addresses first.
-	err = s.machine1.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
-		network.NewSpaceAddress("4.3.2.1", network.WithScope(network.ScopePublic)),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	st := s.ControllerModel(c).State()
-	eps, err := st.InferEndpoints("mysql", "remote-wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := st.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-
-	relUnit, err := rel.Unit(s.mysqlUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relUnit, false)
-	return rel.Tag(), relUnit
-}
-
-func (s *uniterSuite) TestPrivateAddressWithRemoteRelation(c *gc.C) {
-	relTag, relUnit := s.setupRemoteRelationScenario(c)
-
-	thisUniter := s.makeMysqlUniter(c)
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: relTag.String(), Unit: "unit-mysql-0"},
-	}}
-	result, err := thisUniter.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
-
-	// Verify the scope changes and settings.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.mysqlUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"private-address": "4.3.2.1",
-		"ingress-address": "4.3.2.1",
-		"egress-subnets":  "4.3.2.1/32",
-	})
-}
-
-func (s *uniterSuite) TestPrivateAddressWithRemoteRelationNoPublic(c *gc.C) {
-	relTag, relUnit := s.setupRemoteRelationScenario(c)
-
-	thisUniter := s.makeMysqlUniter(c)
-
-	controllerConfig, err := s.controllerConfig(c)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Set mysql's addresses - no public address.
-	err = s.machine1.SetProviderAddresses(
-		controllerConfig,
-		network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: relTag.String(), Unit: "unit-mysql-0"},
-	}}
-	result, err := thisUniter.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
-
-	// Verify that we fell back to the private address.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.mysqlUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"private-address": "1.2.3.4",
-		"ingress-address": "1.2.3.4",
-		"egress-subnets":  "1.2.3.4/32",
-	})
-}
-
-func (s *uniterSuite) TestRelationEgressSubnets(c *gc.C) {
-	relTag, relUnit := s.setupRemoteRelationScenario(c)
-
-	// Check model attributes are overridden by setting up a value.
-	err := s.ControllerServiceFactory(c).Config().UpdateModelConfig(context.Background(), map[string]interface{}{"egress-subnets": "192.168.0.0/16"}, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	egress := state.NewRelationEgressNetworks(s.ControllerModel(c).State())
-	_, err = egress.Save(relTag.Id(), false, []string{"10.0.0.0/16", "10.1.2.0/8"})
-	c.Assert(err, jc.ErrorIsNil)
-
-	thisUniter := s.makeMysqlUniter(c)
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: relTag.String(), Unit: "unit-mysql-0"},
-	}}
-
-	result, err := thisUniter.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
-
-	// Verify the scope changes and settings.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.mysqlUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"private-address": "4.3.2.1",
-		"ingress-address": "4.3.2.1",
-		"egress-subnets":  "10.0.0.0/16,10.1.2.0/8",
-	})
-}
-
-func (s *uniterSuite) TestModelEgressSubnets(c *gc.C) {
-	relTag, relUnit := s.setupRemoteRelationScenario(c)
-
-	err := s.ControllerServiceFactory(c).Config().UpdateModelConfig(context.Background(), map[string]interface{}{"egress-subnets": "192.168.0.0/16"}, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	thisUniter := s.makeMysqlUniter(c)
-	args := params.RelationUnits{RelationUnits: []params.RelationUnit{
-		{Relation: relTag.String(), Unit: "unit-mysql-0"},
-	}}
-	result, err := thisUniter.EnterScope(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{{Error: nil}},
-	})
-
-	// Verify the scope changes and settings.
-	s.assertInScope(c, relUnit, true)
-	readSettings, err := relUnit.ReadSettings(s.mysqlUnit.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(readSettings, gc.DeepEquals, map[string]interface{}{
-		"private-address": "4.3.2.1",
-		"ingress-address": "4.3.2.1",
-		"egress-subnets":  "192.168.0.0/16",
-	})
-}
-
-func (s *uniterSuite) makeMysqlUniter(c *gc.C) *uniter.UniterAPI {
-	authorizer := s.authorizer
-	authorizer.Tag = s.mysqlUnit.Tag()
-	return s.newUniterAPI(c, s.ControllerModel(c).State(), authorizer)
-}
-
-func (s *uniterSuite) makeRemoteWordpress(c *gc.C) {
-	_, err := s.ControllerModel(c).State().AddRemoteApplication(state.AddRemoteApplicationParams{
-		Name:            "remote-wordpress",
-		SourceModel:     names.NewModelTag("source-model"),
-		IsConsumerProxy: true,
-		OfferUUID:       "offer-uuid",
-		Endpoints: []charm.Relation{{
-			Interface: "mysql",
-			Limit:     1,
-			Name:      "db",
-			Role:      charm.RoleRequirer,
-			Scope:     charm.ScopeGlobal,
-		}},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *uniterSuite) TestRefresh(c *gc.C) {
-	args := params.Entities{
-		Entities: []params.Entity{
-			{s.wordpressUnit.Tag().String()},
-			{s.mysqlUnit.Tag().String()},
-			{s.mysql.Tag().String()},
-			{s.machine0.Tag().String()},
-			{"some-word"},
-		},
-	}
-	expect := params.UnitRefreshResults{
-		Results: []params.UnitRefreshResult{
-			{Life: life.Alive, Resolved: params.ResolvedNone},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-			{Error: apiservertesting.ErrUnauthorized},
-		},
-	}
-	results, err := s.uniter.Refresh(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, expect)
-}
-
-func (s *uniterSuite) TestRefreshNoArgs(c *gc.C) {
-	results, err := s.uniter.Refresh(context.Background(), params.Entities{Entities: []params.Entity{}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.UnitRefreshResults{Results: []params.UnitRefreshResult{}})
-}
-
-func (s *uniterSuite) TestOpenedPortRangesByEndpoint(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
-	st := cm.State()
-
-	appPortRanges, err := app.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(appPortRanges.UniquePortRanges(), gc.HasLen, 0)
-
-	portRanges, err := unit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Open some ports using different endpoints.
-	portRanges.Open(allEndpoints, network.MustParsePortRange("1000/tcp"))
-	portRanges.Open("db", network.MustParsePortRange("1111/udp"))
-
-	c.Assert(st.ApplyOperation(portRanges.Changes()), jc.ErrorIsNil)
-
-	// Get the open port ranges
-	expectPortRanges := []params.OpenUnitPortRangesByEndpoint{
-		{
-			Endpoint:   "",
-			PortRanges: []params.PortRange{{FromPort: 1000, ToPort: 1000, Protocol: "tcp"}},
-		},
-		{
-			Endpoint:   "db",
-			PortRanges: []params.PortRange{{FromPort: 1111, ToPort: 1111, Protocol: "udp"}},
-		},
-	}
-
-	uniterAPI := s.newUniterAPI(c, st, s.authorizer)
-
-	result, err := uniterAPI.OpenedPortRangesByEndpoint(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.OpenPortRangesByEndpointResults{
-		Results: []params.OpenPortRangesByEndpointResult{
-			{
-				UnitPortRanges: map[string][]params.OpenUnitPortRangesByEndpoint{
-					"unit-gitlab-0": expectPortRanges,
-				},
-			},
-		},
-	})
-}
-
-func (s *uniterSuite) TestCommitHookChangesWithSecrets(c *gc.C) {
-	c.Skip("TODO(secrets) - wire up new secret service mock to test")
-	s.addRelatedApplication(c, "wordpress", "logging", s.wordpressUnit)
-	s.leadershipChecker.isLeader = true
-	st := s.ControllerModel(c).State()
-	store := state.NewSecrets(st)
-	uri2 := secrets.NewURI()
-	_, err := store.CreateSecret(uri2, state.CreateSecretParams{
-		UpdateSecretParams: state.UpdateSecretParams{
-			LeaderToken: &token{isLeader: true},
-			Data:        map[string]string{"foo2": "bar"},
-		},
-		Owner: s.wordpress.Tag(),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	err = st.GrantSecretAccess(uri2, state.SecretAccessParams{
-		LeaderToken: &token{isLeader: true},
-		Scope:       s.wordpress.Tag(),
-		Subject:     s.wordpress.Tag(),
-		Role:        secrets.RoleManage,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	uri3 := secrets.NewURI()
-	_, err = store.CreateSecret(uri3, state.CreateSecretParams{
-		UpdateSecretParams: state.UpdateSecretParams{
-			LeaderToken: &token{isLeader: true},
-			Data:        map[string]string{"foo3": "bar"},
-		},
-		Owner: s.wordpress.Tag(),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	err = st.GrantSecretAccess(uri3, state.SecretAccessParams{
-		LeaderToken: &token{isLeader: true},
-		Scope:       s.wordpress.Tag(),
-		Subject:     s.wordpress.Tag(),
-		Role:        secrets.RoleManage,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	b := apiuniter.NewCommitHookParamsBuilder(s.wordpressUnit.UnitTag())
-	uri := secrets.NewURI()
-	err = b.AddSecretCreates([]apiuniter.SecretCreateArg{{
-		SecretUpsertArg: apiuniter.SecretUpsertArg{
-			URI:   uri,
-			Label: ptr("foobar"),
-			Value: secrets.NewSecretValue(map[string]string{"foo": "bar"}),
-		},
-		Owner: secrets.Owner{Kind: secrets.ApplicationOwner, ID: s.wordpress.Name()},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	b.AddSecretUpdates([]apiuniter.SecretUpsertArg{{
-		URI:          uri,
-		RotatePolicy: ptr(secrets.RotateDaily),
-		Description:  ptr("a secret"),
-		Label:        ptr("foobar"),
-		Value:        secrets.NewSecretValue(map[string]string{"foo": "bar2"}),
-	}, {
-		URI:   uri3,
-		Value: secrets.NewSecretValue(map[string]string{"foo3": "bar3"}),
-	}})
-	b.AddTrackLatest([]string{uri3.ID})
-	b.AddSecretDeletes([]apiuniter.SecretDeleteArg{{URI: uri3, Revision: ptr(1)}})
-	b.AddSecretGrants([]apiuniter.SecretGrantRevokeArgs{{
-		URI:             uri,
-		ApplicationName: ptr(s.mysql.Name()),
-		Role:            secrets.RoleView,
-	}, {
-		URI:             uri2,
-		ApplicationName: ptr(s.mysql.Name()),
-		Role:            secrets.RoleView,
-	}})
-	b.AddSecretRevokes([]apiuniter.SecretGrantRevokeArgs{{
-		URI:             uri2,
-		ApplicationName: ptr(s.mysql.Name()),
-	}})
-	req, _ := b.Build()
-
-	result, err := s.uniter.CommitHookChanges(context.Background(), req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-
-	// Verify state
-	_, _, err = store.GetSecretValue(uri3, 1)
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
-	md, err := store.GetSecret(uri)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(md.Description, gc.Equals, "a secret")
-	c.Assert(md.Label, gc.Equals, "foobar")
-	c.Assert(md.RotatePolicy, gc.Equals, secrets.RotateDaily)
-	val, _, err := store.GetSecretValue(uri, 2)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(val.EncodedValues(), jc.DeepEquals, map[string]string{"foo": "bar2"})
-	access, err := st.SecretAccess(uri, s.mysql.Tag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(access, gc.Equals, secrets.RoleView)
-	access, err = st.SecretAccess(uri2, s.mysql.Tag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(access, gc.Equals, secrets.RoleNone)
-
-	info, err := st.GetSecretConsumer(uri3, s.wordpressUnit.Tag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(info.CurrentRevision, gc.Equals, 2)
-	c.Assert(info.LatestRevision, gc.Equals, 2)
-}
-
-func (s *uniterSuite) TestCommitHookChangesWithStorage(c *gc.C) {
-	f, release := s.NewFactory(c, s.ControllerModelUUID())
-	defer release()
-
-	// We need to set up a unit that has storage metadata defined.
-	application := f.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "storage-block2",
-		Charm: f.MakeCharm(c, &factory.CharmParams{Name: "storage-block2"}),
-	})
-	unit, err := application.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	st := s.ControllerModel(c).State()
-	err = st.AssignUnit(s.InstancePrechecker(c, st), unit, state.AssignNew)
-	c.Assert(err, jc.ErrorIsNil)
-	assignedMachineId, err := unit.AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	machine, err := st.Machine(assignedMachineId)
-	c.Assert(err, jc.ErrorIsNil)
-	oldVolumeAttachments, err := machine.VolumeAttachments()
-	c.Assert(err, jc.ErrorIsNil)
-
-	stCount := uint64(1)
-	b := apiuniter.NewCommitHookParamsBuilder(unit.UnitTag())
-	b.UpdateNetworkInfo()
-	b.OpenPortRange(allEndpoints, network.MustParsePortRange("80-81/tcp"))
-	b.OpenPortRange(allEndpoints, network.MustParsePortRange("7337/tcp")) // same port closed below; this should be a no-op
-	b.ClosePortRange(allEndpoints, network.MustParsePortRange("7337/tcp"))
-	b.UpdateCharmState(map[string]string{"charm-key": "charm-value"})
-	b.AddStorage(map[string][]params.StorageDirectives{
-		"multi1to10": {{Count: &stCount}},
-	})
-	req, _ := b.Build()
-
-	// Test-suite uses an older API version. Create a new one and override
-	// authorizer to allow access to the unit we just created.
-	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag: unit.Tag(),
-	}
-	api, err := uniter.NewUniterAPI(context.Background(), s.facadeContext(c))
-	c.Assert(err, jc.ErrorIsNil)
-
-	result, err := api.CommitHookChanges(context.Background(), req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-
-	// Verify state
-	unitPortRanges, err := unit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(unitPortRanges.UniquePortRanges(), jc.DeepEquals, []network.PortRange{{Protocol: "tcp", FromPort: 80, ToPort: 81}})
-
-	unitState, err := unit.State()
-	c.Assert(err, jc.ErrorIsNil)
-	charmState, _ := unitState.CharmState()
-	c.Assert(charmState, jc.DeepEquals, map[string]string{"charm-key": "charm-value"}, gc.Commentf("state doc not updated"))
-
-	newVolumeAttachments, err := machine.VolumeAttachments()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(newVolumeAttachments, gc.HasLen, len(oldVolumeAttachments)+1, gc.Commentf("expected an additional instance of block storage to be added"))
-}
-
-func (s *uniterSuite) TestCommitHookChangesWithPortsSidecarApplication(c *gc.C) {
-	_, cm, app, unit := s.setupCAASModel(c)
-
-	b := apiuniter.NewCommitHookParamsBuilder(unit.UnitTag())
-	b.UpdateNetworkInfo()
-	b.UpdateCharmState(map[string]string{"charm-key": "charm-value"})
-
-	b.OpenPortRange("db", network.MustParsePortRange("80/tcp"))
-	b.OpenPortRange("db", network.MustParsePortRange("7337/tcp")) // same port closed below; this should be a no-op
-	b.ClosePortRange("db", network.MustParsePortRange("7337/tcp"))
-	req, _ := b.Build()
-
-	s.authorizer = apiservertesting.FakeAuthorizer{Tag: unit.Tag()}
-	uniterAPI, err := uniter.NewUniterAPI(context.Background(), facadetest.ModelContext{
-		State_:             cm.State(),
-		StatePool_:         s.StatePool(),
-		Resources_:         s.resources,
-		Auth_:              s.authorizer,
-		LeadershipChecker_: s.leadershipChecker,
-		ServiceFactory_:    s.DefaultModelServiceFactory(c),
-		Logger_:            loggertesting.WrapCheckLog(c),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	result, err := uniterAPI.CommitHookChanges(context.Background(), req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-
-	appPortRanges, err := app.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(appPortRanges.UniquePortRanges(), jc.DeepEquals, []network.PortRange{{Protocol: "tcp", FromPort: 80, ToPort: 80}})
-
-	portRanges, err := unit.OpenedPortRanges()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(portRanges.ByEndpoint(), jc.DeepEquals, network.GroupedPortRanges{
-		"db": []network.PortRange{network.MustParsePortRange("80/tcp")},
-	})
-}
-
-func (s *uniterNetworkInfoSuite) TestCommitHookChangesCAAS(c *gc.C) {
-	_, cm, _, unit := s.setupCAASModel(c)
-
-	s.leadershipChecker.isLeader = true
-
-	b := apiuniter.NewCommitHookParamsBuilder(unit.UnitTag())
-	b.UpdateNetworkInfo()
-	b.UpdateCharmState(map[string]string{"charm-key": "charm-value"})
-
-	req, _ := b.Build()
-
-	s.st = cm.State()
-	s.authorizer = apiservertesting.FakeAuthorizer{Tag: unit.Tag()}
-	uniterAPI := s.newUniterAPI(c, s.st, s.authorizer)
-
-	result, err := uniterAPI.CommitHookChanges(context.Background(), req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
-		Results: []params.ErrorResult{
-			{Error: nil},
-		},
-	})
-
-	// Verify expected unit state
-	unitState, err := unit.State()
-	c.Assert(err, jc.ErrorIsNil)
-	charmState, _ := unitState.CharmState()
-	c.Assert(charmState, jc.DeepEquals, map[string]string{"charm-key": "charm-value"}, gc.Commentf("state doc not updated"))
-}
-
-func (s *uniterSuite) TestNetworkInfoCAASModelRelation(c *gc.C) {
-	_, cm, gitlab, gitlabUnit := s.setupCAASModel(c)
-
-	f, release := s.NewFactory(c, cm.UUID())
-	defer release()
-
-	st := cm.State()
-	ch := f.MakeCharm(c, &factory.CharmParams{Name: "mariadb-k8s", Series: "focal"})
-	f.MakeApplication(c, &factory.ApplicationParams{Name: "mariadb", Charm: ch})
-	eps, err := st.InferEndpoints("gitlab", "mariadb")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := st.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	wpRelUnit, err := rel.Unit(gitlabUnit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = wpRelUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	var updateUnits state.UpdateUnitsOperation
-	addr := "10.0.0.1"
-	updateUnits.Updates = []*state.UpdateUnitOperation{gitlabUnit.UpdateOperation(state.UnitUpdateProperties{
-		Address: &addr,
-		Ports:   &[]string{"443"},
-	})}
-	err = gitlab.UpdateUnits(&updateUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = gitlab.UpdateCloudService("", []network.SpaceAddress{
-		network.NewSpaceAddress("192.168.1.2", network.WithScope(network.ScopeCloudLocal)),
-		network.NewSpaceAddress("54.32.1.2", network.WithScope(network.ScopePublic)),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	relId := rel.Id()
-	args := params.NetworkInfoParams{
-		Unit:       gitlabUnit.Tag().String(),
-		Endpoints:  []string{"db"},
-		RelationId: &relId,
-	}
-
-	expectedResult := params.NetworkInfoResult{
-		Info: []params.NetworkInfo{
-			{
-				Addresses: []params.InterfaceAddress{
-					{Address: "10.0.0.1"},
-				},
-			},
-		},
-		EgressSubnets:    []string{"54.32.1.2/32"},
-		IngressAddresses: []string{"54.32.1.2", "192.168.1.2"},
-	}
-
-	uniterAPI := s.newUniterAPI(c, st, s.authorizer)
-	result, err := uniterAPI.NetworkInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(result.Results["db"], jc.DeepEquals, expectedResult)
-}
-
-func (s *uniterSuite) TestNetworkInfoCAASModelNoRelation(c *gc.C) {
-	_, cm, wp, wpUnit := s.setupCAASModel(c)
-
-	f, release := s.NewFactory(c, cm.UUID())
-	defer release()
-
-	ch := f.MakeCharm(c, &factory.CharmParams{Name: "mariadb-k8s", Series: "focal"})
-	_ = f.MakeApplication(c, &factory.ApplicationParams{Name: "mariadb", Charm: ch})
-
-	var updateUnits state.UpdateUnitsOperation
-	addr := "10.0.0.1"
-	updateUnits.Updates = []*state.UpdateUnitOperation{wpUnit.UpdateOperation(state.UnitUpdateProperties{
-		Address: &addr,
-		Ports:   &[]string{"443"},
-	})}
-	err := wp.UpdateUnits(&updateUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = wp.UpdateCloudService("", []network.SpaceAddress{
-		network.NewSpaceAddress("192.168.1.2", network.WithScope(network.ScopeCloudLocal)),
-		network.NewSpaceAddress("54.32.1.2", network.WithScope(network.ScopePublic)),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(wp.Refresh(), jc.ErrorIsNil)
-	c.Assert(wpUnit.Refresh(), jc.ErrorIsNil)
-
-	args := params.NetworkInfoParams{
-		Unit:      wpUnit.Tag().String(),
-		Endpoints: []string{"db"},
-	}
-
-	expectedResult := params.NetworkInfoResult{
-		Info: []params.NetworkInfo{
-			{
-				Addresses: []params.InterfaceAddress{
-					{Address: "10.0.0.1"},
-				},
-			},
-		},
-		EgressSubnets:    []string{"54.32.1.2/32"},
-		IngressAddresses: []string{"54.32.1.2", "192.168.1.2"},
-	}
-
-	uniterAPI := s.newUniterAPI(c, cm.State(), s.authorizer)
-	result, err := uniterAPI.NetworkInfo(context.Background(), args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(result.Results["db"], jc.DeepEquals, expectedResult)
-}
-
-func (s *uniterSuite) TestGetCloudSpecDeniesAccessWhenNotTrusted(c *gc.C) {
-	result, err := s.uniter.CloudSpec(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.DeepEquals, params.CloudSpecResult{Error: apiservertesting.ErrUnauthorized})
+	return ctrl
 }

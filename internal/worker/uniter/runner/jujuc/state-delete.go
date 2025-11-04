@@ -4,9 +4,8 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v4"
-
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StateDeleteCommand implements the state-delete command.
@@ -26,16 +25,13 @@ func NewStateDeleteCommand(ctx Context) (cmd.Command, error) {
 func (c *StateDeleteCommand) Info() *cmd.Info {
 	doc := `
 state-delete deletes the value of the server side state specified by key.
-
-See also:
-    state-get
-    state-set
 `
 	return jujucmd.Info(&cmd.Info{
 		Name:    "state-delete",
 		Args:    "<key>",
-		Purpose: "delete server-side-state key value pair",
+		Purpose: "Delete server-side-state key value pairs.",
 		Doc:     doc,
+		SeeAlso: []string{"state-get", "state-set"},
 	})
 }
 

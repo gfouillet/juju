@@ -11,6 +11,7 @@ import (
 	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/api/common/secretsdrain"
+	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/logger"
 	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/watcher"
@@ -19,9 +20,9 @@ import (
 
 // SecretsDrainFacade instances provide a set of API for the worker to deal with secret drain process.
 type SecretsDrainFacade interface {
-	WatchSecretBackendChanged() (watcher.NotifyWatcher, error)
-	GetSecretsToDrain() ([]coresecrets.SecretMetadataForDrain, error)
-	ChangeSecretBackend([]secretsdrain.ChangeSecretBackendArg) (secretsdrain.ChangeSecretBackendResult, error)
+	WatchSecretBackendChanged(context.Context) (watcher.NotifyWatcher, error)
+	GetSecretsToDrain(context.Context) ([]coresecrets.SecretMetadataForDrain, error)
+	ChangeSecretBackend(context.Context, []secretsdrain.ChangeSecretBackendArg) (secretsdrain.ChangeSecretBackendResult, error)
 }
 
 // Config defines the operation of the Worker.
@@ -29,7 +30,8 @@ type Config struct {
 	SecretsDrainFacade
 	Logger logger.Logger
 
-	SecretsBackendGetter func() (jujusecrets.BackendsClient, error)
+	SecretsBackendGetter  func() (jujusecrets.BackendsClient, error)
+	LeadershipTrackerFunc func() leadership.ChangeTracker
 }
 
 // Validate returns an error if config cannot drive the Worker.
@@ -43,6 +45,9 @@ func (config Config) Validate() error {
 	if config.SecretsBackendGetter == nil {
 		return errors.NotValidf("nil SecretsBackendGetter")
 	}
+	if config.LeadershipTrackerFunc == nil {
+		return errors.NotValidf("nil LeadershipTrackerFunc")
+	}
 	return nil
 }
 
@@ -54,6 +59,7 @@ func NewWorker(config Config) (worker.Worker, error) {
 
 	w := &Worker{config: config}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "secrets-drain",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -78,8 +84,11 @@ func (w *Worker) Wait() error {
 	return w.catacomb.Wait()
 }
 
-func (w *Worker) loop() (err error) {
-	watcher, err := w.config.SecretsDrainFacade.WatchSecretBackendChanged()
+func (w *Worker) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	watcher, err := w.config.SecretsDrainFacade.WatchSecretBackendChanged(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -87,6 +96,7 @@ func (w *Worker) loop() (err error) {
 		return errors.Trace(err)
 	}
 
+waitforchanges:
 	for {
 		select {
 		case <-w.catacomb.Dying():
@@ -95,23 +105,17 @@ func (w *Worker) loop() (err error) {
 			if !ok {
 				return errors.New("secret backend changed watch closed")
 			}
-			w.config.Logger.Debugf("got new secret backend")
-
-			secrets, err := w.config.SecretsDrainFacade.GetSecretsToDrain()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if len(secrets) == 0 {
-				w.config.Logger.Debugf("no secrets to drain")
-				continue
-			}
-			w.config.Logger.Debugf("got %d secrets to drain", len(secrets))
-			backends, err := w.config.SecretsBackendGetter()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			for _, md := range secrets {
-				if err := w.drainSecret(md, backends); err != nil {
+			w.config.Logger.Debugf(ctx, "got new secret backend")
+			for {
+				switch err := w.drainSecrets(); {
+				case err == nil:
+					continue waitforchanges
+				case errors.Is(err, leadership.ErrLeadershipChanged):
+					// If leadership changes during the drain operation,
+					// we need to finish up and start again.
+					w.config.Logger.Warningf(ctx, "leadership changed, restarting drain operation")
+					continue
+				default:
 					return errors.Trace(err)
 				}
 			}
@@ -119,32 +123,90 @@ func (w *Worker) loop() (err error) {
 	}
 }
 
-func (w *Worker) drainSecret(md coresecrets.SecretMetadataForDrain, client jujusecrets.BackendsClient) (err error) {
+// scopedContext returns a context that is in the scope of the worker lifetime.
+// It returns a cancellable context that is cancelled when the action has
+// completed.
+func (w *Worker) scopedContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return w.catacomb.Context(ctx), cancel
+}
+
+// drainSecrets queries the secrets owned by the unit and if the unit is
+// the leader, this will include any application owned secrets.
+// If leadership changes during the draining operation, an error satisfying
+// [leadershipworker.ErrLeadershipChanged] is returned.
+func (w *Worker) drainSecrets() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	leadershipTracker := w.config.LeadershipTrackerFunc()
+	drainErr := leadershipTracker.WithStableLeadership(ctx, func(ctx context.Context) error {
+		secrets, err := w.config.SecretsDrainFacade.GetSecretsToDrain(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if len(secrets) == 0 {
+			w.config.Logger.Debugf(ctx, "no secrets to drain")
+			return nil
+		}
+		w.config.Logger.Debugf(ctx, "got %d secrets to drain", len(secrets))
+		backends, err := w.config.SecretsBackendGetter()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for _, md := range secrets {
+			if err := w.drainSecret(ctx, md, backends); err != nil {
+				return errors.Trace(err)
+			}
+		}
+		return nil
+	})
+	if errors.Is(drainErr, context.Canceled) ||
+		errors.Is(drainErr, context.DeadlineExceeded) {
+		select {
+		case <-w.catacomb.Dying():
+			drainErr = w.catacomb.ErrDying()
+		default:
+		}
+	}
+	return drainErr
+}
+
+func (w *Worker) drainSecret(
+	ctx context.Context, md coresecrets.SecretMetadataForDrain, client jujusecrets.BackendsClient,
+) error {
+	// Exit early if we need to abort.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+
+	// Otherwise completely process the specified secret
+	// and its revisions.
 	var args []secretsdrain.ChangeSecretBackendArg
 	var cleanUpInExternalBackendFuncs []func() error
 	for _, revisionMeta := range md.Revisions {
 		rev := revisionMeta
 		// We have to get the active backend for each drain operation because the active backend
 		// could be changed during the draining process.
-		activeBackend, activeBackendID, err := client.GetBackend(nil, true)
+		activeBackend, activeBackendID, err := client.GetBackend(ctx, nil, true)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		if rev.ValueRef != nil && rev.ValueRef.BackendID == activeBackendID {
-			w.config.Logger.Debugf("secret %q revision %d is already on the active backend %q", md.URI, rev.Revision, activeBackendID)
+			w.config.Logger.Debugf(ctx, "secret %q revision %d is already on the active backend %q", md.URI, rev.Revision, activeBackendID)
 			continue
 		}
-		w.config.Logger.Debugf("draining %s/%d", md.URI.ID, rev.Revision)
+		w.config.Logger.Debugf(ctx, "draining %s/%d", md.URI.ID, rev.Revision)
 
-		secretVal, err := client.GetRevisionContent(md.URI, rev.Revision)
+		secretVal, err := client.GetRevisionContent(ctx, md.URI, rev.Revision)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		newRevId, err := activeBackend.SaveContent(context.TODO(), md.URI, rev.Revision, secretVal)
+		newRevId, err := activeBackend.SaveContent(ctx, md.URI, rev.Revision, secretVal)
 		if err != nil && !errors.Is(err, errors.NotSupported) {
 			return errors.Trace(err)
 		}
-		w.config.Logger.Debugf("saved secret %s/%d to the new backend %q, %#v", md.URI.ID, rev.Revision, activeBackendID, err)
+		w.config.Logger.Debugf(ctx, "saved secret %s/%d to the new backend %q, %#v", md.URI.ID, rev.Revision, activeBackendID, err)
 		var newValueRef *coresecrets.ValueRef
 		data := secretVal.EncodedValues()
 		if err == nil {
@@ -163,12 +225,12 @@ func (w *Worker) drainSecret(md coresecrets.SecretMetadataForDrain, client jujus
 			// The old backend is an external backend.
 			// Note: we have to get the old backend before we make ChangeSecretBackend facade call.
 			// Because the token policy(for the vault backend especially) will be changed after we changed the secret's backend.
-			oldBackend, _, err := client.GetBackend(&rev.ValueRef.BackendID, true)
+			oldBackend, _, err := client.GetBackend(ctx, &rev.ValueRef.BackendID, true)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			cleanUpInExternalBackend = func() error {
-				w.config.Logger.Debugf("cleanup secret %s/%d from old backend %q", md.URI.ID, rev.Revision, rev.ValueRef.BackendID)
+				w.config.Logger.Debugf(ctx, "cleanup secret %s/%d from old backend %q", md.URI.ID, rev.Revision, rev.ValueRef.BackendID)
 				if activeBackendID == rev.ValueRef.BackendID {
 					// Ideally, We should have done all these drain steps in the controller via transaction, but by design, we only allow
 					// uniters to be able to access secret content. So we have to do these extra checks to avoid
@@ -176,7 +238,7 @@ func (w *Worker) drainSecret(md coresecrets.SecretMetadataForDrain, client jujus
 					// the old backend while the secret is being drained.
 					return nil
 				}
-				err := oldBackend.DeleteContent(context.TODO(), rev.ValueRef.RevisionID)
+				err := oldBackend.DeleteContent(ctx, rev.ValueRef.RevisionID)
 				if errors.Is(err, errors.NotFound) {
 					// This should never happen, but if it does, we can just ignore.
 					return nil
@@ -196,8 +258,8 @@ func (w *Worker) drainSecret(md coresecrets.SecretMetadataForDrain, client jujus
 		return nil
 	}
 
-	w.config.Logger.Debugf("content moved, updating backend info")
-	results, err := w.config.SecretsDrainFacade.ChangeSecretBackend(args)
+	w.config.Logger.Debugf(ctx, "content moved, updating backend info")
+	results, err := w.config.SecretsDrainFacade.ChangeSecretBackend(ctx, args)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -208,12 +270,12 @@ func (w *Worker) drainSecret(md coresecrets.SecretMetadataForDrain, client jujus
 			// We have already changed the secret to the active backend, so we
 			// can clean up the secret content in the old backend now.
 			if err := cleanUpInExternalBackendFuncs[i](); err != nil {
-				w.config.Logger.Warningf("failed to clean up secret %q-%d in the external backend: %v", arg.URI, arg.Revision, err)
+				w.config.Logger.Warningf(ctx, "failed to clean up secret %q-%d in the external backend: %v", arg.URI, arg.Revision, err)
 			}
 		} else {
 			// If any of the ChangeSecretBackend calls failed, we will
 			// bounce the agent to retry those failed tasks.
-			w.config.Logger.Warningf("failed to change secret backend for %q-%d: %v", arg.URI, arg.Revision, err)
+			w.config.Logger.Warningf(ctx, "failed to change secret backend for %q-%d: %v", arg.URI, arg.Revision, err)
 		}
 	}
 	if results.ErrorCount() > 0 {

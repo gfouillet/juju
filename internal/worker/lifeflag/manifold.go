@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/worker/v4"
 	"github.com/juju/worker/v4/dependency"
 
@@ -35,7 +35,7 @@ type ManifoldConfig struct {
 	NotFoundIsDead bool
 
 	NewFacade func(base.APICaller) (Facade, error)
-	NewWorker func(Config) (worker.Worker, error)
+	NewWorker func(context.Context, Config) (worker.Worker, error)
 }
 
 func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
@@ -59,7 +59,7 @@ func (config ManifoldConfig) start(context context.Context, getter dependency.Ge
 		config.Entity = agent.CurrentConfig().Tag()
 	}
 
-	worker, err := config.NewWorker(Config{
+	worker, err := config.NewWorker(context, Config{
 		Facade:         facade,
 		Entity:         config.Entity,
 		Result:         config.Result,

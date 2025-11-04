@@ -4,14 +4,17 @@
 package connector
 
 import (
+	"context"
 	"errors"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 
 	"github.com/juju/juju/api"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
 )
+
+var apiOpen = api.Open
 
 var ErrEmptyControllerName = errors.New("empty controller name")
 
@@ -66,7 +69,7 @@ func NewClientStore(config ClientStoreConfig, dialOptions ...api.DialOption) (*C
 
 // Connect returns an api.Connection to the controller / model specified in c's
 // config, or an error if there was a problem opening the connection.
-func (c *ClientStoreConnector) Connect(dialOptions ...api.DialOption) (api.Connection, error) {
+func (c *ClientStoreConnector) Connect(ctx context.Context, dialOptions ...api.DialOption) (api.Connection, error) {
 	opts := c.defaultDialOpts
 	for _, f := range dialOptions {
 		f(&opts)
@@ -84,12 +87,12 @@ func (c *ClientStoreConnector) Connect(dialOptions ...api.DialOption) (api.Conne
 	bakeryClient.Jar = jar
 	opts.BakeryClient = bakeryClient
 
-	return juju.NewAPIConnection(juju.NewAPIConnectionParams{
-		ControllerName: c.config.ControllerName,
-		Store:          c.config.ClientStore,
-		OpenAPI:        api.Open,
-		DialOpts:       opts,
-		AccountDetails: c.config.AccountDetails,
-		ModelUUID:      c.config.ModelUUID,
+	return juju.NewAPIConnection(ctx, juju.NewAPIConnectionParams{
+		ControllerName:  c.config.ControllerName,
+		ControllerStore: c.config.ClientStore,
+		OpenAPI:         apiOpen,
+		DialOpts:        opts,
+		AccountDetails:  c.config.AccountDetails,
+		ModelUUID:       c.config.ModelUUID,
 	})
 }

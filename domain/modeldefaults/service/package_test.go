@@ -3,14 +3,5 @@
 
 package service
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
-// tlm: Tests coming in following PR when integrated back into API
+//go:generate go run go.uber.org/mock/mockgen -typed -package service -destination service_mock_test.go github.com/juju/juju/domain/modeldefaults/service State
+//go:generate go run go.uber.org/mock/mockgen -typed -package service -destination environs_mock_test.go github.com/juju/juju/environs ModelConfigProvider

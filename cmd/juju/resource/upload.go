@@ -7,16 +7,16 @@ import (
 	"context"
 	"io"
 
-	"github.com/juju/cmd/v4"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/resources"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
-	coreresources "github.com/juju/juju/core/resources"
+	coreresources "github.com/juju/juju/core/resource"
 	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // UploadClient has the API client methods needed by UploadCommand.
@@ -25,7 +25,7 @@ type UploadClient interface {
 	Upload(ctx context.Context, application, name, filename, pendingID string, resource io.ReadSeeker) error
 
 	// ListResources returns info about resources for applications in the model.
-	ListResources(applications []string) ([]coreresources.ApplicationResources, error)
+	ListResources(ctx context.Context, applications []string) ([]coreresources.ApplicationResources, error)
 
 	// Close closes the client.
 	Close() error
@@ -35,7 +35,7 @@ type UploadClient interface {
 type UploadCommand struct {
 	modelcmd.ModelCommandBase
 
-	newClient func() (UploadClient, error)
+	newClient func(ctx context.Context) (UploadClient, error)
 
 	application   string
 	resourceValue resourceValue
@@ -45,8 +45,8 @@ type UploadCommand struct {
 // by a charm.
 func NewUploadCommand() modelcmd.ModelCommand {
 	c := &UploadCommand{}
-	c.newClient = func() (UploadClient, error) {
-		apiRoot, err := c.NewAPIRoot()
+	c.newClient = func(ctx context.Context) (UploadClient, error) {
+		apiRoot, err := c.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -65,28 +65,34 @@ The format is
 
 where the resource name is the name from the metadata.yaml file of the charm
 and where, depending on the type of the resource, the resource can be specified
-as follows: 
+as follows:
 
-(1) If the resource is type 'file', you can specify it by providing
-(a) the resource revision number or
-(b) a path to a local file.
+- If the resource is type ` + "`file`" + `, you can specify it by providing one of the following:
 
-(2) If the resource is type 'oci-image', you can specify it by providing
-(a) the resource revision number,
-(b) a path to a local file = private OCI image,
-(c) a link to a public OCI image.
+    a. the resource revision number.
 
+    b. a path to a local file. Caveat: If you choose this, you will not be able
+	 to go back to using a resource from Charmhub.
 
-Note: If you choose (1b) or (2b-c), i.e., a resource that is not from Charmhub:
-You will not be able to go back to using a resource from Charmhub.
+- If the resource is type ` + "`oci-image`" + `, you can specify it by providing one of the following:
 
-Note: If you choose (1b) or (2b): This uploads a file from your loal disk to the juju
-controller to be streamed to the charm when "resource-get" is called by a hook.
+    a. the resource revision number.
 
-Note: If you choose (2b): You will need to specify:
-(i) the local path to the private OCI image as well as
-(ii) the username/password required to access the private OCI image.
+	b. a path to the local file for your private OCI image as well as the
+	username and password required to access the private OCI image.
+	Caveat: If you choose this, you will not be able to go back to using a
+	resource from Charmhub.
 
+    c. a link to a public OCI image. Caveat: If you choose this, you will not be
+	 able to go back to using a resource from Charmhub.
+
+`
+	attachExample = `
+    juju attach-resource mysql resource-name=foo
+
+    juju attach-resource ubuntu-k8s ubuntu_image=ubuntu
+
+    juju attach-resource redis-k8s redis-image=redis
 `
 )
 
@@ -145,13 +151,13 @@ func (c *UploadCommand) addResourceValue(arg string) error {
 
 // Run implements cmd.Command.Run.
 func (c *UploadCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.newClient()
+	apiclient, err := c.newClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer apiclient.Close()
 
-	result, err := apiclient.ListResources([]string{c.application})
+	result, err := apiclient.ListResources(ctx, []string{c.application})
 	if err != nil {
 		return errors.Trace(err)
 	}

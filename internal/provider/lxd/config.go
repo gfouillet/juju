@@ -8,15 +8,15 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	"project": {
 		Description: "The LXD project name to use for Juju's resources.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 }
 

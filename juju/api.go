@@ -4,18 +4,22 @@
 package juju
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"reflect"
+	"slices"
+	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/core/network"
 	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/proxy"
-	"github.com/juju/juju/jujuclient"
 )
 
 var logger = internallogger.GetLogger("juju.juju")
@@ -26,9 +30,9 @@ type NewAPIConnectionParams struct {
 	// ControllerName is the name of the controller to connect to.
 	ControllerName string
 
-	// Store is the jujuclient.ClientStore from which the controller's
+	// ControllerStore is the jujuclient.ControllerStore from which the controller's
 	// details will be fetched, and updated on address changes.
-	Store jujuclient.ClientStore
+	ControllerStore jujuclient.ControllerStore
 
 	// OpenAPI is the function that will be used to open API connections.
 	OpenAPI api.OpenFunc
@@ -40,6 +44,7 @@ type NewAPIConnectionParams struct {
 	// in to the Juju API. If this is nil, then no login will take
 	// place. If AccountDetails.Password and AccountDetails.Macaroon
 	// are zero, the login will be as an external user.
+	// Updates to this value will be saved to the client store after login.
 	AccountDetails *jujuclient.AccountDetails
 
 	// ModelUUID is an optional model UUID. If specified, the API connection
@@ -63,7 +68,7 @@ func IsNoAddressesError(err error) bool {
 // NewAPIConnection returns an api.Connection to the specified Juju controller,
 // with specified account credentials, optionally scoped to the specified model
 // name.
-func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error) {
+func NewAPIConnection(ctx context.Context, args NewAPIConnectionParams) (_ api.Connection, err error) {
 	if args.OpenAPI == nil {
 		args.OpenAPI = api.Open
 	}
@@ -86,8 +91,8 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 	// we'll update the entry correctly.
 	dnsCache := dnsCacheMap(controller.DNSCache).copy()
 	args.DialOpts.DNSCache = dnsCache
-	logger.Infof("connecting to API addresses: %v", apiInfo.Addrs)
-	st, err := args.OpenAPI(apiInfo, args.DialOpts)
+	logger.Infof(context.TODO(), "connecting to API addresses: %v", apiInfo.Addrs)
+	st, err := args.OpenAPI(ctx, apiInfo, args.DialOpts)
 	if err != nil {
 		var redirErr *api.RedirectError
 		if !errors.As(err, &redirErr) || !redirErr.FollowRedirect {
@@ -106,7 +111,7 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 			CACert:         redirErr.CACert,
 			ControllerUUID: apiInfo.ControllerUUID,
 		}
-		st, err = args.OpenAPI(apiInfo, args.DialOpts)
+		st, err = args.OpenAPI(ctx, apiInfo, args.DialOpts)
 		if err != nil {
 			return nil, errors.Annotatef(err, "cannot connect to redirected address")
 		}
@@ -120,6 +125,18 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 		}
 	}()
 
+	// If the account details are set, ensure that the user we've logged in as
+	// matches the user we expected to log in as.
+	// This only applies if the user was explicitly set.
+	// Logging in via an external auth provider is allowed with specifying a
+	// user in the args - that comes from the provider.
+	if args.AccountDetails != nil &&
+		st.AuthTag() != nil &&
+		args.AccountDetails.User != "" &&
+		args.AccountDetails.User != st.AuthTag().Id() {
+		return nil, errors.Unauthorizedf("attempted login as %q for user %q", st.AuthTag().Id(), args.AccountDetails.User)
+	}
+
 	// Update API addresses if they've changed. Error is non-fatal.
 	// Note that in the redirection case, we won't update the addresses
 	// of the controller we first connected to. This shouldn't be
@@ -131,71 +148,26 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 	if v, ok := st.ServerVersion(); ok {
 		agentVersion = v.String()
 	}
+
 	params := UpdateControllerParams{
-		AgentVersion:      agentVersion,
-		AddrConnectedTo:   st.Addr(),
-		IPAddrConnectedTo: st.IPAddr(),
-		CurrentHostPorts:  hostPorts,
-		DNSCache:          dnsCache,
+		AgentVersion:     agentVersion,
+		CurrentHostPorts: hostPorts,
+		DNSCache:         dnsCache,
+		CurrentConnection: &currentConnection{
+			Proxied:   st.IsProxied(),
+			Address:   st.Addr(),
+			IPAddress: st.IPAddr(),
+		},
 	}
 	if host := st.PublicDNSName(); host != "" {
 		params.PublicDNSName = &host
 	}
-	err = updateControllerDetailsFromLogin(args.Store, args.ControllerName, controller, params)
+	err = updateControllerDetailsFromLogin(args.ControllerStore, args.ControllerName, controller, params)
 	if err != nil {
-		logger.Errorf("cannot cache API addresses: %v", err)
+		logger.Errorf(context.TODO(), "cannot cache API addresses: %v", err)
 	}
-
-	// Process the account details obtained from login.
-	processAccountDetails(
-		st.AuthTag(),
-		apiInfo.Tag,
-		args.ControllerName,
-		st.ControllerAccess(),
-		args.Store, apiInfo.SkipLogin,
-	)
 
 	return st, nil
-}
-
-func processAccountDetails(authTag names.Tag, apiInfoTag names.Tag, controllerName string, controllerAccess string, store jujuclient.ClientStore, skipLogin bool) {
-	var accountDetails *jujuclient.AccountDetails
-	var err error
-
-	user, ok := authTag.(names.UserTag)
-	if !skipLogin {
-		if ok {
-			if accountDetails, err = store.AccountDetails(controllerName); err != nil {
-				if !errors.Is(err, errors.NotFound) {
-					logger.Errorf("cannot load local account information: %v", err)
-				}
-			} else {
-				accountDetails.LastKnownAccess = controllerAccess
-			}
-		}
-		accountType := jujuclient.UserPassAccountDetailsType
-		if accountDetails != nil {
-			accountType = accountDetails.Type
-		}
-		if accountType == "" || accountType == jujuclient.UserPassAccountDetailsType {
-			if ok && !user.IsLocal() && apiInfoTag == nil {
-				// We used macaroon auth to login; save the username
-				// that we've logged in as.
-				accountDetails = &jujuclient.AccountDetails{
-					Type:            jujuclient.UserPassAccountDetailsType,
-					User:            user.Id(),
-					LastKnownAccess: controllerAccess,
-				}
-			} else if apiInfoTag == nil {
-				logger.Errorf("unexpected logged-in username %v", authTag)
-			}
-		}
-	}
-	if accountDetails != nil {
-		if err := store.UpdateAccount(controllerName, *accountDetails); err != nil {
-			logger.Errorf("cannot update account information: %v", err)
-		}
-	}
 }
 
 // connectionInfo returns connection information suitable for
@@ -204,9 +176,12 @@ func processAccountDetails(authTag names.Tag, apiInfoTag names.Tag, controllerNa
 // it may return a *api.Info with no APIEndpoints, but all other
 // information will be populated.
 func connectionInfo(args NewAPIConnectionParams) (*api.Info, *jujuclient.ControllerDetails, error) {
-	controller, err := args.Store.ControllerByName(args.ControllerName)
+	controller, err := args.ControllerStore.ControllerByName(args.ControllerName)
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "cannot get controller details")
+	}
+	if args.AccountDetails == nil {
+		return nil, nil, errors.New("empty account details")
 	}
 	apiInfo := &api.Info{
 		Addrs:          controller.APIEndpoints,
@@ -224,10 +199,6 @@ func connectionInfo(args NewAPIConnectionParams) (*api.Info, *jujuclient.Control
 	}
 	if controller.PublicDNSName != "" {
 		apiInfo.SNIHostName = controller.PublicDNSName
-	}
-	if args.AccountDetails == nil {
-		apiInfo.SkipLogin = true
-		return apiInfo, controller, nil
 	}
 	account := args.AccountDetails
 	if account.User != "" {
@@ -285,6 +256,21 @@ func addrsChanged(a, b []string) (bool, bool) {
 	return outOfOrder, false
 }
 
+// currentConnection represents information
+// about a recently established connection.
+type currentConnection struct {
+	// Proxied indicates if the connection was proxied.
+	Proxied bool
+
+	// Address is an API address that has been recently
+	// connected to.
+	Address *url.URL
+
+	// IPAddress is the IP address of Address
+	// that has been recently connected to.
+	IPAddress string
+}
+
 // UpdateControllerParams holds values used to update a controller details
 // after bootstrap or a login operation.
 type UpdateControllerParams struct {
@@ -294,13 +280,9 @@ type UpdateControllerParams struct {
 	// CurrentHostPorts are the available api addresses.
 	CurrentHostPorts []network.MachineHostPorts
 
-	// AddrConnectedTo (when set) is an API address that has been recently
-	// connected to.
-	AddrConnectedTo string
-
-	// IPAddrConnected to (when set) is the IP address of AddrConnectedTo
-	// that has been recently connected to.
-	IPAddrConnectedTo string
+	// CurrentConnection provides information on the address
+	// we are connected to.
+	CurrentConnection *currentConnection
 
 	// Proxier
 	Proxier proxy.Proxier
@@ -337,18 +319,7 @@ func updateControllerDetailsFromLogin(
 	controllerName string, details *jujuclient.ControllerDetails,
 	params UpdateControllerParams,
 ) error {
-	hostPorts := usableHostPorts(params.CurrentHostPorts).Strings()
-	// Move the connected-to host (if present) to the front of the address list.
-	host, _, err := net.SplitHostPort(params.AddrConnectedTo)
-	if err == nil {
-		moveToFront(host, hostPorts)
-	}
-	// Move the IP address used to the front of the DNS cache entry
-	// (if present) so that it will be the first address dialed.
-	ipHost, _, err := net.SplitHostPort(params.IPAddrConnectedTo)
-	if err == nil {
-		moveToFront(ipHost, params.DNSCache[host])
-	}
+	addresses := makeUsableAddresses(&params)
 
 	newDetails := new(jujuclient.ControllerDetails)
 	*newDetails = *details
@@ -360,7 +331,7 @@ func updateControllerDetailsFromLogin(
 	}
 
 	newDetails.AgentVersion = params.AgentVersion
-	newDetails.APIEndpoints = hostPorts
+	newDetails.APIEndpoints = addresses
 	newDetails.DNSCache = params.DNSCache
 	if params.MachineCount != nil {
 		newDetails.MachineCount = params.MachineCount
@@ -377,12 +348,47 @@ func updateControllerDetailsFromLogin(
 	}
 	reordered, diffContents := addrsChanged(newDetails.APIEndpoints, details.APIEndpoints)
 	if diffContents {
-		logger.Infof("API endpoints changed from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
+		logger.Infof(context.TODO(), "API endpoints changed from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
 	} else if reordered {
-		logger.Tracef("API endpoints reordered from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
+		logger.Tracef(context.TODO(), "API endpoints reordered from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
 	}
-	err = store.UpdateController(controllerName, *newDetails)
+	err := store.UpdateController(controllerName, *newDetails)
 	return errors.Trace(err)
+}
+
+// makeUsableAddresses returns a list of controller addresses
+// in a format appropriate for persisting in the Juju client store.
+// The addresses will be a URL but omit any scheme i.e. <domain>:<port>/<path>
+// The addresses are filtered to only those unique and usable.
+// Finally, the params.DNSCache will be updated.
+func makeUsableAddresses(params *UpdateControllerParams) []string {
+	addresses := usableHostPorts(params.CurrentHostPorts).Strings()
+
+	// Ignore the currently connected address if there is no current
+	// connection (during bootstrap) or if the connection is proxied.
+	if params.CurrentConnection == nil ||
+		params.CurrentConnection.Address == nil ||
+		params.CurrentConnection.Proxied {
+		return addresses
+	}
+
+	connectedUrl := params.CurrentConnection.Address
+	urlWithoutScheme := connectedUrl.Host + connectedUrl.RequestURI()
+	urlWithoutScheme, _ = strings.CutSuffix(urlWithoutScheme, "/")
+
+	// Move the connected-to host to the front of the address list.
+	if !slices.Contains(addresses, urlWithoutScheme) {
+		addresses = slices.Insert(addresses, 0, urlWithoutScheme)
+	}
+
+	// Move the IP address used to the front of the DNS cache entry
+	// so that it will be the first address dialed.
+	ipHost, _, err := net.SplitHostPort(params.CurrentConnection.IPAddress)
+	if err == nil {
+		host := connectedUrl.Hostname()
+		moveToFront(ipHost, params.DNSCache[host])
+	}
+	return addresses
 }
 
 // dnsCacheMap implements api.DNSCache by

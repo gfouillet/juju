@@ -4,54 +4,54 @@
 package service
 
 import (
-	"context"
-
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	coresecrets "github.com/juju/juju/core/secrets"
 	domainsecret "github.com/juju/juju/domain/secret"
+	domaintesting "github.com/juju/juju/domain/testing"
 	"github.com/juju/juju/internal/secrets/provider"
+	"github.com/juju/juju/internal/uuid"
 )
 
-func (s *serviceSuite) TestDeleteSecretInternal(c *gc.C) {
-	ctrl := gomock.NewController(c)
+func (s *serviceSuite) TestDeleteObsoleteUserSecretRevisions(c *tc.C) {
+	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.backendConfigGetter = func(context.Context) (*provider.ModelBackendConfigInfo, error) {
-		return &provider.ModelBackendConfigInfo{}, nil
-	}
+	revisionID1, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
+	revisionID2, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.state.EXPECT().DeleteObsoleteUserSecretRevisions(gomock.Any()).Return([]string{revisionID1.String(), revisionID2.String()}, nil)
+	s.secretBackendState.EXPECT().RemoveSecretBackendReference(gomock.Any(), revisionID1.String(), revisionID2.String()).Return(nil)
+
+	err = s.service.DeleteObsoleteUserSecretRevisions(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *serviceSuite) TestDeleteSecret(c *tc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
 
 	uri := coresecrets.NewURI()
 
-	s.state = NewMockState(ctrl)
 	s.state.EXPECT().GetSecretAccess(gomock.Any(), uri, domainsecret.AccessParams{
 		SubjectTypeID: domainsecret.SubjectUnit,
 		SubjectID:     "mariadb/0",
 	}).Return("manage", nil)
-	s.state.EXPECT().ListExternalSecretRevisions(gomock.Any(), uri, 666).Return([]coresecrets.ValueRef{}, nil)
-	s.state.EXPECT().DeleteSecret(gomock.Any(), uri, []int{666}).Return(nil)
+	s.state.EXPECT().DeleteSecret(domaintesting.IsAtomicContextChecker, uri, []int{1, 2})
 
-	err := s.service(c).DeleteSecret(context.Background(), uri, DeleteSecretParams{
-		LeaderToken: successfulToken{},
+	revs := provider.SecretRevisions{}
+	revs.Add(uri, "rev-id1")
+	revs.Add(uri, "rev-id2")
+
+	err := s.service.DeleteSecret(c.Context(), uri, DeleteSecretParams{
 		Accessor: SecretAccessor{
 			Kind: UnitAccessor,
 			ID:   "mariadb/0",
 		},
-		Revisions: []int{666},
+		Revisions: []int{1, 2},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-// TODO(secrets) - add tests for backend when properly implemented
-
-func (s *serviceSuite) TestDeleteObsoleteUserSecretRevisions(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	s.state = NewMockState(ctrl)
-	s.state.EXPECT().DeleteObsoleteUserSecretRevisions(gomock.Any()).Return(nil)
-	err := s.service(c).DeleteObsoleteUserSecretRevisions(context.Background())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

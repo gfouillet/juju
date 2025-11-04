@@ -26,15 +26,16 @@ func newFacade(ctx facade.ModelContext) (*Facade, error) {
 		return nil, apiservererrors.ErrPerm
 	}
 
-	serviceFactory := ctx.ServiceFactory()
+	domainServices := ctx.DomainServices()
 	return &Facade{
 		auth:            authorizer,
 		watcherRegistry: ctx.WatcherRegistry(),
 		controllerConfigAPI: common.NewControllerConfigAPI(
-			ctx.State(),
-			serviceFactory.ControllerConfig(),
-			serviceFactory.ExternalController(),
+			domainServices.ControllerConfig(),
+			domainServices.ControllerNode(),
+			domainServices.ExternalController(),
+			domainServices.Model(),
 		),
-		controllerConfigService: serviceFactory.ControllerConfig(),
+		controllerConfigService: domainServices.ControllerConfig(),
 	}, nil
 }

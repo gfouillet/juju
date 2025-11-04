@@ -7,82 +7,75 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/cloudspec"
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/internal/docker/registry"
-	"github.com/juju/juju/state/stateenvirons"
+	"github.com/juju/juju/rpc/params"
 )
+
+// UpgraderAPI holds the common methods for upgrading agents in controllers and models.
+// At the moment it is used to dynamically register the facade because the facade names
+// are the same for both [ControllerUpgraderAPI] and [ModelUpgraderAPI].
+// See [Register] func.
+type UpgraderAPI interface {
+	AbortModelUpgrade(ctx context.Context, arg params.ModelParam) error
+	UpgradeModel(
+		ctx context.Context,
+		arg params.UpgradeModelParams,
+	) (result params.UpgradeModelResult, err error)
+}
+
+// UpgradeAPI represents the model upgrader facade. This type exist to sastify
+// registration requirements of providing a singular type to must register.
+// Behind this struct is a facade implementation that implements the
+// [UpgradeAPI] interface.
+type UpgradeAPI struct {
+	UpgraderAPI
+}
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("ModelUpgrader", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
-		return newFacadeV1(ctx)
-	}, reflect.TypeOf((*ModelUpgraderAPI)(nil)))
+	registry.MustRegisterForMultiModel("ModelUpgrader", 1, func(
+		stdCtx context.Context,
+		ctx facade.MultiModelContext,
+	) (facade.Facade, error) {
+		return newUpgraderFacadeV1(ctx)
+	}, reflect.TypeOf(UpgradeAPI{}))
 }
 
-// newFacadeV1 is used for API registration.
-func newFacadeV1(ctx facade.ModelContext) (*ModelUpgraderAPI, error) {
+// newUpgraderFacadeV1 returns which facade to register.
+// It will return a [ControllerUpgraderAPI] if the current model hosts the controller.
+// Otherwise, it defaults to [ModelUpgraderAPI].
+func newUpgraderFacadeV1(ctx facade.MultiModelContext) (UpgradeAPI, error) {
 	auth := ctx.Auth()
-
-	// Since we know this is a user tag (because AuthClient is true),
-	// we just do the type assertion to the UserTag.
 	if !auth.AuthClient() {
-		return nil, apiservererrors.ErrPerm
+		return UpgradeAPI{}, apiservererrors.ErrPerm
 	}
 
-	st := ctx.State()
-	pool := ctx.StatePool()
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
+	controllerTag := names.NewControllerTag(ctx.ControllerUUID())
+	modelTag := names.NewModelTag(ctx.ModelUUID().String())
+	domainServices := ctx.DomainServices()
+	checker := common.NewBlockChecker(domainServices.BlockCommand())
+
+	if ctx.IsControllerModelScoped() {
+		upgraderAPI := NewControllerUpgraderAPI(
+			controllerTag,
+			modelTag,
+			auth,
+			checker,
+			domainServices.ControllerUpgraderService(),
+		)
+		return UpgradeAPI{upgraderAPI}, nil
 	}
-	modelUUID := model.UUID()
 
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	serviceFactory := ctx.ServiceFactory()
-	cloudService := serviceFactory.Cloud()
-	credentialService := serviceFactory.Credential()
-
-	configGetter := stateenvirons.EnvironConfigGetter{
-		Model:             model,
-		CloudService:      cloudService,
-		CredentialService: credentialService,
-	}
-	newEnviron := common.EnvironFuncForModel(model, cloudService, credentialService, configGetter)
-
-	controllerConfigService := serviceFactory.ControllerConfig()
-
-	urlGetter := common.NewToolsURLGetter(modelUUID, systemState)
-	toolsFinder := common.NewToolsFinder(controllerConfigService, configGetter, st, urlGetter, newEnviron, ctx.ControllerObjectStore())
-	environscloudspecGetter := cloudspec.MakeCloudSpecGetter(pool, cloudService, credentialService)
-
-	configSchemaSource := environs.ProviderConfigSchemaSource(cloudService)
-
-	apiUser, _ := auth.GetAuthTag().(names.UserTag)
-	backend := common.NewUserAwareModelManagerBackend(configSchemaSource, model, pool, apiUser)
-	return NewModelUpgraderAPI(
-		systemState.ControllerTag(),
-		statePoolShim{StatePool: pool},
-		toolsFinder,
-		newEnviron,
-		common.NewBlockChecker(backend),
+	upgraderAPI := NewModelUpgraderAPI(
+		controllerTag,
+		modelTag,
 		auth,
-		credentialcommon.CredentialInvalidatorGetter(ctx),
-		registry.New,
-		environscloudspecGetter,
-		controllerConfigService,
-		serviceFactory.Upgrade(),
-		ctx.Logger().Child("modelupgrader"),
+		checker,
+		domainServices.Agent(),
 	)
+	return UpgradeAPI{UpgraderAPI: upgraderAPI}, nil
 }

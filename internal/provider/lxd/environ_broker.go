@@ -4,6 +4,7 @@
 package lxd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/envcontext"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/tags"
@@ -22,15 +22,14 @@ import (
 	"github.com/juju/juju/internal/cloudconfig/instancecfg"
 	"github.com/juju/juju/internal/cloudconfig/providerinit"
 	"github.com/juju/juju/internal/container/lxd"
-	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/tools"
 )
 
 // StartInstance implements environs.InstanceBroker.
 func (env *environ) StartInstance(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (*environs.StartInstanceResult, error) {
-	logger.Debugf("StartInstance: %q, %s", args.InstanceConfig.MachineId, args.InstanceConfig.Base)
+	logger.Debugf(ctx, "StartInstance: %q, %s", args.InstanceConfig.MachineId, args.InstanceConfig.Base)
 
 	arch, virtType, err := env.finishInstanceConfig(args)
 	if err != nil {
@@ -39,13 +38,13 @@ func (env *environ) StartInstance(
 
 	container, err := env.newContainer(ctx, args, arch, virtType)
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
+		err = env.HandleCredentialError(ctx, err)
 		if args.StatusCallback != nil {
-			_ = args.StatusCallback(status.ProvisioningError, err.Error(), nil)
+			_ = args.StatusCallback(ctx, status.ProvisioningError, err.Error(), nil)
 		}
 		return nil, errors.Trace(err)
 	}
-	logger.Infof("started instance %q", container.Name)
+	logger.Infof(ctx, "started instance %q", container.Name)
 	inst := newInstance(container, env)
 
 	// Build the result.
@@ -87,7 +86,7 @@ func (env *environ) finishInstanceConfig(args environs.StartInstanceParams) (str
 // provisioned, relative to the provided args and spec. Info for that
 // low-level instance is returned.
 func (env *environ) newContainer(
-	ctx envcontext.ProviderCallContext,
+	ctx context.Context,
 	args environs.StartInstanceParams,
 	arch string,
 	virtType instance.VirtType,
@@ -96,7 +95,7 @@ func (env *environ) newContainer(
 	// and passed in as args.ImageMetadata. However, lxd provider doesn't
 	// use datatype: image-ids, it uses datatype: image-download, and we
 	// don't have a registered cloud/region.
-	imageSources, err := env.getImageSources()
+	imageSources, err := env.getImageSources(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -106,9 +105,9 @@ func (env *environ) newContainer(
 	// are made, instead of at a higher level in the package, so as not to
 	// assume that all providers will have the same need to be implemented
 	// in the same way.
-	statusCallback := func(currentStatus status.Status, msg string, data map[string]interface{}) error {
+	statusCallback := func(ctx context.Context, currentStatus status.Status, msg string, data map[string]interface{}) error {
 		if args.StatusCallback != nil {
-			_ = args.StatusCallback(currentStatus, msg, nil)
+			_ = args.StatusCallback(ctx, currentStatus, msg, nil)
 		}
 		return nil
 	}
@@ -130,21 +129,21 @@ func (env *environ) newContainer(
 	}
 	cleanupCallback() // Clean out any long line of completed download status
 
-	cSpec, err := env.getContainerSpec(image, target.ServerVersion(), args)
+	cSpec, err := env.getContainerSpec(ctx, image, target.ServerVersion(), args)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	_ = statusCallback(status.Allocating, "Creating container", nil)
+	_ = statusCallback(ctx, status.Allocating, "Creating container", nil)
 	container, err := target.CreateContainerFromSpec(cSpec)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	_ = statusCallback(status.Running, "Container started", nil)
+	_ = statusCallback(ctx, status.Running, "Container started", nil)
 	return container, nil
 }
 
-func (env *environ) getImageSources() ([]lxd.ServerSpec, error) {
+func (env *environ) getImageSources(ctx context.Context) ([]lxd.ServerSpec, error) {
 	// TODO (stickupkid): Allow the passing in of the factory.
 	factory := simplestreams.DefaultDataSourceFactory()
 	metadataSources, err := environs.ImageMetadataSources(env, factory)
@@ -155,7 +154,7 @@ func (env *environ) getImageSources() ([]lxd.ServerSpec, error) {
 	for _, source := range metadataSources {
 		url, err := source.URL("")
 		if err != nil {
-			logger.Debugf("failed to get the URL for metadataSource: %s", err)
+			logger.Debugf(ctx, "failed to get the URL for metadataSource: %s", err)
 			continue
 		}
 		// NOTE(jam) LXD only allows you to pass HTTPS URLs. So strip
@@ -181,6 +180,7 @@ func (env *environ) getImageSources() ([]lxd.ServerSpec, error) {
 // Cloud-init config is generated based on the network devices in the default
 // profile and included in the spec config.
 func (env *environ) getContainerSpec(
+	ctx context.Context,
 	image lxd.SourcedImage, serverVersion string, args environs.StartInstanceParams,
 ) (lxd.ContainerSpec, error) {
 	hostname, err := env.namespace.Hostname(args.InstanceConfig.MachineId)
@@ -213,7 +213,7 @@ func (env *environ) getContainerSpec(
 	}
 
 	if !(len(nics) == 1 && nics["eth0"] != nil) {
-		logger.Debugf("generating custom cloud-init networking")
+		logger.Debugf(ctx, "generating custom cloud-init networking")
 
 		cSpec.Config[lxd.NetworkConfigKey] = cloudinit.CloudInitNetworkConfigDisabled
 
@@ -232,7 +232,7 @@ func (env *environ) getContainerSpec(
 	if err != nil {
 		return cSpec, errors.Annotate(err, "composing user data")
 	}
-	logger.Debugf("LXD user data; %d bytes", len(userData))
+	logger.Debugf(ctx, "LXD user data; %d bytes", len(userData))
 
 	// TODO(ericsnow) Looks like LXD does not handle gzipped userdata
 	// correctly.  It likely has to do with the HTTP transport, much
@@ -246,7 +246,7 @@ func (env *environ) getContainerSpec(
 			// Since some metadata is interpreted by LXD, we cannot allow
 			// arbitrary tags to be passed in by the user.
 			// We currently only pass through Juju-defined tags.
-			logger.Debugf("ignoring non-juju tag: %s=%s", k, v)
+			logger.Debugf(ctx, "ignoring non-juju tag: %s=%s", k, v)
 			continue
 		}
 		cSpec.Config[lxd.UserNamespacePrefix+k] = v
@@ -342,24 +342,27 @@ func (env *environ) assignContainerNICs(instStartParams environs.StartInstancePa
 // directive in the start-up start-up arguments. If so, a server for the
 // specific node is returned.
 func (env *environ) getTargetServer(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (Server, error) {
-	p, err := env.parsePlacement(ctx, args.Placement)
+	zone, err := env.deriveAvailabilityZone(ctx, args)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	if p.nodeName == "" {
+	if zone == "" || !env.server().IsClustered() {
+		if zone != "" && zone != env.server().Name() {
+			return nil, errors.NotFoundf("LXD server %q", zone)
+		}
 		return env.server(), nil
+
 	}
-	return env.server().UseTargetServer(p.nodeName)
+	return env.server().UseTargetServer(ctx, zone)
 }
 
 type lxdPlacement struct {
 	nodeName string
 }
 
-func (env *environ) parsePlacement(ctx envcontext.ProviderCallContext, placement string) (*lxdPlacement, error) {
+func (env *environ) parsePlacement(ctx context.Context, placement string) (*lxdPlacement, error) {
 	if placement == "" {
 		return &lxdPlacement{}, nil
 	}
@@ -404,16 +407,23 @@ func (env *environ) getHardwareCharacteristics(
 	}
 	cores := uint64(container.CPUs())
 	mem := uint64(container.Mem())
+	location := container.Location
+	// In non-cluster mode, the container location has value as "none".
+	// Use the single server name to make it human friendly.
+	if location == "none" {
+		location = env.server().Name()
+	}
 	return &instance.HardwareCharacteristics{
-		Arch:     &archStr,
-		CpuCores: &cores,
-		Mem:      &mem,
-		VirtType: &container.Type,
+		Arch:             &archStr,
+		CpuCores:         &cores,
+		Mem:              &mem,
+		VirtType:         &container.Type,
+		AvailabilityZone: &location,
 	}
 }
 
 // AllInstances implements environs.InstanceBroker.
-func (env *environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (env *environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	environInstances, err := env.allInstances()
 	instances := make([]instances.Instance, len(environInstances))
 	for i, inst := range environInstances {
@@ -426,13 +436,13 @@ func (env *environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instance
 }
 
 // AllRunningInstances implements environs.InstanceBroker.
-func (env *environ) AllRunningInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (env *environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
 	// We can only get Alive containers from lxd api which means that "all" is the same as "running".
 	return env.AllInstances(ctx)
 }
 
 // StopInstances implements environs.InstanceBroker.
-func (env *environ) StopInstances(ctx envcontext.ProviderCallContext, instances ...instance.Id) error {
+func (env *environ) StopInstances(ctx context.Context, instances ...instance.Id) error {
 	prefix := env.namespace.Prefix()
 	var names []string
 	for _, id := range instances {
@@ -440,13 +450,13 @@ func (env *environ) StopInstances(ctx envcontext.ProviderCallContext, instances 
 		if strings.HasPrefix(name, prefix) {
 			names = append(names, name)
 		} else {
-			logger.Warningf("ignoring request to stop container %q - not in namespace %q", name, prefix)
+			logger.Warningf(ctx, "ignoring request to stop container %q - not in namespace %q", name, prefix)
 		}
 	}
 
 	err := env.server().RemoveContainers(names)
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
+		return env.HandleCredentialError(ctx, err)
 	}
-	return errors.Trace(err)
+	return nil
 }

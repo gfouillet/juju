@@ -3,14 +3,4 @@
 
 package subnets_test
 
-import (
-	stdtesting "testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-//go:generate go run go.uber.org/mock/mockgen -typed -package subnets -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/subnets Backing,NetworkService
-
-func TestPackage(t *stdtesting.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package subnets -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/subnets NetworkService

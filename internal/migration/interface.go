@@ -6,36 +6,31 @@ package migration
 import (
 	"context"
 
-	"github.com/juju/names/v5"
-	"github.com/juju/replicaset/v3"
-	"github.com/juju/version/v2"
-
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/credential"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/core/status"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/internal/tools"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/modelmigration"
+	"github.com/juju/juju/domain/relation"
 )
 
-// PrecheckBackend defines the interface to query Juju's state
-// for migration prechecks.
-type PrecheckBackend interface {
-	AgentVersion() (version.Number, error)
-	NeedsCleanup() (bool, error)
-	Model() (PrecheckModel, error)
-	AllModelUUIDs() ([]string, error)
-	IsMigrationActive(string) (bool, error)
-	AllMachines() ([]PrecheckMachine, error)
-	AllMachinesCount() (int, error)
-	AllApplications() ([]PrecheckApplication, error)
-	AllRelations() ([]PrecheckRelation, error)
-	ControllerBackend() (PrecheckBackend, error)
-	HasUpgradeSeriesLocks() (bool, error)
-	MachineCountForBase(base ...state.Base) (map[string]int, error)
-	MongoCurrentStatus() (*replicaset.Status, error)
+// ModelService provides access to the model service.
+type ModelService interface {
+	// ListAllModels returns all models registered in the controller. If no
+	// models exist a zero value slice will be returned.
+	ListAllModels(context.Context) ([]coremodel.Model, error)
+	// Model returns the model associated with the provided uuid.
+	Model(ctx context.Context, uuid coremodel.UUID) (coremodel.Model, error)
+}
+
+// ModelMigrationService provides access to migration status.
+type ModelMigrationService interface {
+	// ModelMigrationMode returns the current migration mode for the model.
+	ModelMigrationMode(ctx context.Context) (modelmigration.MigrationMode, error)
 }
 
 // CredentialService provides access to credentials.
@@ -48,87 +43,54 @@ type UpgradeService interface {
 	IsUpgrading(context.Context) (bool, error)
 }
 
+// ApplicationService provides access to the application service.
+type ApplicationService interface {
+	// CheckAllApplicationsAndUnitsAreAlive checks that all applications and units
+	// in the model are alive, returning an error if any are not.
+	CheckAllApplicationsAndUnitsAreAlive(ctx context.Context) error
+
+	// GetUnitNamesForApplication returns a slice of the unit names for the given application
+	GetUnitNamesForApplication(ctx context.Context, appName string) ([]unit.Name, error)
+}
+
+// RelationService provides access to the relation service.
+type RelationService interface {
+	// GetAllRelationDetails return RelationDetailResults for all relations
+	// for the current model.
+	GetAllRelationDetails(ctx context.Context) ([]relation.RelationDetailsResult, error)
+
+	// RelationUnitInScopeByID returns a boolean to indicate whether the given
+	// unit is in scopen of a given relation
+	RelationUnitInScopeByID(ctx context.Context, relationID int, unitName unit.Name) (bool,
+		error)
+}
+
+type StatusService interface {
+	// CheckUnitStatusesReadyForMigration returns true is the statuses of all units
+	// in the model indicate they can be migrated.
+	CheckUnitStatusesReadyForMigration(context.Context) error
+
+	// CheckMachineStatusesReadyForMigration returns an error if the statuses of any
+	// machines in the model indicate they cannot be migrated.
+	CheckMachineStatusesReadyForMigration(context.Context) error
+}
+
 // ControllerConfigService describes the method needed to get the
 // controller config.
 type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
 }
 
-// Pool defines the interface to a StatePool used by the migration
-// prechecks.
-type Pool interface {
-	GetModel(string) (PrecheckModel, func(), error)
+// MachineService is used to get the life of all machines before migrating.
+type MachineService interface {
+	// AllMachineNames returns the names of all machines in the model.
+	AllMachineNames(ctx context.Context) ([]machine.Name, error)
+	// GetMachineLife returns the GetMachineLife status of the specified machine.
+	// It returns a NotFound if the given machine doesn't exist.
+	GetMachineLife(ctx context.Context, machineName machine.Name) (life.Value, error)
+	// GetMachineBase returns the base for the given machine.
+	//
+	// The following errors may be returned:
+	// - [machineerrors.MachineNotFound] if the machine does not exist.
+	GetMachineBase(ctx context.Context, mName machine.Name) (base.Base, error)
 }
-
-// PrecheckModel describes the state interface a model as needed by
-// the migration prechecks.
-type PrecheckModel interface {
-	UUID() string
-	Name() string
-	Type() state.ModelType
-	Owner() names.UserTag
-	Life() state.Life
-	MigrationMode() state.MigrationMode
-	AgentVersion() (version.Number, error)
-	CloudCredentialTag() (names.CloudCredentialTag, bool)
-}
-
-// PrecheckMachine describes the state interface for a machine needed
-// by migration prechecks.
-type PrecheckMachine interface {
-	Id() string
-	AgentTools() (*tools.Tools, error)
-	Life() state.Life
-	Status() (status.StatusInfo, error)
-	InstanceStatus() (status.StatusInfo, error)
-	ShouldRebootOrShutdown() (state.RebootAction, error)
-}
-
-// PrecheckApplication describes the state interface for an
-// application needed by migration prechecks.
-type PrecheckApplication interface {
-	Name() string
-	Life() state.Life
-	CharmURL() (*string, bool)
-	AllUnits() ([]PrecheckUnit, error)
-	MinUnits() int
-}
-
-// PrecheckUnit describes state interface for a unit needed by
-// migration prechecks.
-type PrecheckUnit interface {
-	Name() string
-	AgentTools() (*tools.Tools, error)
-	Life() state.Life
-	CharmURL() *string
-	AgentStatus() (status.StatusInfo, error)
-	Status() (status.StatusInfo, error)
-	ShouldBeAssigned() bool
-	IsSidecar() (bool, error)
-}
-
-// PrecheckRelation describes the state interface for relations needed
-// for prechecks.
-type PrecheckRelation interface {
-	String() string
-	Endpoints() []state.Endpoint
-	Unit(PrecheckUnit) (PrecheckRelationUnit, error)
-	AllRemoteUnits(appName string) ([]PrecheckRelationUnit, error)
-	RemoteApplication() (string, bool, error)
-}
-
-// PrecheckRelationUnit describes the interface for relation units
-// needed for migration prechecks.
-type PrecheckRelationUnit interface {
-	Valid() (bool, error)
-	InScope() (bool, error)
-	UnitName() string
-}
-
-// ModelPresence represents the API server connections for a model.
-type ModelPresence interface {
-	// For a given non controller agent, return the Status for that agent.
-	AgentStatus(agent string) (presence.Status, error)
-}
-
-type environsCloudSpecGetter func(context.Context, names.ModelTag) (environscloudspec.CloudSpec, error)

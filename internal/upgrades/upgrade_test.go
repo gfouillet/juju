@@ -7,36 +7,38 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/internal/mongo"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/upgrades"
-	coretesting "github.com/juju/juju/testing"
-	jujuversion "github.com/juju/juju/version"
 )
 
 type upgradeSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&upgradeSuite{})
+func TestUpgradeSuite(t *testing.T) {
+	tc.Run(t, &upgradeSuite{})
+}
 
 type mockUpgradeOperation struct {
-	targetVersion version.Number
+	targetVersion semversion.Number
 	steps         []upgrades.Step
 }
 
-func (m *mockUpgradeOperation) TargetVersion() version.Number {
+func (m *mockUpgradeOperation) TargetVersion() semversion.Number {
 	return m.targetVersion
 }
 
@@ -100,15 +102,15 @@ func (c *mockContext) APIContext() upgrades.Context {
 
 type mockAgentConfig struct {
 	agent.ConfigSetter
-	dataDir      string
-	logDir       string
-	tag          names.Tag
-	jobs         []model.MachineJob
-	apiAddresses []string
-	values       map[string]string
-	mongoInfo    *mongo.MongoInfo
-	servingInfo  controller.StateServingInfo
-	modelTag     names.ModelTag
+	dataDir             string
+	logDir              string
+	tag                 names.Tag
+	jobs                []model.MachineJob
+	apiAddresses        []string
+	values              map[string]string
+	mongoInfo           *mongo.MongoInfo
+	controllerAgentInfo controller.ControllerAgentInfo
+	modelTag            names.ModelTag
 }
 
 func (mock *mockAgentConfig) Tag() names.Tag {
@@ -147,12 +149,12 @@ func (mock *mockAgentConfig) MongoInfo() (*mongo.MongoInfo, bool) {
 	return mock.mongoInfo, true
 }
 
-func (mock *mockAgentConfig) StateServingInfo() (controller.StateServingInfo, bool) {
-	return mock.servingInfo, true
+func (mock *mockAgentConfig) StateServingInfo() (controller.ControllerAgentInfo, bool) {
+	return mock.controllerAgentInfo, true
 }
 
-func (mock *mockAgentConfig) SetStateServingInfo(info controller.StateServingInfo) {
-	mock.servingInfo = info
+func (mock *mockAgentConfig) SetStateServingInfo(info controller.ControllerAgentInfo) {
+	mock.controllerAgentInfo = info
 }
 
 func (mock *mockAgentConfig) Model() names.ModelTag {
@@ -162,7 +164,7 @@ func (mock *mockAgentConfig) Model() names.ModelTag {
 func upgradeOperations() []upgrades.Operation {
 	steps := []upgrades.Operation{
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.12.0"),
+			targetVersion: semversion.MustParse("1.12.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.12.0", upgrades.AllMachines),
 				newUpgradeStep("step 2 error", upgrades.HostMachine),
@@ -170,7 +172,7 @@ func upgradeOperations() []upgrades.Operation {
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.16.0"),
+			targetVersion: semversion.MustParse("1.16.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.16.0", upgrades.HostMachine),
 				newUpgradeStep("step 2 - 1.16.0", upgrades.HostMachine),
@@ -178,27 +180,27 @@ func upgradeOperations() []upgrades.Operation {
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.17.0"),
+			targetVersion: semversion.MustParse("1.17.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.17.0", upgrades.HostMachine),
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.17.1"),
+			targetVersion: semversion.MustParse("1.17.1"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.17.1", upgrades.HostMachine),
 				newUpgradeStep("step 2 - 1.17.1", upgrades.Controller),
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.18.0"),
+			targetVersion: semversion.MustParse("1.18.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.18.0", upgrades.HostMachine),
 				newUpgradeStep("step 2 - 1.18.0", upgrades.Controller),
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.20.0"),
+			targetVersion: semversion.MustParse("1.20.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.20.0", upgrades.AllMachines),
 				newUpgradeStep("step 2 - 1.20.0", upgrades.HostMachine),
@@ -206,13 +208,13 @@ func upgradeOperations() []upgrades.Operation {
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.21.0"),
+			targetVersion: semversion.MustParse("1.21.0"),
 			steps: []upgrades.Step{
 				newUpgradeStep("step 1 - 1.21.0", upgrades.AllMachines),
 			},
 		},
 		&mockUpgradeOperation{
-			targetVersion: version.MustParse("1.22.0"),
+			targetVersion: semversion.MustParse("1.22.0"),
 			steps: []upgrades.Step{
 				// Separate targets used intentionally
 				newUpgradeStep("step 1 - 1.22.0", upgrades.Controller, upgrades.HostMachine),
@@ -332,7 +334,7 @@ var upgradeTests = []upgradeTest{
 	},
 }
 
-func (s *upgradeSuite) TestPerformUpgradeSteps(c *gc.C) {
+func (s *upgradeSuite) TestPerformUpgradeSteps(c *tc.C) {
 	s.PatchValue(upgrades.UpgradeOperations, upgradeOperations)
 	for i, test := range upgradeTests {
 		c.Logf("%d: %s", i, test.about)
@@ -340,47 +342,47 @@ func (s *upgradeSuite) TestPerformUpgradeSteps(c *gc.C) {
 		ctx := &mockContext{
 			messages: messages,
 		}
-		fromVersion := version.Zero
+		fromVersion := semversion.Zero
 		if test.fromVersion != "" {
-			fromVersion = version.MustParse(test.fromVersion)
+			fromVersion = semversion.MustParse(test.fromVersion)
 		}
-		toVersion := version.MustParse("1.18.0")
+		toVersion := semversion.MustParse("1.18.0")
 		if test.toVersion != "" {
-			toVersion = version.MustParse(test.toVersion)
+			toVersion = semversion.MustParse(test.toVersion)
 		}
 		s.PatchValue(&jujuversion.Current, toVersion)
 		err := upgrades.PerformUpgradeSteps(fromVersion, test.targets, ctx)
 		if test.err == "" {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		} else {
-			c.Check(err, gc.ErrorMatches, test.err)
+			c.Check(err, tc.ErrorMatches, test.err)
 		}
-		c.Check(ctx.messages, jc.DeepEquals, test.expectedSteps)
+		c.Check(ctx.messages, tc.DeepEquals, test.expectedSteps)
 	}
 }
 
-func (s *upgradeSuite) TestUpgradeOperationsOrdered(c *gc.C) {
-	var previous version.Number
+func (s *upgradeSuite) TestUpgradeOperationsOrdered(c *tc.C) {
+	var previous semversion.Number
 	for i, utv := range (*upgrades.UpgradeOperations)() {
 		vers := utv.TargetVersion()
 		if i > 0 {
-			c.Check(previous.Compare(vers), gc.Equals, -1)
+			c.Check(previous.Compare(vers), tc.Equals, -1)
 		}
 		previous = vers
 	}
 }
 
-func (s *upgradeSuite) TestUpgradeOperationsVersions(c *gc.C) {
+func (s *upgradeSuite) TestUpgradeOperationsVersions(c *tc.C) {
 	versions := extractUpgradeVersions(c, (*upgrades.UpgradeOperations)())
-	c.Assert(versions, gc.DeepEquals, []string{"6.6.6"})
+	c.Assert(versions, tc.DeepEquals, []string{"6.6.6"})
 }
 
-func extractUpgradeVersions(c *gc.C, ops []upgrades.Operation) []string {
+func extractUpgradeVersions(c *tc.C, ops []upgrades.Operation) []string {
 	var versions []string
 	for _, utv := range ops {
 		vers := utv.TargetVersion()
 		// Upgrade steps should only be targeted at final versions (not alpha/beta).
-		c.Check(vers.Tag, gc.Equals, "")
+		c.Check(vers.Tag, tc.Equals, "")
 		versions = append(versions, vers.String())
 	}
 	return versions

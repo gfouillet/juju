@@ -17,9 +17,9 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/os/ostype"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/storage"
 	coretools "github.com/juju/juju/internal/tools"
@@ -73,19 +73,19 @@ const (
 // ToolsConstraint defines criteria used to find a tools metadata record.
 type ToolsConstraint struct {
 	simplestreams.LookupParams
-	Version      version.Number
+	Version      semversion.Number
 	MajorVersion int
 	MinorVersion int
 }
 
 // NewVersionedToolsConstraint returns a ToolsConstraint for a tools with a specific version.
-func NewVersionedToolsConstraint(vers version.Number, params simplestreams.LookupParams) *ToolsConstraint {
+func NewVersionedToolsConstraint(vers semversion.Number, params simplestreams.LookupParams) *ToolsConstraint {
 	return &ToolsConstraint{LookupParams: params, Version: vers}
 }
 
 // NewGeneralToolsConstraint returns a ToolsConstraint for tools with matching major/minor version numbers.
 func NewGeneralToolsConstraint(majorVersion, minorVersion int, params simplestreams.LookupParams) *ToolsConstraint {
-	return &ToolsConstraint{LookupParams: params, Version: version.Zero,
+	return &ToolsConstraint{LookupParams: params, Version: semversion.Zero,
 		MajorVersion: majorVersion, MinorVersion: minorVersion}
 }
 
@@ -102,7 +102,7 @@ func (tc *ToolsConstraint) ProductIds() ([]string, error) {
 	var allIds []string
 	for _, release := range tc.Releases {
 		if !ostype.IsValidOSTypeName(release) {
-			logger.Debugf("ignoring unknown os type %q", release)
+			logger.Debugf(context.TODO(), "ignoring unknown os type %q", release)
 			continue
 		}
 		ids := make([]string, len(tc.Arches))
@@ -137,12 +137,12 @@ func (t *ToolsMetadata) sortString() string {
 
 // binary returns the tools metadata's binary version, which may be used for
 // map lookup.
-func (t *ToolsMetadata) binary() (version.Binary, error) {
-	num, err := version.Parse(t.Version)
+func (t *ToolsMetadata) binary() (semversion.Binary, error) {
+	num, err := semversion.Parse(t.Version)
 	if err != nil {
-		return version.Binary{}, errors.Trace(err)
+		return semversion.Binary{}, errors.Trace(err)
 	}
-	return version.Binary{
+	return semversion.Binary{
 		Number:  num,
 		Release: t.Release,
 		Arch:    t.Arch,
@@ -201,8 +201,10 @@ func Sort(metadata []*ToolsMetadata) {
 
 type byVersion []*ToolsMetadata
 
-func (b byVersion) Len() int           { return len(b) }
-func (b byVersion) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+func (b byVersion) Len() int { return len(b) }
+
+func (b byVersion) Swap(i, j int) { b[i], b[j] = b[j], b[i] }
+
 func (b byVersion) Less(i, j int) bool { return b[i].sortString() < b[j].sortString() }
 
 // appendMatchingTools updates matchingTools with tools metadata records from tools which belong to the
@@ -210,7 +212,7 @@ func (b byVersion) Less(i, j int) bool { return b[i].sortString() < b[j].sortStr
 func appendMatchingTools(source simplestreams.DataSource, matchingTools []interface{},
 	tools map[string]interface{}, cons simplestreams.LookupConstraint) ([]interface{}, error) {
 
-	toolsMap := make(map[version.Binary]*ToolsMetadata, len(matchingTools))
+	toolsMap := make(map[semversion.Binary]*ToolsMetadata, len(matchingTools))
 	for _, val := range matchingTools {
 		tm := val.(*ToolsMetadata)
 		binary, err := tm.binary()
@@ -225,8 +227,8 @@ func appendMatchingTools(source simplestreams.DataSource, matchingTools []interf
 			continue
 		}
 		if toolsConstraint, ok := cons.(*ToolsConstraint); ok {
-			tmNumber := version.MustParse(tm.Version)
-			if toolsConstraint.Version == version.Zero {
+			tmNumber := semversion.MustParse(tm.Version)
+			if toolsConstraint.Version == semversion.Zero {
 				if toolsConstraint.MajorVersion > 0 && toolsConstraint.MajorVersion != tmNumber.Major {
 					continue
 				}
@@ -293,7 +295,7 @@ func ResolveMetadata(stor storage.StorageReader, toolsDir string, metadata []*To
 		if err != nil {
 			return errors.Annotate(err, "cannot resolve metadata")
 		}
-		logger.Infof("Fetching agent binaries from dir %q to generate hash: %v", toolsDir, binary)
+		logger.Infof(context.TODO(), "Fetching agent binaries from dir %q to generate hash: %v", toolsDir, binary)
 		size, sha256hash, err := fetchToolsHash(stor, md.Path)
 		if err != nil {
 			return err
@@ -310,7 +312,7 @@ func ResolveMetadata(stor storage.StorageReader, toolsDir string, metadata []*To
 // the two entries have different sizes/hashes, then an error is
 // returned.
 func MergeMetadata(tmlist1, tmlist2 []*ToolsMetadata) ([]*ToolsMetadata, error) {
-	merged := make(map[version.Binary]*ToolsMetadata)
+	merged := make(map[semversion.Binary]*ToolsMetadata)
 	for _, tm := range tmlist1 {
 		binary, err := tm.binary()
 		if err != nil {
@@ -351,7 +353,7 @@ func MergeMetadata(tmlist1, tmlist2 []*ToolsMetadata) ([]*ToolsMetadata, error) 
 // ReadMetadata returns the tools metadata from the given storage for the specified stream.
 func ReadMetadata(ctx context.Context, ss SimplestreamsFetcher, store storage.StorageReader, stream string) ([]*ToolsMetadata, error) {
 	dataSource := storage.NewStorageSimpleStreamsDataSource("existing metadata", store, storage.BaseToolsPath, simplestreams.EXISTING_CLOUD_DATA, false)
-	toolsConstraint, err := makeToolsConstraint(simplestreams.CloudSpec{}, stream, -1, -1, coretools.Filter{})
+	toolsConstraint, err := makeToolsConstraint(ctx, simplestreams.CloudSpec{}, stream, -1, -1, coretools.Filter{})
 	if err != nil {
 		return nil, err
 	}
@@ -454,7 +456,7 @@ func WriteMetadata(stor storage.Storage, streamMetadata map[string][]*ToolsMetad
 				return err
 			}
 			if unchanged {
-				logger.Infof("Metadata for stream %q unchanged", stream)
+				logger.Infof(context.TODO(), "Metadata for stream %q unchanged", stream)
 				continue
 			}
 			// Metadata is different, so include it.
@@ -487,7 +489,7 @@ func WriteMetadata(stor storage.Storage, streamMetadata map[string][]*ToolsMetad
 var writeMetadataFiles = func(stor storage.Storage, metadataInfo []MetadataFile) error {
 	for _, md := range metadataInfo {
 		filePath := path.Join(storage.BaseToolsPath, md.Path)
-		logger.Infof("Writing %s", filePath)
+		logger.Infof(context.TODO(), "Writing %s", filePath)
 		err := stor.Put(filePath, bytes.NewReader(md.Data), int64(len(md.Data)))
 		if err != nil {
 			return err

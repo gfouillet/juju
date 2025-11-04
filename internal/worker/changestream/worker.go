@@ -4,6 +4,8 @@
 package changestream
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/worker/v4"
@@ -12,6 +14,7 @@ import (
 	"github.com/juju/juju/core/changestream"
 	coredatabase "github.com/juju/juju/core/database"
 	"github.com/juju/juju/core/logger"
+	internalworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/filenotifywatcher"
 )
 
@@ -80,31 +83,44 @@ func newWorker(cfg WorkerConfig) (*changeStreamWorker, error) {
 		return nil, errors.Trace(err)
 	}
 
-	w := &changeStreamWorker{
-		cfg: cfg,
-		runner: worker.NewRunner(worker.RunnerParams{
-			// Prevent the runner from restarting the worker, if one of the
-			// workers dies, we want to stop the whole thing.
-			IsFatal: func(err error) bool {
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name: "change-stream",
+		// Prevent the runner from restarting the worker, if one of the
+		// workers dies, we want to stop the whole thing.
+		IsFatal: func(err error) bool {
+			return false
+		},
+		// ShouldRestart is used to determine if the worker should be
+		// restarted. We only want to restart the worker if the error is not
+		// ErrDBDead, ErrDBNotFound or NotValid.
+		// The ErrDBNotFound error can be returned if the namespace doesn't
+		// exist and so can not be retrieved. When this happens, we do not
+		// want to restart the worker and instead return the error to the
+		// caller.
+		// The caller can retry if they want, but internally to the
+		// changestream, the worker is dead.
+		ShouldRestart: func(err error) bool {
+			// This can occur if the database namespace is not valid.
+			if errors.Is(err, errors.NotValid) {
 				return false
-			},
-			// ShouldRestart is used to determine if the worker should be
-			// restarted. We only want to restart the worker if the error is not
-			// ErrDBDead and ErrDBNotFound.
-			// The ErrDBNotFound error can be returned if the namespace doesn't
-			// exist and so can not be retrieved. When this happens, we do not
-			// want to restart the worker and instead return the error to the
-			// caller.
-			// The caller can retry if they want, but internally to the
-			// changestream, the worker is dead.
-			ShouldRestart: func(err error) bool {
-				return !(errors.Is(err, coredatabase.ErrDBDead) || errors.Is(err, coredatabase.ErrDBNotFound))
-			},
-			Clock: cfg.Clock,
-		}),
+			}
+
+			return internalworker.ShouldRunnerRestart(err)
+		},
+		Clock:  cfg.Clock,
+		Logger: internalworker.WrapLogger(cfg.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	w := &changeStreamWorker{
+		cfg:    cfg,
+		runner: runner,
 	}
 
 	if err = catacomb.Invoke(catacomb.Plan{
+		Name: "change-stream",
 		Site: &w.catacomb,
 		Work: w.loop,
 		Init: []worker.Worker{
@@ -140,7 +156,7 @@ func (w *changeStreamWorker) Report() map[string]any {
 }
 
 // GetWatchableDB returns a new WatchableDB for the given namespace.
-func (w *changeStreamWorker) GetWatchableDB(namespace string) (changestream.WatchableDB, error) {
+func (w *changeStreamWorker) GetWatchableDB(ctx context.Context, namespace string) (changestream.WatchableDB, error) {
 	if mux, err := w.workerFromCache(namespace); err != nil {
 		return nil, errors.Trace(err)
 	} else if mux != nil {
@@ -148,16 +164,23 @@ func (w *changeStreamWorker) GetWatchableDB(namespace string) (changestream.Watc
 	}
 
 	// If the worker doesn't exist yet, create it.
-	if err := w.runner.StartWorker(namespace, func() (worker.Worker, error) {
-		db, err := w.cfg.DBGetter.GetDB(namespace)
+	if err := w.runner.StartWorker(ctx, namespace, func(ctx context.Context) (worker.Worker, error) {
+		db, err := w.cfg.DBGetter.GetDB(ctx, namespace)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
-		mux, err := w.cfg.NewWatchableDB(w.cfg.AgentTag, db, fileNotifyWatcher{
-			fileNotifier: w.cfg.FileNotifyWatcher,
-			fileName:     namespace,
-		}, w.cfg.Clock, w.cfg.Metrics.ForNamespace(namespace), w.cfg.Logger)
+		mux, err := w.cfg.NewWatchableDB(
+			w.cfg.AgentTag,
+			db,
+			fileNotifyWatcher{
+				fileNotifier: w.cfg.FileNotifyWatcher,
+				fileName:     namespace,
+			},
+			w.cfg.Clock,
+			w.cfg.Metrics.ForNamespace(namespace),
+			w.cfg.Logger.Child(coredatabase.ShortNamespace(namespace)),
+		)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -168,9 +191,13 @@ func (w *changeStreamWorker) GetWatchableDB(namespace string) (changestream.Watc
 
 	// Block until the worker is started and ready to go.
 	mux, err := w.runner.Worker(namespace, w.catacomb.Dying())
-	if err != nil {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
+	if mux == nil {
+		return nil, coredatabase.ErrDBNotFound
+	}
+
 	return mux.(WatchableDBWorker), nil
 }
 

@@ -1,44 +1,13 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package storageprovisioner_test
+package storageprovisioner
 
-import (
-	stdtesting "testing"
-	"time"
-
-	gc "gopkg.in/check.v1"
-
-	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
-)
-
+//go:generate go run go.uber.org/mock/mockgen -typed -package storageprovisioner -destination watcher_mock_test.go github.com/juju/juju/core/watcher StringsWatcher,MachineStorageIDsWatcher
 //go:generate go run go.uber.org/mock/mockgen -typed -package storageprovisioner_test -destination blockdevice_mock_test.go github.com/juju/juju/apiserver/facades/agent/storageprovisioner BlockDeviceService
+//go:generate go run go.uber.org/mock/mockgen -typed -package storageprovisioner -destination facade_mock_test.go github.com/juju/juju/apiserver/facade FacadeRegistry
+//go:generate go run go.uber.org/mock/mockgen -typed -package storageprovisioner -destination service_mock_test.go github.com/juju/juju/apiserver/facades/agent/storageprovisioner ApplicationService,MachineService,StorageProvisioningService,BlockDeviceService,RemovalService
 
-func TestAll(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
-}
-
-type storageSetUp interface {
-	setupVolumes(c *gc.C)
-	setupFilesystems(c *gc.C)
-}
-
-const dontWait = time.Duration(0)
-
-type byMachineAndEntity []params.MachineStorageId
-
-func (b byMachineAndEntity) Len() int {
-	return len(b)
-}
-
-func (b byMachineAndEntity) Less(i, j int) bool {
-	if b[i].MachineTag == b[j].MachineTag {
-		return b[i].AttachmentTag < b[j].AttachmentTag
-	}
-	return b[i].MachineTag < b[j].MachineTag
-}
-
-func (b byMachineAndEntity) Swap(i, j int) {
-	b[i], b[j] = b[j], b[i]
+func ptr[T any](v T) *T {
+	return &v
 }

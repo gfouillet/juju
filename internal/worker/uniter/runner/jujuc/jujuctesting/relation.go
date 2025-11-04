@@ -9,10 +9,11 @@ import (
 	"sort"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/rpc/params"
 )
@@ -109,7 +110,7 @@ func (r *ContextRelation) Life() life.Value {
 }
 
 // Settings implements jujuc.ContextRelation.
-func (r *ContextRelation) Settings() (jujuc.Settings, error) {
+func (r *ContextRelation) Settings(_ context.Context) (jujuc.Settings, error) {
 	r.stub.AddCall("Settings")
 	if err := r.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -123,7 +124,7 @@ func (r *ContextRelation) Settings() (jujuc.Settings, error) {
 }
 
 // ApplicationSettings implements jujuc.ContextRelation.
-func (r *ContextRelation) ApplicationSettings() (jujuc.Settings, error) {
+func (r *ContextRelation) ApplicationSettings(context.Context) (jujuc.Settings, error) {
 	r.stub.AddCall("ApplicationSettings")
 	if err := r.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -146,7 +147,7 @@ func (r *ContextRelation) UnitNames() []string {
 }
 
 // ReadSettings implements jujuc.ContextRelation.
-func (r *ContextRelation) ReadSettings(name string) (params.Settings, error) {
+func (r *ContextRelation) ReadSettings(_ context.Context, name string) (params.Settings, error) {
 	r.stub.AddCall("ReadSettings", name)
 	if err := r.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -160,7 +161,7 @@ func (r *ContextRelation) ReadSettings(name string) (params.Settings, error) {
 }
 
 // ReadApplicationSettings implements jujuc.ContextRelation.
-func (r *ContextRelation) ReadApplicationSettings(name string) (params.Settings, error) {
+func (r *ContextRelation) ReadApplicationSettings(_ context.Context, name string) (params.Settings, error) {
 	r.stub.AddCall("ReadApplicationSettings", name)
 	if err := r.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -183,4 +184,10 @@ func (r *ContextRelation) SetStatus(_ context.Context, status relation.Status) e
 func (r *ContextRelation) RemoteApplicationName() string {
 	r.stub.AddCall("RemoteApplicationName")
 	return r.info.RemoteApplicationName
+}
+
+// RemoteModelUUID implements jujuc.ContextRelation.
+func (r *ContextRelation) RemoteModelUUID() string {
+	r.stub.AddCall("RemoteModelUUID")
+	return testing.ModelTag.Id()
 }

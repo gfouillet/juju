@@ -4,6 +4,7 @@
 package openstack
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -91,7 +92,7 @@ func (n *NeutronNetworking) AllocatePublicIP(id instance.Id) (*string, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	extNetworkIds, err := n.getExternalNetworkIDsFromHostAddrs(detail.Addresses)
+	extNetworkIds, err := n.getExternalNetworkIDsFromHostAddrs(context.TODO(), detail.Addresses)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -113,7 +114,7 @@ func (n *NeutronNetworking) AllocatePublicIP(id instance.Id) (*string, error) {
 			// and the FIP will be in the same availability zone.
 			for _, extNetId := range extNetworkIds {
 				if fip.FloatingNetworkId == extNetId {
-					logger.Debugf("found unassigned public ip: %v", fip.IP)
+					logger.Debugf(context.TODO(), "found unassigned public ip: %v", fip.IP)
 					return &fip.IP, nil
 				}
 			}
@@ -126,12 +127,12 @@ func (n *NeutronNetworking) AllocatePublicIP(id instance.Id) (*string, error) {
 		var newfip *neutron.FloatingIPV2
 		newfip, lastErr = n.neutron().AllocateFloatingIPV2(extNetId)
 		if lastErr == nil {
-			logger.Debugf("allocated new public IP: %s", newfip.IP)
+			logger.Debugf(context.TODO(), "allocated new public IP: %s", newfip.IP)
 			return &newfip.IP, nil
 		}
 	}
 
-	logger.Debugf("Unable to allocate a public IP")
+	logger.Debugf(context.TODO(), "Unable to allocate a public IP")
 	return nil, lastErr
 }
 
@@ -139,16 +140,16 @@ func (n *NeutronNetworking) AllocatePublicIP(id instance.Id) (*string, error) {
 // If specified, the configured external network is returned. Otherwise search
 // for an external network in the same availability zones as the provided
 // server addresses.
-func (n *NeutronNetworking) getExternalNetworkIDsFromHostAddrs(addrs map[string][]nova.IPAddress) ([]string, error) {
+func (n *NeutronNetworking) getExternalNetworkIDsFromHostAddrs(ctx context.Context, addrs map[string][]nova.IPAddress) ([]string, error) {
 	var extNetworkIds []string
 	externalNetwork := n.ecfg().externalNetwork()
 	if externalNetwork != "" {
 		// The config specified an external network, try it first.
 		networks, err := n.ResolveNetworks(externalNetwork, true)
 		if err != nil {
-			logger.Warningf("resolving configured external network %q: %s", externalNetwork, err.Error())
+			logger.Warningf(ctx, "resolving configured external network %q: %s", externalNetwork, err.Error())
 		} else {
-			logger.Debugf("using external network %q", externalNetwork)
+			logger.Debugf(ctx, "using external network %q", externalNetwork)
 			toID := func(n neutron.NetworkV2) string { return n.Id }
 			extNetworkIds = transform.Slice(networks, toID)
 		}
@@ -159,7 +160,7 @@ func (n *NeutronNetworking) getExternalNetworkIDsFromHostAddrs(addrs map[string]
 		return extNetworkIds, nil
 	}
 
-	logger.Debugf("unique match for external network %q not found; searching for one", externalNetwork)
+	logger.Debugf(ctx, "unique match for external network %q not found; searching for one", externalNetwork)
 
 	hostAddrAZs, err := n.findNetworkAZForHostAddrs(addrs)
 	if err != nil {
@@ -170,7 +171,7 @@ func (n *NeutronNetworking) getExternalNetworkIDsFromHostAddrs(addrs map[string]
 	// Create slice of network.Ids for external networks in the same AZ as
 	// the instance's networks, to find an existing floating ip in, or allocate
 	// a new floating ip from.
-	extNetIds, _ := getExternalNeutronNetworksByAZ(n, hostAddrAZs)
+	extNetIds, _ := getExternalNeutronNetworksByAZ(ctx, n, hostAddrAZs)
 
 	// We have an external network ID, no need for specific error message.
 	if len(extNetIds) > 0 {
@@ -205,7 +206,7 @@ func (n *NeutronNetworking) findNetworkAZForHostAddrs(addrs map[string][]nova.IP
 // getExternalNeutronNetworksByAZ returns all external networks within the
 // given availability zones. If azName is empty, return all external networks
 // with no AZ.  If no network has an AZ, return all external networks.
-func getExternalNeutronNetworksByAZ(e NetworkingBase, azNames set.Strings) ([]string, error) {
+func getExternalNeutronNetworksByAZ(ctx context.Context, e NetworkingBase, azNames set.Strings) ([]string, error) {
 	neutronClient := e.neutron()
 	// Find all external networks in availability zone.
 	networks, err := neutronClient.ListNetworksV2(externalNetworkFilter())
@@ -221,7 +222,7 @@ func getExternalNeutronNetworksByAZ(e NetworkingBase, azNames set.Strings) ([]st
 			}
 		}
 		if azNames.IsEmpty() || len(network.AvailabilityZones) == 0 {
-			logger.Debugf(
+			logger.Debugf(ctx,
 				"Adding %q to potential external networks for Floating IPs, no availability zones found", network.Name)
 			netIds = append(netIds, network.Id)
 		}
@@ -332,7 +333,7 @@ func generateUniquePortName(name string) string {
 	return fmt.Sprintf("juju-%s-%s", name, unique)
 }
 
-func makeSubnetInfo(neutron NetworkingNeutron, subnet neutron.SubnetV2) (network.SubnetInfo, error) {
+func makeSubnetInfo(ctx context.Context, neutron NetworkingNeutron, subnet neutron.SubnetV2, azNames []string) (network.SubnetInfo, error) {
 	_, _, err := net.ParseCIDR(subnet.Cidr)
 	if err != nil {
 		return network.SubnetInfo{}, errors.Annotatef(err, "skipping subnet %q, invalid CIDR", subnet.Cidr)
@@ -340,6 +341,10 @@ func makeSubnetInfo(neutron NetworkingNeutron, subnet neutron.SubnetV2) (network
 	net, err := neutron.GetNetworkV2(subnet.NetworkId)
 	if err != nil {
 		return network.SubnetInfo{}, err
+	}
+
+	if len(net.AvailabilityZones) > 0 {
+		azNames = net.AvailabilityZones
 	}
 
 	// TODO (hml) 2017-03-20:
@@ -350,23 +355,23 @@ func makeSubnetInfo(neutron NetworkingNeutron, subnet neutron.SubnetV2) (network
 		ProviderId:        network.Id(subnet.Id),
 		ProviderNetworkId: network.Id(subnet.NetworkId),
 		VLANTag:           0,
-		AvailabilityZones: net.AvailabilityZones,
+		AvailabilityZones: azNames,
 	}
-	logger.Tracef("found subnet with info %#v", info)
+	logger.Tracef(ctx, "found subnet with info %#v", info)
 	return info, nil
 }
 
 // Subnets returns basic information about the specified subnets known
 // by the provider for the specified instance or list of ids. subnetIds can be
 // empty, in which case all known are returned.
-func (n *NeutronNetworking) Subnets(instId instance.Id, subnetIds []network.Id) ([]network.SubnetInfo, error) {
+func (n *NeutronNetworking) Subnets(subnetIds []network.Id) ([]network.SubnetInfo, error) {
 	netIds := set.NewStrings()
 	internalNets := n.ecfg().networks()
 
 	for _, iNet := range internalNets {
 		networks, err := n.ResolveNetworks(iNet, false)
 		if err != nil {
-			logger.Warningf("could not resolve internal network id for %q: %v", iNet, err)
+			logger.Warningf(context.TODO(), "could not resolve internal network id for %q: %v", iNet, err)
 			continue
 		}
 		for _, net := range networks {
@@ -382,7 +387,7 @@ func (n *NeutronNetworking) Subnets(instId instance.Id, subnetIds []network.Id) 
 	if externalNet != "" {
 		networks, err := n.ResolveNetworks(externalNet, true)
 		if err != nil {
-			logger.Warningf("could not resolve external network id for %q: %v", externalNet, err)
+			logger.Warningf(context.TODO(), "could not resolve external network id for %q: %v", externalNet, err)
 		} else {
 			for _, net := range networks {
 				netIds.Add(net.Id)
@@ -390,7 +395,7 @@ func (n *NeutronNetworking) Subnets(instId instance.Id, subnetIds []network.Id) 
 		}
 	}
 
-	logger.Debugf("finding subnets in networks: %s", strings.Join(netIds.Values(), ", "))
+	logger.Debugf(context.TODO(), "finding subnets in networks: %s", strings.Join(netIds.Values(), ", "))
 
 	subIdSet := set.NewStrings()
 	for _, subId := range subnetIds {
@@ -398,44 +403,54 @@ func (n *NeutronNetworking) Subnets(instId instance.Id, subnetIds []network.Id) 
 	}
 
 	var results []network.SubnetInfo
-	if instId != instance.UnknownId {
-		// TODO(hml): 2017-03-20
-		// Implement Subnets() for case where instId is specified
-		return nil, errors.NotSupportedf("neutron subnets with instance Id")
-	} else {
-		// TODO(jam): 2018-05-23 It is likely that ListSubnetsV2 could
-		// take a Filter rather that doing the filtering client side.
-		neutron := n.neutron()
-		subnets, err := neutron.ListSubnetsV2()
-		if err != nil {
-			return nil, errors.Annotatef(err, "failed to retrieve subnets")
-		}
-		if len(subnetIds) == 0 {
-			for _, subnet := range subnets {
-				// TODO (manadart 2018-07-17): If there was an error resolving
-				// an internal network ID, then no subnets will be discovered.
-				// The user will get an error attempting to add machines to
-				// this model and will have to update model config with a
-				// network name; but this does not re-discover the subnets.
-				// If subnets/spaces become important, we will have to address
-				// this somehow.
-				if !netIds.Contains(subnet.NetworkId) {
-					logger.Tracef("ignoring subnet %q, part of network %q", subnet.Id, subnet.NetworkId)
-					continue
-				}
-				subIdSet.Add(subnet.Id)
-			}
-		}
+	// TODO(jam): 2018-05-23 It is likely that ListSubnetsV2 could
+	// take a Filter rather that doing the filtering client side.
+	neutron := n.neutron()
+	subnets, err := neutron.ListSubnetsV2()
+	if err != nil {
+		return nil, errors.Annotatef(err, "failed to retrieve subnets")
+	}
+	if len(subnetIds) == 0 {
 		for _, subnet := range subnets {
-			if !subIdSet.Contains(subnet.Id) {
-				logger.Tracef("subnet %q not in %v, skipping", subnet.Id, subnetIds)
+			// TODO (manadart 2018-07-17): If there was an error resolving
+			// an internal network ID, then no subnets will be discovered.
+			// The user will get an error attempting to add machines to
+			// this model and will have to update model config with a
+			// network name; but this does not re-discover the subnets.
+			// If subnets/spaces become important, we will have to address
+			// this somehow.
+			if !netIds.Contains(subnet.NetworkId) {
+				logger.Tracef(context.TODO(), "ignoring subnet %q, part of network %q", subnet.Id, subnet.NetworkId)
 				continue
 			}
-			subIdSet.Remove(subnet.Id)
-			if info, err := makeSubnetInfo(neutron, subnet); err == nil {
-				// Error will already have been logged.
-				results = append(results, info)
-			}
+			subIdSet.Add(subnet.Id)
+		}
+	}
+
+	// if there are no availability zones linked to a subnet, we will default
+	// it to all available zones.
+	// This is required because for now, AZs are only inserted in the database
+	// through subnet infos, and AZs will be required to create a VM.
+	allAZs, err := n.nova().ListAvailabilityZones()
+	if err != nil {
+		return nil, errors.Annotatef(err, "failed to retrieve availability zones")
+	}
+	var allAZNames []string
+	for _, az := range allAZs {
+		if az.State.Available {
+			allAZNames = append(allAZNames, az.Name)
+		}
+	}
+
+	for _, subnet := range subnets {
+		if !subIdSet.Contains(subnet.Id) {
+			logger.Tracef(context.TODO(), "subnet %q not in %v, skipping", subnet.Id, subnetIds)
+			continue
+		}
+		subIdSet.Remove(subnet.Id)
+		if info, err := makeSubnetInfo(context.TODO(), neutron, subnet, allAZNames); err == nil {
+			// Error will already have been logged.
+			results = append(results, info)
 		}
 	}
 	if !subIdSet.IsEmpty() {
@@ -453,7 +468,7 @@ func (n *NeutronNetworking) Subnets(instId instance.Id, subnetIds []network.Id) 
 // value for the missing instances and a ErrPartialInstances error will be
 // returned.
 func (n *NeutronNetworking) NetworkInterfaces(instanceIDs []instance.Id) ([]network.InterfaceInfos, error) {
-	allSubnets, err := n.Subnets(instance.UnknownId, nil)
+	allSubnets, err := n.Subnets(nil)
 	if err != nil {
 		return nil, errors.Annotate(err, "listing subnets")
 	}
@@ -520,9 +535,8 @@ func mapInterfaceList(
 
 	for idx, port := range in {
 		ni := network.InterfaceInfo{
-			DeviceIndex:       idx,
-			ProviderId:        network.Id(port.Id),
-			ProviderNetworkId: network.Id(port.NetworkId),
+			DeviceIndex: idx,
+			ProviderId:  network.Id(port.Id),
 			// NOTE(achilleasa): on microstack port.Name is always empty.
 			InterfaceName: port.Name,
 			Disabled:      port.Status != "ACTIVE",
@@ -532,12 +546,12 @@ func mapInterfaceList(
 			MACAddress:    network.NormalizeMACAddress(port.MACAddress),
 		}
 
-		for i, ipConf := range port.FixedIPs {
+		for _, ipConf := range port.FixedIPs {
 			providerAddr := network.NewMachineAddress(
 				ipConf.IPAddress,
 				network.WithConfigType(network.ConfigStatic),
 				network.WithCIDR(subnetIDToCIDR[ipConf.SubnetID]),
-			).AsProviderAddress()
+			).AsProviderAddress(network.WithProviderSubnetID(network.Id(ipConf.SubnetID)))
 
 			ni.Addresses = append(ni.Addresses, providerAddr)
 
@@ -553,11 +567,6 @@ func mapInterfaceList(
 					// We should consider another type for what are in effect
 					// NATing arrangements, that better conveys the topology.
 				).AsProviderAddress())
-			}
-
-			// If this is the first address, populate additional NIC details.
-			if i == 0 {
-				ni.ProviderSubnetId = network.Id(ipConf.SubnetID)
 			}
 		}
 

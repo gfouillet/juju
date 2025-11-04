@@ -4,19 +4,22 @@
 package hook_test
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/testing"
 )
 
 type InfoSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&InfoSuite{})
+func TestInfoSuite(t *stdtesting.T) {
+	tc.Run(t, &InfoSuite{})
+}
 
 var validateTests = []struct {
 	info hook.Info
@@ -53,8 +56,17 @@ var validateTests = []struct {
 		hook.Info{Kind: hooks.PebbleCustomNotice, WorkloadName: "test"},
 		`"pebble-custom-notice" hook requires a notice ID, type, and key`,
 	}, {
-		hook.Info{Kind: hooks.PreSeriesUpgrade},
-		`"pre-series-upgrade" hook requires a target base`,
+		hook.Info{Kind: hooks.PebbleCheckFailed, CheckName: "http-check"},
+		`"pebble-check-failed" hook requires a workload name`,
+	}, {
+		hook.Info{Kind: hooks.PebbleCheckFailed, WorkloadName: "test"},
+		`"pebble-check-failed" hook requires a check name`,
+	}, {
+		hook.Info{Kind: hooks.PebbleCheckRecovered, CheckName: "http-check"},
+		`"pebble-check-recovered" hook requires a workload name`,
+	}, {
+		hook.Info{Kind: hooks.PebbleCheckRecovered, WorkloadName: "test"},
+		`"pebble-check-recovered" hook requires a check name`,
 	}, {
 		hook.Info{Kind: hooks.SecretRotate},
 		`"secret-rotate" hook requires a secret URI`,
@@ -81,17 +93,16 @@ var validateTests = []struct {
 	{hook.Info{Kind: hooks.StorageAttached, StorageId: "data/0"}, ""},
 	{hook.Info{Kind: hooks.StorageDetaching, StorageId: "data/0"}, ""},
 	{hook.Info{Kind: hooks.PebbleReady, WorkloadName: "gitlab"}, ""},
-	{hook.Info{Kind: hooks.PreSeriesUpgrade, MachineUpgradeTarget: "ubuntu@20.04"}, ""},
 }
 
-func (s *InfoSuite) TestValidate(c *gc.C) {
+func (s *InfoSuite) TestValidate(c *tc.C) {
 	for i, t := range validateTests {
 		c.Logf("test %d", i)
 		err := t.info.Validate()
 		if t.err == "" {
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		} else {
-			c.Assert(err, gc.ErrorMatches, t.err)
+			c.Assert(err, tc.ErrorMatches, t.err)
 		}
 	}
 }

@@ -36,7 +36,7 @@ type BlockDeviceSetter interface {
 
 // ListBlockDevicesFunc is the type of a function that is supplied to
 // NewWorker for listing block devices available on the local host.
-type ListBlockDevicesFunc func() ([]blockdevice.BlockDevice, error)
+type ListBlockDevicesFunc func(context.Context) ([]blockdevice.BlockDevice, error)
 
 // DefaultListBlockDevices is the default function for listing block
 // devices for the operating system of the local host.
@@ -46,14 +46,14 @@ var DefaultListBlockDevices ListBlockDevicesFunc
 // attached to the machine, and records them in state.
 var NewWorker = func(l ListBlockDevicesFunc, b BlockDeviceSetter) worker.Worker {
 	var old []blockdevice.BlockDevice
-	f := func(stop <-chan struct{}) error {
-		return doWork(context.TODO(), l, b, &old)
+	f := func(ctx context.Context) error {
+		return doWork(ctx, l, b, &old)
 	}
 	return jworker.NewPeriodicWorker(f, listBlockDevicesPeriod, jworker.NewTimer)
 }
 
 func doWork(ctx context.Context, listf ListBlockDevicesFunc, b BlockDeviceSetter, old *[]blockdevice.BlockDevice) error {
-	blockDevices, err := listf()
+	blockDevices, err := listf(ctx)
 	if err != nil {
 		return err
 	}
@@ -62,10 +62,10 @@ func doWork(ctx context.Context, listf ListBlockDevicesFunc, b BlockDeviceSetter
 		sort.Strings(blockDevice.DeviceLinks)
 	}
 	if reflect.DeepEqual(blockDevices, *old) {
-		logger.Tracef("no changes to block devices detected")
+		logger.Tracef(ctx, "no changes to block devices detected")
 		return nil
 	}
-	logger.Infof("block devices changed: %#v", blockDevices)
+	logger.Tracef(ctx, "block devices changed: %#v", blockDevices)
 	if err := b.SetMachineBlockDevices(ctx, blockDevices); err != nil {
 		return err
 	}
