@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juju/collections/set"
@@ -17,6 +19,7 @@ import (
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v6"
 
+	apiclient "github.com/juju/juju/api/client/client"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
@@ -209,12 +212,32 @@ func (c *statusHistoryCommand) getAPI(ctx context.Context) (HistoryAPI, error) {
 	return c.NewAPIClient(ctx)
 }
 
-func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.getAPI(ctx)
+// getControllerAddresses returns all controller addresses for HA environments.
+// This allows fetching status history from all controllers instead of just one.
+func (c *statusHistoryCommand) getControllerAddresses() ([]string, error) {
+	controllerName, err := c.ModelCommandBase.ControllerName()
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Annotatef(err, "getting controller details")
 	}
-	defer apiclient.Close()
+
+	details, err := c.ClientStore().ControllerByName(controllerName)
+	if err != nil {
+		return nil, errors.Annotatef(err, "getting controller details")
+	}
+
+	return details.APIEndpoints, nil
+}
+
+// getAPIForAddress creates an API client connected to a specific controller address.
+func (c *statusHistoryCommand) getAPIForAddress(ctx context.Context, addr string) (HistoryAPI, error) {
+	root, err := c.NewAPIRootWithAddressOverride(ctx, []string{addr})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return apiclient.NewClient(root, logger), nil
+}
+
+func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
 	kind := status.HistoryKind(c.outputContent)
 	var delta *time.Duration
 
@@ -222,14 +245,17 @@ func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
 		t := time.Duration(c.backlogSizeDays*24) * time.Hour
 		delta = &t
 	}
+	
+	// Build filter args - we'll apply size limits after merging results from all controllers
 	filterArgs := status.StatusHistoryFilter{
-		Size:  c.backlogSize,
+		Size:  0, // Fetch all available, we'll limit after merge
 		Delta: delta,
 	}
 
 	if !c.date.IsZero() {
 		filterArgs.FromDate = &c.date
 	}
+	
 	var tag names.Tag
 	switch kind {
 	case status.KindModel:
@@ -254,20 +280,149 @@ func (c *statusHistoryCommand) Run(ctx *cmd.Context) error {
 		}
 		tag = names.NewMachineTag(c.entityName)
 	}
-	statuses, err := apiclient.StatusHistory(ctx, kind, tag, filterArgs)
-	historyLen := len(statuses)
-	if err != nil {
-		if historyLen == 0 {
+
+	// If api is mocked (for testing), fall back to single API
+	if c.api != nil {
+		apiclient, err := c.getAPI(ctx)
+		if err != nil {
 			return errors.Trace(err)
 		}
-		// Display any error, but continue to print status if some was returned
-		fmt.Fprintf(ctx.Stderr, "%v\n", err)
+		defer apiclient.Close()
+		
+		statuses, err := apiclient.StatusHistory(ctx, kind, tag, filterArgs)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		
+		if len(statuses) == 0 {
+			return errors.Errorf("no status history available")
+		}
+		
+		return c.formatAndWriteHistory(ctx, statuses)
+	}
+	
+	// Get all controller addresses for HA support
+	controllerAddrs, err := c.getControllerAddresses()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	
+	// If no addresses, fall back to single API
+	if len(controllerAddrs) == 0 {
+		apiclient, err := c.getAPI(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		defer apiclient.Close()
+		
+		statuses, err := apiclient.StatusHistory(ctx, kind, tag, filterArgs)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		
+		if len(statuses) == 0 {
+			return errors.Errorf("no status history available")
+		}
+		
+		return c.formatAndWriteHistory(ctx, statuses)
 	}
 
-	if historyLen == 0 {
+	// Fetch status history from all controllers concurrently
+	type result struct {
+		statuses status.History
+		err      error
+	}
+	
+	results := make(chan result, len(controllerAddrs))
+	var wg sync.WaitGroup
+	
+	for _, addr := range controllerAddrs {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			
+			apiclient, err := c.getAPIForAddress(ctx, addr)
+			if err != nil {
+				// Log error but don't fail completely - other controllers might work
+				fmt.Fprintf(ctx.Stderr, "Warning: failed to connect to controller %s: %v\n", addr, err)
+				results <- result{err: err}
+				return
+			}
+			defer apiclient.Close()
+			
+			statuses, err := apiclient.StatusHistory(ctx, kind, tag, filterArgs)
+			results <- result{statuses: statuses, err: err}
+		}(addr)
+	}
+	
+	// Wait for all fetches to complete
+	wg.Wait()
+	close(results)
+	
+	// Collect all statuses from all controllers
+	var allStatuses status.History
+	var lastErr error
+	for r := range results {
+		if r.err != nil {
+			lastErr = r.err
+			continue
+		}
+		allStatuses = append(allStatuses, r.statuses...)
+	}
+	
+	if len(allStatuses) == 0 {
+		if lastErr != nil {
+			return errors.Annotate(lastErr, "no status history available")
+		}
 		return errors.Errorf("no status history available")
 	}
+	
+	// Merge, deduplicate and sort the results
+	mergedStatuses := c.mergeAndDeduplicateStatuses(allStatuses)
+	
+	// Apply size limit after merging
+	if c.backlogSize > 0 && len(mergedStatuses) > c.backlogSize {
+		mergedStatuses = mergedStatuses[:c.backlogSize]
+	}
+	
+	return c.formatAndWriteHistory(ctx, mergedStatuses)
+}
 
+// mergeAndDeduplicateStatuses merges status histories from multiple controllers,
+// removes duplicates, and sorts by timestamp (newest first).
+func (c *statusHistoryCommand) mergeAndDeduplicateStatuses(statuses status.History) status.History {
+	// Use a map to deduplicate based on timestamp + status + message
+	seen := make(map[string]bool)
+	var unique status.History
+	
+	for _, s := range statuses {
+		// Create a unique key from timestamp, status, and message
+		key := fmt.Sprintf("%v-%s-%s", s.Since, s.Status, s.Info)
+		if !seen[key] {
+			seen[key] = true
+			unique = append(unique, s)
+		}
+	}
+	
+	// Sort by timestamp descending (newest first)
+	sort.Slice(unique, func(i, j int) bool {
+		if unique[i].Since == nil && unique[j].Since == nil {
+			return false
+		}
+		if unique[i].Since == nil {
+			return false
+		}
+		if unique[j].Since == nil {
+			return true
+		}
+		return unique[i].Since.After(*unique[j].Since)
+	})
+	
+	return unique
+}
+
+// formatAndWriteHistory converts status.History to History and writes it out.
+func (c *statusHistoryCommand) formatAndWriteHistory(ctx *cmd.Context, statuses status.History) error {
 	history := make(History, len(statuses))
 	for i, h := range statuses {
 		history[i] = DetailedStatus{
