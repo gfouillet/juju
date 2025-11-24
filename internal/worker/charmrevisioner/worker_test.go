@@ -173,8 +173,8 @@ func (s *WorkerSuite) TestConfigChangesDoNotResetTimer(c *tc.C) {
 
 	s.clock.EXPECT().NewTimer(gomock.Any()).Return(timer)
 
-	// Setup config watcher
-	configCh := make(chan []string, 1)
+	// Setup config watcher - use an unbuffered channel to ensure synchronization
+	configCh := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(configCh)
 	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
@@ -197,15 +197,24 @@ func (s *WorkerSuite) TestConfigChangesDoNotResetTimer(c *tc.C) {
 
 	s.ensureStartup(c)
 
-	// Send a non-charmhub config change - this should NOT reset the timer
-	select {
-	case configCh <- []string{"some-other-config"}:
-	case <-c.Context().Done():
-		c.Fatalf("timed out sending config change")
-	}
+	// Send a non-charmhub config change in a goroutine since it's unbuffered
+	configProcessed := make(chan struct{})
+	go func() {
+		select {
+		case configCh <- []string{"some-other-config"}:
+			// Config change was received by the worker
+			close(configProcessed)
+		case <-c.Context().Done():
+		}
+	}()
 
-	// Give it a moment to process the config change
-	time.Sleep(10 * time.Millisecond)
+	// Wait for config to be processed
+	select {
+	case <-configProcessed:
+		// Config change was sent and received, continue with test
+	case <-time.After(testhelpers.ShortWait):
+		c.Fatalf("config change was not processed")
+	}
 
 	// Now trigger the timer - this should still work despite the config change
 	select {
