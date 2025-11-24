@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
 	"github.com/juju/names/v6"
 	"github.com/juju/tc"
@@ -21,6 +22,7 @@ import (
 	"github.com/juju/juju/core/logger"
 	coremodel "github.com/juju/juju/core/model"
 	modeltesting "github.com/juju/juju/core/model/testing"
+	coretesting "github.com/juju/juju/core/testing"
 	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/core/watcher/watchertest"
 	"github.com/juju/juju/domain/application"
@@ -52,7 +54,7 @@ type WorkerSuite struct {
 	charmhubClient     *MockCharmhubClient
 	httpClient         *MockHTTPClient
 	httpClientGetter   *MockHTTPClientGetter
-	clock              *MockClock
+	clock              *testclock.Clock
 
 	modelTag names.ModelTag
 }
@@ -72,14 +74,6 @@ func (s *WorkerSuite) TestTriggerFetch(c *tc.C) {
 	watcher := watchertest.NewMockStringsWatcher(make(chan []string))
 	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
 
-	ch := make(chan time.Time)
-	timer := NewMockTimer(ctrl)
-	timer.EXPECT().Chan().Return(ch).AnyTimes()
-	timer.EXPECT().Stop()
-	timer.EXPECT().Reset(gomock.Any()).Return(true)
-
-	s.clock.EXPECT().NewTimer(gomock.Any()).Return(timer)
-
 	done := make(chan struct{})
 	s.applicationService.EXPECT().GetApplicationsForRevisionUpdater(gomock.Any()).DoAndReturn(func(ctx context.Context) ([]application.RevisionUpdaterApplication, error) {
 		close(done)
@@ -95,15 +89,14 @@ func (s *WorkerSuite) TestTriggerFetch(c *tc.C) {
 
 	s.ensureStartup(c)
 
-	select {
-	case ch <- time.Now():
-	case <-c.Context().Done():
-		c.Fatalf("timed out sending time")
-	}
+	// Wait for the timer to be set up, then advance the clock to trigger it
+	// Jitter can be up to 2x the period, so advance by 2 seconds + a bit
+	err := s.clock.WaitAdvance(time.Second*2+time.Millisecond, coretesting.ShortWait, 1)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case <-done:
-	case <-c.Context().Done():
+	case <-time.After(coretesting.ShortWait):
 		c.Fatalf("timed out waiting for fetch")
 	}
 
@@ -114,13 +107,6 @@ func (s *WorkerSuite) TestTriggerModelConfig(c *tc.C) {
 	// Ensure that a model config change triggers a new charmhub client.
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
-
-	// This will block, and we can then trigger the model config change
-	// independently.
-	timer := NewMockTimer(ctrl)
-	timer.EXPECT().Chan().Return(make(<-chan time.Time)).AnyTimes()
-	timer.EXPECT().Stop()
-	s.clock.EXPECT().NewTimer(gomock.Any()).Return(timer)
 
 	ch := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(ch)
@@ -145,13 +131,13 @@ func (s *WorkerSuite) TestTriggerModelConfig(c *tc.C) {
 
 	select {
 	case ch <- []string{config.CharmHubURLKey}:
-	case <-c.Context().Done():
-		c.Fatalf("timed out sending time")
+	case <-time.After(coretesting.ShortWait):
+		c.Fatalf("timed out sending config change")
 	}
 
 	select {
 	case <-done:
-	case <-c.Context().Done():
+	case <-time.After(coretesting.ShortWait):
 		c.Fatalf("timed out waiting for new client")
 	}
 
@@ -164,16 +150,7 @@ func (s *WorkerSuite) TestConfigChangesDoNotResetTimer(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	// Create channels for controlling the timer
-	timerCh := make(chan time.Time, 1)
-	timer := NewMockTimer(ctrl)
-	timer.EXPECT().Chan().Return(timerCh).AnyTimes()
-	timer.EXPECT().Stop()
-	timer.EXPECT().Reset(gomock.Any()).Return(true).AnyTimes()
-
-	s.clock.EXPECT().NewTimer(gomock.Any()).Return(timer)
-
-	// Setup config watcher - use an unbuffered channel to ensure synchronization
+	// Setup config watcher
 	configCh := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(configCh)
 	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
@@ -197,37 +174,28 @@ func (s *WorkerSuite) TestConfigChangesDoNotResetTimer(c *tc.C) {
 
 	s.ensureStartup(c)
 
-	// Send a non-charmhub config change in a goroutine since it's unbuffered
-	configProcessed := make(chan struct{})
+	// Send a non-charmhub config change - this should NOT reset the timer
 	go func() {
 		select {
 		case configCh <- []string{"some-other-config"}:
-			// Config change was received by the worker
-			close(configProcessed)
-		case <-c.Context().Done():
+		case <-time.After(coretesting.ShortWait):
 		}
 	}()
 
-	// Wait for config to be processed
-	select {
-	case <-configProcessed:
-		// Config change was sent and received, continue with test
-	case <-time.After(testhelpers.ShortWait):
-		c.Fatalf("config change was not processed")
-	}
+	// Give the config change time to be processed
+	time.Sleep(10 * time.Millisecond)
 
-	// Now trigger the timer - this should still work despite the config change
-	select {
-	case timerCh <- time.Now():
-	case <-c.Context().Done():
-		c.Fatalf("timed out sending timer event")
-	}
+	// Now advance the clock - the timer should still fire despite the config change
+	// Wait for the timer to be set up, then advance
+	// Jitter can be up to 2x the period, so advance by 2 seconds + a bit
+	err := s.clock.WaitAdvance(time.Second*2+time.Millisecond, coretesting.ShortWait, 1)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Verify that fetch was called
 	select {
 	case <-fetchCalled:
 		// Success - the timer fired and fetch was called
-	case <-time.After(testhelpers.ShortWait):
+	case <-time.After(coretesting.ShortWait):
 		c.Fatalf("fetch was not called after timer fired")
 	}
 
@@ -1262,9 +1230,7 @@ func (s *WorkerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	s.charmhubClient = NewMockCharmhubClient(ctrl)
 
 	s.now = time.Now()
-
-	s.clock = NewMockClock(ctrl)
-	s.clock.EXPECT().Now().Return(s.now).AnyTimes()
+	s.clock = testclock.NewClock(s.now)
 
 	s.modelTag = names.NewModelTag(uuid.MustNewUUID().String())
 
@@ -1297,26 +1263,6 @@ func (s *WorkerSuite) expectWatcher(c *tc.C) {
 	ch := make(chan []string)
 	watcher := watchertest.NewMockStringsWatcher(ch)
 	s.modelConfigService.EXPECT().Watch(gomock.Any()).Return(watcher, nil)
-	// Create a timer that never fires for tests that don't need timing
-	timer := &neverFireTimer{ch: make(chan time.Time)}
-	s.clock.EXPECT().NewTimer(gomock.Any()).Return(timer).AnyTimes()
-}
-
-// neverFireTimer is a simple timer implementation that never fires
-type neverFireTimer struct {
-	ch chan time.Time
-}
-
-func (t *neverFireTimer) Chan() <-chan time.Time {
-	return t.ch
-}
-
-func (t *neverFireTimer) Reset(d time.Duration) bool {
-	return true
-}
-
-func (t *neverFireTimer) Stop() bool {
-	return true
 }
 
 func (s *WorkerSuite) expectModelConfig(c *tc.C) {
