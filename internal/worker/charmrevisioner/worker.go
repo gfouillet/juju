@@ -243,12 +243,17 @@ func (w *revisionUpdateWorker) loop() error {
 	// Report the initial started state.
 	w.reportInternalState(stateStarted)
 
+	// Create the update timer outside the loop to prevent config changes
+	// from resetting it.
+	updateTimer := w.config.Clock.NewTimer(jitter(w.config.Period))
+	defer updateTimer.Stop()
+
 	for {
 		select {
 		case <-w.catacomb.Dying():
 			return w.catacomb.ErrDying()
 
-		case <-w.config.Clock.After(jitter(w.config.Period)):
+		case <-updateTimer.Chan():
 			w.config.Logger.Debugf(ctx, "%v elapsed, performing work", w.config.Period)
 
 			// This worker is responsible for updating the latest revision of
@@ -261,15 +266,18 @@ func (w *revisionUpdateWorker) loop() error {
 			latestInfo, err := w.fetch(ctx, charmhubClient)
 			if errors.Is(err, ErrFailedToSendMetrics) {
 				logger.Warningf(ctx, "failed to send metrics: %v", err)
+				updateTimer.Reset(jitter(w.config.Period))
 				continue
 			} else if err != nil {
 				logger.Errorf(ctx, "failed to fetch revisions: %v", err)
+				updateTimer.Reset(jitter(w.config.Period))
 				continue
 			} else if len(latestInfo) == 0 {
 				if err := w.recordNoApplications(ctx, charmhubClient); err != nil {
 					logger.Warningf(ctx, "failed to record no applications: %v", err)
 				}
 				logger.Debugf(ctx, "no new application revisions")
+				updateTimer.Reset(jitter(w.config.Period))
 				continue
 			}
 
@@ -277,10 +285,14 @@ func (w *revisionUpdateWorker) loop() error {
 
 			if err := w.storeNewRevisions(ctx, latestInfo); err != nil {
 				logger.Warningf(ctx, "failed to store revisions: %v", err)
+				updateTimer.Reset(jitter(w.config.Period))
 				continue
 			}
 
 			logger.Debugf(ctx, "revisions stored for %d applications", len(latestInfo))
+
+			// Reset the timer for the next update cycle.
+			updateTimer.Reset(jitter(w.config.Period))
 
 		case changes, ok := <-configWatcher.Changes():
 			if !ok {
