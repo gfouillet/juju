@@ -89,7 +89,7 @@ func (s *WorkerSuite) TestTriggerFetch(c *tc.C) {
 
 	s.ensureStartup(c)
 
-	// Wait for the timer to be set up, then advance the clock to trigger it
+	// Wait for 1 timer (the update timer) to be registered, then advance the clock to trigger it
 	// Jitter can be up to 2x the period, so advance by 2 seconds + a bit
 	err := s.clock.WaitAdvance(time.Second*2+time.Millisecond, coretesting.ShortWait, 1)
 	c.Assert(err, tc.ErrorIsNil)
@@ -175,18 +175,24 @@ func (s *WorkerSuite) TestConfigChangesDoNotResetTimer(c *tc.C) {
 	s.ensureStartup(c)
 
 	// Send a non-charmhub config change - this should NOT reset the timer
+	configProcessed := make(chan struct{})
 	go func() {
 		select {
 		case configCh <- []string{"some-other-config"}:
+			close(configProcessed)
 		case <-time.After(coretesting.ShortWait):
 		}
 	}()
 
-	// Give the config change time to be processed
-	time.Sleep(10 * time.Millisecond)
+	// Wait for the config change to be processed
+	select {
+	case <-configProcessed:
+	case <-time.After(coretesting.ShortWait):
+		c.Fatalf("config change was not processed")
+	}
 
 	// Now advance the clock - the timer should still fire despite the config change
-	// Wait for the timer to be set up, then advance
+	// Wait for 1 timer (the update timer) to be registered, then advance the clock
 	// Jitter can be up to 2x the period, so advance by 2 seconds + a bit
 	err := s.clock.WaitAdvance(time.Second*2+time.Millisecond, coretesting.ShortWait, 1)
 	c.Assert(err, tc.ErrorIsNil)
