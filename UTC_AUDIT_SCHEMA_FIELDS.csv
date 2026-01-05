@@ -1,0 +1,56 @@
+Schema File,Table Name,Field Name,Field Type,Has UTC Default,Code Layer Verification,Status,Notes
+domain/schema/model/sql/0001-changelog.sql,change_log,created_at,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0001-changelog.sql,change_log,updated_at,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0020-unit.sql,unit_agent_status,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Used by status domain
+domain/schema/model/sql/0020-unit.sql,unit_workload_status,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Used by status domain
+domain/schema/model/sql/0020-unit.sql,cloud_container_status,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Container status updates
+domain/schema/model/sql/0020-unit.sql,cloud_container,last_seen,DATETIME,NO,VIOLATION,VIOLATION,Status domain uses clock.Now() without UTC
+domain/schema/model/sql/0012-secret.sql,secret,create_time,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0012-secret.sql,secret,update_time,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0012-secret.sql,secret,next_rotation_time,DATETIME,NO,OK,OK,Set by secret service with UTC
+domain/schema/model/sql/0012-secret.sql,secret_revision,create_time,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0012-secret.sql,secret_revision,expire_time,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Expiration logic needs review
+domain/schema/model/sql/0033-operation.sql,operation,enqueued_at,TIMESTAMP,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation,started_at,TIMESTAMP,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation,completed_at,TIMESTAMP,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation_task,enqueued_at,DATETIME,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation_task,started_at,DATETIME,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation_task,completed_at,DATETIME,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation_task_status,updated_at,DATETIME,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0033-operation.sql,operation_message,created_at,TIMESTAMP,NO,OK,OK,Operation state uses time.Now().UTC()
+domain/schema/model/sql/0018-machine.sql,machine,agent_started_at,DATETIME,NO,VIOLATION,VIOLATION,Machine state uses clock.Now() without UTC
+domain/schema/model/sql/0018-machine.sql,machine,created_at,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0018-machine.sql,machine,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Machine updates need review
+domain/schema/model/sql/0018-machine.sql,machine_status_data,last_seen,DATETIME,NO,VIOLATION,VIOLATION,Status domain uses clock.Now() without UTC
+domain/schema/model/sql/0017-machine-cloud-instance.sql,machine_cloud_instance,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Cloud instance updates
+domain/schema/model/sql/0034-cross-model-relation.sql,cross_model_relation,updated_at,DATETIME,NO,VIOLATION,VIOLATION,Cross model state uses clock.Now() without UTC
+domain/schema/model/sql/0015-charm.sql,charm,create_time,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0040-operator-status.PATCH.sql,operator_status,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Operator status updates
+domain/schema/model/sql/0023-resource.sql,resource,created_at,TIMESTAMP,NO,VIOLATION,VIOLATION,Resource state uses clock.Now() without UTC
+domain/schema/model/sql/0023-resource.sql,resource_stored_file,last_polled,TIMESTAMP,NO,VIOLATION,VIOLATION,Resource state uses clock.Now() without UTC
+domain/schema/model/sql/0023-resource.sql,application_resource,added_at,TIMESTAMP,NO,VIOLATION,VIOLATION,Resource state uses clock.Now() without UTC
+domain/schema/model/sql/0024-relation.sql,relation_status,updated_at,DATETIME,NO,VIOLATION,VIOLATION,Relation state uses clock.Now() without UTC
+domain/schema/model/sql/0028-cleanup.sql,cleanup,scheduled_for,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/model/sql/0011-storage.sql,storage_instance,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Storage updates
+domain/schema/model/sql/0011-storage.sql,storage_attachment,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Storage attachment updates
+domain/schema/model/sql/0019-application.sql,application,updated_at,DATETIME,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Application updates
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_status,start_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Migration timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_status,success_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Migration timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_status,end_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Migration timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_status,phase_changed_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Migration timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_minion_sync,start_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Minion sync timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_minion_sync,success_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Minion sync timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_minion_sync,end_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Minion sync timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_minion_sync,phase_changed_time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Minion sync timing
+domain/schema/controller/sql/0011-model-migration.sql,model_migration_minion_sync,time,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Minion sync timing
+domain/schema/controller/sql/0020-macaroon.sql,root_key,created_at,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Macaroon key creation
+domain/schema/controller/sql/0020-macaroon.sql,root_key,expires_at,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Macaroon key expiration
+domain/schema/controller/sql/0018-secret-backend.sql,secret_backend,next_rotation_time,DATETIME,NO,OK,OK,Secret backend service uses UTC
+domain/schema/controller/sql/0015-user.sql,user,created_at,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,User creation time
+domain/schema/controller/sql/0012-upgrade-info.sql,upgrade_info,node_upgrade_completed_at,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Upgrade completion time
+domain/schema/controller/sql/0002-lease.sql,lease,start,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Lease management timing
+domain/schema/controller/sql/0002-lease.sql,lease,expiry,TIMESTAMP,NO,NEEDS_CHECK,NEEDS_VERIFICATION,Lease management timing
+domain/schema/controller/sql/0003-changelog.sql,change_log,created_at,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/controller/sql/0003-changelog.sql,change_log,updated_at,DATETIME,YES,N/A,OK,Schema default ensures UTC
+domain/schema/controller/sql/0024-cloudimagemetadata.sql,cloud_image_metadata,created_at,DATETIME,NO,VIOLATION,VIOLATION,Cloud metadata state uses clock.Now() without UTC
+domain/schema/controller/sql/0019-model-last-login.sql,model_last_login,time,TIMESTAMP,NO,VIOLATION,VIOLATION,Access service uses time.Now() without UTC

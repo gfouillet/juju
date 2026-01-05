@@ -1,0 +1,29 @@
+File Path,Line Context,Violation Type,Severity,Current Code,Fixed Code,Domain,Layer
+domain/application/state/peer_relation.go,insertNewRelationStatus,clock.Now() without UTC,HIGH,"UpdatedAt: st.clock.Now()","UpdatedAt: st.clock.Now().UTC()",application,state
+domain/application/state/unit.go,unit timestamp,clock.Now() without UTC,HIGH,"now := ptr(st.clock.Now())","now := ptr(st.clock.Now().UTC())",application,state
+domain/application/state/resource.go,resource creation,clock.Now() without UTC,HIGH,"now := st.clock.Now()","now := st.clock.Now().UTC()",application,state
+domain/application/state/unitstate.go,unit state update,time.Now() without UTC,HIGH,"= time.Now()","= time.Now().UTC()",application,state
+domain/application/state/unitstate.go,unit state update,time.Now() without UTC,HIGH,"= time.Now()","= time.Now().UTC()",application,state
+domain/changestream/state/state.go,change stream timestamp,clock.Now() without UTC,MEDIUM,"now := st.clock.Now()","now := st.clock.Now().UTC()",changestream,state
+domain/cloudimagemetadata/state/state.go,metadata insertion,clock.Now() without UTC,MEDIUM,"InsertMetadata(ctx, db, metadata, s.clock.Now())","InsertMetadata(ctx, db, metadata, s.clock.Now().UTC())",cloudimagemetadata,state
+domain/cloudimagemetadata/state/state.go,expiration time,clock.Now() without UTC,MEDIUM,"ExpiresAt: s.clock.Now().Add(-ExpirationDelay)","ExpiresAt: s.clock.Now().UTC().Add(-ExpirationDelay)",cloudimagemetadata,state
+domain/cloudimagemetadata/state/state.go,expiration time,clock.Now() without UTC,MEDIUM,"ExpiresAt: s.clock.Now().Add(-ExpirationDelay)","ExpiresAt: s.clock.Now().UTC().Add(-ExpirationDelay)",cloudimagemetadata,state
+domain/crossmodelrelation/state/model/remoteapplication.go,remote app update,clock.Now() without UTC,MEDIUM,"UpdatedAt: st.clock.Now()","UpdatedAt: st.clock.Now().UTC()",crossmodelrelation,state
+domain/machine/state/state.go,agent started time,clock.Now() without UTC,HIGH,"AgentStartedAt: st.clock.Now()","AgentStartedAt: st.clock.Now().UTC()",machine,state
+domain/machine/state/placement.go,machine placement,clock.Now() without UTC,HIGH,"now := clock.Now()","now := clock.Now().UTC()",machine,state
+domain/relation/state/subordinateunit.go,subordinate unit,clock.Now() without UTC,MEDIUM,"now := ptr(st.clock.Now())","now := ptr(st.clock.Now().UTC())",relation,state
+domain/relation/state/relation.go,relation update,clock.Now() without UTC,MEDIUM,"UpdatedAt: st.clock.Now()","UpdatedAt: st.clock.Now().UTC()",relation,state
+domain/resource/state/resource.go,resource added,clock.Now() without UTC,HIGH,"AddedAt: st.clock.Now()","AddedAt: st.clock.Now().UTC()",resource,state
+domain/resource/state/resource.go,resource timestamp,clock.Now() without UTC,HIGH,"now := st.clock.Now()","now := st.clock.Now().UTC()",resource,state
+domain/resource/state/resource.go,resource created,clock.Now() without UTC,HIGH,"CreatedAt: st.clock.Now()","CreatedAt: st.clock.Now().UTC()",resource,state
+domain/resource/state/resource.go,resource created,clock.Now() without UTC,HIGH,"CreatedAt: st.clock.Now()","CreatedAt: st.clock.Now().UTC()",resource,state
+domain/resource/state/resource.go,resource timestamp,time.Now() without UTC,HIGH,"time.Now()","time.Now().UTC()",resource,state
+domain/status/state/model/modelstate.go,last seen timestamp,clock.Now() without UTC,HIGH,"LastSeen: st.clock.Now()","LastSeen: st.clock.Now().UTC()",status,state
+domain/status/state/model/modelstate.go,last seen timestamp,clock.Now() without UTC,HIGH,"LastSeen: st.clock.Now()","LastSeen: st.clock.Now().UTC()",status,state
+domain/access/state/user.go,user timestamp,time.Now() without UTC,HIGH,"time.Now()","time.Now().UTC()",access,state
+domain/operation/state/prune.go,expiration calculation,time.Now() without UTC,HIGH,"expires{At: time.Now().Add(-age)}","expires{At: time.Now().UTC().Add(-age)}",operation,state
+domain/access/service/user.go,last model login,time.Now() without UTC,HIGH,"time.Now()","time.Now().UTC()",access,service
+domain/application/service/unit.go,unit timestamp,clock.Now() without UTC,HIGH,"now := ptr(s.clock.Now())","now := ptr(s.clock.Now().UTC())",application,service
+domain/application/service/service.go,status timestamp,clock.Now() without UTC,HIGH,"Since: ptr(s.clock.Now())","Since: ptr(s.clock.Now().UTC())",application,service
+domain/crossmodelrelation/service/remoteapplication.go,status timestamp,clock.Now() without UTC,MEDIUM,"Since: ptr(s.clock.Now())","Since: ptr(s.clock.Now().UTC())",crossmodelrelation,service
+domain/machine/service/service.go,status timestamp,clock.Now() without UTC,HIGH,"Since: ptr(clock.Now())","Since: ptr(clock.Now().UTC())",machine,service
