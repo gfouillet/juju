@@ -205,7 +205,7 @@ VALUES ($insertMachine.*);
 		return errors.Errorf("inserting machine container type: %w", err)
 	}
 
-	now := clock.Now()
+	now := clock.Now().UTC()
 
 	machineStatusID, err := domainstatus.EncodeMachineStatus(domainstatus.MachineStatusPending)
 	if err != nil {
