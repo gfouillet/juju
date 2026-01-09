@@ -4,33 +4,18 @@
 package network
 
 import (
+	"context"
 	"math/big"
 	"net"
 	"sort"
 	"strings"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/errors"
 )
-
-// FanCIDRs describes the subnets relevant to a fan network.
-type FanCIDRs struct {
-	// FanLocalUnderlay is the CIDR of the local underlying fan network.
-	// It allows easy identification of the device the fan is running on.
-	FanLocalUnderlay string
-
-	// FanOverlay is the CIDR of the complete fan setup.
-	FanOverlay string
-}
-
-func newFanCIDRs(overlay, underlay string) *FanCIDRs {
-	return &FanCIDRs{
-		FanLocalUnderlay: underlay,
-		FanOverlay:       overlay,
-	}
-}
 
 // SubnetInfo is a source-agnostic representation of a subnet.
 // It may originate from state, or from a provider.
@@ -70,44 +55,15 @@ type SubnetInfo struct {
 	// Default value should be AlphaSpaceId. It can be empty if
 	// the subnet is returned from an networkingEnviron. SpaceID is
 	// preferred over SpaceName in state and non networkingEnviron use.
-	SpaceID string
+	SpaceID SpaceUUID
 
 	// SpaceName is the name of the space the subnet is associated with.
 	// An empty string indicates it is part of the AlphaSpaceName OR
 	// if the SpaceID is set. Should primarily be used in an networkingEnviron.
-	SpaceName string
-
-	// FanInfo describes the fan networking setup for the subnet.
-	// It may be empty if this is not a fan subnet,
-	// or if this subnet information comes from a provider.
-	FanInfo *FanCIDRs
-
-	// IsPublic describes whether a subnet is public or not.
-	IsPublic bool
+	SpaceName SpaceName
 
 	// Life represents the current life-cycle status of the subnets.
 	Life life.Value
-}
-
-// SetFan sets the fan networking information for the subnet.
-func (s *SubnetInfo) SetFan(underlay, overlay string) {
-	s.FanInfo = newFanCIDRs(overlay, underlay)
-}
-
-// FanLocalUnderlay returns the fan underlay CIDR if known.
-func (s *SubnetInfo) FanLocalUnderlay() string {
-	if s.FanInfo == nil {
-		return ""
-	}
-	return s.FanInfo.FanLocalUnderlay
-}
-
-// FanOverlay returns the fan overlay CIDR if known.
-func (s *SubnetInfo) FanOverlay() string {
-	if s.FanInfo == nil {
-		return ""
-	}
-	return s.FanInfo.FanOverlay
 }
 
 // Validate validates the subnet, checking the CIDR, and VLANTag, if present.
@@ -115,7 +71,7 @@ func (s *SubnetInfo) Validate() error {
 	if s.CIDR == "" {
 		return errors.Errorf("missing CIDR")
 	} else if _, err := s.ParsedCIDRNetwork(); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 
 	if s.VLANTag < 0 || s.VLANTag > 4094 {
@@ -147,28 +103,9 @@ type SubnetInfos []SubnetInfo
 func (s SubnetInfos) SpaceIDs() set.Strings {
 	spaceIDs := set.NewStrings()
 	for _, sub := range s {
-		spaceIDs.Add(sub.SpaceID)
+		spaceIDs.Add(sub.SpaceID.String())
 	}
 	return spaceIDs
-}
-
-// GetByUnderlayCIDR returns any subnets in this collection that are fan
-// overlays for the input CIDR.
-// An error is returned if the input is not a valid CIDR.
-// TODO (manadart 2020-04-15): Consider storing subnet IDs in FanInfo,
-// so we can ensure uniqueness in multi-network deployments.
-func (s SubnetInfos) GetByUnderlayCIDR(cidr string) (SubnetInfos, error) {
-	if !IsValidCIDR(cidr) {
-		return nil, errors.NotValidf("CIDR %q", cidr)
-	}
-
-	var overlays SubnetInfos
-	for _, sub := range s {
-		if sub.FanLocalUnderlay() == cidr {
-			overlays = append(overlays, sub)
-		}
-	}
-	return overlays, nil
 }
 
 // ContainsID returns true if the collection contains a
@@ -191,7 +128,7 @@ func (s SubnetInfos) GetByID(id Id) *SubnetInfo {
 // with a CIDR matching the input.
 func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 	if !IsValidCIDR(cidr) {
-		return nil, errors.NotValidf("CIDR %q", cidr)
+		return nil, errors.Errorf("CIDR %q %w", cidr, coreerrors.NotValid)
 	}
 
 	var matching SubnetInfos
@@ -205,19 +142,18 @@ func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 		return matching, nil
 	}
 
-	// Some providers (e.g. equinix) carve subnets into smaller CIDRs and
-	// assign addresses from the carved subnets to the machines. If we were
-	// not able to find a direct CIDR match fallback to a CIDR is sub-CIDR
-	// of check.
+	// Some providers carve subnets into smaller CIDRs and assign addresses from
+	// the carved subnets to the machines. If we were not able to find a direct
+	// CIDR match fallback to a CIDR is sub-CIDR of check.
 	firstIP, lastIP, err := IPRangeForCIDR(cidr)
 	if err != nil {
-		return nil, errors.Annotatef(err, "unable to extract first and last IP addresses from CIDR %q", cidr)
+		return nil, errors.Errorf("unable to extract first and last IP addresses from CIDR %q: %w", cidr, err)
 	}
 
 	for _, sub := range s {
 		subNet, err := sub.ParsedCIDRNetwork()
 		if err != nil { // this should not happen; but let's be paranoid.
-			logger.Warningf("unable to parse CIDR %q for subnet %q", sub.CIDR, sub.ID)
+			logger.Warningf(context.TODO(), "unable to parse CIDR %q for subnet %q", sub.CIDR, sub.ID)
 			continue
 		}
 
@@ -234,58 +170,20 @@ func (s SubnetInfos) GetByCIDR(cidr string) (SubnetInfos, error) {
 func (s SubnetInfos) GetByAddress(addr string) (SubnetInfos, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {
-		return nil, errors.NotValidf("%q as IP address", addr)
+		return nil, errors.Errorf("%q as IP address %w", addr, coreerrors.NotValid)
 	}
 
 	var subs SubnetInfos
 	for _, sub := range s {
 		ipNet, err := sub.ParsedCIDRNetwork()
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		if ipNet.Contains(ip) {
 			subs = append(subs, sub)
 		}
 	}
 	return subs, nil
-}
-
-// GetBySpaceID returns all subnets with the input space ID,
-// including those inferred by being overlays of subnets in the space.
-func (s SubnetInfos) GetBySpaceID(spaceID string) (SubnetInfos, error) {
-	var subsInSpace SubnetInfos
-	for _, sub := range s {
-		if sub.SpaceID == spaceID {
-			subsInSpace = append(subsInSpace, sub)
-		}
-	}
-
-	var spaceOverlays SubnetInfos
-	for _, sub := range subsInSpace {
-		// If we picked up an overlay because the space was already set,
-		// don't try to find subnets for which it is an underlay.
-		if sub.FanInfo != nil {
-			continue
-		}
-
-		// TODO (manadart 2020-05-13): See comment for GetByUnderlayCIDR.
-		// This will only be correct for unique CIDRs.
-		overlays, err := s.GetByUnderlayCIDR(sub.CIDR)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-
-		// Don't include overlays that already have a space ID.
-		// They will have been retrieved as subsInSpace.
-		for _, overlay := range overlays {
-			if overlay.SpaceID == "" {
-				overlay.SpaceID = spaceID
-				spaceOverlays = append(spaceOverlays, overlay)
-			}
-		}
-	}
-
-	return append(subsInSpace, spaceOverlays...), nil
 }
 
 // AllSubnetInfos implements SubnetLookup
@@ -345,7 +243,7 @@ func FindSubnetIDsForAvailabilityZone(zoneName string, subnetsToZones map[Id][]s
 	}
 
 	if matchingSubnetIDs.IsEmpty() {
-		return nil, errors.NotFoundf("subnets in AZ %q", zoneName)
+		return nil, errors.Errorf("subnets in AZ %q %w", zoneName, coreerrors.NotFound)
 	}
 
 	sorted := make([]Id, matchingSubnetIDs.Size())
@@ -381,7 +279,7 @@ func IsInFanNetwork(network Id) bool {
 func IPRangeForCIDR(cidr string) (net.IP, net.IP, error) {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
-		return net.IP{}, net.IP{}, errors.Trace(err)
+		return net.IP{}, net.IP{}, errors.Capture(err)
 	}
 	ones, numBits := ipNet.Mask.Size()
 

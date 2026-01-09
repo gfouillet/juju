@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3/workertest"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	core "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -24,10 +23,10 @@ import (
 	"k8s.io/utils/pointer"
 
 	k8swatchertest "github.com/juju/juju/internal/provider/kubernetes/watcher/test"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
-func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *gc.C) {
+func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
@@ -155,7 +154,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockClusterRoleBindings.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(s.k8sNotFoundError()),
+			).Return(s.k8sNotFoundError()).Call,
 		)
 
 	// timer +1.
@@ -165,7 +164,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockClusterRoles.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(s.k8sNotFoundError()),
+			).Return(s.k8sNotFoundError()).Call,
 		)
 
 	// timer +1.
@@ -179,12 +178,12 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 				Version:  "v1alpha2",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// list all custom resources for crd "v1".
 		s.mockNamespaceableResourceClient.EXPECT().List(gomock.Any(),
 			v1.ListOptions{LabelSelector: "juju-resource-lifecycle notin (persistent),model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-		).Return(&unstructured.UnstructuredList{}, nil),
+		).Return(&unstructured.UnstructuredList{}, nil).Call,
 	).After(
 		s.mockDynamicClient.EXPECT().Resource(
 			schema.GroupVersionResource{
@@ -192,7 +191,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 				Version:  "v1",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// list cluster wide all custom resource definitions for listing custom resources.
 		s.mockCustomResourceDefinitionV1.EXPECT().List(gomock.Any(), v1.ListOptions{}).AnyTimes().
@@ -202,7 +201,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 		s.mockNamespaceableResourceClient.EXPECT().DeleteCollection(gomock.Any(),
 			s.deleteOptions(v1.DeletePropagationForeground, ""),
 			v1.ListOptions{LabelSelector: "juju-resource-lifecycle notin (persistent),model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-		).Return(nil),
+		).Return(nil).Call,
 	).After(
 		s.mockDynamicClient.EXPECT().Resource(
 			schema.GroupVersionResource{
@@ -210,13 +209,13 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 				Version:  "v1alpha2",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// delete all custom resources for crd "v1".
 		s.mockNamespaceableResourceClient.EXPECT().DeleteCollection(gomock.Any(),
 			s.deleteOptions(v1.DeletePropagationForeground, ""),
 			v1.ListOptions{LabelSelector: "juju-resource-lifecycle notin (persistent),model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-		).Return(nil),
+		).Return(nil).Call,
 	).After(
 		s.mockDynamicClient.EXPECT().Resource(
 			schema.GroupVersionResource{
@@ -224,7 +223,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 				Version:  "v1",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// list cluster wide all custom resource definitions for deleting custom resources.
 		s.mockCustomResourceDefinitionV1.EXPECT().List(gomock.Any(), v1.ListOptions{}).AnyTimes().
@@ -238,7 +237,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockCustomResourceDefinitionV1.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "juju-resource-lifecycle notin (persistent),model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(s.k8sNotFoundError()),
+			).Return(s.k8sNotFoundError()).Call,
 		)
 
 	// timer +1.
@@ -248,7 +247,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockMutatingWebhookConfigurationV1.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(s.k8sNotFoundError()),
+			).Return(s.k8sNotFoundError()).Call,
 		)
 
 	// timer +1.
@@ -258,7 +257,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockValidatingWebhookConfigurationV1.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(s.k8sNotFoundError()),
+			).Return(s.k8sNotFoundError()).Call,
 		)
 
 	// timer +1.
@@ -268,7 +267,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 			s.mockStorageClass.EXPECT().DeleteCollection(gomock.Any(),
 				s.deleteOptions(v1.DeletePropagationForeground, ""),
 				v1.ListOptions{LabelSelector: "model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-			).Return(nil),
+			).Return(nil).Call,
 		)
 
 	var wg sync.WaitGroup
@@ -282,14 +281,14 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 		close(done)
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.Context())
 	defer cancel()
 	go s.broker.DeleteClusterScopeResourcesModelTeardown(ctx, &wg, errCh)
 
 	err := s.clock.WaitAdvance(time.Second, testing.ShortWait, 6)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = s.clock.WaitAdvance(time.Second, testing.ShortWait, 1)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	select {
 	case <-done:
 	case <-time.After(testing.LongWait):
@@ -297,7 +296,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownSuccess(c *
 	}
 }
 
-func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownTimeout(c *gc.C) {
+func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownTimeout(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
@@ -435,13 +434,13 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownTimeout(c *
 				Version:  "v1alpha2",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// delete all custom resources for crd "v1".
 		s.mockNamespaceableResourceClient.EXPECT().DeleteCollection(gomock.Any(),
 			s.deleteOptions(v1.DeletePropagationForeground, ""),
 			v1.ListOptions{LabelSelector: "juju-resource-lifecycle notin (persistent),model.juju.is/id=deadbeef-0bad-400d-8000-4b1d0d06f00d,model.juju.is/name=test"},
-		).Return(nil),
+		).Return(nil).Call,
 	).After(
 		s.mockDynamicClient.EXPECT().Resource(
 			schema.GroupVersionResource{
@@ -449,7 +448,7 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownTimeout(c *
 				Version:  "v1",
 				Resource: crdClusterScope.Spec.Names.Plural,
 			},
-		).Return(s.mockNamespaceableResourceClient),
+		).Return(s.mockNamespaceableResourceClient).Call,
 	).After(
 		// list cluster wide all custom resource definitions for deleting custom resources.
 		s.mockCustomResourceDefinitionV1.EXPECT().List(gomock.Any(), v1.ListOptions{}).AnyTimes().
@@ -487,21 +486,21 @@ func (s *K8sBrokerSuite) TestDeleteClusterScopeResourcesModelTeardownTimeout(c *
 		close(done)
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(c.Context(), 500*time.Millisecond)
 	defer cancel()
 	go s.broker.DeleteClusterScopeResourcesModelTeardown(ctx, &wg, errCh)
 
 	err := s.clock.WaitAdvance(500*time.Millisecond, testing.ShortWait, 6)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	select {
 	case <-done:
-		c.Assert(<-errCh, gc.ErrorMatches, `context deadline exceeded`)
+		c.Assert(<-errCh, tc.ErrorMatches, `context deadline exceeded`)
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for DeleteClusterScopeResourcesModelTeardown return")
 	}
 }
 
-func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardown(c *gc.C) {
+func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardown(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
@@ -511,13 +510,14 @@ func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardown(c *gc.C) {
 	namespaceWatcher, namespaceFirer := k8swatchertest.NewKubernetesTestWatcher()
 	s.k8sWatcherFn = k8swatchertest.NewKubernetesTestWatcherFunc(namespaceWatcher)
 
-	s.mockNamespaces.EXPECT().Get(gomock.Any(), "test", v1.GetOptions{}).
-		Return(ns, nil)
 	s.mockNamespaces.EXPECT().Delete(gomock.Any(), "test", s.deleteOptions(v1.DeletePropagationForeground, "")).
-		Return(nil)
+		DoAndReturn(func(_ context.Context, _ string, _ v1.DeleteOptions) error {
+			namespaceFirer()
+			return nil
+		})
 	// still terminating.
 	s.mockNamespaces.EXPECT().Get(gomock.Any(), "test", v1.GetOptions{}).
-		DoAndReturn(func(_, _, _ interface{}) (*core.Namespace, error) {
+		DoAndReturn(func(_ context.Context, _ string, _ v1.GetOptions) (*core.Namespace, error) {
 			namespaceFirer()
 			return ns, nil
 		})
@@ -536,21 +536,27 @@ func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardown(c *gc.C) {
 		close(done)
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.Context())
 	defer cancel()
 	go s.broker.DeleteNamespaceModelTeardown(ctx, &wg, errCh)
 
 	select {
 	case <-done:
+		var err error
+		select {
+		case err = <-errCh:
+		default:
+		}
+		c.Assert(err, tc.ErrorIsNil)
 		for _, watcher := range s.watchers {
-			c.Assert(workertest.CheckKilled(c, watcher), jc.ErrorIsNil)
+			c.Assert(workertest.CheckKilled(c, watcher), tc.ErrorIsNil)
 		}
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for deleteNamespaceModelTeardown return")
 	}
 }
 
-func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardownFailed(c *gc.C) {
+func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardownFailed(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
@@ -566,7 +572,7 @@ func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardownFailed(c *gc.C) {
 		Return(nil)
 	// still terminating.
 	s.mockNamespaces.EXPECT().Get(gomock.Any(), "test", v1.GetOptions{}).
-		DoAndReturn(func(_, _, _ interface{}) (*core.Namespace, error) {
+		DoAndReturn(func(_ context.Context, _ string, _ v1.GetOptions) (*core.Namespace, error) {
 			namespaceFirer()
 			return ns, nil
 		})
@@ -585,16 +591,20 @@ func (s *K8sBrokerSuite) TestDeleteNamespaceModelTeardownFailed(c *gc.C) {
 		close(done)
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.Context())
 	defer cancel()
 	go s.broker.DeleteNamespaceModelTeardown(ctx, &wg, errCh)
 
 	select {
 	case <-done:
-		err := <-errCh
-		c.Assert(err, gc.ErrorMatches, `getting namespace "test": error bla`)
+		var err error
+		select {
+		case err = <-errCh:
+		default:
+		}
+		c.Assert(err, tc.ErrorMatches, `getting namespace "test": error bla`)
 		for _, watcher := range s.watchers {
-			c.Assert(workertest.CheckKilled(c, watcher), jc.ErrorIsNil)
+			c.Assert(workertest.CheckKilled(c, watcher), tc.ErrorIsNil)
 		}
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for deleteNamespaceModelTeardown return")

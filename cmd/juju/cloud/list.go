@@ -4,32 +4,33 @@
 package cloud
 
 import (
+	"context"
 	"io"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.cloud")
+var logger = internallogger.GetLogger("juju.cmd.juju.cloud")
 
 type listCloudsCommand struct {
 	modelcmd.OptionalControllerCommand
 	out cmd.Output
 
-	listCloudsAPIFunc func() (ListCloudsAPI, error)
+	listCloudsAPIFunc func(ctx context.Context) (ListCloudsAPI, error)
 
 	all            bool
 	showAllMessage bool
@@ -71,8 +72,8 @@ const listCloudsExamples = `
 `
 
 type ListCloudsAPI interface {
-	Clouds() (map[names.CloudTag]jujucloud.Cloud, error)
-	CloudInfo(tags []names.CloudTag) ([]cloudapi.CloudInfo, error)
+	Clouds(ctx context.Context) (map[names.CloudTag]jujucloud.Cloud, error)
+	CloudInfo(ctx context.Context, tags []names.CloudTag) ([]cloudapi.CloudInfo, error)
 	Close() error
 }
 
@@ -90,8 +91,8 @@ func NewListCloudsCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *listCloudsCommand) cloudAPI() (ListCloudsAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *listCloudsCommand) cloudAPI(ctx context.Context) (ListCloudsAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -134,7 +135,7 @@ func (c *listCloudsCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 }
 
-func (c *listCloudsCommand) getCloudList() (*cloudList, error) {
+func (c *listCloudsCommand) getCloudList(ctx context.Context) (*cloudList, error) {
 	var returnErr error
 	accumulateErrors := func(err error) {
 		if returnErr != nil {
@@ -155,12 +156,12 @@ func (c *listCloudsCommand) getCloudList() (*cloudList, error) {
 
 	if c.ControllerName != "" {
 		remotes := func() error {
-			api, err := c.listCloudsAPIFunc()
+			api, err := c.listCloudsAPIFunc(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			defer api.Close()
-			controllerClouds, err := api.Clouds()
+			controllerClouds, err := api.Clouds(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -170,7 +171,7 @@ func (c *listCloudsCommand) getCloudList() (*cloudList, error) {
 				tags[i] = names.NewCloudTag(cloud.Name)
 				i++
 			}
-			cloudInfos, err := api.CloudInfo(tags)
+			cloudInfos, err := api.CloudInfo(ctx, tags)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -193,7 +194,7 @@ func (c *listCloudsCommand) Run(ctxt *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	details, listErr := c.getCloudList() // error checked below, after printing out best-effort results
+	details, listErr := c.getCloudList(ctxt) // error checked below, after printing out best-effort results
 	if c.showAllMessage {
 		if details.len() != 0 {
 			ctxt.Infof("Only clouds with registered credentials are shown.")

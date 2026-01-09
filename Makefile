@@ -28,7 +28,7 @@ JUJU_BUILD_NUMBER ?=
 
 # JUJU_VERSION is the JUJU version currently being represented in this
 # repository.
-JUJU_VERSION=$(shell go run -ldflags "-X $(PROJECT)/version.build=$(JUJU_BUILD_NUMBER)" version/helper/main.go)
+JUJU_VERSION=$(shell go run -ldflags "-X $(PROJECT)/version.build=$(JUJU_BUILD_NUMBER)" scripts/version/main.go)
 
 # BUILD_DIR is the directory relative to this project where we place build
 # artifacts created by this Makefile.
@@ -38,6 +38,10 @@ BIN_DIR ?= ${BUILD_DIR}/${GOOS}_${GOARCH}/bin
 # JUJU_METADATA_SOURCE is the directory where we place simple streams archives
 # for built juju binaries.
 JUJU_METADATA_SOURCE ?= ${BUILD_DIR}/simplestreams
+
+# JUJU_PUBLISH_STREAM defines the simplestreams stream that we will publish
+# agents to (default "released").
+JUJU_PUBLISH_STREAM ?= "released"
 
 # TEST_PACKAGE_LIST is the path to a file that is a newline delimited list of
 # packages to test. This file must be sorted.
@@ -54,7 +58,7 @@ tool_platform_paths = $(addsuffix /${1},$(call bin_platform_paths,${2}))
 
 # simplestream_paths takes a list of Go style platforms to calculate the
 # paths to their respective simplestreams agent binary archives.
-simplestream_paths = $(addprefix ${JUJU_METADATA_SOURCE}/, $(addprefix tools/released/juju-${JUJU_VERSION}-, $(addsuffix .tgz,$(subst /,-,${1}))))
+simplestream_paths = $(addprefix ${JUJU_METADATA_SOURCE}/, $(addprefix tools/${JUJU_PUBLISH_STREAM}/juju-${JUJU_VERSION}-, $(addsuffix .tgz,$(subst /,-,${1}))))
 
 # CLIENT_PACKAGE_PLATFORMS defines a white space seperated list of platforms
 # to build the Juju client binaries for. Platforms are defined as GO style
@@ -78,18 +82,20 @@ BUILD_TAGS ?=
 
 # EXTRA_BUILD_TAGS is not passed in, but built up from context.
 EXTRA_BUILD_TAGS =
-ifeq (,$(findstring no-dqlite,$(BUILD_TAGS)))
-    EXTRA_BUILD_TAGS += libsqlite3
-    EXTRA_BUILD_TAGS += dqlite
-endif
 
 # Enable coverage collection.
 ifneq ($(COVERAGE_COLLECT_URL),)
     EXTRA_BUILD_TAGS += cover
 endif
 
+ifdef DEBUG_JUJU
+	EXTRA_BUILD_TAGS += debug
+endif
+
+# TEST_BUILD_TAGS is the final list of build tags for tests only.
+TEST_BUILD_TAGS=$(shell echo "$(BUILD_TAGS) $(EXTRA_BUILD_TAGS)" | awk '{$$1=$$1};1' | tr ' ' ',')
 # FINAL_BUILD_TAGS is the final list of build tags.
-FINAL_BUILD_TAGS=$(shell echo "$(BUILD_TAGS) $(EXTRA_BUILD_TAGS)" | awk '{$$1=$$1};1' | tr ' ' ',')
+FINAL_BUILD_TAGS=$(shell echo "$(BUILD_TAGS) $(EXTRA_BUILD_TAGS) notest" | awk '{$$1=$$1};1' | tr ' ' ',')
 
 # GIT_COMMIT the current git commit of this repository
 GIT_COMMIT ?= $(shell git -C $(PROJECT_DIR) rev-parse HEAD 2>/dev/null)
@@ -110,6 +116,7 @@ GIT_TREE_STATE = $(if $(shell git -C $(PROJECT_DIR) rev-parse --is-inside-work-t
 #   compile for at the moment.
 define BUILD_AGENT_TARGETS
 	$(call tool_platform_paths,jujuc,$(filter-out windows%,${AGENT_PACKAGE_PLATFORMS})) \
+	$(call tool_platform_paths,jujud,$(filter linux%,${AGENT_PACKAGE_PLATFORMS})) \
 	$(call tool_platform_paths,containeragent,$(filter-out windows%,${AGENT_PACKAGE_PLATFORMS})) \
 	$(call tool_platform_paths,pebble,$(filter linux%,${AGENT_PACKAGE_PLATFORMS}))
 endef
@@ -118,7 +125,11 @@ endef
 # under the category of Juju agents, that are CGO. These targets are also the
 # ones we are more then likely wanting to cross compile.
 define BUILD_CGO_AGENT_TARGETS
-	$(call tool_platform_paths,jujud,$(filter linux%,${AGENT_PACKAGE_PLATFORMS}))
+	$(call tool_platform_paths,jujud-controller,$(filter linux%,${AGENT_PACKAGE_PLATFORMS}))
+endef
+
+define BUILD_CGO_BENCH_TARGETS
+	$(call tool_platform_paths,dqlite-bench,$(filter linux%,${AGENT_PACKAGE_PLATFORMS}))
 endef
 
 # BUILD_CLIENT_TARGETS is a list of make targets that get built that fall under
@@ -155,34 +166,28 @@ endif
 
 # We only add pebble to the list of install targets if we are building for linux
 ifeq ($(GOOS), linux)
+    INSTALL_TARGETS += jujud-controller
     INSTALL_TARGETS += pebble
 endif
 
-# Allow the tests to take longer on restricted platforms.
-ifeq ($(shell echo "${GOARCH}" | sed -E 's/.*(arm|arm64|ppc64le|ppc64|s390x).*/golang/'), golang)
-    TEST_TIMEOUT ?= 5400s
-else
-    TEST_TIMEOUT ?= 2700s
-endif
-TEST_TIMEOUT := $(TEST_TIMEOUT)
-
 TEST_ARGS ?=
 # Limit concurrency on s390x.
-ifeq ($(shell echo "${GOARCH}" | sed -E 's/.*(s390x).*/golang/'), golang)
+ifeq ($(GOARCH), s390x)
     TEST_ARGS += -p 4
 endif
 
-# Enable verbose testing for reporting.
-ifeq ($(VERBOSE_CHECK), 1)
-    CHECK_ARGS = -v
+ifeq ($(FUZZ_CHECK), 1)
+	TEST_ARGS += -fuzzminimizetime=30s
+else
+	TEST_ARGS += -fuzzminimizetime=0
 endif
 
 define link_flags_version
--X $(PROJECT)/version.GitCommit=$(GIT_COMMIT) \
--X $(PROJECT)/version.GitTreeState=$(GIT_TREE_STATE) \
--X $(PROJECT)/version.build=$(JUJU_BUILD_NUMBER) \
--X $(PROJECT)/version.Grade=$(JUJU_GRADE) \
--X $(PROJECT)/version.GoBuildTags=$(FINAL_BUILD_TAGS) \
+-X $(PROJECT)/core/version.GitCommit=$(GIT_COMMIT) \
+-X $(PROJECT)/core/version.GitTreeState=$(GIT_TREE_STATE) \
+-X $(PROJECT)/core/version.build=$(JUJU_BUILD_NUMBER) \
+-X $(PROJECT)/core/version.Grade=$(JUJU_GRADE) \
+-X $(PROJECT)/core/version.GoBuildTags=$(FINAL_BUILD_TAGS) \
 -X $(PROJECT)/internal/debug/coveruploader.putURL=$(COVERAGE_COLLECT_URL)
 endef
 
@@ -194,23 +199,15 @@ ifneq ($(COVERAGE_COLLECT_URL),)
 endif
 
 # Compile with debug flags if requested.
-ifeq ($(DEBUG_JUJU), 1)
+ifdef DEBUG_JUJU
     COMPILE_FLAGS = $(COVER_COMPILE_FLAGS) -gcflags "all=-N -l"
-    LINK_FLAGS = "$(COVER_LINK_FLAGS) $(link_flags_version)"
-    CGO_LINK_FLAGS = "$(COVER_CGO_LINK_FLAGS) -linkmode 'external' -extldflags '-static' $(link_flags_version)"
+    LINK_FLAGS = $(COVER_LINK_FLAGS) "$(link_flags_version)"
+    CGO_LINK_FLAGS = $(COVER_CGO_LINK_FLAGS) "-linkmode 'external' -extldflags '-static' $(link_flags_version)"
 else
     COMPILE_FLAGS = $(COVER_COMPILE_FLAGS)
     LINK_FLAGS = "$(COVER_LINK_FLAGS) -s -w -extldflags '-static' $(link_flags_version)"
     CGO_LINK_FLAGS = "$(COVER_CGO_LINK_FLAGS) -s -w -linkmode 'external' -extldflags '-static' $(link_flags_version)"
 endif
-
-define DEPENDENCIES
-  ca-certificates
-  bzip2
-  distro-info-data
-  git
-  zip
-endef
 
 # run_go_build is a canned command sequence for the steps required to build a
 # juju package. It's expected that the make target using this sequence has a
@@ -231,6 +228,7 @@ define run_go_build
 	@echo "Building ${PACKAGE} for ${OS}/${ARCH}"
 	@env GOOS=${OS} \
 		GOARCH=${BUILD_ARCH} \
+		CGO_ENABLED=0 \
 		go build \
 			-mod=$(JUJU_GOMOD_MODE) \
 			-tags=$(FINAL_BUILD_TAGS) \
@@ -250,7 +248,7 @@ define run_cgo_build
 	@env PATH="${MUSL_BIN_PATH}:${PATH}" \
 		CC="musl-gcc" \
 		CGO_CFLAGS="-I${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}/include" \
-		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -lraft -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
+		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
 		CGO_LDFLAGS_ALLOW="(-Wl,-wrap,pthread_create)|(-Wl,-z,now)" \
 		LD_LIBRARY_PATH="${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}" \
 		CGO_ENABLED=1 \
@@ -267,7 +265,8 @@ endef
 
 define run_go_install
 	@echo "Installing ${PACKAGE}"
-	@go install \
+	@env CGO_ENABLED=0 \
+		go install \
 		-mod=$(JUJU_GOMOD_MODE) \
 		-tags=$(FINAL_BUILD_TAGS) \
 		$(COMPILE_FLAGS) \
@@ -280,7 +279,7 @@ define run_cgo_install
 	@env PATH="${MUSL_BIN_PATH}:${PATH}" \
 		CC="musl-gcc" \
 		CGO_CFLAGS="-I${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}/include" \
-		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -lraft -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
+		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
 		CGO_LDFLAGS_ALLOW="(-Wl,-wrap,pthread_create)|(-Wl,-z,now)" \
 		LD_LIBRARY_PATH="${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}" \
 		CGO_ENABLED=1 \
@@ -296,6 +295,9 @@ endef
 
 default: build
 
+.PHONY: dqlite-bench
+dqlite-bench: $(BUILD_CGO_BENCH_TARGETS)
+
 .PHONY: juju
 juju: PACKAGE = github.com/juju/juju/cmd/juju
 juju:
@@ -310,9 +312,26 @@ jujuc:
 
 .PHONY: jujud
 jujud: PACKAGE = github.com/juju/juju/cmd/jujud
-jujud: musl-install-if-missing dqlite-install-if-missing
+jujud:
+## jujud: Install jujud without updating dependencies
+	${run_go_install}
+	mv $(GO_INSTALL_PATH)/jujud $(GO_INSTALL_PATH)/jujud-junk
+
+.PHONY: jujud-controller
+jujud-controller: PACKAGE = github.com/juju/juju/cmd/jujud-controller
+jujud-controller: EXTRA_BUILD_TAGS += dqlite libsqlite3
+jujud-controller: musl-install-if-missing dqlite-install-if-missing
 ## jujud: Install jujud without updating dependencies
 	${run_cgo_install}
+	mv $(GO_INSTALL_PATH)/jujud-controller $(GO_INSTALL_PATH)/jujud
+
+.PHONY: dqlite-repl
+dqlite-repl: PACKAGE = github.com/juju/juju/scripts/dqlite/cmd
+dqlite-repl: EXTRA_BUILD_TAGS += dqlite libsqlite3
+dqlite-repl: musl-install-if-missing dqlite-install-if-missing
+## jujud: Install jujud without updating dependencies
+	${run_cgo_install}
+	mv $(GO_INSTALL_PATH)/cmd $(GO_INSTALL_PATH)/dqlite-repl
 
 .PHONY: containeragent
 containeragent: PACKAGE = github.com/juju/juju/cmd/containeragent
@@ -336,6 +355,12 @@ pebble:
 phony_explicit:
 # phone_explicit: is a dummy target that can be added to pattern targets to phony make.
 
+${BUILD_DIR}/%/bin/dqlite-bench: PACKAGE = github.com/juju/juju/scripts/dqlite-bench
+${BUILD_DIR}/%/bin/dqlite-bench: EXTRA_BUILD_TAGS += dqlite libsqlite3
+${BUILD_DIR}/%/bin/dqlite-bench: phony_explicit musl-install-if-missing dqlite-install-if-missing
+# build for dqlite-bench
+	$(run_cgo_build)
+
 ${BUILD_DIR}/%/bin/juju: PACKAGE = github.com/juju/juju/cmd/juju
 ${BUILD_DIR}/%/bin/juju: phony_explicit
 # build for juju
@@ -347,9 +372,23 @@ ${BUILD_DIR}/%/bin/jujuc: phony_explicit
 	$(run_go_build)
 
 ${BUILD_DIR}/%/bin/jujud: PACKAGE = github.com/juju/juju/cmd/jujud
-${BUILD_DIR}/%/bin/jujud: phony_explicit musl-install-if-missing dqlite-install-if-missing
+${BUILD_DIR}/%/bin/jujud: phony_explicit
 # build for jujud
+	$(run_go_build)
+	$(eval OS = $(word 1,$(subst _, ,$*)))
+	$(eval ARCH = $(word 2,$(subst _, ,$*)))
+	$(eval BBIN_DIR = ${BUILD_DIR}/${OS}_${ARCH}/bin)
+	mv ${BBIN_DIR}/jujud ${BBIN_DIR}/jujud-junk
+
+${BUILD_DIR}/%/bin/jujud-controller: PACKAGE = github.com/juju/juju/cmd/jujud-controller
+${BUILD_DIR}/%/bin/jujud-controller: EXTRA_BUILD_TAGS += dqlite libsqlite3
+${BUILD_DIR}/%/bin/jujud-controller: phony_explicit musl-install-if-missing dqlite-install-if-missing
+# build for jujud-controller
 	$(run_cgo_build)
+	$(eval OS = $(word 1,$(subst _, ,$*)))
+	$(eval ARCH = $(word 2,$(subst _, ,$*)))
+	$(eval BBIN_DIR = ${BUILD_DIR}/${OS}_${ARCH}/bin)
+	mv ${BBIN_DIR}/jujud-controller ${BBIN_DIR}/jujud
 
 ${BUILD_DIR}/%/bin/containeragent: PACKAGE = github.com/juju/juju/cmd/containeragent
 ${BUILD_DIR}/%/bin/containeragent: phony_explicit
@@ -366,14 +405,14 @@ ${BUILD_DIR}/%/bin/pebble: phony_explicit
 # build for pebble
 	$(run_go_build)
 
-${JUJU_METADATA_SOURCE}/tools/released/juju-${JUJU_VERSION}-%.tgz: phony_explicit juju go-agent-build
+${JUJU_METADATA_SOURCE}/tools/${JUJU_PUBLISH_STREAM}/juju-${JUJU_VERSION}-%.tgz: phony_explicit juju $(BUILD_AGENT_TARGETS) $(BUILD_CGO_AGENT_TARGETS)
 	@echo "Packaging simplestream tools for juju ${JUJU_VERSION} on $*"
-	@mkdir -p ${JUJU_METADATA_SOURCE}/tools/released
+	@mkdir -p ${JUJU_METADATA_SOURCE}/tools/${JUJU_PUBLISH_STREAM}
 	@tar czf "$@" -C $(call bin_platform_paths,$(subst -,/,$*)) jujud jujuc
 
 .PHONY: simplestreams
 simplestreams: juju juju-metadata ${SIMPLESTREAMS_TARGETS}
-	@juju metadata generate-agent-binaries -d ${JUJU_METADATA_SOURCE} --clean --prevent-fallback ;
+	@juju metadata generate-agent-binaries -d ${JUJU_METADATA_SOURCE} --clean --prevent-fallback --stream ${JUJU_PUBLISH_STREAM} ;
 	@echo "\nRun export JUJU_METADATA_SOURCE=\"${JUJU_METADATA_SOURCE}\" if not defined in your env"
 
 .PHONY: build
@@ -432,17 +471,26 @@ run-tests: musl-install-if-missing dqlite-install-if-missing
 	$(eval ARCH = $(shell go env GOARCH))
 	$(eval BUILD_ARCH = $(subst ppc64el,ppc64le,${ARCH}))
 	$(eval TMP := $(shell mktemp -d $${TMPDIR:-/tmp}/jj-XXX))
+# How this line selects packages to test:
+# 1. List all the project packages with json output.
+# 2. Filter out packages without test files and select their package import path.
+# 3. Sort the list for comm.
+# 4. If there is a list of packages in TEST_PACKAGE_LIST, use it as a filter.
+# 5. Filter out vendored packages.
+# 6. Filter out packages in the generate directory.
+# 7. Filter out packages in the mocks directory.
+# 8. Filter out all mocks.
 	$(eval TEST_PACKAGES := $(shell make -s test-packages))
-	@echo 'go test -mod=$(JUJU_GOMOD_MODE) -tags=$(FINAL_BUILD_TAGS) $(TEST_ARGS) $(CHECK_ARGS) -test.timeout=$(TEST_TIMEOUT) $$TEST_PACKAGES -check.v $(TEST_EXTRA_ARGS)'
+	@echo 'go test -mod=$(JUJU_GOMOD_MODE) -tags=$(TEST_BUILD_TAGS) $(TEST_ARGS) $$TEST_PACKAGES $(TEST_EXTRA_ARGS)'
 	@TMPDIR=$(TMP) \
 		PATH="${MUSL_BIN_PATH}:${PATH}" \
 		CC="musl-gcc" \
 		CGO_CFLAGS="-I${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}/include" \
-		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -lraft -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
+		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
 		CGO_LDFLAGS_ALLOW="(-Wl,-wrap,pthread_create)|(-Wl,-z,now)" \
 		LD_LIBRARY_PATH="${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}" \
 		CGO_ENABLED=1 \
-		go test -v -mod=$(JUJU_GOMOD_MODE) -tags=$(FINAL_BUILD_TAGS) $(TEST_ARGS) $(CHECK_ARGS) -ldflags ${CGO_LINK_FLAGS} -test.timeout=$(TEST_TIMEOUT) $(TEST_PACKAGES) -check.v $(TEST_EXTRA_ARGS)
+		go test -mod=$(JUJU_GOMOD_MODE) -tags=$(TEST_BUILD_TAGS) $(TEST_ARGS) -ldflags ${CGO_LINK_FLAGS} $(TEST_PACKAGES) $(TEST_EXTRA_ARGS)
 	@rm -r $(TMP)
 
 .PHONY: test-packages
@@ -459,6 +507,8 @@ test-packages:
 # 8. Filter out all mocks.
 	@go list -json $(PROJECT)/... | jq -s -r '[.[] | if (.TestGoFiles | length) + (.XTestGoFiles | length) > 0 then .ImportPath else null end]|del(..|nulls).[]' | sort | ([ -f "$(TEST_PACKAGE_LIST)" ] && comm -12 "$(TEST_PACKAGE_LIST)" - || cat) | grep -v $(PROJECT)$$ | grep -v $(PROJECT)/vendor/ | grep -v $(PROJECT)/generate/ | grep -v $(PROJECT)/mocks/ | grep -v mocks
 
+.PHONY: run-go-tests
+run-go-tests: EXTRA_BUILD_TAGS += dqlite libsqlite3
 run-go-tests: musl-install-if-missing dqlite-install-if-missing
 ## run-go-tests: Run the unit tests
 	$(eval OS = $(shell go env GOOS))
@@ -466,27 +516,29 @@ run-go-tests: musl-install-if-missing dqlite-install-if-missing
 	$(eval BUILD_ARCH = $(subst ppc64el,ppc64le,${ARCH}))
 	$(eval TEST_PACKAGES ?= "./...")
 	$(eval TEST_FILTER ?= "")
-	@echo 'go test -mod=$(JUJU_GOMOD_MODE) -tags=$(FINAL_BUILD_TAGS) $(TEST_ARGS) $(CHECK_ARGS) -test.timeout=$(TEST_TIMEOUT) $$TEST_PACKAGES -check.v -check.f $(TEST_FILTER) $(TEST_EXTRA_ARGS)'
+	@echo 'go test -mod=$(JUJU_GOMOD_MODE) -tags=$(TEST_BUILD_TAGS) $(TEST_ARGS) $$TEST_PACKAGES -test.run $(TEST_FILTER) $(TEST_EXTRA_ARGS)'
 	@PATH="${MUSL_BIN_PATH}:${PATH}" \
 		CC="musl-gcc" \
 		CGO_CFLAGS="-I${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}/include" \
-		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -lraft -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
+		CGO_LDFLAGS="-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -llz4 -lsqlite3 -Wl,-z,stack-size=1048576" \
 		CGO_LDFLAGS_ALLOW="(-Wl,-wrap,pthread_create)|(-Wl,-z,now)" \
 		LD_LIBRARY_PATH="${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}" \
 		CGO_ENABLED=1 \
-		go test -v -mod=$(JUJU_GOMOD_MODE) -tags=$(FINAL_BUILD_TAGS) $(TEST_ARGS) $(CHECK_ARGS) -ldflags ${CGO_LINK_FLAGS} -test.timeout=$(TEST_TIMEOUT) ${TEST_PACKAGES} -check.v -check.f $(TEST_FILTER) $(TEST_EXTRA_ARGS)
+		go test -mod=$(JUJU_GOMOD_MODE) -tags=$(TEST_BUILD_TAGS) $(TEST_ARGS) -ldflags ${CGO_LINK_FLAGS} ${TEST_PACKAGES} -test.run $(TEST_FILTER) $(TEST_EXTRA_ARGS)
 
+.PHONY: go-test-alias
+go-test-alias: EXTRA_BUILD_TAGS += dqlite libsqlite3
 go-test-alias: musl-install-if-missing dqlite-install-if-missing
 ## go-test-alias: Prints out an alias command for easy running of tests.
 	$(eval PPATH := "PATH")
 	@echo alias jt=\'PATH=\"${MUSL_BIN_PATH}:$$${PPATH}\" \
 		CC=\"musl-gcc\" \
 		CGO_CFLAGS=\"-I${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}/include\" \
-		CGO_LDFLAGS=\"-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -lraft -llz4 -lsqlite3 -Wl,-z,stack-size=1048576\" \
+		CGO_LDFLAGS=\"-L${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH} -luv -ldqlite -llz4 -lsqlite3 -Wl,-z,stack-size=1048576\" \
 		CGO_LDFLAGS_ALLOW=\""(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"\" \
 		LD_LIBRARY_PATH=\"${DQLITE_EXTRACTED_DEPS_ARCHIVE_PATH}\" \
 		CGO_ENABLED=\"1\" \
-		go test -mod=\"$(JUJU_GOMOD_MODE)\" -tags=\"$(FINAL_BUILD_TAGS)\" -ldflags \"${CGO_LINK_FLAGS}\"\'
+		go test -mod=\"$(JUJU_GOMOD_MODE)\" -tags=\"$(TEST_BUILD_TAGS)\" -ldflags \"${CGO_LINK_FLAGS}\"\'
 
 .PHONY: install
 install: rebuild-schema go-install
@@ -496,43 +548,26 @@ install: rebuild-schema go-install
 go-install: $(INSTALL_TARGETS)
 ## go-install: Install Juju binaries
 
-.PHONY: clean
-clean:
-## clean: Clean the cache and test caches
-	go clean -x --cache --testcache
-	go clean -x -r $(PROJECT)/...
-
-.PHONY: vendor-dependencies
-vendor-dependencies:
-## vendor-dependencies: updates vendored dependencies
-	@go mod vendor
-
-.PHONY: format
-# Reformat source files.
-format:
-## format: Format the go source code
-	gofmt -w -l .
-
-.PHONY: simplify
-# Reformat and simplify source files.
-simplify:
-## simplify: Format and simplify the go source code
-	gofmt -w -l -s .
-
 .PHONY: rebuild-schema
 rebuild-schema:
 ## rebuild-schema: Rebuild the schema for clients with the latest facades
 	@echo "Generating facade schema..."
 # GOOS and GOARCH environment variables are cleared in case the user is trying to cross architecture compilation.
 ifdef SCHEMA_PATH
-	@env GOOS= GOARCH= go run $(PROJECT)/generate/schemagen -admin-facades -facade-group=client "$(SCHEMA_PATH)/schema.json"
-	@env GOOS= GOARCH= go run $(PROJECT)/generate/schemagen -admin-facades -facade-group=agent "$(SCHEMA_PATH)/agent-schema.json"
+	@env GOOS= GOARCH= CGO_ENABLED=1 go run -tags="libsqlite3" $(PROJECT)/generate/schemagen -admin-facades -facade-group=client "$(SCHEMA_PATH)/schema.json"
+	@env GOOS= GOARCH= CGO_ENABLED=1 go run -tags="libsqlite3" $(PROJECT)/generate/schemagen -admin-facades -facade-group=agent "$(SCHEMA_PATH)/agent-schema.json"
 else
-	@env GOOS= GOARCH= go run $(PROJECT)/generate/schemagen -admin-facades -facade-group=client \
+	@env GOOS= GOARCH= CGO_ENABLED=1 go run -tags="libsqlite3" $(PROJECT)/generate/schemagen -admin-facades -facade-group=client \
 		./apiserver/facades/schema.json
-	@env GOOS= GOARCH= go run $(PROJECT)/generate/schemagen -admin-facades -facade-group=agent \
+	@env GOOS= GOARCH= CGO_ENABLED=1 go run -tags="libsqlite3" $(PROJECT)/generate/schemagen -admin-facades -facade-group=agent \
 		./apiserver/facades/agent-schema.json
 endif
+
+.PHONY: rebuild-triggers
+rebuild-triggers:
+## rebuild-triggers: Rebuild the SQL trigger schema
+	@echo "Generating trigger schema..."
+	@env GOOS= GOARCH= CGO_ENABLED=1 go generate -tags="libsqlite3" $(COMPILE_FLAGS) -x ./domain/schema
 
 .PHONY: install-snap-dependencies
 # Install packages required to develop Juju and run tests. The stable
@@ -553,19 +588,17 @@ endif
 endif
 
 WAIT_FOR_DPKG=bash -c '. "${PROJECT_DIR}/make_functions.sh"; wait_for_dpkg "$$@"' wait_for_dpkg
-JUJU_DB_VERSION=4.4
-JUJU_DB_CHANNEL=${JUJU_DB_VERSION}/stable
 
-.PHONY: install-mongo-dependencies
-install-mongo-dependencies:
-## install-mongo-dependencies: Install Mongo and its dependencies
-	@echo Installing ${JUJU_DB_CHANNEL} juju-db snap for mongodb
-	@sudo snap refresh juju-db --channel=${JUJU_DB_CHANNEL} 2> /dev/null; sudo snap install juju-db --channel=${JUJU_DB_CHANNEL} 2> /dev/null
+.PHONY: install-sqlite3-dependencies
+install-sqlite3-dependencies:
+## install-sqlite3-dependencies: Install libsqlite3-dev
+	@echo Installing libsqlite3-dev
 	@$(WAIT_FOR_DPKG)
-	@sudo apt-get --yes install  $(strip $(DEPENDENCIES))
+	@sudo apt-get update
+	@sudo apt-get --yes install libsqlite3-dev
 
 .PHONY: install-dependencies
-install-dependencies: install-snap-dependencies install-mongo-dependencies
+install-dependencies: install-snap-dependencies install-sqlite3-dependencies
 ## install-dependencies: Install all the dependencies
 	@echo "Installing dependencies"
 
@@ -588,6 +621,10 @@ else
 	@sudo scripts/setup-lxd.sh || true
 endif
 
+.PHONY: vendor-dependencies
+vendor-dependencies:
+## vendor-dependencies: updates vendored dependencies
+	@go mod vendor
 
 GOCHECK_COUNT="$(shell go list -f '{{join .Deps "\n"}}' ${PROJECT}/... | grep -c "gopkg.in/check.v*")"
 .PHONY: check-deps

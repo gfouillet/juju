@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StorageListCommand implements the storage-list command.
@@ -66,7 +66,7 @@ func (c *StorageListCommand) Init(args []string) (err error) {
 }
 
 func (c *StorageListCommand) Run(ctx *cmd.Context) error {
-	tags, err := c.ctx.StorageTags()
+	tags, err := c.ctx.StorageTags(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}

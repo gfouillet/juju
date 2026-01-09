@@ -4,23 +4,28 @@
 package addons
 
 import (
+	"context"
 	"path"
 	"runtime"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
-	"github.com/juju/juju/core/presence"
 	"github.com/juju/juju/internal/worker/introspection"
 )
 
-var logger = loggo.GetLogger("juju.cmd.jujud.agent.addons")
+// MetricSink describes a way to unregister a model metrics collector. This
+// ensures that we correctly tidy up after the removal of a model.
+type MetricSink interface {
+	dependency.Metrics
+	Unregister() bool
+}
 
 // IntrospectionSocketName is the name of the socket file inside
 // the agent's directory used for introspection calls.
@@ -31,14 +36,12 @@ const IntrospectionSocketName = "introspection.socket"
 type IntrospectionConfig struct {
 	AgentDir           string
 	Engine             *dependency.Engine
-	StatePoolReporter  introspection.Reporter
-	PubSubReporter     introspection.Reporter
 	MachineLock        machinelock.Lock
 	PrometheusGatherer prometheus.Gatherer
-	PresenceRecorder   presence.Recorder
-	Clock              clock.Clock
-	LocalHub           introspection.SimpleHub
-	CentralHub         introspection.StructuredHub
+	FlightRecorder     flightrecorder.FlightRecorder
+
+	Clock  clock.Clock
+	Logger logger.Logger
 
 	WorkerFunc func(config introspection.Config) (worker.Worker, error)
 }
@@ -51,7 +54,7 @@ type IntrospectionConfig struct {
 // life to that of the engine that is returned.
 func StartIntrospection(cfg IntrospectionConfig) error {
 	if runtime.GOOS != "linux" {
-		logger.Debugf("introspection worker not supported on %q", runtime.GOOS)
+		cfg.Logger.Debugf(context.TODO(), "introspection worker not supported on %q", runtime.GOOS)
 		return nil
 	}
 
@@ -59,14 +62,9 @@ func StartIntrospection(cfg IntrospectionConfig) error {
 	w, err := cfg.WorkerFunc(introspection.Config{
 		SocketName:         socketName,
 		DepEngine:          cfg.Engine,
-		StatePool:          cfg.StatePoolReporter,
-		PubSub:             cfg.PubSubReporter,
 		MachineLock:        cfg.MachineLock,
 		PrometheusGatherer: cfg.PrometheusGatherer,
-		Presence:           cfg.PresenceRecorder,
-		Clock:              cfg.Clock,
-		LocalHub:           cfg.LocalHub,
-		CentralHub:         cfg.CentralHub,
+		FlightRecorder:     cfg.FlightRecorder,
 		// TODO(leases) - add lease introspection
 	})
 	if err != nil {
@@ -74,10 +72,10 @@ func StartIntrospection(cfg IntrospectionConfig) error {
 	}
 	go func() {
 		_ = cfg.Engine.Wait()
-		logger.Debugf("engine stopped, stopping introspection")
+		cfg.Logger.Debugf(context.TODO(), "engine stopped, stopping introspection")
 		w.Kill()
 		_ = w.Wait()
-		logger.Debugf("introspection stopped")
+		cfg.Logger.Debugf(context.TODO(), "introspection stopped")
 	}()
 
 	return nil
@@ -101,7 +99,7 @@ func NewPrometheusRegistry() (*prometheus.Registry, error) {
 
 // RegisterEngineMetrics registers the metrics sink on a prometheus registerer,
 // ensuring that we cleanup when the worker has stopped.
-func RegisterEngineMetrics(registry prometheus.Registerer, metrics prometheus.Collector, worker worker.Worker, sink engine.MetricSink) error {
+func RegisterEngineMetrics(registry prometheus.Registerer, metrics prometheus.Collector, worker worker.Worker, sink MetricSink) error {
 	if err := registry.Register(metrics); err != nil {
 		return errors.Annotatef(err, "failed to register engine metrics")
 	}

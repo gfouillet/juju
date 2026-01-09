@@ -4,13 +4,13 @@
 package user
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const logoutDoc = `
@@ -91,7 +91,7 @@ func (c *logoutCommand) Run(ctx *cmd.Context) error {
 			continue
 		}
 		_, err := store.AccountDetails(name)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			continue
 		} else if err != nil {
 			return errors.Trace(err)
@@ -111,7 +111,7 @@ func (c *logoutCommand) Run(ctx *cmd.Context) error {
 
 func (c *logoutCommand) logout(store jujuclient.ClientStore, controllerName string) error {
 	accountDetails, err := store.AccountDetails(controllerName)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		// Not logged in; nothing else to do.
 		return nil
 	} else if err != nil {

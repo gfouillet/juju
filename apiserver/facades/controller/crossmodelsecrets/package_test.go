@@ -3,17 +3,5 @@
 
 package crossmodelsecrets_test
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsstate.go github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets SecretsState
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/statebackend.go github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets StateBackend
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsconsumer.go github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets SecretsConsumer
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/crossmodel.go github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets CrossModelState
-
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -package crossmodelsecrets_test -destination package_mock_test.go github.com/juju/juju/apiserver/facades/controller/crossmodelsecrets SecretService,SecretBackendService,CrossModelRelationService
+//go:generate go run go.uber.org/mock/mockgen -typed -package crossmodelsecrets_test -destination auth_mock_test.go github.com/juju/juju/apiserver/facade CrossModelAuthContext,MacaroonAuthenticator

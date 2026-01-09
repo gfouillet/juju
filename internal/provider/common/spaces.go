@@ -4,6 +4,7 @@
 package common
 
 import (
+	"context"
 	"sort"
 
 	"github.com/juju/collections/set"
@@ -17,7 +18,7 @@ import (
 // requirements are congruent and can be met, and that the representative
 // subnet-zone map is returned, with Fan networks filtered out.
 // The returned map will be nil if there are no space requirements.
-func GetValidSubnetZoneMap(args environs.StartInstanceParams) (map[network.Id][]string, error) {
+func GetValidSubnetZoneMap(ctx context.Context, args environs.StartInstanceParams) (map[network.Id][]string, error) {
 	spaceCons := args.Constraints.IncludeSpaces()
 
 	bindings := set.NewStrings()
@@ -73,7 +74,7 @@ func GetValidSubnetZoneMap(args environs.StartInstanceParams) (map[network.Id][]
 	// providers which support multi-nic if we use them all when
 	// constructing the instance creation request.
 	if conCount > 1 || bindCount > 1 {
-		logger.Warningf("only considering the space requirement for %q", allSpaceReqs[indexInCommon])
+		logger.Warningf(ctx, "only considering the space requirement for %q", allSpaceReqs[indexInCommon])
 	}
 
 	// We should always have a mapping if there are space requirements,
@@ -84,7 +85,7 @@ func GetValidSubnetZoneMap(args environs.StartInstanceParams) (map[network.Id][]
 	mappingCount := len(args.SubnetsToZones)
 	if mappingCount == 0 || mappingCount <= indexInCommon {
 		logger.Warningf(
-			"got space requirements, but not a valid subnet-zone map; constraints/bindings not applied")
+			ctx, "got space requirements, but not a valid subnet-zone map; constraints/bindings not applied")
 		return nil, nil
 	}
 

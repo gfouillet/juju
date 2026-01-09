@@ -4,40 +4,41 @@
 package caasupgrader_test
 
 import (
-	"github.com/juju/testing"
-	"github.com/juju/version/v2"
+	"context"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type mockUpgraderClient struct {
-	testing.Stub
+	testhelpers.Stub
 
-	desired version.Number
-	actual  version.Binary
+	desired semversion.Number
+	actual  semversion.Binary
 	watcher watcher.NotifyWatcher
 }
 
-func (m *mockUpgraderClient) DesiredVersion(tag string) (version.Number, error) {
+func (m *mockUpgraderClient) DesiredVersion(_ context.Context, tag string) (semversion.Number, error) {
 	m.Stub.AddCall("DesiredVersion", tag)
 	return m.desired, nil
 }
 
-func (m *mockUpgraderClient) SetVersion(tag string, v version.Binary) error {
+func (m *mockUpgraderClient) SetVersion(_ context.Context, tag string, v semversion.Binary) error {
 	m.Stub.AddCall("SetVersion", tag, v)
 	m.actual = v
 	return nil
 }
 
-func (m *mockUpgraderClient) WatchAPIVersion(agentTag string) (watcher.NotifyWatcher, error) {
+func (m *mockUpgraderClient) WatchAPIVersion(_ context.Context, agentTag string) (watcher.NotifyWatcher, error) {
 	return m.watcher, nil
 }
 
 type mockOperatorUpgrader struct {
-	testing.Stub
+	testhelpers.Stub
 }
 
-func (m *mockOperatorUpgrader) Upgrade(appName string, vers version.Number) error {
+func (m *mockOperatorUpgrader) Upgrade(_ context.Context, appName string, vers semversion.Number) error {
 	m.AddCall("Upgrade", appName, vers)
 	return nil
 }

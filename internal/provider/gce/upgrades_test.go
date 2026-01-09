@@ -4,10 +4,11 @@
 package gce_test
 
 import (
+	"testing"
+
 	"cloud.google.com/go/compute/apiv1/computepb"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/internal/provider/gce"
@@ -17,45 +18,47 @@ type environUpgradeSuite struct {
 	gce.BaseSuite
 }
 
-var _ = gc.Suite(&environUpgradeSuite{})
-
-func (s *environUpgradeSuite) TestEnvironImplementsUpgrader(c *gc.C) {
-	ctrl := s.SetupMocks(c)
-	defer ctrl.Finish()
-
-	env := s.SetupEnv(c, s.MockService)
-	c.Assert(env, gc.Implements, new(environs.Upgrader))
+func TestEnvironUpgradeSuite(t *testing.T) {
+	tc.Run(t, &environUpgradeSuite{})
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationsInvalidCredentialError(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironImplementsUpgrader(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
-	c.Assert(s.InvalidatedCredentials, jc.IsFalse)
+	c.Assert(env, tc.Implements, new(environs.Upgrader))
+}
+
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationsInvalidCredentialError(c *tc.C) {
+	ctrl := s.SetupMocks(c)
+	defer ctrl.Finish()
+
+	env := s.SetupEnv(c, s.MockService)
+	c.Assert(s.InvalidatedCredentials, tc.IsFalse)
 
 	s.MockService.EXPECT().Disks(gomock.Any()).Return(nil, gce.InvalidCredentialError)
 
-	ops := env.UpgradeOperations(s.CallCtx, environs.UpgradeOperationsParams{})
-	err := ops[0].Steps[0].Run(s.CallCtx)
-	c.Assert(err, gc.NotNil)
-	c.Assert(s.InvalidatedCredentials, jc.IsTrue)
+	ops := env.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})
+	err := ops[0].Steps[0].Run(c.Context())
+	c.Assert(err, tc.NotNil)
+	c.Assert(s.InvalidatedCredentials, tc.IsTrue)
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperations(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperations(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 
-	ops := env.UpgradeOperations(s.CallCtx, environs.UpgradeOperationsParams{})
-	c.Assert(ops, gc.HasLen, 1)
-	c.Assert(ops[0].TargetVersion, gc.Equals, 1)
-	c.Assert(ops[0].Steps, gc.HasLen, 1)
-	c.Assert(ops[0].Steps[0].Description(), gc.Equals, "Set disk labels")
+	ops := env.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})
+	c.Assert(ops, tc.HasLen, 1)
+	c.Assert(ops[0].TargetVersion, tc.Equals, 1)
+	c.Assert(ops[0].Steps, tc.HasLen, 1)
+	c.Assert(ops[0].Steps[0].Description(), tc.Equals, "Set disk labels")
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabels(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabels(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -74,13 +77,13 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabels(c *gc.C) 
 			"juju-model-uuid":      s.ModelUUID,
 		})
 
-	op0 := env.UpgradeOperations(s.CallCtx, environs.UpgradeOperationsParams{
+	op0 := env.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{
 		ControllerUUID: s.ControllerUUID,
 	})[0]
-	c.Assert(op0.Steps[0].Run(s.CallCtx), jc.ErrorIsNil)
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.ErrorIsNil)
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsNoDescription(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsNoDescription(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -94,13 +97,13 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsNoDescript
 		},
 	}}, nil)
 
-	op0 := env.UpgradeOperations(s.CallCtx, environs.UpgradeOperationsParams{
+	op0 := env.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{
 		ControllerUUID: s.ControllerUUID,
 	})[0]
-	c.Assert(op0.Steps[0].Run(s.CallCtx), jc.ErrorIsNil)
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.ErrorIsNil)
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsIdempotent(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsIdempotent(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -117,8 +120,8 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationSetDiskLabelsIdempotent
 		},
 	}}, nil)
 
-	op0 := env.UpgradeOperations(s.CallCtx, environs.UpgradeOperationsParams{
+	op0 := env.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{
 		ControllerUUID: s.ControllerUUID,
 	})[0]
-	c.Assert(op0.Steps[0].Run(s.CallCtx), jc.ErrorIsNil)
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.ErrorIsNil)
 }

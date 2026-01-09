@@ -4,14 +4,17 @@
 package identityfilewriter
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	apiagent "github.com/juju/juju/api/agent/agent"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	coreagent "github.com/juju/juju/core/agent"
 	jworker "github.com/juju/juju/internal/worker"
 )
 
@@ -26,15 +29,15 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 }
 
 // newWorker trivially wraps NewWorker for use in a engine.AgentAPIManifold.
-func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func newWorker(ctx context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	cfg := a.CurrentConfig()
 
 	// Grab the tag and ensure that it's for a controller.
-	if !apiagent.IsAllowedControllerTag(cfg.Tag().Kind()) {
+	if !coreagent.IsAllowedControllerTag(cfg.Tag().Kind()) {
 		return nil, errors.New("this manifold may only be used inside a machine or controller agent")
 	}
 
-	isController, err := apiagent.IsController(apiCaller, cfg.Tag())
+	isController, err := apiagent.IsController(ctx, apiCaller, cfg.Tag())
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +49,7 @@ func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 }
 
 var NewWorker = func(agentConfig agent.Config) (worker.Worker, error) {
-	inner := func(<-chan struct{}) error {
+	inner := func(ctx context.Context) error {
 		return agent.WriteSystemIdentityFile(agentConfig)
 	}
 	return jworker.NewSimpleWorker(inner), nil

@@ -4,25 +4,26 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
 	"github.com/juju/ansiterm"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -35,16 +36,16 @@ func NewListModelsCommand() cmd.Command {
 // the models command calls.
 type ModelManagerAPI interface {
 	Close() error
-	ListModels(user string) ([]base.UserModel, error)
-	ListModelSummaries(user string, all bool) ([]base.UserModelSummary, error)
-	ModelInfo([]names.ModelTag) ([]params.ModelInfoResult, error)
+	ListModels(ctx context.Context, user string) ([]base.UserModel, error)
+	ListModelSummaries(ctx context.Context, user string, all bool) ([]base.UserModelSummary, error)
+	ModelInfo(context.Context, []names.ModelTag) ([]params.ModelInfoResult, error)
 }
 
 // ModelsSysAPI defines the methods on the controller manager API that the
 // list models command calls.
 type ModelsSysAPI interface {
 	Close() error
-	AllModels() ([]base.UserModel, error)
+	AllModels(ctx context.Context) ([]base.UserModel, error)
 }
 
 // modelsCommand returns the list of all the models the
@@ -111,13 +112,13 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 	}
 
 	c.runVars = modelsRunValues{
-		currentUser:    names.NewUserTag(c.user),
+		currentUser:    c.user,
 		controllerName: controllerName,
 	}
 	// TODO(perrito666) 2016-05-02 lp:1558657
 	now := time.Now()
 
-	modelmanagerAPI, err := c.getModelManagerAPI()
+	modelmanagerAPI, err := c.getModelManagerAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -141,27 +142,22 @@ func (c *modelsCommand) currentModelName() (qualified, name string) {
 	if err == nil {
 		qualified, name = current, current
 		if c.user != "" {
-			unqualifiedModelName, owner, err := jujuclient.SplitModelName(current)
-			if err == nil {
-				// If current model's owner is this user, un-qualify model name.
-				name = common.OwnerQualifiedModelName(
-					unqualifiedModelName, owner, c.runVars.currentUser,
-				)
-			}
+			// If current model's qualifier is this user, un-qualify model name.
+			name = common.UserModelName(current, c.runVars.currentUser)
 		}
 	}
 	return
 }
 
-func (c *modelsCommand) getModelManagerAPI() (ModelManagerAPI, error) {
+func (c *modelsCommand) getModelManagerAPI(ctx context.Context) (ModelManagerAPI, error) {
 	if c.modelAPI != nil {
 		return c.modelAPI, nil
 	}
-	return c.NewModelManagerAPIClient()
+	return c.NewModelManagerAPIClient(ctx)
 }
 
 func (c *modelsCommand) getModelSummaries(ctx *cmd.Context, client ModelManagerAPI, now time.Time) (bool, error) {
-	results, err := client.ListModelSummaries(c.user, c.all)
+	results, err := client.ListModelSummaries(ctx, c.user, c.all)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -211,24 +207,24 @@ type ModelSummarySet struct {
 	CurrentModel string `yaml:"current-model,omitempty" json:"current-model,omitempty"`
 
 	// CurrentModelQualified is the fully qualified name for the current
-	// model, i.e. having the format $owner/$model.
+	// model, i.e. having the format $qualifier/$model.
 	CurrentModelQualified string `yaml:"-" json:"-"`
 }
 
 // ModelSummary contains a summary of some information about a model.
 type ModelSummary struct {
-	// Name is a fully qualified model name, i.e. having the format $owner/$model.
+	// Name is a fully qualified model name, i.e. having the format $qualifier/$model.
 	Name string `json:"name" yaml:"name"`
 
 	// ShortName is un-qualified model name.
 	ShortName string          `json:"short-name" yaml:"short-name"`
+	Qualifier string          `json:"-" yaml:"-"`
 	UUID      string          `json:"model-uuid" yaml:"model-uuid"`
 	Type      model.ModelType `json:"model-type" yaml:"model-type"`
 
 	ControllerUUID     string                  `json:"controller-uuid" yaml:"controller-uuid"`
 	ControllerName     string                  `json:"controller-name" yaml:"controller-name"`
 	IsController       bool                    `json:"is-controller" yaml:"is-controller"`
-	Owner              string                  `json:"owner" yaml:"owner"`
 	Cloud              string                  `json:"cloud" yaml:"cloud"`
 	CloudRegion        string                  `json:"region,omitempty" yaml:"region,omitempty"`
 	CloudCredential    *common.ModelCredential `json:"credential,omitempty" yaml:"credential,omitempty"`
@@ -241,8 +237,6 @@ type ModelSummary struct {
 	// Counts is the map of different counts where key is the entity that was counted
 	// and value is the number, for e.g. {"machines":10,"cores":3, "units:4}.
 	Counts       map[string]int64 `json:"-" yaml:"-"`
-	SLA          string           `json:"sla,omitempty" yaml:"sla,omitempty"`
-	SLAOwner     string           `json:"sla-owner,omitempty" yaml:"sla-owner,omitempty"`
 	AgentVersion string           `json:"agent-version,omitempty" yaml:"agent-version,omitempty"`
 }
 
@@ -255,12 +249,12 @@ func (c *modelsCommand) modelSummaryFromParams(apiSummary base.UserModelSummary,
 	}
 	summary := ModelSummary{
 		ShortName:      apiSummary.Name,
-		Name:           jujuclient.JoinOwnerModelName(names.NewUserTag(apiSummary.Owner), apiSummary.Name),
+		Name:           jujuclient.QualifyModelName(apiSummary.Qualifier.String(), apiSummary.Name),
+		Qualifier:      apiSummary.Qualifier.String(),
 		UUID:           apiSummary.UUID,
 		Type:           apiSummary.Type,
 		ControllerUUID: apiSummary.ControllerUUID,
 		IsController:   apiSummary.IsController,
-		Owner:          apiSummary.Owner,
 		Life:           apiSummary.Life,
 		Cloud:          apiSummary.Cloud,
 		CloudRegion:    apiSummary.CloudRegion,
@@ -308,10 +302,6 @@ func (c *modelsCommand) modelSummaryFromParams(apiSummary base.UserModelSummary,
 	} else {
 		summary.UserLastConnection = "never connected"
 	}
-	if apiSummary.SLA != nil {
-		summary.SLA = apiSummary.SLA.Level
-		summary.SLAOwner = apiSummary.SLA.Owner
-	}
 	summary.Counts = map[string]int64{}
 	for _, v := range apiSummary.Counts {
 		summary.Counts[v.Entity] = v.Count
@@ -342,7 +332,7 @@ func (c *modelsCommand) modelSummaryFromParams(apiSummary base.UserModelSummary,
 
 // These values are specific to an individual Run() of the model command.
 type modelsRunValues struct {
-	currentUser      names.UserTag
+	currentUser      string
 	controllerName   string
 	hasMachinesCount bool
 	hasCoresCount    bool
@@ -362,7 +352,7 @@ type ModelSet struct {
 	CurrentModel string `yaml:"current-model,omitempty" json:"current-model,omitempty"`
 
 	// CurrentModelQualified is the fully qualified name for the current
-	// model, i.e. having the format $owner/$model.
+	// model, i.e. having the format $qualifier/$model.
 	CurrentModelQualified string `yaml:"-" json:"-"`
 }
 
@@ -413,54 +403,49 @@ func (c *modelsCommand) tabularSummaries(writer io.Writer, modelSet ModelSummary
 	w := output.Wrapper{tw}
 	c.tabularColumns(tw, w)
 
-	for _, model := range modelSet.Models {
-		cloudRegion := strings.Trim(model.Cloud+"/"+model.CloudRegion, "/")
-		owner := names.NewUserTag(model.Owner)
-		name := model.Name
-		if c.runVars.currentUser == owner {
-			// No need to display fully qualified model name to its owner.
-			name = model.ShortName
-		}
-		if model.Name == modelSet.CurrentModelQualified {
+	for _, m := range modelSet.Models {
+		cloudRegion := strings.Trim(m.Cloud+"/"+m.CloudRegion, "/")
+		name := common.UserModelName(m.Name, c.runVars.currentUser)
+		if m.Name == modelSet.CurrentModelQualified {
 			name += "*"
 			w.PrintColor(output.CurrentHighlight, name)
 		} else {
 			w.Print(name)
 		}
 		if c.listUUID {
-			w.Print(model.UUID)
+			w.Print(m.UUID)
 		}
 		status := "-"
-		if model.Status != nil && model.Status.Current.String() != "" {
-			status = model.Status.Current.String()
+		if m.Status != nil && m.Status.Current.String() != "" {
+			status = m.Status.Current.String()
 		}
-		w.Print(cloudRegion, model.ProviderType, status)
+		w.Print(cloudRegion, m.ProviderType, status)
 		if c.runVars.hasMachinesCount {
-			if v, ok := model.Counts[string(params.Machines)]; ok {
+			if v, ok := m.Counts[string(params.Machines)]; ok {
 				w.Print(v)
 			} else {
 				w.Print(0)
 			}
 		}
 		if c.runVars.hasCoresCount {
-			if v, ok := model.Counts[string(params.Cores)]; ok {
+			if v, ok := m.Counts[string(params.Cores)]; ok {
 				w.Print(v)
 			} else {
 				w.Print("-")
 			}
 		}
 		if c.runVars.hasUnitsCount {
-			if v, ok := model.Counts[string(params.Units)]; ok {
+			if v, ok := m.Counts[string(params.Units)]; ok {
 				w.Print(v)
 			} else {
 				w.Print("-")
 			}
 		}
-		access := model.UserAccess
+		access := m.UserAccess
 		if access == "" {
 			access = "-"
 		}
-		w.Println(access, model.UserLastConnection)
+		w.Println(access, m.UserLastConnection)
 	}
 	tw.Flush()
 	return nil

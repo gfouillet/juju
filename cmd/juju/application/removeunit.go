@@ -4,14 +4,14 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/modelconfig"
@@ -19,6 +19,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -129,8 +130,8 @@ func (c *removeUnitCommand) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *removeUnitCommand) Init(args []string) error {
 	c.EntityNames = args
-	if err := c.validateArgsByModelType(); err != nil {
-		if !errors.IsNotFound(err) {
+	if err := c.validateArgsByModelType(context.Background()); err != nil {
+		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 
@@ -142,8 +143,8 @@ func (c *removeUnitCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *removeUnitCommand) validateArgsByModelType() error {
-	modelType, err := c.ModelType()
+func (c *removeUnitCommand) validateArgsByModelType(ctx context.Context) error {
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -201,11 +202,11 @@ func (c *removeUnitCommand) validateIAASRemoval() error {
 	return nil
 }
 
-func (c *removeUnitCommand) getAPI() (RemoveApplicationAPI, error) {
+func (c *removeUnitCommand) getAPI(ctx context.Context) (RemoveApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -213,11 +214,11 @@ func (c *removeUnitCommand) getAPI() (RemoveApplicationAPI, error) {
 	return api, nil
 }
 
-func (c *removeUnitCommand) getModelConfigAPI() (ModelConfigClient, error) {
+func (c *removeUnitCommand) getModelConfigAPI(ctx context.Context) (ModelConfigClient, error) {
 	if c.modelConfigApi != nil {
 		return c.modelConfigApi, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -228,17 +229,17 @@ func (c *removeUnitCommand) getModelConfigAPI() (ModelConfigClient, error) {
 // Run connects to the environment specified on the command line and destroys
 // units therein.
 func (c *removeUnitCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	if err := c.validateArgsByModelType(); err != nil {
+	if err := c.validateArgsByModelType(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	modelType, err := c.ModelType()
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -258,13 +259,13 @@ func (c *removeUnitCommand) removeUnits(ctx *cmd.Context, client RemoveApplicati
 	if c.DryRun {
 		return c.performDryRun(ctx, client)
 	}
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer modelConfigClient.Close()
 
-	needsConfirmation := c.NeedsConfirmation(modelConfigClient)
+	needsConfirmation := c.NeedsConfirmation(ctx, modelConfigClient)
 	if needsConfirmation {
 		err := c.performDryRun(ctx, client)
 		if err == errDryRunNotSupportedByController {
@@ -277,7 +278,7 @@ func (c *removeUnitCommand) removeUnits(ctx *cmd.Context, client RemoveApplicati
 		}
 	}
 
-	results, err := client.DestroyUnits(application.DestroyUnitsParams{
+	results, err := client.DestroyUnits(ctx, application.DestroyUnitsParams{
 		Units:          c.EntityNames,
 		DestroyStorage: c.DestroyStorage,
 		Force:          c.Force,
@@ -300,7 +301,7 @@ func (c *removeUnitCommand) performDryRun(ctx *cmd.Context, client RemoveApplica
 	if client.BestAPIVersion() < 16 {
 		return errDryRunNotSupportedByController
 	}
-	results, err := client.DestroyUnits(application.DestroyUnitsParams{
+	results, err := client.DestroyUnits(ctx, application.DestroyUnitsParams{
 		Units:          c.EntityNames,
 		DestroyStorage: c.DestroyStorage,
 		DryRun:         true,
@@ -380,7 +381,7 @@ func (c *removeUnitCommand) logRemovedUnit(ctx *cmd.Context, name string, info *
 }
 
 func (c *removeUnitCommand) removeCaasUnits(ctx *cmd.Context, client RemoveApplicationAPI) error {
-	result, err := client.ScaleApplication(application.ScaleApplicationParams{
+	result, err := client.ScaleApplication(ctx, application.ScaleApplicationParams{
 		ApplicationName: c.EntityNames[0],
 		ScaleChange:     -c.NumUnits,
 		Force:           c.Force,

@@ -5,14 +5,18 @@ package assumes
 
 import (
 	"fmt"
+	"testing"
 
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/core/semversion"
 )
 
 type errorSuite struct{}
 
-var _ = gc.Suite(&errorSuite{})
+func TestErrorSuite(t *testing.T) {
+	tc.Run(t, &errorSuite{})
+}
 
 var errorTests = []struct {
 	description string
@@ -22,7 +26,7 @@ var errorTests = []struct {
 }{{
 	description: "Unsupported Juju version",
 	featureSet: FeatureSet{features: map[string]Feature{
-		"juju": JujuFeature(version.MustParse("2.9.42")),
+		"juju": JujuFeature(semversion.MustParse("2.9.42")),
 	}},
 	assumes:     "assumes:\n- juju >= 3.1",
 	expectedErr: "(?s).*charm requires Juju version >= 3.1.0.*",
@@ -34,17 +38,17 @@ var errorTests = []struct {
 }, {
 	description: "k8s version too low",
 	featureSet: FeatureSet{features: map[string]Feature{
-		"k8s-api": K8sAPIFeature(version.MustParse("1.25.0")),
+		"k8s-api": K8sAPIFeature(semversion.MustParse("1.25.0")),
 	}},
 	assumes:     "assumes:\n- k8s-api >= 1.30",
 	expectedErr: "(?s).*charm requires Kubernetes version >= 1.30.*",
 }}
 
-func (*errorSuite) TestErrorMessages(c *gc.C) {
+func (*errorSuite) TestErrorMessages(c *tc.C) {
 	for _, test := range errorTests {
 		fmt.Println(test.description)
 		assumesTree := mustParseAssumesExpr(c, test.assumes)
 		err := test.featureSet.Satisfies(assumesTree)
-		c.Check(err, gc.ErrorMatches, test.expectedErr)
+		c.Check(err, tc.ErrorMatches, test.expectedErr)
 	}
 }

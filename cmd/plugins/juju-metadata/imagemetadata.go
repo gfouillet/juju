@@ -4,35 +4,35 @@
 package main
 
 import (
-	"context"
+	stdcontext "context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/filestorage"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/storage"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/version"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func prepare(ctx *cmd.Context, controllerName string, store jujuclient.ClientStore) (environs.Environ, error) {
 	// NOTE(axw) this is a work-around for the TODO below. This
 	// means that the command will only work if you've bootstrapped
 	// the specified environment.
-	bootstrapConfig, params, err := modelcmd.NewGetBootstrapConfigParamsFunc(
+	bootstrapConfig, spec, cfg, err := modelcmd.NewGetBootstrapConfigParamsFunc(
 		ctx, store, environs.GlobalProviderRegistry(),
 	)(controllerName)
 	if err != nil {
@@ -45,21 +45,21 @@ func prepare(ctx *cmd.Context, controllerName string, store jujuclient.ClientSto
 	if _, ok := provider.(caas.ContainerEnvironProvider); ok {
 		return nil, errors.NotSupportedf("preparing environ for CAAS")
 	}
-	cfg, err := provider.PrepareConfig(*params)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	// TODO(axw) we'll need to revise the metadata commands to work
 	// without preparing an environment. They should take the same
 	// format as bootstrap, i.e. cloud/region, and we'll use that to
 	// identify region and endpoint info that we need. Not sure what
 	// we'll do about simplestreams.MetadataValidator yet. Probably
 	// move it to the EnvironProvider interface.
-	return environs.New(context.TODO(), environs.OpenParams{
-		Cloud:          params.Cloud,
+	ctrl, err := store.ControllerByName(controllerName)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return environs.New(ctx, environs.OpenParams{
+		ControllerUUID: ctrl.ControllerUUID,
+		Cloud:          *spec,
 		Config:         cfg,
-		ControllerUUID: bootstrapConfig.ControllerConfig.ControllerUUID(),
-	})
+	}, environs.NoopCredentialInvalidator())
 }
 
 func newImageMetadataCommand() cmd.Command {
@@ -71,7 +71,6 @@ type imageMetadataCommand struct {
 	modelcmd.ControllerCommandBase
 
 	Dir            string
-	Series         string
 	Base           string
 	Arch           string
 	ImageId        string
@@ -96,6 +95,9 @@ may also be changed.
 Selecting an image for a specific base can be done via --base. --base can be 
 specified using the OS name and the version of the OS, separated by @. For 
 example, --base ubuntu@22.04.
+
+Valid values for --stream are released, testing, proposed and devel. The image
+stream used by Juju can be configured with 'juju model-config'.
 `
 
 func (c *imageMetadataCommand) Info() *cmd.Info {
@@ -103,11 +105,16 @@ func (c *imageMetadataCommand) Info() *cmd.Info {
 		Name:    "generate-image",
 		Purpose: "generate simplestreams image metadata",
 		Doc:     imageMetadataDoc,
+		SeeAlso: []string{
+			"bootstrap",
+			"model-config",
+			"sign",
+			"validate-images",
+		},
 	})
 }
 
 func (c *imageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
-	f.StringVar(&c.Series, "s", "", "the charm series. DEPRECATED use --base")
 	f.StringVar(&c.Base, "base", "", "the charm base")
 	f.StringVar(&c.Arch, "a", arch.AMD64, "the image architecture")
 	f.StringVar(&c.Dir, "d", "", "the destination directory in which to place the metadata files")
@@ -120,9 +127,6 @@ func (c *imageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 }
 
 func (c *imageMetadataCommand) Init(args []string) error {
-	if c.Series != "" && c.Base != "" {
-		return errors.Errorf("cannot specify both base and series (series is deprecated)")
-	}
 	return nil
 }
 
@@ -140,7 +144,7 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 	var environ environs.Environ
 	if err == nil {
 		if environ, err := prepare(context, controllerName, c.ClientStore()); err == nil {
-			logger.Infof("creating image metadata for model %q", environ.Config().Name())
+			logger.Infof(stdcontext.TODO(), "creating image metadata for model %q", environ.Config().Name())
 			// If the user has not specified region and endpoint, try and get it from the environment.
 			if c.Region == "" || c.Endpoint == "" {
 				var cloudSpec simplestreams.CloudSpec
@@ -173,11 +177,11 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 				}
 			}
 		} else {
-			logger.Warningf("bootstrap parameters could not be opened: %v", err)
+			logger.Warningf(stdcontext.TODO(), "bootstrap parameters could not be opened: %v", err)
 		}
 	}
 	if environ == nil {
-		logger.Infof("no model found, creating image metadata using user supplied data")
+		logger.Infof(stdcontext.TODO(), "no model found, creating image metadata using user supplied data")
 	}
 	if c.ImageId == "" {
 		return base, errors.Errorf("image id must be specified")
@@ -189,7 +193,7 @@ func (c *imageMetadataCommand) setParams(context *cmd.Context, base corebase.Bas
 		return base, errors.Errorf("cloud endpoint URL must be specified")
 	}
 	if c.Dir == "" {
-		logger.Infof("no destination directory specified, using current directory")
+		logger.Infof(stdcontext.TODO(), "no destination directory specified, using current directory")
 		var err error
 		if c.Dir, err = os.Getwd(); err != nil {
 			return base, err
@@ -224,16 +228,6 @@ func (c *imageMetadataCommand) Run(ctx *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.Series != "" {
-		ctx.Warningf("series flag is deprecated, use --base instead")
-		if base, err = corebase.GetBaseFromSeries(c.Series); err != nil {
-			return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
-		}
-		c.Base = base.String()
-		c.Series = ""
-	}
 	if c.Base != "" {
 		if base, err = corebase.ParseBaseFromString(c.Base); err != nil {
 			return errors.Trace(err)
@@ -263,7 +257,7 @@ func (c *imageMetadataCommand) Run(ctx *cmd.Context) error {
 		return err
 	}
 	fetcher := simplestreams.NewSimpleStreams(simplestreams.DefaultDataSourceFactory())
-	err = imagemetadata.MergeAndWriteMetadata(fetcher, base, []*imagemetadata.ImageMetadata{im}, &cloudSpec, targetStorage)
+	err = imagemetadata.MergeAndWriteMetadata(ctx, fetcher, base, []*imagemetadata.ImageMetadata{im}, &cloudSpec, targetStorage)
 	if err != nil {
 		return errors.Errorf("image metadata files could not be created: %v", err)
 	}

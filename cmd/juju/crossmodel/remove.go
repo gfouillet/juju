@@ -4,33 +4,36 @@
 package crossmodel
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/applicationoffers"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewRemoveOfferCommand returns a command used to remove a specified offer.
 func NewRemoveOfferCommand() cmd.Command {
 	removeCmd := &removeCommand{}
-	removeCmd.newAPIFunc = func(controllerName string) (RemoveAPI, error) {
-		return removeCmd.NewApplicationOffersAPI(controllerName)
+	removeCmd.newAPIFunc = func(ctx context.Context, controllerName string) (RemoveAPI, error) {
+		return removeCmd.NewApplicationOffersAPI(ctx, controllerName)
 	}
 	return modelcmd.WrapController(removeCmd)
 }
 
 type removeCommand struct {
 	modelcmd.ControllerCommandBase
-	newAPIFunc  func(string) (RemoveAPI, error)
+	newAPIFunc  func(context.Context, string) (RemoveAPI, error)
 	offers      []string
 	offerSource string
 
@@ -50,8 +53,8 @@ the offer is considered to reside in the current model.
 `
 
 const destroyOfferExamples = `
-    juju remove-offer prod.model/hosted-mysql
-    juju remove-offer prod.model/hosted-mysql --force
+    juju remove-offer staging/mymodel.hosted-mysql
+    juju remove-offer staging/mymodel.hosted-mysql --force
     juju remove-offer hosted-mysql
 `
 
@@ -90,12 +93,12 @@ func (c *removeCommand) Init(args []string) error {
 // RemoveAPI defines the API methods that the remove offer command uses.
 type RemoveAPI interface {
 	Close() error
-	DestroyOffers(force bool, offerURLs ...string) error
+	DestroyOffers(ctx context.Context, force bool, offerURLs ...string) error
 }
 
 // NewApplicationOffersAPI returns an application offers api.
-func (c *removeCommand) NewApplicationOffersAPI(controllerName string) (*applicationoffers.Client, error) {
-	root, err := c.CommandBase.NewAPIRoot(c.ClientStore(), controllerName, "")
+func (c *removeCommand) NewApplicationOffersAPI(ctx context.Context, controllerName string) (*applicationoffers.Client, error) {
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), controllerName, "")
 	if err != nil {
 		return nil, err
 	}
@@ -115,28 +118,25 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	store := c.ClientStore()
-	currentModel, err := store.CurrentModel(controllerName)
+	currentModel, err := c.ClientStore().CurrentModel(controllerName)
 	if err != nil {
 		return errors.Trace(err)
 	}
+
 	var invalidOffers []string
 	for i, urlStr := range c.offers {
-		url, err := crossmodel.ParseOfferURL(urlStr)
+		url, err := c.parseOfferURL(controllerName, currentModel, urlStr)
 		if err != nil {
-			url, err = makeURLFromCurrentModel(urlStr, c.offerSource, currentModel)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			c.offers[i] = url.String()
+			return errors.Trace(err)
 		}
+		c.offers[i] = url.String()
 		if c.offerSource == "" {
 			c.offerSource = url.Source
 		}
 		if c.offerSource != url.Source {
 			return errors.New("all offer URLs must use the same controller")
 		}
-		if strings.Contains(url.ApplicationName, ":") {
+		if strings.Contains(url.Name, ":") {
 			invalidOffers = append(invalidOffers, " -"+c.offers[i])
 		}
 	}
@@ -157,29 +157,57 @@ func (c *removeCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	api, err := c.newAPIFunc(c.offerSource)
+	api, err := c.newAPIFunc(ctx, c.offerSource)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	err = api.DestroyOffers(c.force, c.offers...)
+	err = api.DestroyOffers(ctx, c.force, c.offers...)
 	return block.ProcessBlockedError(err, block.BlockRemove)
 }
 
-func makeURLFromCurrentModel(urlStr, offerSource, currentModel string) (*crossmodel.OfferURL, error) {
+func (c *removeCommand) parseOfferURL(controllerName, currentModel, urlStr string) (crossmodel.OfferURL, error) {
+	url, err := crossmodel.ParseOfferURL(urlStr)
+	if err == nil {
+		return url, nil
+	}
+	if !names.IsValidApplication(urlStr) {
+		return crossmodel.OfferURL{}, errors.Trace(err)
+	}
+	store := c.ClientStore()
+	return makeURLFromCurrentModel(store, controllerName, c.offerSource, currentModel, urlStr)
+}
+
+func makeURLFromCurrentModel(
+	store jujuclient.ClientStore, controllerName, offerSource, modelName, offerName string,
+) (crossmodel.OfferURL, error) {
 	// We may have just been given an offer name.
 	// Try again with the current model as the host model.
-	modelName := currentModel
-	userName := ""
-	if jujuclient.IsQualifiedModelName(currentModel) {
-		baseName, userTag, err := jujuclient.SplitModelName(currentModel)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		modelName = baseName
-		userName = userTag.Id()
+	url := crossmodel.OfferURL{
+		Source: offerSource,
+		Name:   offerName,
 	}
-	derivedUrl := crossmodel.MakeURL(userName, modelName, urlStr, offerSource)
-	return crossmodel.ParseOfferURL(derivedUrl)
+	if url.ModelName == "" {
+		if jujuclient.IsQualifiedModelName(modelName) {
+			modelName, qualifier, err := jujuclient.SplitFullyQualifiedModelName(modelName)
+			if err != nil {
+				return crossmodel.OfferURL{}, errors.Trace(err)
+			}
+			url.ModelQualifier = qualifier
+			url.ModelName = modelName
+		} else {
+			url.ModelName = modelName
+		}
+	}
+
+	if url.ModelQualifier == "" {
+		accountDetails, err := store.AccountDetails(controllerName)
+		if err != nil {
+			return crossmodel.OfferURL{}, errors.Trace(err)
+		}
+		qualifier := model.QualifierFromUserTag(names.NewUserTag(accountDetails.User))
+		url.ModelQualifier = qualifier.String()
+	}
+	return url, nil
 }

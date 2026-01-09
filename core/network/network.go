@@ -4,15 +4,16 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net"
 	"sort"
 
-	"github.com/juju/loggo"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.core.network")
+var logger = internallogger.GetLogger("juju.core.network")
 
 // macAddressTemplate is suitable for generating virtual MAC addresses,
 // particularly for use by container devices.
@@ -133,7 +134,7 @@ func SubnetsForAddresses(addrs []string) []string {
 			continue
 		}
 
-		logger.Warningf("unable to determine egress subnet for %q", a)
+		logger.Warningf(context.TODO(), "unable to determine egress subnet for %q", a)
 	}
 	return subs
 }

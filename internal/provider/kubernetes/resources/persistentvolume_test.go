@@ -4,11 +4,10 @@
 package resources_test
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,9 +19,11 @@ type persistentVolumeSuite struct {
 	resourceSuite
 }
 
-var _ = gc.Suite(&persistentVolumeSuite{})
+func TestPersistentVolumeSuite(t *testing.T) {
+	tc.Run(t, &persistentVolumeSuite{})
+}
 
-func (s *persistentVolumeSuite) TestApply(c *gc.C) {
+func (s *persistentVolumeSuite) TestApply(c *tc.C) {
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pv1",
@@ -30,23 +31,23 @@ func (s *persistentVolumeSuite) TestApply(c *gc.C) {
 	}
 	// Create.
 	pvResource := resources.NewPersistentVolume(s.client.CoreV1().PersistentVolumes(), "pv1", pv)
-	c.Assert(pvResource.Apply(context.TODO()), jc.ErrorIsNil)
-	result, err := s.client.CoreV1().PersistentVolumes().Get(context.TODO(), "pv1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result.GetAnnotations()), gc.Equals, 0)
+	c.Assert(pvResource.Apply(c.Context()), tc.ErrorIsNil)
+	result, err := s.client.CoreV1().PersistentVolumes().Get(c.Context(), "pv1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(result.GetAnnotations()), tc.Equals, 0)
 
 	// Update.
 	pv.SetAnnotations(map[string]string{"a": "b"})
 	pvResource = resources.NewPersistentVolume(s.client.CoreV1().PersistentVolumes(), "pv1", pv)
-	c.Assert(pvResource.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(pvResource.Apply(c.Context()), tc.ErrorIsNil)
 
-	result, err = s.client.CoreV1().PersistentVolumes().Get(context.TODO(), "pv1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `pv1`)
-	c.Assert(result.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	result, err = s.client.CoreV1().PersistentVolumes().Get(c.Context(), "pv1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `pv1`)
+	c.Assert(result.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *persistentVolumeSuite) TestGet(c *gc.C) {
+func (s *persistentVolumeSuite) TestGet(c *tc.C) {
 	template := corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pv1",
@@ -54,40 +55,40 @@ func (s *persistentVolumeSuite) TestGet(c *gc.C) {
 	}
 	pv1 := template
 	pv1.SetAnnotations(map[string]string{"a": "b"})
-	_, err := s.client.CoreV1().PersistentVolumes().Create(context.TODO(), &pv1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.CoreV1().PersistentVolumes().Create(c.Context(), &pv1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	pvResource := resources.NewPersistentVolume(s.client.CoreV1().PersistentVolumes(), "pv1", &template)
-	c.Assert(len(pvResource.GetAnnotations()), gc.Equals, 0)
-	err = pvResource.Get(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(pvResource.GetName(), gc.Equals, `pv1`)
-	c.Assert(pvResource.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	c.Assert(len(pvResource.GetAnnotations()), tc.Equals, 0)
+	err = pvResource.Get(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(pvResource.GetName(), tc.Equals, `pv1`)
+	c.Assert(pvResource.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *persistentVolumeSuite) TestDelete(c *gc.C) {
+func (s *persistentVolumeSuite) TestDelete(c *tc.C) {
 	pv := corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "pv1",
 		},
 	}
-	_, err := s.client.CoreV1().PersistentVolumes().Create(context.TODO(), &pv, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.CoreV1().PersistentVolumes().Create(c.Context(), &pv, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	result, err := s.client.CoreV1().PersistentVolumes().Get(context.TODO(), "pv1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `pv1`)
+	result, err := s.client.CoreV1().PersistentVolumes().Get(c.Context(), "pv1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `pv1`)
 
 	pvResource := resources.NewPersistentVolume(s.client.CoreV1().PersistentVolumes(), "pv1", &pv)
-	err = pvResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
+	err = pvResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = pvResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err = pvResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	err = pvResource.Get(context.TODO())
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	err = pvResource.Get(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	_, err = s.client.CoreV1().PersistentVolumes().Get(context.TODO(), "pv1", metav1.GetOptions{})
-	c.Assert(err, jc.Satisfies, k8serrors.IsNotFound)
+	_, err = s.client.CoreV1().PersistentVolumes().Get(c.Context(), "pv1", metav1.GetOptions{})
+	c.Assert(err, tc.Satisfies, k8serrors.IsNotFound)
 }

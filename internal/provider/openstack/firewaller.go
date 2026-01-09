@@ -4,6 +4,7 @@
 package openstack
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -21,7 +22,6 @@ import (
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/common"
@@ -50,22 +50,22 @@ type FirewallerFactory interface {
 // This is used in other providers that embed the openstack provider.
 type Firewaller interface {
 	// OpenPorts opens the given port ranges for the whole environment.
-	OpenPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	OpenPorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// ClosePorts closes the given port ranges for the whole environment.
-	ClosePorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	ClosePorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// IngressRules returns the ingress rules applied to the whole environment.
 	// It is expected that there be only one ingress rule result for a given
 	// port range - the rule's SourceCIDRs will contain all applicable source
 	// address rules for that port range.
-	IngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error)
+	IngressRules(ctx context.Context) (firewall.IngressRules, error)
 
 	// OpenModelPorts opens the given port ranges on the model firewall
-	OpenModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	OpenModelPorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// CloseModelPorts Closes the given port ranges on the model firewall
-	CloseModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	CloseModelPorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// ModelIngressRules returns the set of ingress rules on the model firewall.
 	// The rules are returned as sorted by network.SortIngressRules().
@@ -73,48 +73,48 @@ type Firewaller interface {
 	// port range - the rule's SourceCIDRs will contain all applicable source
 	// address rules for that port range.
 	// If the model security group doesn't exist, return a NotFound error
-	ModelIngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error)
+	ModelIngressRules(ctx context.Context) (firewall.IngressRules, error)
 
 	// DeleteMachineGroup delete's the security group specific to the provided machine.
 	// When in 'instance' firewall mode, each instance in a model is assigned its own
 	// security group, with a lifecycle matching that of the instance itself.
 	// In 'global' mode, all security groups are model scoped, and have lifecycles
 	// matching the model, so this method will remove no groups.
-	DeleteMachineGroup(ctx context.ProviderCallContext, machineId string) error
+	DeleteMachineGroup(ctx context.Context, machineId string) error
 
 	// DeleteAllModelGroups deletes all security groups for the
 	// model.
-	DeleteAllModelGroups(ctx context.ProviderCallContext) error
+	DeleteAllModelGroups(ctx context.Context) error
 
 	// DeleteAllControllerGroups deletes all security groups for the
 	// controller, ie those for all hosted models.
-	DeleteAllControllerGroups(ctx context.ProviderCallContext, controllerUUID string) error
+	DeleteAllControllerGroups(ctx context.Context, controllerUUID string) error
 
 	// DeleteGroups deletes the security groups with the specified names.
-	DeleteGroups(ctx context.ProviderCallContext, names ...string) error
+	DeleteGroups(ctx context.Context, names ...string) error
 
 	// UpdateGroupController updates all of the security groups for
 	// this model to refer to the specified controller, such that
 	// DeleteAllControllerGroups will remove them only when called
 	// with the specified controller ID.
-	UpdateGroupController(ctx context.ProviderCallContext, controllerUUID string) error
+	UpdateGroupController(ctx context.Context, controllerUUID string) error
 
 	// GetSecurityGroups returns a list of the security groups that
 	// belong to given instances.
-	GetSecurityGroups(ctx context.ProviderCallContext, ids ...instance.Id) ([]string, error)
+	GetSecurityGroups(ctx context.Context, ids ...instance.Id) ([]string, error)
 
 	// SetUpGroups sets up initial security groups, if any, and returns
 	// their names.
-	SetUpGroups(ctx context.ProviderCallContext, controllerUUID, machineID string) ([]string, error)
+	SetUpGroups(ctx context.Context, controllerUUID, machineID string) ([]string, error)
 
 	// OpenInstancePorts opens the given port ranges for the specified  instance.
-	OpenInstancePorts(ctx context.ProviderCallContext, inst instances.Instance, machineID string, rules firewall.IngressRules) error
+	OpenInstancePorts(ctx context.Context, inst instances.Instance, machineID string, rules firewall.IngressRules) error
 
 	// CloseInstancePorts closes the given port ranges for the specified  instance.
-	CloseInstancePorts(ctx context.ProviderCallContext, inst instances.Instance, machineID string, rules firewall.IngressRules) error
+	CloseInstancePorts(ctx context.Context, inst instances.Instance, machineID string, rules firewall.IngressRules) error
 
 	// InstanceIngressRules returns the ingress rules applied to the specified  instance.
-	InstanceIngressRules(ctx context.ProviderCallContext, inst instances.Instance, machineID string) (firewall.IngressRules, error)
+	InstanceIngressRules(ctx context.Context, inst instances.Instance, machineID string) (firewall.IngressRules, error)
 }
 
 type firewallerFactory struct{}
@@ -130,7 +130,7 @@ type firewallerBase struct {
 }
 
 // GetSecurityGroups implements Firewaller interface.
-func (c *firewallerBase) GetSecurityGroups(ctx context.ProviderCallContext, ids ...instance.Id) ([]string, error) {
+func (c *firewallerBase) GetSecurityGroups(ctx context.Context, ids ...instance.Id) ([]string, error) {
 	var securityGroupNames []string
 	if c.environ.Config().FirewallMode() == config.FwInstance {
 		instances, err := c.environ.Instances(ctx, ids)
@@ -149,8 +149,7 @@ func (c *firewallerBase) GetSecurityGroups(ctx context.ProviderCallContext, ids 
 			}
 			groups, err := novaClient.GetServerSecurityGroups(string(inst.Id()))
 			if err != nil {
-				handleCredentialError(err, ctx)
-				return nil, errors.Trace(err)
+				return nil, c.environ.HandleCredentialError(ctx, err)
 			}
 			for _, group := range groups {
 				// We only include the group specifically tied to the instance, not
@@ -184,20 +183,20 @@ func instServerID(inst instances.Instance) (string, error) {
 // has it around internally. To attempt to catch this timing issue, deletion
 // of the groups is tried multiple times.
 func deleteSecurityGroup(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
+	invalidator common.CredentialInvalidator,
 	deleteSecurityGroupByID func(string) error,
 	name, id string,
 	clock clock.Clock,
 ) {
-	logger.Debugf("deleting security group %q", name)
+	logger.Debugf(ctx, "deleting security group %q", name)
 	err := retry.Call(retry.CallArgs{
 		Func: func() error {
 			if err := deleteSecurityGroupByID(id); err != nil {
-				if gooseerrors.IsNotFound(err) {
+				if isNotFoundError(err) {
 					return nil
 				}
-				handleCredentialError(err, ctx)
-				return errors.Trace(err)
+				return invalidator.HandleCredentialError(ctx, err)
 			}
 			return nil
 		},
@@ -207,7 +206,7 @@ func deleteSecurityGroup(
 				if attempt != 4 {
 					message = "still " + message
 				}
-				logger.Debugf(message)
+				logger.Debugf(ctx, message)
 			}
 		},
 		Attempts: 30,
@@ -215,7 +214,7 @@ func deleteSecurityGroup(
 		Clock:    clock,
 	})
 	if err != nil {
-		logger.Warningf("cannot delete security group %q. Used by another model?", name)
+		logger.Warningf(ctx, "cannot delete security group %q. Used by another model?", name)
 	}
 }
 
@@ -247,7 +246,7 @@ type neutronFirewaller struct {
 // Note: ideally we'd have a better way to determine group membership so that 2
 // people that happen to share an openstack account and name their environment
 // "openstack" don't end up destroying each other's machines.
-func (c *neutronFirewaller) SetUpGroups(ctx context.ProviderCallContext, controllerUUID, machineID string) ([]string, error) {
+func (c *neutronFirewaller) SetUpGroups(ctx context.Context, controllerUUID, machineID string) ([]string, error) {
 	tags := []string{fmt.Sprintf("%s=%s", tags.JujuController, controllerUUID),
 		fmt.Sprintf("%s=%s", tags.JujuModel, c.environ.modelUUID),
 	}
@@ -263,8 +262,7 @@ func (c *neutronFirewaller) SetUpGroups(ctx context.ProviderCallContext, control
 		machineGroup, err = c.ensureGroup(c.globalGroupName(controllerUUID), false, tags)
 	}
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, c.environ.HandleCredentialError(ctx, err)
 	}
 	groups := []string{jujuGroup.Name, machineGroup.Name}
 	if c.environ.ecfg().useDefaultSecurityGroup() {
@@ -389,11 +387,12 @@ func (c *neutronFirewaller) ensureInternalRules(neutronClient NetworkingNeutron,
 	return nil
 }
 
-func (c *neutronFirewaller) deleteSecurityGroups(ctx context.ProviderCallContext, securityGroups []neutron.SecurityGroupV2) error {
+func (c *neutronFirewaller) deleteSecurityGroups(ctx context.Context, securityGroups []neutron.SecurityGroupV2) error {
 	neutronClient := c.environ.neutron()
 	for _, group := range securityGroups {
 		deleteSecurityGroup(
 			ctx,
+			c.environ.CredentialInvalidator,
 			neutronClient.DeleteSecurityGroupV2,
 			group.Name,
 			group.Id,
@@ -404,7 +403,7 @@ func (c *neutronFirewaller) deleteSecurityGroups(ctx context.ProviderCallContext
 }
 
 // DeleteGroups implements Firewaller interface.
-func (c *neutronFirewaller) DeleteGroups(ctx context.ProviderCallContext, names ...string) error {
+func (c *neutronFirewaller) DeleteGroups(ctx context.Context, names ...string) error {
 	var groupsToDelete []neutron.SecurityGroupV2
 	for _, name := range names {
 		group, err := c.getSecurityGroupByName(ctx, name)
@@ -418,34 +417,32 @@ func (c *neutronFirewaller) DeleteGroups(ctx context.ProviderCallContext, names 
 }
 
 // DeleteAllControllerGroups implements Firewaller interface.
-func (c *neutronFirewaller) DeleteAllControllerGroups(ctx context.ProviderCallContext, controllerUUID string) error {
+func (c *neutronFirewaller) DeleteAllControllerGroups(ctx context.Context, controllerUUID string) error {
 	neutronClient := c.environ.neutron()
 	tags := []string{fmt.Sprintf("%s=%s", tags.JujuController, controllerUUID)}
 	query := neutron.ListSecurityGroupsV2Query{Tags: tags}
 	securityGroups, err := neutronClient.ListSecurityGroupsV2(query)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return errors.Annotate(c.environ.HandleCredentialError(ctx, err), "cannot list security groups")
 	}
 
 	return c.deleteSecurityGroups(ctx, securityGroups)
 }
 
 // DeleteAllModelGroups implements Firewaller interface.
-func (c *neutronFirewaller) DeleteAllModelGroups(ctx context.ProviderCallContext) error {
+func (c *neutronFirewaller) DeleteAllModelGroups(ctx context.Context) error {
 	neutronClient := c.environ.neutron()
 	tags := []string{fmt.Sprintf("%s=%s", tags.JujuModel, c.environ.modelUUID)}
 	query := neutron.ListSecurityGroupsV2Query{Tags: tags}
 	securityGroups, err := neutronClient.ListSecurityGroupsV2(query)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return errors.Annotate(c.environ.HandleCredentialError(ctx, err), "cannot list security groups")
 	}
 
 	return c.deleteSecurityGroups(ctx, securityGroups)
 }
 
-func (c *neutronFirewaller) DeleteMachineGroup(ctx context.ProviderCallContext, machineID string) error {
+func (c *neutronFirewaller) DeleteMachineGroup(ctx context.Context, machineID string) error {
 	if c.environ.Config().FirewallMode() != config.FwInstance {
 		return nil
 	}
@@ -459,23 +456,22 @@ func (c *neutronFirewaller) DeleteMachineGroup(ctx context.ProviderCallContext, 
 }
 
 // UpdateGroupController implements Firewaller interface.
-func (c *neutronFirewaller) UpdateGroupController(ctx context.ProviderCallContext, controllerUUID string) error {
+func (c *neutronFirewaller) UpdateGroupController(ctx context.Context, controllerUUID string) error {
 	neutronClient := c.environ.neutron()
 	tags := []string{fmt.Sprintf("%s=%s", tags.JujuModel, c.environ.modelUUID)}
 	query := neutron.ListSecurityGroupsV2Query{Tags: tags}
 	groups, err := neutronClient.ListSecurityGroupsV2(query)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
 
 	var failed []string
 	for _, group := range groups {
 		err := c.updateGroupControllerUUID(&group, controllerUUID)
 		if err != nil {
-			logger.Errorf("error updating controller for security group %s: %v", group.Id, err)
+			logger.Errorf(ctx, "error updating controller for security group %s: %v", group.Id, err)
 			failed = append(failed, group.Id)
-			if common.MaybeHandleCredentialError(IsAuthorisationFailure, err, ctx) {
+			if denied, _ := c.environ.MaybeInvalidateCredentialError(ctx, err); denied {
 				// No need to continue here since we will 100% fail with an invalid credential.
 				break
 			}
@@ -510,84 +506,78 @@ func (c *neutronFirewaller) updateGroupControllerUUID(group *neutron.SecurityGro
 }
 
 // OpenPorts implements Firewaller interface.
-func (c *neutronFirewaller) OpenPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) OpenPorts(ctx context.Context, rules firewall.IngressRules) error {
 	if c.environ.Config().FirewallMode() != config.FwGlobal {
 		return errors.Errorf("invalid firewall mode %q for opening ports on model",
 			c.environ.Config().FirewallMode())
 	}
 	if err := c.openPortsInGroup(ctx, c.globalGroupName(c.environ.controllerUUID), rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("opened ports in global group: %v", rules)
+	logger.Infof(ctx, "opened ports in global group: %v", rules)
 	return nil
 }
 
 // ClosePorts implements Firewaller interface.
-func (c *neutronFirewaller) ClosePorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) ClosePorts(ctx context.Context, rules firewall.IngressRules) error {
 	if c.environ.Config().FirewallMode() != config.FwGlobal {
 		return errors.Errorf("invalid firewall mode %q for closing ports on model",
 			c.environ.Config().FirewallMode())
 	}
 	if err := c.closePortsInGroup(ctx, c.globalGroupName(c.environ.controllerUUID), rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("closed ports in global group: %v", rules)
+	logger.Infof(ctx, "closed ports in global group: %v", rules)
 	return nil
 }
 
 // IngressRules implements Firewaller interface.
-func (c *neutronFirewaller) IngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
+func (c *neutronFirewaller) IngressRules(ctx context.Context) (firewall.IngressRules, error) {
 	if c.environ.Config().FirewallMode() != config.FwGlobal {
 		return nil, errors.Errorf("invalid firewall mode %q for retrieving ingress rules from model",
 			c.environ.Config().FirewallMode())
 	}
 	rules, err := c.ingressRulesInGroup(ctx, c.globalGroupName(c.environ.controllerUUID))
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return rules, errors.Trace(err)
+		return rules, c.environ.HandleCredentialError(ctx, err)
 	}
 	return rules, nil
 }
 
 // OpenModelPorts implements Firewaller interface
-func (c *neutronFirewaller) OpenModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) OpenModelPorts(ctx context.Context, rules firewall.IngressRules) error {
 	err := c.openPortsInGroup(ctx, c.jujuGroupName(c.environ.controllerUUID), rules)
 	if errors.Is(err, errors.NotFound) && !c.environ.usingSecurityGroups {
-		logger.Warningf("attempted to open %v but network port security is disabled. Already open", rules)
+		logger.Warningf(ctx, "attempted to open %v but network port security is disabled. Already open", rules)
 		return nil
 	}
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("opened ports in model group: %v", rules)
+	logger.Infof(ctx, "opened ports in model group: %v", rules)
 	return nil
 }
 
 // CloseModelPorts implements Firewaller interface
-func (c *neutronFirewaller) CloseModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) CloseModelPorts(ctx context.Context, rules firewall.IngressRules) error {
 	if err := c.closePortsInGroup(ctx, c.jujuGroupName(c.environ.controllerUUID), rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("closed ports in global group: %v", rules)
+	logger.Infof(ctx, "closed ports in global group: %v", rules)
 	return nil
 }
 
 // ModelIngressRules implements Firewaller interface
-func (c *neutronFirewaller) ModelIngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
+func (c *neutronFirewaller) ModelIngressRules(ctx context.Context) (firewall.IngressRules, error) {
 	rules, err := c.ingressRulesInGroup(ctx, c.jujuGroupName(c.environ.controllerUUID))
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return rules, errors.Trace(err)
+		return rules, c.environ.HandleCredentialError(ctx, err)
 	}
 	return rules, nil
 }
 
 // OpenInstancePorts implements Firewaller interface.
-func (c *neutronFirewaller) OpenInstancePorts(ctx context.ProviderCallContext, inst instances.Instance, machineID string, ports firewall.IngressRules) error {
+func (c *neutronFirewaller) OpenInstancePorts(ctx context.Context, inst instances.Instance, machineID string, ports firewall.IngressRules) error {
 	if c.environ.Config().FirewallMode() != config.FwInstance {
 		return errors.Errorf("invalid firewall mode %q for opening ports on instance",
 			c.environ.Config().FirewallMode())
@@ -600,15 +590,14 @@ func (c *neutronFirewaller) OpenInstancePorts(ctx context.ProviderCallContext, i
 		return nil
 	}
 	if err := c.openPortsInGroup(ctx, c.machineGroupName(c.environ.controllerUUID, machineID), ports); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("opened ports in security group %s-%s: %v", c.environ.Config().UUID(), machineID, ports)
+	logger.Infof(ctx, "opened ports in security group %s-%s: %v", c.environ.Config().UUID(), machineID, ports)
 	return nil
 }
 
 // CloseInstancePorts implements Firewaller interface.
-func (c *neutronFirewaller) CloseInstancePorts(ctx context.ProviderCallContext, inst instances.Instance, machineID string, ports firewall.IngressRules) error {
+func (c *neutronFirewaller) CloseInstancePorts(ctx context.Context, inst instances.Instance, machineID string, ports firewall.IngressRules) error {
 	if c.environ.Config().FirewallMode() != config.FwInstance {
 		return errors.Errorf("invalid firewall mode %q for closing ports on instance",
 			c.environ.Config().FirewallMode())
@@ -621,15 +610,14 @@ func (c *neutronFirewaller) CloseInstancePorts(ctx context.ProviderCallContext, 
 		return nil
 	}
 	if err := c.closePortsInGroup(ctx, c.machineGroupName(c.environ.controllerUUID, machineID), ports); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return c.environ.HandleCredentialError(ctx, err)
 	}
-	logger.Infof("closed ports in security group %s-%s: %v", c.environ.Config().UUID(), machineID, ports)
+	logger.Infof(ctx, "closed ports in security group %s-%s: %v", c.environ.Config().UUID(), machineID, ports)
 	return nil
 }
 
 // InstanceIngressRules implements Firewaller interface.
-func (c *neutronFirewaller) InstanceIngressRules(ctx context.ProviderCallContext, inst instances.Instance, machineID string) (firewall.IngressRules, error) {
+func (c *neutronFirewaller) InstanceIngressRules(ctx context.Context, inst instances.Instance, machineID string) (firewall.IngressRules, error) {
 	if c.environ.Config().FirewallMode() != config.FwInstance {
 		return nil, errors.Errorf("invalid firewall mode %q for retrieving ingress rules from instance",
 			c.environ.Config().FirewallMode())
@@ -643,15 +631,14 @@ func (c *neutronFirewaller) InstanceIngressRules(ctx context.ProviderCallContext
 	}
 	rules, err := c.ingressRulesInGroup(ctx, c.machineGroupName(c.environ.controllerUUID, machineID))
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return rules, errors.Trace(err)
+		return rules, c.environ.HandleCredentialError(ctx, err)
 	}
 	return rules, err
 }
 
 // getSecurityGroupByName talks to Openstack Neutron service to get a security group by name.
 // Here, argument name can be a group name for a model, machine or global.
-func (c *neutronFirewaller) getSecurityGroupByName(ctx context.ProviderCallContext, name string) (neutron.SecurityGroupV2, error) {
+func (c *neutronFirewaller) getSecurityGroupByName(ctx context.Context, name string) (neutron.SecurityGroupV2, error) {
 	neutronClient := c.environ.neutron()
 
 	// If the security group has just been created, it might not be available
@@ -661,15 +648,14 @@ func (c *neutronFirewaller) getSecurityGroupByName(ctx context.ProviderCallConte
 
 	retryStrategy := shortRetryStrategy
 	retryStrategy.IsFatalError = func(err error) bool {
-		return !errors.IsNotFound(err)
+		return !errors.Is(err, errors.NotFound)
 	}
 	retryStrategy.Func = func() error {
 		groups, err := neutronClient.SecurityGroupByNameV2(name)
 		if gooseerrors.IsNotFound(err) {
 			return errors.NotFoundf("security group %q", name)
 		} else if err != nil {
-			handleCredentialError(err, ctx)
-			return err
+			return c.environ.HandleCredentialError(ctx, err)
 		}
 
 		numMatching := len(groups)
@@ -688,7 +674,7 @@ func (c *neutronFirewaller) getSecurityGroupByName(ctx context.ProviderCallConte
 	return matchingGroup, err
 }
 
-func (c *neutronFirewaller) openPortsInGroup(ctx context.ProviderCallContext, name string, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) openPortsInGroup(ctx context.Context, name string, rules firewall.IngressRules) error {
 	group, err := c.getSecurityGroupByName(ctx, name)
 	if err != nil {
 		return errors.Trace(err)
@@ -698,7 +684,7 @@ func (c *neutronFirewaller) openPortsInGroup(ctx context.ProviderCallContext, na
 	for _, rule := range ruleInfo {
 		_, err := neutronClient.CreateSecurityGroupRuleV2(rule)
 		if err != nil && !gooseerrors.IsDuplicateValue(err) {
-			handleCredentialError(err, ctx)
+			err = c.environ.HandleCredentialError(ctx, err)
 			// TODO: if err is not rule already exists, raise?
 			return fmt.Errorf("creating security group rule %q for parent group id %q using proto %q: %w", rule.Direction, rule.ParentGroupId, rule.IPProtocol, err)
 		}
@@ -729,7 +715,7 @@ func secGroupMatchesIngressRule(secGroupRule neutron.SecurityGroupRuleV2, rule f
 	return rule.SourceCIDRs.Contains(secGroupRule.RemoteIPPrefix)
 }
 
-func (c *neutronFirewaller) closePortsInGroup(ctx context.ProviderCallContext, name string, rules firewall.IngressRules) error {
+func (c *neutronFirewaller) closePortsInGroup(ctx context.Context, name string, rules firewall.IngressRules) error {
 	if len(rules) == 0 {
 		return nil
 	}
@@ -749,8 +735,7 @@ func (c *neutronFirewaller) closePortsInGroup(ctx context.ProviderCallContext, n
 				if gooseerrors.IsNotFound(err) {
 					break
 				}
-				handleCredentialError(err, ctx)
-				return errors.Trace(err)
+				return c.environ.HandleCredentialError(ctx, err)
 			}
 
 			// The rule to be removed may contain multiple CIDRs;
@@ -762,7 +747,7 @@ func (c *neutronFirewaller) closePortsInGroup(ctx context.ProviderCallContext, n
 	return nil
 }
 
-func (c *neutronFirewaller) ingressRulesInGroup(ctx context.ProviderCallContext, name string) (rules firewall.IngressRules, err error) {
+func (c *neutronFirewaller) ingressRulesInGroup(ctx context.Context, name string) (rules firewall.IngressRules, err error) {
 	group, err := c.getSecurityGroupByName(ctx, name)
 	if err != nil {
 		return nil, errors.Trace(err)

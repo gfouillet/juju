@@ -245,6 +245,17 @@ Ensure also that the client has access to Charmhub by performing a random search
 
 Our `juju` client is ready! Take a quick look at what it can do: `juju help commands`. (You can also pipe a query to zoom in on feature: `juju help commands | grep application`.)
 
+```{tip}
+
+Split your terminal window into 3 (or open 3 terminal windows). In all, access your Multipass VM shell (`multipass shell my-juju-vm`) and then:
+
+**Shell 1:** Keep using it as you've already been doing so far, namely to type the commands in this tutorial.
+
+**Shell 2:** Run `watch -n 1 -c juju status --relations --color` to watch your deployment status evolve. Things are all right if your `App Status` and your `Unit - Workload` reach `active` and your `Unit - Agent` reaches `idle`. To exit and return to the terminal prompt, press {kbd}`mod` + {kbd}`C` (e.g., {kbd}`Ctrl`+{kbd}`C`). See more: {ref}`status`
+
+**Shell 3:** Run `juju debug-log -m controller` to watch all the details behind your deployment status. (Especially useful when things don't evolve as expected. In that case, please get in touch.)
+```
+
 ### Set up a Juju controller
 
 A Juju controller is your Juju control plane -- the entity that holds the Juju API server and Juju's database. Anything you do in Juju post-controller-setup goes through a Juju controller, and to work properly the controller needs access to a cloud and to Charmhub (or a local source of charms). Let's set it up!
@@ -531,5 +542,3 @@ No instances found.
 ```
 
 Finally, [uninstall Multipass](https://documentation.ubuntu.com/multipass/en/latest/how-to-guides/install-multipass/#uninstall).
-
-

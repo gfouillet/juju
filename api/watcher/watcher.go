@@ -4,24 +4,32 @@
 package watcher
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/api/base"
+	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.api.watcher")
+var logger = internallogger.GetLogger("juju.api.watcher")
+
+const (
+	// WatcherStopTimeout is the time to wait for a watcher to stop.
+	WatcherStopTimeout = time.Second * 60
+)
 
 // commonWatcher implements common watcher logic in one place to
 // reduce code duplication, but it's not in fact a complete watcher;
@@ -45,14 +53,14 @@ type commonWatcher struct {
 // watcherAPICall wraps up the information about what facade and what watcher
 // Id we are calling, and just gives us a simple way to call a common method
 // with a given return value.
-type watcherAPICall func(method string, result interface{}) error
+type watcherAPICall func(ctx context.Context, method string, result interface{}) error
 
 // makeWatcherAPICaller creates a watcherAPICall function for a given facade name
 // and watcherId.
 func makeWatcherAPICaller(caller base.APICaller, facadeName, watcherId string) watcherAPICall {
 	bestVersion := caller.BestFacadeVersion(facadeName)
-	return func(request string, result interface{}) error {
-		return caller.APICall(facadeName, bestVersion,
+	return func(ctx context.Context, request string, result interface{}) error {
+		return caller.APICall(ctx, facadeName, bestVersion,
 			watcherId, request, nil, &result)
 	}
 }
@@ -75,6 +83,7 @@ func (w *commonWatcher) init() {
 // tomb when an error occurs.
 func (w *commonWatcher) commonLoop() {
 	defer close(w.in)
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -87,15 +96,39 @@ func (w *commonWatcher) commonLoop() {
 		// the watcher will die with all resources cleaned up.
 		defer wg.Done()
 		<-w.tomb.Dying()
-		if err := w.call("Stop", nil); err != nil {
-			// Don't log an error if a watcher is stopped due to an agent restart,
-			// or if the entity being watched is already removed.
-			if !isAgentRestartError(err) &&
-				err.Error() != rpc.ErrShutdown.Error() && !params.IsCodeNotFound(err) {
-				logger.Errorf("error trying to stop watcher: %v", err)
-			}
+
+		// Give a reasonable amount of time for the watcher to stop. If it
+		// doesn't stop in time, log the error and return.
+		ctx, cancel := context.WithTimeout(context.Background(), WatcherStopTimeout)
+		defer cancel()
+
+		// We need to stop the watcher before returning, so that the
+		// server can clean up resources.
+		err := w.call(ctx, "Stop", nil)
+		if err == nil {
+			return
+		}
+
+		// If the deadline is exceeded whilst attempting to stop the watcher,
+		// give up and log the error as debug. This is indicative of a bad
+		// watcher, one that is not responding to the stop request.
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.Debugf(context.TODO(), "timeout stopping watcher: %v", err)
+			return
+		}
+
+		// Don't log an error if a watcher is stopped due to an agent restart,
+		// or if the entity being watched is already removed.
+		if !isAgentRestartError(err) &&
+			err.Error() != rpc.ErrShutdown.Error() && !params.IsCodeNotFound(err) {
+			logger.Errorf(context.TODO(), "error trying to stop watcher: %v", err)
+			return
 		}
 	}()
+
+	ctx, cancel := context.WithCancel(w.tomb.Context(context.Background()))
+	defer cancel()
+
 	wg.Add(1)
 	go func() {
 		// Because Next blocks until there are changes, we need to
@@ -104,9 +137,11 @@ func (w *commonWatcher) commonLoop() {
 		defer wg.Done()
 		for {
 			result := w.newResult()
-			err := w.call("Next", &result)
+			err := w.call(ctx, "Next", &result)
 			if err != nil {
-				if params.IsCodeStopped(err) || params.IsCodeNotFound(err) {
+				// If the call was canceled, stopped or not found, and the
+				// watcher is not alive, report it as a dying error.
+				if params.IsCodeStopped(err) || params.IsCodeNotFound(err) || errors.Is(err, context.Canceled) {
 					if w.tomb.Err() != tomb.ErrStillAlive {
 						// The watcher has been stopped at the client end, so we're
 						// expecting one of the above two kinds of error.
@@ -132,7 +167,7 @@ func (w *commonWatcher) commonLoop() {
 }
 
 var (
-	// ErrRestartArgent matches juju/juju/worker/error.go ErrRestartAgent
+	// ErrRestartArgent matches juju/juju/internal/worker/error.go ErrRestartAgent
 	// and is used to indicate that the watcher should be restarted.
 	ErrRestartAgent = errors.New("agent should be restarted")
 )
@@ -197,7 +232,7 @@ func (w *notifyWatcher) loop() error {
 
 // Changes returns a channel that receives a value when a given entity
 // changes in some way.
-func (w *notifyWatcher) Changes() watcher.NotifyChannel {
+func (w *notifyWatcher) Changes() <-chan struct{} {
 	return w.out
 }
 
@@ -249,7 +284,7 @@ func (w *stringsWatcher) loop(initialChanges []string) error {
 
 // Changes returns a channel that receives a list of strings of watched
 // entities with changes.
-func (w *stringsWatcher) Changes() watcher.StringsChannel {
+func (w *stringsWatcher) Changes() <-chan []string {
 	return w.out
 }
 
@@ -259,7 +294,7 @@ func (w *stringsWatcher) Changes() watcher.StringsChannel {
 type relationUnitsWatcher struct {
 	commonWatcher
 	caller                 base.APICaller
-	logger                 loggo.Logger
+	logger                 corelogger.Logger
 	relationUnitsWatcherId string
 	out                    chan watcher.RelationUnitsChange
 }
@@ -309,8 +344,8 @@ func (w *relationUnitsWatcher) loop(initialChanges params.RelationUnitsChange) e
 		select {
 		// Send the initial event or subsequent change.
 		case w.out <- changes:
-			if w.logger.IsTraceEnabled() {
-				w.logger.Tracef("sent relation units changes %# v", pretty.Formatter(changes))
+			if w.logger.IsLevelEnabled(corelogger.TRACE) {
+				w.logger.Tracef(context.TODO(), "sent relation units changes %# v", pretty.Formatter(changes))
 			}
 		case <-w.tomb.Dying():
 			return nil
@@ -338,10 +373,7 @@ func (w *relationUnitsWatcher) Changes() watcher.RelationUnitsChannel {
 // structs - this makes more sense than converting to a core struct
 // just to convert back when the event is published to the other
 // model's API.
-type RemoteRelationWatcher interface {
-	watcher.CoreWatcher
-	Changes() <-chan params.RemoteRelationChangeEvent
-}
+type RemoteRelationWatcher = watcher.Watcher[params.RemoteRelationChangeEvent]
 
 // remoteRelationWatcher sends notifications of units entering and
 // leaving scope of a relation and changes to unit/application
@@ -350,7 +382,7 @@ type RemoteRelationWatcher interface {
 type remoteRelationWatcher struct {
 	commonWatcher
 	caller                  base.APICaller
-	logger                  loggo.Logger
+	logger                  corelogger.Logger
 	remoteRelationWatcherId string
 	out                     chan params.RemoteRelationChangeEvent
 }
@@ -384,8 +416,8 @@ func (w *remoteRelationWatcher) loop(initialChange params.RemoteRelationChangeEv
 		select {
 		// Send out the initial event or subsequent change.
 		case w.out <- change:
-			if w.logger.IsTraceEnabled() {
-				w.logger.Tracef("sent remote relation change %# v", pretty.Formatter(change))
+			if w.logger.IsLevelEnabled(corelogger.TRACE) {
+				w.logger.Tracef(context.TODO(), "sent remote relation change %# v", pretty.Formatter(change))
 			}
 		case <-w.tomb.Dying():
 			return nil
@@ -419,7 +451,7 @@ func (w *remoteRelationWatcher) Changes() <-chan params.RemoteRelationChangeEven
 // events.
 type SettingsGetter func([]string) ([]params.SettingsResult, error)
 
-// remoteRelationCompatWatcher is a compatibility adapter that calls
+// remoteRelationCompatWatcher is a compatibility adaptor that calls
 // back to the v1 crossmodelrelations API methods to wrap a
 // server-side RelationUnitsWatcher into a RemoteRelationWatcher. It
 // needs the relation and application token to include in the outgoing
@@ -536,10 +568,10 @@ func (w *remoteRelationCompatWatcher) expandChange(change params.RelationUnitsCh
 	}
 
 	expanded := params.RemoteRelationChangeEvent{
-		RelationToken:    w.relationToken,
-		ApplicationToken: w.appToken,
-		ChangedUnits:     changedUnits,
-		DepartedUnits:    departedUnits,
+		RelationToken:           w.relationToken,
+		ApplicationOrOfferToken: w.appToken,
+		ChangedUnits:            changedUnits,
+		DepartedUnits:           departedUnits,
 	}
 	// No need to handle AppChanged here - the v1 API can't tell us
 	// app settings.
@@ -672,10 +704,10 @@ func NewOfferStatusWatcher(
 func (w *offerStatusWatcher) mergeChanges(current, new []watcher.OfferStatusChange) []watcher.OfferStatusChange {
 	chMap := make(map[string]watcher.OfferStatusChange)
 	for _, c := range current {
-		chMap[c.Name] = c
+		chMap[c.UUID] = c
 	}
 	for _, c := range new {
-		chMap[c.Name] = c
+		chMap[c.UUID] = c
 	}
 	var result []watcher.OfferStatusChange
 	for _, c := range chMap {
@@ -694,7 +726,7 @@ func (w *offerStatusWatcher) loop(initialChanges []params.OfferStatusChange) err
 		result := make([]watcher.OfferStatusChange, len(changes))
 		for i, ch := range changes {
 			result[i] = watcher.OfferStatusChange{
-				Name: ch.OfferName,
+				UUID: ch.OfferUUID,
 				Status: status.StatusInfo{
 					Status:  ch.Status.Status,
 					Message: ch.Status.Info,
@@ -742,35 +774,35 @@ type machineAttachmentsWatcher struct {
 	commonWatcher
 	caller                      base.APICaller
 	machineAttachmentsWatcherId string
-	out                         chan []watcher.MachineStorageId
+	out                         chan []watcher.MachineStorageID
 }
 
 // NewVolumeAttachmentsWatcher returns a MachineStorageIdsWatcher which
 // communicates with the VolumeAttachmentsWatcher API facade to watch
 // volume attachments.
-func NewVolumeAttachmentsWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIdsWatcher {
+func NewVolumeAttachmentsWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIDsWatcher {
 	return newMachineStorageIdsWatcher("VolumeAttachmentsWatcher", caller, result)
 }
 
 // NewVolumeAttachmentPlansWatcher returns a MachineStorageIdsWatcher which
 // communicates with the VolumeAttachmentPlansWatcher API facade to watch
 // volume attachments.
-func NewVolumeAttachmentPlansWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIdsWatcher {
+func NewVolumeAttachmentPlansWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIDsWatcher {
 	return newMachineStorageIdsWatcher("VolumeAttachmentPlansWatcher", caller, result)
 }
 
 // NewFilesystemAttachmentsWatcher returns a MachineStorageIdsWatcher which
 // communicates with the FilesystemAttachmentsWatcher API facade to watch
 // filesystem attachments.
-func NewFilesystemAttachmentsWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIdsWatcher {
+func NewFilesystemAttachmentsWatcher(caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIDsWatcher {
 	return newMachineStorageIdsWatcher("FilesystemAttachmentsWatcher", caller, result)
 }
 
-func newMachineStorageIdsWatcher(facade string, caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIdsWatcher {
+func newMachineStorageIdsWatcher(facade string, caller base.APICaller, result params.MachineStorageIdsWatchResult) watcher.MachineStorageIDsWatcher {
 	w := &machineAttachmentsWatcher{
 		caller:                      caller,
 		machineAttachmentsWatcherId: result.MachineStorageIdsWatcherId,
-		out:                         make(chan []watcher.MachineStorageId),
+		out:                         make(chan []watcher.MachineStorageID),
 	}
 	w.tomb.Go(func() error {
 		return w.loop(facade, result.Changes)
@@ -778,10 +810,10 @@ func newMachineStorageIdsWatcher(facade string, caller base.APICaller, result pa
 	return w
 }
 
-func copyMachineStorageIds(src []params.MachineStorageId) []watcher.MachineStorageId {
-	dst := make([]watcher.MachineStorageId, len(src))
+func copyMachineStorageIds(src []params.MachineStorageId) []watcher.MachineStorageID {
+	dst := make([]watcher.MachineStorageID, len(src))
 	for i, msi := range src {
-		dst[i] = watcher.MachineStorageId{
+		dst[i] = watcher.MachineStorageID{
 			MachineTag:    msi.MachineTag,
 			AttachmentTag: msi.AttachmentTag,
 		}
@@ -791,7 +823,7 @@ func copyMachineStorageIds(src []params.MachineStorageId) []watcher.MachineStora
 
 func (w *machineAttachmentsWatcher) loop(facade string, initialChanges []params.MachineStorageId) error {
 	changes := copyMachineStorageIds(initialChanges)
-	w.newResult = func() interface{} { return new(params.MachineStorageIdsWatchResult) }
+	w.newResult = func() any { return new(params.MachineStorageIdsWatchResult) }
 	w.call = makeWatcherAPICaller(w.caller, facade, w.machineAttachmentsWatcherId)
 	w.commonWatcher.init()
 	go w.commonLoop()
@@ -816,7 +848,7 @@ func (w *machineAttachmentsWatcher) loop(facade string, initialChanges []params.
 
 // Changes returns a channel that will receive the IDs of machine
 // storage entity attachments which have changed.
-func (w *machineAttachmentsWatcher) Changes() watcher.MachineStorageIdsChannel {
+func (w *machineAttachmentsWatcher) Changes() watcher.MachineStorageIDsChannel {
 	return w.out
 }
 
@@ -946,7 +978,7 @@ func (w *secretsTriggerWatcher) loop(initialChanges []params.SecretTriggerChange
 		for i, ch := range changes {
 			uri, err := secrets.ParseURI(ch.URI)
 			if err != nil {
-				logger.Errorf("ignoring invalid secret URI: %q", ch.URI)
+				logger.Errorf(context.TODO(), "ignoring invalid secret URI: %q", ch.URI)
 				continue
 			}
 			result[i] = watcher.SecretTriggerChange{
@@ -1129,12 +1161,12 @@ func (w *SecretsRevisionWatcher) loop(initialChanges []params.SecretRevisionChan
 		for _, ch := range changes {
 			uri, err := secrets.ParseURI(ch.URI)
 			if err != nil {
-				logger.Warningf("invalid secret URI: %v", ch.URI)
+				logger.Warningf(context.TODO(), "invalid secret URI: %v", ch.URI)
 				continue
 			}
 			result = append(result, watcher.SecretRevisionChange{
 				URI:      uri,
-				Revision: ch.Revision,
+				Revision: ch.LatestRevision,
 			})
 		}
 		return result

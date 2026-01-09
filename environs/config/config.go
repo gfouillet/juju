@@ -4,7 +4,9 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -14,29 +16,25 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 	"github.com/juju/schema"
-	"github.com/juju/utils/v3"
-	"github.com/juju/version/v2"
-	"gopkg.in/juju/environschema.v1"
+	"github.com/juju/utils/v4"
 	"gopkg.in/yaml.v2"
 
-	"github.com/juju/juju/charmhub"
-	"github.com/juju/juju/controller"
 	corebase "github.com/juju/juju/core/base"
-	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/network"
+	coremodelconfig "github.com/juju/juju/core/modelconfig"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/feature"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/logfwd/syslog"
-	jujuversion "github.com/juju/juju/version"
 )
 
-var logger = loggo.GetLogger("juju.environs.config")
+var logger = internallogger.GetLogger("juju.environs.config")
 
 const (
 	// FwInstance requests the use of an individual firewall per instance.
@@ -62,6 +60,12 @@ const (
 	// Settings Attributes
 	//
 
+	// AdminSecretKey
+	AdminSecretKey = "admin-secret"
+
+	// CAPrivateKeyKey
+	CAPrivateKeyKey = "ca-private-key"
+
 	// NameKey is the key for the model's name.
 	NameKey = "name"
 
@@ -76,9 +80,6 @@ const (
 
 	// AuthorizedKeysKey is the key for the authorized-keys attribute.
 	AuthorizedKeysKey = "authorized-keys"
-
-	// ProvisionerHarvestModeKey stores the key for this setting.
-	ProvisionerHarvestModeKey = "provisioner-harvest-mode"
 
 	// NumProvisionWorkersKey is the key for number of model provisioner
 	// workers.
@@ -191,9 +192,9 @@ const (
 	// the network for containers.
 	NetBondReconfigureDelayKey = "net-bond-reconfigure-delay"
 
-	// ContainerNetworkingMethod is the key for setting up
-	// networking method for containers.
-	ContainerNetworkingMethod = "container-networking-method"
+	// ContainerNetworkingMethodKey is the key for setting up networking method
+	// for containers.
+	ContainerNetworkingMethodKey = "container-networking-method"
 
 	// StorageDefaultBlockSourceKey is the key for the default block storage source.
 	StorageDefaultBlockSourceKey = "storage-default-block-source"
@@ -205,27 +206,24 @@ const (
 	// of k=v pairs, defining the tags for ResourceTags.
 	ResourceTagsKey = "resource-tags"
 
-	// LogForwardEnabled determines whether the log forward functionality is enabled.
-	LogForwardEnabled = "logforward-enabled"
-
-	// LogFwdSyslogHost sets the hostname:port of the syslog server.
-	LogFwdSyslogHost = "syslog-host"
-
-	// LogFwdSyslogCACert sets the certificate of the CA that signed the syslog
-	// server certificate.
-	LogFwdSyslogCACert = "syslog-ca-cert"
-
-	// LogFwdSyslogClientCert sets the client certificate for syslog
-	// forwarding.
-	LogFwdSyslogClientCert = "syslog-client-cert"
-
-	// LogFwdSyslogClientKey sets the client key for syslog
-	// forwarding.
-	LogFwdSyslogClientKey = "syslog-client-key"
-
 	// AutomaticallyRetryHooks determines whether the uniter will
 	// automatically retry a hook that has failed
 	AutomaticallyRetryHooks = "automatically-retry-hooks"
+
+	// EnableOSRefreshUpdateKey determines whether newly provisioned instances
+	// should run their respective OS's update capability.
+	EnableOSRefreshUpdateKey = "enable-os-refresh-update"
+
+	// EnableOSUpgradeKey determines whether newly provisioned instances
+	// should run their respective OS's upgrade capability.
+	EnableOSUpgradeKey = "enable-os-upgrade"
+
+	// DevelopmentKey determines whether the model is in development mode.
+	DevelopmentKey = "development"
+
+	// SSLHostnameVerificationKey determines whether the environment has
+	// SSL hostname verification enabled.
+	SSLHostnameVerificationKey = "ssl-hostname-verification"
 
 	// TransmitVendorMetricsKey is the key for whether the controller sends
 	// metrics collected in this model for anonymized aggregate analytics.
@@ -234,14 +232,6 @@ const (
 	// ExtraInfoKey is the key for arbitrary user specified string data that
 	// is stored against the model.
 	ExtraInfoKey = "extra-info"
-
-	// MaxStatusHistoryAge is the maximum age of status history values
-	// to keep when pruning, eg "72h"
-	MaxStatusHistoryAge = "max-status-history-age"
-
-	// MaxStatusHistorySize is the maximum size the status history
-	// collection can grow to before it is pruned, eg "5M"
-	MaxStatusHistorySize = "max-status-history-size"
 
 	// MaxActionResultsAge is the maximum age of actions to keep when pruning, eg
 	// "72h"
@@ -258,9 +248,6 @@ const (
 	// originates if the model is deployed such that NAT or similar is in use.
 	EgressSubnets = "egress-subnets"
 
-	// FanConfig defines the configuration for FAN network running in the model.
-	FanConfig = "fan-config"
-
 	// CloudInitUserDataKey is the key to specify cloud-init yaml the user
 	// wants to add into the cloud-config data produced by Juju when
 	// provisioning machines.
@@ -276,7 +263,7 @@ const (
 
 	// DefaultSpace specifies which space should be used for the default
 	// endpoint bindings.
-	DefaultSpace = "default-space"
+	DefaultSpaceKey = "default-space"
 
 	// LXDSnapChannel selects the channel to use when installing LXD from a snap.
 	LXDSnapChannel = "lxd-snap-channel"
@@ -315,85 +302,13 @@ const (
 	// models will be done.
 	DisableTelemetryKey = "disable-telemetry"
 
-	// LoggingOutputKey is a key for determining the destination of output for
-	// logging.
-	LoggingOutputKey = "logging-output"
-
-	// DefaultSeriesKey is a key for determining the series a model should
-	// explicitly use for charms unless otherwise provided.
-	DefaultSeriesKey = "default-series"
-
 	// DefaultBaseKey is a key for determining the base a model should
 	// explicitly use for charms unless otherwise provided.
 	DefaultBaseKey = "default-base"
 
-	// SecretBackendKey is used to specify the secret backend.
-	SecretBackendKey = "secret-backend"
+	// LoggingConfigKey is used to specify the logging backend configuration.
+	LoggingConfigKey = "logging-config"
 )
-
-// ParseHarvestMode parses description of harvesting method and
-// returns the representation.
-func ParseHarvestMode(description string) (HarvestMode, error) {
-	description = strings.ToLower(description)
-	for method, descr := range harvestingMethodToFlag {
-		if description == descr {
-			return method, nil
-		}
-	}
-	return 0, fmt.Errorf("unknown harvesting method: %s", description)
-}
-
-// HarvestMode is a bit field which is used to store the harvesting
-// behavior for Juju.
-type HarvestMode uint32
-
-const (
-	// HarvestNone signifies that Juju should not harvest any
-	// machines.
-	HarvestNone HarvestMode = 1 << iota
-	// HarvestUnknown signifies that Juju should only harvest machines
-	// which exist, but we don't know about.
-	HarvestUnknown
-	// HarvestDestroyed signifies that Juju should only harvest
-	// machines which have been explicitly released by the user
-	// through a destroy of an application/model/unit.
-	HarvestDestroyed
-	// HarvestAll signifies that Juju should harvest both unknown and
-	// destroyed instances. ♫ Don't fear the reaper. ♫
-	HarvestAll = HarvestUnknown | HarvestDestroyed
-)
-
-// A mapping from method to description. Going this way will be the
-// more common operation, so we want this type of lookup to be O(1).
-var harvestingMethodToFlag = map[HarvestMode]string{
-	HarvestAll:       "all",
-	HarvestNone:      "none",
-	HarvestUnknown:   "unknown",
-	HarvestDestroyed: "destroyed",
-}
-
-// String returns the description of the harvesting mode.
-func (method HarvestMode) String() string {
-	if description, ok := harvestingMethodToFlag[method]; ok {
-		return description
-	}
-	panic("Unknown harvesting method.")
-}
-
-// HarvestNone returns whether or not the None harvesting flag is set.
-func (method HarvestMode) HarvestNone() bool {
-	return method&HarvestNone != 0
-}
-
-// HarvestDestroyed returns whether or not the Destroyed harvesting flag is set.
-func (method HarvestMode) HarvestDestroyed() bool {
-	return method&HarvestDestroyed != 0
-}
-
-// HarvestUnknown returns whether or not the Unknown harvesting flag is set.
-func (method HarvestMode) HarvestUnknown() bool {
-	return method&HarvestUnknown != 0
-}
 
 // GetDefaultSupportedLTSBase returns the DefaultSupportedLTSBase.
 // This is exposed for one reason and one reason only; testing!
@@ -424,7 +339,7 @@ type Config struct {
 	// defined holds the attributes that are defined for Config.
 	// unknown holds the other attributes that are passed in (aka UnknownAttrs).
 	// the union of these two are AllAttrs
-	defined, unknown map[string]interface{}
+	defined, unknown map[string]any
 }
 
 // Defaulting is a value that specifies whether a configuration
@@ -457,7 +372,7 @@ const (
 // if $XDG_DATA_HOME is defined it will be used instead of ~/.local/share
 //
 // The attrs map can not be nil, otherwise a panic is raised.
-func New(withDefaults Defaulting, attrs map[string]interface{}) (*Config, error) {
+func New(withDefaults Defaulting, attrs map[string]any) (*Config, error) {
 	ensureSchema()
 
 	checker := noDefaultsChecker
@@ -488,15 +403,15 @@ func New(withDefaults Defaulting, attrs map[string]interface{}) (*Config, error)
 	}
 
 	c := &Config{
-		defined: defined.(map[string]interface{}),
-		unknown: make(map[string]interface{}),
+		defined: defined.(map[string]any),
+		unknown: make(map[string]any),
 	}
 	if err := c.setLoggingFromEnviron(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	// no old config to compare against
-	if err := Validate(c, nil); err != nil {
+	if err := Validate(context.Background(), c, nil); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// Copy unknown attributes onto the type-specific map.
@@ -509,12 +424,6 @@ func New(withDefaults Defaulting, attrs map[string]interface{}) (*Config, error)
 }
 
 const (
-	// DefaultStatusHistoryAge is the default value for MaxStatusHistoryAge.
-	DefaultStatusHistoryAge = "336h" // 2 weeks
-
-	// DefaultStatusHistorySize is the default value for MaxStatusHistorySize.
-	DefaultStatusHistorySize = "5G"
-
 	// DefaultUpdateStatusHookInterval is the default value for
 	// UpdateStatusHookInterval
 	DefaultUpdateStatusHookInterval = "5m"
@@ -533,14 +442,14 @@ const (
 	DefaultSecretBackend = "auto"
 )
 
-var defaultConfigValues = map[string]interface{}{
+var defaultConfigValues = map[string]any{
 	// Network.
 	"firewall-mode":              FwInstance,
 	"disable-network-management": false,
 	IgnoreMachineAddresses:       false,
-	"ssl-hostname-verification":  true,
+	SSLHostnameVerificationKey:   true,
 	"proxy-ssh":                  false,
-	DefaultSpace:                 "",
+	DefaultSpaceKey:              "",
 	// Why is net-bond-reconfigure-delay set to 17 seconds?
 	//
 	// The value represents the amount of time in seconds to sleep
@@ -558,28 +467,25 @@ var defaultConfigValues = map[string]interface{}{
 	// This value can be further tweaked via:
 	//
 	// $ juju model-config net-bond-reconfigure-delay=30
-	NetBondReconfigureDelayKey: 17,
-	ContainerNetworkingMethod:  "",
+	NetBondReconfigureDelayKey:   17,
+	ContainerNetworkingMethodKey: "",
 
 	DefaultBaseKey: "",
 
-	ProvisionerHarvestModeKey:       HarvestDestroyed.String(),
 	NumProvisionWorkersKey:          16,
 	NumContainerProvisionWorkersKey: 4,
 	ResourceTagsKey:                 "",
-	"logging-config":                "",
-	LoggingOutputKey:                "",
+	LoggingConfigKey:                "",
 	AutomaticallyRetryHooks:         true,
-	"enable-os-refresh-update":      true,
-	"enable-os-upgrade":             true,
-	"development":                   false,
+	EnableOSRefreshUpdateKey:        true,
+	EnableOSUpgradeKey:              true,
+	DevelopmentKey:                  false,
 	TestModeKey:                     false,
 	ModeKey:                         RequiresPromptsMode,
 	DisableTelemetryKey:             false,
 	TransmitVendorMetricsKey:        true,
 	UpdateStatusHookInterval:        DefaultUpdateStatusHookInterval,
 	EgressSubnets:                   "",
-	FanConfig:                       "",
 	CloudInitUserDataKey:            "",
 	ContainerInheritPropertiesKey:   "",
 	BackupDirKey:                    "",
@@ -591,14 +497,10 @@ var defaultConfigValues = map[string]interface{}{
 	ImageStreamKey:                            "released",
 	ImageMetadataURLKey:                       "",
 	ImageMetadataDefaultsDisabledKey:          false,
-	AgentStreamKey:                            "released",
 	AgentMetadataURLKey:                       "",
 	ContainerImageStreamKey:                   "released",
 	ContainerImageMetadataURLKey:              "",
 	ContainerImageMetadataDefaultsDisabledKey: false,
-
-	// Log forward settings.
-	LogForwardEnabled: false,
 
 	// Proxy settings.
 	HTTPProxyKey:      "",
@@ -623,13 +525,8 @@ var defaultConfigValues = map[string]interface{}{
 	SnapStoreProxyURLKey:   "",
 
 	// Status history settings
-	MaxStatusHistoryAge:  DefaultStatusHistoryAge,
-	MaxStatusHistorySize: DefaultStatusHistorySize,
 	MaxActionResultsAge:  DefaultActionResultsAge,
 	MaxActionResultsSize: DefaultActionResultsSize,
-
-	// Secret settings.
-	SecretBackendKey: DefaultSecretBackend,
 
 	// Model firewall settings
 	SSHAllowKey:         "0.0.0.0/0,::/0",
@@ -645,8 +542,8 @@ const defaultLoggingConfig = "<root>=INFO"
 // ConfigDefaults returns the config default values
 // to be used for any new model where there is no
 // value yet defined.
-func ConfigDefaults() map[string]interface{} {
-	defaults := make(map[string]interface{})
+func ConfigDefaults() map[string]any {
+	defaults := make(map[string]any)
 	for name, value := range defaultConfigValues {
 		if developerConfigValue(name) {
 			continue
@@ -657,30 +554,17 @@ func ConfigDefaults() map[string]interface{} {
 }
 
 func (c *Config) setLoggingFromEnviron() error {
-	loggingConfig := c.asString("logging-config")
+	loggingConfig := c.asString(LoggingConfigKey)
 	// If the logging config hasn't been set, then look for the os environment
 	// variable, and failing that, get the config from loggo itself.
 	if loggingConfig == "" {
 		if environmentValue := os.Getenv(osenv.JujuLoggingConfigEnvKey); environmentValue != "" {
-			c.defined["logging-config"] = environmentValue
+			c.defined[LoggingConfigKey] = environmentValue
 		} else {
-			c.defined["logging-config"] = defaultLoggingConfig
+			c.defined[LoggingConfigKey] = defaultLoggingConfig
 		}
 	}
 	return nil
-}
-
-// ProcessDeprecatedAttributes gathers any deprecated attributes in attrs and adds or replaces
-// them with new name value pairs for the replacement attrs.
-// Ths ensures that older versions of Juju which require that deprecated
-// attribute values still be used will work as expected.
-func ProcessDeprecatedAttributes(attrs map[string]interface{}) map[string]interface{} {
-	processedAttrs := make(map[string]interface{}, len(attrs))
-	for k, v := range attrs {
-		processedAttrs[k] = v
-	}
-	// No deprecated attributes at the moment.
-	return processedAttrs
 }
 
 // CoerceForStorage transforms attributes prior to being saved in a persistent store.
@@ -718,10 +602,35 @@ func CoerceForStorage(attrs map[string]any) (map[string]any, error) {
 	return coercedAttrs, nil
 }
 
+func initSchemas() {
+	allFields = fields()
+	defaultsWhenParsing = allDefaults()
+	withDefaultsChecker = schema.FieldMap(allFields, defaultsWhenParsing)
+	noDefaultsChecker = schema.FieldMap(allFields, alwaysOptional)
+
+	coerceOptional := schema.Defaults{}
+	maps.Copy(coerceOptional, alwaysOptional)
+	coerceOptional[UUIDKey] = schema.Omit
+	coerceOptional[NameKey] = schema.Omit
+	coerceOptional[TypeKey] = schema.Omit
+	coerceChecker = schema.FieldMap(allFields, coerceOptional)
+}
+
+// Coerce transforms the attributes from strings to their typed values.
+func Coerce(attrs map[string]string) (map[string]any, error) {
+	initSchema.Do(initSchemas)
+
+	result, err := coerceChecker.Coerce(attrs, nil)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return result.(map[string]any), nil
+}
+
 // Validate ensures that config is a valid configuration.  If old is not nil,
 // it holds the previous environment configuration for consideration when
 // validating changes.
-func Validate(cfg, old *Config) error {
+func Validate(_ctx context.Context, cfg, old *Config) error {
 	// Check that all other fields that have been specified are non-empty,
 	// unless they're allowed to be empty for backward compatibility,
 	for attr, val := range cfg.defined {
@@ -744,21 +653,15 @@ func Validate(cfg, old *Config) error {
 	// Check that the agent version parses ok if set explicitly; otherwise leave
 	// it alone.
 	if v, ok := cfg.defined[AgentVersionKey].(string); ok {
-		if _, err := version.Parse(v); err != nil {
+		if _, err := semversion.Parse(v); err != nil {
 			return fmt.Errorf("invalid agent version in model configuration: %q", v)
 		}
 	}
 
 	// If the logging config is set, make sure it is valid.
-	if v, ok := cfg.defined["logging-config"].(string); ok {
+	if v, ok := cfg.defined[LoggingConfigKey].(string); ok {
 		if _, err := loggo.ParseConfigString(v); err != nil {
 			return err
-		}
-	}
-
-	if lfCfg, ok := cfg.LogFwdSyslog(); ok {
-		if err := lfCfg.Validate(); err != nil {
-			return errors.Annotate(err, "invalid syslog forwarding config")
 		}
 	}
 
@@ -769,18 +672,6 @@ func Validate(cfg, old *Config) error {
 	// Ensure the resource tags have the expected k=v format.
 	if _, err := cfg.resourceTags(); err != nil {
 		return errors.Annotate(err, "validating resource tags")
-	}
-
-	if v, ok := cfg.defined[MaxStatusHistoryAge].(string); ok {
-		if _, err := time.ParseDuration(v); err != nil {
-			return errors.Annotate(err, "invalid max status history age in model configuration")
-		}
-	}
-
-	if v, ok := cfg.defined[MaxStatusHistorySize].(string); ok {
-		if _, err := utils.ParseSize(v); err != nil {
-			return errors.Annotate(err, "invalid max status history size in model configuration")
-		}
 	}
 
 	if v, ok := cfg.defined[MaxActionResultsAge].(string); ok {
@@ -820,27 +711,6 @@ func Validate(cfg, old *Config) error {
 		}
 	}
 
-	if v, ok := cfg.defined[FanConfig].(string); ok && v != "" {
-		_, err := network.ParseFanConfig(v)
-		if err != nil {
-			return err
-		}
-	}
-
-	if v, ok := cfg.defined[ContainerNetworkingMethod].(string); ok {
-		switch v {
-		case "fan":
-			if cfg, err := cfg.FanConfig(); err != nil || cfg == nil {
-				return errors.New("container-networking-method cannot be set to 'fan' without fan-config set")
-			}
-		case "provider": // TODO(wpk) FIXME we should check that the provider supports this setting!
-		case "local":
-		case "": // We'll try to autoconfigure it
-		default:
-			return fmt.Errorf("Invalid value for container-networking-method - %v", v)
-		}
-	}
-
 	if raw, ok := cfg.defined[CloudInitUserDataKey].(string); ok && raw != "" {
 		userDataMap, err := ensureStringMaps(raw)
 		if err != nil {
@@ -848,7 +718,7 @@ func Validate(cfg, old *Config) error {
 		}
 
 		// if there packages, ensure they are strings
-		if packages, ok := userDataMap["packages"].([]interface{}); ok {
+		if packages, ok := userDataMap["packages"].([]any); ok {
 			for _, v := range packages {
 				checker := schema.String()
 				if _, err := checker.Coerce(v, nil); err != nil {
@@ -911,10 +781,6 @@ func Validate(cfg, old *Config) error {
 		return errors.Trace(err)
 	}
 
-	if err := cfg.validateLoggingOutput(); err != nil {
-		return errors.Trace(err)
-	}
-
 	if err := cfg.validateNumProvisionWorkers(); err != nil {
 		return errors.Trace(err)
 	}
@@ -934,11 +800,7 @@ func Validate(cfg, old *Config) error {
 				return fmt.Errorf("cannot change %s from %#v to %#v", attr, oldv, newv)
 			}
 		}
-		if _, oldFound := old.AgentVersion(); oldFound {
-			if _, newFound := cfg.AgentVersion(); !newFound {
-				return errors.New("cannot clear agent-version")
-			}
-		}
+
 		if _, oldFound := old.CharmHubURL(); oldFound {
 			if _, newFound := cfg.CharmHubURL(); !newFound {
 				return errors.New("cannot clear charmhub-url")
@@ -955,14 +817,13 @@ func Validate(cfg, old *Config) error {
 		return errors.New("cannot specify both legacy proxy values and juju proxy values")
 	}
 
-	cfg.defined = ProcessDeprecatedAttributes(cfg.defined)
 	return nil
 }
 
 // ensureStringMaps takes in a string and returns YAML in a map
 // where all keys of any nested maps are strings.
-func ensureStringMaps(in string) (map[string]interface{}, error) {
-	userDataMap := make(map[string]interface{})
+func ensureStringMaps(in string) (map[string]any, error) {
+	userDataMap := make(map[string]any)
 	if err := yaml.Unmarshal([]byte(in), &userDataMap); err != nil {
 		return nil, errors.Annotate(err, "must be valid YAML")
 	}
@@ -970,10 +831,10 @@ func ensureStringMaps(in string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return out.(map[string]interface{}), nil
+	return out.(map[string]any), nil
 }
 
-func isEmpty(val interface{}) bool {
+func isEmpty(val any) bool {
 	switch val := val.(type) {
 	case nil:
 		return true
@@ -986,7 +847,7 @@ func isEmpty(val interface{}) bool {
 		return val == 0
 	case string:
 		return val == ""
-	case []interface{}:
+	case []any:
 		return len(val) == 0
 	case []string:
 		return len(val) == 0
@@ -1030,7 +891,7 @@ func (c *Config) UUID() string {
 }
 
 func (c *Config) validateDefaultSpace() error {
-	if raw, ok := c.defined[DefaultSpace]; ok {
+	if raw, ok := c.defined[DefaultSpaceKey]; ok {
 		if v, ok := raw.(string); ok {
 			if v == "" {
 				return nil
@@ -1048,7 +909,7 @@ func (c *Config) validateDefaultSpace() error {
 // DefaultSpace returns the name of the space for to be used
 // for endpoint bindings that are not explicitly set.
 func (c *Config) DefaultSpace() string {
-	return c.asString(DefaultSpace)
+	return c.asString(DefaultSpaceKey)
 }
 
 func (c *Config) validateDefaultBase() error {
@@ -1062,11 +923,8 @@ func (c *Config) validateDefaultBase() error {
 		return errors.Annotatef(err, "invalid default base %q", defaultBase)
 	}
 
-	supported, err := corebase.WorkloadBases(time.Now(), corebase.Base{}, "")
-	if err != nil {
-		return errors.Annotate(err, "cannot read supported bases")
-	}
-	logger.Tracef("supported bases %s", supported)
+	supported := corebase.WorkloadBases()
+	logger.Tracef(context.TODO(), "supported bases %s", supported)
 	var found bool
 	for _, supportedBase := range supported {
 		if parsedBase.IsCompatible(supportedBase) {
@@ -1091,15 +949,9 @@ func (c *Config) DefaultBase() (string, bool) {
 	case string:
 		return s, s != ""
 	default:
-		logger.Errorf("invalid default-base: %q", s)
+		logger.Errorf(context.TODO(), "invalid default-base: %q", s)
 		return "", false
 	}
-}
-
-// SecretBackend returns the secret backend name.
-func (c *Config) SecretBackend() string {
-	value, _ := c.defined[SecretBackendKey].(string)
-	return value
 }
 
 // AuthorizedKeys returns the content for ssh's authorized_keys file.
@@ -1124,8 +976,8 @@ func (c *Config) NetBondReconfigureDelay() int {
 
 // ContainerNetworkingMethod returns the method with which
 // containers network should be set up.
-func (c *Config) ContainerNetworkingMethod() string {
-	return c.asString(ContainerNetworkingMethod)
+func (c *Config) ContainerNetworkingMethod() coremodelconfig.ContainerNetworkingMethod {
+	return coremodelconfig.ContainerNetworkingMethod(c.asString(ContainerNetworkingMethodKey))
 }
 
 // LegacyProxySettings returns all four proxy settings; http, https, ftp, and no
@@ -1308,42 +1160,6 @@ func (c *Config) SnapStoreProxyURL() string {
 	return c.asString(SnapStoreProxyURLKey)
 }
 
-// LogFwdSyslog returns the syslog forwarding config.
-func (c *Config) LogFwdSyslog() (*syslog.RawConfig, bool) {
-	partial := false
-	var lfCfg syslog.RawConfig
-
-	if s, ok := c.defined[LogForwardEnabled]; ok {
-		partial = true
-		lfCfg.Enabled = s.(bool)
-	}
-
-	if s, ok := c.defined[LogFwdSyslogHost]; ok && s != "" {
-		partial = true
-		lfCfg.Host = s.(string)
-	}
-
-	if s, ok := c.defined[LogFwdSyslogCACert]; ok && s != "" {
-		partial = true
-		lfCfg.CACert = s.(string)
-	}
-
-	if s, ok := c.defined[LogFwdSyslogClientCert]; ok && s != "" {
-		partial = true
-		lfCfg.ClientCert = s.(string)
-	}
-
-	if s, ok := c.defined[LogFwdSyslogClientKey]; ok && s != "" {
-		partial = true
-		lfCfg.ClientKey = s.(string)
-	}
-
-	if !partial {
-		return nil, false
-	}
-	return &lfCfg, true
-}
-
 // FirewallMode returns whether the firewall should
 // manage ports per machine, globally, or not at all.
 // (FwInstance, FwGlobal, or FwNone).
@@ -1354,15 +1170,15 @@ func (c *Config) FirewallMode() string {
 // AgentVersion returns the proposed version number for the agent tools,
 // and whether it has been set. Once an environment is bootstrapped, this
 // must always be valid.
-func (c *Config) AgentVersion() (version.Number, bool) {
+func (c *Config) AgentVersion() (semversion.Number, bool) {
 	if v, ok := c.defined[AgentVersionKey].(string); ok {
-		n, err := version.Parse(v)
+		n, err := semversion.Parse(v)
 		if err != nil {
 			panic(err) // We should have checked it earlier.
 		}
 		return n, true
 	}
-	return version.Zero, false
+	return semversion.Zero, false
 }
 
 // AgentMetadataURL returns the URL that locates the agent tarballs and metadata,
@@ -1416,14 +1232,14 @@ func (c *Config) ContainerImageMetadataDefaultsDisabled() bool {
 
 // Development returns whether the environment is in development mode.
 func (c *Config) Development() bool {
-	value, _ := c.defined["development"].(bool)
+	value, _ := c.defined[DevelopmentKey].(bool)
 	return value
 }
 
 // EnableOSRefreshUpdate returns whether or not newly provisioned
 // instances should run their respective OS's update capability.
 func (c *Config) EnableOSRefreshUpdate() bool {
-	val, ok := c.defined["enable-os-refresh-update"].(bool)
+	val, ok := c.defined[EnableOSRefreshUpdateKey].(bool)
 	if !ok {
 		return true
 	}
@@ -1433,22 +1249,26 @@ func (c *Config) EnableOSRefreshUpdate() bool {
 // EnableOSUpgrade returns whether or not newly provisioned instances
 // should run their respective OS's upgrade capability.
 func (c *Config) EnableOSUpgrade() bool {
-	val, ok := c.defined["enable-os-upgrade"].(bool)
+	val, ok := c.defined[EnableOSUpgradeKey].(bool)
 	if !ok {
 		return true
 	}
 	return val
 }
 
-// SSLHostnameVerification returns weather the environment has requested
+// SSLHostnameVerification returns whether the environment has requested
 // SSL hostname verification to be enabled.
 func (c *Config) SSLHostnameVerification() bool {
-	return c.defined["ssl-hostname-verification"].(bool)
+	val, ok := c.defined["ssl-hostname-verification"].(bool)
+	if !ok {
+		return true
+	}
+	return val
 }
 
 // LoggingConfig returns the configuration string for the loggers.
 func (c *Config) LoggingConfig() string {
-	return c.asString("logging-config")
+	return c.asString(LoggingConfigKey)
 }
 
 // BackupDir returns the configuration string for the temporary files
@@ -1475,22 +1295,6 @@ func (c *Config) TransmitVendorMetrics() bool {
 		return true
 	}
 	return val
-}
-
-// ProvisionerHarvestMode reports the harvesting methodology the
-// provisioner should take.
-func (c *Config) ProvisionerHarvestMode() HarvestMode {
-	if v, ok := c.defined[ProvisionerHarvestModeKey].(string); ok {
-		if method, err := ParseHarvestMode(v); err != nil {
-			// This setting should have already been validated. Don't
-			// burden the caller with handling any errors.
-			panic(err)
-		} else {
-			return method
-		}
-	} else {
-		return HarvestDestroyed
-	}
 }
 
 // NumProvisionWorkers returns the number of provisioner workers to use.
@@ -1553,10 +1357,7 @@ func (c *Config) ImageStream() string {
 // bootstrapping or upgrading an environment.
 func (c *Config) AgentStream() string {
 	v, _ := c.defined[AgentStreamKey].(string)
-	if v != "" {
-		return v
-	}
-	return "released"
+	return v
 }
 
 // ContainerImageStream returns the simplestreams stream used to identify which
@@ -1672,40 +1473,6 @@ func (c *Config) validateCIDRs(cidrs []string, allowEmpty bool) error {
 	return nil
 }
 
-// LoggingOutput is a for determining the destination of output for
-// logging.
-func (c *Config) LoggingOutput() ([]string, bool) {
-	outputs, ok := c.defined[LoggingOutputKey]
-	if !ok {
-		return []string{}, false
-	}
-	if m, ok := outputs.(string); ok {
-		s := set.NewStrings()
-		for _, v := range strings.Split(strings.TrimSpace(m), ",") {
-			if v == "" {
-				continue
-			}
-			s.Add(strings.TrimSpace(v))
-		}
-		if s.Size() > 0 {
-			return s.SortedValues(), true
-		}
-	}
-	return []string{}, false
-}
-
-func (c *Config) validateLoggingOutput() error {
-	outputs, _ := c.LoggingOutput()
-	for _, output := range outputs {
-		switch strings.TrimSpace(output) {
-		case corelogger.DatabaseName, corelogger.SyslogName:
-		default:
-			return errors.NotValidf("logging-output %q", output)
-		}
-	}
-	return nil
-}
-
 // DisableNetworkManagement reports whether Juju is allowed to
 // configure and manage networking inside the environment.
 func (c *Config) DisableNetworkManagement() (bool, bool) {
@@ -1759,22 +1526,6 @@ func (c *Config) resourceTags() (map[string]string, error) {
 	return v, nil
 }
 
-// MaxStatusHistoryAge is the maximum age of status history entries
-// before being pruned.
-func (c *Config) MaxStatusHistoryAge() time.Duration {
-	// Value has already been validated.
-	val, _ := time.ParseDuration(c.mustString(MaxStatusHistoryAge))
-	return val
-}
-
-// MaxStatusHistorySizeMB is the maximum size in MiB which the status history
-// collection can grow to before being pruned.
-func (c *Config) MaxStatusHistorySizeMB() uint {
-	// Value has already been validated.
-	val, _ := utils.ParseSize(c.mustString(MaxStatusHistorySize))
-	return uint(val)
-}
-
 func (c *Config) MaxActionResultsAge() time.Duration {
 	// Value has already been validated.
 	val, _ := time.ParseDuration(c.mustString(MaxActionResultsAge))
@@ -1811,15 +1562,9 @@ func (c *Config) EgressSubnets() []string {
 	return result
 }
 
-// FanConfig is the configuration of FAN network running in the model.
-func (c *Config) FanConfig() (network.FanConfig, error) {
-	// At this point we are sure that the line is valid.
-	return network.ParseFanConfig(c.asString(FanConfig))
-}
-
 // CloudInitUserData returns a copy of the raw user data attributes
 // that were specified by the user.
-func (c *Config) CloudInitUserData() map[string]interface{} {
+func (c *Config) CloudInitUserData() map[string]any {
 	raw := c.asString(CloudInitUserDataKey)
 	if raw == "" {
 		return nil
@@ -1850,8 +1595,8 @@ func (c *Config) Telemetry() bool {
 // that are supposedly specific to the environment type. They could
 // also be wrong attributes, though. Only the specific environment
 // implementation can tell.
-func (c *Config) UnknownAttrs() map[string]interface{} {
-	newAttrs := make(map[string]interface{})
+func (c *Config) UnknownAttrs() map[string]any {
+	newAttrs := make(map[string]any)
 	for k, v := range c.unknown {
 		newAttrs[k] = v
 	}
@@ -1859,7 +1604,7 @@ func (c *Config) UnknownAttrs() map[string]interface{} {
 }
 
 // AllAttrs returns a copy of the raw configuration attributes.
-func (c *Config) AllAttrs() map[string]interface{} {
+func (c *Config) AllAttrs() map[string]any {
 	allAttrs := c.UnknownAttrs()
 	for k, v := range c.defined {
 		allAttrs[k] = v
@@ -1877,7 +1622,7 @@ func (c *Config) Remove(attrs []string) (*Config, error) {
 }
 
 // Apply returns a new configuration that has the attributes of c plus attrs.
-func (c *Config) Apply(attrs map[string]interface{}) (*Config, error) {
+func (c *Config) Apply(attrs map[string]any) (*Config, error) {
 	defined := c.AllAttrs()
 	for k, v := range attrs {
 		defined[k] = v
@@ -1911,13 +1656,6 @@ var alwaysOptional = schema.Defaults{
 	AuthorizedKeysKey: schema.Omit,
 	ExtraInfoKey:      schema.Omit,
 
-	LogForwardEnabled:      schema.Omit,
-	LogFwdSyslogHost:       schema.Omit,
-	LogFwdSyslogCACert:     schema.Omit,
-	LogFwdSyslogClientCert: schema.Omit,
-	LogFwdSyslogClientKey:  schema.Omit,
-	LoggingOutputKey:       schema.Omit,
-
 	// Storage related config.
 	// Environ providers will specify their own defaults.
 	StorageDefaultBlockSourceKey:      schema.Omit,
@@ -1928,7 +1666,6 @@ var alwaysOptional = schema.Defaults{
 	SAASIngressAllowKey: schema.Omit,
 
 	"logging-config":                schema.Omit,
-	ProvisionerHarvestModeKey:       schema.Omit,
 	NumProvisionWorkersKey:          schema.Omit,
 	NumContainerProvisionWorkersKey: schema.Omit,
 	HTTPProxyKey:                    schema.Omit,
@@ -1952,11 +1689,11 @@ var alwaysOptional = schema.Defaults{
 	AgentStreamKey:                  schema.Omit,
 	ResourceTagsKey:                 schema.Omit,
 	"cloudimg-base-url":             schema.Omit,
-	"enable-os-refresh-update":      schema.Omit,
-	"enable-os-upgrade":             schema.Omit,
+	EnableOSRefreshUpdateKey:        schema.Omit,
+	EnableOSUpgradeKey:              schema.Omit,
 	DefaultBaseKey:                  schema.Omit,
-	"development":                   schema.Omit,
-	"ssl-hostname-verification":     schema.Omit,
+	DevelopmentKey:                  schema.Omit,
+	SSLHostnameVerificationKey:      schema.Omit,
 	"proxy-ssh":                     schema.Omit,
 	"disable-network-management":    schema.Omit,
 	IgnoreMachineAddresses:          schema.Omit,
@@ -1966,18 +1703,15 @@ var alwaysOptional = schema.Defaults{
 	ModeKey:                         schema.Omit,
 	TransmitVendorMetricsKey:        schema.Omit,
 	NetBondReconfigureDelayKey:      schema.Omit,
-	ContainerNetworkingMethod:       schema.Omit,
-	MaxStatusHistoryAge:             schema.Omit,
-	MaxStatusHistorySize:            schema.Omit,
+	ContainerNetworkingMethodKey:    schema.Omit,
 	MaxActionResultsAge:             schema.Omit,
 	MaxActionResultsSize:            schema.Omit,
 	UpdateStatusHookInterval:        schema.Omit,
 	EgressSubnets:                   schema.Omit,
-	FanConfig:                       schema.Omit,
 	CloudInitUserDataKey:            schema.Omit,
 	ContainerInheritPropertiesKey:   schema.Omit,
 	BackupDirKey:                    schema.Omit,
-	DefaultSpace:                    schema.Omit,
+	DefaultSpaceKey:                 schema.Omit,
 	LXDSnapChannel:                  schema.Omit,
 	CharmHubURLKey:                  schema.Omit,
 
@@ -2031,15 +1765,11 @@ var (
 	defaultsWhenParsing schema.Defaults
 	withDefaultsChecker schema.Checker
 	noDefaultsChecker   schema.Checker
+	coerceChecker       schema.Checker
 )
 
 func ensureSchema() {
-	initSchema.Do(func() {
-		allFields = fields()
-		defaultsWhenParsing = allDefaults()
-		withDefaultsChecker = schema.FieldMap(allFields, defaultsWhenParsing)
-		noDefaultsChecker = schema.FieldMap(allFields, alwaysOptional)
-	})
+	initSchema.Do(initSchemas)
 }
 
 // ValidateUnknownAttrs checks the unknown attributes of the config against
@@ -2049,15 +1779,15 @@ func ensureSchema() {
 // of juju that does recognise the fields, but that their presence is still
 // anomalous to some degree and should be flagged (and that there is thereby
 // a mechanism for observing fields that really are typos etc).
-func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema.Defaults) (map[string]interface{}, error) {
+func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema.Defaults) (map[string]any, error) {
 	attrs := c.UnknownAttrs()
 	checker := schema.FieldMap(extrafields, defaults)
 	coerced, err := checker.Coerce(attrs, nil)
 	if err != nil {
-		logger.Debugf("coercion failed attributes: %#v, checker: %#v, %v", attrs, checker, err)
+		logger.Debugf(context.TODO(), "coercion failed attributes: %#v, checker: %#v, %v", attrs, checker, err)
 		return nil, err
 	}
-	result := coerced.(map[string]interface{})
+	result := coerced.(map[string]any)
 	for name, value := range attrs {
 		if extrafields[name] == nil {
 			// We know this name isn't in the global fields, or it wouldn't be
@@ -2068,14 +1798,14 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 				// only warn about attributes with non-empty string values
 				altName := strings.Replace(name, "_", "-", -1)
 				if extrafields[altName] != nil || allFields[altName] != nil {
-					logger.Warningf("unknown config field %q, did you mean %q?", name, altName)
+					logger.Warningf(context.TODO(), "unknown config field %q, did you mean %q?", name, altName)
 				} else {
-					logger.Warningf("unknown config field %q", name)
+					logger.Warningf(context.TODO(), "unknown config field %q", name)
 				}
 			}
 			result[name] = value
 			// The only allowed types for unknown attributes are string, int,
-			// float, bool and []interface{} (which is really []string)
+			// float, bool and []any (which is really []string)
 			switch t := value.(type) {
 			case string:
 				continue
@@ -2087,7 +1817,7 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 				continue
 			case float64:
 				continue
-			case []interface{}:
+			case []any:
 				for _, val := range t {
 					if _, ok := val.(string); !ok {
 						return nil, errors.Errorf("%s: unknown type (%v)", name, value)
@@ -2102,7 +1832,7 @@ func (c *Config) ValidateUnknownAttrs(extrafields schema.Fields, defaults schema
 	return result, nil
 }
 
-func addIfNotEmpty(settings map[string]interface{}, key, value string) {
+func addIfNotEmpty(settings map[string]any, key, value string) {
 	if value != "" {
 		settings[key] = value
 	}
@@ -2110,8 +1840,8 @@ func addIfNotEmpty(settings map[string]interface{}, key, value string) {
 
 // ProxyConfigMap returns a map suitable to be applied to a Config to update
 // proxy settings.
-func ProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
-	settings := make(map[string]interface{})
+func ProxyConfigMap(proxySettings proxy.Settings) map[string]any {
+	settings := make(map[string]any)
 	addIfNotEmpty(settings, HTTPProxyKey, proxySettings.Http)
 	addIfNotEmpty(settings, HTTPSProxyKey, proxySettings.Https)
 	addIfNotEmpty(settings, FTPProxyKey, proxySettings.Ftp)
@@ -2121,8 +1851,8 @@ func ProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
 
 // AptProxyConfigMap returns a map suitable to be applied to a Config to update
 // proxy settings.
-func AptProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
-	settings := make(map[string]interface{})
+func AptProxyConfigMap(proxySettings proxy.Settings) map[string]any {
+	settings := make(map[string]any)
 	addIfNotEmpty(settings, AptHTTPProxyKey, proxySettings.Http)
 	addIfNotEmpty(settings, AptHTTPSProxyKey, proxySettings.Https)
 	addIfNotEmpty(settings, AptFTPProxyKey, proxySettings.Ftp)
@@ -2131,462 +1861,10 @@ func AptProxyConfigMap(proxySettings proxy.Settings) map[string]interface{} {
 }
 
 func developerConfigValue(name string) bool {
-	if !featureflag.Enabled(feature.DeveloperMode) {
+	if !featureflag.Enabled(featureflag.DeveloperMode) {
 		switch name {
 		// Add developer-mode keys here.
 		}
 	}
 	return false
-}
-
-// Schema returns a configuration schema that includes both
-// the given extra fields and all the fields defined in this package.
-// It returns an error if extra defines any fields defined in this
-// package.
-func Schema(extra environschema.Fields) (environschema.Fields, error) {
-	fields := make(environschema.Fields)
-	for name, field := range configSchema {
-		if developerConfigValue(name) {
-			continue
-		}
-		if controller.ControllerOnlyAttribute(name) {
-			return nil, errors.Errorf("config field %q clashes with controller config", name)
-		}
-		fields[name] = field
-	}
-	for name, field := range extra {
-		if controller.ControllerOnlyAttribute(name) {
-			return nil, errors.Errorf("config field %q clashes with controller config", name)
-		}
-		if _, ok := fields[name]; ok {
-			return nil, errors.Errorf("config field %q clashes with global config", name)
-		}
-		fields[name] = field
-	}
-	return fields, nil
-}
-
-// configSchema holds information on all the fields defined by
-// the config package.
-var configSchema = environschema.Fields{
-	AgentMetadataURLKey: {
-		Description: "URL of private stream",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AgentStreamKey: {
-		Description: `Version of Juju to use for deploy/upgrades.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AgentVersionKey: {
-		Description: "The desired Juju agent version to use",
-		Type:        environschema.Tstring,
-		Group:       environschema.JujuGroup,
-		Immutable:   true,
-	},
-	AptFTPProxyKey: {
-		// TODO document acceptable format
-		Description: "The APT FTP proxy for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AptHTTPProxyKey: {
-		// TODO document acceptable format
-		Description: "The APT HTTP proxy for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AptHTTPSProxyKey: {
-		// TODO document acceptable format
-		Description: "The APT HTTPS proxy for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AptNoProxyKey: {
-		Description: "List of domain addresses not to be proxied for APT (comma-separated)",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AptMirrorKey: {
-		// TODO document acceptable format
-		Description: "The APT mirror for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	AuthorizedKeysKey: {
-		Description: "Any authorized SSH public keys for the model, as found in a ~/.ssh/authorized_keys file",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	DefaultBaseKey: {
-		Description: "The default base image to use for deploying charms, will act like --base when deploying charms",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	// TODO (jack-w-shaw) integrate this into mode
-	"development": {
-		Description: "Whether the model is in development mode",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	"disable-network-management": {
-		Description: "Whether the provider should control networks (on MAAS models, set to true for MAAS to control networks",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	IgnoreMachineAddresses: {
-		Description: "Whether the machine worker should discover machine addresses on startup",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	"enable-os-refresh-update": {
-		Description: `Whether newly provisioned instances should run their respective OS's update capability.`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	"enable-os-upgrade": {
-		Description: `Whether newly provisioned instances should run their respective OS's upgrade capability.`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	ExtraInfoKey: {
-		Description: "Arbitrary user specified string data that is stored against the model.",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	"firewall-mode": {
-		Description: `The mode to use for network firewalling.
-
-'instance' requests the use of an individual firewall per instance.
-
-'global' uses a single firewall for all instances (access
-for a network port is enabled to one instance if any instance requires
-that port).
-
-'none' requests that no firewalling should be performed
-inside the model. It's useful for clouds without support for either
-global or per instance security groups.`,
-		Type:      environschema.Tstring,
-		Values:    []interface{}{FwInstance, FwGlobal, FwNone},
-		Immutable: true,
-		Group:     environschema.EnvironGroup,
-	},
-	FTPProxyKey: {
-		Description: "The FTP proxy value to configure on instances, in the FTP_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	HTTPProxyKey: {
-		Description: "The HTTP proxy value to configure on instances, in the HTTP_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	HTTPSProxyKey: {
-		Description: "The HTTPS proxy value to configure on instances, in the HTTPS_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	NoProxyKey: {
-		Description: "List of domain addresses not to be proxied (comma-separated)",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	JujuFTPProxyKey: {
-		Description: "The FTP proxy value to pass to charms in the JUJU_CHARM_FTP_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	JujuHTTPProxyKey: {
-		Description: "The HTTP proxy value to pass to charms in the JUJU_CHARM_HTTP_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	JujuHTTPSProxyKey: {
-		Description: "The HTTPS proxy value to pass to charms in the JUJU_CHARM_HTTPS_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	JujuNoProxyKey: {
-		Description: "List of domain addresses not to be proxied (comma-separated), may contain CIDRs. Passed to charms in the JUJU_CHARM_NO_PROXY environment variable",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SnapHTTPProxyKey: {
-		Description: "The HTTP proxy value for installing snaps",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SnapHTTPSProxyKey: {
-		Description: "The HTTPS proxy value for installing snaps",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SnapStoreProxyKey: {
-		Description: "The snap store proxy for installing snaps",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SnapStoreAssertionsKey: {
-		Description: "The assertions for the defined snap store proxy",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SnapStoreProxyURLKey: {
-		Description: "The URL for the defined snap store proxy",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ImageMetadataURLKey: {
-		Description: "The URL at which the metadata used to locate OS image ids is located",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ImageStreamKey: {
-		Description: `The simplestreams stream used to identify which image ids to search when starting an instance.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ImageMetadataDefaultsDisabledKey: {
-		Description: `Whether default simplestreams sources are used for image metadata.`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	ContainerImageMetadataURLKey: {
-		Description: "The URL at which the metadata used to locate container OS image ids is located",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ContainerImageStreamKey: {
-		Description: `The simplestreams stream used to identify which image ids to search when starting a container.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ContainerImageMetadataDefaultsDisabledKey: {
-		Description: `Whether default simplestreams sources are used for image metadata with containers.`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	"logging-config": {
-		Description: `The configuration string to use when configuring Juju agent logging (see http://godoc.org/github.com/juju/loggo#ParseConfigurationString for details)`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	NameKey: {
-		Description: "The name of the current model",
-		Type:        environschema.Tstring,
-		Mandatory:   true,
-		Immutable:   true,
-		Group:       environschema.EnvironGroup,
-	},
-	ProvisionerHarvestModeKey: {
-		// default: destroyed, but also depends on current setting of ProvisionerSafeModeKey
-		Description: "What to do with unknown machines (default destroyed)",
-		Type:        environschema.Tstring,
-		Values:      []interface{}{"all", "none", "unknown", "destroyed"},
-		Group:       environschema.EnvironGroup,
-	},
-	NumProvisionWorkersKey: {
-		Description: "The number of provisioning workers to use per model",
-		Type:        environschema.Tint,
-		Group:       environschema.EnvironGroup,
-	},
-	NumContainerProvisionWorkersKey: {
-		Description: "The number of container provisioning workers to use per machine",
-		Type:        environschema.Tint,
-		Group:       environschema.EnvironGroup,
-	},
-	"proxy-ssh": {
-		// default: true
-		Description: `Whether SSH commands should be proxied through the API server`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	ResourceTagsKey: {
-		Description: "resource tags",
-		Type:        environschema.Tattrs,
-		Group:       environschema.EnvironGroup,
-	},
-	LogForwardEnabled: {
-		Description: `Whether syslog forwarding is enabled.`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	LogFwdSyslogHost: {
-		Description: `The hostname:port of the syslog server.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	LogFwdSyslogCACert: {
-		Description: `The certificate of the CA that signed the syslog server certificate, in PEM format.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	LogFwdSyslogClientCert: {
-		Description: `The syslog client certificate in PEM format.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	LogFwdSyslogClientKey: {
-		Description: `The syslog client key in PEM format.`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	"ssl-hostname-verification": {
-		Description: "Whether SSL hostname verification is enabled (default true)",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	StorageDefaultBlockSourceKey: {
-		Description: "The default block storage source for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	StorageDefaultFilesystemSourceKey: {
-		Description: "The default filesystem storage source for the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	TestModeKey: {
-		Description: `Whether the model is intended for testing.
-If true, accessing the charm store does not affect statistical
-data of the store. (default false)`,
-		Type:  environschema.Tbool,
-		Group: environschema.EnvironGroup,
-	},
-	DisableTelemetryKey: {
-		Description: `Disable telemetry reporting of model information`,
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	ModeKey: {
-		Description: `Mode is a comma-separated list which sets the
-mode the model should run in. So far only one is implemented
-- If 'requires-prompts' is present, clients will ask for confirmation before removing
-potentially valuable resources.
-(default "")`,
-		Type:  environschema.Tstring,
-		Group: environschema.EnvironGroup,
-	},
-	SSHAllowKey: {
-		Description: `SSH allowlist is a comma-separated list of CIDRs from
-which machines in this model will accept connections to the SSH service.
-Currently only the aws, gce, openstack providers support ssh-allow`,
-		Type:  environschema.Tstring,
-		Group: environschema.EnvironGroup,
-	},
-	SAASIngressAllowKey: {
-		Description: `Application-offer ingress allowlist is a comma-separated list of
-CIDRs specifying what ingress can be applied to offers in this model.`,
-		Type:  environschema.Tstring,
-		Group: environschema.EnvironGroup,
-	},
-	TypeKey: {
-		Description: "Type of model, e.g. local, ec2",
-		Type:        environschema.Tstring,
-		Mandatory:   true,
-		Immutable:   true,
-		Group:       environschema.EnvironGroup,
-	},
-	UUIDKey: {
-		Description: "The UUID of the model",
-		Type:        environschema.Tstring,
-		Group:       environschema.JujuGroup,
-		Immutable:   true,
-	},
-	AutomaticallyRetryHooks: {
-		Description: "Determines whether the uniter should automatically retry failed hooks",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	TransmitVendorMetricsKey: {
-		Description: "Determines whether metrics declared by charms deployed into this model are sent for anonymized aggregate analytics",
-		Type:        environschema.Tbool,
-		Group:       environschema.EnvironGroup,
-	},
-	NetBondReconfigureDelayKey: {
-		Description: "The amount of time in seconds to sleep between ifdown and ifup when bridging",
-		Type:        environschema.Tint,
-		Group:       environschema.EnvironGroup,
-	},
-	ContainerNetworkingMethod: {
-		Description: "Method of container networking setup - one of fan, provider, local",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	MaxStatusHistoryAge: {
-		Description: "The maximum age for status history entries before they are pruned, in human-readable time format",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	MaxStatusHistorySize: {
-		Description: "The maximum size for the status history collection, in human-readable memory format",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	MaxActionResultsAge: {
-		Description: "The maximum age for action entries before they are pruned, in human-readable time format",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	MaxActionResultsSize: {
-		Description: "The maximum size for the action collection, in human-readable memory format",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	UpdateStatusHookInterval: {
-		Description: "How often to run the charm update-status hook, in human-readable time format (default 5m, range 1-60m)",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	EgressSubnets: {
-		Description: "Source address(es) for traffic originating from this model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	FanConfig: {
-		Description: "Configuration for fan networking for this model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	CloudInitUserDataKey: {
-		Description: "Cloud-init user-data (in yaml format) to be added to userdata for new machines created in this model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	ContainerInheritPropertiesKey: {
-		Description: "List of properties to be copied from the host machine to new containers created in this model (comma-separated)",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	BackupDirKey: {
-		Description: "Directory used to store the backup working directory",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	DefaultSpace: {
-		Description: "The default network space used for application endpoints in this model",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	LXDSnapChannel: {
-		Description: "The channel to use when installing LXD from a snap (cosmic and later)",
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	CharmHubURLKey: {
-		Description: `The url for CharmHub API calls`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	LoggingOutputKey: {
-		Description: `The logging output destination: database and/or syslog. (default "")`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
-	SecretBackendKey: {
-		Description: `The name of the secret store backend. (default "auto")`,
-		Type:        environschema.Tstring,
-		Group:       environschema.EnvironGroup,
-	},
 }

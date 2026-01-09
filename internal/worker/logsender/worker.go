@@ -4,11 +4,12 @@
 package logsender
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api/logsender"
 	jworker "github.com/juju/juju/internal/worker"
@@ -17,10 +18,15 @@ import (
 
 const loggerName = "juju.worker.logsender"
 
+// LogSenderAPI provides a log writer.
+type LogSenderAPI interface {
+	LogWriter(ctx context.Context) (logsender.LogWriter, error)
+}
+
 // New starts a logsender worker which reads log message structs from
 // a channel and sends them to the controller via the logsink API.
-func New(logs LogRecordCh, logSenderAPI *logsender.API) worker.Worker {
-	loop := func(stop <-chan struct{}) error {
+func New(logs LogRecordCh, logSenderAPI LogSenderAPI) worker.Worker {
+	loop := func(ctx context.Context) error {
 		// It has been observed that sometimes the logsender.API gets wedged
 		// attempting to get the LogWriter while the agent is being torn down,
 		// and the call to logSenderAPI.LogWriter() doesn't return. This stops
@@ -30,19 +36,17 @@ func New(logs LogRecordCh, logSenderAPI *logsender.API) worker.Worker {
 		sender := make(chan logsender.LogWriter)
 		errChan := make(chan error)
 		go func() {
-			logWriter, err := logSenderAPI.LogWriter()
+			logWriter, err := logSenderAPI.LogWriter(context.TODO())
 			if err != nil {
 				select {
 				case errChan <- err:
-				case <-stop:
+				case <-ctx.Done():
 				}
 				return
 			}
 			select {
 			case sender <- logWriter:
-			case <-stop:
-				// Loop has been stopped before returning the writer. Need to close it in order to avoid
-				// possible ressources leak
+			case <-ctx.Done():
 				logWriter.Close()
 			}
 		}()
@@ -52,7 +56,7 @@ func New(logs LogRecordCh, logSenderAPI *logsender.API) worker.Worker {
 		case logWriter = <-sender:
 		case err = <-errChan:
 			return errors.Annotate(err, "logsender dial failed")
-		case <-stop:
+		case <-ctx.Done():
 			return nil
 		}
 		// the logwriter has been successfully retrieved from the inside goroutine and its lifecycle is now handled
@@ -99,7 +103,7 @@ func New(logs LogRecordCh, logSenderAPI *logsender.API) worker.Worker {
 					}
 				}
 
-			case <-stop:
+			case <-ctx.Done():
 				return nil
 			}
 		}

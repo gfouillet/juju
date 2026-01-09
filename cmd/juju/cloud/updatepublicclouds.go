@@ -12,21 +12,21 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/crypto/openpgp"
 	"golang.org/x/crypto/openpgp/clearsign"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/cmd"
+	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/juju/keys"
-	"github.com/juju/juju/jujuclient"
 )
 
 type updatePublicCloudsCommand struct {
@@ -35,7 +35,7 @@ type updatePublicCloudsCommand struct {
 	publicSigningKey string
 	publicCloudURL   string
 
-	addCloudAPIFunc func() (updatePublicCloudAPI, error)
+	addCloudAPIFunc func(ctx context.Context) (updatePublicCloudAPI, error)
 }
 
 var updatePublicCloudsDoc = `
@@ -108,11 +108,12 @@ func (c *updatePublicCloudsCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args)
 }
 
-func PublishedPublicClouds(url, key string) (map[string]jujucloud.Cloud, error) {
+// PublishedPublicClouds retrieves public cloud information from the given URL.
+func PublishedPublicClouds(ctx context.Context, url, key string) (map[string]jujucloud.Cloud, error) {
 	client := jujuhttp.NewClient(
-		jujuhttp.WithLogger(logger.ChildWithLabels("http", corelogger.HTTP)),
+		jujuhttp.WithLogger(logger.Child("http", corelogger.HTTP)),
 	)
-	resp, err := client.Get(context.TODO(), url)
+	resp, err := client.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +147,7 @@ func (c *updatePublicCloudsCommand) Run(ctxt *cmd.Context) error {
 	fmt.Fprint(ctxt.Stderr, "Fetching latest public cloud list...\n")
 	var returnedErr error
 	publishedClouds, msg, err := FetchAndMaybeUpdatePublicClouds(
+		ctxt,
 		PublicCloudsAccessDetails{
 			publicSigningKey: c.publicSigningKey,
 			publicCloudURL:   c.publicCloudURL,
@@ -182,9 +184,9 @@ func (c *updatePublicCloudsCommand) Run(ctxt *cmd.Context) error {
 // Since this call can also update a client copy of clouds, it is possible that the public
 // clouds have been retrieved but the client update fail. In this case, we still
 // return public clouds as well as the client error.
-var FetchAndMaybeUpdatePublicClouds = func(access PublicCloudsAccessDetails, updateClient bool) (map[string]jujucloud.Cloud, string, error) {
+var FetchAndMaybeUpdatePublicClouds = func(ctx context.Context, access PublicCloudsAccessDetails, updateClient bool) (map[string]jujucloud.Cloud, string, error) {
 	var msg string
-	publishedClouds, err := PublishedPublicClouds(access.publicCloudURL, access.publicSigningKey)
+	publishedClouds, err := PublishedPublicClouds(ctx, access.publicCloudURL, access.publicSigningKey)
 	if err != nil {
 		return nil, msg, errors.Trace(err)
 	}
@@ -217,13 +219,13 @@ func updateClientCopy(publishedClouds map[string]jujucloud.Cloud) (string, error
 }
 
 func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publishedClouds map[string]jujucloud.Cloud) error {
-	api, err := c.addCloudAPIFunc()
+	api, err := c.addCloudAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	allClouds, err := api.Clouds()
+	allClouds, err := api.Clouds(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -240,7 +242,7 @@ func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publ
 		}
 		oldCopies[cloudName] = currentCopy
 		newCopies[cloudName] = updatedCopy
-		if err := api.UpdateCloud(updatedCopy); err != nil {
+		if err := api.UpdateCloud(ctxt, updatedCopy); err != nil {
 			fmt.Fprintln(ctxt.Stderr, fmt.Sprintf("ERROR updating public cloud data on controller %q: %v", c.ControllerName, err))
 			continue
 		}
@@ -257,11 +259,11 @@ func (c *updatePublicCloudsCommand) updateControllerCopy(ctxt *cmd.Context, publ
 
 type updatePublicCloudAPI interface {
 	updateCloudAPI
-	Clouds() (map[names.CloudTag]jujucloud.Cloud, error)
+	Clouds(ctx context.Context) (map[names.CloudTag]jujucloud.Cloud, error)
 }
 
-func (c *updatePublicCloudsCommand) cloudAPI() (updatePublicCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *updatePublicCloudsCommand) cloudAPI(ctx context.Context) (updatePublicCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

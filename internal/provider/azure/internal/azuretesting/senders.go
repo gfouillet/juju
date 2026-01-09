@@ -15,10 +15,11 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/juju/loggo"
+
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.provider.azure.internal.azuretesting")
+var logger = internallogger.GetLogger("juju.provider.azure.internal.azuretesting")
 
 // FakeCredential is a credential that returns a fake token.
 type FakeCredential struct{}
@@ -285,7 +286,7 @@ func SetResponseHeaderValues(resp *http.Response, h string, values []string) {
 type Senders []policy.Transporter
 
 func (s *Senders) Do(req *http.Request) (*http.Response, error) {
-	logger.Debugf("Senders.Do(%s)", req.URL)
+	logger.Debugf(req.Context(), "Senders.Do(%s)", req.URL)
 	if len(*s) == 0 {
 		response := NewResponseWithStatus("", http.StatusInternalServerError) //nolint:bodyclose
 		return response, fmt.Errorf("no sender for %q", req.URL)

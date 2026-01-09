@@ -4,17 +4,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"slices"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
-	"github.com/juju/juju/storage"
 )
 
 // These commands are deprecated, we don't want to document them.
@@ -55,11 +56,11 @@ func main() {
 	err := jujucSuperCmd.Init([]string{"documentation", "--split", "--no-index", "--out", dest})
 	check(err)
 	err = jujucSuperCmd.Run(&cmd.Context{
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Context: context.Background(),
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
 	})
 	check(err)
-
 }
 
 // dummyHookContext implements hooks.Context, as expected by hooks.NewCommand.
@@ -81,7 +82,7 @@ func (dummyHookContext) SetRawK8sSpec(specYaml string) error {
 func (dummyHookContext) GetRawK8sSpec() (string, error) {
 	return "", nil
 }
-func (dummyHookContext) PublicAddress() (string, error) {
+func (dummyHookContext) PublicAddress(ctx context.Context) (string, error) {
 	return "", errors.NotFoundf("PublicAddress")
 }
 func (dummyHookContext) PrivateAddress() (string, error) {
@@ -99,7 +100,7 @@ func (dummyHookContext) ClosePort(protocol string, port int) error {
 func (dummyHookContext) OpenedPorts() []network.PortRange {
 	return nil
 }
-func (dummyHookContext) ConfigSettings() (charm.Settings, error) {
+func (dummyHookContext) ConfigSettings(ctx context.Context) (charm.Config, error) {
 	return charm.NewConfig().DefaultSettings(), nil
 }
 func (dummyHookContext) HookRelation() (jujuc.ContextRelation, error) {
@@ -123,13 +124,13 @@ func (dummyHookContext) RequestReboot(prio jujuc.RebootPriority) error {
 func (dummyHookContext) HookStorageInstance() (*storage.StorageInstance, error) {
 	return nil, errors.NotFoundf("HookStorageInstance")
 }
-func (dummyHookContext) HookStorage() (jujuc.ContextStorageAttachment, error) {
+func (dummyHookContext) HookStorage(ctx context.Context) (jujuc.ContextStorageAttachment, error) {
 	return nil, errors.NotFoundf("HookStorage")
 }
 func (dummyHookContext) StorageInstance(id string) (*storage.StorageInstance, error) {
 	return nil, errors.NotFoundf("StorageInstance")
 }
-func (dummyHookContext) UnitStatus() (*jujuc.StatusInfo, error) {
+func (dummyHookContext) UnitStatus(ctx context.Context) (*jujuc.StatusInfo, error) {
 	return &jujuc.StatusInfo{}, nil
 }
 func (dummyHookContext) SetStatus(jujuc.StatusInfo) error {

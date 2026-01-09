@@ -4,10 +4,10 @@
 package application
 
 import (
+	"context"
 	"strconv"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -15,6 +15,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var helpSummary = `
@@ -58,8 +59,8 @@ at least once. For example, the commands below will all have the same effect:
 // NewRemoveRelationCommand returns a command to remove a relation between 2 applications.
 func NewRemoveRelationCommand() cmd.Command {
 	command := &removeRelationCommand{}
-	command.newAPIFunc = func() (ApplicationDestroyRelationAPI, error) {
-		root, err := command.NewAPIRoot()
+	command.newAPIFunc = func(ctx context.Context) (ApplicationDestroyRelationAPI, error) {
+		root, err := command.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -74,7 +75,7 @@ type removeRelationCommand struct {
 	modelcmd.ModelCommandBase
 	RelationId int
 	Endpoints  []string
-	newAPIFunc func() (ApplicationDestroyRelationAPI, error)
+	newAPIFunc func(ctx context.Context) (ApplicationDestroyRelationAPI, error)
 	Force      bool
 	NoWait     bool
 	fs         *gnuflag.FlagSet
@@ -117,11 +118,11 @@ func (c *removeRelationCommand) SetFlags(f *gnuflag.FlagSet) {
 // ApplicationDestroyRelationAPI defines the API methods that application remove relation command uses.
 type ApplicationDestroyRelationAPI interface {
 	Close() error
-	DestroyRelation(force *bool, maxWait *time.Duration, endpoints ...string) error
-	DestroyRelationId(relationId int, force *bool, maxWait *time.Duration) error
+	DestroyRelation(ctx context.Context, force *bool, maxWait *time.Duration, endpoints ...string) error
+	DestroyRelationId(ctx context.Context, relationId int, force *bool, maxWait *time.Duration) error
 }
 
-func (c *removeRelationCommand) Run(_ *cmd.Context) error {
+func (c *removeRelationCommand) Run(ctx *cmd.Context) error {
 	noWaitSet := false
 	forceSet := false
 	c.fs.Visit(func(flag *gnuflag.Flag) {
@@ -144,15 +145,15 @@ func (c *removeRelationCommand) Run(_ *cmd.Context) error {
 		}
 	}
 
-	client, err := c.newAPIFunc()
+	client, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 	if len(c.Endpoints) > 0 {
-		err = client.DestroyRelation(force, maxWait, c.Endpoints...)
+		err = client.DestroyRelation(ctx, force, maxWait, c.Endpoints...)
 	} else {
-		err = client.DestroyRelationId(c.RelationId, force, maxWait)
+		err = client.DestroyRelationId(ctx, c.RelationId, force, maxWait)
 	}
 	return block.ProcessBlockedError(err, block.BlockRemove)
 }

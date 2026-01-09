@@ -4,17 +4,17 @@
 package azure
 
 import (
+	"context"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/internal/provider/azure/internal/armtemplates"
-	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
 )
 
 func (env *azureEnviron) createDeployment(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	resourceGroup string,
 	deploymentName string,
 	t armtemplates.Template,
@@ -50,11 +50,11 @@ func (env *azureEnviron) createDeployment(
 			err = errors.New(toValue(result.Properties.Error.Message))
 		}
 	}
-	return errorutils.HandleCredentialError(errors.Annotatef(err, "creating Azure deployment %q", deploymentName), ctx)
+	return env.HandleCredentialError(ctx, errors.Annotatef(err, "creating Azure deployment %q", deploymentName))
 }
 
 func (env *azureEnviron) createSubscriptionDeployment(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	location string,
 	deploymentName string,
 	params any,
@@ -90,5 +90,5 @@ func (env *azureEnviron) createSubscriptionDeployment(
 			err = errors.New(toValue(result.Properties.Error.Message))
 		}
 	}
-	return errorutils.HandleCredentialError(errors.Annotatef(err, "creating Azure subscription deployment %q", deploymentName), ctx)
+	return env.HandleCredentialError(ctx, errors.Annotatef(err, "creating Azure subscription deployment %q", deploymentName))
 }

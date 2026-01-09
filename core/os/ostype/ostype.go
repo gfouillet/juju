@@ -3,7 +3,12 @@
 
 package ostype
 
-import "strings"
+import (
+	"strings"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
+)
 
 type OSType int
 
@@ -53,21 +58,13 @@ func (t OSType) IsLinux() bool {
 	return false
 }
 
-var validOSTypeNames map[string]OSType
-
-func init() {
-	osTypes := []OSType{
-		Unknown,
-		Ubuntu,
-		Windows,
-		CentOS,
-		GenericLinux,
-		Kubernetes,
-	}
-	validOSTypeNames = make(map[string]OSType)
-	for _, osType := range osTypes {
-		validOSTypeNames[strings.ToLower(osType.String())] = osType
-	}
+var validOSTypeNames = map[string]OSType{
+	"ubuntu":       Ubuntu,
+	"windows":      Windows,
+	"osx":          OSX,
+	"centos":       CentOS,
+	"genericlinux": GenericLinux,
+	"kubernetes":   Kubernetes,
 }
 
 // IsValidOSTypeName returns true if osType is a
@@ -88,4 +85,13 @@ func OSTypeForName(name string) OSType {
 		return os
 	}
 	return Unknown
+}
+
+// ParseOSType parses a string and returns the corresponding OSType.
+func ParseOSType(s string) (OSType, error) {
+	osType, ok := validOSTypeNames[strings.ToLower(s)]
+	if !ok {
+		return Unknown, errors.Errorf("unknown os type %q %w", s, coreerrors.NotValid)
+	}
+	return osType, nil
 }

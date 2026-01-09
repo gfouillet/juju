@@ -5,91 +5,35 @@ package charms_test
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
-	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/httprequest.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/charms"
 	"github.com/juju/juju/api/http/mocks"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/testcharms"
-	"github.com/juju/juju/testing"
-	coretesting "github.com/juju/juju/testing"
-	jujuversion "github.com/juju/juju/version"
 )
 
 type addCharmSuite struct {
-	coretesting.BaseSuite
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&addCharmSuite{})
-
-// TestLegacyAddLocalCharm runs the same test as AddLocalCharm,
-// but backs our client with the legacy http putter
-func (s *addCharmSuite) TestLegacyAddLocalCharm(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockCaller := basemocks.NewMockAPICaller(ctrl)
-	mockHttpDoer := mocks.NewMockHTTPClient(ctrl)
-	reqClient := &httprequest.Client{
-		BaseURL: "http://somewhere.invalid",
-		Doer:    mockHttpDoer,
-	}
-
-	mockCaller.EXPECT().ModelTag().Return(testing.ModelTag, false).AnyTimes()
-	mockFacadeCaller.EXPECT().RawAPICaller().Return(mockCaller).AnyTimes()
-
-	curl, charmArchive := s.testCharm(c)
-	resp := &http.Response{
-		StatusCode: 200,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(strings.NewReader(`{"charm-url": "local:quantal/dummy-1"}`)),
-	}
-	resp.Header.Add("Content-Type", "application/json")
-	mockHttpDoer.EXPECT().Do(
-		&httpURLMatcher{"http://somewhere.invalid/charms\\?revision=1&schema=local&series=quantal"},
-	).Return(resp, nil).MinTimes(1)
-
-	httpPutter := charms.NewHTTPPutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
-	vers := version.MustParse("2.6.6")
-	// Test the sanity checks first.
-	_, err := client.AddLocalCharm(charm.MustParseURL("ch:wordpress-1"), nil, false, vers)
-	c.Assert(err, gc.ErrorMatches, `expected charm URL with local: schema, got "ch:wordpress-1"`)
-
-	// Upload an archive with its original revision.
-	savedURL, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, curl.String())
-
-	// Upload a charm directory with changed revision.
-	resp.Body = io.NopCloser(strings.NewReader(`{"charm-url": "local:quantal/dummy-42"}`))
-	charmDir := testcharms.Repo.ClonedDir(c.MkDir(), "dummy")
-	err = charmDir.SetDiskRevision(42)
-	c.Assert(err, jc.ErrorIsNil)
-	savedURL, err = client.AddLocalCharm(curl, charmDir, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.Revision, gc.Equals, 42)
-
-	// Upload a charm directory again, revision should be bumped.
-	resp.Body = io.NopCloser(strings.NewReader(`{"charm-url": "local:quantal/dummy-43"}`))
-	savedURL, err = client.AddLocalCharm(curl, charmDir, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, curl.WithRevision(43).String())
+func TestAddCharmSuite(t *stdtesting.T) {
+	tc.Run(t, &addCharmSuite{})
 }
 
-func (s *addCharmSuite) TestAddLocalCharm(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharm(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -110,40 +54,37 @@ func (s *addCharmSuite) TestAddLocalCharm(c *gc.C) {
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/dummy-1")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/dummy-1")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/dummy-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(resp, nil).MinTimes(1)
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
-	vers := version.MustParse("2.6.6")
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
+	vers := semversion.MustParse("2.6.6")
 	// Test the sanity checks first.
 	_, err := client.AddLocalCharm(charm.MustParseURL("ch:wordpress-1"), nil, false, vers)
-	c.Assert(err, gc.ErrorMatches, `expected charm URL with local: schema, got "ch:wordpress-1"`)
+	c.Assert(err, tc.ErrorMatches, `expected charm URL with local: schema, got "ch:wordpress-1"`)
 
 	// Upload an archive with its original revision.
 	savedURL, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, curl.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedURL.String(), tc.Equals, curl.String())
 
 	// Upload a charm directory with changed revision.
-	resp.Header.Set("Juju-Curl", "local:quantal/dummy-42")
-	charmDir := testcharms.Repo.ClonedDir(c.MkDir(), "dummy")
-	err = charmDir.SetDiskRevision(42)
-	c.Assert(err, jc.ErrorIsNil)
-	savedURL, err = client.AddLocalCharm(curl, charmDir, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.Revision, gc.Equals, 42)
+	resp.Header.Set(params.JujuCharmURLHeader, "local:quantal/dummy-42")
+	savedURL, err = client.AddLocalCharm(curl, charmArchive, false, vers)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedURL.Revision, tc.Equals, 42)
 
 	// Upload a charm directory again, revision should be bumped.
-	resp.Header.Set("Juju-Curl", "local:quantal/dummy-43")
-	savedURL, err = client.AddLocalCharm(curl, charmDir, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, curl.WithRevision(43).String())
+	resp.Header.Set(params.JujuCharmURLHeader, "local:quantal/dummy-43")
+	savedURL, err = client.AddLocalCharm(curl, charmArchive, false, vers)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedURL.String(), tc.Equals, curl.WithRevision(43).String())
 }
 
-func (s *addCharmSuite) TestAddLocalCharmFindingHooksError(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmFindingHooksError(c *tc.C) {
 	s.assertAddLocalCharmFailed(c,
 		func(string) (bool, error) {
 			return true, fmt.Errorf("bad zip")
@@ -151,7 +92,7 @@ func (s *addCharmSuite) TestAddLocalCharmFindingHooksError(c *gc.C) {
 		`bad zip`)
 }
 
-func (s *addCharmSuite) TestAddLocalCharmNoHooks(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmNoHooks(c *tc.C) {
 	s.assertAddLocalCharmFailed(c,
 		func(string) (bool, error) {
 			return false, nil
@@ -159,7 +100,7 @@ func (s *addCharmSuite) TestAddLocalCharmNoHooks(c *gc.C) {
 		`invalid charm \"dummy\": has no hooks nor dispatch file`)
 }
 
-func (s *addCharmSuite) TestAddLocalCharmWithLXDProfile(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmWithLXDProfile(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -179,26 +120,26 @@ func (s *addCharmSuite) TestAddLocalCharmWithLXDProfile(c *gc.C) {
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/lxd-profile-0")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/lxd-profile-0")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/lxd-profile-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(resp, nil).MinTimes(1)
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "lxd-profile")
 	curl := charm.MustParseURL(
 		fmt.Sprintf("local:quantal/%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
 	)
 
-	vers := version.MustParse("2.6.6")
+	vers := semversion.MustParse("2.6.6")
 	savedURL, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, "local:quantal/lxd-profile-0")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedURL.String(), tc.Equals, "local:quantal/lxd-profile-0")
 }
 
-func (s *addCharmSuite) TestAddLocalCharmWithInvalidLXDProfile(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmWithInvalidLXDProfile(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -208,28 +149,28 @@ func (s *addCharmSuite) TestAddLocalCharmWithInvalidLXDProfile(c *gc.C) {
 		BaseURL: "http://somewhere.invalid",
 		Doer:    mockHttpDoer,
 	}
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "lxd-profile-fail")
 	curl := charm.MustParseURL(
 		fmt.Sprintf("local:quantal/%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
 	)
 
-	vers := version.MustParse("2.6.6")
+	vers := semversion.MustParse("2.6.6")
 	_, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, gc.ErrorMatches, "invalid lxd-profile.yaml: contains device type \"unix-disk\"")
+	c.Assert(err, tc.ErrorMatches, "invalid lxd-profile.yaml: contains device type \"unix-disk\"")
 }
 
-func (s *addCharmSuite) TestAddLocalCharmWithValidLXDProfileWithForceSucceeds(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmWithValidLXDProfileWithForceSucceeds(c *tc.C) {
 	s.testAddLocalCharmWithForceSucceeds("lxd-profile", c)
 }
 
-func (s *addCharmSuite) TestAddLocalCharmWithInvalidLXDProfileWithForceSucceeds(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmWithInvalidLXDProfileWithForceSucceeds(c *tc.C) {
 	s.testAddLocalCharmWithForceSucceeds("lxd-profile-fail", c)
 }
 
-func (s *addCharmSuite) testAddLocalCharmWithForceSucceeds(name string, c *gc.C) {
+func (s *addCharmSuite) testAddLocalCharmWithForceSucceeds(name string, c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -249,26 +190,26 @@ func (s *addCharmSuite) testAddLocalCharmWithForceSucceeds(name string, c *gc.C)
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/lxd-profile-0")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/lxd-profile-0")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/lxd-profile-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(resp, nil).MinTimes(1)
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "lxd-profile")
 	curl := charm.MustParseURL(
 		fmt.Sprintf("local:quantal/%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
 	)
 
-	vers := version.MustParse("2.6.6")
+	vers := semversion.MustParse("2.6.6")
 	savedURL, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedURL.String(), gc.Equals, "local:quantal/lxd-profile-0")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedURL.String(), tc.Equals, "local:quantal/lxd-profile-0")
 }
 
-func (s *addCharmSuite) assertAddLocalCharmFailed(c *gc.C, f func(string) (bool, error), msg string) {
+func (s *addCharmSuite) assertAddLocalCharmFailed(c *tc.C, f func(string) (bool, error), msg string) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -281,14 +222,14 @@ func (s *addCharmSuite) assertAddLocalCharmFailed(c *gc.C, f func(string) (bool,
 		BaseURL: "http://somewhere.invalid",
 		Doer:    mockHttpDoer,
 	}
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
-	vers := version.MustParse("2.6.6")
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
+	vers := semversion.MustParse("2.6.6")
 	_, err := client.AddLocalCharm(curl, ch, false, vers)
-	c.Assert(err, gc.ErrorMatches, msg)
+	c.Assert(err, tc.ErrorMatches, msg)
 }
 
-func (s *addCharmSuite) TestAddLocalCharmDefinitelyWithHooks(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmDefinitelyWithHooks(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -312,21 +253,21 @@ func (s *addCharmSuite) TestAddLocalCharmDefinitelyWithHooks(c *gc.C) {
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/dummy-1")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/dummy-1")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/dummy-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(resp, nil).MinTimes(1)
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
-	vers := version.MustParse("2.6.6")
+	vers := semversion.MustParse("2.6.6")
 	savedCURL, err := client.AddLocalCharm(curl, ch, false, vers)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(savedCURL.String(), gc.Equals, curl.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(savedCURL.String(), tc.Equals, curl.String())
 }
 
-func (s *addCharmSuite) testCharm(c *gc.C) (*charm.URL, charm.Charm) {
+func (s *addCharmSuite) testCharm(c *tc.C) (*charm.URL, *charm.CharmArchive) {
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "dummy")
 	curl := charm.MustParseURL(
 		fmt.Sprintf("local:quantal/%s-%d", charmArchive.Meta().Name, charmArchive.Revision()),
@@ -334,7 +275,7 @@ func (s *addCharmSuite) testCharm(c *gc.C) (*charm.URL, charm.Charm) {
 	return curl, charmArchive
 }
 
-func (s *addCharmSuite) TestAddLocalCharmError(c *gc.C) {
+func (s *addCharmSuite) TestAddLocalCharmError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -357,20 +298,20 @@ func (s *addCharmSuite) TestAddLocalCharmError(c *gc.C) {
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/dummy-1")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/dummy-1")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/dummy-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(nil, errors.New("boom")).MinTimes(1)
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
-	vers := version.MustParse("2.6.6")
+	vers := semversion.MustParse("2.6.6")
 	_, err := client.AddLocalCharm(curl, charmArchive, false, vers)
-	c.Assert(err, gc.ErrorMatches, `.*boom$`)
+	c.Assert(err, tc.ErrorMatches, `.*boom$`)
 }
 
-func (s *addCharmSuite) TestMinVersionLocalCharm(c *gc.C) {
+func (s *addCharmSuite) TestMinVersionLocalCharm(c *tc.C) {
 	tests := []minverTest{
 		{"2.0.0", "1.0.0", false, true},
 		{"1.0.0", "2.0.0", false, false},
@@ -403,7 +344,7 @@ type minverTest struct {
 	ok    bool
 }
 
-func testMinVer(t minverTest, c *gc.C) {
+func testMinVer(t minverTest, c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -415,6 +356,7 @@ func testMinVer(t minverTest, c *gc.C) {
 		Doer:    mockHttpDoer,
 	}
 
+	mockCaller.EXPECT().HTTPClient().Return(reqClient, nil).AnyTimes()
 	mockCaller.EXPECT().ModelTag().Return(testing.ModelTag, false).AnyTimes()
 	mockFacadeCaller.EXPECT().RawAPICaller().Return(mockCaller).AnyTimes()
 
@@ -423,16 +365,16 @@ func testMinVer(t minverTest, c *gc.C) {
 		Header:     make(http.Header),
 	}
 	resp.Header.Add("Content-Type", "application/json")
-	resp.Header.Add("Juju-Curl", "local:quantal/dummy-1")
+	resp.Header.Add(params.JujuCharmURLHeader, "local:quantal/dummy-1")
 	mockHttpDoer.EXPECT().Do(
 		&httpURLMatcher{fmt.Sprintf("http://somewhere.invalid/model-%s/charms/dummy-[a-f0-9]{7}", testing.ModelTag.Id())},
 	).Return(resp, nil).AnyTimes()
 
-	httpPutter := charms.NewS3PutterWithHTTPClient(reqClient)
-	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, httpPutter)
+	putter := charms.NewS3PutterWithHTTPClient(reqClient)
+	client := charms.NewLocalCharmClientWithFacade(mockFacadeCaller, nil, putter)
 
-	charmMinVer := version.MustParse(t.charm)
-	jujuVer := version.MustParse(t.juju)
+	charmMinVer := semversion.MustParse(t.charm)
+	jujuVer := semversion.MustParse(t.juju)
 
 	charmArchive := testcharms.Repo.CharmArchive(c.MkDir(), "dummy")
 	curl := charm.MustParseURL(

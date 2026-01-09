@@ -11,15 +11,15 @@ run_relation_list_app() {
 	ensure "${model_name}" "${file}"
 
 	echo "Deploy 2 departer instances"
-	juju deploy ./testcharms/charms/dummy-sink
-	juju deploy ./testcharms/charms/dummy-source
+
+	juju deploy juju-qa-dummy-sink
+	juju deploy juju-qa-dummy-source --config token=becomegreen
 
 	echo "Establish relation"
 	juju relate dummy-sink dummy-source
-	juju config dummy-source token=becomegreen
 
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0 0)"
-	wait_for "dummy-source" "$(idle_condition "dummy-source" 1 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
+	wait_for "dummy-source" "$(idle_condition "dummy-source" 0)"
 
 	echo "Figure out the right relation IDs to use for our hook tool invocations"
 	sink_rel_id=$(juju exec --unit dummy-source/0 "relation-ids sink" | cut -d':' -f2)

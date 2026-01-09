@@ -4,28 +4,35 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juju/ansiterm"
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/loggo/loggocolor"
-	"github.com/juju/names/v5"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/loggo/v2/loggocolor"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 	"github.com/mattn/go-isatty"
 
+	"github.com/juju/juju/api"
+	debuglog "github.com/juju/juju/api/client/client"
+	"github.com/juju/juju/api/client/highavailability"
 	"github.com/juju/juju/api/common"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // defaultLineCount is the default number of lines to
@@ -56,17 +63,17 @@ The ` + "`--include-module`" + ` and ` + "`--exclude-module`" + ` options filter
 logging module name. The module name can be truncated such that all loggers
 with the prefix will match.
 
-The ` + "`--include-label`" + ` and ` + "`--exclude-label`" + ` options filter by logging label.
+The ` + "`--include-labels`" + ` and ` + "`--exclude-labels`" + ` options filter by logging labels.
 
 The filtering options combine as follows:
 * All ` + "`--include`" + ` options are logically ORed together.
 * All ` + "`--exclude`" + ` options are logically ORed together.
 * All ` + "`--include-module`" + ` options are logically ORed together.
 * All ` + "`--exclude-module`" + ` options are logically ORed together.
-* All ` + "`--include-label`" + ` options are logically ORed together.
-* All ` + "`--exclude-label`" + ` options are logically ORed together.
+* All ` + "`--include-labels`" + ` options are logically ORed together.
+* All ` + "`--exclude-labels`" + ` options are logically ORed together.
 * The combined ` + "`--include`" + `, ` + "`--exclude`" + `, ` + "`--include-module`" + `, ` + "`--exclude-module`" + `,
-  ` + "`--include-label`" + ` and ` + "`--exclude-label`" + ` selections are logically ANDed to form
+  ` + "`--include-labels`" + ` and ` + "`--exclude-labels`" + ` selections are logically ANDed to form
   the complete filter.
 
 The ` + "`--tail`" + ` option waits for and continuously prints new log lines after displaying the most recent log lines.
@@ -130,7 +137,7 @@ new WARNING and ERROR messages as they are logged:
 
 View all logs on the ` + "`cmr`" + ` topic (label):
 
-    juju debug-log --include-label cmr
+    juju debug-log --include-labels cmr
 
 Progressively exclude more content from the entire log:
 
@@ -174,7 +181,6 @@ Show all messages from the ` + "`juju.worker.uniter`" + ` module, except those s
         --include-module juju.worker.uniter \
         --exclude machine-3 \
         --exclude machine-4
-
 `
 
 func (c *debugLogCommand) Info() *cmd.Info {
@@ -203,6 +209,9 @@ func newDebugLogCommandTZ(store jujuclient.ClientStore, tz *time.Location) cmd.C
 type debugLogCommand struct {
 	modelcmd.ModelCommandBase
 
+	tw  *ansiterm.Writer
+	out cmd.Output
+
 	level  string
 	params common.DebugLogParams
 
@@ -222,6 +231,9 @@ type debugLogCommand struct {
 
 	format string
 	tz     *time.Location
+
+	includeLabels []string
+	excludeLabels []string
 }
 
 func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
@@ -232,8 +244,8 @@ func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.Var(cmd.NewAppendStringsValue(&c.params.ExcludeEntity), "exclude", "Do not show log messages for these entities")
 	f.Var(cmd.NewAppendStringsValue(&c.params.IncludeModule), "include-module", "Only show log messages for these logging modules")
 	f.Var(cmd.NewAppendStringsValue(&c.params.ExcludeModule), "exclude-module", "Do not show log messages for these logging modules")
-	f.Var(cmd.NewAppendStringsValue(&c.params.IncludeLabel), "include-label", "Only show log messages for these logging labels")
-	f.Var(cmd.NewAppendStringsValue(&c.params.ExcludeLabel), "exclude-label", "Do not show log messages for these logging labels")
+	f.Var(cmd.NewAppendStringsValue(&c.includeLabels), "include-labels", "Only show log messages for these logging label key values")
+	f.Var(cmd.NewAppendStringsValue(&c.excludeLabels), "exclude-labels", "Do not show log messages for these logging label key values")
 
 	f.StringVar(&c.level, "l", "", "Log level to show, one of [TRACE, DEBUG, INFO, WARNING, ERROR]")
 	f.StringVar(&c.level, "level", "", "")
@@ -241,6 +253,8 @@ func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.backLogFlag = newIntValue(&c.params.Backlog)
 	f.Var(c.backLogFlag, "n", "Show this many of the most recent lines and continue to append new ones")
 	f.Var(c.backLogFlag, "lines", "")
+
+	f.BoolVar(&c.params.Firehose, "firehose", false, "Show logs from all models")
 
 	c.limitFlag = newIntValue(&c.params.Limit)
 	f.Var(c.limitFlag, "limit", "Show this many of the most recent logs and then exit")
@@ -258,6 +272,11 @@ func (c *debugLogCommand) SetFlags(f *gnuflag.FlagSet) {
 
 	f.BoolVar(&c.retry, "retry", false, "Retry connection on failure")
 	f.DurationVar(&c.retryDelay, "retry-delay", 1*time.Second, "Retry delay between connection failure retries")
+
+	c.out.AddFlags(f, "text", map[string]cmd.Formatter{
+		"json": cmd.FormatJson,
+		"text": c.writeText,
+	})
 }
 
 func (c *debugLogCommand) Init(args []string) error {
@@ -312,6 +331,28 @@ func (c *debugLogCommand) Init(args []string) error {
 	}
 	c.params.IncludeEntity = transform.Slice(c.params.IncludeEntity, c.parseEntity)
 	c.params.ExcludeEntity = transform.Slice(c.params.ExcludeEntity, c.parseEntity)
+
+	for _, label := range c.includeLabels {
+		parts := strings.Split(label, "=")
+		if len(parts) < 2 {
+			return fmt.Errorf("include label key value %q %w", label, errors.NotValid)
+		}
+		if c.params.IncludeLabels == nil {
+			c.params.IncludeLabels = make(map[string]string)
+		}
+		c.params.IncludeLabels[parts[0]] = parts[1]
+	}
+	for _, label := range c.excludeLabels {
+		parts := strings.Split(label, "=")
+		if len(parts) < 2 {
+			return fmt.Errorf("exclude label key value %q %w", label, errors.NotValid)
+		}
+		if c.params.ExcludeLabels == nil {
+			c.params.ExcludeLabels = make(map[string]string)
+		}
+		c.params.ExcludeLabels[parts[0]] = parts[1]
+	}
+
 	return cmd.CheckEmpty(args)
 }
 
@@ -331,26 +372,121 @@ func (c *debugLogCommand) parseEntity(entity string) string {
 		// nova-compute units for IAAS models.
 		return names.UnitTagKind + "-" + entity + "-*"
 	default:
-		logger.Warningf("%q was not recognised as a valid application, machine or unit name", entity)
+		logger.Warningf(context.TODO(), "%q was not recognised as a valid application, machine or unit name", entity)
 		return entity
 	}
 }
 
+// DebugLogAPI provides access to the client facade.
 type DebugLogAPI interface {
-	WatchDebugLog(params common.DebugLogParams) (<-chan common.LogMessage, error)
+	// WatchDebugLog streams debug log messages according to the specified
+	// parameters.
+	WatchDebugLog(ctx context.Context, params common.DebugLogParams) (<-chan common.LogMessage, error)
+	// Close closes the API client.
 	Close() error
 }
 
-var getDebugLogAPI = func(c *debugLogCommand) (DebugLogAPI, error) {
-	return c.NewAPIClient()
+var getDebugLogClient = func(ctx context.Context, c *debugLogCommand) (DebugLogAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return debuglog.NewClient(root, logger), nil
+}
+
+var getDebugLogClientForAddresses = func(ctx context.Context, c *debugLogCommand, addresses []string) (DebugLogAPI, error) {
+	root, err := c.NewAPIRootWithDialOpts(ctx, &api.DialOpts{
+		DialTimeout: 5 * time.Second,
+		Timeout:     30 * time.Second,
+	}, addresses...)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return debuglog.NewClient(root, logger), nil
+}
+
+// ControllerDetailsAPI provides access to the high availability facade.
+type ControllerDetailsAPI interface {
+	// ControllerDetails returns details about all controllers known to the
+	// client.
+	ControllerDetails(ctx context.Context) (map[string]highavailability.ControllerDetails, error)
+
+	// BestAPIVersion returns the best API version supported by the server.
+	BestAPIVersion() int
+
+	// Close closes the API client.
+	Close() error
+}
+
+var getControllerDetailsClient = func(ctx context.Context, c *debugLogCommand) (ControllerDetailsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return highavailability.NewClient(root), nil
 }
 
 func isTerminal(f interface{}) bool {
-	f_, ok := f.(*os.File)
+	file, ok := f.(*os.File)
 	if !ok {
 		return false
 	}
-	return isatty.IsTerminal(f_.Fd())
+	return isatty.IsTerminal(file.Fd())
+}
+
+type logFunc func([]corelogger.LogRecord) error
+
+func (f logFunc) Log(r []corelogger.LogRecord) error {
+	return f(r)
+}
+
+type warningLogger interface {
+	Warningf(format string, args ...interface{})
+}
+
+func (c *debugLogCommand) getDebugLogClients(ctx context.Context, warningLogger warningLogger) ([]DebugLogAPI, error) {
+	controllerClient, err := getControllerDetailsClient(ctx, c)
+	if err != nil {
+		return nil, errors.Annotatef(err, "getting controller addresses")
+	}
+	defer controllerClient.Close()
+
+	// If we're connected to a HA facade that is less that 3, that indicates
+	// that the controller details API is not supported, so we fall back to
+	// using the address of the connected controller only.
+	if controllerClient.BestAPIVersion() < 3 {
+		return c.getDebugLogClient(ctx)
+	}
+
+	// We're connected to a HA controller that supports the controller details
+	// API, so we can get the addresses of all controllers.
+	controllers, err := controllerClient.ControllerDetails(ctx)
+	if errors.Is(err, errors.NotSupported) {
+		return c.getDebugLogClient(ctx)
+	} else if err != nil {
+		return nil, errors.Annotatef(err, "getting controller details")
+	}
+
+	var clients []DebugLogAPI
+	for _, details := range controllers {
+		client, err := getDebugLogClientForAddresses(ctx, c, details.APIEndpoints)
+		if len(controllers) > 1 && errors.Is(err, api.ConnectionFailure) {
+			warningLogger.Warningf("cannot connect to debug log client for controller %q at addresses %v: %v", details.ControllerID, details.APIEndpoints, err)
+			continue
+		} else if err != nil {
+			return nil, errors.Annotatef(err, "getting debug log client for controller %q", details.ControllerID)
+		}
+		clients = append(clients, client)
+	}
+	return clients, nil
+}
+
+func (c *debugLogCommand) getDebugLogClient(ctx context.Context) ([]DebugLogAPI, error) {
+	client, err := getDebugLogClient(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	return []DebugLogAPI{client}, nil
 }
 
 // Run retrieves the debug log via the API.
@@ -365,20 +501,93 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 		c.params.NoTail = !isTerminal(ctx.Stdout)
 	}
 
-	writer := ansiterm.NewWriter(ctx.Stdout)
-	if c.color {
-		writer.SetColorCapable(true)
+	// Get the controller debug-log clients to connect to.
+	clients, err := c.getDebugLogClients(ctx, ctx)
+	if err != nil {
+		return err
+	} else if len(clients) == 0 {
+		return errors.New("no controller debug-log clients available; is bootstrap still in progress?")
+	}
+	defer func() {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	}()
+
+	// The default log buffer size is 1 for a single controller
+	// (stream log entries as they arrive).
+	bufferSize := 1
+	// If we are connecting to multiple controllers, adjust the buffer size so
+	// that we have a chance of ordering incoming records by timestamp.
+	// Replaying the logs will likely stream many initially so use a larger
+	// buffer size to account for controllers having potentially divergent log
+	// entry timestamps. This is best effort so it's ok if some log entries are
+	// printed out of order. Ideally we'd have a variable flush timeout
+	// depending on the rate of incoming messages but the buffered logger
+	// doesn't support that.
+	if len(clients) > 1 {
+		if c.params.Replay || c.params.NoTail {
+			bufferSize = 500
+		} else {
+			bufferSize = 5
+		}
 	}
 
+	// Buffered log writer will batch log records and flush them either when the
+	// buffer is full or after the specified time interval. This also allows to
+	// remove duplicates when multiple controllers are streaming logs.
+	buf := corelogger.NewBufferedLogWriter(logFunc(func(recs []corelogger.LogRecord) error {
+		for _, r := range recs {
+			_ = c.out.Write(ctx, &r)
+		}
+		return nil
+	}), bufferSize, time.Second, clock.WallClock)
+
+	pollCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Size of errors channel and wait group needs to match the number of debug
+	// log streams.
+	var (
+		errs = make(chan error, len(clients))
+		wg   sync.WaitGroup
+	)
+	for _, client := range clients {
+		wg.Go(func() {
+			errs <- c.streamLogs(pollCtx, client, buf)
+		})
+	}
+
+	// Wait for the streams to exit.
+	var pollErr error
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			// If the context is done, flush the buffer and exit. We don't need
+			// to wait for the streamers to exit and stop.
+			_ = buf.Flush()
+			return nil
+
+		case pollErr = <-errs:
+			// Exit on the first error.
+			break loop
+		}
+	}
+
+	// Cancel the message polling before flushing the buffer.
+	cancel()
+	wg.Wait()
+	_ = buf.Flush()
+	return pollErr
+}
+
+// streamLogs watches debug logs from the specified controller and logs any results
+// into the supplied buffered logger. Any error is reported to the errors channel.
+func (c *debugLogCommand) streamLogs(ctx context.Context, client DebugLogAPI, buf *corelogger.BufferedLogWriter) error {
 	err := retry.Call(retry.CallArgs{
 		Func: func() error {
-			client, err := getDebugLogAPI(c)
-			if err != nil {
-				return err
-			}
-			defer client.Close()
-
-			messages, err := client.WatchDebugLog(c.params)
+			messages, err := client.WatchDebugLog(ctx, c.params)
 			if err != nil {
 				return err
 			}
@@ -388,7 +597,20 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 				if !ok {
 					return ErrConnectionClosed
 				}
-				c.writeLogRecord(writer, msg)
+				level, _ := corelogger.ParseLevelFromString(msg.Severity)
+				logRecord := corelogger.LogRecord{
+					ModelUUID: msg.ModelUUID,
+					Time:      msg.Timestamp,
+					Entity:    msg.Entity,
+					Level:     level,
+					Module:    msg.Module,
+					Location:  msg.Location,
+					Message:   msg.Message,
+					Labels:    msg.Labels,
+				}
+				if err := buf.Log([]corelogger.LogRecord{logRecord}); err != nil {
+					return err
+				}
 			}
 		},
 		IsFatalError: func(err error) bool {
@@ -401,7 +623,7 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 			return true
 		},
 		NotifyFunc: func(err error, attempt int) {
-			logger.Debugf("retrying to connect to debug log")
+			logger.Debugf(ctx, "retrying to connect to debug log")
 		},
 		Attempts: -1,
 		Clock:    clock.WallClock,
@@ -413,7 +635,7 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 	// user. As this is a synthetic error that is used to signal that the
 	// connection is retried, we don't want to show this to the user.
 	if errors.Is(err, ErrConnectionClosed) {
-		return nil
+		err = nil
 	}
 
 	// Unwrap the retry call error trace for all errors. We don't want to show
@@ -425,30 +647,49 @@ func (c *debugLogCommand) Run(ctx *cmd.Context) error {
 // is closed.
 var ErrConnectionClosed = errors.ConstError("connection closed")
 
-var SeverityColor = map[string]*ansiterm.Context{
-	"TRACE":   ansiterm.Foreground(ansiterm.Default),
-	"DEBUG":   ansiterm.Foreground(ansiterm.Green),
-	"INFO":    ansiterm.Foreground(ansiterm.BrightBlue),
-	"WARNING": ansiterm.Foreground(ansiterm.Yellow),
-	"ERROR":   ansiterm.Foreground(ansiterm.BrightRed),
-	"CRITICAL": {
+// SeverityColor maps log severity levels to ansiterm color contexts.
+var SeverityColor = map[corelogger.Level]*ansiterm.Context{
+	corelogger.TRACE:   ansiterm.Foreground(ansiterm.Default),
+	corelogger.DEBUG:   ansiterm.Foreground(ansiterm.Green),
+	corelogger.INFO:    ansiterm.Foreground(ansiterm.BrightBlue),
+	corelogger.WARNING: ansiterm.Foreground(ansiterm.Yellow),
+	corelogger.ERROR:   ansiterm.Foreground(ansiterm.BrightRed),
+	corelogger.CRITICAL: {
 		Foreground: ansiterm.White,
 		Background: ansiterm.Red,
 	},
 }
 
-func (c *debugLogCommand) writeLogRecord(w *ansiterm.Writer, r common.LogMessage) {
-	ts := r.Timestamp.In(c.tz).Format(c.format)
+func (c *debugLogCommand) writeText(w io.Writer, v interface{}) error {
+	if c.tw == nil {
+		c.tw = ansiterm.NewWriter(w)
+		if c.color {
+			c.tw.SetColorCapable(true)
+		}
+	}
+	r, ok := v.(*corelogger.LogRecord)
+	if !ok {
+		return fmt.Errorf("expected log message of type %T, got %t", common.LogMessage{}, v)
+	}
+	ts := r.Time.In(c.tz).Format(c.format)
+	if c.params.Firehose {
+		fmt.Fprintf(w, "%s: ", r.ModelUUID)
+	}
 	fmt.Fprintf(w, "%s: %s ", r.Entity, ts)
-	SeverityColor[r.Severity].Fprint(w, r.Severity)
+	SeverityColor[r.Level].Fprint(c.tw, r.Level.String())
 	fmt.Fprintf(w, " %s ", r.Module)
 	if c.location {
-		loggocolor.LocationColor.Fprintf(w, "%s ", r.Location)
+		loggocolor.LocationColor.Fprintf(c.tw, "%s ", r.Location)
 	}
 	if len(r.Labels) > 0 {
-		fmt.Fprintf(w, "%v ", strings.Join(r.Labels, ","))
+		var labelsOut []string
+		for k, v := range r.Labels {
+			labelsOut = append(labelsOut, fmt.Sprintf("%s:%s", k, v))
+		}
+		fmt.Fprintf(w, "%v ", strings.Join(labelsOut, ","))
 	}
-	fmt.Fprintln(w, r.Message)
+	fmt.Fprintln(c.tw, r.Message)
+	return nil
 }
 
 // intValue implements gnuflag.Value for an int value that can be set

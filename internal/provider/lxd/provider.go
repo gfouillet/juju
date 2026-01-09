@@ -4,7 +4,7 @@
 package lxd
 
 import (
-	stdcontext "context"
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,19 +12,18 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
 	"github.com/juju/jsonschema"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/container/lxd"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
+	"github.com/juju/juju/internal/configschema"
+	"github.com/juju/juju/internal/container/lxd"
+	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/internal/provider/lxd/lxdnames"
 )
 
@@ -126,7 +125,7 @@ func NewProvider() environs.CloudEnvironProvider {
 	configReader := lxcConfigReader{}
 	factory := NewServerFactory(NewHTTPClientFunc(func() *http.Client {
 		return jujuhttp.NewClient(
-			jujuhttp.WithLogger(logger.ChildWithLabels("http", corelogger.HTTP)),
+			jujuhttp.WithLogger(logger.Child("http", corelogger.HTTP)),
 		).Client()
 	}))
 
@@ -151,14 +150,16 @@ func (*environProvider) Version() int {
 }
 
 // Open implements environs.EnvironProvider.
-func (p *environProvider) Open(_ stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
+func (p *environProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
 	if err := p.validateCloudSpec(args.Cloud); err != nil {
 		return nil, errors.Annotate(err, "validating cloud spec")
 	}
 	env, err := newEnviron(
+		ctx,
 		p,
 		args.Cloud,
 		args.Config,
+		invalidator,
 	)
 	return env, errors.Trace(err)
 }
@@ -169,7 +170,7 @@ func (p *environProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p *environProvider) Ping(ctx context.ProviderCallContext, endpoint string) error {
+func (p *environProvider) Ping(_ context.Context, endpoint string) error {
 	// if the endpoint is empty, then don't ping, as we can assume we're using
 	// local lxd
 	if endpoint == "" {
@@ -193,26 +194,20 @@ func (p *environProvider) Ping(ctx context.ProviderCallContext, endpoint string)
 	return nil
 }
 
-// PrepareConfig implements environs.EnvironProvider.
-func (p *environProvider) PrepareConfig(args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := p.validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	// Set the default filesystem-storage source.
-	attrs := make(map[string]interface{})
-	if _, ok := args.Config.StorageDefaultFilesystemSource(); !ok {
-		attrs[config.StorageDefaultFilesystemSourceKey] = lxdStorageProviderType
-	}
-	if len(attrs) == 0 {
-		return args.Config, nil
-	}
-	cfg, err := args.Config.Apply(attrs)
-	return cfg, errors.Trace(err)
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p *environProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+// ValidateCloud is specified in the EnvironProvider interface.
+func (p *environProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(p.validateCloudSpec(spec), "validating cloud spec")
 }
 
 // Validate implements environs.EnvironProvider.
-func (*environProvider) Validate(cfg, old *config.Config) (valid *config.Config, err error) {
-	if _, err := newValidConfig(cfg); err != nil {
+func (*environProvider) Validate(ctx context.Context, cfg, old *config.Config) (valid *config.Config, err error) {
+	if _, err := newValidConfig(ctx, cfg); err != nil {
 		return nil, errors.Annotate(err, "invalid base config")
 	}
 	return cfg, nil
@@ -227,7 +222,7 @@ func (p *environProvider) DetectClouds() ([]cloud.Cloud, error) {
 		config, err := p.lxcConfigReader.ReadConfig(configPath)
 		if err != nil {
 			if !strings.HasSuffix(err.Error(), "permission denied") {
-				logger.Warningf("unable to read/parse LXC config file (%s): %s", configPath, err)
+				logger.Warningf(context.TODO(), "unable to read/parse LXC config file (%s): %s", configPath, err)
 			}
 		}
 		for name, remote := range config.Remotes {
@@ -235,7 +230,7 @@ func (p *environProvider) DetectClouds() ([]cloud.Cloud, error) {
 				continue
 			}
 			if usedNames[name] {
-				logger.Warningf("ignoring ambigious cloud %s", name)
+				logger.Warningf(context.TODO(), "ignoring ambigious cloud %s", name)
 				continue
 			}
 			usedNames[name] = true
@@ -366,7 +361,7 @@ func (*environProvider) DetectRegions() ([]cloud.Region, error) {
 }
 
 // Schema returns the configuration schema for an environment.
-func (*environProvider) Schema() environschema.Fields {
+func (*environProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)

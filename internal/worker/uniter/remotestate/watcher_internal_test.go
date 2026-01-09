@@ -4,19 +4,22 @@
 package remotestate
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
 
-	"github.com/juju/juju/testing"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/internal/testing"
 )
 
 type WatcherInternalSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&WatcherInternalSuite{})
+func TestWatcherInternalSuite(t *stdtesting.T) {
+	tc.Run(t, &WatcherInternalSuite{})
+}
 
-func (s *WatcherInternalSuite) TestDeleteSecretSignal(c *gc.C) {
+func (s *WatcherInternalSuite) TestDeleteSecretSignal(c *tc.C) {
 	w := RemoteStateWatcher{
 		current: Snapshot{
 			ObsoleteSecretRevisions: map[string][]int{
@@ -32,8 +35,8 @@ func (s *WatcherInternalSuite) TestDeleteSecretSignal(c *gc.C) {
 		"secret:9m4e2mr0ui3e8a215n4g": {665},
 		"secret:777e2mr0ui3e8a215n4g": {},
 	})
-	c.Assert(w.current.DeletedSecretRevisions, gc.HasLen, 0)
-	c.Assert(w.current.ObsoleteSecretRevisions, jc.DeepEquals, map[string][]int{
+	c.Assert(w.current.DeletedSecretRevisions, tc.HasLen, 0)
+	c.Assert(w.current.ObsoleteSecretRevisions, tc.DeepEquals, map[string][]int{
 		"secret:9m4e2mr0ui3e8a215n4g": {666},
 	})
 }

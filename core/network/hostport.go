@@ -4,14 +4,15 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
+
+	"github.com/juju/juju/internal/errors"
 )
 
 // HostPort describes methods on an object that
@@ -143,11 +144,11 @@ func NewMachineHostPorts(port int, addresses ...string) MachineHostPorts {
 func ParseMachineHostPort(hp string) (*MachineHostPort, error) {
 	host, port, err := net.SplitHostPort(hp)
 	if err != nil {
-		return nil, errors.Annotatef(err, "cannot parse %q as address:port", hp)
+		return nil, errors.Errorf("cannot parse %q as address:port: %w", hp, err)
 	}
 	numPort, err := strconv.Atoi(port)
 	if err != nil {
-		return nil, errors.Annotatef(err, "cannot parse %q port", hp)
+		return nil, errors.Errorf("cannot parse %q port: %w", hp, err)
 	}
 	return &MachineHostPort{
 		MachineAddress: NewMachineAddress(host),
@@ -216,7 +217,7 @@ func ParseProviderHostPorts(hostPorts ...string) (ProviderHostPorts, error) {
 	for i, hp := range hostPorts {
 		mhp, err := ParseMachineHostPort(hp)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Capture(err)
 		}
 		hps[i] = ProviderHostPort{
 			ProviderAddress: ProviderAddress{MachineAddress: mhp.MachineAddress},
@@ -287,7 +288,7 @@ func (hps SpaceHostPorts) HostPorts() HostPorts {
 // InSpaces returns the SpaceHostPorts that are in the input spaces.
 func (hps SpaceHostPorts) InSpaces(spaces ...SpaceInfo) (SpaceHostPorts, bool) {
 	if len(spaces) == 0 {
-		logger.Errorf("host ports not filtered - no spaces given.")
+		logger.Errorf(context.TODO(), "host ports not filtered - no spaces given.")
 		return hps, false
 	}
 
@@ -295,7 +296,7 @@ func (hps SpaceHostPorts) InSpaces(spaces ...SpaceInfo) (SpaceHostPorts, bool) {
 	var selectedHostPorts SpaceHostPorts
 	for _, hp := range hps {
 		if space := spaceInfos.GetByID(hp.SpaceID); space != nil {
-			logger.Debugf("selected %q as a hostPort in space %q", hp.Value, space.Name)
+			logger.Debugf(context.TODO(), "selected %q as a hostPort in space %q", hp.Value, space.Name)
 			selectedHostPorts = append(selectedHostPorts, hp)
 		}
 	}
@@ -304,7 +305,7 @@ func (hps SpaceHostPorts) InSpaces(spaces ...SpaceInfo) (SpaceHostPorts, bool) {
 		return selectedHostPorts, true
 	}
 
-	logger.Errorf("no hostPorts found in spaces %s", spaceInfos)
+	logger.Errorf(context.TODO(), "no hostPorts found in spaces %s", spaceInfos)
 	return hps, false
 }
 
@@ -317,40 +318,6 @@ func (hps SpaceHostPorts) AllMatchingScope(getMatcher ScopeMatchFunc) []string {
 		out = append(out, DialAddress(hps[index]))
 	}
 	return out
-}
-
-// ToProviderHostPorts transforms the SpaceHostPorts to ProviderHostPorts
-// by using the input lookup for conversion of space ID to space info.
-func (hps SpaceHostPorts) ToProviderHostPorts(lookup SpaceLookup) (ProviderHostPorts, error) {
-	if hps == nil {
-		return nil, nil
-	}
-
-	var spaces SpaceInfos
-	if len(hps) > 0 {
-		var err error
-		if spaces, err = lookup.AllSpaceInfos(); err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
-
-	pHPs := make(ProviderHostPorts, len(hps))
-	for i, hp := range hps {
-		pHPs[i] = ProviderHostPort{
-			ProviderAddress: ProviderAddress{MachineAddress: hp.MachineAddress},
-			NetPort:         hp.NetPort,
-		}
-
-		if hp.SpaceID != "" {
-			info := spaces.GetByID(hp.SpaceID)
-			if info == nil {
-				return nil, errors.NotFoundf("space with ID %q", hp.SpaceID)
-			}
-			pHPs[i].SpaceName = info.Name
-			pHPs[i].ProviderSpaceID = info.ProviderId
-		}
-	}
-	return pHPs, nil
 }
 
 func (hps SpaceHostPorts) Len() int      { return len(hps) }
@@ -370,21 +337,6 @@ func SpaceAddressesWithPort(addrs SpaceAddresses, port int) SpaceHostPorts {
 		}
 	}
 	return hps
-}
-
-// APIHostPortsToNoProxyString converts list of lists of NetAddrs() to
-// a NoProxy-like comma separated string, ignoring local addresses
-func APIHostPortsToNoProxyString(ahp []SpaceHostPorts) string {
-	noProxySet := set.NewStrings()
-	for _, host := range ahp {
-		for _, hp := range host {
-			if hp.SpaceAddress.Scope == ScopeMachineLocal || hp.SpaceAddress.Scope == ScopeLinkLocal {
-				continue
-			}
-			noProxySet.Add(hp.SpaceAddress.Value)
-		}
-	}
-	return strings.Join(noProxySet.SortedValues(), ",")
 }
 
 // EnsureFirstHostPort scans the given list of SpaceHostPorts and if

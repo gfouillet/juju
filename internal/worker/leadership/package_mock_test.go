@@ -10,6 +10,7 @@
 package leadership_test
 
 import (
+	context "context"
 	reflect "reflect"
 	time "time"
 
@@ -40,7 +41,7 @@ func (m *MockClaimer) EXPECT() *MockClaimerMockRecorder {
 }
 
 // BlockUntilLeadershipReleased mocks base method.
-func (m *MockClaimer) BlockUntilLeadershipReleased(arg0 string, arg1 <-chan struct{}) error {
+func (m *MockClaimer) BlockUntilLeadershipReleased(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "BlockUntilLeadershipReleased", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -54,15 +55,15 @@ func (mr *MockClaimerMockRecorder) BlockUntilLeadershipReleased(arg0, arg1 any) 
 }
 
 // ClaimLeadership mocks base method.
-func (m *MockClaimer) ClaimLeadership(arg0, arg1 string, arg2 time.Duration) error {
+func (m *MockClaimer) ClaimLeadership(arg0 context.Context, arg1, arg2 string, arg3 time.Duration) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ClaimLeadership", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "ClaimLeadership", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // ClaimLeadership indicates an expected call of ClaimLeadership.
-func (mr *MockClaimerMockRecorder) ClaimLeadership(arg0, arg1, arg2 any) *gomock.Call {
+func (mr *MockClaimerMockRecorder) ClaimLeadership(arg0, arg1, arg2, arg3 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimLeadership", reflect.TypeOf((*MockClaimer)(nil).ClaimLeadership), arg0, arg1, arg2)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimLeadership", reflect.TypeOf((*MockClaimer)(nil).ClaimLeadership), arg0, arg1, arg2, arg3)
 }

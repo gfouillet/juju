@@ -4,10 +4,12 @@
 package operation
 
 import (
+	stdcontext "context"
 	"fmt"
 
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
@@ -21,7 +23,7 @@ type runCommands struct {
 	runnerFactory runner.Factory
 
 	runner runner.Runner
-	logger Logger
+	logger logger.Logger
 
 	RequiresMachineLock
 }
@@ -41,8 +43,8 @@ func (rc *runCommands) String() string {
 
 // Prepare ensures the commands can be run. It never returns a state change.
 // Prepare is part of the Operation interface.
-func (rc *runCommands) Prepare(state State) (*State, error) {
-	rnr, err := rc.runnerFactory.NewCommandRunner(context.CommandInfo{
+func (rc *runCommands) Prepare(ctx stdcontext.Context, state State) (*State, error) {
+	rnr, err := rc.runnerFactory.NewCommandRunner(ctx, context.CommandInfo{
 		RelationId:     rc.args.RelationId,
 		RemoteUnitName: rc.args.RemoteUnitName,
 		// TODO(jam): 2019-10-24 include RemoteAppName
@@ -51,7 +53,7 @@ func (rc *runCommands) Prepare(state State) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = rnr.Context().Prepare()
+	err = rnr.Context().Prepare(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -63,16 +65,16 @@ func (rc *runCommands) Prepare(state State) (*State, error) {
 // Execute runs the commands and dispatches their results. It never returns a
 // state change.
 // Execute is part of the Operation interface.
-func (rc *runCommands) Execute(state State) (*State, error) {
-	rc.logger.Tracef("run commands: %s", rc)
-	if err := rc.callbacks.SetExecutingStatus("running commands"); err != nil {
+func (rc *runCommands) Execute(ctx stdcontext.Context, state State) (*State, error) {
+	rc.logger.Tracef(ctx, "run commands: %s", rc)
+	if err := rc.callbacks.SetExecutingStatus(ctx, "running commands"); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	response, err := rc.runner.RunCommands(rc.args.Commands, rc.args.RunLocation)
+	response, err := rc.runner.RunCommands(ctx, rc.args.Commands)
 	switch err {
 	case context.ErrRequeueAndReboot:
-		rc.logger.Warningf("cannot requeue external commands")
+		rc.logger.Warningf(ctx, "cannot requeue external commands")
 		fallthrough
 	case context.ErrReboot:
 		rc.sendResponse(response, nil)
@@ -88,7 +90,7 @@ func (rc *runCommands) Execute(state State) (*State, error) {
 
 // Commit does nothing.
 // Commit is part of the Operation interface.
-func (rc *runCommands) Commit(state State) (*State, error) {
+func (rc *runCommands) Commit(ctx stdcontext.Context, state State) (*State, error) {
 	return nil, nil
 }
 

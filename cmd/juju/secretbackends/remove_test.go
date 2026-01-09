@@ -4,28 +4,30 @@
 package secretbackends_test
 
 import (
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
-	jujuerrors "github.com/juju/errors"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	jujuerrors "github.com/juju/errors"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/secretbackends"
-	"github.com/juju/juju/cmd/juju/secretbackends/mocks"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type RemoveSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	store                   *jujuclient.MemStore
-	removeSecretBackendsAPI *mocks.MockRemoveSecretBackendsAPI
+	removeSecretBackendsAPI *secretbackends.MockRemoveSecretBackendsAPI
 }
 
-var _ = gc.Suite(&RemoveSuite{})
+func TestRemoveSuite(t *testing.T) {
+	tc.Run(t, &RemoveSuite{})
+}
 
-func (s *RemoveSuite) SetUpTest(c *gc.C) {
+func (s *RemoveSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	store := jujuclient.NewMemStore()
 	store.Controllers["mycontroller"] = jujuclient.ControllerDetails{}
@@ -33,15 +35,15 @@ func (s *RemoveSuite) SetUpTest(c *gc.C) {
 	s.store = store
 }
 
-func (s *RemoveSuite) setup(c *gc.C) *gomock.Controller {
+func (s *RemoveSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
-	s.removeSecretBackendsAPI = mocks.NewMockRemoveSecretBackendsAPI(ctrl)
+	s.removeSecretBackendsAPI = secretbackends.NewMockRemoveSecretBackendsAPI(ctrl)
 
 	return ctrl
 }
 
-func (s *RemoveSuite) TestRemoveInitError(c *gc.C) {
+func (s *RemoveSuite) TestRemoveInitError(c *tc.C) {
 	for _, t := range []struct {
 		args []string
 		err  string
@@ -53,32 +55,32 @@ func (s *RemoveSuite) TestRemoveInitError(c *gc.C) {
 		err:  `unrecognized args: \["extra"\]`,
 	}} {
 		_, err := cmdtesting.RunCommand(c, secretbackends.NewRemoveCommandForTest(s.store, s.removeSecretBackendsAPI), t.args...)
-		c.Assert(err, gc.ErrorMatches, t.err)
+		c.Assert(err, tc.ErrorMatches, t.err)
 	}
 }
 
-func (s *RemoveSuite) TestRemove(c *gc.C) {
+func (s *RemoveSuite) TestRemove(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.removeSecretBackendsAPI.EXPECT().RemoveSecretBackend("myvault", true).Return(nil)
+	s.removeSecretBackendsAPI.EXPECT().RemoveSecretBackend(gomock.Any(), "myvault", true).Return(nil)
 	s.removeSecretBackendsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secretbackends.NewRemoveCommandForTest(s.store, s.removeSecretBackendsAPI),
 		"myvault", "--force",
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *RemoveSuite) TestRemoveNotSupported(c *gc.C) {
+func (s *RemoveSuite) TestRemoveNotSupported(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.removeSecretBackendsAPI.EXPECT().RemoveSecretBackend("myvault", false).Return(
+	s.removeSecretBackendsAPI.EXPECT().RemoveSecretBackend(gomock.Any(), "myvault", false).Return(
 		jujuerrors.NotSupportedf(""))
 	s.removeSecretBackendsAPI.EXPECT().Close().Return(nil)
 
 	ctx, err := cmdtesting.RunCommand(c, secretbackends.NewRemoveCommandForTest(s.store, s.removeSecretBackendsAPI),
 		"myvault",
 	)
-	c.Assert(err, gc.Equals, cmd.ErrSilent)
-	c.Check(cmdtesting.Stderr(ctx), gc.Matches, `ERROR backend "myvault" still contains secret content\n`)
+	c.Assert(err, tc.Equals, cmd.ErrSilent)
+	c.Check(cmdtesting.Stderr(ctx), tc.Matches, `ERROR backend "myvault" still contains secret content\n`)
 }

@@ -4,42 +4,42 @@
 package ec2
 
 import (
-	stdcontext "context"
+	"context"
+	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
-
-	"github.com/juju/juju/environs/context"
+	"github.com/juju/tc"
 )
 
-type fetchInstanceClientFunc func(stdcontext.Context, *ec2.DescribeInstanceTypesInput, ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
+type fetchInstanceClientFunc func(context.Context, *ec2.DescribeInstanceTypesInput, ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
 
 type instanceSuite struct{}
 
-var _ = gc.Suite(&instanceSuite{})
+func TestInstanceSuite(t *testing.T) {
+	tc.Run(t, &instanceSuite{})
+}
 
 func (f fetchInstanceClientFunc) DescribeInstanceTypes(
-	c stdcontext.Context,
+	c context.Context,
 	i *ec2.DescribeInstanceTypesInput,
 	o ...func(*ec2.Options),
 ) (*ec2.DescribeInstanceTypesOutput, error) {
 	return f(c, i, o...)
 }
 
-func (s *instanceSuite) TestFetchInstanceTypeInfoPagnation(c *gc.C) {
+func (s *instanceSuite) TestFetchInstanceTypeInfoPagination(c *tc.C) {
 	callCount := 0
 	client := func(
-		_ stdcontext.Context,
+		_ context.Context,
 		i *ec2.DescribeInstanceTypesInput,
 		o ...func(*ec2.Options),
 	) (*ec2.DescribeInstanceTypesOutput, error) {
 		if callCount != 0 {
-			c.Assert(*i.NextToken, gc.Equals, "next")
+			c.Assert(*i.NextToken, tc.Equals, "next")
 		}
-		c.Assert(*i.MaxResults, gc.Equals, int32(100))
+		c.Assert(*i.MaxResults, tc.Equals, int32(100))
 
 		callCount++
 		nextToken := aws.String("next")
@@ -55,9 +55,9 @@ func (s *instanceSuite) TestFetchInstanceTypeInfoPagnation(c *gc.C) {
 	}
 
 	res, err := FetchInstanceTypeInfo(
-		context.NewCloudCallContext(stdcontext.Background()),
+		c.Context(),
 		fetchInstanceClientFunc(client),
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(res), gc.Equals, 600)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(res), tc.Equals, 600)
 }

@@ -1,425 +1,690 @@
 // Copyright 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package action_test
+package action
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/apiserver/common"
-	commontesting "github.com/juju/juju/apiserver/common/testing"
-	"github.com/juju/juju/apiserver/facades/client/action"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/actions"
-	jujutesting "github.com/juju/juju/juju/testing"
+	"github.com/juju/juju/core/leadership"
+	coremodel "github.com/juju/juju/core/model"
+	corestatus "github.com/juju/juju/core/status"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	operation "github.com/juju/juju/domain/operation"
+	operationerrors "github.com/juju/juju/domain/operation/errors"
+	internalcharm "github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	coretesting "github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
 )
 
-func TestAll(t *testing.T) {
-	coretesting.MgoTestPackage(t)
+func TestActionSuite(t *testing.T) {
+	tc.Run(t, &actionSuite{})
 }
 
-type baseSuite struct {
-	jujutesting.JujuConnSuite
-	commontesting.BlockHelper
-
-	action     *action.ActionAPI
-	authorizer apiservertesting.FakeAuthorizer
-	resources  *common.Resources
-
-	charm         *state.Charm
-	machine0      *state.Machine
-	machine1      *state.Machine
-	dummy         *state.Application
-	wordpress     *state.Application
-	mysql         *state.Application
-	wordpressUnit *state.Unit
-	mysqlUnit     *state.Unit
+func TestActionWatchSuite(t *testing.T) {
+	tc.Run(t, &actionWatcherSuite{})
 }
 
 type actionSuite struct {
-	baseSuite
+	applicationService *MockApplicationService
+	operationService   *MockOperationService
+
+	adminTag names.UserTag
+	client   *ActionAPI
 }
 
-var _ = gc.Suite(&actionSuite{})
+func (s *actionSuite) SetUpTest(c *tc.C) {
+	s.adminTag = names.NewUserTag("admin")
+}
 
-func (s *baseSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
-	s.BlockHelper = commontesting.NewBlockHelper(s.APIState)
-	s.AddCleanup(func(*gc.C) { s.BlockHelper.Close() })
+func (s *actionSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
 
-	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag: s.AdminUserTag(c),
-	}
-	s.resources = common.NewResources()
-	s.AddCleanup(func(_ *gc.C) { s.resources.StopAll() })
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.operationService = NewMockOperationService(ctrl)
 
+	c.Cleanup(func() {
+		s.applicationService = nil
+		s.operationService = nil
+	})
+
+	return ctrl
+}
+
+func (s *actionSuite) setupAPI(c *tc.C, authTag names.UserTag) {
 	var err error
-	s.action, err = action.NewActionAPI(s.State, s.resources, s.authorizer, action.FakeLeadership{})
-	c.Assert(err, jc.ErrorIsNil)
 
-	s.charm = s.Factory.MakeCharm(c, &factory.CharmParams{
-		Name: "wordpress",
-	})
-
-	s.dummy = s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name: "dummy",
-		Charm: s.Factory.MakeCharm(c, &factory.CharmParams{
-			Name: "dummy",
-		}),
-	})
-	s.wordpress = s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "wordpress",
-		Charm: s.charm,
-	})
-	s.machine0 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits, state.JobManageModel},
-	})
-	s.wordpressUnit = s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.wordpress,
-		Machine:     s.machine0,
-	})
-
-	mysqlCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
-		Name: "mysql",
-	})
-	s.mysql = s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "mysql",
-		Charm: mysqlCharm,
-	})
-	s.machine1 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	})
-	s.mysqlUnit = s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.mysql,
-		Machine:     s.machine1,
-	})
-}
-
-func (s *actionSuite) TestActions(c *gc.C) {
-	arg := params.Actions{
-		Actions: []params.Action{
-			{Receiver: s.wordpressUnit.Tag().String(), Name: "fakeaction", Parameters: map[string]interface{}{}},
-			{Receiver: s.mysqlUnit.Tag().String(), Name: "fakeaction", Parameters: map[string]interface{}{}},
-			{Receiver: s.wordpressUnit.Tag().String(), Name: "fakeaction", Parameters: map[string]interface{}{"foo": 1, "bar": "please"}},
-			{Receiver: s.mysqlUnit.Tag().String(), Name: "fakeaction", Parameters: map[string]interface{}{"baz": true}},
-		}}
-
-	r, err := s.action.EnqueueOperation(arg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(r.Actions, gc.HasLen, len(arg.Actions))
-
-	// There's only one operation created.
-	operations, err := s.Model.AllOperations()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(operations, gc.HasLen, 1)
-	c.Assert(operations[0].Summary(), gc.Equals, "fakeaction run on unit-wordpress-0,unit-mysql-0,unit-wordpress-0,unit-mysql-0")
-
-	emptyActionTag := names.ActionTag{}
-	for i, got := range r.Actions {
-		c.Assert(got.Action, gc.NotNil)
-		c.Logf("check index %d (%s: %s)", i, got.Action.Tag, arg.Actions[i].Name)
-		c.Assert(got.Error, gc.Equals, (*params.Error)(nil))
-		c.Assert(got.Action, gc.Not(gc.Equals), (*params.Action)(nil))
-		c.Assert(got.Action.Tag, gc.Not(gc.Equals), emptyActionTag)
-		c.Assert(got.Action.Name, gc.Equals, arg.Actions[i].Name)
-		c.Assert(got.Action.Receiver, gc.Equals, arg.Actions[i].Receiver)
-		c.Assert(got.Action.Parameters, gc.DeepEquals, arg.Actions[i].Parameters)
-		c.Assert(got.Status, gc.Equals, params.ActionPending)
-		c.Assert(got.Message, gc.Equals, "")
-		c.Assert(got.Output, gc.IsNil)
+	auth := apiservertesting.FakeAuthorizer{
+		Tag:      authTag,
+		AdminTag: s.adminTag,
 	}
-}
+	modelUUID := tc.Must0(c, coremodel.NewUUID)
 
-func (s *actionSuite) TestCancel(c *gc.C) {
-	// Make sure no Actions already exist on wordpress Unit.
-	actions, err := s.wordpressUnit.Actions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// Make sure no Actions already exist on mysql Unit.
-	actions, err = s.mysqlUnit.Actions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// Add Actions.
-	tests := params.Actions{
-		Actions: []params.Action{{
-			Receiver: s.wordpressUnit.Tag().String(),
-			Name:     "fakeaction",
-		}, {
-			Receiver: s.wordpressUnit.Tag().String(),
-			Name:     "fakeaction",
-		}, {
-			Receiver: s.mysqlUnit.Tag().String(),
-			Name:     "fakeaction",
-		}, {
-			Receiver: s.mysqlUnit.Tag().String(),
-			Name:     "fakeaction",
-		}},
+	leadershipFunc := func() (leadership.Reader, error) {
+		return FakeLeadership{}, nil
 	}
-
-	results, err := s.action.EnqueueOperation(tests)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Actions, gc.HasLen, 4)
-	for _, res := range results.Actions {
-		c.Assert(res.Error, gc.IsNil)
-	}
-
-	// blocking changes should have no effect
-	s.BlockAllChanges(c, "Cancel")
-
-	// Cancel Some.
-	arg := params.Entities{
-		Entities: []params.Entity{
-			// "wp-two"
-			{Tag: results.Actions[1].Action.Tag},
-			// "my-one"
-			{Tag: results.Actions[2].Action.Tag},
-		}}
-	cancelled, err := s.action.Cancel(arg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cancelled.Results, gc.HasLen, 2)
-
-	// Assert the Actions are all in the expected state.
-	operations, err := s.action.ListOperations(params.OperationQueryArgs{
-		Units: []string{
-			s.wordpressUnit.Name(),
-			s.mysqlUnit.Name(),
-		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(operations.Results, gc.HasLen, 1)
-
-	resultActions := operations.Results[0].Actions
-	c.Assert(resultActions, gc.HasLen, 4)
-	c.Assert(resultActions[0].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(resultActions[0].Status, gc.Equals, params.ActionPending)
-	c.Assert(resultActions[1].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(resultActions[1].Status, gc.Equals, params.ActionCancelled)
-	c.Assert(resultActions[2].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(resultActions[2].Status, gc.Equals, params.ActionCancelled)
-	c.Assert(resultActions[3].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(resultActions[3].Status, gc.Equals, params.ActionPending)
-}
-
-func (s *actionSuite) TestAbort(c *gc.C) {
-	// Make sure no Actions already exist on wordpress Unit.
-	actions, err := s.wordpressUnit.Actions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// Add Actions.
-	tests := params.Actions{
-		Actions: []params.Action{{
-			Receiver: s.wordpressUnit.Tag().String(),
-			Name:     "fakeaction",
-		}},
-	}
-
-	results, err := s.action.EnqueueOperation(tests)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Actions, gc.HasLen, 1)
-	c.Assert(results.Actions[0].Error, gc.IsNil)
-
-	actions, err = s.wordpressUnit.Actions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 1)
-
-	_, err = actions[0].Begin()
-	c.Assert(err, jc.ErrorIsNil)
-
-	// blocking changes should have no effect
-	s.BlockAllChanges(c, "Cancel")
-
-	// Cancel Some.
-	arg := params.Entities{
-		Entities: []params.Entity{
-			// "wp-one"
-			{Tag: results.Actions[0].Action.Tag},
-		}}
-	cancelled, err := s.action.Cancel(arg)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cancelled.Results, gc.HasLen, 1)
-	c.Assert(cancelled.Results[0].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(cancelled.Results[0].Status, gc.Equals, params.ActionAborting)
-
-	// Assert the Actions are all in the expected state.
-	operations, err := s.action.ListOperations(params.OperationQueryArgs{
-		Units: []string{s.wordpressUnit.Name()},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(operations.Results, gc.HasLen, 1)
-
-	wpActions := operations.Results[0].Actions
-	c.Assert(wpActions, gc.HasLen, 1)
-	c.Assert(wpActions[0].Action.Name, gc.Equals, "fakeaction")
-	c.Assert(wpActions[0].Status, gc.Equals, params.ActionAborting)
-}
-
-func (s *actionSuite) TestApplicationsCharmsActions(c *gc.C) {
-	actionSchemas := map[string]map[string]interface{}{
-		"snapshot": {
-			"type":        "object",
-			"title":       "snapshot",
-			"description": "Take a snapshot of the database.",
-			"properties": map[string]interface{}{
-				"outfile": map[string]interface{}{
-					"description": "The file to write out to.",
-					"type":        "string",
-					"default":     "foo.bz2",
-				},
-			},
-		},
-		"fakeaction": {
-			"type":        "object",
-			"title":       "fakeaction",
-			"description": "No description",
-			"properties":  map[string]interface{}{},
-		},
-	}
-	tests := []struct {
-		applicationNames []string
-		expectedResults  params.ApplicationsCharmActionsResults
-	}{{
-		applicationNames: []string{"dummy"},
-		expectedResults: params.ApplicationsCharmActionsResults{
-			Results: []params.ApplicationCharmActionsResult{
-				{
-					ApplicationTag: names.NewApplicationTag("dummy").String(),
-					Actions: map[string]params.ActionSpec{
-						"snapshot": {
-							Description: "Take a snapshot of the database.",
-							Params:      actionSchemas["snapshot"],
-						},
-					},
-				},
-			},
-		},
-	}, {
-		applicationNames: []string{"wordpress"},
-		expectedResults: params.ApplicationsCharmActionsResults{
-			Results: []params.ApplicationCharmActionsResult{
-				{
-					ApplicationTag: names.NewApplicationTag("wordpress").String(),
-					Actions: map[string]params.ActionSpec{
-						"fakeaction": {
-							Description: "No description",
-							Params:      actionSchemas["fakeaction"],
-						},
-					},
-				},
-			},
-		},
-	}, {
-		applicationNames: []string{"nonsense"},
-		expectedResults: params.ApplicationsCharmActionsResults{
-			Results: []params.ApplicationCharmActionsResult{
-				{
-					ApplicationTag: names.NewApplicationTag("nonsense").String(),
-					Error: &params.Error{
-						Message: `application "nonsense" not found`,
-						Code:    "not found",
-					},
-				},
-			},
-		},
-	}}
-
-	for i, t := range tests {
-		c.Logf("test %d: applications: %#v", i, t.applicationNames)
-
-		svcTags := params.Entities{
-			Entities: make([]params.Entity, len(t.applicationNames)),
-		}
-
-		for j, app := range t.applicationNames {
-			svcTag := names.NewApplicationTag(app)
-			svcTags.Entities[j] = params.Entity{Tag: svcTag.String()}
-		}
-
-		results, err := s.action.ApplicationsCharmsActions(svcTags)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Check(results.Results, jc.DeepEquals, t.expectedResults.Results)
-	}
-}
-
-func assertReadyToTest(c *gc.C, receiver state.ActionReceiver) {
-	// make sure there are no actions on the receiver already.
-	actions, err := receiver.Actions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// make sure there are no actions pending already.
-	actions, err = receiver.PendingActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// make sure there are no actions running already.
-	actions, err = receiver.RunningActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-
-	// make sure there are no actions completed already.
-	actions, err = receiver.CompletedActions()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, gc.HasLen, 0)
-}
-
-func (s *actionSuite) TestWatchActionProgress(c *gc.C) {
-	unit, err := s.State.Unit("mysql/0")
-	c.Assert(err, jc.ErrorIsNil)
-	assertReadyToTest(c, unit)
-
-	operationID, err := s.Model.EnqueueOperation("a test", 1)
-	c.Assert(err, jc.ErrorIsNil)
-	added, err := s.Model.AddAction(unit, operationID, "fakeaction", nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	w, err := s.action.WatchActionsProgress(
-		params.Entities{Entities: []params.Entity{{Tag: "action-2"}}},
+	s.client, err = newActionAPI(
+		auth,
+		leadershipFunc,
+		s.applicationService,
+		nil,
+		nil,
+		s.operationService,
+		modelUUID,
+		nil,
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(w.Results, gc.HasLen, 1)
-	c.Assert(w.Results[0].Error, gc.IsNil)
-	c.Assert(w.Results[0].Changes, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
 
-	// Verify the resource was registered and stop when done
-	c.Assert(s.resources.Count(), gc.Equals, 1)
-	resource := s.resources.Get("1")
-	defer statetesting.AssertStop(c, resource)
-
-	// Check that the Watch has consumed the initial event
-	wc := statetesting.NewStringsWatcherC(c, resource.(state.StringsWatcher))
-	wc.AssertNoChange()
-
-	// Log a message and check the watcher result.
-	added, err = added.Begin()
-	c.Assert(err, jc.ErrorIsNil)
-	err = added.Log("hello")
-	c.Assert(err, jc.ErrorIsNil)
-
-	a, err := s.Model.Action("2")
-	c.Assert(err, jc.ErrorIsNil)
-	logged := a.Messages()
-	c.Assert(logged, gc.HasLen, 1)
-	expected, err := json.Marshal(actions.ActionMessage{
-		Message:   logged[0].Message(),
-		Timestamp: logged[0].Timestamp(),
+	c.Cleanup(func() {
+		s.client = nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
+}
+func (s *actionSuite) TestActionsSuccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	wc.AssertChange(string(expected))
-	wc.AssertNoChange()
+	s.setupAPI(c, s.adminTag)
+
+	resAction := operation.Task{
+		TaskInfo: operation.TaskInfo{
+			ID:             "42",
+			ActionName:     "charm-action-0",
+			ExecutionGroup: ptr("group-0"),
+			IsParallel:     true,
+			Parameters: map[string]any{
+				"arg-0": "value-0",
+			},
+			Status: corestatus.Completed,
+		},
+		Receiver: "app/0", // Unit receiver.
+	}
+	taskID := "42"
+
+	s.operationService.EXPECT().GetTask(
+		gomock.Any(),
+		taskID,
+	).Return(resAction, nil)
+
+	result, err := s.client.Actions(c.Context(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.IsNil)
+	c.Check(result.Results[0].Action.Tag, tc.Equals, "action-42")
+	c.Check(result.Results[0].Action.Receiver, tc.Equals, "unit-app-0") // ActionReceiverTag applies the conversion.
+	c.Check(result.Results[0].Action.Name, tc.Equals, "charm-action-0")
+	c.Check(*result.Results[0].Action.ExecutionGroup, tc.Equals, "group-0")
+}
+
+func (s *actionSuite) TestActionsPermissionDenied(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Use a non-admin user tag to fail permission check.
+	nonAdminUser := names.NewUserTag("unauthorized")
+	s.setupAPI(c, nonAdminUser)
+	taskID := "42"
+
+	_, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *actionSuite) TestActionsInvalidActionTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: "invalid-tag"},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestActionsActionNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	taskID := "42"
+
+	s.operationService.EXPECT().GetTask(
+		gomock.Any(),
+		taskID,
+	).Return(operation.Task{}, operationerrors.TaskNotFound)
+
+	result, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestActionsServerError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	taskID := "42"
+
+	s.operationService.EXPECT().GetTask(
+		gomock.Any(),
+		taskID,
+	).Return(operation.Task{}, errors.New("boom"))
+
+	result, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	// This error was already (wrongly) black-holed into a ErrBadId.
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestActionsMultipleEntities(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	taskID0 := "42"
+	taskID1 := "43"
+	resAction0 := operation.Task{
+		TaskInfo: operation.TaskInfo{
+			ID: "42",
+		},
+		Receiver: "3", // Machine receiver.
+	}
+
+	s.operationService.EXPECT().GetTask(
+		gomock.Any(),
+		taskID0,
+	).Return(resAction0, nil)
+	s.operationService.EXPECT().GetTask(
+		gomock.Any(),
+		taskID1,
+	).Return(operation.Task{}, operationerrors.TaskNotFound)
+
+	result, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID0).String()},
+			{Tag: names.NewActionTag(taskID1).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 2)
+	c.Assert(result.Results[0].Error, tc.IsNil)
+	c.Assert(result.Results[1].Error, tc.NotNil)
+	c.Assert(result.Results[1].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestActionsEmptyEntityList(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.Actions(context.Background(), params.Entities{
+		Entities: []params.Entity{},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 0)
+}
+
+func (s *actionSuite) TestCancelSuccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	cancelledAction := operation.Task{
+		TaskInfo: operation.TaskInfo{
+			ID: "42",
+		},
+		Receiver: "app/0", // Unit receiver.
+	}
+	taskID := "42"
+
+	s.operationService.EXPECT().CancelTask(
+		gomock.Any(),
+		taskID,
+	).Return(cancelledAction, nil)
+
+	result, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result.Results, tc.HasLen, 1)
+	c.Check(result.Results[0].Error, tc.IsNil)
+	c.Check(result.Results[0].Action.Tag, tc.Equals, "action-42")
+	c.Check(result.Results[0].Action.Receiver, tc.Equals, "unit-app-0") // ActionReceiverTag applies the conversion.
+}
+
+func (s *actionSuite) TestCancelPermissionDenied(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Use a non-admin user tag to fail permission check.
+	nonAdminUser := names.NewUserTag("unauthorized")
+	s.setupAPI(c, nonAdminUser)
+	taskID := "42"
+
+	_, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *actionSuite) TestCancelInvalidActionTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: "invalid-tag"},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestCancelActionNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	taskID := "42"
+
+	s.operationService.EXPECT().CancelTask(
+		gomock.Any(),
+		taskID,
+	).Return(operation.Task{}, operationerrors.TaskNotFound)
+
+	result, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestCancelServerError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	taskID := "42"
+
+	s.operationService.EXPECT().CancelTask(
+		gomock.Any(),
+		taskID,
+	).Return(operation.Task{}, errors.New("boom"))
+
+	result, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewActionTag(taskID).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error.Message, tc.Equals, "boom")
+}
+
+func (s *actionSuite) TestCancelEmptyEntityList(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.Cancel(context.Background(), params.Entities{
+		Entities: []params.Entity{},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 0)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsSuccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	appName := "postgresql"
+	locator := applicationcharm.CharmLocator{
+		Name:     "postgresql",
+		Revision: 42,
+		Source:   applicationcharm.CharmHubSource,
+	}
+	actions := internalcharm.Actions{
+		ActionSpecs: map[string]internalcharm.ActionSpec{
+			"backup": {
+				Description: "Create a backup",
+				Params: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"target": map[string]interface{}{
+							"type": "string",
+						},
+					},
+				},
+			},
+			"restore": {
+				Description: "Restore from backup",
+				Params: map[string]interface{}{
+					"type": "object",
+				},
+			},
+		},
+	}
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName,
+	).Return(locator, nil)
+	s.applicationService.EXPECT().GetCharmActions(
+		gomock.Any(),
+		locator,
+	).Return(actions, nil)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag(appName).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.IsNil)
+	c.Assert(result.Results[0].ApplicationTag, tc.Equals, names.NewApplicationTag(appName).String())
+	c.Assert(result.Results[0].Actions, tc.HasLen, 2)
+	c.Assert(result.Results[0].Actions["backup"].Description, tc.Equals, "Create a backup")
+	c.Assert(result.Results[0].Actions["restore"].Description, tc.Equals, "Restore from backup")
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsPermissionDenied(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Use a non-admin user tag to fail permission check.
+	nonAdminUser := names.NewUserTag("unauthorized")
+	s.setupAPI(c, nonAdminUser)
+
+	_, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag("postgresql").String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsInvalidApplicationTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: "invalid-tag"},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	appName := "postgresql"
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName,
+	).Return(applicationcharm.CharmLocator{}, applicationerrors.ApplicationNotFound)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag(appName).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsCharmNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	appName := "postgresql"
+	locator := applicationcharm.CharmLocator{
+		Name:     "postgresql",
+		Revision: 42,
+		Source:   applicationcharm.CharmHubSource,
+	}
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName,
+	).Return(locator, nil)
+	s.applicationService.EXPECT().GetCharmActions(
+		gomock.Any(),
+		locator,
+	).Return(internalcharm.Actions{}, applicationerrors.CharmNotFound)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag(appName).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.NotNil)
+	c.Assert(result.Results[0].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsServerError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	appName := "postgresql"
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName,
+	).Return(applicationcharm.CharmLocator{}, errors.New("boom"))
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag(appName).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error.Message, tc.Equals, "boom")
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsMultipleEntities(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+	appName1 := "postgresql"
+	appName2 := "mysql"
+	locator1 := applicationcharm.CharmLocator{
+		Name:     "postgresql",
+		Revision: 42,
+		Source:   applicationcharm.CharmHubSource,
+	}
+	actions1 := internalcharm.Actions{
+		ActionSpecs: map[string]internalcharm.ActionSpec{
+			"backup": {
+				Description: "Create a backup",
+				Params: map[string]interface{}{
+					"type": "object",
+				},
+			},
+		},
+	}
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName1,
+	).Return(locator1, nil)
+	s.applicationService.EXPECT().GetCharmActions(
+		gomock.Any(),
+		locator1,
+	).Return(actions1, nil)
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(
+		gomock.Any(),
+		appName2,
+	).Return(applicationcharm.CharmLocator{}, applicationerrors.ApplicationNotFound)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewApplicationTag(appName1).String()},
+			{Tag: names.NewApplicationTag(appName2).String()},
+		},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 2)
+	c.Assert(result.Results[0].Error, tc.IsNil)
+	c.Assert(result.Results[0].ApplicationTag, tc.Equals, names.NewApplicationTag(appName1).String())
+	c.Assert(result.Results[0].Actions, tc.HasLen, 1)
+	c.Assert(result.Results[1].Error, tc.NotNil)
+	c.Assert(result.Results[1].Error.Code, tc.Equals, params.CodeNotFound)
+}
+
+func (s *actionSuite) TestApplicationsCharmsActionsEmptyEntityList(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c, s.adminTag)
+
+	result, err := s.client.ApplicationsCharmsActions(context.Background(), params.Entities{
+		Entities: []params.Entity{},
+	})
+
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 0)
+}
+
+type actionWatcherSuite struct {
+	MockBaseSuite
+
+	watcher *MockStringsWatcher
+}
+
+func (s *actionWatcherSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := s.MockBaseSuite.setupMocks(c)
+	s.watcher = NewMockStringsWatcher(ctrl)
+
+	c.Cleanup(func() { s.watcher = nil })
+
+	return ctrl
+}
+
+func (s *actionWatcherSuite) TestWatchLogProgress(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	// First action
+	chOne := make(chan []string, 1)
+	watcherMsgOne := "test task log"
+	chOne <- []string{
+		watcherMsgOne,
+	}
+	s.watcher.EXPECT().Changes().Return(chOne)
+
+	actionTagOne := names.NewActionTag("7")
+	s.OperationService.EXPECT().WatchTaskLogs(gomock.Any(), actionTagOne.Id()).Return(s.watcher, nil)
+	watcherIDOne := "42"
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return(watcherIDOne, nil)
+
+	// Second action
+	chTwo := make(chan []string, 1)
+	watcherMsgTwo := "second test task log"
+	chTwo <- []string{
+		watcherMsgTwo,
+	}
+	s.watcher.EXPECT().Changes().Return(chTwo)
+
+	actionTagTwo := names.NewActionTag("7")
+	s.OperationService.EXPECT().WatchTaskLogs(gomock.Any(), actionTagTwo.Id()).Return(s.watcher, nil)
+	watcherIDTwo := "42"
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return(watcherIDTwo, nil)
+
+	// Act
+	results, err := s.newActionAPI(c).WatchActionsProgress(c.Context(), params.Entities{Entities: []params.Entity{
+		{Tag: actionTagOne.String()},
+		{Tag: actionTagTwo.String()},
+	}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringsWatchResults{
+		Results: []params.StringsWatchResult{
+			{StringsWatcherId: watcherIDOne, Changes: []string{watcherMsgOne}},
+			{StringsWatcherId: watcherIDTwo, Changes: []string{watcherMsgTwo}},
+		},
+	})
+}
+
+func (s *actionWatcherSuite) TestWatchLogProgressNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange
+	actionTag := names.NewActionTag("7")
+	s.OperationService.EXPECT().WatchTaskLogs(gomock.Any(), actionTag.Id()).Return(nil, operationerrors.TaskNotFound)
+	api := s.newActionAPI(c)
+
+	// Act
+	results, err := api.WatchActionsProgress(c.Context(), params.Entities{Entities: []params.Entity{{Tag: actionTag.String()}}})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.ErrorMatches, fmt.Sprintf("action %q not found", actionTag.Id()))
 }

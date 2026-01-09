@@ -4,43 +4,52 @@
 package certupdater
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
 
-	jujuagent "github.com/juju/juju/agent"
-	"github.com/juju/juju/internal/worker/common"
-	workerstate "github.com/juju/juju/internal/worker/state"
-	"github.com/juju/juju/pki"
-	"github.com/juju/juju/state"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	coredependency "github.com/juju/juju/core/dependency"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/pki"
+	"github.com/juju/juju/internal/services"
 )
+
+// ControllerDomainServices is an interface that defines the
+// controller domain services required by the api address setter.
+type ControllerDomainServices interface {
+	// ControllerNode returns the controller node service.
+	ControllerNode() ControllerNodeService
+}
 
 // ManifoldConfig holds the information necessary to run a certupdater
 // in a dependency.Engine.
 type ManifoldConfig struct {
-	AgentName                string
-	AuthorityName            string
-	StateName                string
-	NewWorker                func(Config) worker.Worker
-	NewMachineAddressWatcher func(st *state.State, machineId string) (AddressWatcher, error)
+	AuthorityName               string
+	DomainServicesName          string
+	GetControllerDomainServices func(getter dependency.Getter, name string) (ControllerDomainServices, error)
+	NewWorker                   func(Config) (worker.Worker, error)
+	Logger                      logger.Logger
 }
 
 // Validate validates the manifold configuration.
 func (config ManifoldConfig) Validate() error {
-	if config.AgentName == "" {
-		return errors.NotValidf("empty AgentName")
-	}
 	if config.AuthorityName == "" {
-		return errors.NotValidf("empty AuthorityName")
+		return errors.New("empty AuthorityName not valid").Add(coreerrors.NotValid)
 	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
+	if config.DomainServicesName == "" {
+		return errors.New("empty DomainServicesName not valid").Add(coreerrors.NotValid)
+	}
+	if config.GetControllerDomainServices == nil {
+		return errors.New("nil GetControllerDomainServices not valid").Add(coreerrors.NotValid)
 	}
 	if config.NewWorker == nil {
-		return errors.NotValidf("nil NewWorker")
+		return errors.New("nil NewWorker not valid").Add(coreerrors.NotValid)
 	}
-	if config.NewMachineAddressWatcher == nil {
-		return errors.NotValidf("nil NewMachineAddressWatcher")
+	if config.Logger == nil {
+		return errors.New("nil Logger not valid").Add(coreerrors.NotValid)
 	}
 	return nil
 }
@@ -49,62 +58,51 @@ func (config ManifoldConfig) Validate() error {
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
-			config.AgentName,
 			config.AuthorityName,
-			config.StateName,
+			config.DomainServicesName,
 		},
 		Start: config.start,
 	}
 }
 
 // start is a method on ManifoldConfig because it's more readable than a closure.
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	var agent jujuagent.Agent
-	if err := context.Get(config.AgentName, &agent); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	var authority pki.Authority
-	if err := context.Get(config.AuthorityName, &authority); err != nil {
-		return nil, errors.Trace(err)
+	if err := getter.Get(config.AuthorityName, &authority); err != nil {
+		return nil, errors.Capture(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := context.Get(config.StateName, &stTracker); err != nil {
-		return nil, errors.Trace(err)
-	}
-	statePool, err := stTracker.Use()
+	controllerDomainServices, err := config.GetControllerDomainServices(getter, config.DomainServicesName)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
-	agentConfig := agent.CurrentConfig()
-
-	st, err := statePool.SystemState()
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-	addressWatcher, err := config.NewMachineAddressWatcher(st, agentConfig.Tag().Id())
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-
-	w := config.NewWorker(Config{
-		AddressWatcher:     addressWatcher,
-		Authority:          authority,
-		APIHostPortsGetter: st,
+	return config.NewWorker(Config{
+		Authority:             authority,
+		ControllerNodeService: controllerDomainServices.ControllerNode(),
+		Logger:                config.Logger,
 	})
-	return common.NewCleanupWorker(w, func() { _ = stTracker.Done() }), nil
 }
 
-// NewMachineAddressWatcher is the function that non-test code should
-// pass into ManifoldConfig.NewMachineAddressWatcher.
-func NewMachineAddressWatcher(st *state.State, machineId string) (AddressWatcher, error) {
-	return st.Machine(machineId)
+// GetControllerDomainServices retrieves the controller domain services
+// from the dependency getter.
+func GetControllerDomainServices(getter dependency.Getter, name string) (ControllerDomainServices, error) {
+	return coredependency.GetDependencyByName(getter, name, func(s services.ControllerDomainServices) ControllerDomainServices {
+		return controllerDomainServices{
+			controllerNodeService: s.ControllerNode(),
+		}
+	})
+}
+
+type controllerDomainServices struct {
+	controllerNodeService ControllerNodeService
+}
+
+// ControllerNode returns the controller node service.
+func (s controllerDomainServices) ControllerNode() ControllerNodeService {
+	return s.controllerNodeService
 }

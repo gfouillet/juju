@@ -4,6 +4,7 @@
 package gce
 
 import (
+	"context"
 	"path"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
@@ -12,9 +13,8 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
 
 type gceAvailabilityZone struct {
@@ -30,10 +30,10 @@ func (z *gceAvailabilityZone) Available() bool {
 }
 
 // AvailabilityZones returns all availability zones in the environment.
-func (env *environ) AvailabilityZones(ctx context.ProviderCallContext) (network.AvailabilityZones, error) {
+func (env *environ) AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error) {
 	zones, err := env.gce.AvailabilityZones(ctx, env.cloud.Region)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
 
 	var result network.AvailabilityZones
@@ -49,7 +49,7 @@ func (env *environ) AvailabilityZones(ctx context.ProviderCallContext) (network.
 // InstanceAvailabilityZoneNames returns the names of the availability
 // zones for the specified instances. The error returned follows the same
 // rules as Environ.Instances.
-func (env *environ) InstanceAvailabilityZoneNames(ctx context.ProviderCallContext, ids []instance.Id) (map[instance.Id]string, error) {
+func (env *environ) InstanceAvailabilityZoneNames(ctx context.Context, ids []instance.Id) (map[instance.Id]string, error) {
 	instances, err := env.Instances(ctx, ids)
 	if err != nil && err != environs.ErrPartialInstances && err != environs.ErrNoInstances {
 		return nil, errors.Trace(err)
@@ -69,7 +69,7 @@ func (env *environ) InstanceAvailabilityZoneNames(ctx context.ProviderCallContex
 }
 
 // DeriveAvailabilityZones is part of the common.ZonedEnviron interface.
-func (env *environ) DeriveAvailabilityZones(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
+func (env *environ) DeriveAvailabilityZones(ctx context.Context, args environs.StartInstanceParams) ([]string, error) {
 	volumeAttachmentsZone, err := volumeAttachmentsZone(args.VolumeAttachments)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -94,10 +94,10 @@ func (env *environ) DeriveAvailabilityZones(ctx context.ProviderCallContext, arg
 	return []string{zone.GetName()}, nil
 }
 
-func (env *environ) availZone(ctx context.ProviderCallContext, name string) (*computepb.Zone, error) {
+func (env *environ) availZone(ctx context.Context, name string) (*computepb.Zone, error) {
 	zones, err := env.gce.AvailabilityZones(ctx, env.cloud.Region)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
 	for _, z := range zones {
 		if z.GetName() == name {
@@ -107,7 +107,7 @@ func (env *environ) availZone(ctx context.ProviderCallContext, name string) (*co
 	return nil, errors.NotFoundf("invalid availability zone %q", name)
 }
 
-func (env *environ) availZoneUp(ctx context.ProviderCallContext, name string) (*computepb.Zone, error) {
+func (env *environ) availZoneUp(ctx context.Context, name string) (*computepb.Zone, error) {
 	zone, err := env.availZone(ctx, name)
 	if err != nil {
 		return nil, errors.Trace(err)

@@ -4,17 +4,16 @@
 package uniter
 
 import (
+	stdcontext "context"
 	"fmt"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 	"github.com/juju/juju/rpc/params"
 )
@@ -26,7 +25,7 @@ type operationCallbacks struct {
 }
 
 // PrepareHook is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) PrepareHook(hi hook.Info) (string, error) {
+func (opc *operationCallbacks) PrepareHook(ctx stdcontext.Context, hi hook.Info) (string, error) {
 	name := string(hi.Kind)
 	switch {
 	case hi.Kind.IsWorkload():
@@ -49,22 +48,19 @@ func (opc *operationCallbacks) PrepareHook(hi hook.Info) (string, error) {
 		// TODO(axw) if the agent is not installed yet,
 		// set the status to "preparing storage".
 	case hi.Kind.IsSecret():
-		err := opc.u.secretsTracker.PrepareHook(hi)
+		err := opc.u.secretsTracker.PrepareHook(ctx, hi)
 		if err != nil {
 			return "", err
 		}
 	case hi.Kind == hooks.ConfigChanged:
 		// TODO(axw)
 		//opc.u.f.DiscardConfigEvent()
-	case hi.Kind == hooks.LeaderSettingsChanged:
-		// TODO(axw)
-		//opc.u.f.DiscardLeaderSettingsEvent()
 	}
 	return name, nil
 }
 
 // CommitHook is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) CommitHook(hi hook.Info) error {
+func (opc *operationCallbacks) CommitHook(ctx stdcontext.Context, hi hook.Info) error {
 	switch {
 	case hi.Kind == hooks.Start:
 		opc.u.Probe.SetHasStarted(true)
@@ -72,11 +68,11 @@ func (opc *operationCallbacks) CommitHook(hi hook.Info) error {
 		opc.u.Probe.SetHasStarted(false)
 	case hi.Kind.IsWorkload():
 	case hi.Kind.IsRelation():
-		return opc.u.relationStateTracker.CommitHook(hi)
+		return opc.u.relationStateTracker.CommitHook(ctx, hi)
 	case hi.Kind.IsStorage():
-		return opc.u.storage.CommitHook(hi)
+		return opc.u.storage.CommitHook(ctx, hi)
 	case hi.Kind.IsSecret():
-		return opc.u.secretsTracker.CommitHook(hi)
+		return opc.u.secretsTracker.CommitHook(ctx, hi)
 	}
 	return nil
 }
@@ -110,29 +106,42 @@ func (opc *operationCallbacks) NotifyHookFailed(hook string, ctx context.Context
 }
 
 // FailAction is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) FailAction(actionId, message string) error {
+func (opc *operationCallbacks) FailAction(ctx stdcontext.Context, actionId, message string) error {
 	if !names.IsValidAction(actionId) {
 		return errors.Errorf("invalid action id %q", actionId)
 	}
 	tag := names.NewActionTag(actionId)
-	err := opc.u.st.ActionFinish(tag, params.ActionFailed, nil, message)
+	err := opc.u.client.ActionFinish(ctx, tag, params.ActionFailed, nil, message)
 	if params.IsCodeNotFoundOrCodeUnauthorized(err) || params.IsCodeAlreadyExists(err) {
 		err = nil
 	}
 	return err
 }
 
-func (opc *operationCallbacks) ActionStatus(actionId string) (string, error) {
+// ErrorAction is part of the operation.Callbacks interface.
+func (opc *operationCallbacks) ErrorAction(ctx stdcontext.Context, actionId, message string) error {
+	if !names.IsValidAction(actionId) {
+		return errors.Errorf("invalid action id %q", actionId)
+	}
+	tag := names.NewActionTag(actionId)
+	err := opc.u.client.ActionFinish(ctx, tag, params.ActionError, nil, message)
+	if params.IsCodeNotFoundOrCodeUnauthorized(err) || params.IsCodeAlreadyExists(err) {
+		err = nil
+	}
+	return err
+}
+
+func (opc *operationCallbacks) ActionStatus(ctx stdcontext.Context, actionId string) (string, error) {
 	if !names.IsValidAction(actionId) {
 		return "", errors.NotValidf("invalid action id %q", actionId)
 	}
 	tag := names.NewActionTag(actionId)
-	return opc.u.st.ActionStatus(tag)
+	return opc.u.client.ActionStatus(ctx, tag)
 }
 
 // GetArchiveInfo is part of the operation.Callbacks interface.
 func (opc *operationCallbacks) GetArchiveInfo(url string) (charm.BundleInfo, error) {
-	ch, err := opc.u.st.Charm(url)
+	ch, err := opc.u.client.Charm(url)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -140,38 +149,21 @@ func (opc *operationCallbacks) GetArchiveInfo(url string) (charm.BundleInfo, err
 }
 
 // SetCurrentCharm is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) SetCurrentCharm(charmURL string) error {
-	return opc.u.unit.SetCharmURL(charmURL)
+func (opc *operationCallbacks) SetCurrentCharm(ctx stdcontext.Context, charmURL string) error {
+	return opc.u.unit.SetCharm(ctx, charmURL)
 }
 
 // SetExecutingStatus is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) SetExecutingStatus(message string) error {
-	return setAgentStatus(opc.u, status.Executing, message, nil)
-}
-
-// SetUpgradeSeriesStatus is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) SetUpgradeSeriesStatus(upgradeSeriesStatus model.UpgradeSeriesStatus, reason string) error {
-	return setUpgradeSeriesStatus(opc.u, upgradeSeriesStatus, reason)
-}
-
-// RemoteInit is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) RemoteInit(runningStatus remotestate.ContainerRunningStatus, abort <-chan struct{}) error {
-	if opc.u.modelType != model.CAAS || opc.u.sidecar {
-		// Non CAAS model or sidecar CAAS model do not have remote init process.
-		return nil
-	}
-	if opc.u.remoteInitFunc == nil {
-		return nil
-	}
-	return opc.u.remoteInitFunc(runningStatus, abort)
+func (opc *operationCallbacks) SetExecutingStatus(ctx stdcontext.Context, message string) error {
+	return setAgentStatus(ctx, opc.u, status.Executing, message, nil)
 }
 
 // SetSecretRotated is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) SetSecretRotated(uri string, oldRevision int) error {
-	return opc.u.secretsClient.SecretRotated(uri, oldRevision)
+func (opc *operationCallbacks) SetSecretRotated(ctx stdcontext.Context, uri string, oldRevision int) error {
+	return opc.u.secretsClient.SecretRotated(ctx, uri, oldRevision)
 }
 
 // SecretsRemoved is part of the operation.Callbacks interface.
-func (opc *operationCallbacks) SecretsRemoved(deletedRevisions, deletedObsoleteRevisions map[string][]int) error {
-	return opc.u.secretsTracker.SecretsRemoved(deletedRevisions, deletedObsoleteRevisions)
+func (opc *operationCallbacks) SecretsRemoved(ctx stdcontext.Context, deletedRevisions, deletedObsoleteRevisions map[string][]int) error {
+	return opc.u.secretsTracker.SecretsRemoved(ctx, deletedRevisions, deletedObsoleteRevisions)
 }

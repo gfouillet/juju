@@ -22,7 +22,6 @@ Run the commands on the remote targets specified.
 | `--machine` |  | One or more machine ids |
 | `--no-color` | false | Disable ANSI color codes in output |
 | `-o`, `--output` |  | Specify an output file |
-| `--operator` | false | Run the commands on the operator (k8s-only) |
 | `--parallel` | true | Run the commands in parallel without first acquiring a lock |
 | `-u`, `--unit` |  | One or more unit ids |
 | `--utc` | false | Show times in UTC |
@@ -73,10 +72,7 @@ application. For example, if there was an application `mysql` and that applicati
 had two units, `mysql/0` and `mysql/1`, then `--application mysql`
 is equivalent to `--unit mysql/0,mysql/1`.
 
-If `--operator` is provided on Kubernetes models, commands are executed on the operator
-instead of the workload. On machine models, `--operator` has no effect.
-
-Commands run for applications or units are executed in a hook context for
+Commands run for applications or units are executed in a 'hook context' for
 the unit.
 
 Commands run on machines via the -`-machine` argument are run in parallel

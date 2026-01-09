@@ -4,9 +4,10 @@
 package deployer
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiwatcher "github.com/juju/juju/api/watcher"
 	"github.com/juju/juju/core/watcher"
@@ -15,19 +16,19 @@ import (
 
 // Machine represents a juju machine as seen by the deployer worker.
 type Machine struct {
-	tag names.MachineTag
-	st  *State
+	tag    names.MachineTag
+	client *Client
 }
 
 // WatchUnits starts a StringsWatcher to watch all units deployed to
 // the machine, in order to track which ones should be deployed or
 // recalled.
-func (m *Machine) WatchUnits() (watcher.StringsWatcher, error) {
+func (m *Machine) WatchUnits(ctx context.Context) (watcher.StringsWatcher, error) {
 	var results params.StringsWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: m.tag.String()}},
 	}
-	err := m.st.facade.FacadeCall("WatchUnits", args, &results)
+	err := m.client.facade.FacadeCall(ctx, "WatchUnits", args, &results)
 	if err != nil {
 		return nil, err
 	}
@@ -38,6 +39,6 @@ func (m *Machine) WatchUnits() (watcher.StringsWatcher, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	w := apiwatcher.NewStringsWatcher(m.st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewStringsWatcher(m.client.facade.RawAPICaller(), result)
 	return w, nil
 }

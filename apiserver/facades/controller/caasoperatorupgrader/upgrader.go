@@ -4,27 +4,29 @@
 package caasoperatorupgrader
 
 import (
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/caas"
+	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/rpc/params"
 )
-
-var logger = loggo.GetLogger("juju.controller.caasoperatorupgrader")
 
 type API struct {
 	auth facade.Authorizer
 
 	broker caas.Upgrader
+	logger corelogger.Logger
 }
 
 // NewCAASOperatorUpgraderAPI returns a new CAAS operator upgrader API facade.
 func NewCAASOperatorUpgraderAPI(
 	authorizer facade.Authorizer,
 	broker caas.Upgrader,
+	logger corelogger.Logger,
 ) (*API, error) {
 	if !authorizer.AuthController() &&
 		!authorizer.AuthApplicationAgent() &&
@@ -35,11 +37,12 @@ func NewCAASOperatorUpgraderAPI(
 	return &API{
 		auth:   authorizer,
 		broker: broker,
+		logger: logger,
 	}, nil
 }
 
 // UpgradeOperator upgrades the operator for the specified agents.
-func (api *API) UpgradeOperator(arg params.KubernetesUpgradeArg) (params.ErrorResult, error) {
+func (api *API) UpgradeOperator(ctx context.Context, arg params.KubernetesUpgradeArg) (params.ErrorResult, error) {
 	serverErr := func(err error) params.ErrorResult {
 		return params.ErrorResult{Error: apiservererrors.ServerError(err)}
 	}
@@ -51,8 +54,8 @@ func (api *API) UpgradeOperator(arg params.KubernetesUpgradeArg) (params.ErrorRe
 		return serverErr(apiservererrors.ErrPerm), nil
 	}
 
-	logger.Debugf("upgrading caas agent for %s", tag)
-	err = api.broker.Upgrade(arg.AgentTag, arg.Version)
+	api.logger.Debugf(ctx, "upgrading caas agent for %s", tag)
+	err = api.broker.Upgrade(ctx, arg.AgentTag, arg.Version)
 	if err != nil {
 		return serverErr(err), nil
 	}

@@ -4,13 +4,12 @@
 package resolver_test
 
 import (
-	"github.com/juju/charm/v12/hooks"
-	"github.com/juju/loggo"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	"github.com/juju/juju/internal/worker/fortress"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/internal/charm/hooks"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
@@ -20,39 +19,41 @@ type GuardSuite struct {
 	guard *mockCharmDirGuard
 }
 
-var _ = gc.Suite(&GuardSuite{})
+func TestGuardSuite(t *testing.T) {
+	tc.Run(t, &GuardSuite{})
+}
 
-func (s *GuardSuite) SetUpTest(c *gc.C) {
+func (s *GuardSuite) SetUpTest(c *tc.C) {
 	s.guard = &mockCharmDirGuard{}
 }
 
-func (s *GuardSuite) checkCall(c *gc.C, state operation.State, call string) {
-	err := resolver.UpdateCharmDir(state, s.guard, nil, loggo.GetLogger("test"))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *GuardSuite) checkCall(c *tc.C, state operation.State, call string) {
+	err := resolver.UpdateCharmDir(c.Context(), state, s.guard, loggertesting.WrapCheckLog(c))
+	c.Assert(err, tc.ErrorIsNil)
 	s.guard.CheckCallNames(c, call)
 }
 
-func (s *GuardSuite) TestLockdownEmptyState(c *gc.C) {
+func (s *GuardSuite) TestLockdownEmptyState(c *tc.C) {
 	s.checkCall(c, operation.State{}, "Lockdown")
 }
 
-func (s *GuardSuite) TestLockdownNotStarted(c *gc.C) {
+func (s *GuardSuite) TestLockdownNotStarted(c *tc.C) {
 	s.checkCall(c, operation.State{Started: false}, "Lockdown")
 }
 
-func (s *GuardSuite) TestLockdownStartStopInvalid(c *gc.C) {
+func (s *GuardSuite) TestLockdownStartStopInvalid(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: true}, "Lockdown")
 }
 
-func (s *GuardSuite) TestLockdownInstall(c *gc.C) {
+func (s *GuardSuite) TestLockdownInstall(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: false, Kind: operation.Install}, "Lockdown")
 }
 
-func (s *GuardSuite) TestLockdownUpgrade(c *gc.C) {
+func (s *GuardSuite) TestLockdownUpgrade(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: false, Kind: operation.Upgrade}, "Lockdown")
 }
 
-func (s *GuardSuite) TestLockdownRunHookUpgradeCharm(c *gc.C) {
+func (s *GuardSuite) TestLockdownRunHookUpgradeCharm(c *tc.C) {
 	s.checkCall(c, operation.State{
 		Started: true,
 		Stopped: false,
@@ -63,19 +64,19 @@ func (s *GuardSuite) TestLockdownRunHookUpgradeCharm(c *gc.C) {
 	}, "Lockdown")
 }
 
-func (s *GuardSuite) TestUnlockStarted(c *gc.C) {
+func (s *GuardSuite) TestUnlockStarted(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: false}, "Unlock")
 }
 
-func (s *GuardSuite) TestUnlockStartedContinue(c *gc.C) {
+func (s *GuardSuite) TestUnlockStartedContinue(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: false, Kind: operation.Continue}, "Unlock")
 }
 
-func (s *GuardSuite) TestUnlockStartedRunAction(c *gc.C) {
+func (s *GuardSuite) TestUnlockStartedRunAction(c *tc.C) {
 	s.checkCall(c, operation.State{Started: true, Stopped: false, Kind: operation.RunAction}, "Unlock")
 }
 
-func (s *GuardSuite) TestUnlockConfigChanged(c *gc.C) {
+func (s *GuardSuite) TestUnlockConfigChanged(c *tc.C) {
 	s.checkCall(c, operation.State{
 		Started: true,
 		Stopped: false,
@@ -84,11 +85,4 @@ func (s *GuardSuite) TestUnlockConfigChanged(c *gc.C) {
 			Kind: hooks.ConfigChanged,
 		},
 	}, "Unlock")
-}
-
-func (s *GuardSuite) TestLockdownAbortArg(c *gc.C) {
-	abort := make(fortress.Abort)
-	err := resolver.UpdateCharmDir(operation.State{}, s.guard, abort, loggo.GetLogger("test"))
-	c.Assert(err, jc.ErrorIsNil)
-	s.guard.CheckCalls(c, []testing.StubCall{{FuncName: "Lockdown", Args: []interface{}{abort}}})
 }

@@ -4,50 +4,54 @@
 package secretbackends_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/common/secretbackends"
 	"github.com/juju/juju/api/common/secretbackends/mocks"
 	coresecrets "github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/secrets"
+	"github.com/juju/juju/internal/secrets/provider"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/secrets"
-	"github.com/juju/juju/secrets/provider"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&SecretsSuite{})
+func TestSecretsSuite(t *testing.T) {
+	tc.Run(t, &SecretsSuite{})
+}
 
 type SecretsSuite struct {
 	coretesting.BaseSuite
 }
 
-func (s *SecretsSuite) TestNewClient(c *gc.C) {
+func (s *SecretsSuite) TestNewClient(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	apiCaller := mocks.NewMockFacadeCaller(ctrl)
 	client := secretbackends.NewClient(apiCaller)
-	c.Assert(client, gc.NotNil)
+	c.Assert(client, tc.NotNil)
 }
 
 func ptr[T any](v T) *T {
 	return &v
 }
 
-func (s *SecretsSuite) TestGetSecretBackendConfig(c *gc.C) {
+func (s *SecretsSuite) TestGetSecretBackendConfig(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	apiCaller := mocks.NewMockFacadeCaller(ctrl)
 
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretBackendConfigs",
 		params.SecretBackendArgs{BackendIDs: []string{"active-id"}},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretBackendConfigResults{
+		3, params.SecretBackendConfigResults{
 			ActiveID: "active-id",
 			Results: map[string]params.SecretBackendConfigResult{
 				"active-id": {
@@ -64,9 +68,9 @@ func (s *SecretsSuite) TestGetSecretBackendConfig(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	result, err := client.GetSecretBackendConfig(ptr("active-id"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, &provider.ModelBackendConfigInfo{
+	result, err := client.GetSecretBackendConfig(c.Context(), ptr("active-id"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, &provider.ModelBackendConfigInfo{
 		ActiveID: "active-id",
 		Configs: map[string]provider.ModelBackendConfig{
 			"active-id": {
@@ -82,18 +86,19 @@ func (s *SecretsSuite) TestGetSecretBackendConfig(c *gc.C) {
 	})
 }
 
-func (s *SecretsSuite) TestGetBackendConfigForDraing(c *gc.C) {
+func (s *SecretsSuite) TestGetBackendConfigForDraing(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	apiCaller := mocks.NewMockFacadeCaller(ctrl)
 
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretBackendConfigs",
 		params.SecretBackendArgs{ForDrain: true, BackendIDs: []string{"active-id"}},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretBackendConfigResults{
+		3, params.SecretBackendConfigResults{
 			ActiveID: "active-id",
 			Results: map[string]params.SecretBackendConfigResult{
 				"active-id": {
@@ -110,9 +115,9 @@ func (s *SecretsSuite) TestGetBackendConfigForDraing(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	result, activeID, err := client.GetBackendConfigForDrain(ptr("active-id"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, &provider.ModelBackendConfig{
+	result, activeID, err := client.GetBackendConfigForDrain(c.Context(), ptr("active-id"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, &provider.ModelBackendConfig{
 		ControllerUUID: coretesting.ControllerTag.Id(),
 		ModelUUID:      coretesting.ModelTag.Id(),
 		ModelName:      "fred",
@@ -121,10 +126,10 @@ func (s *SecretsSuite) TestGetBackendConfigForDraing(c *gc.C) {
 			Config:      map[string]interface{}{"foo": "bar"},
 		},
 	})
-	c.Assert(activeID, gc.Equals, "active-id")
+	c.Assert(activeID, tc.Equals, "active-id")
 }
 
-func (s *SecretsSuite) TestGetContentInfo(c *gc.C) {
+func (s *SecretsSuite) TestGetContentInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -132,6 +137,7 @@ func (s *SecretsSuite) TestGetContentInfo(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretContentInfo",
 		params.GetSecretContentArgs{
 			Args: []params.GetSecretContentArg{{
@@ -143,7 +149,7 @@ func (s *SecretsSuite) TestGetContentInfo(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{Data: map[string]string{"foo": "bar"}},
 			}},
@@ -151,15 +157,15 @@ func (s *SecretsSuite) TestGetContentInfo(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, draining, err := client.GetContentInfo(uri, "label", true, true)
-	c.Assert(err, jc.ErrorIsNil)
+	content, backendConfig, draining, err := client.GetContentInfo(c.Context(), uri, "label", true, true)
+	c.Assert(err, tc.ErrorIsNil)
 	value := coresecrets.NewSecretValue(map[string]string{"foo": "bar"})
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{SecretValue: value})
-	c.Assert(backendConfig, gc.IsNil)
-	c.Assert(draining, jc.IsFalse)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{SecretValue: value})
+	c.Assert(backendConfig, tc.IsNil)
+	c.Assert(draining, tc.IsFalse)
 }
 
-func (s *SecretsSuite) TestGetContentInfoExternal(c *gc.C) {
+func (s *SecretsSuite) TestGetContentInfoExternal(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -167,6 +173,7 @@ func (s *SecretsSuite) TestGetContentInfoExternal(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretContentInfo",
 		params.GetSecretContentArgs{
 			Args: []params.GetSecretContentArg{{
@@ -178,7 +185,7 @@ func (s *SecretsSuite) TestGetContentInfoExternal(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{ValueRef: &params.SecretValueRef{
 					BackendID:  "backend-id",
@@ -199,13 +206,13 @@ func (s *SecretsSuite) TestGetContentInfoExternal(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, draining, err := client.GetContentInfo(uri, "label", true, true)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{ValueRef: &coresecrets.ValueRef{
+	content, backendConfig, draining, err := client.GetContentInfo(c.Context(), uri, "label", true, true)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{ValueRef: &coresecrets.ValueRef{
 		BackendID:  "backend-id",
 		RevisionID: "rev-id",
 	}})
-	c.Assert(backendConfig, jc.DeepEquals, &provider.ModelBackendConfig{
+	c.Assert(backendConfig, tc.DeepEquals, &provider.ModelBackendConfig{
 		ControllerUUID: "controller-uuid",
 		ModelUUID:      "model-uuid",
 		ModelName:      "model",
@@ -214,16 +221,17 @@ func (s *SecretsSuite) TestGetContentInfoExternal(c *gc.C) {
 			Config:      map[string]interface{}{"foo": "bar"},
 		},
 	})
-	c.Assert(draining, jc.IsTrue)
+	c.Assert(draining, tc.IsTrue)
 }
 
-func (s *SecretsSuite) TestGetContentInfoLabelArgOnly(c *gc.C) {
+func (s *SecretsSuite) TestGetContentInfoLabelArgOnly(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	apiCaller := mocks.NewMockFacadeCaller(ctrl)
 
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretContentInfo",
 		params.GetSecretContentArgs{
 			Args: []params.GetSecretContentArg{{
@@ -234,7 +242,7 @@ func (s *SecretsSuite) TestGetContentInfoLabelArgOnly(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{Data: map[string]string{"foo": "bar"}},
 			}},
@@ -242,15 +250,15 @@ func (s *SecretsSuite) TestGetContentInfoLabelArgOnly(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, draining, err := client.GetContentInfo(nil, "label", true, true)
-	c.Assert(err, jc.ErrorIsNil)
+	content, backendConfig, draining, err := client.GetContentInfo(c.Context(), nil, "label", true, true)
+	c.Assert(err, tc.ErrorIsNil)
 	value := coresecrets.NewSecretValue(map[string]string{"foo": "bar"})
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{SecretValue: value})
-	c.Assert(backendConfig, gc.IsNil)
-	c.Assert(draining, jc.IsFalse)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{SecretValue: value})
+	c.Assert(backendConfig, tc.IsNil)
+	c.Assert(draining, tc.IsFalse)
 }
 
-func (s *SecretsSuite) TestGetContentInfoError(c *gc.C) {
+func (s *SecretsSuite) TestGetContentInfoError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -258,6 +266,7 @@ func (s *SecretsSuite) TestGetContentInfoError(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretContentInfo",
 		params.GetSecretContentArgs{
 			Args: []params.GetSecretContentArg{{
@@ -268,7 +277,7 @@ func (s *SecretsSuite) TestGetContentInfoError(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Error: &params.Error{Message: "boom"},
 			}},
@@ -276,13 +285,13 @@ func (s *SecretsSuite) TestGetContentInfoError(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, _, err := client.GetContentInfo(uri, "", true, true)
-	c.Assert(err, gc.ErrorMatches, "boom")
-	c.Assert(content, gc.IsNil)
-	c.Assert(backendConfig, gc.IsNil)
+	content, backendConfig, _, err := client.GetContentInfo(c.Context(), uri, "", true, true)
+	c.Assert(err, tc.ErrorMatches, "boom")
+	c.Assert(content, tc.IsNil)
+	c.Assert(backendConfig, tc.IsNil)
 }
 
-func (s *SecretsSuite) TestGetRevisionContentInfo(c *gc.C) {
+func (s *SecretsSuite) TestGetRevisionContentInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -290,6 +299,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfo(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretRevisionContentInfo",
 		params.SecretRevisionArg{
 			URI:           uri.String(),
@@ -298,7 +308,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfo(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{Data: map[string]string{"foo": "bar"}},
 			}},
@@ -306,15 +316,15 @@ func (s *SecretsSuite) TestGetRevisionContentInfo(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, draining, err := client.GetRevisionContentInfo(uri, 666, true)
-	c.Assert(err, jc.ErrorIsNil)
+	content, backendConfig, draining, err := client.GetRevisionContentInfo(c.Context(), uri, 666, true)
+	c.Assert(err, tc.ErrorIsNil)
 	value := coresecrets.NewSecretValue(map[string]string{"foo": "bar"})
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{SecretValue: value})
-	c.Assert(backendConfig, gc.IsNil)
-	c.Assert(draining, jc.IsFalse)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{SecretValue: value})
+	c.Assert(backendConfig, tc.IsNil)
+	c.Assert(draining, tc.IsFalse)
 }
 
-func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *gc.C) {
+func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -322,6 +332,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretRevisionContentInfo",
 		params.SecretRevisionArg{
 			URI:           uri.String(),
@@ -330,7 +341,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Content: params.SecretContentParams{ValueRef: &params.SecretValueRef{
 					BackendID:  "backend-id",
@@ -351,13 +362,13 @@ func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	content, backendConfig, draining, err := client.GetRevisionContentInfo(uri, 666, true)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(content, jc.DeepEquals, &secrets.ContentParams{ValueRef: &coresecrets.ValueRef{
+	content, backendConfig, draining, err := client.GetRevisionContentInfo(c.Context(), uri, 666, true)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(content, tc.DeepEquals, &secrets.ContentParams{ValueRef: &coresecrets.ValueRef{
 		BackendID:  "backend-id",
 		RevisionID: "rev-id",
 	}})
-	c.Assert(backendConfig, jc.DeepEquals, &provider.ModelBackendConfig{
+	c.Assert(backendConfig, tc.DeepEquals, &provider.ModelBackendConfig{
 		ControllerUUID: "controller-uuid",
 		ModelUUID:      "model-uuid",
 		ModelName:      "model",
@@ -366,10 +377,10 @@ func (s *SecretsSuite) TestGetRevisionContentInfoExternal(c *gc.C) {
 			Config:      map[string]interface{}{"foo": "bar"},
 		},
 	})
-	c.Assert(draining, jc.IsTrue)
+	c.Assert(draining, tc.IsTrue)
 }
 
-func (s *SecretsSuite) TestGetRevisionContentInfoError(c *gc.C) {
+func (s *SecretsSuite) TestGetRevisionContentInfoError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -377,6 +388,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfoError(c *gc.C) {
 
 	uri := coresecrets.NewURI()
 	apiCaller.EXPECT().FacadeCall(
+		gomock.Any(),
 		"GetSecretRevisionContentInfo",
 		params.SecretRevisionArg{
 			URI:           uri.String(),
@@ -385,7 +397,7 @@ func (s *SecretsSuite) TestGetRevisionContentInfoError(c *gc.C) {
 		},
 		gomock.Any(),
 	).SetArg(
-		2, params.SecretContentResults{
+		3, params.SecretContentResults{
 			Results: []params.SecretContentResult{{
 				Error: &params.Error{Message: "boom"},
 			}},
@@ -393,8 +405,8 @@ func (s *SecretsSuite) TestGetRevisionContentInfoError(c *gc.C) {
 	).Return(nil)
 
 	client := secretbackends.NewClient(apiCaller)
-	config, backendConfig, _, err := client.GetRevisionContentInfo(uri, 666, true)
-	c.Assert(err, gc.ErrorMatches, "boom")
-	c.Assert(config, gc.IsNil)
-	c.Assert(backendConfig, gc.IsNil)
+	config, backendConfig, _, err := client.GetRevisionContentInfo(c.Context(), uri, 666, true)
+	c.Assert(err, tc.ErrorMatches, "boom")
+	c.Assert(config, tc.IsNil)
+	c.Assert(backendConfig, tc.IsNil)
 }

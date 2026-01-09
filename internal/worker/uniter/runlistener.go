@@ -7,25 +7,19 @@
 package uniter
 
 import (
+	"context"
 	"net"
 	"net/rpc"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3/exec"
-	"github.com/juju/worker/v3"
+	"github.com/juju/utils/v4/exec"
+	"github.com/juju/worker/v4"
 	"gopkg.in/tomb.v2"
-	"gopkg.in/yaml.v2"
 
-	"github.com/juju/juju/agent"
-	"github.com/juju/juju/caas"
-	agentconfig "github.com/juju/juju/cmd/jujud/agent/config"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/runcommands"
-	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/juju/sockets"
 )
 
@@ -47,11 +41,6 @@ type RunCommandsArgs struct {
 	ForceRemoteUnit bool
 	// UnitName is the unit for which the command is being run.
 	UnitName string
-	// Token is the unit token when run under CAAS environments for auth.
-	Token string
-	// Operator is true when the command should be run on the operator.
-	// This only affects k8s workload charms.
-	Operator bool
 }
 
 // A CommandRunner is something that will actually execute the commands and
@@ -65,7 +54,7 @@ type CommandRunner interface {
 // setting up the rpc server on that net connection. Also starts the go routine
 // that listens and hands off the work.
 type RunListener struct {
-	logger Logger
+	logger logger.Logger
 
 	mu sync.Mutex
 
@@ -86,7 +75,7 @@ type RunListener struct {
 // socket or named pipe passed in. If a valid RunListener is returned, is
 // has the go routine running, and should be closed by the creator
 // when they are done with it.
-func NewRunListener(socket sockets.Socket, logger Logger) (*RunListener, error) {
+func NewRunListener(socket sockets.Socket, logger logger.Logger) (*RunListener, error) {
 	listener, err := sockets.Listen(socket)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -114,7 +103,7 @@ func NewRunListener(socket sockets.Socket, logger Logger) (*RunListener, error) 
 // Run accepts new connections until it encounters an error, or until Close is
 // called, and then blocks until all existing connections have been closed.
 func (r *RunListener) Run() (err error) {
-	r.logger.Debugf("juju-exec listener running")
+	r.logger.Debugf(context.TODO(), "juju-exec listener running")
 	var conn net.Conn
 	for {
 		conn, err = r.listener.Accept()
@@ -127,7 +116,7 @@ func (r *RunListener) Run() (err error) {
 			r.wg.Done()
 		}(conn)
 	}
-	r.logger.Debugf("juju-exec listener stopping")
+	r.logger.Debugf(context.TODO(), "juju-exec listener stopping")
 	select {
 	case <-r.closing:
 		// Someone has called Close(), so it is overwhelmingly likely that
@@ -146,7 +135,7 @@ func (r *RunListener) Run() (err error) {
 func (r *RunListener) Close() error {
 	defer func() {
 		<-r.closed
-		r.logger.Debugf("juju-exec listener stopped")
+		r.logger.Debugf(context.TODO(), "juju-exec listener stopped")
 	}()
 	close(r.closing)
 	return r.listener.Close()
@@ -168,7 +157,7 @@ func (r *RunListener) UnregisterRunner(unitName string) {
 
 // RunCommands executes the supplied commands in a hook context.
 func (r *RunListener) RunCommands(args RunCommandsArgs) (results *exec.ExecResponse, err error) {
-	r.logger.Debugf("run commands on unit %v: %s", args.UnitName, args.Commands)
+	r.logger.Debugf(context.TODO(), "run commands on unit %v: %s", args.UnitName, args.Commands)
 	if args.UnitName == "" {
 		return nil, errors.New("missing unit name running command")
 	}
@@ -179,24 +168,6 @@ func (r *RunListener) RunCommands(args RunCommandsArgs) (results *exec.ExecRespo
 		return nil, errors.Errorf("no runner is registered for unit %v", args.UnitName)
 	}
 
-	if r.requiresAuth {
-		// TODO: Cache unit password
-		baseDir := agent.Dir(agentconfig.DataDir, names.NewUnitTag(args.UnitName))
-		infoFilePath := filepath.Join(baseDir, caas.OperatorClientInfoCacheFile)
-		d, err := os.ReadFile(infoFilePath)
-		if err != nil {
-			return nil, errors.Annotatef(err, "reading %s", infoFilePath)
-		}
-		op := caas.OperatorClientInfo{}
-		err = yaml.Unmarshal(d, &op)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		if args.Token != op.Token {
-			return nil, errors.Forbiddenf("unit token mismatch")
-		}
-	}
-
 	return runner.RunCommands(args)
 }
 
@@ -204,7 +175,7 @@ func (r *RunListener) RunCommands(args RunCommandsArgs) (results *exec.ExecRespo
 // listener when the worker is killed. The Wait() method will never return
 // an error -- NewRunListener just drops the Run error on the floor and that's
 // not what I'm fixing here.
-func NewRunListenerWrapper(rl *RunListener, logger Logger) worker.Worker {
+func NewRunListenerWrapper(rl *RunListener, logger logger.Logger) worker.Worker {
 	rlw := &runListenerWrapper{logger: logger, rl: rl}
 	rlw.tomb.Go(func() error {
 		defer rlw.tearDown()
@@ -215,14 +186,14 @@ func NewRunListenerWrapper(rl *RunListener, logger Logger) worker.Worker {
 }
 
 type runListenerWrapper struct {
-	logger Logger
+	logger logger.Logger
 	tomb   tomb.Tomb
 	rl     *RunListener
 }
 
 func (rlw *runListenerWrapper) tearDown() {
 	if err := rlw.rl.Close(); err != nil {
-		rlw.logger.Warningf("error closing runlistener: %v", err)
+		rlw.logger.Warningf(context.TODO(), "error closing runlistener: %v", err)
 	}
 }
 
@@ -240,13 +211,13 @@ func (rlw *runListenerWrapper) Wait() error {
 // the rpc connection.
 type JujuExecServer struct {
 	runner CommandRunner
-	logger Logger
+	logger logger.Logger
 }
 
 // RunCommands delegates the actual running to the runner and populates the
 // response structure.
 func (r *JujuExecServer) RunCommands(args RunCommandsArgs, result *exec.ExecResponse) error {
-	r.logger.Debugf("RunCommands: %+v", args)
+	r.logger.Debugf(context.TODO(), "RunCommands: %+v", args)
 	runResult, err := r.runner.RunCommands(args)
 	if err != nil {
 		return errors.Annotate(err, "r.runner.RunCommands")
@@ -301,17 +272,13 @@ func NewChannelCommandRunner(cfg ChannelCommandRunnerConfig) (*ChannelCommandRun
 // arguments in a runcommands.Commands, and then sending the returned
 // ID to a channel and waiting for a response callback.
 func (c *ChannelCommandRunner) RunCommands(args RunCommandsArgs) (results *exec.ExecResponse, err error) {
-	runLocation := runner.Workload
-	if args.Operator {
-		runLocation = runner.Operator
-	}
+
 	operationArgs := operation.CommandArgs{
 		Commands:       args.Commands,
 		RelationId:     args.RelationId,
 		RemoteUnitName: args.RemoteUnitName,
 		// TODO(jam): 2019-10-24 Include RemoteAppName
 		ForceRemoteUnit: args.ForceRemoteUnit,
-		RunLocation:     runLocation,
 	}
 	if err := operationArgs.Validate(); err != nil {
 		return nil, errors.Trace(err)

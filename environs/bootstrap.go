@@ -9,18 +9,24 @@ import (
 	"os"
 	"time"
 
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/podcfg"
 	"github.com/juju/juju/controller"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs/imagemetadata"
-	"github.com/juju/juju/storage"
-	"github.com/juju/juju/tools"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
+	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/tools"
 )
 
 // BootstrapParams holds the parameters for bootstrapping an environment.
 type BootstrapParams struct {
+	// AuthorizedKeys is the set of authorized keys to be allowed to ssh to the
+	// bootstrap instance during bootstrap. This may not be the same set of keys
+	// that are allowed after the controller takes over management of the
+	// instance.
+	AuthorizedKeys []string
+
 	// Cloud contains the name of the cloud that Juju will be
 	// bootstrapped in. Used for printing feedback during bootstrap.
 	CloudName string
@@ -51,7 +57,7 @@ type BootstrapParams struct {
 	// initial bootstrap machine.
 	BootstrapBase corebase.Base
 
-	// SupportedBootstrapBases is a supported set of bases to use for
+	// SupportedBootstrapBases is a list of supported bases to use for
 	// validating against the bootstrap base.
 	SupportedBootstrapBases []corebase.Base
 
@@ -133,6 +139,7 @@ type BootstrapLogger interface {
 // it is being invoked.
 type BootstrapContext interface {
 	BootstrapLogger
+	context.Context
 
 	// InterruptNotify starts watching for interrupt signals
 	// on behalf of the caller, sending them to the supplied
@@ -148,7 +155,4 @@ type BootstrapContext interface {
 	// ShouldVerifyCredentials indicates whether the caller's cloud
 	// credentials should be verified.
 	ShouldVerifyCredentials() bool
-
-	// Context is the context.Context value for this bootstrap command.
-	Context() context.Context
 }

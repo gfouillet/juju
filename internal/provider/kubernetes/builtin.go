@@ -5,6 +5,7 @@ package kubernetes
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,15 +14,15 @@ import (
 
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/exec"
+	"github.com/juju/utils/v4"
+	"github.com/juju/utils/v4/exec"
 
 	k8s "github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/caas/kubernetes/clientconfig"
 	k8scloud "github.com/juju/juju/caas/kubernetes/cloud"
 	jujucloud "github.com/juju/juju/cloud"
+	"github.com/juju/juju/core/version"
 	envtools "github.com/juju/juju/environs/tools"
-	"github.com/juju/juju/version"
 )
 
 func attemptMicroK8sCloud(cmdRunner CommandRunner, getKubeConfigDir func() (string, error)) (jujucloud.Cloud, error) {
@@ -45,7 +46,7 @@ func attemptMicroK8sCloud(cmdRunner CommandRunner, getKubeConfigDir func() (stri
 	return k8sCloud, err
 }
 
-func attemptMicroK8sCredential(cmdRunner CommandRunner, getKubeConfigDir func() (string, error)) (jujucloud.Credential, error) {
+func attemptMicroK8sCredential(ctx context.Context, cmdRunner CommandRunner, getKubeConfigDir func() (string, error)) (jujucloud.Credential, error) {
 	microk8sConfig, err := getLocalMicroK8sConfig(cmdRunner, getKubeConfigDir)
 	if err != nil {
 		return jujucloud.Credential{}, err
@@ -62,7 +63,7 @@ func attemptMicroK8sCredential(cmdRunner CommandRunner, getKubeConfigDir func() 
 	}
 
 	context := k8sConfig.Contexts[contextName]
-	resolver := clientconfig.GetJujuAdminServiceAccountResolver(jujuclock.WallClock)
+	resolver := clientconfig.GetJujuAdminServiceAccountResolver(ctx, jujuclock.WallClock)
 	conf, err := resolver(k8s.K8sCloudMicrok8s, k8sConfig, contextName)
 	if err != nil {
 		return jujucloud.Credential{}, errors.Annotate(err, "resolving microk8s credentials")
@@ -80,7 +81,7 @@ func decideKubeConfigDir() (string, error) {
 		return "", errors.Annotate(err, "cannot find juju binary")
 	}
 	_, isOffical, err := CheckJujuOfficial(jujuDir)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return "", errors.Trace(err)
 	}
 	if isOffical {
@@ -108,7 +109,7 @@ func getLocalMicroK8sConfig(cmdRunner CommandRunner, getKubeConfigDir func() (st
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Tracef("reading kubeconfig %q", clientConfigPath)
+	logger.Tracef(context.TODO(), "reading kubeconfig %q", clientConfigPath)
 	content, err := os.ReadFile(clientConfigPath)
 	if os.IsNotExist(err) {
 		return nil, errors.Annotatef(notSupportErr, "%q does not exist", clientConfigPath)

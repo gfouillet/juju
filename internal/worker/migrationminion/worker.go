@@ -4,19 +4,21 @@
 package migrationminion
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/retry"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/migration"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/watcher"
@@ -99,8 +101,8 @@ const (
 
 // Facade exposes controller functionality to a Worker.
 type Facade interface {
-	Watch() (watcher.MigrationStatusWatcher, error)
-	Report(migrationId string, phase migration.Phase, success bool) error
+	Watch(context.Context) (watcher.MigrationStatusWatcher, error)
+	Report(ctx context.Context, migrationId string, phase migration.Phase, success bool) error
 }
 
 // Config defines the operation of a Worker.
@@ -109,10 +111,10 @@ type Config struct {
 	Facade            Facade
 	Guard             fortress.Guard
 	Clock             clock.Clock
-	APIOpen           func(*api.Info, api.DialOpts) (api.Connection, error)
-	ValidateMigration func(base.APICaller) error
+	APIOpen           func(context.Context, *api.Info, api.DialOpts) (api.Connection, error)
+	ValidateMigration func(context.Context, base.APICaller) error
 	NewFacade         func(base.APICaller) (Facade, error)
-	Logger            Logger
+	Logger            logger.Logger
 
 	// ApplyJitter indicates whether to apply jitter to the retry
 	// backoff. This is useful when retrying validation requests to
@@ -156,6 +158,7 @@ func New(config Config) (worker.Worker, error) {
 		processed: make(map[string]migration.Phase),
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "migration-minion",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -191,7 +194,10 @@ func (w *Worker) Wait() error {
 }
 
 func (w *Worker) loop() error {
-	watch, err := w.config.Facade.Watch()
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	watch, err := w.config.Facade.Watch(ctx)
 	if err != nil {
 		return errors.Annotate(err, "setting up watcher")
 	}
@@ -207,24 +213,23 @@ func (w *Worker) loop() error {
 			if !ok {
 				return errors.New("watcher channel closed")
 			}
-
-			if err := w.handle(status); err != nil {
-				w.config.Logger.Errorf("handling migration phase %s failed: %v", status.Phase, err)
+			if err := w.handle(ctx, status); err != nil {
+				w.config.Logger.Errorf(ctx, "handling migration phase %s failed: %v", status.Phase, err)
 				return errors.Trace(err)
 			}
 		}
 	}
 }
 
-func (w *Worker) handle(status watcher.MigrationStatus) error {
-	w.config.Logger.Infof("migration phase is now: %s", status.Phase)
+func (w *Worker) handle(ctx context.Context, status watcher.MigrationStatus) error {
+	w.config.Logger.Infof(ctx, "migration phase is now: %s", status.Phase)
 
 	if !status.Phase.IsRunning() {
 		// If the phase is not running, we can unlock the fortress, but remove
 		// the migration from the processed map first.
 		delete(w.processed, status.MigrationId)
 
-		return w.config.Guard.Unlock()
+		return w.config.Guard.Unlock(ctx)
 	}
 
 	// We've already processed this phase, so we can ignore it.
@@ -236,7 +241,7 @@ func (w *Worker) handle(status watcher.MigrationStatus) error {
 
 	// Ensure that all workers related to migration fortress have
 	// stopped and aren't allowed to restart.
-	err := w.config.Guard.Lockdown(w.catacomb.Dying())
+	err := w.config.Guard.Lockdown(ctx)
 	if errors.Cause(err) == fortress.ErrAborted {
 		return w.catacomb.ErrDying()
 	} else if err != nil {
@@ -245,11 +250,11 @@ func (w *Worker) handle(status watcher.MigrationStatus) error {
 
 	switch status.Phase {
 	case migration.QUIESCE:
-		err = w.doQUIESCE(status)
+		err = w.doQUIESCE(ctx, status)
 	case migration.VALIDATION:
-		err = w.doVALIDATION(status)
+		err = w.doVALIDATION(ctx, status)
 	case migration.SUCCESS:
-		err = w.doSUCCESS(status)
+		err = w.doSUCCESS(ctx, status)
 	default:
 		// The minion doesn't need to do anything for other
 		// migration phases.
@@ -273,22 +278,22 @@ func (w *Worker) handle(status watcher.MigrationStatus) error {
 	return nil
 }
 
-func (w *Worker) doQUIESCE(status watcher.MigrationStatus) error {
+func (w *Worker) doQUIESCE(ctx context.Context, status watcher.MigrationStatus) error {
 	// Report that the minion is ready and that all workers that
 	// should be shut down have done so.
-	return w.report(status, true)
+	return w.report(ctx, status, true)
 }
 
-func (w *Worker) doVALIDATION(status watcher.MigrationStatus) error {
+func (w *Worker) doVALIDATION(ctx context.Context, status watcher.MigrationStatus) error {
 	// Attempt the validation multiple times, with exponential backoff.
 	// If this fails, that's it, we can't proceed. There isn't a guarantee
 	// that we'll get another change event to retry.
 	err := retry.Call(retry.CallArgs{
 		Func: func() error {
-			return w.validate(status)
+			return w.validate(ctx, status)
 		},
 		NotifyFunc: func(lastError error, attempt int) {
-			w.config.Logger.Warningf("validation failed (attempt %d): %v", attempt, lastError)
+			w.config.Logger.Warningf(ctx, "validation failed (attempt %d): %v", attempt, lastError)
 		},
 		Clock:       w.config.Clock,
 		Attempts:    maxRetries,
@@ -300,27 +305,25 @@ func (w *Worker) doVALIDATION(status watcher.MigrationStatus) error {
 	if errors.Is(err, apiservererrors.ErrTryAgain) || params.IsCodeTryAgain(err) {
 		// Provide additional context about why the error occurred in the logs.
 		// Then report the error to the migrationmaster.
-		w.config.Logger.Warningf(`validation failed: try changing "agent-ratelimit-max" and "agent-ratelimit-rate", before trying again: %v`, err)
+		w.config.Logger.Warningf(ctx, `validation failed: try changing "agent-ratelimit-max" and "agent-ratelimit-rate", before trying again: %v`, err)
 		return ErrRetryable
 	} else if err != nil {
 		// Don't return this error just log it and report to the
 		// migrationmaster that things didn't work out.
-		w.config.Logger.Errorf("validation failed: %v", err)
+		w.config.Logger.Errorf(ctx, "validation failed: %v", err)
 	}
-
-	// Report the result of the validation.
-	return w.report(status, err == nil)
+	return w.report(ctx, status, err == nil)
 }
 
-func (w *Worker) validate(status watcher.MigrationStatus) error {
-	conn, newDetails, err := w.dialNewController(status.TargetAPIAddrs, status.TargetCACert)
+func (w *Worker) validate(ctx context.Context, status watcher.MigrationStatus) error {
+	conn, newDetails, err := w.dialNewController(ctx, status.TargetAPIAddrs, status.TargetCACert)
 	if err != nil {
 		return errors.Annotate(err, "failed to open API to target controller")
 	}
 	defer func() { _ = conn.Close() }()
 
 	// Ask the agent to confirm that things look ok.
-	err = w.config.ValidateMigration(conn)
+	err = w.config.ValidateMigration(ctx, conn)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -336,7 +339,7 @@ func (w *Worker) validate(status watcher.MigrationStatus) error {
 // It uses the current agent configuration to get the API connection details.
 // If the connection is redirected, it will follow the redirect and return
 // the final addresses and CA cert in the newDetails struct.
-func (w *Worker) dialNewController(addrs []string, caCert string) (api.Connection, newDetails, error) {
+func (w *Worker) dialNewController(ctx context.Context, addrs []string, caCert string) (api.Connection, newDetails, error) {
 	agentConf := w.config.Agent.CurrentConfig()
 	apiInfo, ok := agentConf.APIInfo()
 	if !ok {
@@ -352,7 +355,7 @@ func (w *Worker) dialNewController(addrs []string, caCert string) (api.Connectio
 	// Use zero DialOpts (no retries) because the worker must stay
 	// responsive to Kill requests. We don't want it to be blocked by
 	// a long set of retry attempts.
-	conn, err := w.dialWithRedirect(apiInfo, api.DialOpts{}, 0)
+	conn, err := w.dialWithRedirect(ctx, apiInfo, api.DialOpts{}, 0)
 	if err != nil {
 		return nil, newDetails{}, errors.Annotate(err, "failed to open API to target controller")
 	}
@@ -362,7 +365,7 @@ func (w *Worker) dialNewController(addrs []string, caCert string) (api.Connectio
 	}, nil
 }
 
-func (w *Worker) dialWithRedirect(apiInfo *api.Info, dialOpts api.DialOpts, redirectCount int) (api.Connection, error) {
+func (w *Worker) dialWithRedirect(ctx context.Context, apiInfo *api.Info, dialOpts api.DialOpts, redirectCount int) (api.Connection, error) {
 	select {
 	case <-w.catacomb.Dying():
 		return nil, w.catacomb.ErrDying()
@@ -372,24 +375,24 @@ func (w *Worker) dialWithRedirect(apiInfo *api.Info, dialOpts api.DialOpts, redi
 	if redirectCount >= maxRedirects {
 		return nil, errors.Errorf("too many redirects (%d) when connecting to target controller", redirectCount)
 	}
-	conn, err := w.config.APIOpen(apiInfo, api.DialOpts{})
+	conn, err := w.config.APIOpen(ctx, apiInfo, api.DialOpts{})
 	if err != nil {
 		if redirectErr, ok := errors.Cause(err).(*api.RedirectError); ok {
-			w.config.Logger.Infof("following redirect to %v", redirectErr.Servers)
+			w.config.Logger.Infof(ctx, "following redirect to %v", redirectErr.Servers)
 			apiInfo.Addrs = network.CollapseToHostPorts(redirectErr.Servers).Strings()
 			apiInfo.CACert = redirectErr.CACert
-			return w.dialWithRedirect(apiInfo, dialOpts, redirectCount+1)
+			return w.dialWithRedirect(ctx, apiInfo, dialOpts, redirectCount+1)
 		}
 		return nil, errors.Annotatef(err, "failed to open API to target controller")
 	}
 	return conn, nil
 }
 
-func (w *Worker) doSUCCESS(status watcher.MigrationStatus) (err error) {
+func (w *Worker) doSUCCESS(ctx context.Context, status watcher.MigrationStatus) (err error) {
 	defer func() {
 		if err != nil {
 			cfg := w.config.Agent.CurrentConfig()
-			w.config.Logger.Criticalf("migration failed for %v: %s/agent.conf left unchanged and pointing to source controller: %v",
+			w.config.Logger.Criticalf(ctx, "migration failed for %v: %s/agent.conf left unchanged and pointing to source controller: %v",
 				cfg.Tag(), cfg.Dir(), err,
 			)
 		}
@@ -399,7 +402,7 @@ func (w *Worker) doSUCCESS(status watcher.MigrationStatus) (err error) {
 	// VALIDATION and SUCCESS phases, and we need to re-dial the new controller to
 	// ensure that we follow any redirects that may have occurred.
 	if w.newControllerDetails == nil {
-		conn, newDetails, err := w.dialNewController(status.TargetAPIAddrs, status.TargetCACert)
+		conn, newDetails, err := w.dialNewController(ctx, status.TargetAPIAddrs, status.TargetCACert)
 		if err != nil {
 			return errors.Annotate(err, "failed to open API to target controller")
 		}
@@ -416,7 +419,7 @@ func (w *Worker) doSUCCESS(status watcher.MigrationStatus) (err error) {
 	// will cause the API connection to drop. The SUCCESS phase is the
 	// point of no return anyway, so we must retry this step even if
 	// the api connection dies.
-	if err := w.robustReport(status, true); err != nil {
+	if err := w.robustReport(ctx, status, true); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -431,20 +434,20 @@ func (w *Worker) doSUCCESS(status watcher.MigrationStatus) (err error) {
 	return errors.Annotate(err, "setting agent config")
 }
 
-func (w *Worker) report(status watcher.MigrationStatus, success bool) error {
-	w.config.Logger.Infof("reporting back for phase %s: %v", status.Phase, success)
-	err := w.config.Facade.Report(status.MigrationId, status.Phase, success)
+func (w *Worker) report(ctx context.Context, status watcher.MigrationStatus, success bool) error {
+	w.config.Logger.Infof(ctx, "reporting back for phase %s: %v", status.Phase, success)
+	err := w.config.Facade.Report(ctx, status.MigrationId, status.Phase, success)
 	return errors.Annotate(err, "failed to report phase progress")
 }
 
-func (w *Worker) robustReport(status watcher.MigrationStatus, success bool) error {
-	err := w.report(status, success)
+func (w *Worker) robustReport(ctx context.Context, status watcher.MigrationStatus, success bool) error {
+	err := w.report(ctx, status, success)
 	if err != nil && !rpc.IsShutdownErr(err) {
 		return fmt.Errorf("cannot report migration status %v success=%v: %w", status, success, err)
 	} else if err == nil {
 		return nil
 	}
-	w.config.Logger.Warningf("report migration status failed: %v", err)
+	w.config.Logger.Warningf(ctx, "report migration status failed: %v", err)
 
 	apiInfo, ok := w.config.Agent.CurrentConfig().APIInfo()
 	if !ok {
@@ -455,9 +458,9 @@ func (w *Worker) robustReport(status watcher.MigrationStatus, success bool) erro
 
 	err = retry.Call(retry.CallArgs{
 		Func: func() error {
-			w.config.Logger.Infof("reporting back for phase %s: %v", status.Phase, success)
+			w.config.Logger.Infof(ctx, "reporting back for phase %s: %v", status.Phase, success)
 
-			conn, err := w.dialWithRedirect(apiInfo, api.DialOpts{}, 0)
+			conn, err := w.dialWithRedirect(ctx, apiInfo, api.DialOpts{}, 0)
 			if err != nil {
 				return fmt.Errorf("cannot dial source controller: %w", err)
 			}
@@ -468,22 +471,26 @@ func (w *Worker) robustReport(status watcher.MigrationStatus, success bool) erro
 				return err
 			}
 
-			return facade.Report(status.MigrationId, status.Phase, success)
+			return facade.Report(ctx, status.MigrationId, status.Phase, success)
 		},
 		IsFatalError: func(err error) bool {
 			return false
 		},
 		NotifyFunc: func(lastError error, attempt int) {
-			w.config.Logger.Warningf("report migration status failed (attempt %d): %v", attempt, lastError)
+			w.config.Logger.Warningf(ctx, "report migration status failed (attempt %d): %v", attempt, lastError)
 		},
 		Clock:       w.config.Clock,
 		Delay:       initialRetryDelay,
 		Attempts:    maxRetries,
 		BackoffFunc: retry.DoubleDelay,
-		Stop:        w.catacomb.Dying(),
+		Stop:        ctx.Done(),
 	})
 	if err != nil {
 		return fmt.Errorf("cannot report migration status %v success=%v: %w", status, success, err)
 	}
 	return nil
+}
+
+func (w *Worker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }

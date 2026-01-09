@@ -10,33 +10,30 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
-	"github.com/juju/featureflag"
 	"github.com/juju/gnuflag"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	jujucloud "github.com/juju/juju/cloud"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/application"
-	"github.com/juju/juju/cmd/juju/cloud"
 	"github.com/juju/juju/cmd/modelcmd"
-	jujuos "github.com/juju/juju/core/os"
-	"github.com/juju/juju/core/os/ostype"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/featureflag"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	"github.com/juju/juju/testing"
 )
 
 type MainSuite struct {
 	testing.FakeJujuXDGDataHomeSuite
-	jujutesting.PatchExecHelper
 }
 
-var _ = gc.Suite(&MainSuite{})
+func TestMainSuite(t *stdtesting.T) {
+	tc.Run(t, &MainSuite{})
+}
 
 func helpText(command cmd.Command, name string) string {
 	buff := &bytes.Buffer{}
@@ -72,7 +69,7 @@ func syncToolsHelpText() string {
 	return helpText(newSyncAgentBinaryCommand(), "juju sync-agent-binary")
 }
 
-func (s *MainSuite) TestRunMain(c *gc.C) {
+func (s *MainSuite) TestRunMain(c *tc.C) {
 	jujuclienttesting.SetupMinimalFileStore(c)
 
 	missingCommandMessage := func(wanted, actual string) string {
@@ -155,16 +152,6 @@ func (s *MainSuite) TestRunMain(c *gc.C) {
 		code:    0,
 		out:     syncToolsHelpText(),
 	}, {
-		summary: "check version command returns a fully qualified version string",
-		args:    []string{"version"},
-		code:    0,
-		out:     testing.CurrentVersion().String() + "\n",
-	}, {
-		summary: "check --version command returns a fully qualified version string",
-		args:    []string{"--version"},
-		code:    0,
-		out:     testing.CurrentVersion().String() + "\n",
-	}, {
 		summary: "--version option after command is not changed to version command",
 		args:    []string{"bootstrap", "--version"},
 		code:    0,
@@ -187,11 +174,11 @@ func (s *MainSuite) TestRunMain(c *gc.C) {
 	}} {
 		c.Logf("test %d: %s", i, t.summary)
 		out := badrun(c, t.code, t.args...)
-		c.Assert(out, gc.Equals, t.out)
+		c.Assert(out, tc.Equals, t.out)
 	}
 }
 
-func (s *MainSuite) TestActualRunJujuArgOrder(c *gc.C) {
+func (s *MainSuite) TestActualRunJujuArgOrder(c *tc.C) {
 	s.PatchEnvironment(osenv.JujuControllerEnvKey, "current-controller")
 	s.PatchEnvironment(osenv.JujuModelEnvKey, "current")
 	logpath := filepath.Join(c.MkDir(), "log")
@@ -204,104 +191,10 @@ func (s *MainSuite) TestActualRunJujuArgOrder(c *gc.C) {
 		c.Logf("test %d: %v", i, test)
 		badrun(c, 0, test...)
 		content, err := os.ReadFile(logpath)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(string(content), gc.Matches, "(.|\n)*running juju(.|\n)*command finished(.|\n)*")
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(string(content), tc.Matches, "(.|\n)*running juju(.|\n)*command finished(.|\n)*")
 		err = os.Remove(logpath)
-		c.Assert(err, jc.ErrorIsNil)
-	}
-}
-
-func (s *MainSuite) TestNoWarn2xFirstRun(c *gc.C) {
-	// Code should only rnu on ubuntu series, so patch out the series for
-	// when non-ubuntu OSes run this test.
-	s.PatchValue(&jujuos.HostOS, func() ostype.OSType { return ostype.Ubuntu })
-
-	argChan := make(chan []string, 1)
-	// we shouldn't actually be running anything, but if we do, this will
-	// provide some consistent results.
-	execCommand := s.GetExecCommand(jujutesting.PatchExecConfig{
-		Stdout: "1.25.0-trusty-amd64",
-		Args:   argChan,
-	})
-	stub := &jujutesting.Stub{}
-	s.PatchValue(&cloud.NewUpdatePublicCloudsCommand, func() cmd.Command {
-		return &stubCommand{stub: stub}
-	})
-
-	// remove the new juju-home.
-	err := os.RemoveAll(osenv.JujuXDGDataHomeDir())
-	c.Assert(err, jc.ErrorIsNil)
-
-	// create fake (empty) old juju home.
-	path := c.MkDir()
-	s.PatchEnvironment("JUJU_HOME", path)
-
-	s.PatchValue(&cloud.FetchAndMaybeUpdatePublicClouds,
-		func(access cloud.PublicCloudsAccessDetails, updateClient bool) (map[string]jujucloud.Cloud, string, error) {
-			return nil, "", nil
-		})
-
-	var code int
-	stdout, stderr := jujutesting.CaptureOutput(c, func() {
-		code = jujuMain{
-			execCommand: execCommand,
-		}.Run([]string{"juju", "version"})
-	})
-
-	c.Assert(code, gc.Equals, 0)
-
-	assertNoArgs(c, argChan)
-	c.Check(string(stderr), gc.Equals, `
-Since Juju 3 is being run for the first time, it has downloaded the latest public cloud information.`[1:]+"\n")
-	checkVersionOutput(c, string(stdout))
-}
-
-func (s *MainSuite) assertRunUpdateCloud(c *gc.C, expectedCalled bool) {
-	argChan := make(chan []string, 1)
-	execCommand := s.GetExecCommand(jujutesting.PatchExecConfig{
-		Stdout: "1.25.0-trusty-amd64",
-		Args:   argChan,
-	})
-
-	called := false
-	s.PatchValue(&cloud.FetchAndMaybeUpdatePublicClouds,
-		func(access cloud.PublicCloudsAccessDetails, updateClient bool) (map[string]jujucloud.Cloud, string, error) {
-			called = true
-			return nil, "", nil
-		})
-	var code int
-	jujutesting.CaptureOutput(c, func() {
-		code = jujuMain{
-			execCommand: execCommand,
-		}.Run([]string{"juju", "version"})
-	})
-	c.Assert(code, gc.Equals, 0)
-	c.Assert(called, gc.Equals, expectedCalled)
-}
-
-func (s *MainSuite) TestFirstRunUpdateCloud(c *gc.C) {
-	// remove the juju-home.
-	err := os.RemoveAll(osenv.JujuXDGDataHomeDir())
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertRunUpdateCloud(c, true)
-}
-
-func (s *MainSuite) TestRunNoUpdateCloud(c *gc.C) {
-	s.assertRunUpdateCloud(c, false)
-}
-
-func checkVersionOutput(c *gc.C, output string) {
-	ver := testing.CurrentVersion()
-	c.Check(output, gc.Equals, ver.String()+"\n")
-}
-
-func assertNoArgs(c *gc.C, argChan <-chan []string) {
-	select {
-	case args := <-argChan:
-		c.Fatalf("Exec function called when it shouldn't have been (with args %q).", args)
-	default:
-		// this is the good path - there shouldn't be any args, which indicates
-		// the executable was not called.
+		c.Assert(err, tc.ErrorIsNil)
 	}
 }
 
@@ -313,14 +206,12 @@ var commandNames = []string{
 	"add-machine",
 	"add-model",
 	"add-secret-backend",
+	"add-secret",
 	"add-space",
 	"add-ssh-key",
-	"add-secret",
 	"add-storage",
 	"add-unit",
 	"add-user",
-	"agree",
-	"agreements",
 	"attach-resource",
 	"attach-storage",
 	"autoload-credentials",
@@ -331,6 +222,7 @@ var commandNames = []string{
 	"charm-resources",
 	"clouds",
 	"config",
+	"constraints",
 	"consume",
 	"controller-config",
 	"controllers",
@@ -353,23 +245,20 @@ var commandNames = []string{
 	"disable-user",
 	"disabled-commands",
 	"documentation",
-	"download",
 	"download-backup",
+	"download",
 	"enable-command",
 	"enable-destroy-controller",
-	"enable-ha",
 	"enable-user",
 	"exec",
 	"export-bundle",
 	"expose",
-	"find",
 	"find-offers",
+	"find",
 	"firewall-rules",
-	"constraints",
-	"model-constraints",
-	"grant",
-	"grant-secret",
 	"grant-cloud",
+	"grant-secret",
+	"grant",
 	"help",
 	"help-action-commands",
 	"help-hook-commands",
@@ -379,7 +268,6 @@ var commandNames = []string{
 	"integrate",
 	"kill-controller",
 	"list-actions",
-	"list-agreements",
 	"list-charm-resources",
 	"list-clouds",
 	"list-controllers",
@@ -390,15 +278,14 @@ var commandNames = []string{
 	"list-models",
 	"list-offers",
 	"list-operations",
-	"list-payloads",
 	"list-regions",
 	"list-resources",
 	"list-secret-backends",
 	"list-secrets",
 	"list-spaces",
 	"list-ssh-keys",
-	"list-storage",
 	"list-storage-pools",
+	"list-storage",
 	"list-subnets",
 	"list-users",
 	"login",
@@ -406,14 +293,15 @@ var commandNames = []string{
 	"machines",
 	"migrate",
 	"model-config",
+	"model-constraints",
 	"model-default",
 	"model-defaults",
+	"model-secret-backend",
 	"models",
 	"move-to-space",
 	"offer",
 	"offers",
 	"operations",
-	"payloads",
 	"refresh",
 	"regions",
 	"register",
@@ -431,27 +319,26 @@ var commandNames = []string{
 	"remove-secret",
 	"remove-space",
 	"remove-ssh-key",
-	"remove-storage",
 	"remove-storage-pool",
+	"remove-storage",
 	"remove-unit",
 	"remove-user",
 	"rename-space",
-	"resolved",
 	"resolve",
+	"resolved",
 	"resources",
 	"resume-relation",
 	"retry-provisioning",
-	"revoke",
 	"revoke-cloud",
 	"revoke-secret",
+	"revoke",
 	"run",
 	"scale-application",
 	"scp",
-	"secrets",
 	"secret-backends",
-	"set-application-base",
-	"set-credential",
+	"secrets",
 	"set-constraints",
+	"set-credential",
 	"set-default-credentials",
 	"set-default-region",
 	"set-firewall-rule",
@@ -466,20 +353,20 @@ var commandNames = []string{
 	"show-model",
 	"show-offer",
 	"show-operation",
-	"show-secret",
 	"show-secret-backend",
+	"show-secret",
+	"show-space",
 	"show-status-log",
 	"show-storage",
-	"show-space",
 	"show-task",
 	"show-unit",
 	"show-user",
 	"spaces",
-	"ssh",
 	"ssh-keys",
+	"ssh",
 	"status",
-	"storage",
 	"storage-pools",
+	"storage",
 	"subnets",
 	"suspend-relation",
 	"switch",
@@ -488,19 +375,17 @@ var commandNames = []string{
 	"unexpose",
 	"unregister",
 	"update-cloud",
-	"update-k8s",
-	"update-public-clouds",
 	"update-credential",
 	"update-credentials",
+	"update-k8s",
+	"update-public-clouds",
 	"update-secret-backend",
 	"update-secret",
 	"update-storage-pool",
 	"upgrade-controller",
 	"upgrade-model",
-	"upgrade-machine",
 	"users",
 	"version",
-	"wait-for",
 	"whoami",
 }
 
@@ -512,7 +397,7 @@ var commandNamesBehindFlags = set.NewStrings(
 	"list-secrets", "secrets", "show-secret",
 )
 
-func (s *MainSuite) TestHelpCommands(c *gc.C) {
+func (s *MainSuite) TestHelpCommands(c *tc.C) {
 	// Check that we have correctly registered all the commands
 	// by checking the help output.
 	// First check default commands, and then check commands that are
@@ -529,21 +414,21 @@ func (s *MainSuite) TestHelpCommands(c *gc.C) {
 	// Use sorted values here so we can better see what is wrong.
 	registered := getHelpCommandNames(c)
 	unknown := registered.Difference(cmdSet)
-	c.Assert(unknown, jc.DeepEquals, set.NewStrings())
+	c.Assert(unknown, tc.DeepEquals, set.NewStrings())
 	missing := cmdSet.Difference(registered)
-	c.Assert(missing, jc.DeepEquals, set.NewStrings())
+	c.Assert(missing, tc.DeepEquals, set.NewStrings())
 
 	// 2. Enable development features, and test again.
 	cmdSet = cmdSet.Union(commandNamesBehindFlags)
 	setFeatureFlags(strings.Join(optionalFeatures, ","))
 	registered = getHelpCommandNames(c)
 	unknown = registered.Difference(cmdSet)
-	c.Assert(unknown, jc.DeepEquals, set.NewStrings())
+	c.Assert(unknown, tc.DeepEquals, set.NewStrings())
 	missing = cmdSet.Difference(registered)
-	c.Assert(missing.IsEmpty(), jc.IsTrue)
+	c.Assert(missing.IsEmpty(), tc.IsTrue)
 }
 
-func getHelpCommandNames(c *gc.C) set.Strings {
+func getHelpCommandNames(c *tc.C) set.Strings {
 	out := badrun(c, 0, "help", "commands")
 	lines := strings.Split(out, "\n")
 	names := set.NewStrings()
@@ -575,11 +460,11 @@ var globalFlags = []string{
 	"-v, --verbose .*",
 }
 
-func (s *MainSuite) TestHelpGlobalOptions(c *gc.C) {
+func (s *MainSuite) TestHelpGlobalOptions(c *tc.C) {
 	// Check that we have correctly registered all the topics
 	// by checking the help output.
 	out := badrun(c, 0, "help", "global-options")
-	c.Assert(out, gc.Matches, `Global Options
+	c.Assert(out, tc.Matches, `Global Options
 
 These options may be used with any command, and may appear in front of any
 command\.(.|\n)*`)
@@ -592,14 +477,14 @@ command\.(.|\n)*`)
 		}
 		flags = append(flags, line)
 	}
-	c.Assert(len(flags), gc.Equals, len(globalFlags))
+	c.Assert(len(flags), tc.Equals, len(globalFlags))
 	for i, line := range flags {
-		c.Assert(line, gc.Matches, globalFlags[i])
+		c.Assert(line, tc.Matches, globalFlags[i])
 	}
 }
 
-func (s *MainSuite) TestRegisterCommands(c *gc.C) {
-	stub := &jujutesting.Stub{}
+func (s *MainSuite) TestRegisterCommands(c *tc.C) {
+	stub := &testhelpers.Stub{}
 
 	registry := &stubRegistry{stub: stub}
 	registry.names = append(registry.names, "help")          // implicit
@@ -610,23 +495,23 @@ func (s *MainSuite) TestRegisterCommands(c *gc.C) {
 	expected := make([]string, len(commandNames))
 	copy(expected, commandNames)
 	sort.Strings(expected)
-	c.Check(registry.names, jc.DeepEquals, expected)
+	c.Check(registry.names, tc.DeepEquals, expected)
 }
 
-func (s *MainSuite) TestRegisterCommandsWhitelist(c *gc.C) {
-	stubRegistry := &stubRegistry{stub: &jujutesting.Stub{}}
+func (s *MainSuite) TestRegisterCommandsWhitelist(c *tc.C) {
+	stubRegistry := &stubRegistry{stub: &testhelpers.Stub{}}
 	registry := jujuCommandRegistry{
 		commandRegistry: stubRegistry,
 		whitelist:       set.NewStrings("status"),
 		excluded:        set.NewStrings(),
 	}
 	registerCommands(registry)
-	c.Assert(stubRegistry.names, jc.SameContents, []string{"status"})
+	c.Assert(stubRegistry.names, tc.SameContents, []string{"status"})
 }
 
-func (s *MainSuite) TestRegisterCommandsEmbedded(c *gc.C) {
+func (s *MainSuite) TestRegisterCommandsEmbedded(c *tc.C) {
 	store := jujuclienttesting.MinimalStore()
-	stubRegistry := &stubRegistry{stub: &jujutesting.Stub{}}
+	stubRegistry := &stubRegistry{stub: &testhelpers.Stub{}}
 	registry := jujuCommandRegistry{
 		commandRegistry: stubRegistry,
 		embedded:        true,
@@ -634,15 +519,15 @@ func (s *MainSuite) TestRegisterCommandsEmbedded(c *gc.C) {
 		excluded:        set.NewStrings(),
 	}
 	stubCmd := &stubCommand{
-		stub: &jujutesting.Stub{},
+		stub: &testhelpers.Stub{},
 		info: &cmd.Info{
 			Name: "test",
 		},
 	}
 	registry.Register(stubCmd)
-	c.Assert(stubRegistry.names, jc.SameContents, []string{"test"})
-	c.Assert(stubCmd.Embedded, jc.IsTrue)
-	c.Assert(stubCmd.ClientStore(), jc.DeepEquals, store)
+	c.Assert(stubRegistry.names, tc.SameContents, []string{"test"})
+	c.Assert(stubCmd.Embedded, tc.IsTrue)
+	c.Assert(stubCmd.ClientStore(), tc.DeepEquals, store)
 }
 
 type commands []cmd.Command
@@ -661,18 +546,18 @@ func (r *commands) RegisterSuperAlias(name, super, forName string, check cmd.Dep
 	// Do nothing.
 }
 
-func (s *MainSuite) TestModelCommands(c *gc.C) {
+func (s *MainSuite) TestModelCommands(c *tc.C) {
 	var commands commands
 	registerCommands(&commands)
 	// There should not be any ModelCommands registered.
 	// ModelCommands must be wrapped using modelcmd.Wrap.
 	for _, command := range commands {
 		c.Logf("%v", command.Info().Name)
-		c.Check(command, gc.Not(gc.FitsTypeOf), modelcmd.ModelCommand(&bootstrapCommand{}))
+		c.Check(command, tc.Not(tc.FitsTypeOf), modelcmd.ModelCommand(&bootstrapCommand{}))
 	}
 }
 
-func (s *MainSuite) TestAllCommandsPurpose(c *gc.C) {
+func (s *MainSuite) TestAllCommandsPurpose(c *tc.C) {
 	// Verify each command that:
 	// - the Purpose field is not empty.
 	// - the Purpose ends with a full stop.
@@ -692,20 +577,20 @@ func (s *MainSuite) TestAllCommandsPurpose(c *gc.C) {
 		purpose := strings.TrimSpace(info.Purpose)
 		doc := strings.TrimSpace(info.Doc)
 		comment := func(message string) interface{} {
-			return gc.Commentf("command %q %s", info.Name, message)
+			return tc.Commentf("command %q %s", info.Name, message)
 		}
 
-		c.Check(purpose, gc.Not(gc.Equals), "", comment("has empty Purpose"))
+		c.Check(purpose, tc.Not(tc.Equals), "", comment("has empty Purpose"))
 		if purpose != "" {
 			prefix := string(purpose[0])
-			c.Check(prefix, gc.Equals, strings.ToUpper(prefix),
+			c.Check(prefix, tc.Equals, strings.ToUpper(prefix),
 				comment("expected uppercase first-letter Purpose"))
-			c.Check(strings.HasSuffix(purpose, "."), jc.IsTrue,
+			c.Check(strings.HasSuffix(purpose, "."), tc.IsTrue,
 				comment("is missing full stop in Purpose"))
 		}
 		if doc != "" && !strings.HasPrefix(doc, info.Name) {
 			prefix := string(doc[0])
-			c.Check(prefix, gc.Equals, strings.ToUpper(prefix),
+			c.Check(prefix, tc.Equals, strings.ToUpper(prefix),
 				comment("expected uppercase first-letter Doc"),
 			)
 		}

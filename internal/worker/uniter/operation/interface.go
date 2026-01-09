@@ -4,34 +4,20 @@
 package operation
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	utilexec "github.com/juju/utils/v3/exec"
+	stdcontext "context"
 
-	"github.com/juju/juju/core/model"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	utilexec "github.com/juju/utils/v4/exec"
+
+	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
-	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/interface_mock.go github.com/juju/juju/internal/worker/uniter/operation Operation,Factory,Callbacks
-
-// Logger is here to stop the desire of creating a package level Logger.
-// Don't do this, pass one in to the needed functions.
-type logger interface{}
-
-var _ logger = struct{}{}
-
-// Logger determines the logging methods used by the operations package.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	Tracef(string, ...interface{})
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/interface_mock.go github.com/juju/juju/internal/worker/uniter/operation Operation,Factory,Callbacks
 
 // Operation encapsulates the stages of the various things the uniter can do,
 // and the state changes that need to be recorded as they happen. Operations
@@ -52,16 +38,16 @@ type Operation interface {
 	// If it returns a non-nil state, that state will be validated and recorded.
 	// If it returns ErrSkipExecute, it indicates that the operation can be
 	// committed directly.
-	Prepare(state State) (*State, error)
+	Prepare(ctx stdcontext.Context, state State) (*State, error)
 
 	// Execute carries out the operation. It must not be called without having
 	// called Prepare first. If it returns a non-nil state, that state will be
 	// validated and recorded.
-	Execute(state State) (*State, error)
+	Execute(ctx stdcontext.Context, state State) (*State, error)
 
 	// Commit ensures that the operation's completion is recorded. If it returns
 	// a non-nil state, that state will be validated and recorded.
-	Commit(state State) (*State, error)
+	Commit(ctx stdcontext.Context, state State) (*State, error)
 
 	// RemoteStateChanged is called when the remote state changed during execution
 	// of the operation.
@@ -98,11 +84,11 @@ type Executor interface {
 	// error, the run will be aborted and an error will be returned.
 	// On remote state change, the executor will fire the operation's
 	// RemoteStateChanged method.
-	Run(Operation, <-chan remotestate.Snapshot) error
+	Run(stdcontext.Context, Operation, <-chan remotestate.Snapshot) error
 
 	// Skip will Commit the supplied operation, and write any state change
 	// indicated. If Commit returns an error, so will Skip.
-	Skip(Operation) error
+	Skip(stdcontext.Context, Operation) error
 }
 
 // Factory creates operations.
@@ -113,16 +99,6 @@ type Factory interface {
 
 	// NewUpgrade creates an upgrade operation for the supplied charm.
 	NewUpgrade(charmURL string) (Operation, error)
-
-	// NewRemoteInit inits the remote charm on CAAS pod.
-	NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (Operation, error)
-
-	// NewSkipRemoteInit skips a remote-init operation.
-	NewSkipRemoteInit(retry bool) (Operation, error)
-
-	// NewNoOpFinishUpgradeSeries creates a noop which simply resets the
-	// status of a units upgrade series.
-	NewNoOpFinishUpgradeSeries() (Operation, error)
 
 	// NewRevertUpgrade creates an operation to clear the unit's resolved flag,
 	// and execute an upgrade to the supplied charm that is careful to excise
@@ -142,7 +118,7 @@ type Factory interface {
 	NewSkipHook(hookInfo hook.Info) (Operation, error)
 
 	// NewAction creates an operation to execute the supplied action.
-	NewAction(actionId string) (Operation, error)
+	NewAction(ctx stdcontext.Context, actionId string) (Operation, error)
 
 	// NewFailAction creates an operation that marks an action as failed.
 	NewFailAction(actionId string) (Operation, error)
@@ -176,8 +152,6 @@ type CommandArgs struct {
 	// TODO(jam): 2019-10-24 Include RemoteAppName
 	// ForceRemoteUnit skips unit inference and existence validation.
 	ForceRemoteUnit bool
-	// RunLocation describes where the command must run.
-	RunLocation runner.RunLocation
 }
 
 // Validate the command arguments.
@@ -206,11 +180,11 @@ type Callbacks interface {
 	// PrepareHook and CommitHook exist so that we can defer worrying about how
 	// to untangle Uniter.relationers from everything else. They're only used by
 	// RunHook operations.
-	PrepareHook(info hook.Info) (name string, err error)
-	CommitHook(info hook.Info) error
+	PrepareHook(ctx stdcontext.Context, info hook.Info) (name string, err error)
+	CommitHook(ctx stdcontext.Context, info hook.Info) error
 
 	// SetExecutingStatus sets the agent state to "Executing" with a message.
-	SetExecutingStatus(string) error
+	SetExecutingStatus(stdcontext.Context, string) error
 
 	// NotifyHook* exist so that we can defer worrying about how to untangle the
 	// callbacks inserted for uniter_test. They're only used by RunHook operations.
@@ -221,13 +195,17 @@ type Callbacks interface {
 	// The following methods exist primarily to allow us to test operation code
 	// without using a live api connection.
 
-	// FailAction marks the supplied action failed. It's only used by
-	// RunActions operations.
-	FailAction(actionId, message string) error
+	// FailAction marks the supplied action status as "failed". It's only used
+	// by RunActions operations.
+	FailAction(ctx stdcontext.Context, actionId, message string) error
+
+	// ErrorAction marks the supplied action status as "error". It's only used
+	// by RunActions operations.
+	ErrorAction(ctx stdcontext.Context, actionId, message string) error
 
 	// ActionStatus returns the status of the action required by the action operation for
 	// cancelation.
-	ActionStatus(actionId string) (string, error)
+	ActionStatus(ctx stdcontext.Context, actionId string) (string, error)
 
 	// GetArchiveInfo is used to find out how to download a charm archive. It's
 	// only used by Deploy operations.
@@ -237,23 +215,14 @@ type Callbacks interface {
 	// *before* recording local state referencing that charm, to ensure there's
 	// no path by which the controller can legitimately garbage collect that
 	// charm or the application's settings for it. It's only used by Deploy operations.
-	SetCurrentCharm(charmURL string) error
-
-	// SetUpgradeSeriesStatus is intended to give the uniter a chance to
-	// upgrade the status of a running series upgrade before or after
-	// upgrade series hook code completes and, for display purposes, to
-	// supply a reason as to why it is making the change.
-	SetUpgradeSeriesStatus(status model.UpgradeSeriesStatus, reason string) error
+	SetCurrentCharm(ctx stdcontext.Context, charmURL string) error
 
 	// SetSecretRotated updates the secret rotation status.
-	SetSecretRotated(url string, originalRevision int) error
+	SetSecretRotated(ctx stdcontext.Context, url string, originalRevision int) error
 
 	// SecretsRemoved updates the unit secret state when
 	// secret revisions are removed.
-	SecretsRemoved(deletedRevisions, deletedObsoleteRevisions map[string][]int) error
-
-	// RemoteInit copies the charm to the remote instance. CAAS only.
-	RemoteInit(runningStatus remotestate.ContainerRunningStatus, abort <-chan struct{}) error
+	SecretsRemoved(ctx stdcontext.Context, deletedRevisions, deletedObsoleteRevisions map[string][]int) error
 }
 
 // StorageUpdater is an interface used for updating local knowledge of storage
@@ -262,4 +231,9 @@ type StorageUpdater interface {
 	// UpdateStorage updates local knowledge of the storage attachments
 	// with the specified tags.
 	UpdateStorage([]names.StorageTag) error
+}
+
+// ActionGetter provides a method to query a given action.
+type ActionGetter interface {
+	Action(ctx stdcontext.Context, tag names.ActionTag) (*uniter.Action, error)
 }

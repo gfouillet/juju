@@ -6,11 +6,11 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -68,7 +68,7 @@ func (c *UnitGetCommand) Run(ctx *cmd.Context) error {
 	var err error
 	if c.Key == "private-address" {
 		var networkInfos map[string]params.NetworkInfoResult
-		networkInfos, err = c.ctx.NetworkInfo([]string{""}, -1)
+		networkInfos, err = c.ctx.NetworkInfo(ctx, []string{""}, -1)
 		if err == nil {
 			if networkInfos[""].Error != nil {
 				err = errors.Trace(networkInfos[""].Error)
@@ -91,7 +91,7 @@ func (c *UnitGetCommand) Run(ctx *cmd.Context) error {
 			}
 		}
 	} else {
-		value, err = c.ctx.PublicAddress()
+		value, err = c.ctx.PublicAddress(ctx)
 	}
 	if err != nil {
 		return errors.Trace(err)

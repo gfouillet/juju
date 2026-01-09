@@ -6,12 +6,12 @@ package storage
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -73,7 +73,7 @@ type VolumeAttachment struct {
 // generateListVolumeOutput returns a map of volume info
 func generateListVolumeOutput(ctx *cmd.Context, api StorageListAPI, ids []string) (map[string]VolumeInfo, error) {
 
-	results, err := api.ListVolumes(ids)
+	results, err := api.ListVolumes(ctx, ids)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -121,11 +121,11 @@ func createVolumeInfo(details params.VolumeDetails) (names.VolumeTag, VolumeInfo
 	}
 
 	var info VolumeInfo
-	info.ProviderVolumeId = details.Info.VolumeId
+	info.ProviderVolumeId = details.Info.ProviderId
 	info.HardwareId = details.Info.HardwareId
 	info.WWN = details.Info.WWN
 	info.Pool = details.Info.Pool
-	info.Size = details.Info.Size
+	info.Size = details.Info.SizeMiB
 	info.Persistent = details.Info.Persistent
 	info.Life = string(details.Life)
 	info.Status = EntityStatus{

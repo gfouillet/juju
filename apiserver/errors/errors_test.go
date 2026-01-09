@@ -8,28 +8,30 @@ import (
 	stderrors "errors"
 	"net/http"
 	"reflect"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	jujutxn "github.com/juju/txn/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"gopkg.in/macaroon.v2"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
 	"github.com/juju/juju/core/network"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
+	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	stateerrors "github.com/juju/juju/state/errors"
-	"github.com/juju/juju/testing"
 )
 
 type errorsSuite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&errorsSuite{})
+func TestErrorsSuite(t *stdtesting.T) {
+	tc.Run(t, &errorsSuite{})
+}
 
 var errorTransformTests = []struct {
 	err          error
@@ -48,35 +50,35 @@ var errorTransformTests = []struct {
 	status:     http.StatusNotFound,
 	helperFunc: params.IsCodeUserNotFound,
 }, {
+	err:        secreterrors.SecretNotFound,
+	code:       params.CodeSecretNotFound,
+	status:     http.StatusNotFound,
+	helperFunc: params.IsCodeSecretNotFound,
+}, {
+	err:        secreterrors.SecretRevisionNotFound,
+	code:       params.CodeSecretRevisionNotFound,
+	status:     http.StatusNotFound,
+	helperFunc: params.IsCodeSecretRevisionNotFound,
+}, {
+	err:        secreterrors.SecretConsumerNotFound,
+	code:       params.CodeSecretConsumerNotFound,
+	status:     http.StatusNotFound,
+	helperFunc: params.IsCodeSecretConsumerNotFound,
+}, {
+	err:        secretbackenderrors.NotFound,
+	code:       params.CodeSecretBackendNotFound,
+	status:     http.StatusNotFound,
+	helperFunc: params.IsCodeSecretBackendNotFound,
+}, {
+	err:        secretbackenderrors.Forbidden,
+	code:       params.CodeSecretBackendForbidden,
+	status:     http.StatusForbidden,
+	helperFunc: params.IsCodeSecretBackendForbidden,
+}, {
 	err:        errors.Unauthorized,
 	code:       params.CodeUnauthorized,
 	status:     http.StatusUnauthorized,
 	helperFunc: params.IsCodeUnauthorized,
-}, {
-	err:        stateerrors.ErrCannotEnterScopeYet,
-	code:       params.CodeCannotEnterScopeYet,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeCannotEnterScopeYet,
-}, {
-	err:        stateerrors.ErrCannotEnterScope,
-	code:       params.CodeCannotEnterScope,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeCannotEnterScope,
-}, {
-	err:        stateerrors.ErrDead,
-	code:       params.CodeDead,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeDead,
-}, {
-	err:        jujutxn.ErrExcessiveContention,
-	code:       params.CodeExcessiveContention,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeExcessiveContention,
-}, {
-	err:        stateerrors.ErrUnitHasSubordinates,
-	code:       params.CodeUnitHasSubordinates,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeUnitHasSubordinates,
 }, {
 	err:        apiservererrors.ErrBadId,
 	code:       params.CodeNotFound,
@@ -91,7 +93,7 @@ var errorTransformTests = []struct {
 		return errors.Is(e, apiservererrors.NoAddressSetError)
 	},
 }, {
-	err:        apiservererrors.ErrBadCreds,
+	err:        apiservererrors.ErrUnauthorized,
 	code:       params.CodeUnauthorized,
 	status:     http.StatusUnauthorized,
 	helperFunc: params.IsCodeUnauthorized,
@@ -131,25 +133,17 @@ var errorTransformTests = []struct {
 	status:     http.StatusInternalServerError,
 	helperFunc: params.IsCodeStopped,
 }, {
-	err:        stateerrors.NewHasAssignedUnitsError("42", []string{"a"}),
-	code:       params.CodeHasAssignedUnits,
-	status:     http.StatusInternalServerError,
-	helperFunc: params.IsCodeHasAssignedUnits,
-	targetTester: func(e error) bool {
-		return errors.Is(e, stateerrors.HasAssignedUnitsError)
-	},
-}, {
 	err:        apiservererrors.ErrTryAgain,
 	code:       params.CodeTryAgain,
 	status:     http.StatusInternalServerError,
 	helperFunc: params.IsCodeTryAgain,
 }, {
-	err:        leadership.ErrClaimDenied,
+	err:        errors.ConstError(leadership.ErrClaimDenied),
 	code:       params.CodeLeadershipClaimDenied,
 	status:     http.StatusInternalServerError,
 	helperFunc: params.IsCodeLeadershipClaimDenied,
 }, {
-	err:        lease.ErrClaimDenied,
+	err:        errors.ConstError(lease.ErrClaimDenied),
 	code:       params.CodeLeaseClaimDenied,
 	status:     http.StatusInternalServerError,
 	helperFunc: params.IsCodeLeaseClaimDenied,
@@ -285,25 +279,25 @@ func (err unhashableError) Error() string {
 	return err[0]
 }
 
-func (s *errorsSuite) TestErrorTransform(c *gc.C) {
+func (s *errorsSuite) TestErrorTransform(c *tc.C) {
 	for i, t := range errorTransformTests {
 		c.Logf("running test %d: %T{%q}", i, t.err, t.err)
 		err1, status := apiservererrors.ServerErrorAndStatus(t.err)
 
 		// Sanity check that ServerError returns the same thing.
 		err2 := apiservererrors.ServerError(t.err)
-		c.Assert(err2, gc.DeepEquals, err1)
-		c.Assert(status, gc.Equals, t.status)
+		c.Assert(err2, tc.DeepEquals, err1)
+		c.Assert(status, tc.Equals, t.status)
 
 		if t.err == nil {
-			c.Assert(err1, gc.IsNil)
-			c.Assert(status, gc.Equals, http.StatusOK)
+			c.Assert(err1, tc.IsNil)
+			c.Assert(status, tc.Equals, http.StatusOK)
 			continue
 		}
-		c.Assert(err1.Message, gc.Equals, t.err.Error())
-		c.Assert(err1.Code, gc.Equals, t.code)
+		c.Assert(err1.Message, tc.Equals, t.err.Error())
+		c.Assert(err1.Code, tc.Equals, t.code)
 		if t.helperFunc != nil {
-			c.Assert(err1, jc.Satisfies, t.helperFunc)
+			c.Assert(err1, tc.Satisfies, t.helperFunc)
 		}
 
 		// TODO(ericsnow) Remove this switch once the other error types are supported.
@@ -324,22 +318,22 @@ func (s *errorsSuite) TestErrorTransform(c *gc.C) {
 		c.Logf("  checking restore (%#v)", err1)
 		restored := apiservererrors.RestoreError(err1)
 		if t.err == nil {
-			c.Check(restored, jc.ErrorIsNil)
+			c.Check(restored, tc.ErrorIsNil)
 		} else if t.code == "" {
-			c.Check(restored.Error(), gc.Equals, t.err.Error())
+			c.Check(restored.Error(), tc.Equals, t.err.Error())
 		}
 
 		if t.targetTester == nil {
-			c.Check(errors.Is(restored, t.err), jc.IsTrue)
-			c.Check(restored.Error(), gc.Equals, t.err.Error())
+			c.Check(restored, tc.ErrorIs, t.err)
+			c.Check(restored.Error(), tc.Equals, t.err.Error())
 		} else {
-			c.Check(t.targetTester(restored), jc.IsTrue)
-			c.Check(restored.Error(), gc.Equals, t.err.Error())
+			c.Check(t.targetTester(restored), tc.IsTrue)
+			c.Check(restored.Error(), tc.Equals, t.err.Error())
 		}
 	}
 }
 
-func (s *errorsSuite) TestDestroyErr(c *gc.C) {
+func (s *errorsSuite) TestDestroyErr(c *tc.C) {
 	errs := []error{
 		errors.New("error one"),
 		errors.New("error two"),
@@ -351,11 +345,11 @@ func (s *errorsSuite) TestDestroyErr(c *gc.C) {
 		"id3",
 	}
 
-	c.Assert(apiservererrors.DestroyErr("entities", ids, nil), jc.ErrorIsNil)
+	c.Assert(apiservererrors.DestroyErr("entities", ids, nil), tc.ErrorIsNil)
 
 	err := apiservererrors.DestroyErr("entities", ids, errs)
-	c.Assert(err, gc.ErrorMatches, "no entities were destroyed: error one; error two; error three")
+	c.Assert(err, tc.ErrorMatches, "no entities were destroyed: error one; error two; error three")
 
 	err = apiservererrors.DestroyErr("entities", ids, errs[1:])
-	c.Assert(err, gc.ErrorMatches, "some entities were not destroyed: error two; error three")
+	c.Assert(err, tc.ErrorMatches, "some entities were not destroyed: error two; error three")
 }

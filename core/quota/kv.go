@@ -4,10 +4,11 @@
 package quota
 
 import (
+	"encoding/json"
 	"reflect"
 
-	"github.com/juju/errors"
-	"github.com/juju/mgo/v3/bson"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 var _ Checker = (*MapKeyValueSizeChecker)(nil)
@@ -32,7 +33,7 @@ func NewMapKeyValueSizeChecker(maxKeySize, maxValueSize int) *MapKeyValueSizeChe
 
 // Check applies the configured size checks to v and updates the checker's
 // internal state. Check expects a map as an argument where both the keys and
-// the values can be serialized to BSON; any other value will cause an error
+// the values can be serialized to JSON; any other value will cause an error
 // to be returned when Outcome is called.
 func (c *MapKeyValueSizeChecker) Check(v interface{}) {
 	if v == nil || c.lastErr != nil {
@@ -41,7 +42,7 @@ func (c *MapKeyValueSizeChecker) Check(v interface{}) {
 
 	reflMap := reflect.ValueOf(v)
 	if reflMap.Kind() != reflect.Map {
-		c.lastErr = errors.NotImplementedf("key/value size check for non map-values")
+		c.lastErr = errors.Errorf("key/value size check for non map-values %w", coreerrors.NotImplemented)
 		return
 	}
 
@@ -72,14 +73,14 @@ func CheckTupleSize(key, value interface{}, maxKeyLen, maxValueLen int) error {
 	if err != nil {
 		return err
 	} else if maxKeyLen > 0 && size > maxKeyLen {
-		return errors.QuotaLimitExceededf("max allowed key length (%d) exceeded", maxKeyLen)
+		return errors.Errorf("max allowed key length (%d) exceeded %w", maxKeyLen, coreerrors.QuotaLimitExceeded)
 	}
 
 	size, err = effectiveSize(value)
 	if err != nil {
 		return err
 	} else if maxValueLen > 0 && size > maxValueLen {
-		return errors.QuotaLimitExceededf("max allowed value length (%d) exceeded", maxValueLen)
+		return errors.Errorf("max allowed value length (%d) exceeded %w", maxValueLen, coreerrors.QuotaLimitExceeded)
 	}
 
 	return nil
@@ -89,10 +90,10 @@ func effectiveSize(v interface{}) (int, error) {
 	switch rawValue := v.(type) {
 	case string:
 		return len(rawValue), nil
-	default: // marshal non-string values to bson and return the serialized length
-		d, err := bson.Marshal(rawValue)
+	default: // marshal non-string values to json and return the serialized length
+		d, err := json.Marshal(rawValue)
 		if err != nil {
-			return -1, errors.Annotatef(err, "marshaling value to BSON")
+			return -1, errors.Errorf("marshaling value to JSON: %w", err)
 		}
 		return len(d), nil
 	}

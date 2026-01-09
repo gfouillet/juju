@@ -4,25 +4,24 @@
 package commands
 
 import (
-	"bufio"
+	"context"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/modelconfig"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
+	coretools "github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	coretools "github.com/juju/juju/tools"
 )
 
 var usageUpgradeJujuSummary = `
@@ -49,8 +48,6 @@ When looking for an agent to upgrade to, Juju will check the currently
 configured agent stream for that model. It's possible to overwrite this for
 the lifetime of this upgrade using ` + "`--agent-stream`" + `.
 
-If a failed upgrade has been resolved, ` + "`--reset-previous-upgrade`" + ` can be
-used to allow the upgrade to proceed.
 Backups are recommended prior to upgrading.
 
 `
@@ -72,13 +69,12 @@ func newUpgradeModelCommand() cmd.Command {
 type upgradeModelCommand struct {
 	modelcmd.ModelCommandBase
 
-	vers          string
-	Version       version.Number
-	DryRun        bool
-	ResetPrevious bool
-	AssumeYes     bool
-	AgentStream   string
-	timeout       time.Duration
+	vers        string
+	Version     semversion.Number
+	DryRun      bool
+	AssumeYes   bool
+	AgentStream string
+	timeout     time.Duration
 	// IgnoreAgentVersions is used to allow an admin to request an agent
 	// version without waiting for all agents to be at the right version.
 	IgnoreAgentVersions bool
@@ -108,7 +104,6 @@ func (c *upgradeModelCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.vers, "agent-version", "", "Upgrade to specific version")
 	f.StringVar(&c.AgentStream, "agent-stream", "", "Check this agent stream for upgrades")
 	f.BoolVar(&c.DryRun, "dry-run", false, "Don't change anything, just report what would be changed")
-	f.BoolVar(&c.ResetPrevious, "reset-previous-upgrade", false, "Clear the previous (incomplete) upgrade status (use with care)")
 	f.BoolVar(&c.AssumeYes, "y", false, "Answer 'yes' to confirmation prompts")
 	f.BoolVar(&c.AssumeYes, "yes", false, "")
 	f.BoolVar(&c.IgnoreAgentVersions, "ignore-agent-versions", false,
@@ -118,7 +113,7 @@ func (c *upgradeModelCommand) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *upgradeModelCommand) Init(args []string) error {
 	if c.vers != "" {
-		vers, err := version.Parse(c.vers)
+		vers, err := semversion.Parse(c.vers)
 		if err != nil {
 			return err
 		}
@@ -133,47 +128,47 @@ const (
 
 // ModelConfigAPI defines the model config API methods.
 type ModelConfigAPI interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 	Close() error
 }
 
 // ModelUpgraderAPI defines model upgrader API methods.
 type ModelUpgraderAPI interface {
 	UpgradeModel(
-		modelUUID string, targetVersion version.Number, stream string, ignoreAgentVersions, druRun bool,
-	) (version.Number, error)
-	AbortModelUpgrade(modelUUID string) error
-	UploadTools(r io.ReadSeeker, vers version.Binary) (coretools.List, error)
+		ctx context.Context,
+		modelUUID string, targetVersion semversion.Number, stream string, ignoreAgentVersions, druRun bool,
+	) (semversion.Number, error)
+	UploadTools(ctx context.Context, r io.Reader, vers semversion.Binary) (coretools.List, error)
 
 	Close() error
 }
 
-func (c *upgradeModelCommand) getModelUpgraderAPI() (ModelUpgraderAPI, error) {
+func (c *upgradeModelCommand) getModelUpgraderAPI(ctx context.Context) (ModelUpgraderAPI, error) {
 	if c.modelUpgraderAPI != nil {
 		return c.modelUpgraderAPI, nil
 	}
 
-	return c.NewModelUpgraderAPIClient()
+	return c.NewModelUpgraderAPIClient(ctx)
 }
 
-func (c *upgradeModelCommand) getModelConfigAPI() (ModelConfigAPI, error) {
+func (c *upgradeModelCommand) getModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.modelConfigAPI != nil {
 		return c.modelConfigAPI, nil
 	}
 
-	api, err := c.NewAPIRoot()
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return modelconfig.NewClient(api), nil
 }
 
-func (c *upgradeModelCommand) getControllerModelConfigAPI() (ModelConfigAPI, error) {
+func (c *upgradeModelCommand) getControllerModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.controllerModelConfigAPI != nil {
 		return c.controllerModelConfigAPI, nil
 	}
 
-	api, err := c.NewControllerAPIRoot()
+	api, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -202,29 +197,29 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 			err = nil
 		}
 		if err != nil {
-			logger.Debugf("upgradeModel failed %v", err)
+			logger.Debugf(context.TODO(), "upgradeModel failed %v", err)
 		}
 	}()
 
-	modelUpgrader, err := c.getModelUpgraderAPI()
+	modelUpgrader, err := c.getModelUpgraderAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelUpgrader.Close()
 
-	controllerClient, err := c.getControllerModelConfigAPI()
+	controllerClient, err := c.getControllerModelConfigAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer controllerClient.Close()
 
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelConfigClient.Close()
 
-	attrs, err := modelConfigClient.ModelGet()
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -243,7 +238,7 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 		return errUpToDate
 	}
 
-	controllerModelConfig, err := controllerClient.ModelGet()
+	controllerModelConfig, err := controllerClient.ModelGet(ctx)
 	if err != nil && !params.IsCodeUnauthorized(err) {
 		return err
 	}
@@ -255,7 +250,7 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 
 	targetVersion, err = c.notifyControllerUpgrade(ctx, modelUpgrader, targetVersion, c.DryRun)
 	if err == nil {
-		logger.Debugf("upgraded to %s", targetVersion)
+		logger.Debugf(context.TODO(), "upgraded to %s", targetVersion)
 		return nil
 	}
 	if errors.Is(err, errors.NotFound) {
@@ -265,34 +260,21 @@ func (c *upgradeModelCommand) upgradeModel(ctx *cmd.Context, fetchTimeout time.D
 }
 
 func (c *upgradeModelCommand) notifyControllerUpgrade(
-	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion version.Number, dryRun bool,
-) (chosenVersion version.Number, err error) {
-	_, details, err := c.ModelCommandBase.ModelDetails()
+	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion semversion.Number, dryRun bool,
+) (chosenVersion semversion.Number, err error) {
+	_, details, err := c.ModelCommandBase.ModelDetails(ctx)
 	if err != nil {
 		return chosenVersion, errors.Trace(err)
 	}
 	modelTag := names.NewModelTag(details.ModelUUID)
 
-	if c.ResetPrevious {
-		if ok, err := c.confirmResetPreviousUpgrade(ctx); !ok || err != nil {
-			const message = "previous upgrade not reset and no new upgrade triggered"
-			if err != nil {
-				return chosenVersion, errors.Annotate(err, message)
-			}
-			return chosenVersion, errors.New(message)
-		}
-		if err := modelUpgrader.AbortModelUpgrade(modelTag.Id()); err != nil {
-			return chosenVersion, block.ProcessBlockedError(err, block.BlockChange)
-		}
-	}
 	if chosenVersion, err = modelUpgrader.UpgradeModel(
+		ctx,
 		modelTag.Id(), targetVersion, c.AgentStream, c.IgnoreAgentVersions, dryRun,
 	); err != nil {
 		if params.IsCodeUpgradeInProgress(err) {
 			return chosenVersion, errors.Errorf("%s\n\n"+
-				"Please wait for the upgrade to complete or if there was a problem with\n"+
-				"the last upgrade that has been resolved, consider running the\n"+
-				"upgrade-model command with the --reset-previous-upgrade option.", err,
+				"Please wait for the upgrade to complete.", err,
 			)
 		}
 		if errors.Is(err, errors.AlreadyExists) {
@@ -301,26 +283,4 @@ func (c *upgradeModelCommand) notifyControllerUpgrade(
 		return chosenVersion, block.ProcessBlockedError(err, block.BlockChange)
 	}
 	return chosenVersion, nil
-}
-
-const modelResetPreviousUpgradeMessage = `
-WARNING! using --reset-previous-upgrade when an upgrade is in progress
-will cause the upgrade to fail. Only use this option to clear an
-incomplete upgrade where the root cause has been resolved.
-
-Continue [y/N]? `
-
-func (c *upgradeModelCommand) confirmResetPreviousUpgrade(ctx *cmd.Context) (bool, error) {
-	if c.AssumeYes {
-		return true, nil
-	}
-	fmt.Fprint(ctx.Stdout, modelResetPreviousUpgradeMessage)
-	scanner := bufio.NewScanner(ctx.Stdin)
-	scanner.Scan()
-	err := scanner.Err()
-	if err != nil && err != io.EOF {
-		return false, err
-	}
-	answer := strings.ToLower(scanner.Text())
-	return answer == "y" || answer == "yes", nil
 }

@@ -5,21 +5,29 @@ package common
 
 import (
 	ctx "context"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	ociCommon "github.com/oracle/oci-go-sdk/v65/common"
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/oci/testing"
 )
 
-var _ = gc.Suite(&computeClientSuite{})
-var _ = gc.Suite(&networkClientSuite{})
-var _ = gc.Suite(&storageClientSuite{})
+func TestComputeClientSuite(t *stdtesting.T) {
+	tc.Run(t, &computeClientSuite{})
+}
+
+func TestNetworkClientSuite(t *stdtesting.T) {
+	tc.Run(t, &networkClientSuite{})
+}
+
+func TestStorageClientSuite(t *stdtesting.T) {
+	tc.Run(t, &storageClientSuite{})
+}
 
 var compartmentID = "compartment-id"
 
@@ -40,7 +48,7 @@ type computeClientSuite struct {
 	volumes   []ociCore.VolumeAttachment
 }
 
-func (s *computeClientSuite) SetUpSuite(c *gc.C) {
+func (s *computeClientSuite) SetUpSuite(c *tc.C) {
 	s.images = []ociCore.Image{
 		{
 			CompartmentId:          &compartmentID,
@@ -140,7 +148,7 @@ func (s *computeClientSuite) SetUpSuite(c *gc.C) {
 	}
 }
 
-func (s *computeClientSuite) TestListImages(c *gc.C) {
+func (s *computeClientSuite) TestListImages(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -149,11 +157,11 @@ func (s *computeClientSuite) TestListImages(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListImages(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.images)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.images)
 }
 
-func (s *computeClientSuite) TestListImagesPageN(c *gc.C) {
+func (s *computeClientSuite) TestListImagesPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -170,22 +178,22 @@ func (s *computeClientSuite) TestListImagesPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListImages(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.images)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.images)
 }
 
-func (s *computeClientSuite) TestListImagesFail(c *gc.C) {
+func (s *computeClientSuite) TestListImagesFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListImages(gomock.Any(), gomock.Any()).Return(ociCore.ListImagesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListImages(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListImagesFailPageN(c *gc.C) {
+func (s *computeClientSuite) TestListImagesFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -196,11 +204,11 @@ func (s *computeClientSuite) TestListImagesFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListImages(gomock.Any(), gomock.Any()).Return(ociCore.ListImagesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListImages(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListShapes(c *gc.C) {
+func (s *computeClientSuite) TestListShapes(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -224,13 +232,13 @@ func (s *computeClientSuite) TestListShapes(c *gc.C) {
 	s.mockAPI.EXPECT().ListShapes(gomock.Any(), req).Return(resp, nil)
 
 	obtained, err := s.client.ListShapes(ctx.TODO(), &compartmentID, s.images[1].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.HasLen, 2)
-	c.Assert(obtained[0].Shape, gc.Equals, &shape1)
-	c.Assert(obtained[1].Shape, gc.Equals, &shape2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.HasLen, 2)
+	c.Assert(obtained[0].Shape, tc.Equals, &shape1)
+	c.Assert(obtained[1].Shape, tc.Equals, &shape2)
 }
 
-func (s *computeClientSuite) TestListShapesPageN(c *gc.C) {
+func (s *computeClientSuite) TestListShapesPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -256,24 +264,24 @@ func (s *computeClientSuite) TestListShapesPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListShapes(ctx.TODO(), &compartmentID, req.ImageId)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.HasLen, 2)
-	c.Assert(obtained[0].Shape, gc.Equals, &shape1)
-	c.Assert(obtained[1].Shape, gc.Equals, &shape2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.HasLen, 2)
+	c.Assert(obtained[0].Shape, tc.Equals, &shape1)
+	c.Assert(obtained[1].Shape, tc.Equals, &shape2)
 }
 
-func (s *computeClientSuite) TestListShapesFail(c *gc.C) {
+func (s *computeClientSuite) TestListShapesFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListShapes(gomock.Any(), gomock.Any()).Return(ociCore.ListShapesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListShapes(ctx.TODO(), &compartmentID, makeStringPointer("testFail"))
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListShapesFailPageN(c *gc.C) {
+func (s *computeClientSuite) TestListShapesFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -296,11 +304,11 @@ func (s *computeClientSuite) TestListShapesFailPageN(c *gc.C) {
 		ociCore.ListShapesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListShapes(ctx.TODO(), &compartmentID, req.ImageId)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListInstances(c *gc.C) {
+func (s *computeClientSuite) TestListInstances(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -309,11 +317,11 @@ func (s *computeClientSuite) TestListInstances(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListInstances(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.instances)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.instances)
 }
 
-func (s *computeClientSuite) TestListInstancesPageN(c *gc.C) {
+func (s *computeClientSuite) TestListInstancesPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -326,22 +334,22 @@ func (s *computeClientSuite) TestListInstancesPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListInstances(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.instances)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.instances)
 }
 
-func (s *computeClientSuite) TestListInstancesFail(c *gc.C) {
+func (s *computeClientSuite) TestListInstancesFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListInstances(gomock.Any(), gomock.Any()).Return(ociCore.ListInstancesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListInstances(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListInstancesFailPageN(c *gc.C) {
+func (s *computeClientSuite) TestListInstancesFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -352,11 +360,11 @@ func (s *computeClientSuite) TestListInstancesFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListInstances(gomock.Any(), gomock.Any()).Return(ociCore.ListInstancesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListInstances(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListVnicAttachments(c *gc.C) {
+func (s *computeClientSuite) TestListVnicAttachments(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -365,11 +373,11 @@ func (s *computeClientSuite) TestListVnicAttachments(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListVnicAttachments(ctx.TODO(), &compartmentID, s.vnics[0].InstanceId)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.vnics)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.vnics)
 }
 
-func (s *computeClientSuite) TestListVnicAttachmentsPageN(c *gc.C) {
+func (s *computeClientSuite) TestListVnicAttachmentsPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -389,22 +397,22 @@ func (s *computeClientSuite) TestListVnicAttachmentsPageN(c *gc.C) {
 		}, nil)
 
 	obtained, err := s.client.ListVnicAttachments(ctx.TODO(), &compartmentID, s.vnics[0].InstanceId)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.vnics)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.vnics)
 }
 
-func (s *computeClientSuite) TestListVnicAttachmentsFail(c *gc.C) {
+func (s *computeClientSuite) TestListVnicAttachmentsFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListVnicAttachments(gomock.Any(), gomock.Any()).Return(ociCore.ListVnicAttachmentsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVnicAttachments(ctx.TODO(), &compartmentID, s.vnics[0].InstanceId)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListVnicAttachmentsFailPageN(c *gc.C) {
+func (s *computeClientSuite) TestListVnicAttachmentsFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -421,11 +429,11 @@ func (s *computeClientSuite) TestListVnicAttachmentsFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListVnicAttachments(gomock.Any(), req).Return(ociCore.ListVnicAttachmentsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVnicAttachments(ctx.TODO(), &compartmentID, s.vnics[0].InstanceId)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListVolumeAttachments(c *gc.C) {
+func (s *computeClientSuite) TestListVolumeAttachments(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -439,11 +447,11 @@ func (s *computeClientSuite) TestListVolumeAttachments(c *gc.C) {
 	s.mockAPI.EXPECT().ListVolumeAttachments(gomock.Any(), req).Return(resp, nil)
 
 	obtained, err := s.client.ListVolumeAttachments(ctx.TODO(), &compartmentID, s.volumes[0].GetInstanceId())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.volumes)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.volumes)
 }
 
-func (s *computeClientSuite) TestListVolumeAttachmentsPageN(c *gc.C) {
+func (s *computeClientSuite) TestListVolumeAttachmentsPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -463,22 +471,22 @@ func (s *computeClientSuite) TestListVolumeAttachmentsPageN(c *gc.C) {
 		}, nil)
 
 	obtained, err := s.client.ListVolumeAttachments(ctx.TODO(), &compartmentID, s.volumes[0].GetInstanceId())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.volumes)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.volumes)
 }
 
-func (s *computeClientSuite) TestListVolumeAttachmentsFail(c *gc.C) {
+func (s *computeClientSuite) TestListVolumeAttachmentsFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListVolumeAttachments(gomock.Any(), gomock.Any()).Return(ociCore.ListVolumeAttachmentsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVolumeAttachments(ctx.TODO(), &compartmentID, s.volumes[0].GetInstanceId())
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) TestListVolumeAttachmentsFailPageN(c *gc.C) {
+func (s *computeClientSuite) TestListVolumeAttachmentsFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -495,11 +503,11 @@ func (s *computeClientSuite) TestListVolumeAttachmentsFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListVolumeAttachments(gomock.Any(), req).Return(ociCore.ListVolumeAttachmentsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVolumeAttachments(ctx.TODO(), &compartmentID, s.volumes[0].GetInstanceId())
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *computeClientSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *computeClientSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.mockAPI = testing.NewMockOCIComputeClient(ctrl)
@@ -517,7 +525,7 @@ type networkClientSuite struct {
 	securityLists []ociCore.SecurityList
 }
 
-func (s *networkClientSuite) SetUpSuite(c *gc.C) {
+func (s *networkClientSuite) SetUpSuite(c *tc.C) {
 	s.vcns = []ociCore.Vcn{
 		{
 			CompartmentId: &compartmentID,
@@ -597,7 +605,7 @@ func (s *networkClientSuite) SetUpSuite(c *gc.C) {
 	}
 }
 
-func (s *networkClientSuite) TestListVcns(c *gc.C) {
+func (s *networkClientSuite) TestListVcns(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -606,11 +614,11 @@ func (s *networkClientSuite) TestListVcns(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListVcns(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.vcns)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.vcns)
 }
 
-func (s *networkClientSuite) TestListVcnsPageN(c *gc.C) {
+func (s *networkClientSuite) TestListVcnsPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -628,22 +636,22 @@ func (s *networkClientSuite) TestListVcnsPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListVcns(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.vcns)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.vcns)
 }
 
-func (s *networkClientSuite) TestListVcnsFail(c *gc.C) {
+func (s *networkClientSuite) TestListVcnsFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
 	s.mockAPI.EXPECT().ListVcns(gomock.Any(), gomock.Any()).Return(ociCore.ListVcnsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVcns(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListVcnsFailPageN(c *gc.C) {
+func (s *networkClientSuite) TestListVcnsFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -659,11 +667,11 @@ func (s *networkClientSuite) TestListVcnsFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListVcns(gomock.Any(), req).Return(ociCore.ListVcnsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVcns(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListSubnets(c *gc.C) {
+func (s *networkClientSuite) TestListSubnets(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -676,11 +684,11 @@ func (s *networkClientSuite) TestListSubnets(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListSubnets(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.subnets)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.subnets)
 }
 
-func (s *networkClientSuite) TestListSubnetsPageN(c *gc.C) {
+func (s *networkClientSuite) TestListSubnetsPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -699,11 +707,11 @@ func (s *networkClientSuite) TestListSubnetsPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListSubnets(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.subnets)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.subnets)
 }
 
-func (s *networkClientSuite) TestListSubnetsFail(c *gc.C) {
+func (s *networkClientSuite) TestListSubnetsFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -714,11 +722,11 @@ func (s *networkClientSuite) TestListSubnetsFail(c *gc.C) {
 	s.mockAPI.EXPECT().ListSubnets(gomock.Any(), req).Return(ociCore.ListSubnetsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListSubnets(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListSubnetsFailPageN(c *gc.C) {
+func (s *networkClientSuite) TestListSubnetsFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -735,11 +743,11 @@ func (s *networkClientSuite) TestListSubnetsFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListSubnets(gomock.Any(), req).Return(ociCore.ListSubnetsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListSubnets(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListInternetGateways(c *gc.C) {
+func (s *networkClientSuite) TestListInternetGateways(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -752,11 +760,11 @@ func (s *networkClientSuite) TestListInternetGateways(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListInternetGateways(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.gateways)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.gateways)
 }
 
-func (s *networkClientSuite) TestListInternetGatewaysPageN(c *gc.C) {
+func (s *networkClientSuite) TestListInternetGatewaysPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -775,11 +783,11 @@ func (s *networkClientSuite) TestListInternetGatewaysPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListInternetGateways(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.gateways)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.gateways)
 }
 
-func (s *networkClientSuite) TestListInternetGatewaysFail(c *gc.C) {
+func (s *networkClientSuite) TestListInternetGatewaysFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -790,11 +798,11 @@ func (s *networkClientSuite) TestListInternetGatewaysFail(c *gc.C) {
 	s.mockAPI.EXPECT().ListInternetGateways(gomock.Any(), req).Return(ociCore.ListInternetGatewaysResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListInternetGateways(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListInternetGatewaysFailPageN(c *gc.C) {
+func (s *networkClientSuite) TestListInternetGatewaysFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -811,11 +819,11 @@ func (s *networkClientSuite) TestListInternetGatewaysFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListInternetGateways(gomock.Any(), req).Return(ociCore.ListInternetGatewaysResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListInternetGateways(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListRouteTables(c *gc.C) {
+func (s *networkClientSuite) TestListRouteTables(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -828,11 +836,11 @@ func (s *networkClientSuite) TestListRouteTables(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListRouteTables(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.tables)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.tables)
 }
 
-func (s *networkClientSuite) TestListRouteTablesPageN(c *gc.C) {
+func (s *networkClientSuite) TestListRouteTablesPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -851,11 +859,11 @@ func (s *networkClientSuite) TestListRouteTablesPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListRouteTables(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.tables)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.tables)
 }
 
-func (s *networkClientSuite) TestListRouteTablesFail(c *gc.C) {
+func (s *networkClientSuite) TestListRouteTablesFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -866,11 +874,11 @@ func (s *networkClientSuite) TestListRouteTablesFail(c *gc.C) {
 	s.mockAPI.EXPECT().ListRouteTables(gomock.Any(), req).Return(ociCore.ListRouteTablesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListRouteTables(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListRouteTablesFailPageN(c *gc.C) {
+func (s *networkClientSuite) TestListRouteTablesFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -887,11 +895,11 @@ func (s *networkClientSuite) TestListRouteTablesFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListRouteTables(gomock.Any(), req).Return(ociCore.ListRouteTablesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListRouteTables(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListSecurityLists(c *gc.C) {
+func (s *networkClientSuite) TestListSecurityLists(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -904,11 +912,11 @@ func (s *networkClientSuite) TestListSecurityLists(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListSecurityLists(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.securityLists)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.securityLists)
 }
 
-func (s *networkClientSuite) TestListSecurityListsPageN(c *gc.C) {
+func (s *networkClientSuite) TestListSecurityListsPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -927,11 +935,11 @@ func (s *networkClientSuite) TestListSecurityListsPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListSecurityLists(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, s.securityLists)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, s.securityLists)
 }
 
-func (s *networkClientSuite) TestListSecurityListsFail(c *gc.C) {
+func (s *networkClientSuite) TestListSecurityListsFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -942,11 +950,11 @@ func (s *networkClientSuite) TestListSecurityListsFail(c *gc.C) {
 	s.mockAPI.EXPECT().ListSecurityLists(gomock.Any(), req).Return(ociCore.ListSecurityListsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListSecurityLists(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) TestListSecurityListsFailPageN(c *gc.C) {
+func (s *networkClientSuite) TestListSecurityListsFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -963,11 +971,11 @@ func (s *networkClientSuite) TestListSecurityListsFailPageN(c *gc.C) {
 	s.mockAPI.EXPECT().ListSecurityLists(gomock.Any(), req).Return(ociCore.ListSecurityListsResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListSecurityLists(ctx.TODO(), &compartmentID, s.vcns[0].Id)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *networkClientSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *networkClientSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.mockAPI = testing.NewMockOCIVirtualNetworkingClient(ctrl)
@@ -980,7 +988,7 @@ type storageClientSuite struct {
 	mockAPI *testing.MockOCIStorageClient
 }
 
-func (s *storageClientSuite) TestListVolumes(c *gc.C) {
+func (s *storageClientSuite) TestListVolumes(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -990,11 +998,11 @@ func (s *storageClientSuite) TestListVolumes(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListVolumes(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, []ociCore.Volume{vol})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, []ociCore.Volume{vol})
 }
 
-func (s *storageClientSuite) TestListVolumesPageN(c *gc.C) {
+func (s *storageClientSuite) TestListVolumesPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -1010,11 +1018,11 @@ func (s *storageClientSuite) TestListVolumesPageN(c *gc.C) {
 	}, nil)
 
 	obtained, err := s.client.ListVolumes(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, []ociCore.Volume{vol, vol2})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtained, tc.DeepEquals, []ociCore.Volume{vol, vol2})
 }
 
-func (s *storageClientSuite) TestListVolumesFail(c *gc.C) {
+func (s *storageClientSuite) TestListVolumesFail(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -1022,11 +1030,11 @@ func (s *storageClientSuite) TestListVolumesFail(c *gc.C) {
 		ociCore.ListVolumesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVolumes(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *storageClientSuite) TestListVolumesFailPageN(c *gc.C) {
+func (s *storageClientSuite) TestListVolumesFailPageN(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -1039,11 +1047,11 @@ func (s *storageClientSuite) TestListVolumesFailPageN(c *gc.C) {
 		ociCore.ListVolumesResponse{}, errors.BadRequestf("test fail"))
 
 	obtained, err := s.client.ListVolumes(ctx.TODO(), &compartmentID)
-	c.Assert(err, jc.Satisfies, errors.IsBadRequest)
-	c.Assert(obtained, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+	c.Assert(obtained, tc.HasLen, 0)
 }
 
-func (s *storageClientSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *storageClientSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.mockAPI = testing.NewMockOCIStorageClient(ctrl)

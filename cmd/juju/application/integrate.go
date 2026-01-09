@@ -4,15 +4,15 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"regexp"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/applicationoffers"
@@ -21,6 +21,7 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -125,11 +126,12 @@ Use the ` + "`juju find-offers`" + ` command to list aliases.
 ` + "`<offer-url>`" + ` is a path to enable Juju to resolve communication between
 controllers and the models they control.
 
-    [[<controller>:]<user>/]<model-name>.<application-name>
+    [[<controller>:]<qualifier>/]<model-name>.<application-name>
 
 ` + "`<controller>`" + ` is the name of a controller. The ` + "`juju controllers`" + ` command
 provides a list of controllers.` + "`<user>`" + ` is the user account of the model's owner.
 
+` + "`<qualifier>`" + ` is used to disambiguate the model name.
 
 ### Cross-model relations: network management
 
@@ -222,28 +224,28 @@ func (c *addRelationCommand) SetFlags(f *gnuflag.FlagSet) {
 // applicationAddRelationAPI defines the API methods that application add relation command uses.
 type applicationAddRelationAPI interface {
 	Close() error
-	AddRelation(endpoints, viaCIDRs []string) (*params.AddRelationResults, error)
-	Consume(crossmodel.ConsumeApplicationArgs) (string, error)
+	AddRelation(ctx context.Context, endpoints, viaCIDRs []string) (*params.AddRelationResults, error)
+	Consume(context.Context, crossmodel.ConsumeApplicationArgs) (string, error)
 }
 
-func (c *addRelationCommand) getAddRelationAPI() (applicationAddRelationAPI, error) {
+func (c *addRelationCommand) getAddRelationAPI(ctx context.Context) (applicationAddRelationAPI, error) {
 	if c.addRelationAPI != nil {
 		return c.addRelationAPI, nil
 	}
 
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return application.NewClient(root), nil
 }
 
-func (c *addRelationCommand) getOffersAPI(url *crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
+func (c *addRelationCommand) getOffersAPI(ctx context.Context, url *crossmodel.OfferURL) (applicationConsumeDetailsAPI, error) {
 	if c.consumeDetailsAPI != nil {
 		return c.consumeDetailsAPI, nil
 	}
 
-	root, err := c.CommandBase.NewAPIRoot(c.ClientStore(), url.Source, "")
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), url.Source, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -255,7 +257,7 @@ func (c *addRelationCommand) getOffersAPI(url *crossmodel.OfferURL) (application
 var offerTerminatedRegexp = regexp.MustCompile(`.*offer (?P<offer>\S+) .*terminated.*`)
 
 func (c *addRelationCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAddRelationAPI()
+	client, err := c.getAddRelationAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -270,12 +272,12 @@ func (c *addRelationCommand) Run(ctx *cmd.Context) error {
 			}
 			c.remoteEndpoint.Source = controllerName
 		}
-		if err := c.maybeConsumeOffer(client); err != nil {
+		if err := c.maybeConsumeOffer(ctx, client); err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	_, err = client.AddRelation(c.endpoints, c.viaCIDRs)
+	_, err = client.AddRelation(ctx, c.endpoints, c.viaCIDRs)
 	if params.IsCodeUnauthorized(err) {
 		// XXX: Double check the error message looks sane
 		common.PermissionsMessage(ctx.Stderr, "integrate")
@@ -296,7 +298,7 @@ To integrate with a new offer with the same name, first run
 'juju remove-saas %s' to remove the SAAS record from this model.`, offerName, offerName))
 		}
 		if c.remoteEndpoint != nil && strings.HasSuffix(err.Error(), "not alive") {
-			saasName := c.remoteEndpoint.ApplicationName
+			saasName := c.remoteEndpoint.Name
 			return errors.New(fmt.Sprintf(
 				`SAAS application %q has been removed but termination has not completed.
 To integrate with a new offer with the same name, first run
@@ -306,8 +308,8 @@ To integrate with a new offer with the same name, first run
 	return block.ProcessBlockedError(err, block.BlockChange)
 }
 
-func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelationAPI) error {
-	sourceClient, err := c.getOffersAPI(c.remoteEndpoint)
+func (c *addRelationCommand) maybeConsumeOffer(ctx context.Context, targetClient applicationAddRelationAPI) error {
+	sourceClient, err := c.getOffersAPI(ctx, c.remoteEndpoint)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -315,7 +317,7 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 
 	// Get the details of the remote offer - this will fail with a permission
 	// error if the user isn't authorised to consume the offer.
-	consumeDetails, err := sourceClient.GetConsumeDetails(c.remoteEndpoint.AsLocal().String())
+	consumeDetails, err := sourceClient.GetConsumeDetails(ctx, c.remoteEndpoint.AsLocal().String())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -332,7 +334,7 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 	// it's safe to do so again.
 	arg := crossmodel.ConsumeApplicationArgs{
 		Offer:            *consumeDetails.Offer,
-		ApplicationAlias: c.remoteEndpoint.ApplicationName,
+		ApplicationAlias: c.remoteEndpoint.Name,
 		Macaroon:         consumeDetails.Macaroon,
 	}
 	if consumeDetails.ControllerInfo != nil {
@@ -341,13 +343,13 @@ func (c *addRelationCommand) maybeConsumeOffer(targetClient applicationAddRelati
 			return errors.Trace(err)
 		}
 		arg.ControllerInfo = &crossmodel.ControllerInfo{
-			ControllerTag: controllerTag,
-			Alias:         offerURL.Source,
-			Addrs:         consumeDetails.ControllerInfo.Addrs,
-			CACert:        consumeDetails.ControllerInfo.CACert,
+			ControllerUUID: controllerTag.Id(),
+			Alias:          offerURL.Source,
+			Addrs:          consumeDetails.ControllerInfo.Addrs,
+			CACert:         consumeDetails.ControllerInfo.CACert,
 		}
 	}
-	_, err = targetClient.Consume(arg)
+	_, err = targetClient.Consume(ctx, arg)
 	return errors.Trace(err)
 }
 
@@ -363,8 +365,8 @@ func (c *addRelationCommand) validateEndpoints(all []string) error {
 			if c.remoteEndpoint != nil {
 				return errors.NotSupportedf("providing more than one remote endpoints")
 			}
-			c.remoteEndpoint = url
-			c.endpoints = append(c.endpoints, url.ApplicationName)
+			c.remoteEndpoint = &url
+			c.endpoints = append(c.endpoints, url.Name)
 			continue
 		}
 		// at this stage, we are assuming that this could be a local endpoint

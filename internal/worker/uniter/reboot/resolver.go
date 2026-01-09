@@ -4,24 +4,21 @@
 package reboot
 
 import (
-	"github.com/juju/charm/v12/hooks"
+	"context"
+
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
 )
 
-// Logger represents the logging methods used in this package.
-type Logger interface {
-	Infof(string, ...interface{})
-}
-
 // NewResolver returns a resolver that runs the start hook to notify install
 // charms that the machine has been rebooted.
-func NewResolver(logger Logger, rebootDetected bool) resolver.Resolver {
+func NewResolver(logger logger.Logger, rebootDetected bool) resolver.Resolver {
 	if !rebootDetected {
 		return nopResolver{}
 	}
@@ -35,24 +32,18 @@ func NewResolver(logger Logger, rebootDetected bool) resolver.Resolver {
 type nopResolver struct {
 }
 
-func (nopResolver) NextOp(_ resolver.LocalState, _ remotestate.Snapshot, _ operation.Factory) (operation.Operation, error) {
+func (nopResolver) NextOp(_ context.Context, _ resolver.LocalState, _ remotestate.Snapshot, _ operation.Factory) (operation.Operation, error) {
 	return nil, resolver.ErrNoOperation
 }
 
 type rebootResolver struct {
 	rebootDetected bool
-	logger         Logger
+	logger         logger.Logger
 }
 
-func (r *rebootResolver) NextOp(localState resolver.LocalState, remoteState remotestate.Snapshot, opfactory operation.Factory) (operation.Operation, error) {
+func (r *rebootResolver) NextOp(ctx context.Context, localState resolver.LocalState, remoteState remotestate.Snapshot, opfactory operation.Factory) (operation.Operation, error) {
 	// Have we already notified that a reboot occurred?
 	if !r.rebootDetected {
-		return nil, resolver.ErrNoOperation
-	}
-
-	// If we performing a series upgrade, suppress start hooks until the
-	// upgrade is complete.
-	if remoteState.UpgradeMachineStatus != model.UpgradeSeriesNotStarted {
 		return nil, resolver.ErrNoOperation
 	}
 
@@ -73,7 +64,7 @@ func (r *rebootResolver) NextOp(localState resolver.LocalState, remoteState remo
 		return nil, errors.Trace(err)
 	}
 
-	r.logger.Infof("reboot detected; triggering implicit start hook to notify charm")
+	r.logger.Infof(ctx, "reboot detected; triggering implicit start hook to notify charm")
 
 	r.rebootDetected = false
 	return op, nil

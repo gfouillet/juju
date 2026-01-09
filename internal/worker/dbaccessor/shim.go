@@ -9,8 +9,8 @@ import (
 
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/database/app"
-	"github.com/juju/juju/database/dqlite"
+	"github.com/juju/juju/internal/database/app"
+	"github.com/juju/juju/internal/database/dqlite"
 )
 
 // Client describes a client that speaks the Dqlite wire protocol,
@@ -52,6 +52,9 @@ type DBApp interface {
 	// ID returns the dqlite ID of this application node.
 	ID() uint64
 
+	// Address returns the bind address of this application node.
+	Address() string
+
 	// Close the application node, releasing all resources it created.
 	Close() error
 }
@@ -73,5 +76,10 @@ func NewApp(dataDir string, options ...app.Option) (DBApp, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &dbApp{dqliteApp}, nil
+	return WrapApp(dqliteApp), nil
+}
+
+// WrapApp wraps a Dqlite App reference, so that we can shim out Client.
+func WrapApp(dqliteApp *app.App) DBApp {
+	return &dbApp{dqliteApp}
 }

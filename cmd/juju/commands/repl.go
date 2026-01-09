@@ -10,15 +10,17 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type replCommand struct {
@@ -163,7 +165,7 @@ func (c *replCommand) Run(ctx *cmd.Context) error {
 			} else {
 				continue
 			}
-		} else if err == io.EOF {
+		} else if errors.Is(err, io.EOF) {
 			break
 		}
 		line = strings.TrimSpace(line)
@@ -194,10 +196,10 @@ func (c *replCommand) getPrompt() (prompt string, err error) {
 		}
 	}()
 
-	store := modelcmd.QualifyingClientStore{c.store}
+	store := modelcmd.QualifyingClientStore{ClientStore: c.store}
 
 	controllerName, err := modelcmd.DetermineCurrentController(store)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return "", errors.Trace(err)
 	}
 	if err != nil {
@@ -212,7 +214,7 @@ func (c *replCommand) getPrompt() (prompt string, err error) {
 		return "", nil
 	}
 	modelName, err := store.CurrentModel(controllerName)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		modelName = ""
 	} else if err != nil {
 		return "", errors.Trace(err)
@@ -220,7 +222,7 @@ func (c *replCommand) getPrompt() (prompt string, err error) {
 
 	userName := ""
 	account, err := store.AccountDetails(controllerName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return "", errors.Trace(err)
 	}
 	if err == nil {
@@ -229,8 +231,10 @@ func (c *replCommand) getPrompt() (prompt string, err error) {
 	if userName != "" {
 		controllerName = userName + "@" + controllerName
 		if jujuclient.IsQualifiedModelName(modelName) {
-			baseModelName, userTag, _ := jujuclient.SplitModelName(modelName)
-			if userName == userTag.Name() {
+			baseModelName, qualifier, _ := jujuclient.SplitFullyQualifiedModelName(modelName)
+			// If the logged in username matches the model qualifier,
+			// we can mask out the qualifier in the display prompt.
+			if model.QualifierFromUserTag(names.NewUserTag(userName)).String() == qualifier {
 				modelName = baseModelName
 			}
 		}

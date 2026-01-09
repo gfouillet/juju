@@ -4,94 +4,86 @@
 package agent
 
 import (
-	stdcontext "context"
-	"fmt"
-	"io"
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
+	"github.com/juju/loggo/v2"
 	"github.com/juju/lumberjack/v2"
-	"github.com/juju/mgo/v3"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/exec"
-	"github.com/juju/utils/v3/symlink"
-	"github.com/juju/utils/v3/voyeur"
-	"github.com/juju/version/v2"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
+	"github.com/juju/utils/v4/exec"
+	"github.com/juju/utils/v4/symlink"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/agent/addons"
+	agentconfig "github.com/juju/juju/agent/config"
+	agentengine "github.com/juju/juju/agent/engine"
+	agenterrors "github.com/juju/juju/agent/errors"
 	"github.com/juju/juju/agent/tools"
 	"github.com/juju/juju/api"
-	apiagent "github.com/juju/juju/api/agent/agent"
 	apimachiner "github.com/juju/juju/api/agent/machiner"
-	apiprovisioner "github.com/juju/juju/api/agent/provisioner"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/charmhub"
 	jujucmd "github.com/juju/juju/cmd"
-	"github.com/juju/juju/cmd/jujud/agent/agentconf"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
-	agenterrors "github.com/juju/juju/cmd/jujud/agent/errors"
+	"github.com/juju/juju/cmd/internal/agent/agentconf"
 	"github.com/juju/juju/cmd/jujud/agent/machine"
-	"github.com/juju/juju/cmd/jujud/agent/model"
 	"github.com/juju/juju/cmd/jujud/reboot"
 	cmdutil "github.com/juju/juju/cmd/jujud/util"
-	"github.com/juju/juju/container/broker"
-	"github.com/juju/juju/container/kvm"
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
-	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/paths"
-	"github.com/juju/juju/core/presence"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/container/broker"
+	internaldependency "github.com/juju/juju/internal/dependency"
+	"github.com/juju/juju/internal/flightrecorder"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/pki"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
-	jworker "github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/s3client"
+	"github.com/juju/juju/internal/service"
+	"github.com/juju/juju/internal/storage/looputil"
+	internalupgrade "github.com/juju/juju/internal/upgrade"
+	"github.com/juju/juju/internal/upgrades"
+	"github.com/juju/juju/internal/upgradesteps"
+	internalworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/deployer"
+	workerflightrecorder "github.com/juju/juju/internal/worker/flightrecorder"
 	"github.com/juju/juju/internal/worker/gate"
 	"github.com/juju/juju/internal/worker/introspection"
 	"github.com/juju/juju/internal/worker/logsender"
 	"github.com/juju/juju/internal/worker/logsender/logsendermetrics"
-	"github.com/juju/juju/internal/worker/migrationmaster"
-	"github.com/juju/juju/internal/worker/modelworkermanager"
-	psworker "github.com/juju/juju/internal/worker/pubsub"
-	"github.com/juju/juju/internal/worker/upgradedatabase"
-	"github.com/juju/juju/internal/worker/upgradesteps"
 	jujunames "github.com/juju/juju/juju/names"
-	"github.com/juju/juju/mongo"
-	"github.com/juju/juju/mongo/mongometrics"
-	"github.com/juju/juju/pki"
-	"github.com/juju/juju/pubsub/centralhub"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/service"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
-	"github.com/juju/juju/storage/looputil"
-	"github.com/juju/juju/upgrades"
-	"github.com/juju/juju/wrench"
+)
+
+type (
+	// The following allows the upgrade steps to be overridden by brittle
+	// integration tests.
+	PreUpgradeStepsFunc func(model.ModelType) upgrades.PreUpgradeStepsFunc
+	UpgradeStepsFunc    = upgrades.UpgradeStepsFunc
 )
 
 var (
-	logger            = loggo.GetLogger("juju.cmd.jujud")
+	logger            = internallogger.GetLogger("juju.cmd.jujud")
 	jujuExec          = paths.JujuExec(paths.CurrentOS())
 	jujuDumpLogs      = paths.JujuDumpLogs(paths.CurrentOS())
 	jujuIntrospect    = paths.JujuIntrospect(paths.CurrentOS())
@@ -103,36 +95,11 @@ var (
 	// be expressed as explicit dependencies, but nobody has yet had
 	// the intestinal fortitude to untangle this package. Be that
 	// person! Juju Needs You.
-	useMultipleCPUs   = utils.UseMultipleCPUs
-	reportOpenedState = func(*state.State) {}
-	getHostname       = os.Hostname
+	getHostname = os.Hostname
 
-	caasModelManifolds   = model.CAASManifolds
-	iaasModelManifolds   = model.IAASManifolds
 	caasMachineManifolds = machine.CAASManifolds
 	iaasMachineManifolds = machine.IAASManifolds
 )
-
-// ProductionMongoWriteConcern is provided to override in tests, default is true
-var ProductionMongoWriteConcern = true
-
-func init() {
-	stateWorkerDialOpts = mongo.DefaultDialOpts()
-	stateWorkerDialOpts.PostDial = func(session *mgo.Session) error {
-		safe := mgo.Safe{}
-		if ProductionMongoWriteConcern {
-			safe.J = true
-			_, err := mongo.CurrentReplicasetConfig(session)
-			if err == nil {
-				// set mongo to write-majority (writes only returned after
-				// replicated to a majority of replica-set members).
-				safe.WMode = "majority"
-			}
-		}
-		session.SetSafe(&safe)
-		return nil
-	}
-}
 
 type machineAgentFactoryFnType func(names.Tag, bool) (*MachineAgent, error)
 
@@ -145,21 +112,16 @@ type AgentInitializer interface {
 	DataDir() string
 }
 
-// ModelMetrics defines a type for creating metrics for a given model.
-type ModelMetrics interface {
-	ForModel(model names.ModelTag) dependency.Metrics
-}
-
-// NewMachineAgentCmd creates a Command which handles parsing
+// NewMachineAgentCommand creates a Command that handles parsing
 // command-line arguments and instantiating and running a
 // MachineAgent.
-func NewMachineAgentCmd(
+func NewMachineAgentCommand(
 	ctx *cmd.Context,
 	machineAgentFactory machineAgentFactoryFnType,
 	agentInitializer AgentInitializer,
-	configFetcher agentconf.AgentConfigWriter,
+	configFetcher agentconfig.AgentConfigWriter,
 ) cmd.Command {
-	return &machineAgentCmd{
+	return &machineAgentCommand{
 		ctx:                 ctx,
 		machineAgentFactory: machineAgentFactory,
 		agentInitializer:    agentInitializer,
@@ -167,12 +129,12 @@ func NewMachineAgentCmd(
 	}
 }
 
-type machineAgentCmd struct {
+type machineAgentCommand struct {
 	cmd.CommandBase
 
 	// This group of arguments is required.
 	agentInitializer    AgentInitializer
-	currentConfig       agentconf.AgentConfigWriter
+	currentConfig       agentconfig.AgentConfigWriter
 	machineAgentFactory machineAgentFactoryFnType
 	ctx                 *cmd.Context
 
@@ -190,8 +152,7 @@ type machineAgentCmd struct {
 
 // Init is called by the cmd system to initialize the structure for
 // running.
-func (a *machineAgentCmd) Init(args []string) error {
-
+func (a *machineAgentCommand) Init(args []string) error {
 	if a.machineId == "" && a.controllerId == "" {
 		return errors.New("either machine-id or controller-id must be set")
 	}
@@ -216,24 +177,24 @@ func (a *machineAgentCmd) Init(args []string) error {
 	} else {
 		a.agentTag = names.NewControllerAgentTag(a.controllerId)
 	}
-	if err := agentconf.ReadAgentConfig(a.currentConfig, a.agentTag.Id()); err != nil {
+	if err := agentconfig.ReadAgentConfig(a.currentConfig, a.agentTag.Id()); err != nil {
 		return errors.Errorf("cannot read agent configuration: %v", err)
 	}
 	config := a.currentConfig.CurrentConfig()
 	if err := os.MkdirAll(config.LogDir(), 0644); err != nil {
-		logger.Warningf("cannot create log dir: %v", err)
+		logger.Warningf(context.TODO(), "cannot create log dir: %v", err)
 	}
 	a.isCaas = config.Value(agent.ProviderType) == k8sconstants.CAASProviderType
 
 	if !a.logToStdErr {
-		// the context's stderr is set as the loggo writer in github.com/juju/cmd/v3/logging.go
+		// the context's stderr is set as the loggo writer in github.com/juju/juju/internal/cmd/logging.go
 		ljLogger := &lumberjack.Logger{
 			Filename:   agent.LogFilename(config), // eg: "/var/log/juju/machine-0.log"
 			MaxSize:    config.AgentLogfileMaxSizeMB(),
 			MaxBackups: config.AgentLogfileMaxBackups(),
 			Compress:   true,
 		}
-		logger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
+		logger.Debugf(context.TODO(), "created rotating log file %q with max size %d MB and max backups %d",
 			ljLogger.Filename, ljLogger.MaxSize, ljLogger.MaxBackups)
 		a.ctx.Stderr = ljLogger
 	}
@@ -242,7 +203,7 @@ func (a *machineAgentCmd) Init(args []string) error {
 }
 
 // Run instantiates a MachineAgent and runs it.
-func (a *machineAgentCmd) Run(c *cmd.Context) error {
+func (a *machineAgentCommand) Run(c *cmd.Context) error {
 	machineAgent, err := a.machineAgentFactory(a.agentTag, a.isCaas)
 	if err != nil {
 		return errors.Trace(err)
@@ -251,7 +212,7 @@ func (a *machineAgentCmd) Run(c *cmd.Context) error {
 }
 
 // SetFlags adds the requisite flags to run this command.
-func (a *machineAgentCmd) SetFlags(f *gnuflag.FlagSet) {
+func (a *machineAgentCommand) SetFlags(f *gnuflag.FlagSet) {
 	a.agentInitializer.AddFlags(f)
 	f.StringVar(&a.machineId, "machine-id", "", "id of the machine to run")
 	f.StringVar(&a.controllerId, "controller-id", "", "id of the controller to run")
@@ -259,7 +220,7 @@ func (a *machineAgentCmd) SetFlags(f *gnuflag.FlagSet) {
 }
 
 // Info returns usage information for the command.
-func (a *machineAgentCmd) Info() *cmd.Info {
+func (a *machineAgentCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:    "machine",
 		Purpose: "run a juju machine agent",
@@ -269,24 +230,32 @@ func (a *machineAgentCmd) Info() *cmd.Info {
 // MachineAgentFactoryFn returns a function which instantiates a
 // MachineAgent given a machineId.
 func MachineAgentFactoryFn(
-	agentConfWriter agentconf.AgentConfigWriter,
+	agentConfWriter agentconfig.AgentConfigWriter,
 	bufferedLogger *logsender.BufferedLogWriter,
-	preUpgradeSteps upgrades.PreUpgradeStepsFunc,
+	preUpgradeSteps PreUpgradeStepsFunc,
+	upgradeSteps UpgradeStepsFunc,
 	rootDir string,
 ) machineAgentFactoryFnType {
 	return func(agentTag names.Tag, isCaasAgent bool) (*MachineAgent, error) {
+		runner, err := worker.NewRunner(worker.RunnerParams{
+			Name:          "machine-agent",
+			IsFatal:       agenterrors.IsFatal,
+			MoreImportant: agenterrors.MoreImportant,
+			RestartDelay:  internalworker.RestartDelay,
+			Logger:        internalworker.WrapLogger(logger),
+		})
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
 		return NewMachineAgent(
 			agentTag,
 			agentConfWriter,
 			bufferedLogger,
-			worker.NewRunner(worker.RunnerParams{
-				IsFatal:       agenterrors.IsFatal,
-				MoreImportant: agenterrors.MoreImportant,
-				RestartDelay:  jworker.RestartDelay,
-				Logger:        logger,
-			}),
+			runner,
 			looputil.NewLoopDeviceManager(),
 			preUpgradeSteps,
+			upgradeSteps,
 			rootDir,
 			isCaasAgent,
 		)
@@ -296,11 +265,12 @@ func MachineAgentFactoryFn(
 // NewMachineAgent instantiates a new MachineAgent.
 func NewMachineAgent(
 	agentTag names.Tag,
-	agentConfWriter agentconf.AgentConfigWriter,
+	agentConfWriter agentconfig.AgentConfigWriter,
 	bufferedLogger *logsender.BufferedLogWriter,
 	runner *worker.Runner,
 	loopDeviceManager looputil.LoopDeviceManager,
-	preUpgradeSteps upgrades.PreUpgradeStepsFunc,
+	preUpgradeSteps PreUpgradeStepsFunc,
+	upgradeSteps UpgradeStepsFunc,
 	rootDir string,
 	isCaasAgent bool,
 ) (*MachineAgent, error) {
@@ -320,9 +290,8 @@ func NewMachineAgent(
 		initialUpgradeCheckComplete: gate.NewLock(),
 		loopDeviceManager:           loopDeviceManager,
 		prometheusRegistry:          prometheusRegistry,
-		mongoTxnCollector:           mongometrics.NewTxnCollector(),
-		mongoDialCollector:          mongometrics.NewDialCollector(),
 		preUpgradeSteps:             preUpgradeSteps,
+		upgradeSteps:                upgradeSteps,
 		isCaasAgent:                 isCaasAgent,
 		cmdRunner:                   &defaultRunner{},
 	}
@@ -330,29 +299,10 @@ func NewMachineAgent(
 }
 
 func (a *MachineAgent) registerPrometheusCollectors() error {
-	agentConfig := a.CurrentConfig()
-	if v := agentConfig.Value(agent.MgoStatsEnabled); v == "true" {
-		// Enable mgo stats collection only if requested,
-		// as it may affect performance.
-		mgo.SetStats(true)
-		collector := mongometrics.NewMgoStatsCollector(mgo.GetStats)
-		if err := a.prometheusRegistry.Register(collector); err != nil {
-			return errors.Annotate(err, "registering mgo stats collector")
-		}
-	}
 	if err := a.prometheusRegistry.Register(
 		logsendermetrics.BufferedLogWriterMetrics{BufferedLogWriter: a.bufferedLogger},
 	); err != nil {
 		return errors.Annotate(err, "registering logsender collector")
-	}
-	if err := a.prometheusRegistry.Register(a.mongoTxnCollector); err != nil {
-		return errors.Annotate(err, "registering mgo/txn collector")
-	}
-	if err := a.prometheusRegistry.Register(a.mongoDialCollector); err != nil {
-		return errors.Annotate(err, "registering mongo dial collector")
-	}
-	if err := a.prometheusRegistry.Register(a.pubsubMetrics); err != nil {
-		return errors.Annotate(err, "registering pubsub collector")
 	}
 	return nil
 }
@@ -376,37 +326,34 @@ func (defaultRunner) RunCommands(run exec.RunParams) (*exec.ExecResponse, error)
 // MachineAgent is responsible for tying together all functionality
 // needed to orchestrate a Jujud instance which controls a machine.
 type MachineAgent struct {
-	agentconf.AgentConfigWriter
+	agentconfig.AgentConfigWriter
 
-	ctx               *cmd.Context
-	dead              chan struct{}
-	errReason         error
-	agentTag          names.Tag
-	runner            *worker.Runner
-	rootDir           string
-	bufferedLogger    *logsender.BufferedLogWriter
-	configChangedVal  *voyeur.Value
-	dbUpgradeComplete gate.Lock
-	upgradeComplete   gate.Lock
-	workersStarted    chan struct{}
-	machineLock       machinelock.Lock
+	ctx              *cmd.Context
+	dead             chan struct{}
+	errReason        error
+	agentTag         names.Tag
+	runner           *worker.Runner
+	rootDir          string
+	bufferedLogger   *logsender.BufferedLogWriter
+	configChangedVal *voyeur.Value
+
+	workersStarted chan struct{}
+	machineLock    machinelock.Lock
 
 	// Used to signal that the upgrade worker will not
 	// reboot the agent on startup because there are no
 	// longer any immediately pending agent upgrades.
 	initialUpgradeCheckComplete gate.Lock
 
-	mongoInitMutex   sync.Mutex
-	mongoInitialized bool
-
 	loopDeviceManager  looputil.LoopDeviceManager
 	prometheusRegistry *prometheus.Registry
-	mongoTxnCollector  *mongometrics.TxnCollector
-	mongoDialCollector *mongometrics.DialCollector
-	preUpgradeSteps    upgrades.PreUpgradeStepsFunc
 
-	centralHub    *pubsub.StructuredHub
-	pubsubMetrics *centralhub.PubsubMetrics
+	// To allow for testing in legacy tests (brittle integration tests), we
+	// need to override these.
+	preUpgradeSteps PreUpgradeStepsFunc
+	upgradeSteps    UpgradeStepsFunc
+
+	upgradeStepsLock gate.Lock
 
 	isCaasAgent bool
 	cmdRunner   CommandRunner
@@ -434,7 +381,7 @@ func (a *MachineAgent) Done(err error) {
 // recorded in the agent config and also mongo server.pem contains the
 // DNSNames entries required by Juju.
 func upgradeCertificateDNSNames(config agent.ConfigSetter) error {
-	si, ok := config.StateServingInfo()
+	si, ok := config.ControllerAgentInfo()
 	if !ok || si.CAPrivateKey == "" {
 		// No certificate information exists yet, nothing to do.
 		return nil
@@ -453,7 +400,7 @@ func upgradeCertificateDNSNames(config agent.ConfigSetter) error {
 	leaf, err := authority.LeafGroupFromPemCertKey(pki.DefaultLeafGroup,
 		[]byte(si.Cert), []byte(si.PrivateKey))
 	if err != nil || !pki.LeafHasDNSNames(leaf, controller.DefaultDNSNames) {
-		logger.Infof("parsing certificate/key failed, will generate a new one: %v", err)
+		logger.Infof(context.TODO(), "parsing certificate/key failed, will generate a new one: %v", err)
 		leaf, err = authority.LeafRequestForGroup(pki.DefaultLeafGroup).
 			AddDNSNames(controller.DefaultDNSNames...).
 			Commit()
@@ -469,10 +416,7 @@ func upgradeCertificateDNSNames(config agent.ConfigSetter) error {
 
 	si.Cert, si.PrivateKey = string(cert), string(privateKey)
 
-	if err := mongo.UpdateSSLKey(config.DataDir(), si.Cert, si.PrivateKey); err != nil {
-		return err
-	}
-	config.SetStateServingInfo(si)
+	config.SetControllerAgentInfo(si)
 	return nil
 }
 
@@ -480,22 +424,17 @@ func upgradeCertificateDNSNames(config agent.ConfigSetter) error {
 func (a *MachineAgent) Run(ctx *cmd.Context) (err error) {
 	defer a.Done(err)
 	a.ctx = ctx
-	useMultipleCPUs()
+
 	if err := a.ReadConfig(a.Tag().String()); err != nil {
 		return errors.Errorf("cannot read agent configuration: %v", err)
 	}
 
-	agentconf.SetupAgentLogging(loggo.DefaultContext(), a.CurrentConfig())
+	agentconf.SetupAgentLogging(internallogger.DefaultContext(), a.CurrentConfig())
 
 	if err := introspection.WriteProfileFunctions(introspection.ProfileDir); err != nil {
 		// This isn't fatal, just annoying.
-		logger.Errorf("failed to write profile funcs: %v", err)
+		logger.Errorf(context.TODO(), "failed to write profile funcs: %v", err)
 	}
-
-	// When the API server and peergrouper have manifolds, they can
-	// have dependencies on a central hub worker.
-	a.pubsubMetrics = centralhub.NewPubsubMetrics()
-	a.centralHub = centralhub.New(a.Tag(), a.pubsubMetrics)
 
 	// Before doing anything else, we need to make sure the certificate
 	// generated for use by mongo to validate controller connections is correct.
@@ -516,7 +455,7 @@ func (a *MachineAgent) Run(ctx *cmd.Context) (err error) {
 	machineLock, err := machinelock.New(machinelock.Config{
 		AgentName:   agentName,
 		Clock:       clock.WallClock,
-		Logger:      loggo.GetLogger("juju.machinelock"),
+		Logger:      internallogger.GetLogger("juju.machinelock"),
 		LogFilename: agent.MachineLockLogFilename(agentConfig),
 	})
 	// There will only be an error if the required configuration
@@ -525,115 +464,100 @@ func (a *MachineAgent) Run(ctx *cmd.Context) (err error) {
 		return errors.Trace(err)
 	}
 	a.machineLock = machineLock
-	a.dbUpgradeComplete = upgradedatabase.NewLock(agentConfig)
-	a.upgradeComplete = upgradesteps.NewLock(agentConfig)
+
+	a.upgradeStepsLock = internalupgrade.NewLock(agentConfig, jujuversion.Current)
 
 	createEngine := a.makeEngineCreator(agentName, agentConfig.UpgradedToVersion())
 	if err := a.createJujudSymlinks(agentConfig.DataDir()); err != nil {
 		return err
 	}
-	_ = a.runner.StartWorker("engine", createEngine)
+	_ = a.runner.StartWorker(ctx, "engine", createEngine)
 
 	// At this point, all workers will have been configured to start
 	close(a.workersStarted)
 	err = a.runner.Wait()
 	switch errors.Cause(err) {
-	case jworker.ErrRebootMachine:
-		logger.Infof("Caught reboot error")
+	case internalworker.ErrRebootMachine:
+		logger.Infof(context.TODO(), "Caught reboot error")
 		err = a.executeRebootOrShutdown(params.ShouldReboot)
-	case jworker.ErrShutdownMachine:
-		logger.Infof("Caught shutdown error")
+	case internalworker.ErrShutdownMachine:
+		logger.Infof(context.TODO(), "Caught shutdown error")
 		err = a.executeRebootOrShutdown(params.ShouldShutdown)
 	}
 	return cmdutil.AgentDone(logger, err)
 }
 
 func (a *MachineAgent) makeEngineCreator(
-	agentName string, previousAgentVersion version.Number,
-) func() (worker.Worker, error) {
-	return func() (worker.Worker, error) {
+	agentName string, previousAgentVersion semversion.Number,
+) func(ctx context.Context) (worker.Worker, error) {
+	return func(ctx context.Context) (worker.Worker, error) {
 		agentConfig := a.CurrentConfig()
-		engineConfigFunc := engine.DependencyEngineConfig
-		metrics := engine.NewMetrics()
+		engineConfigFunc := agentengine.DependencyEngineConfig
+		metrics := agentengine.NewMetrics()
 		controllerMetricsSink := metrics.ForModel(agentConfig.Model())
-		engine, err := dependency.NewEngine(engineConfigFunc(controllerMetricsSink))
+		engine, err := dependency.NewEngine(engineConfigFunc(
+			controllerMetricsSink,
+			internaldependency.WrapLogger(internallogger.GetLogger("juju.worker.dependency")),
+		))
 		if err != nil {
 			return nil, err
 		}
-		localHub := pubsub.NewSimpleHub(&pubsub.SimpleHubConfig{
-			Logger: loggo.GetLogger("juju.localhub"),
-		})
-		pubsubReporter := psworker.NewReporter()
-		presenceRecorder := presence.New(clock.WallClock)
 		updateAgentConfLogging := func(loggingConfig string) error {
 			return a.AgentConfigWriter.ChangeConfig(func(setter agent.ConfigSetter) error {
 				setter.SetLoggingConfig(loggingConfig)
 				return nil
 			})
 		}
-		updateControllerAPIPort := func(port int) error {
-			return a.AgentConfigWriter.ChangeConfig(func(setter agent.ConfigSetter) error {
-				setter.SetControllerAPIPort(port)
-				return nil
-			})
-		}
 
-		// statePoolReporter is an introspection.IntrospectionReporter,
-		// which is set to the current StatePool managed by the state
-		// tracker in controller agents.
-		var statePoolReporter statePoolIntrospectionReporter
 		registerIntrospectionHandlers := func(handle func(path string, h http.Handler)) {
 			handle("/metrics/", promhttp.HandlerFor(a.prometheusRegistry, promhttp.HandlerOpts{}))
 		}
 
+		clock := clock.WallClock
+		flightRecorder := workerflightrecorder.New(flightrecorder.NewRecorder(clock), "", internallogger.GetLogger("juju.flightrecorder"))
+
 		// Create a single HTTP client so we can reuse HTTP connections, for
 		// example across the various Charmhub API requests required for deploy.
-		charmhubLogger := loggo.GetLoggerWithLabels("juju.charmhub", corelogger.CHARMHUB)
+		charmhubLogger := internallogger.GetLogger("juju.charmhub", corelogger.CHARMHUB)
 		charmhubHTTPClient := charmhub.DefaultHTTPClient(charmhubLogger)
 
+		s3Logger := internallogger.GetLogger("juju.objectstore.s3", corelogger.OBJECTSTORE)
+		s3HTTPClient := s3client.DefaultHTTPClient(s3Logger)
+
 		manifoldsCfg := machine.ManifoldsConfig{
-			PreviousAgentVersion:    previousAgentVersion,
-			AgentName:               agentName,
-			Agent:                   agent.APIHostPortsSetter{Agent: a},
-			RootDir:                 a.rootDir,
-			AgentConfigChanged:      a.configChangedVal,
-			UpgradeDBLock:           a.dbUpgradeComplete,
-			UpgradeStepsLock:        a.upgradeComplete,
-			UpgradeCheckLock:        a.initialUpgradeCheckComplete,
-			OpenStatePool:           a.initState,
-			OpenStateForUpgrade:     a.openStateForUpgrade,
-			MachineStartup:          a.machineStartup,
-			PreUpgradeSteps:         a.preUpgradeSteps,
-			LogSource:               a.bufferedLogger.Logs(),
-			NewDeployContext:        deployer.NewNestedContext,
-			Clock:                   clock.WallClock,
-			ValidateMigration:       a.validateMigration,
-			PrometheusRegisterer:    a.prometheusRegistry,
-			CentralHub:              a.centralHub,
-			LocalHub:                localHub,
-			PubSubReporter:          pubsubReporter,
-			PresenceRecorder:        presenceRecorder,
-			UpdateLoggerConfig:      updateAgentConfLogging,
-			UpdateControllerAPIPort: updateControllerAPIPort,
-			NewAgentStatusSetter: func(apiConn api.Connection) (upgradesteps.StatusSetter, error) {
-				return a.statusSetter(apiConn)
-			},
-			ControllerLeaseDuration:           time.Minute,
-			TransactionPruneInterval:          time.Hour,
+			PreviousAgentVersion:              previousAgentVersion,
+			AgentName:                         agentName,
+			Agent:                             agent.APIHostPortsSetter{Agent: a},
+			RootDir:                           a.rootDir,
+			AgentConfigChanged:                a.configChangedVal,
+			UpgradeStepsLock:                  a.upgradeStepsLock,
+			UpgradeCheckLock:                  a.initialUpgradeCheckComplete,
+			MachineStartup:                    a.machineStartup,
+			PreUpgradeSteps:                   a.preUpgradeSteps,
+			UpgradeSteps:                      a.upgradeSteps,
+			LogSource:                         a.bufferedLogger.Logs(),
+			NewDeployContext:                  deployer.NewNestedContext,
+			Clock:                             clock,
+			FlightRecorder:                    flightRecorder,
+			ValidateMigration:                 a.validateMigration,
+			PrometheusRegisterer:              a.prometheusRegistry,
+			UpdateLoggerConfig:                updateAgentConfLogging,
+			NewAgentStatusSetter:              a.statusSetter,
 			MachineLock:                       a.machineLock,
-			SetStatePool:                      statePoolReporter.Set,
 			RegisterIntrospectionHTTPHandlers: registerIntrospectionHandlers,
-			NewModelWorker:                    a.startModelWorkers,
 			MuxShutdownWait:                   1 * time.Minute,
-			NewContainerBrokerFunc:            newCAASBroker,
 			NewBrokerFunc:                     newBroker,
 			IsCaasConfig:                      a.isCaasAgent,
 			UnitEngineConfig: func() dependency.EngineConfig {
-				return engineConfigFunc(controllerMetricsSink)
+				return agentengine.DependencyEngineConfig(
+					controllerMetricsSink,
+					internaldependency.WrapLogger(internallogger.GetLogger("juju.worker.dependency")),
+				)
 			},
-			SetupLogging:            agentconf.SetupAgentLogging,
-			DependencyEngineMetrics: metrics,
-			CharmhubHTTPClient:      charmhubHTTPClient,
+			SetupLogging:       agentconf.SetupAgentLogging,
+			CharmhubHTTPClient: charmhubHTTPClient,
+			S3HTTPClient:       s3HTTPClient,
+			NewEnvironFunc:     newEnvirons,
 		}
 		manifolds := iaasMachineManifolds(manifoldsCfg)
 		if a.isCaasAgent {
@@ -641,34 +565,31 @@ func (a *MachineAgent) makeEngineCreator(
 		}
 		if err := dependency.Install(engine, manifolds); err != nil {
 			if err := worker.Stop(engine); err != nil {
-				logger.Errorf("while stopping engine with bad manifolds: %v", err)
+				logger.Errorf(context.TODO(), "while stopping engine with bad manifolds: %v", err)
 			}
 			return nil, err
 		}
 		if err := addons.StartIntrospection(addons.IntrospectionConfig{
 			AgentDir:           agentConfig.Dir(),
 			Engine:             engine,
-			StatePoolReporter:  &statePoolReporter,
-			PubSubReporter:     pubsubReporter,
 			MachineLock:        a.machineLock,
 			PrometheusGatherer: a.prometheusRegistry,
-			PresenceRecorder:   presenceRecorder,
+			FlightRecorder:     flightRecorder,
 			WorkerFunc:         introspection.NewWorker,
-			Clock:              clock.WallClock,
-			LocalHub:           localHub,
-			CentralHub:         a.centralHub,
+			Clock:              clock,
+			Logger:             logger.Child("introspection"),
 		}); err != nil {
 			// If the introspection worker failed to start, we just log error
 			// but continue. It is very unlikely to happen in the real world
 			// as the only issue is connecting to the abstract domain socket
-			// and the agent is controlled by by the OS to only have one.
-			logger.Errorf("failed to start introspection worker: %v", err)
+			// and the agent is controlled by the OS to only have one.
+			logger.Errorf(context.TODO(), "failed to start introspection worker: %v", err)
 		}
 		if err := addons.RegisterEngineMetrics(a.prometheusRegistry, metrics, engine, controllerMetricsSink); err != nil {
 			// If the dependency engine metrics fail, continue on. This is unlikely
-			// to happen in the real world, but should't stop or bring down an
+			// to happen in the real world, but shouldn't stop or bring down an
 			// agent.
-			logger.Errorf("failed to start the dependency engine metrics %v", err)
+			logger.Errorf(context.TODO(), "failed to start the dependency engine metrics %v", err)
 		}
 		return engine, nil
 	}
@@ -681,15 +602,15 @@ func (a *MachineAgent) executeRebootOrShutdown(action params.RebootAction) error
 		return errors.Trace(err)
 	}
 
-	logger.Infof("Reboot: Executing reboot")
+	logger.Infof(context.TODO(), "Reboot: Executing reboot")
 	err = finalize.ExecuteReboot(action)
 	if err != nil {
-		logger.Infof("Reboot: Error executing reboot: %v", err)
+		logger.Infof(context.TODO(), "Reboot: Error executing reboot: %v", err)
 		return errors.Trace(err)
 	}
 	// We return ErrRebootMachine so the agent will simply exit without error
 	// pending reboot/shutdown.
-	return jworker.ErrRebootMachine
+	return internalworker.ErrRebootMachine
 }
 
 func (a *MachineAgent) ChangeConfig(mutate agent.ConfigMutator) error {
@@ -699,26 +620,17 @@ func (a *MachineAgent) ChangeConfig(mutate agent.ConfigMutator) error {
 }
 
 var (
-	newEnvirons   = environs.New
-	newCAASBroker = caas.New
-	newBroker     = broker.New
+	newEnvirons = environs.New
+	newBroker   = broker.New
 )
 
-func (a *MachineAgent) machineStartup(apiConn api.Connection, logger machine.Logger) error {
-	logger.Tracef("machineStartup called")
+func (a *MachineAgent) machineStartup(ctx context.Context, apiConn api.Connection, logger corelogger.Logger) error {
+	logger.Tracef(context.TODO(), "machineStartup called")
 	// CAAS agents do not have machines.
 	if a.isCaasAgent {
 		return nil
 	}
 
-	apiSt, err := apiagent.NewState(apiConn)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	entity, err := apiSt.Entity(a.Tag())
-	if err != nil {
-		return errors.Trace(err)
-	}
 	// Report the machine host name and record the agent start time. This
 	// ensures that whenever a machine restarts, the instancepoller gets a
 	// chance to immediately refresh the provider address (inc. shadow IP)
@@ -727,34 +639,8 @@ func (a *MachineAgent) machineStartup(apiConn api.Connection, logger machine.Log
 	if err != nil {
 		return errors.Annotate(err, "getting machine hostname")
 	}
-	if err := a.recordAgentStartInformation(apiConn, hostname); err != nil {
+	if err := a.recordAgentStartInformation(ctx, apiConn, hostname); err != nil {
 		return errors.Annotate(err, "recording agent start information")
-	}
-
-	if err := a.setupContainerSupport(apiConn, logger); err != nil {
-		return err
-	}
-
-	var isController bool
-	for _, job := range entity.Jobs() {
-		switch job {
-		case coremodel.JobManageModel:
-			isController = true
-		default:
-		}
-	}
-	if isController {
-		// We disallow "do-release-upgrade" to run on Juju Controller machine because we do not want to break mongodb.
-		// - https://bugs.launchpad.net/juju/+bug/1881218
-		result, err := a.cmdRunner.RunCommands(exec.RunParams{
-			Commands: "[ ! -f /etc/update-manager/release-upgrades ] || sed -i '/Prompt=/ s/=.*/=never/' /etc/update-manager/release-upgrades",
-		})
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if result.Code != 0 {
-			return fmt.Errorf("cannot patch /etc/update-manager/release-upgrades: %s", result.Stderr)
-		}
 	}
 
 	return nil
@@ -763,40 +649,40 @@ func (a *MachineAgent) machineStartup(apiConn api.Connection, logger machine.Log
 type noopStatusSetter struct{}
 
 // SetStatus implements upgradesteps.StatusSetter
-func (a *noopStatusSetter) SetStatus(_ status.Status, _ string, _ map[string]interface{}) error {
+func (a *noopStatusSetter) SetStatus(_ context.Context, _ status.Status, _ string, _ map[string]interface{}) error {
 	return nil
 }
 
-func (a *MachineAgent) statusSetter(apiConn api.Connection) (upgradesteps.StatusSetter, error) {
+func (a *MachineAgent) statusSetter(ctx context.Context, apiCaller base.APICaller) (upgradesteps.StatusSetter, error) {
 	if a.isCaasAgent || a.agentTag.Kind() != names.MachineTagKind {
 		// TODO - support set status for controller agents
 		return &noopStatusSetter{}, nil
 	}
-	machinerAPI := apimachiner.NewState(apiConn)
-	return machinerAPI.Machine(a.Tag().(names.MachineTag))
+	machinerAPI := apimachiner.NewClient(apiCaller)
+	return machinerAPI.Machine(ctx, a.Tag().(names.MachineTag))
 }
 
-func (a *MachineAgent) machine(apiConn api.Connection) (*apimachiner.Machine, error) {
-	machinerAPI := apimachiner.NewState(apiConn)
+func (a *MachineAgent) machine(ctx context.Context, apiConn api.Connection) (*apimachiner.Machine, error) {
+	machinerAPI := apimachiner.NewClient(apiConn)
 	agentConfig := a.CurrentConfig()
 
 	tag, ok := agentConfig.Tag().(names.MachineTag)
 	if !ok {
 		return nil, errors.Errorf("%q is not a machine tag", agentConfig.Tag().String())
 	}
-	return machinerAPI.Machine(tag)
+	return machinerAPI.Machine(ctx, tag)
 }
 
-func (a *MachineAgent) recordAgentStartInformation(apiConn api.Connection, hostname string) error {
-	m, err := a.machine(apiConn)
-	if errors.IsNotFound(err) || err == nil && m.Life() == life.Dead {
-		return jworker.ErrTerminateAgent
+func (a *MachineAgent) recordAgentStartInformation(ctx context.Context, apiConn api.Connection, hostname string) error {
+	m, err := a.machine(ctx, apiConn)
+	if errors.Is(err, errors.NotFound) || err == nil && m.Life() == life.Dead {
+		return internalworker.ErrTerminateAgent
 	}
 	if err != nil {
 		return errors.Annotatef(err, "cannot load machine %s from state", a.CurrentConfig().Tag())
 	}
 
-	if err := m.RecordAgentStartInformation(hostname); err != nil {
+	if err := m.RecordAgentStartInformation(ctx, hostname); err != nil {
 		return errors.Annotate(err, "cannot record agent start information")
 	}
 	return nil
@@ -809,413 +695,16 @@ func (a *MachineAgent) Restart() error {
 	return service.Restart(name)
 }
 
-// openStateForUpgrade exists to be passed into the upgradesteps
-// worker. The upgradesteps worker opens state independently of the
-// state worker so that it isn't affected by the state worker's
-// lifetime. It ensures the MongoDB server is configured and started,
-// and then opens a state connection.
-//
-// TODO(mjs)- review the need for this once the dependency engine is
-// in use. Why can't upgradesteps depend on the main state connection?
-func (a *MachineAgent) openStateForUpgrade() (*state.StatePool, error) {
-	agentConfig := a.CurrentConfig()
-	info, ok := agentConfig.MongoInfo()
-	if !ok {
-		return nil, errors.New("no state info available")
-	}
-	dialOpts, err := mongoDialOptions(
-		mongo.DefaultDialOpts(),
-		agentConfig,
-		a.mongoDialCollector,
-	)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	session, err := mongo.DialWithInfo(*info, dialOpts)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer session.Close()
-
-	pool, err := state.OpenStatePool(state.OpenParams{
-		Clock:              clock.WallClock,
-		ControllerTag:      agentConfig.Controller(),
-		ControllerModelTag: agentConfig.Model(),
-		MongoSession:       session,
-		NewPolicy:          stateenvirons.GetNewPolicyFunc(),
-		// state.InitDatabase is idempotent and needs to be called just
-		// prior to performing any upgrades since a new Juju binary may
-		// declare new indices or explicit collections.
-		// NB until https://jira.mongodb.org/browse/SERVER-1864 is resolved,
-		// it is not possible to resize capped collections so there's no
-		// point in reading existing controller config from state in order
-		// to pass in the max-txn-log-size value.
-		InitDatabaseFunc:       state.InitDatabase,
-		RunTransactionObserver: a.mongoTxnCollector.AfterRunTransaction,
-	})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return pool, nil
-}
-
 // validateMigration is called by the migrationminion to help check
 // that the agent will be ok when connected to a new controller.
-func (a *MachineAgent) validateMigration(apiCaller base.APICaller) error {
-	// TODO(mjs) - more extensive checks to come.
+func (a *MachineAgent) validateMigration(ctx context.Context, apiCaller base.APICaller) error {
 	var err error
 	// TODO(controlleragent) - add k8s controller check.
 	if !a.isCaasAgent {
-		facade := apimachiner.NewState(apiCaller)
-		_, err = facade.Machine(a.agentTag.(names.MachineTag))
+		facade := apimachiner.NewClient(apiCaller)
+		_, err = facade.Machine(ctx, a.agentTag.(names.MachineTag))
 	}
 	return errors.Trace(err)
-}
-
-// setupContainerSupport determines what containers can be run on this machine and
-// passes the result to the juju controller.
-func (a *MachineAgent) setupContainerSupport(st api.Connection, logger machine.Logger) error {
-	logger.Tracef("setupContainerSupport called")
-	pr := apiprovisioner.NewState(st)
-	mTag, ok := a.CurrentConfig().Tag().(names.MachineTag)
-	if !ok {
-		return errors.New("not a machine")
-	}
-	result, err := pr.Machines(mTag)
-	if err != nil {
-		return errors.Annotatef(err, "cannot load machine %s from state", mTag)
-	}
-	if len(result) != 1 {
-		return errors.Errorf("expected 1 result, got %d", len(result))
-	}
-	if errors.Is(err, errors.NotFound) || (result[0].Err == nil && result[0].Machine.Life() == life.Dead) {
-		return jworker.ErrTerminateAgent
-	}
-	m := result[0].Machine
-
-	var supportedContainers []instance.ContainerType
-	supportedContainers = append(supportedContainers, instance.LXD)
-
-	supportsKvm, err := kvm.IsKVMSupported()
-	if err != nil {
-		logger.Warningf("determining kvm support: %v\nno kvm containers possible", err)
-	}
-	if err == nil && supportsKvm {
-		supportedContainers = append(supportedContainers, instance.KVM)
-	}
-	logger.Debugf("Supported container types %q", supportedContainers)
-
-	if len(supportedContainers) == 0 {
-		if err := m.SupportsNoContainers(); err != nil {
-			return errors.Annotatef(err, "clearing supported supportedContainers for %s", mTag)
-		}
-		return nil
-	}
-	err = m.SetSupportedContainers(supportedContainers...)
-	if err != nil {
-		return errors.Annotatef(err, "setting supported supportedContainers for %s", mTag)
-	}
-	return nil
-}
-
-func mongoDialOptions(
-	baseOpts mongo.DialOpts,
-	agentConfig agent.Config,
-	mongoDialCollector *mongometrics.DialCollector,
-) (mongo.DialOpts, error) {
-	dialOpts := baseOpts
-	if limitStr := agentConfig.Value("MONGO_SOCKET_POOL_LIMIT"); limitStr != "" {
-		limit, err := strconv.Atoi(limitStr)
-		if err != nil {
-			return mongo.DialOpts{}, errors.Errorf("invalid mongo socket pool limit %q", limitStr)
-		}
-		logger.Infof("using mongo socker pool limit = %d", limit)
-		dialOpts.PoolLimit = limit
-	}
-	if dialOpts.PostDialServer != nil {
-		return mongo.DialOpts{}, errors.New("did not expect PostDialServer to be set")
-	}
-	dialOpts.PostDialServer = mongoDialCollector.PostDialServer
-	return dialOpts, nil
-}
-
-func (a *MachineAgent) initState(ctx stdcontext.Context, agentConfig agent.Config) (*state.StatePool, error) {
-	// Start MongoDB server and dial.
-	if err := a.ensureMongoServer(ctx, agentConfig); err != nil {
-		return nil, err
-	}
-
-	dialOpts, err := mongoDialOptions(
-		stateWorkerDialOpts,
-		agentConfig,
-		a.mongoDialCollector,
-	)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	pool, err := openStatePool(
-		agentConfig,
-		dialOpts,
-		a.mongoTxnCollector.AfterRunTransaction,
-	)
-	if err != nil {
-		// On error, force a mongo refresh.
-		a.mongoInitMutex.Lock()
-		a.mongoInitialized = false
-		a.mongoInitMutex.Unlock()
-		return nil, err
-	}
-	logger.Infof("juju database opened")
-
-	systemState, err := pool.SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	reportOpenedState(systemState)
-
-	return pool, nil
-}
-
-// startModelWorkers starts the set of workers that run for every model
-// in each controller, both IAAS and CAAS.
-func (a *MachineAgent) startModelWorkers(cfg modelworkermanager.NewModelConfig) (worker.Worker, error) {
-	currentConfig := a.CurrentConfig()
-	controllerUUID := currentConfig.Controller().Id()
-	// We look at the model in the agent.conf file to see if we are starting workers
-	// for our model.
-	agentModelUUID := currentConfig.Model().Id()
-	modelAgent, err := model.WrapAgent(a, controllerUUID, cfg.ModelUUID)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	config := engine.DependencyEngineConfig(cfg.ModelMetrics)
-	config.IsFatal = model.IsFatal
-	config.WorstError = model.WorstError
-	config.Filter = model.IgnoreErrRemoved
-	engine, err := dependency.NewEngine(config)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	// Send model logging to a different file on disk to the controller logging
-	// for all models except the controller model.
-	loggingContext := loggo.NewContext(loggo.INFO)
-	var writer io.Writer
-	if agentModelUUID == cfg.ModelUUID {
-		writer = a.ctx.Stderr
-	} else {
-		modelsDir := filepath.Join(currentConfig.LogDir(), "models")
-		if err := os.MkdirAll(modelsDir, 0755); err != nil {
-			return nil, errors.Annotate(err, "unable to create models log directory")
-		}
-		if err := paths.SetSyslogOwner(modelsDir); err != nil && !errors.Is(err, os.ErrPermission) {
-			// If we don't have permission to chown this, it means we are running rootless.
-			return nil, errors.Annotate(err, "unable to set owner for log directory")
-		}
-		if !names.IsValidModel(cfg.ModelUUID) {
-			return nil, errors.NotValidf("model UUID %q", cfg.ModelUUID)
-		}
-		filename := cfg.ModelName + "-" + names.NewModelTag(cfg.ModelUUID).ShortId() + ".log"
-		logFilename := filepath.Join(modelsDir, filename)
-		if err := paths.PrimeLogFile(logFilename); err != nil && !errors.Is(err, os.ErrPermission) {
-			// If we don't have permission to chown this, it means we are running rootless.
-			return nil, errors.Annotate(err, "unable to prime log file")
-		}
-		ljLogger := &lumberjack.Logger{
-			Filename:   logFilename,
-			MaxSize:    cfg.ControllerConfig.ModelLogfileMaxSizeMB(),
-			MaxBackups: cfg.ControllerConfig.ModelLogfileMaxBackups(),
-			Compress:   true,
-		}
-		logger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
-			ljLogger.Filename, ljLogger.MaxSize, ljLogger.MaxBackups)
-		writer = ljLogger
-	}
-	if err := loggingContext.AddWriter(
-		"file", loggo.NewSimpleWriter(writer, loggo.DefaultFormatter)); err != nil {
-		logger.Errorf("unable to configure file logging for model: %v", err)
-	}
-	// Use a standard state logger for the right model.
-	if err := loggingContext.AddWriter("db", cfg.ModelLogger); err != nil {
-		logger.Errorf("unable to configure db logging for model: %v", err)
-	}
-
-	manifoldsCfg := model.ManifoldsConfig{
-		Agent:                       modelAgent,
-		AgentConfigChanged:          a.configChangedVal,
-		Authority:                   cfg.Authority,
-		Clock:                       clock.WallClock,
-		LoggingContext:              loggingContext,
-		RunFlagDuration:             time.Minute,
-		CharmRevisionUpdateInterval: 24 * time.Hour,
-		StatusHistoryPrunerInterval: 5 * time.Minute,
-		ActionPrunerInterval:        24 * time.Hour,
-		Mux:                         cfg.Mux,
-		NewEnvironFunc:              newEnvirons,
-		NewContainerBrokerFunc:      newCAASBroker,
-		NewMigrationMaster:          migrationmaster.NewWorker,
-	}
-	if wrench.IsActive("charmrevision", "shortinterval") {
-		interval := 10 * time.Second
-		logger.Debugf("setting short charmrevision worker interval: %v", interval)
-		manifoldsCfg.CharmRevisionUpdateInterval = interval
-	}
-
-	applyTestingOverrides(currentConfig, &manifoldsCfg)
-
-	var manifolds dependency.Manifolds
-	if cfg.ModelType == state.ModelTypeIAAS {
-		manifolds = iaasModelManifolds(manifoldsCfg)
-	} else {
-		manifolds = caasModelManifolds(manifoldsCfg)
-	}
-	if err := dependency.Install(engine, manifolds); err != nil {
-		if err := worker.Stop(engine); err != nil {
-			logger.Errorf("while stopping engine with bad manifolds: %v", err)
-		}
-		return nil, errors.Trace(err)
-	}
-
-	return &modelWorker{
-		Engine:    engine,
-		logger:    cfg.ModelLogger,
-		modelUUID: cfg.ModelUUID,
-		metrics:   cfg.ModelMetrics,
-	}, nil
-}
-
-func applyTestingOverrides(agentConfig agent.Config, manifoldsCfg *model.ManifoldsConfig) {
-	if v := agentConfig.Value(agent.CharmRevisionUpdateInterval); v != "" {
-		charmRevisionUpdateInterval, err := time.ParseDuration(v)
-		if err == nil {
-			manifoldsCfg.CharmRevisionUpdateInterval = charmRevisionUpdateInterval
-			logger.Infof("model worker charm revision update interval set to %v for testing",
-				charmRevisionUpdateInterval)
-		} else {
-			logger.Warningf("invalid charm revision update interval, using default %v: %v",
-				manifoldsCfg.CharmRevisionUpdateInterval, err)
-		}
-	}
-}
-
-type modelWorker struct {
-	*dependency.Engine
-	logger    modelworkermanager.ModelLogger
-	modelUUID string
-	metrics   engine.MetricSink
-}
-
-// Wait is the last thing that is called on the worker as it is being
-// removed.
-func (m *modelWorker) Wait() error {
-	err := m.Engine.Wait()
-
-	logger.Debugf("closing db logger for %q", m.modelUUID)
-	_ = m.logger.Close()
-	// When closing the model, ensure that we also close the metrics with the
-	// logger.
-	_ = m.metrics.Unregister()
-	return err
-}
-
-// stateWorkerDialOpts is a mongo.DialOpts suitable
-// for use by StateWorker to dial mongo.
-//
-// This must be overridden in tests, as it assumes
-// journaling is enabled.
-var stateWorkerDialOpts mongo.DialOpts
-
-// ensureMongoServer ensures that mongo is installed and running,
-// and ready for opening a state connection.
-func (a *MachineAgent) ensureMongoServer(ctx stdcontext.Context, agentConfig agent.Config) (err error) {
-	a.mongoInitMutex.Lock()
-	defer a.mongoInitMutex.Unlock()
-	if a.mongoInitialized {
-		logger.Debugf("mongo is already initialized")
-		return nil
-	}
-	defer func() {
-		if err == nil {
-			a.mongoInitialized = true
-		}
-	}()
-
-	if a.isCaasAgent {
-		return nil
-	}
-	// EnsureMongoServerInstalled installs/upgrades the init config as necessary.
-	ensureServerParams, err := cmdutil.NewEnsureMongoParams(agentConfig)
-	if err != nil {
-		return err
-	}
-	if err := cmdutil.EnsureMongoServerInstalled(ctx, ensureServerParams); err != nil {
-		return err
-	}
-	logger.Debugf("mongodb service is installed")
-	return nil
-}
-
-func openStatePool(
-	agentConfig agent.Config,
-	dialOpts mongo.DialOpts,
-	runTransactionObserver state.RunTransactionObserverFunc,
-) (_ *state.StatePool, err error) {
-	info, ok := agentConfig.MongoInfo()
-	if !ok {
-		return nil, errors.Errorf("no state info available")
-	}
-	session, err := mongo.DialWithInfo(*info, dialOpts)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer session.Close()
-
-	pool, err := state.OpenStatePool(state.OpenParams{
-		Clock:                  clock.WallClock,
-		ControllerTag:          agentConfig.Controller(),
-		ControllerModelTag:     agentConfig.Model(),
-		MongoSession:           session,
-		NewPolicy:              stateenvirons.GetNewPolicyFunc(),
-		RunTransactionObserver: runTransactionObserver,
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			pool.Close()
-		}
-	}()
-	st, err := pool.SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	controller, err := st.FindEntity(agentConfig.Tag())
-	if err != nil {
-		if errors.IsNotFound(err) {
-			err = jworker.ErrTerminateAgent
-		}
-		return nil, err
-	}
-
-	// Only machines (not controller agents) need to be provisioned.
-	// TODO(controlleragent) - this needs to be reworked
-	m, ok := controller.(*state.Machine)
-	if !ok {
-		return pool, err
-	}
-	if m.Life() == state.Dead {
-		return nil, jworker.ErrTerminateAgent
-	}
-	// Check the machine nonce as provisioned matches the agent.Conf value.
-	if !m.CheckProvisioned(agentConfig.Nonce()) {
-		// The agent is running on a different machine to the one it
-		// should be according to state. It must stop immediately.
-		logger.Errorf("running machine %v agent on inappropriate instance", m)
-		return nil, jworker.ErrTerminateAgent
-	}
-	return pool, nil
 }
 
 // WorkersStarted returns a channel that's closed once all top level workers
@@ -1260,10 +749,10 @@ func (a *MachineAgent) createSymlink(target, link string) error {
 
 	if stat, err := os.Lstat(fullLink); err == nil {
 		if stat.Mode()&os.ModeSymlink == 0 {
-			logger.Infof("skipping creating symlink %q as exsting path has a normal file", fullLink)
+			logger.Infof(context.TODO(), "skipping creating symlink %q as exsting path has a normal file", fullLink)
 			return nil
 		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.Annotatef(err, "cannot check if %q is a symlink", fullLink)
 	}
 
@@ -1286,27 +775,4 @@ func (a *MachineAgent) createSymlink(target, link string) error {
 		return err
 	}
 	return symlink.New(target, fullLink)
-}
-
-// statePoolIntrospectionReporter wraps a (possibly nil) state.StatePool,
-// calling its IntrospectionReport method or returning a message if it
-// is nil.
-type statePoolIntrospectionReporter struct {
-	mu   sync.Mutex
-	pool *state.StatePool
-}
-
-func (h *statePoolIntrospectionReporter) Set(pool *state.StatePool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.pool = pool
-}
-
-func (h *statePoolIntrospectionReporter) IntrospectionReport() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.pool == nil {
-		return "agent has no pool set"
-	}
-	return h.pool.IntrospectionReport()
 }

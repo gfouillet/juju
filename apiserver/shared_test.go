@@ -4,204 +4,96 @@
 package apiserver
 
 import (
-	"time"
+	"net/http"
+	stdtesting "testing"
 
-	"github.com/juju/clock"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/pubsub/v2"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3/workertest"
-	"github.com/prometheus/client_golang/prometheus"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	corecontroller "github.com/juju/juju/controller"
-	"github.com/juju/juju/core/cache"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/internal/worker/gate"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/core/model"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/lease"
-	"github.com/juju/juju/internal/worker/modelcache"
-	"github.com/juju/juju/internal/worker/multiwatcher"
-	"github.com/juju/juju/pubsub/controller"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	"github.com/juju/juju/testing"
 )
 
 type sharedServerContextSuite struct {
-	statetesting.StateSuite
-
-	hub    *pubsub.StructuredHub
-	config sharedServerConfig
+	controllerDomainServices *MockControllerDomainServices
 }
 
-var _ = gc.Suite(&sharedServerContextSuite{})
-
-func (s *sharedServerContextSuite) SetUpTest(c *gc.C) {
-	s.StateSuite.SetUpTest(c)
-
-	allWatcherBacking, err := state.NewAllWatcherBacking(s.StatePool)
-	c.Assert(err, jc.ErrorIsNil)
-	multiWatcherWorker, err := multiwatcher.NewWorker(multiwatcher.Config{
-		Clock:                clock.WallClock,
-		Logger:               loggo.GetLogger("test"),
-		Backing:              allWatcherBacking,
-		PrometheusRegisterer: noopRegisterer{},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	// The worker itself is a coremultiwatcher.Factory.
-	s.AddCleanup(func(c *gc.C) { workertest.CleanKill(c, multiWatcherWorker) })
-
-	initialized := gate.NewLock()
-	s.hub = pubsub.NewStructuredHub(nil)
-	modelCache, err := modelcache.NewWorker(modelcache.Config{
-		StatePool:            s.StatePool,
-		Hub:                  s.hub,
-		InitializedGate:      initialized,
-		Logger:               loggo.GetLogger("test"),
-		WatcherFactory:       multiWatcherWorker.WatchController,
-		PrometheusRegisterer: noopRegisterer{},
-		Cleanup:              func() {},
-	}.WithDefaultRestartStrategy())
-	s.AddCleanup(func(c *gc.C) { workertest.CleanKill(c, modelCache) })
-	c.Assert(err, jc.ErrorIsNil)
-	var controller *cache.Controller
-	err = modelcache.ExtractCacheController(modelCache, &controller)
-	c.Assert(err, jc.ErrorIsNil)
-
-	controllerConfig, err := s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.config = sharedServerConfig{
-		statePool:           s.StatePool,
-		controller:          controller,
-		multiwatcherFactory: multiWatcherWorker,
-		centralHub:          s.hub,
-		presence:            presence.New(clock.WallClock),
-		leaseManager:        &lease.Manager{},
-		controllerConfig:    controllerConfig,
-		logger:              loggo.GetLogger("test"),
-		dbGetter:            StubDBGetter{},
-	}
+func TestSharedServerContextSuite(t *stdtesting.T) {
+	tc.Run(t, &sharedServerContextSuite{})
 }
 
-func (s *sharedServerContextSuite) TestConfigNoStatePool(c *gc.C) {
-	s.config.statePool = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil statePool not valid")
+func (s *sharedServerContextSuite) TestConfigNoLeaseManager(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	config := s.newConfig(c)
+
+	config.leaseManager = nil
+	err := config.validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+	c.Check(err, tc.ErrorMatches, "nil leaseManager not valid")
 }
 
-func (s *sharedServerContextSuite) TestConfigNoController(c *gc.C) {
-	s.config.controller = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil controller not valid")
+func (s *sharedServerContextSuite) TestConfigNoControllerConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	config := s.newConfig(c)
+
+	config.controllerConfig = nil
+	err := config.validate()
+	c.Check(err, tc.ErrorIs, errors.NotValid)
+	c.Check(err, tc.ErrorMatches, "nil controllerConfig not valid")
 }
 
-func (s *sharedServerContextSuite) TestConfigNoMultiwatcherFactory(c *gc.C) {
-	s.config.multiwatcherFactory = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil multiwatcherFactory not valid")
-}
+func (s *sharedServerContextSuite) TestValidConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *sharedServerContextSuite) TestConfigNoHub(c *gc.C) {
-	s.config.centralHub = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil centralHub not valid")
-}
+	config := s.newConfig(c)
 
-func (s *sharedServerContextSuite) TestConfigNoPresence(c *gc.C) {
-	s.config.presence = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil presence not valid")
-}
-
-func (s *sharedServerContextSuite) TestConfigNoLeaseManager(c *gc.C) {
-	s.config.leaseManager = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil leaseManager not valid")
-}
-
-func (s *sharedServerContextSuite) TestConfigNoControllerconfig(c *gc.C) {
-	s.config.controllerConfig = nil
-	err := s.config.validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil controllerConfig not valid")
-}
-
-func (s *sharedServerContextSuite) TestNewCallsConfigValidate(c *gc.C) {
-	s.config.statePool = nil
-	ctx, err := newSharedServerContext(s.config)
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err, gc.ErrorMatches, "nil statePool not valid")
-	c.Check(ctx, gc.IsNil)
-}
-
-func (s *sharedServerContextSuite) TestValidConfig(c *gc.C) {
-	ctx, err := newSharedServerContext(s.config)
-	c.Assert(err, jc.ErrorIsNil)
+	ctx, err := newSharedServerContext(config)
+	c.Assert(err, tc.ErrorIsNil)
 	// Normally you wouldn't directly access features.
-	c.Assert(ctx.features, gc.HasLen, 0)
-	ctx.Close()
+	c.Assert(ctx.features, tc.HasLen, 0)
 }
 
-func (s *sharedServerContextSuite) newContext(c *gc.C) *sharedServerContext {
-	ctx, err := newSharedServerContext(s.config)
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddCleanup(func(*gc.C) { ctx.Close() })
-	return ctx
-}
+func (s *sharedServerContextSuite) newConfig(c *tc.C) sharedServerConfig {
+	controllerConfig := testing.FakeControllerConfig()
 
-type stubHub struct {
-	*pubsub.StructuredHub
-
-	published []string
-}
-
-func (s *stubHub) Publish(topic string, data interface{}) (func(), error) {
-	s.published = append(s.published, topic)
-	return func() {}, nil
-}
-
-func (s *sharedServerContextSuite) TestControllerConfigChanged(c *gc.C) {
-	stub := &stubHub{StructuredHub: s.hub}
-	s.config.centralHub = stub
-	ctx := s.newContext(c)
-
-	msg := controller.ConfigChangedMessage{
-		Config: corecontroller.Config{
-			corecontroller.Features: []string{"foo", "bar"},
-		},
+	return sharedServerConfig{
+		leaseManager:             &lease.Manager{},
+		controllerConfig:         controllerConfig,
+		controllerDomainServices: s.controllerDomainServices,
+		logger:                   loggertesting.WrapCheckLog(c),
+		dbGetter:                 StubDBGetter{},
+		domainServicesGetter:     &StubDomainServicesGetter{},
+		watcherRegistryGetter:    &StubWatcherRegistryGetter{},
+		tracerGetter:             &StubTracerGetter{},
+		flightRecorder:           flightrecorder.NoopRecorder{},
+		objectStoreGetter:        &StubObjectStoreGetter{},
+		machineTag:               names.NewMachineTag("0"),
+		dataDir:                  c.MkDir(),
+		logDir:                   c.MkDir(),
+		controllerUUID:           testing.ControllerTag.Id(),
+		controllerModelUUID:      model.UUID(testing.ModelTag.Id()),
+		charmhubHTTPClient:       stubHTTPClient{},
+		macaroonHTTPClient:       stubHTTPClient{},
+		offersThirdPartyKeyPair:  bakery.MustGenerateKey(),
 	}
-
-	done, err := s.hub.Publish(controller.ConfigChanged, msg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-pubsub.Wait(done):
-	case <-time.After(testing.LongWait):
-		c.Fatalf("handler didn't")
-	}
-
-	c.Check(ctx.featureEnabled("foo"), jc.IsTrue)
-	c.Check(ctx.featureEnabled("bar"), jc.IsTrue)
-	c.Check(ctx.featureEnabled("baz"), jc.IsFalse)
-	c.Check(stub.published, gc.HasLen, 0)
 }
 
-type noopRegisterer struct {
-	prometheus.Registerer
+func (s *sharedServerContextSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.controllerDomainServices = NewMockControllerDomainServices(ctrl)
+	return ctrl
 }
 
-func (noopRegisterer) Register(prometheus.Collector) error {
-	return nil
-}
+type stubHTTPClient struct{}
 
-func (noopRegisterer) Unregister(prometheus.Collector) bool {
-	return true
+func (stubHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	return nil, nil
 }

@@ -5,26 +5,26 @@ package caasadmission
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
 	admission "k8s.io/api/admissionregistration/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/juju/juju/internal/provider/kubernetes/constants"
+	"github.com/juju/juju/internal/pki"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	k8sutils "github.com/juju/juju/internal/provider/kubernetes/utils"
-	"github.com/juju/juju/pki"
 )
 
 // AdmissionCreator represents a creator of mutating webhooks that is context aware of the
 // current controller.
 type AdmissionCreator interface {
-	EnsureMutatingWebhookConfiguration() (func(), error)
+	EnsureMutatingWebhookConfiguration(context.Context) (func(), error)
 }
 
 // AdmissionCreatorFunc is the func type of AdmissionCreator.
-type AdmissionCreatorFunc func() (func(), error)
+type AdmissionCreatorFunc func(context.Context) (func(), error)
 
 const (
 	// Component describes a sub zone to use on the juju tld for unique resource
@@ -42,8 +42,8 @@ var (
 
 // EnsureMutatingWebhookConfiguration implements AdmissionCreator interface for
 // func type.
-func (a AdmissionCreatorFunc) EnsureMutatingWebhookConfiguration() (func(), error) {
-	return a()
+func (a AdmissionCreatorFunc) EnsureMutatingWebhookConfiguration(ctx context.Context) (func(), error) {
+	return a(ctx)
 }
 
 // NewAdmissionCreator instantiates a new AdmissionCreator for the supplied
@@ -54,8 +54,8 @@ func NewAdmissionCreator(
 	modelName string,
 	modelUUID string,
 	controllerUUID string,
-	labelVersion constants.LabelVersion,
-	ensureConfig func(*admission.MutatingWebhookConfiguration) (func(), error),
+	labelVersion k8sconstants.LabelVersion,
+	ensureConfig func(context.Context, *admission.MutatingWebhookConfiguration) (func(), error),
 	service *admission.ServiceReference) (AdmissionCreator, error) {
 
 	caPemBuffer := bytes.Buffer{}
@@ -117,7 +117,7 @@ func NewAdmissionCreator(
 		},
 	}
 
-	return AdmissionCreatorFunc(func() (func(), error) {
+	return AdmissionCreatorFunc(func(ctx context.Context) (func(), error) {
 		leafGroup := fmt.Sprintf("k8sadmission-%s", modelName)
 		_, err := authority.LeafRequestForGroup(leafGroup).
 			AddDNSNames(fmt.Sprintf("%s.%s.svc", service.Name, service.Namespace)).
@@ -126,7 +126,7 @@ func NewAdmissionCreator(
 			return nil, errors.Trace(err)
 		}
 
-		configCleanup, err := ensureConfig(&obj)
+		configCleanup, err := ensureConfig(ctx, &obj)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

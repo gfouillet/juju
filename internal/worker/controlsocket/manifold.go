@@ -4,27 +4,31 @@
 package controlsocket
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
 
-	"github.com/juju/juju/internal/worker/common"
-	workerstate "github.com/juju/juju/internal/worker/state"
+	"github.com/juju/errors"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/socketlistener"
 )
 
 // ManifoldConfig describes the dependencies required by the controlsocket worker.
 type ManifoldConfig struct {
-	StateName  string
-	Logger     Logger
-	NewWorker  func(Config) (worker.Worker, error)
-	SocketName string
+	DomainServicesName string
+	Logger             logger.Logger
+	NewWorker          func(Config) (worker.Worker, error)
+	NewSocketListener  func(socketlistener.Config) (SocketListener, error)
+	SocketName         string
 }
 
 // Manifold returns a Manifold that encapsulates the controlsocket worker.
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
-			config.StateName,
+			config.DomainServicesName,
 		},
 		Start: config.start,
 	}
@@ -32,14 +36,17 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 
 // Validate is called by start to check for bad configuration.
 func (cfg ManifoldConfig) Validate() error {
-	if cfg.StateName == "" {
-		return errors.NotValidf("empty StateName")
+	if cfg.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if cfg.Logger == nil {
 		return errors.NotValidf("nil Logger")
 	}
 	if cfg.NewWorker == nil {
 		return errors.NotValidf("nil NewWorker func")
+	}
+	if cfg.NewSocketListener == nil {
+		return errors.NotValidf("nil NewSocketListener func")
 	}
 	if cfg.SocketName == "" {
 		return errors.NotValidf("empty SocketName")
@@ -48,35 +55,42 @@ func (cfg ManifoldConfig) Validate() error {
 }
 
 // start is a StartFunc for a Worker manifold.
-func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
-	if err := cfg.Validate(); err != nil {
+func (cfg ManifoldConfig) start(ctx context.Context, getter dependency.Getter) (_ worker.Worker, err error) {
+	if err = cfg.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := context.Get(cfg.StateName, &stTracker); err != nil {
+	var domainServices services.ControllerDomainServices
+	if err = getter.Get(cfg.DomainServicesName, &domainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	statePool, err := stTracker.Use()
+	controllerSerivce := domainServices.Controller()
+	controllerModelUUID, err := controllerSerivce.ControllerModelUUID(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	st, err := statePool.SystemState()
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-
-	w, err := cfg.NewWorker(Config{
-		State:      stateShim{st},
-		Logger:     cfg.Logger,
-		SocketName: cfg.SocketName,
+	var w worker.Worker
+	w, err = cfg.NewWorker(Config{
+		AccessService:       domainServices.Access(),
+		Logger:              cfg.Logger,
+		SocketName:          cfg.SocketName,
+		NewSocketListener:   cfg.NewSocketListener,
+		ControllerModelUUID: controllerModelUUID,
 	})
 	if err != nil {
-		_ = stTracker.Done()
 		return nil, errors.Trace(err)
 	}
-	return common.NewCleanupWorker(w, func() { _ = stTracker.Done() }), nil
+	return w, nil
+}
+
+// SocketListener describes a worker that listens on a unix socket.
+type SocketListener interface {
+	worker.Worker
+}
+
+// NewSocketListener is a function that creates a new socket listener.
+func NewSocketListener(config socketlistener.Config) (SocketListener, error) {
+	return socketlistener.NewSocketListener(config)
 }

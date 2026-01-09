@@ -4,16 +4,18 @@
 package containerbroker
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/agent/provisioner"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/container/broker"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/container/broker"
 )
 
 // ManifoldConfig describes the resources used by a Tracker.
@@ -22,7 +24,7 @@ type ManifoldConfig struct {
 	APICallerName string
 	MachineLock   machinelock.Lock
 	NewBrokerFunc func(broker.Config) (environs.InstanceBroker, error)
-	NewTracker    func(Config) (worker.Worker, error)
+	NewTracker    func(context.Context, Config) (worker.Worker, error)
 }
 
 // Validate validates the manifold configuration.
@@ -54,26 +56,26 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.APICallerName,
 		},
 		Output: manifoldOutput,
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
 			}
 
 			var agent agent.Agent
-			if err := context.Get(config.AgentName, &agent); err != nil {
+			if err := getter.Get(config.AgentName, &agent); err != nil {
 				return nil, errors.Trace(err)
 			}
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, errors.Trace(err)
 			}
-			w, err := config.NewTracker(Config{
+			w, err := config.NewTracker(ctx, Config{
 				APICaller:     apiCaller,
 				AgentConfig:   agent.CurrentConfig(),
 				MachineLock:   config.MachineLock,
 				NewBrokerFunc: config.NewBrokerFunc,
 				NewStateFunc: func(apiCaller base.APICaller) State {
-					return provisioner.NewState(apiCaller)
+					return provisioner.NewClient(apiCaller)
 				},
 			})
 			if err != nil {

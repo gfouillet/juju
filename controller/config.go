@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/romulus"
-	"github.com/juju/utils/v3"
-	"gopkg.in/juju/environschema.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
 	"gopkg.in/yaml.v2"
 
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/internal/configschema"
+	"github.com/juju/juju/internal/pki"
 )
 
 const (
@@ -32,14 +35,6 @@ const (
 const (
 	// APIPort is the port used for api connections.
 	APIPort = "api-port"
-
-	// ControllerAPIPort is an optional port that may be set for controllers
-	// that have a very heavy load. If this port is set, this port is used by
-	// the controllers to talk to each other - used for the local API connection
-	// as well as the pubsub forwarders, and the raft workers. If this value is
-	// set, the api-port isn't opened until the controllers have started
-	// properly.
-	ControllerAPIPort = "controller-api-port"
 
 	// ControllerName is the canonical name for the controller.
 	ControllerName = "controller-name"
@@ -62,12 +57,6 @@ const (
 	// AgentRateLimitRate is the interval at which a new token is added to
 	// the token bucket, in milliseconds (ms).
 	AgentRateLimitRate = "agent-ratelimit-rate"
-
-	// APIPortOpenDelay is a duration that the controller will wait
-	// between when the controller has been deemed to be ready to open
-	// the api-port and when the api-port is actually opened. This value
-	// is only used when a controller-api-port value is set.
-	APIPortOpenDelay = "api-port-open-delay"
 
 	// AuditingEnabled determines whether the controller will record
 	// auditing information.
@@ -99,9 +88,6 @@ const (
 	// write time) so any changes to the set of read-only methods in
 	// new versions of Juju will be honoured.
 	ReadOnlyMethodsWildcard = "ReadOnlyMethods"
-
-	// StatePort is the port used for mongo connections.
-	StatePort = "state-port"
 
 	// CACertKey is the key for the controller's CA certificate attribute.
 	CACertKey = "ca-cert"
@@ -148,15 +134,6 @@ const (
 	// they don't have any access rights to the controller itself.
 	AllowModelAccessKey = "allow-model-access"
 
-	// MongoMemoryProfile sets the memory profile for MongoDB. Valid values are:
-	// - "low": use the least possible memory
-	// - "default": use the default memory profile
-	MongoMemoryProfile = "mongo-memory-profile"
-
-	// JujuDBSnapChannel selects the channel to use when installing Mongo
-	// snaps for focal or later. The value is ignored for older releases.
-	JujuDBSnapChannel = "juju-db-snap-channel"
-
 	// MaxDebugLogDuration is used to provide a backstop to the execution of a
 	// debug-log command. If someone starts a debug-log session in a remote
 	// screen for example, it is very easy to disconnect from the screen while
@@ -180,10 +157,6 @@ const (
 	// ModelLogfileMaxBackups is the number of old model
 	// log files to keep (compressed).
 	ModelLogfileMaxBackups = "model-logfile-max-backups"
-
-	// ModelLogsSize is the size of the capped collections used to hold the
-	// logs for the models, eg "20M". Size is per model.
-	ModelLogsSize = "model-logs-size"
 
 	// MaxTxnLogSize is the maximum size the of capped txn log collection, eg "10M"
 	MaxTxnLogSize = "max-txn-log-size"
@@ -231,16 +204,13 @@ const (
 	// executing a model migration.
 	MigrationMinionWaitMax = "migration-agent-wait-time"
 
-	// JujuHASpace is the network space within which the MongoDB replica-set
-	// should communicate.
-	JujuHASpace = "juju-ha-space"
-
 	// JujuManagementSpace is the network space that agents should use to
 	// communicate with controllers.
 	JujuManagementSpace = "juju-mgmt-space"
 
 	// CAASOperatorImagePath sets the URL of the docker image
 	// used for the application operator.
+	//
 	// Deprecated: use CAASImageRepo
 	CAASOperatorImagePath = "caas-operator-image-path"
 
@@ -250,9 +220,6 @@ const (
 
 	// Features allows a list of runtime changeable features to be updated.
 	Features = "features"
-
-	// MeteringURL is the URL to use for metrics.
-	MeteringURL = "metering-url"
 
 	// PublicDNSAddress is the public DNS address (and port) of the controller.
 	PublicDNSAddress = "public-dns-address"
@@ -266,6 +233,57 @@ const (
 	// is enabled). The lower the threshold, the more queries will be output. A
 	// value of 0 means all queries will be output.
 	QueryTracingThreshold = "query-tracing-threshold"
+
+	// DqliteBusyTimeout sets the timeout for how long a database operation will
+	// wait for a lock to be released before returning an error, that is the
+	// amount of time a writer will wait for others to finish writing on the
+	// same database.
+	DqliteBusyTimeout = "dqlite-busy-timeout"
+
+	// OpenTelemetryEnabled returns whether open telemetry is enabled.
+	OpenTelemetryEnabled = "open-telemetry-enabled"
+
+	// OpenTelemetryEndpoint returns the endpoint at which the telemetry will
+	// be pushed to.
+	OpenTelemetryEndpoint = "open-telemetry-endpoint"
+
+	// OpenTelemetryInsecure returns if the telemetry collector endpoint is
+	// insecure or not. Useful for debug or local testing.
+	OpenTelemetryInsecure = "open-telemetry-insecure"
+
+	// OpenTelemetryStackTraces return whether stack traces should be added per
+	// span.
+	OpenTelemetryStackTraces = "open-telemetry-stack-traces"
+
+	// OpenTelemetrySampleRatio returns the sample ratio for open telemetry.
+	OpenTelemetrySampleRatio = "open-telemetry-sample-ratio"
+
+	// OpenTelemetryTailSamplingThreshold returns the tail sampling threshold
+	// for open telemetry as a duration.
+	OpenTelemetryTailSamplingThreshold = "open-telemetry-tail-sampling-threshold"
+
+	// ObjectStoreType is the type of object store to use for storing blobs.
+	// This isn't currently allowed to be changed dynamically, that will come
+	// when we support multiple object store types (not including state).
+	ObjectStoreType = "object-store-type"
+
+	// ObjectStoreS3Endpoint is the endpoint to use for S3 object stores.
+	ObjectStoreS3Endpoint = "object-store-s3-endpoint"
+
+	// ObjectStoreS3StaticKey is the static key to use for S3 object stores.
+	ObjectStoreS3StaticKey = "object-store-s3-static-key"
+
+	// ObjectStoreS3StaticSecret is the static secret to use for S3 object
+	// stores.
+	ObjectStoreS3StaticSecret = "object-store-s3-static-secret"
+
+	// ObjectStoreS3StaticSession is the static session token to use for S3
+	// object stores.
+	ObjectStoreS3StaticSession = "object-store-s3-static-session"
+
+	// SystemSSHKeys returns the set of ssh keys that should be trusted by
+	// agents of this controller regardless of the model.
+	SystemSSHKeys = "system-ssh-keys"
 
 	// JujudControllerSnapSource returns the source for the controller snap.
 	// Can be set to "legacy", "snapstore", "local" or "local-dangerous".
@@ -337,13 +355,6 @@ const (
 	// DefaultAPIPortOpenDelay is the default value for api-port-open-delay.
 	DefaultAPIPortOpenDelay = 2 * time.Second
 
-	// DefaultMongoMemoryProfile is the default profile used by mongo.
-	DefaultMongoMemoryProfile = MongoProfDefault
-
-	// DefaultJujuDBSnapChannel is the default snap channel for installing
-	// mongo in focal or later.
-	DefaultJujuDBSnapChannel = "4.4/stable"
-
 	// DefaultMaxDebugLogDuration is the default duration that debug-log
 	// commands can run before being terminated by the API server.
 	DefaultMaxDebugLogDuration = 24 * time.Hour
@@ -375,10 +386,6 @@ const (
 	// DefaultModelLogfileMaxBackups is the number of old model
 	// log files to keep (compressed).
 	DefaultModelLogfileMaxBackups = 2
-
-	// DefaultModelLogsSizeMB is the size in MB of the capped logs collection
-	// for each model.
-	DefaultModelLogsSizeMB = 20
 
 	// DefaultPruneTxnQueryCount is the number of transactions
 	// to read in a single query.
@@ -413,10 +420,47 @@ const (
 	// it will be logged if query tracing is enabled.
 	DefaultQueryTracingThreshold = time.Second
 
+	// DefaultDqliteBusyTimeout is the default value for the timeout for how
+	// long a database operation will wait for a lock to be released before
+	// returning an error, tailoring the amount of time a writer will wait for
+	// others to finish writing on the same database.
+	DefaultDqliteBusyTimeout = 1 * time.Second
+
+	// DefaultAuditLogExcludeMethods is the default list of methods to
+	// exclude from the audit log.
+	// This special value means we exclude any methods in the set
+	// listed in apiserver/observer/auditfilter.go
+	DefaultAuditLogExcludeMethods = ReadOnlyMethodsWildcard
+
+	// DefaultOpenTelemetryEnabled is the default value for if the open
+	// telemetry tracing is enabled or not.
+	DefaultOpenTelemetryEnabled = false
+
+	// DefaultOpenTelemetryInsecure is the default value for it the open
+	// telemetry tracing endpoint is insecure or not.
+	DefaultOpenTelemetryInsecure = false
+
+	// DefaultOpenTelemetryStackTraces is the default value for it the open
+	// telemetry tracing has stack traces or not.
+	DefaultOpenTelemetryStackTraces = false
+
+	// DefaultOpenTelemetrySampleRatio is the default value for the sample
+	// ratio for open telemetry.
+	// By default we only want to trace 10% of the requests.
+	DefaultOpenTelemetrySampleRatio = 0.1
+
+	// DefaultOpenTelemetryTailSamplingThreshold is the default value for the
+	// tail sampling threshold for open telemetry.
+	DefaultOpenTelemetryTailSamplingThreshold = 1 * time.Millisecond
+
 	// DefaultJujudControllerSnapSource is the default value for the jujud controller
 	// snap source, which is the snapstore.
 	// TODO(jujud-controller-snap): change this to "snapstore" once it is implemented.
 	DefaultJujudControllerSnapSource = "legacy"
+
+	// DefaultObjectStoreType is the default type of object store to use for
+	// storing blobs.
+	DefaultObjectStoreType = objectstore.FileBackend
 
 	// DefaultIdleConnectionTimeout is the default value for how often the jujud
 	// controller will reset idle connections. Apache defaults to a much more
@@ -432,21 +476,16 @@ var (
 		AgentRateLimitMax,
 		AgentRateLimitRate,
 		APIPort,
-		APIPortOpenDelay,
 		IdleConnectionTimeout,
 		AutocertDNSNameKey,
 		AutocertURLKey,
 		CACertKey,
-		ControllerAPIPort,
 		ControllerName,
 		ControllerUUIDKey,
 		LoginTokenRefreshURL,
 		IdentityPublicKey,
 		IdentityURL,
 		SetNUMAControlPolicyKey,
-		StatePort,
-		MongoMemoryProfile,
-		JujuDBSnapChannel,
 		MaxDebugLogDuration,
 		MaxTxnLogSize,
 		MaxPruneTxnBatchSize,
@@ -455,11 +494,9 @@ var (
 		AgentLogfileMaxSize,
 		ModelLogfileMaxBackups,
 		ModelLogfileMaxSize,
-		ModelLogsSize,
 		PruneTxnQueryCount,
 		PruneTxnSleepTime,
 		PublicDNSAddress,
-		JujuHASpace,
 		JujuManagementSpace,
 		AuditingEnabled,
 		AuditLogCaptureArgs,
@@ -469,7 +506,6 @@ var (
 		CAASOperatorImagePath,
 		CAASImageRepo,
 		Features,
-		MeteringURL,
 		MaxCharmStateSize,
 		MaxAgentStateSize,
 		MigrationMinionWaitMax,
@@ -477,6 +513,19 @@ var (
 		ControllerResourceDownloadLimit,
 		QueryTracingEnabled,
 		QueryTracingThreshold,
+		DqliteBusyTimeout,
+		OpenTelemetryEnabled,
+		OpenTelemetryEndpoint,
+		OpenTelemetryInsecure,
+		OpenTelemetryStackTraces,
+		OpenTelemetrySampleRatio,
+		OpenTelemetryTailSamplingThreshold,
+		ObjectStoreType,
+		ObjectStoreS3Endpoint,
+		ObjectStoreS3StaticKey,
+		ObjectStoreS3StaticSecret,
+		ObjectStoreS3StaticSession,
+		SystemSSHKeys,
 		JujudControllerSnapSource,
 		SSHMaxConcurrentConnections,
 		SSHServerPort,
@@ -502,7 +551,6 @@ var (
 		AgentLogfileMaxSize,
 		AgentRateLimitMax,
 		AgentRateLimitRate,
-		APIPortOpenDelay,
 		IdleConnectionTimeout,
 		ApplicationResourceDownloadLimit,
 		AuditingEnabled,
@@ -511,12 +559,8 @@ var (
 		AuditLogMaxBackups,
 		AuditLogMaxSize,
 		CAASImageRepo,
-		// TODO Juju 3.0: ControllerAPIPort should be required and treated
-		// more like api-port.
-		ControllerAPIPort,
 		ControllerResourceDownloadLimit,
 		Features,
-		JujuHASpace,
 		JujuManagementSpace,
 		MaxAgentStateSize,
 		MaxCharmStateSize,
@@ -526,23 +570,25 @@ var (
 		MigrationMinionWaitMax,
 		ModelLogfileMaxBackups,
 		ModelLogfileMaxSize,
-		ModelLogsSize,
-		MongoMemoryProfile,
+		OpenTelemetryEnabled,
+		OpenTelemetryEndpoint,
+		OpenTelemetryInsecure,
+		OpenTelemetryStackTraces,
+		OpenTelemetrySampleRatio,
+		OpenTelemetryTailSamplingThreshold,
 		PruneTxnQueryCount,
 		PruneTxnSleepTime,
 		PublicDNSAddress,
 		QueryTracingEnabled,
 		QueryTracingThreshold,
+		DqliteBusyTimeout,
+		ObjectStoreType,
+		ObjectStoreS3Endpoint,
+		ObjectStoreS3StaticKey,
+		ObjectStoreS3StaticSecret,
+		ObjectStoreS3StaticSession,
 		SSHMaxConcurrentConnections,
 	)
-
-	// DefaultAuditLogExcludeMethods is the default list of methods to
-	// exclude from the audit log.
-	DefaultAuditLogExcludeMethods = []string{
-		// This special value means we exclude any methods in the set
-		// listed in apiserver/observer/auditfilter.go
-		ReadOnlyMethodsWildcard,
-	}
 
 	methodNameRE = regexp.MustCompile(`[[:alpha:]][[:alnum:]]*\.[[:alpha:]][[:alnum:]]*`)
 )
@@ -576,7 +622,7 @@ func NewConfig(controllerUUID, caCert string, attrs map[string]interface{}) (Con
 	// TODO(wallyworld) - use core/config when it supports duration types
 	for k, v := range attrs {
 		field, ok := ConfigSchema[k]
-		if !ok || field.Type != environschema.Tlist {
+		if !ok || field.Type != configschema.Tlist {
 			continue
 		}
 		str, ok := v.(string)
@@ -675,39 +721,14 @@ func (c Config) durationOrDefault(name string, defaultVal time.Duration) time.Du
 	return defaultVal
 }
 
-// StatePort returns the mongo server port for the environment.
-func (c Config) StatePort() int {
-	return c.mustInt(StatePort)
-}
-
 // APIPort returns the API server port for the environment.
 func (c Config) APIPort() int {
 	return c.mustInt(APIPort)
 }
 
-// APIPortOpenDelay returns the duration to wait before opening
-// the APIPort once the controller has started up. Only used when
-// the ControllerAPIPort is non-zero.
-func (c Config) APIPortOpenDelay() time.Duration {
-	return c.durationOrDefault(APIPortOpenDelay, DefaultAPIPortOpenDelay)
-}
-
 // IdleConnectionTimeout returns the time between the controller resetting all idle connections
 func (c Config) IdleConnectionTimeout() time.Duration {
 	return c.durationOrDefault(IdleConnectionTimeout, DefaultIdleConnectionTimeout)
-}
-
-// ControllerAPIPort returns the optional API port to be used for
-// the controllers to talk to each other. A zero value means that
-// it is not set.
-func (c Config) ControllerAPIPort() int {
-	if value, ok := c[ControllerAPIPort].(float64); ok {
-		return int(value)
-	}
-	// If the value isn't an int, this conversion will fail and value
-	// will be 0, which is what we want here.
-	value, _ := c[ControllerAPIPort].(int)
-	return value
 }
 
 // ApplicationResourceDownloadLimit limits the number of concurrent resource download
@@ -793,27 +814,20 @@ func (c Config) AuditLogMaxBackups() int {
 // considered uninteresting for audit logging. Conversations
 // containing only these will be excluded from the audit log.
 func (c Config) AuditLogExcludeMethods() set.Strings {
-	if value, ok := c[AuditLogExcludeMethods]; ok {
-		value := value.([]interface{})
-		items := set.NewStrings()
-		for _, item := range value {
-			items.Add(item.(string))
-		}
-		return items
+	v := c.asString(AuditLogExcludeMethods)
+	if v == "" {
+		return set.NewStrings()
 	}
-	return set.NewStrings(DefaultAuditLogExcludeMethods...)
+	return set.NewStrings(strings.Split(v, ",")...)
 }
 
 // Features returns the controller config set features flags.
 func (c Config) Features() set.Strings {
-	features := set.NewStrings()
-	if value, ok := c[Features]; ok {
-		value := value.([]interface{})
-		for _, item := range value {
-			features.Add(item.(string))
-		}
+	v := c.asString(Features)
+	if v == "" {
+		return set.NewStrings()
 	}
-	return features
+	return set.NewStrings(strings.Split(v, ",")...)
 }
 
 // ControllerName returns the name for the controller
@@ -877,19 +891,6 @@ func (c Config) LoginTokenRefreshURL() string {
 	return c.asString(LoginTokenRefreshURL)
 }
 
-// MongoMemoryProfile returns the selected profile or low.
-func (c Config) MongoMemoryProfile() string {
-	if profile, ok := c[MongoMemoryProfile]; ok {
-		return profile.(string)
-	}
-	return DefaultMongoMemoryProfile
-}
-
-// JujuDBSnapChannel returns the channel for installing mongo snaps.
-func (c Config) JujuDBSnapChannel() string {
-	return c.asString(JujuDBSnapChannel)
-}
-
 // JujudControllerSnapSource returns the source of the jujud-controller snap.
 func (c Config) JujudControllerSnapSource() string {
 	if src, ok := c[JujudControllerSnapSource]; ok {
@@ -937,12 +938,6 @@ func (c Config) ModelLogfileMaxSizeMB() int {
 	return c.sizeMBOrDefault(ModelLogfileMaxSize, DefaultModelLogfileMaxSize)
 }
 
-// ModelLogsSizeMB is the size of the capped collection used to store the model
-// logs. Total size on disk will be ModelLogsSizeMB * number of models.
-func (c Config) ModelLogsSizeMB() int {
-	return c.sizeMBOrDefault(ModelLogsSize, DefaultModelLogsSizeMB)
-}
-
 // MaxDebugLogDuration is the maximum time a debug-log session is allowed
 // to run before it is terminated by the server.
 func (c Config) MaxDebugLogDuration() time.Duration {
@@ -979,20 +974,21 @@ func (c Config) PublicDNSAddress() string {
 	return c.asString(PublicDNSAddress)
 }
 
-// JujuHASpace is the network space within which the MongoDB replica-set
-// should communicate.
-func (c Config) JujuHASpace() string {
-	return c.asString(JujuHASpace)
+// SystemSSHKeys returns the trusted ssh keys that agents of this controller
+// should trust.
+func (c Config) SystemSSHKeys() string {
+	return c.asString(SystemSSHKeys)
 }
 
 // JujuManagementSpace is the network space that agents should use to
 // communicate with controllers.
-func (c Config) JujuManagementSpace() string {
-	return c.asString(JujuManagementSpace)
+func (c Config) JujuManagementSpace() network.SpaceName {
+	return network.SpaceName(c.asString(JujuManagementSpace))
 }
 
 // CAASOperatorImagePath sets the URL of the docker image
 // used for the application operator.
+//
 // Deprecated: use CAASImageRepo
 func (c Config) CAASOperatorImagePath() string {
 	return c.asString(CAASOperatorImagePath)
@@ -1002,15 +998,6 @@ func (c Config) CAASOperatorImagePath() string {
 // used for the jujud operator and mongo images.
 func (c Config) CAASImageRepo() string {
 	return c.asString(CAASImageRepo)
-}
-
-// MeteringURL returns the URL to use for metering api calls.
-func (c Config) MeteringURL() string {
-	url := c.asString(MeteringURL)
-	if url == "" {
-		return romulus.DefaultAPIRoot
-	}
-	return url
 }
 
 // MaxCharmStateSize returns the max size (in bytes) of charm-specific state
@@ -1043,6 +1030,78 @@ func (c Config) QueryTracingEnabled() bool {
 // means all queries will be output.
 func (c Config) QueryTracingThreshold() time.Duration {
 	return c.durationOrDefault(QueryTracingThreshold, DefaultQueryTracingThreshold)
+}
+
+// DqliteBusyTimeout returns the timeout for how long a database operation will
+// wait for a lock to be released before returning an error, that is the amount
+// of time a writer will wait for others to finish writing on the same database.
+func (c Config) DqliteBusyTimeout() time.Duration {
+	return c.durationOrDefault(DqliteBusyTimeout, DefaultDqliteBusyTimeout)
+}
+
+// OpenTelemetryEnabled returns whether open telemetry tracing is enabled.
+func (c Config) OpenTelemetryEnabled() bool {
+	return c.boolOrDefault(OpenTelemetryEnabled, DefaultOpenTelemetryEnabled)
+}
+
+// OpenTelemetryEndpoint returns the open telemetry endpoint.
+func (c Config) OpenTelemetryEndpoint() string {
+	return c.asString(OpenTelemetryEndpoint)
+}
+
+// OpenTelemetryInsecure returns whether open telemetry tracing endpoint is
+// insecure or not.
+func (c Config) OpenTelemetryInsecure() bool {
+	return c.boolOrDefault(OpenTelemetryInsecure, DefaultOpenTelemetryInsecure)
+}
+
+// OpenTelemetryStackTraces returns whether open telemetry tracing spans
+// requires to have stack traces.
+func (c Config) OpenTelemetryStackTraces() bool {
+	return c.boolOrDefault(OpenTelemetryStackTraces, DefaultOpenTelemetryStackTraces)
+}
+
+// OpenTelemetrySampleRatio returns whether open telemetry tracing spans
+// requires to have stack traces.
+func (c Config) OpenTelemetrySampleRatio() float64 {
+	f, err := parseRatio(c, OpenTelemetrySampleRatio)
+	if err == nil {
+		return f
+	}
+	return DefaultOpenTelemetrySampleRatio
+}
+
+// OpenTelemetryTailSamplingThreshold returns the tail sampling threshold
+// for open telemetry tracing spans.
+func (c Config) OpenTelemetryTailSamplingThreshold() time.Duration {
+	return c.durationOrDefault(OpenTelemetryTailSamplingThreshold, DefaultOpenTelemetryTailSamplingThreshold)
+}
+
+// ObjectStoreType returns the type of object store to use for storing blobs.
+func (c Config) ObjectStoreType() objectstore.BackendType {
+	return objectstore.BackendType(c.asString(ObjectStoreType))
+}
+
+// ObjectStoreS3Endpoint returns the endpoint to use for S3 object stores.
+func (c Config) ObjectStoreS3Endpoint() string {
+	return c.asString(ObjectStoreS3Endpoint)
+}
+
+// ObjectStoreS3StaticKey returns the static key to use for S3 object stores.
+func (c Config) ObjectStoreS3StaticKey() string {
+	return c.asString(ObjectStoreS3StaticKey)
+}
+
+// ObjectStoreS3StaticSecret returns the static secret to use for S3 object
+// stores.
+func (c Config) ObjectStoreS3StaticSecret() string {
+	return c.asString(ObjectStoreS3StaticSecret)
+}
+
+// ObjectStoreS3StaticSession returns the static session token to use for S3
+// object stores.
+func (c Config) ObjectStoreS3StaticSession() string {
+	return c.asString(ObjectStoreS3StaticSession)
 }
 
 // SSHServerPort returns the port the SSH server listens on.
@@ -1118,7 +1177,10 @@ func Validate(c Config) error {
 			return errors.NotValidf("negative %s (%d)", AgentRateLimitMax, v)
 		}
 	}
-	if v, ok := c[AgentRateLimitRate].(time.Duration); ok {
+
+	if v, err := parseDuration(c, AgentRateLimitRate); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "parsing %s in configuration", AgentRateLimitRate)
+	} else if err == nil {
 		if v == 0 {
 			return errors.Errorf("%s cannot be zero", AgentRateLimitRate)
 		}
@@ -1130,25 +1192,11 @@ func Validate(c Config) error {
 		}
 	}
 
-	if mgoMemProfile, ok := c[MongoMemoryProfile].(string); ok {
-		if mgoMemProfile != MongoProfLow && mgoMemProfile != MongoProfDefault {
-			return errors.Errorf("mongo-memory-profile: expected one of %q or %q got string(%q)", MongoProfLow, MongoProfDefault, mgoMemProfile)
-		}
-	}
-
-	if v, ok := c[MaxDebugLogDuration].(time.Duration); ok {
+	if v, err := parseDuration(c, MaxDebugLogDuration); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "parsing %s in configuration", MaxDebugLogDuration)
+	} else if err == nil {
 		if v == 0 {
 			return errors.Errorf("%s cannot be zero", MaxDebugLogDuration)
-		}
-	}
-
-	if v, ok := c[ModelLogsSize].(string); ok {
-		mb, err := utils.ParseSize(v)
-		if err != nil {
-			return errors.Annotate(err, "invalid model logs size in configuration")
-		}
-		if mb < 1 {
-			return errors.NotValidf("model logs size less than 1 MB")
 		}
 	}
 
@@ -1194,10 +1242,6 @@ func Validate(c Config) error {
 		}
 	}
 
-	if err := c.validateSpaceConfig(JujuHASpace, "juju HA"); err != nil {
-		return errors.Trace(err)
-	}
-
 	if err := c.validateSpaceConfig(JujuManagementSpace, "juju mgmt"); err != nil {
 		return errors.Trace(err)
 	}
@@ -1223,30 +1267,17 @@ func Validate(c Config) error {
 		}
 	}
 
-	if v, ok := c[AuditLogExcludeMethods].([]interface{}); ok {
-		for i, name := range v {
-			name := name.(string)
-			if name != ReadOnlyMethodsWildcard && !methodNameRE.MatchString(name) {
-				return errors.Errorf(
-					`invalid audit log exclude methods: should be a list of "Facade.Method" names (or "ReadOnlyMethods"), got %q at position %d`,
-					name,
-					i+1,
-				)
+	if v, ok := c[AuditLogExcludeMethods].(string); ok {
+		if v != "" {
+			for i, name := range strings.Split(v, ",") {
+				if name != ReadOnlyMethodsWildcard && !methodNameRE.MatchString(name) {
+					return errors.Errorf(
+						`invalid audit log exclude methods: should be a list of "Facade.Method" names (or "ReadOnlyMethods"), got %q at position %d`,
+						name,
+						i+1,
+					)
+				}
 			}
-		}
-	}
-
-	if v, ok := c[ControllerAPIPort].(int); ok {
-		// TODO: change the validation so 0 is invalid and --reset is used.
-		// However that doesn't exist yet.
-		if v < 0 {
-			return errors.NotValidf("non-positive integer for controller-api-port")
-		}
-		if v == c.APIPort() {
-			return errors.NotValidf("controller-api-port matching api-port")
-		}
-		if v == c.StatePort() {
-			return errors.NotValidf("controller-api-port matching state-port")
 		}
 	}
 
@@ -1256,19 +1287,13 @@ func Validate(c Config) error {
 		}
 	}
 
-	if v, ok := c[APIPortOpenDelay].(string); ok {
-		_, err := time.ParseDuration(v)
-		if err != nil {
-			return errors.Errorf("%s value %q must be a valid duration", APIPortOpenDelay, v)
-		}
-	}
-
 	if v, ok := c[IdleConnectionTimeout].(string); ok {
 		_, err := time.ParseDuration(v)
 		if err != nil {
 			return errors.Errorf("%s value %q must be a valid duration", IdleConnectionTimeout, v)
 		}
 	}
+
 	// Each unit stores the charm and uniter state in a single document.
 	// Given that mongo by default enforces a 16M limit for documents we
 	// should also verify that the combined limits don't exceed 16M.
@@ -1291,8 +1316,8 @@ func Validate(c Config) error {
 		maxUnitStateSize += DefaultMaxAgentStateSize
 	}
 
-	if mongoMax := 16 * 1024 * 1024; maxUnitStateSize > mongoMax {
-		return errors.Errorf("invalid max charm/agent state sizes: combined value should not exceed mongo's 16M per-document limit, got %d", maxUnitStateSize)
+	if maxSize := 16 * 1024 * 1024; maxUnitStateSize > maxSize {
+		return errors.Errorf("invalid max charm/agent state sizes: combined value should not exceed 16M per-document limit, got %d", maxUnitStateSize)
 	}
 
 	if v, ok := c[MigrationMinionWaitMax].(string); ok {
@@ -1302,9 +1327,44 @@ func Validate(c Config) error {
 		}
 	}
 
-	if d, ok := c[QueryTracingThreshold].(time.Duration); ok {
-		if d < 0 {
-			return errors.Errorf("%s value %q must be a positive duration", QueryTracingThreshold, d)
+	if v, err := parseDuration(c, QueryTracingThreshold); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "parsing %s in configuration", QueryTracingThreshold)
+	} else if err == nil {
+		if v < 0 {
+			return errors.Errorf("%s value %q must be a positive duration", QueryTracingThreshold, v)
+		}
+	}
+
+	if v, err := parseDuration(c, DqliteBusyTimeout); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "parsing %s in configuration", DqliteBusyTimeout)
+	} else if err == nil {
+		if v < 0 {
+			return errors.Errorf("%s value %q must be a positive duration", DqliteBusyTimeout, v)
+		}
+	}
+
+	if v, err := parseRatio(c, OpenTelemetrySampleRatio); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "%s", OpenTelemetrySampleRatio)
+	} else if err == nil {
+		if v < 0 || v > 1 {
+			return errors.Errorf("%s value %f must be a ratio between 0 and 1", OpenTelemetrySampleRatio, v)
+		}
+	}
+
+	if v, err := parseDuration(c, OpenTelemetryTailSamplingThreshold); err != nil && !errors.Is(err, errors.NotFound) {
+		return errors.Annotatef(err, "parsing %s in configuration", OpenTelemetryTailSamplingThreshold)
+	} else if err == nil {
+		if v < 0 {
+			return errors.Errorf("%s value %q must be a positive duration", OpenTelemetryTailSamplingThreshold, v)
+		}
+	}
+
+	if v, ok := c[ObjectStoreType].(string); ok {
+		if v == "" {
+			return errors.NotValidf("empty object store type")
+		}
+		if _, err := objectstore.ParseObjectStoreType(v); err != nil {
+			return errors.NotValidf("invalid object store type %q", v)
 		}
 	}
 
@@ -1323,12 +1383,6 @@ func Validate(c Config) error {
 		}
 		if v == c.APIPort() {
 			return errors.NotValidf("ssh-server-port matching api-port")
-		}
-		if v == c.StatePort() {
-			return errors.NotValidf("ssh-server-port matching state-port")
-		}
-		if v == c.ControllerAPIPort() {
-			return errors.NotValidf("ssh-server-port matching controller-api-port")
 		}
 	}
 
@@ -1375,7 +1429,7 @@ func (c Config) AsSpaceConstraints(spaces *[]string) *[]string {
 		}
 	}
 
-	for _, c := range []string{c.JujuManagementSpace(), c.JujuHASpace()} {
+	for _, c := range []string{c.JujuManagementSpace().String()} {
 		// NOTE (hml) 2019-10-30
 		// This can cause issues in deployment and/or enabling HA if
 		// c == AlphaSpaceName as the provisioner expects any space
@@ -1392,4 +1446,65 @@ func (c Config) AsSpaceConstraints(spaces *[]string) *[]string {
 	}
 	ns := newSpaces.SortedValues()
 	return &ns
+}
+
+func parseDuration(c Config, name string) (time.Duration, error) {
+	if _, ok := c[name]; !ok {
+		return 0, errors.NotFoundf("config key %q", name)
+	}
+
+	switch t := c[name].(type) {
+	case string:
+		value, err := time.ParseDuration(t)
+		return value, err
+	case time.Duration:
+		return t, nil
+	case nil:
+		return 0, nil
+	default:
+		return 0, errors.Errorf("unexpected type %T", c[name])
+	}
+}
+
+func parseRatio(c Config, name string) (float64, error) {
+	if _, ok := c[name]; !ok {
+		return 0, errors.NotFoundf("config key %q", name)
+	}
+
+	switch t := c[name].(type) {
+	case float64:
+		return t, nil
+	case float32:
+		return float64(t), nil
+	case string:
+		value, err := strconv.ParseFloat(t, 64)
+		return value, err
+	case nil:
+		return 0, nil
+	default:
+		return 0, errors.Errorf("unexpected type %T", c[name])
+	}
+}
+
+// HasCompleteS3ControllerConfig returns true if the controller has a complete
+// S3 configuration. This includes an endpoint, static key, and static secret.
+func HasCompleteS3ControllerConfig(cfg Config) error {
+	endpoint := cfg.ObjectStoreS3Endpoint()
+	staticKey := cfg.ObjectStoreS3StaticKey()
+	staticSecret := cfg.ObjectStoreS3StaticSecret()
+	return HasCompleteS3Config(endpoint, staticKey, staticSecret)
+}
+
+// HasCompleteS3Config returns true if the S3 configuration is complete.
+func HasCompleteS3Config(endpoint, staticKey, staticSecret string) error {
+	if endpoint == "" {
+		return errors.New("missing S3 endpoint")
+	}
+	if staticKey == "" {
+		return errors.New("missing S3 static key")
+	}
+	if staticSecret == "" {
+		return errors.New("missing S3 static secret")
+	}
+	return nil
 }

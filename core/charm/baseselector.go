@@ -4,26 +4,22 @@
 package charm
 
 import (
-	"fmt"
+	"context"
 	"strings"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/base"
-	"github.com/juju/juju/version"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/errors"
 )
 
 const (
 	msgUserRequestedBase = "with the user specified base %q"
 	msgLatestLTSBase     = "with the latest LTS base %q"
 )
-
-// SelectorLogger defines the logging methods needed
-type SelectorLogger interface {
-	Infof(string, ...interface{})
-	Tracef(string, ...interface{})
-}
 
 // BaseSelector is a helper type that determines what base the charm should
 // be deployed to.
@@ -32,7 +28,7 @@ type BaseSelector struct {
 	defaultBase         base.Base
 	explicitDefaultBase bool
 	force               bool
-	logger              SelectorLogger
+	logger              logger.Logger
 	// supportedBases is the union of SupportedCharmBases and
 	// SupportedJujuBases.
 	supportedBases     []base.Base
@@ -43,7 +39,7 @@ type BaseSelector struct {
 type SelectorConfig struct {
 	Config              SelectorModelConfig
 	Force               bool
-	Logger              SelectorLogger
+	Logger              logger.Logger
 	RequestedBase       base.Base
 	SupportedCharmBases []base.Base
 	WorkloadBases       []base.Base
@@ -73,7 +69,7 @@ func ConfigureBaseSelector(cfg SelectorConfig) (BaseSelector, error) {
 	if explicit {
 		parsedDefaultBase, err = base.ParseBaseFromString(defaultBase)
 		if err != nil {
-			return BaseSelector{}, errors.Trace(err)
+			return BaseSelector{}, errors.Capture(err)
 		}
 	}
 	bs := BaseSelector{
@@ -87,7 +83,7 @@ func ConfigureBaseSelector(cfg SelectorConfig) (BaseSelector, error) {
 	}
 	bs.supportedBases, err = bs.validate(cfg.SupportedCharmBases, cfg.WorkloadBases)
 	if err != nil {
-		return BaseSelector{}, errors.Trace(err)
+		return BaseSelector{}, errors.Capture(err)
 	}
 	return bs, nil
 }
@@ -99,16 +95,16 @@ func (s BaseSelector) validate(supportedCharmBases, supportedJujuBases []base.Ba
 	// If the image-id constraint is provided then base must be explicitly
 	// provided either by flag either by model-config default base.
 	if s.logger == nil {
-		return nil, errors.NotValidf("empty Logger")
+		return nil, errors.Errorf("empty Logger %w", coreerrors.NotValid)
 	}
 	if s.usingImageID && s.requestedBase.Empty() && !s.explicitDefaultBase {
-		return nil, errors.Forbiddenf("base must be explicitly provided when image-id constraint is used")
+		return nil, errors.Errorf("base must be explicitly provided when image-id constraint is used %w", coreerrors.Forbidden)
 	}
 	if len(supportedCharmBases) == 0 {
-		return nil, errors.NotValidf("charm does not define any bases,")
+		return nil, errors.Errorf("charm does not define any bases, %w", coreerrors.NotValid)
 	}
 	if len(supportedJujuBases) == 0 {
-		return nil, errors.NotValidf("no juju supported bases")
+		return nil, errors.Errorf("no juju supported bases %w", coreerrors.NotValid)
 	}
 	// Verify that the charm supported bases include at least one juju
 	// supported base.
@@ -118,12 +114,12 @@ func (s BaseSelector) validate(supportedCharmBases, supportedJujuBases []base.Ba
 			s.jujuSupportedBases.Add(jujuCharmBase.String())
 			if jujuCharmBase.IsCompatible(charmBase) {
 				supportedBases = append(supportedBases, charmBase)
-				s.logger.Infof(msgUserRequestedBase, charmBase)
+				s.logger.Infof(context.TODO(), msgUserRequestedBase, charmBase)
 			}
 		}
 	}
 	if len(supportedBases) == 0 {
-		return nil, errors.NotSupportedf("the charm defined bases %q", printBases(supportedCharmBases))
+		return nil, errors.Errorf("the charm defined bases %q %w", printBases(supportedCharmBases), coreerrors.NotSupported)
 	}
 	return supportedBases, nil
 }
@@ -159,7 +155,7 @@ func (s BaseSelector) CharmBase() (selectedBase base.Base, err error) {
 	// Try juju's current default supported Ubuntu LTS
 	jujuDefaultBase, err := BaseForCharm(version.DefaultSupportedLTSBase(), s.supportedBases)
 	if err == nil {
-		s.logger.Infof(msgLatestLTSBase, version.DefaultSupportedLTSBase())
+		s.logger.Infof(context.TODO(), msgLatestLTSBase, version.DefaultSupportedLTSBase())
 		return jujuDefaultBase, nil
 	}
 
@@ -178,17 +174,17 @@ func (s BaseSelector) userRequested(requestedBase base.Base) (base.Base, error) 
 		b = requestedBase
 	} else if err != nil {
 		if !s.jujuSupportedBases.Contains(requestedBase.String()) {
-			return base.Base{}, errors.NewNotSupported(nil, fmt.Sprintf("base: %s", requestedBase))
+			return base.Base{}, errors.Errorf("base: %s %w", requestedBase, coreerrors.NotSupported)
 		}
 		if IsUnsupportedBaseError(err) {
 			return base.Base{}, errors.Errorf(
 				"base %q is not supported, supported bases are: %s",
-				requestedBase, printBases(s.supportedBases),
-			)
+				requestedBase, printBases(s.supportedBases))
+
 		}
 		return base.Base{}, err
 	}
-	s.logger.Infof(msgUserRequestedBase, b)
+	s.logger.Infof(context.TODO(), msgUserRequestedBase, b)
 	return b, nil
 }
 

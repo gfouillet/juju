@@ -4,11 +4,11 @@
 package modelmanager
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/api/base"
@@ -18,10 +18,18 @@ import (
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/environs/config"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.api.modelmanager")
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
+var logger = internallogger.GetLogger("juju.api.modelmanager")
 
 // Client provides methods that the Juju client command uses to interact
 // with models stored in the Juju Server.
@@ -33,25 +41,33 @@ type Client struct {
 
 // NewClient creates a new `Client` based on an existing authenticated API
 // connection.
-func NewClient(st base.APICallCloser) *Client {
-	frontend, backend := base.NewClientFacade(st, "ModelManager")
+func NewClient(st base.APICallCloser, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(st, "ModelManager", options...)
+	legacy := frontend.BestAPIVersion() < 11
 	return &Client{
 		ClientFacade:   frontend,
 		facade:         backend,
-		ModelStatusAPI: common.NewModelStatusAPI(backend),
+		ModelStatusAPI: common.NewModelStatusAPI(backend, legacy),
 	}
 }
 
 // CreateModel creates a new model using the model config,
 // cloud region and credential specified in the args.
 func (c *Client) CreateModel(
-	name, owner, cloud, cloudRegion string,
+	ctx context.Context,
+	name string,
+	modelCreator names.UserTag,
+	cloud, cloudRegion string,
 	cloudCredential names.CloudCredentialTag,
 	config map[string]interface{},
 ) (base.ModelInfo, error) {
 	var result base.ModelInfo
-	if !names.IsValidUser(owner) {
-		return result, errors.Errorf("invalid owner name %q", owner)
+
+	// At the moment, the model qualifier is set to the user who creates the model.
+	qualifier := model.QualifierFromUserTag(modelCreator)
+
+	if err := qualifier.Validate(); err != nil {
+		return result, errors.Errorf("invalid qualifier %q", qualifier)
 	}
 	var cloudTag string
 	if cloud != "" {
@@ -66,14 +82,17 @@ func (c *Client) CreateModel(
 	}
 	createArgs := params.ModelCreateArgs{
 		Name:               name,
-		OwnerTag:           names.NewUserTag(owner).String(),
+		Qualifier:          qualifier.String(),
 		Config:             config,
 		CloudTag:           cloudTag,
 		CloudRegion:        cloudRegion,
 		CloudCredentialTag: cloudCredentialTag,
 	}
+	if c.BestAPIVersion() < 11 {
+		return c.createModelCompat(ctx, modelCreator, createArgs)
+	}
 	var modelInfo params.ModelInfo
-	err := c.facade.FacadeCall("CreateModel", createArgs, &modelInfo)
+	err := c.facade.FacadeCall(ctx, "CreateModel", createArgs, &modelInfo)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
@@ -83,31 +102,26 @@ func (c *Client) CreateModel(
 func convertParamsModelInfo(modelInfo params.ModelInfo) (base.ModelInfo, error) {
 	cloud, err := names.ParseCloudTag(modelInfo.CloudTag)
 	if err != nil {
-		return base.ModelInfo{}, err
+		return base.ModelInfo{}, errors.Trace(err)
 	}
 	var credential string
 	if modelInfo.CloudCredentialTag != "" {
 		credTag, err := names.ParseCloudCredentialTag(modelInfo.CloudCredentialTag)
 		if err != nil {
-			return base.ModelInfo{}, err
+			return base.ModelInfo{}, errors.Trace(err)
 		}
 		credential = credTag.Id()
 	}
-	ownerTag, err := names.ParseUserTag(modelInfo.OwnerTag)
-	if err != nil {
-		return base.ModelInfo{}, err
-	}
 	result := base.ModelInfo{
 		Name:            modelInfo.Name,
+		Qualifier:       model.Qualifier(modelInfo.Qualifier),
 		UUID:            modelInfo.UUID,
 		ControllerUUID:  modelInfo.ControllerUUID,
 		IsController:    modelInfo.IsController,
 		ProviderType:    modelInfo.ProviderType,
-		DefaultSeries:   modelInfo.DefaultSeries,
 		Cloud:           cloud.Id(),
 		CloudRegion:     modelInfo.CloudRegion,
 		CloudCredential: credential,
-		Owner:           ownerTag.Id(),
 		Life:            modelInfo.Life,
 		AgentVersion:    modelInfo.AgentVersion,
 	}
@@ -140,10 +154,7 @@ func convertParamsModelInfo(modelInfo params.ModelInfo) (base.ModelInfo, error) 
 			Id:          m.Id,
 			InstanceId:  m.InstanceId,
 			DisplayName: m.DisplayName,
-			HasVote:     m.HasVote,
-			WantsVote:   m.WantsVote,
 			Status:      m.Status,
-			HAPrimary:   m.HAPrimary,
 		}
 		if m.Hardware != nil {
 			machine.Hardware = &instance.HardwareCharacteristics{
@@ -165,67 +176,66 @@ func convertParamsModelInfo(modelInfo params.ModelInfo) (base.ModelInfo, error) 
 // has access to in the current server.  Only that controller owner
 // can list models for any user (at this stage).  Other users
 // can only ask about their own models.
-func (c *Client) ListModels(user string) ([]base.UserModel, error) {
-	var models params.UserModelList
+func (c *Client) ListModels(ctx context.Context, user string) ([]base.UserModel, error) {
 	if !names.IsValidUser(user) {
 		return nil, errors.Errorf("invalid user name %q", user)
 	}
+	if c.BestAPIVersion() < 11 {
+		return c.listModelsCompat(ctx, user)
+	}
+	var models params.UserModelList
 	entity := params.Entity{names.NewUserTag(user).String()}
-	err := c.facade.FacadeCall("ListModels", entity, &models)
+	err := c.facade.FacadeCall(ctx, "ListModels", entity, &models)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	result := make([]base.UserModel, len(models.UserModels))
 	for i, usermodel := range models.UserModels {
-		owner, err := names.ParseUserTag(usermodel.OwnerTag)
-		if err != nil {
-			return nil, errors.Annotatef(err, "OwnerTag %q at position %d", usermodel.OwnerTag, i)
-		}
-		modelType := model.ModelType(usermodel.Type)
-		if modelType == "" {
-			modelType = model.IAAS
-		}
 		result[i] = base.UserModel{
 			Name:           usermodel.Name,
 			UUID:           usermodel.UUID,
-			Type:           modelType,
-			Owner:          owner.Id(),
+			Type:           model.ModelType(usermodel.Type),
+			Qualifier:      model.Qualifier(usermodel.Qualifier),
 			LastConnection: usermodel.LastConnection,
 		}
 	}
 	return result, nil
 }
 
-func (c *Client) ListModelSummaries(user string, all bool) ([]base.UserModelSummary, error) {
-	var out params.ModelSummaryResults
+// ListModelSummaries returns summary information about models visible to the user.
+func (c *Client) ListModelSummaries(ctx context.Context, user string, all bool) ([]base.UserModelSummary, error) {
 	if !names.IsValidUser(user) {
 		return nil, errors.Errorf("invalid user name %q", user)
 	}
+	if c.BestAPIVersion() < 11 {
+		return c.listModelSummariesCompat(ctx, user, all)
+	}
+	var out params.ModelSummaryResults
 	in := params.ModelSummariesRequest{UserTag: names.NewUserTag(user).String(), All: all}
-	err := c.facade.FacadeCall("ListModelSummaries", in, &out)
+	err := c.facade.FacadeCall(ctx, "ListModelSummaries", in, &out)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	summaries := make([]base.UserModelSummary, len(out.Results))
-	for i, r := range out.Results {
+	return c.composeModelSummaries(out.Results)
+}
+
+func (c *Client) composeModelSummaries(results []params.ModelSummaryResult) ([]base.UserModelSummary, error) {
+	summaries := make([]base.UserModelSummary, len(results))
+	for i, r := range results {
 		if r.Error != nil {
 			// cope with typed error
 			summaries[i] = base.UserModelSummary{Error: errors.Trace(r.Error)}
 			continue
 		}
 		summary := r.Result
-		modelType := model.ModelType(summary.Type)
-		if modelType == "" {
-			modelType = model.IAAS
-		}
 		summaries[i] = base.UserModelSummary{
 			Name:               summary.Name,
+			Qualifier:          model.Qualifier(summary.Qualifier),
 			UUID:               summary.UUID,
-			Type:               modelType,
+			Type:               model.ModelType(summary.Type),
 			ControllerUUID:     summary.ControllerUUID,
 			IsController:       summary.IsController,
 			ProviderType:       summary.ProviderType,
-			DefaultSeries:      summary.DefaultSeries,
 			CloudRegion:        summary.CloudRegion,
 			Life:               summary.Life,
 			ModelUserAccess:    string(summary.UserAccess),
@@ -245,21 +255,15 @@ func (c *Client) ListModelSummaries(user string, all bool) ([]base.UserModelSumm
 		for k, v := range summary.Status.Data {
 			summaries[i].Status.Data[k] = v
 		}
-		if owner, err := names.ParseUserTag(summary.OwnerTag); err != nil {
-			summaries[i].Error = errors.Annotatef(err, "while parsing model owner tag")
-			continue
-		} else {
-			summaries[i].Owner = owner.Id()
-		}
 		if cloud, err := names.ParseCloudTag(summary.CloudTag); err != nil {
-			summaries[i].Error = errors.Annotatef(err, "while parsing model cloud tag")
+			summaries[i].Error = errors.Annotatef(err, "parsing model cloud tag")
 			continue
 		} else {
 			summaries[i].Cloud = cloud.Id()
 		}
 		if summary.CloudCredentialTag != "" {
 			if credTag, err := names.ParseCloudCredentialTag(summary.CloudCredentialTag); err != nil {
-				summaries[i].Error = errors.Annotatef(err, "while parsing model cloud credential tag")
+				summaries[i].Error = errors.Annotatef(err, "parsing model cloud credential tag")
 				continue
 			} else {
 				summaries[i].CloudCredential = credTag.Id()
@@ -272,17 +276,14 @@ func (c *Client) ListModelSummaries(user string, all bool) ([]base.UserModelSumm
 				EndTime:   summary.Migration.End,
 			}
 		}
-		if summary.SLA != nil {
-			summaries[i].SLA = &base.SLASummary{
-				Level: summary.SLA.Level,
-				Owner: summary.SLA.Owner,
-			}
-		}
 	}
 	return summaries, nil
 }
 
-func (c *Client) ModelInfo(tags []names.ModelTag) ([]params.ModelInfoResult, error) {
+func (c *Client) ModelInfo(ctx context.Context, tags []names.ModelTag) ([]params.ModelInfoResult, error) {
+	if c.BestAPIVersion() < 11 {
+		return c.modelInfoCompat(ctx, tags)
+	}
 	entities := params.Entities{
 		Entities: make([]params.Entity, len(tags)),
 	}
@@ -290,7 +291,7 @@ func (c *Client) ModelInfo(tags []names.ModelTag) ([]params.ModelInfoResult, err
 		entities.Entities[i].Tag = tag.String()
 	}
 	var results params.ModelInfoResults
-	err := c.facade.FacadeCall("ModelInfo", entities, &results)
+	err := c.facade.FacadeCall(ctx, "ModelInfo", entities, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -309,14 +310,13 @@ func (c *Client) ModelInfo(tags []names.ModelTag) ([]params.ModelInfoResult, err
 }
 
 // DumpModel returns the serialized database agnostic model representation.
-func (c *Client) DumpModel(model names.ModelTag, simplified bool) (map[string]interface{}, error) {
+func (c *Client) DumpModel(ctx context.Context, model names.ModelTag) (map[string]interface{}, error) {
 	var results params.StringResults
 	entities := params.DumpModelRequest{
-		Entities:   []params.Entity{{Tag: model.String()}},
-		Simplified: simplified,
+		Entities: []params.Entity{{Tag: model.String()}},
 	}
 
-	err := c.facade.FacadeCall("DumpModels", entities, &results)
+	err := c.facade.FacadeCall(ctx, "DumpModels", entities, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -338,13 +338,13 @@ func (c *Client) DumpModel(model names.ModelTag, simplified bool) (map[string]in
 }
 
 // DumpModelDB returns all relevant mongo documents for the model.
-func (c *Client) DumpModelDB(model names.ModelTag) (map[string]interface{}, error) {
+func (c *Client) DumpModelDB(ctx context.Context, model names.ModelTag) (map[string]interface{}, error) {
 	var results params.MapResults
 	entities := params.Entities{
 		Entities: []params.Entity{{Tag: model.String()}},
 	}
 
-	err := c.facade.FacadeCall("DumpModelsDB", entities, &results)
+	err := c.facade.FacadeCall(ctx, "DumpModelsDB", entities, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -361,7 +361,7 @@ func (c *Client) DumpModelDB(model names.ModelTag) (map[string]interface{}, erro
 // DestroyModel puts the specified model into a "dying" state, which will
 // cause the model's resources to be cleaned up, after which the model will
 // be removed.
-func (c *Client) DestroyModel(tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error {
+func (c *Client) DestroyModel(ctx context.Context, tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error {
 	arg := params.DestroyModelParams{
 		ModelTag:       tag.String(),
 		DestroyStorage: destroyStorage,
@@ -371,7 +371,7 @@ func (c *Client) DestroyModel(tag names.ModelTag, destroyStorage, force *bool, m
 	}
 	args := params.DestroyModelsParams{Models: []params.DestroyModelParams{arg}}
 	var results params.ErrorResults
-	if err := c.facade.FacadeCall("DestroyModels", args, &results); err != nil {
+	if err := c.facade.FacadeCall(ctx, "DestroyModels", args, &results); err != nil {
 		return errors.Trace(err)
 	}
 	if n := len(results.Results); n != 1 {
@@ -384,16 +384,16 @@ func (c *Client) DestroyModel(tag names.ModelTag, destroyStorage, force *bool, m
 }
 
 // GrantModel grants a user access to the specified models.
-func (c *Client) GrantModel(user, access string, modelUUIDs ...string) error {
-	return c.modifyModelUser(params.GrantModelAccess, user, access, modelUUIDs)
+func (c *Client) GrantModel(ctx context.Context, user, access string, modelUUIDs ...string) error {
+	return c.modifyModelUser(ctx, params.GrantModelAccess, user, access, modelUUIDs)
 }
 
 // RevokeModel revokes a user's access to the specified models.
-func (c *Client) RevokeModel(user, access string, modelUUIDs ...string) error {
-	return c.modifyModelUser(params.RevokeModelAccess, user, access, modelUUIDs)
+func (c *Client) RevokeModel(ctx context.Context, user, access string, modelUUIDs ...string) error {
+	return c.modifyModelUser(ctx, params.RevokeModelAccess, user, access, modelUUIDs)
 }
 
-func (c *Client) modifyModelUser(action params.ModelAction, user, access string, modelUUIDs []string) error {
+func (c *Client) modifyModelUser(ctx context.Context, action params.ModelAction, user, access string, modelUUIDs []string) error {
 	var args params.ModifyModelAccessRequest
 
 	if !names.IsValidUser(user) {
@@ -419,7 +419,7 @@ func (c *Client) modifyModelUser(action params.ModelAction, user, access string,
 	}
 
 	var result params.ErrorResults
-	err := c.facade.FacadeCall("ModifyModelAccess", args, &result)
+	err := c.facade.FacadeCall(ctx, "ModifyModelAccess", args, &result)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -429,7 +429,7 @@ func (c *Client) modifyModelUser(action params.ModelAction, user, access string,
 
 	for i, r := range result.Results {
 		if r.Error != nil && r.Error.Code == params.CodeAlreadyExists {
-			logger.Warningf("model %q is already shared with %q", modelUUIDs[i], userTag.Id())
+			logger.Warningf(context.TODO(), "model %q is already shared with %q", modelUUIDs[i], userTag.Id())
 			result.Results[i].Error = nil
 		}
 	}
@@ -438,12 +438,12 @@ func (c *Client) modifyModelUser(action params.ModelAction, user, access string,
 
 // ModelDefaults returns the default values for various sources used when
 // creating a new model on the specified cloud.
-func (c *Client) ModelDefaults(cloud string) (config.ModelDefaultAttributes, error) {
+func (c *Client) ModelDefaults(ctx context.Context, cloud string) (config.ModelDefaultAttributes, error) {
 	results := params.ModelDefaultsResults{}
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: names.NewCloudTag(cloud).String()}},
 	}
-	err := c.facade.FacadeCall("ModelDefaultsForClouds", args, &results)
+	err := c.facade.FacadeCall(ctx, "ModelDefaultsForClouds", args, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -471,7 +471,7 @@ func (c *Client) ModelDefaults(cloud string) (config.ModelDefaultAttributes, err
 }
 
 // SetModelDefaults updates the specified default model config values.
-func (c *Client) SetModelDefaults(cloud, region string, config map[string]interface{}) error {
+func (c *Client) SetModelDefaults(ctx context.Context, cloud, region string, config map[string]interface{}) error {
 	var cloudTag string
 	if cloud != "" {
 		cloudTag = names.NewCloudTag(cloud).String()
@@ -484,7 +484,7 @@ func (c *Client) SetModelDefaults(cloud, region string, config map[string]interf
 		}},
 	}
 	var result params.ErrorResults
-	err := c.facade.FacadeCall("SetModelDefaults", args, &result)
+	err := c.facade.FacadeCall(ctx, "SetModelDefaults", args, &result)
 	if err != nil {
 		return err
 	}
@@ -492,7 +492,7 @@ func (c *Client) SetModelDefaults(cloud, region string, config map[string]interf
 }
 
 // UnsetModelDefaults removes the specified default model config values.
-func (c *Client) UnsetModelDefaults(cloud, region string, keys ...string) error {
+func (c *Client) UnsetModelDefaults(ctx context.Context, cloud, region string, keys ...string) error {
 	var cloudTag string
 	if cloud != "" {
 		cloudTag = names.NewCloudTag(cloud).String()
@@ -505,7 +505,7 @@ func (c *Client) UnsetModelDefaults(cloud, region string, keys ...string) error 
 		}},
 	}
 	var result params.ErrorResults
-	err := c.facade.FacadeCall("UnsetModelDefaults", args, &result)
+	err := c.facade.FacadeCall(ctx, "UnsetModelDefaults", args, &result)
 	if err != nil {
 		return err
 	}
@@ -513,7 +513,7 @@ func (c *Client) UnsetModelDefaults(cloud, region string, keys ...string) error 
 }
 
 // ChangeModelCredential replaces cloud credential for a given model with the provided one.
-func (c *Client) ChangeModelCredential(model names.ModelTag, credential names.CloudCredentialTag) error {
+func (c *Client) ChangeModelCredential(ctx context.Context, model names.ModelTag, credential names.CloudCredentialTag) error {
 	var out params.ErrorResults
 	in := params.ChangeModelCredentialsParams{
 		Models: []params.ChangeModelCredentialParams{
@@ -521,7 +521,7 @@ func (c *Client) ChangeModelCredential(model names.ModelTag, credential names.Cl
 		},
 	}
 
-	err := c.facade.FacadeCall("ChangeModelCredential", in, &out)
+	err := c.facade.FacadeCall(ctx, "ChangeModelCredential", in, &out)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -530,7 +530,7 @@ func (c *Client) ChangeModelCredential(model names.ModelTag, credential names.Cl
 
 // ValidateModelUpgrade checks to see if it's possible to upgrade a model,
 // before actually attempting to do the real environ-upgrade.
-func (c *Client) ValidateModelUpgrade(model names.ModelTag, force bool) error {
+func (c *Client) ValidateModelUpgrade(ctx context.Context, model names.ModelTag, force bool) error {
 	args := params.ValidateModelUpgradeParams{
 		Models: []params.ModelParam{{
 			ModelTag: model.String(),
@@ -538,7 +538,7 @@ func (c *Client) ValidateModelUpgrade(model names.ModelTag, force bool) error {
 		Force: force,
 	}
 	var results params.ErrorResults
-	if err := c.facade.FacadeCall("ValidateModelUpgrades", args, &results); err != nil {
+	if err := c.facade.FacadeCall(ctx, "ValidateModelUpgrades", args, &results); err != nil {
 		return errors.Trace(err)
 	}
 	if num := len(results.Results); num != 1 {

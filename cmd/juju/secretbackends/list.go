@@ -4,29 +4,30 @@
 package secretbackends
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/secretbackends"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/secrets/provider"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/secrets/provider"
 )
 
 type listSecretBackendsCommand struct {
 	modelcmd.ControllerCommandBase
 	out cmd.Output
 
-	listSecretBackendsAPIFunc func() (ListSecretBackendsAPI, error)
+	listSecretBackendsAPIFunc func(ctx context.Context) (ListSecretBackendsAPI, error)
 	revealSecrets             bool
 }
 
@@ -41,7 +42,7 @@ const listSecretBackendsExamples = `
 
 // ListSecretBackendsAPI is the secrets client API.
 type ListSecretBackendsAPI interface {
-	ListSecretBackends([]string, bool) ([]secretbackends.SecretBackend, error)
+	ListSecretBackends(context.Context, []string, bool) ([]secretbackends.SecretBackend, error)
 	Close() error
 }
 
@@ -53,8 +54,8 @@ func NewListSecretBackendsCommand() cmd.Command {
 	return modelcmd.WrapController(c)
 }
 
-func (c *listSecretBackendsCommand) secretBackendsAPI() (ListSecretBackendsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *listSecretBackendsCommand) secretBackendsAPI(ctx context.Context) (ListSecretBackendsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -112,13 +113,13 @@ func (c *listSecretBackendsCommand) Run(ctxt *cmd.Context) error {
 		c.revealSecrets = false
 	}
 
-	api, err := c.listSecretBackendsAPIFunc()
+	api, err := c.listSecretBackendsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	result, err := api.ListSecretBackends(nil, c.revealSecrets)
+	result, err := api.ListSecretBackends(ctxt, nil, c.revealSecrets)
 	if err != nil {
 		return errors.Trace(err)
 	}

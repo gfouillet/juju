@@ -5,60 +5,54 @@ package kubernetes_test
 
 import (
 	"strings"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs/context"
 )
 
 type ConstraintsSuite struct {
 	BaseSuite
-
-	callCtx context.ProviderCallContext
 }
 
-var _ = gc.Suite(&ConstraintsSuite{})
-
-func (s *ConstraintsSuite) SetUpTest(c *gc.C) {
-	s.BaseSuite.SetUpTest(c)
-	s.callCtx = context.NewEmptyCloudCallContext()
+func TestConstraintsSuite(t *testing.T) {
+	tc.Run(t, &ConstraintsSuite{})
 }
 
-func (s *ConstraintsSuite) TestConstraintsValidatorOkay(c *gc.C) {
+func (s *ConstraintsSuite) TestConstraintsValidatorOkay(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
-	validator, err := s.broker.ConstraintsValidator(context.NewEmptyCloudCallContext())
-	c.Assert(err, jc.ErrorIsNil)
+	validator, err := s.broker.ConstraintsValidator(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	cons := constraints.MustParse("mem=64G")
 	unsupported, err := validator.Validate(cons)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(unsupported, gc.HasLen, 0)
+	c.Check(unsupported, tc.HasLen, 0)
 }
 
-func (s *ConstraintsSuite) TestConstraintsValidatorEmpty(c *gc.C) {
+func (s *ConstraintsSuite) TestConstraintsValidatorEmpty(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
-	validator, err := s.broker.ConstraintsValidator(context.NewEmptyCloudCallContext())
-	c.Assert(err, jc.ErrorIsNil)
+	validator, err := s.broker.ConstraintsValidator(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	unsupported, err := validator.Validate(constraints.Value{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(unsupported, gc.HasLen, 0)
+	c.Check(unsupported, tc.HasLen, 0)
 }
 
-func (s *ConstraintsSuite) TestConstraintsValidatorUnsupported(c *gc.C) {
+func (s *ConstraintsSuite) TestConstraintsValidatorUnsupported(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
-	validator, err := s.broker.ConstraintsValidator(context.NewEmptyCloudCallContext())
-	c.Assert(err, jc.ErrorIsNil)
+	validator, err := s.broker.ConstraintsValidator(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	cons := constraints.MustParse(strings.Join([]string{
 		"arch=amd64",
@@ -67,13 +61,13 @@ func (s *ConstraintsSuite) TestConstraintsValidatorUnsupported(c *gc.C) {
 		"instance-type=some-type",
 		"cores=2",
 		"cpu-power=250",
-		"virt-type=kvm",
+		"virt-type=lxd",
 		"root-disk=10M",
 		"spaces=foo",
-		"container=kvm",
+		"container=lxd",
 	}, " "))
 	unsupported, err := validator.Validate(cons)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	expected := []string{
 		"cores",
@@ -82,5 +76,5 @@ func (s *ConstraintsSuite) TestConstraintsValidatorUnsupported(c *gc.C) {
 		"spaces",
 		"container",
 	}
-	c.Check(unsupported, jc.SameContents, expected)
+	c.Check(unsupported, tc.SameContents, expected)
 }

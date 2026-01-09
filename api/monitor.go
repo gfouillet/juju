@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/clock"
@@ -16,7 +17,7 @@ import (
 type monitor struct {
 	clock clock.Clock
 
-	ping        func() error
+	ping        func(context.Context) error
 	pingPeriod  time.Duration
 	pingTimeout time.Duration
 
@@ -26,37 +27,44 @@ type monitor struct {
 }
 
 func (m *monitor) run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	defer close(m.broken)
 	for {
 		select {
 		case <-m.closed:
 			return
+
 		case <-m.dead:
-			logger.Debugf("RPC connection died")
+			logger.Debugf(ctx, "RPC connection died")
 			return
+
 		case <-m.clock.After(m.pingPeriod):
-			if !m.pingWithTimeout() {
+			if !m.pingWithTimeout(ctx) {
 				return
 			}
 		}
 	}
 }
 
-func (m *monitor) pingWithTimeout() bool {
+func (m *monitor) pingWithTimeout(ctx context.Context) bool {
 	result := make(chan error, 1)
 	go func() {
 		// Note that result is buffered so that we don't leak this
 		// goroutine when a timeout happens.
-		result <- m.ping()
+		result <- m.ping(ctx)
 	}()
+
 	select {
 	case err := <-result:
 		if err != nil {
-			logger.Debugf("health ping failed: %v", err)
+			logger.Debugf(ctx, "health ping failed: %v", err)
 		}
 		return err == nil
+
 	case <-m.clock.After(m.pingTimeout):
-		logger.Warningf("health ping timed out after %s", m.pingTimeout)
+		logger.Warningf(ctx, "health ping timed out after %s", m.pingTimeout)
 		return false
 	}
 }

@@ -5,26 +5,28 @@ package machinemanager_test
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/machinemanager"
+	"github.com/juju/juju/core/storage"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
-var _ = gc.Suite(&MachinemanagerSuite{})
+func TestMachinemanagerSuite(t *testing.T) {
+	tc.Run(t, &MachinemanagerSuite{})
+}
 
 type MachinemanagerSuite struct {
 }
 
-func (s *MachinemanagerSuite) TestAddMachines(c *gc.C) {
+func (s *MachinemanagerSuite) TestAddMachines(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -35,7 +37,7 @@ func (s *MachinemanagerSuite) TestAddMachines(c *gc.C) {
 
 	machines := []params.AddMachineParams{{
 		Base:  &params.Base{Name: "ubuntu", Channel: "22.04"},
-		Disks: []storage.Constraints{{Pool: "loop", Size: 1}},
+		Disks: []storage.Directive{{Pool: "loop", Size: 1}},
 	}, {
 		Base: &params.Base{Name: "ubuntu", Channel: "20.04"},
 	}}
@@ -48,15 +50,15 @@ func (s *MachinemanagerSuite) TestAddMachines(c *gc.C) {
 		Machines: apiResult,
 	}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("AddMachines", args, res).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "AddMachines", args, res).SetArg(3, results).Return(nil)
 	st := machinemanager.NewClientFromCaller(mockFacadeCaller)
 
-	result, err := st.AddMachines(machines)
-	c.Check(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, apiResult)
+	result, err := st.AddMachines(c.Context(), machines)
+	c.Check(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, apiResult)
 }
 
-func (s *MachinemanagerSuite) TestAddMachinesClientError(c *gc.C) {
+func (s *MachinemanagerSuite) TestAddMachinesClientError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -66,12 +68,12 @@ func (s *MachinemanagerSuite) TestAddMachinesClientError(c *gc.C) {
 	res := new(params.AddMachinesResults)
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
 	st := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	mockFacadeCaller.EXPECT().FacadeCall("AddMachines", args, res).Return(errors.New("blargh"))
-	_, err := st.AddMachines([]params.AddMachineParams{{}})
-	c.Check(err, gc.ErrorMatches, "blargh")
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "AddMachines", args, res).Return(errors.New("blargh"))
+	_, err := st.AddMachines(c.Context(), []params.AddMachineParams{{}})
+	c.Check(err, tc.ErrorMatches, "blargh")
 }
 
-func (s *MachinemanagerSuite) TestAddMachinesServerError(c *gc.C) {
+func (s *MachinemanagerSuite) TestAddMachinesServerError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -90,14 +92,14 @@ func (s *MachinemanagerSuite) TestAddMachinesServerError(c *gc.C) {
 		Machines: apiResult,
 	}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("AddMachines", args, res).SetArg(2, ress).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "AddMachines", args, res).SetArg(3, ress).Return(nil)
 	st := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	results, err := st.AddMachines(machines)
-	c.Check(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, apiResult)
+	results, err := st.AddMachines(c.Context(), machines)
+	c.Check(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, apiResult)
 }
 
-func (s *MachinemanagerSuite) TestAddMachinesResultCountInvalid(c *gc.C) {
+func (s *MachinemanagerSuite) TestAddMachinesResultCountInvalid(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -119,14 +121,14 @@ func (s *MachinemanagerSuite) TestAddMachinesResultCountInvalid(c *gc.C) {
 			Machines: results,
 		}
 		mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-		mockFacadeCaller.EXPECT().FacadeCall("AddMachines", args, res).SetArg(2, ress).Return(nil)
+		mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "AddMachines", args, res).SetArg(3, ress).Return(nil)
 		st := machinemanager.NewClientFromCaller(mockFacadeCaller)
-		_, err := st.AddMachines(machines)
-		c.Check(err, gc.ErrorMatches, fmt.Sprintf("expected 1 result, got %d", n))
+		_, err := st.AddMachines(c.Context(), machines)
+		c.Check(err, tc.ErrorMatches, fmt.Sprintf("expected 1 result, got %d", n))
 	}
 }
 
-func (s *MachinemanagerSuite) TestRetryProvisioning(c *gc.C) {
+func (s *MachinemanagerSuite) TestRetryProvisioning(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -142,17 +144,17 @@ func (s *MachinemanagerSuite) TestRetryProvisioning(c *gc.C) {
 		{}},
 	}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("RetryProvisioning", args, res).SetArg(2, ress).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "RetryProvisioning", args, res).SetArg(3, ress).Return(nil)
 	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	result, err := client.RetryProvisioning(false, names.NewMachineTag("0"), names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, []params.ErrorResult{
+	result, err := client.RetryProvisioning(c.Context(), false, names.NewMachineTag("0"), names.NewMachineTag("1"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, []params.ErrorResult{
 		{Error: &params.Error{Code: "boom"}},
 		{},
 	})
 }
 
-func (s *MachinemanagerSuite) TestRetryProvisioningAll(c *gc.C) {
+func (s *MachinemanagerSuite) TestRetryProvisioningAll(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -166,17 +168,17 @@ func (s *MachinemanagerSuite) TestRetryProvisioningAll(c *gc.C) {
 		{}},
 	}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("RetryProvisioning", args, res).SetArg(2, ress).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "RetryProvisioning", args, res).SetArg(3, ress).Return(nil)
 	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	result, err := client.RetryProvisioning(true)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, []params.ErrorResult{
+	result, err := client.RetryProvisioning(c.Context(), true)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, []params.ErrorResult{
 		{Error: &params.Error{Code: "boom"}},
 		{},
 	})
 }
 
-func (s *MachinemanagerSuite) TestProvisioningScript(c *gc.C) {
+func (s *MachinemanagerSuite) TestProvisioningScript(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -189,17 +191,17 @@ func (s *MachinemanagerSuite) TestProvisioningScript(c *gc.C) {
 	res := new(params.ProvisioningScriptResult)
 	ress := params.ProvisioningScriptResult{Script: "script"}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("ProvisioningScript", args, res).SetArg(2, ress).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ProvisioningScript", args, res).SetArg(3, ress).Return(nil)
 	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
 
-	script, err := client.ProvisioningScript(params.ProvisioningScriptParams{
+	script, err := client.ProvisioningScript(c.Context(), params.ProvisioningScriptParams{
 		MachineId:              "0",
 		Nonce:                  "nonce",
 		DataDir:                "/path/to/data",
 		DisablePackageCommands: true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(script, gc.Equals, "script")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(script, tc.Equals, "script")
 }
 
 func (s *MachinemanagerSuite) clientToTestDestroyMachinesWithParams(maxWait *time.Duration, ctrl *gomock.Controller) (*machinemanager.Client, []params.DestroyMachineResult) {
@@ -225,92 +227,27 @@ func (s *MachinemanagerSuite) clientToTestDestroyMachinesWithParams(maxWait *tim
 	res := new(params.DestroyMachineResults)
 	ress := params.DestroyMachineResults{Results: expectedResults}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("DestroyMachineWithParams", args, res).SetArg(2, ress).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "DestroyMachineWithParams", args, res).SetArg(3, ress).Return(nil)
 	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
 
 	return client, expectedResults
 }
 
-func (s *MachinemanagerSuite) TestDestroyMachinesWithParamsNoWait(c *gc.C) {
+func (s *MachinemanagerSuite) TestDestroyMachinesWithParamsNoWait(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	noWait := 0 * time.Second
 	client, expected := s.clientToTestDestroyMachinesWithParams(&noWait, ctrl)
-	results, err := client.DestroyMachinesWithParams(true, true, false, &noWait, "0", "0/lxd/1")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, expected)
+	results, err := client.DestroyMachinesWithParams(c.Context(), true, true, false, &noWait, "0", "0/lxd/1")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, expected)
 }
 
-func (s *MachinemanagerSuite) TestDestroyMachinesWithParamsNilWait(c *gc.C) {
+func (s *MachinemanagerSuite) TestDestroyMachinesWithParamsNilWait(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 	client, expected := s.clientToTestDestroyMachinesWithParams((*time.Duration)(nil), ctrl)
-	results, err := client.DestroyMachinesWithParams(true, true, false, (*time.Duration)(nil), "0", "0/lxd/1")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, expected)
-}
-
-func (s *MachinemanagerSuite) TestUpgradeSeriesPrepare(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("UpgradeSeriesPrepare", gomock.Any(), gomock.Any()).Return(&params.Error{
-		Code: params.CodeNotImplemented,
-	})
-	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	err := client.UpgradeSeriesPrepare("machine-0", "24.04/stable", true)
-	c.Assert(err, jc.ErrorIs, errors.NotImplemented)
-}
-
-func (s *MachinemanagerSuite) TestUpgradeSeriesComplete(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("UpgradeSeriesComplete", gomock.Any(), gomock.Any()).Return(&params.Error{
-		Code: params.CodeNotImplemented,
-	})
-	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	err := client.UpgradeSeriesComplete("machine-0")
-	c.Assert(err, jc.ErrorIs, errors.NotImplemented)
-}
-
-func (s *MachinemanagerSuite) TestUpgradeSeriesValidate(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("UpgradeSeriesValidate", gomock.Any(), gomock.Any()).Return(&params.Error{
-		Code: params.CodeNotImplemented,
-	})
-	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	_, err := client.UpgradeSeriesValidate("machine-0", "24.04/stable")
-	c.Assert(err, jc.ErrorIs, errors.NotImplemented)
-}
-
-func (s *MachinemanagerSuite) TestWatchUpgradeSeriesNotifications(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("WatchUpgradeSeriesNotifications", gomock.Any(), gomock.Any()).Return(&params.Error{
-		Code: params.CodeNotImplemented,
-	})
-	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	_, _, err := client.WatchUpgradeSeriesNotifications("machine-0")
-	c.Assert(err, jc.ErrorIs, errors.NotImplemented)
-}
-
-func (s *MachinemanagerSuite) TestGetUpgradeSeriesMessages(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("GetUpgradeSeriesMessages", gomock.Any(), gomock.Any()).Return(&params.Error{
-		Code: params.CodeNotImplemented,
-	})
-	client := machinemanager.NewClientFromCaller(mockFacadeCaller)
-	_, err := client.GetUpgradeSeriesMessages("machine-0", "0")
-	c.Assert(err, jc.ErrorIs, errors.NotImplemented)
+	results, err := client.DestroyMachinesWithParams(c.Context(), true, true, false, (*time.Duration)(nil), "0", "0/lxd/1")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, expected)
 }

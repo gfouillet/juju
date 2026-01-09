@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/core/application"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // GoalStateCommand implements the config-get command.
@@ -85,7 +85,7 @@ func (c *GoalStateCommand) Init(args []string) error {
 }
 
 func (c *GoalStateCommand) Run(ctx *cmd.Context) error {
-	goalState, err := c.ctx.GoalState()
+	goalState, err := c.ctx.GoalState(ctx)
 	if err != nil {
 		return err
 	}

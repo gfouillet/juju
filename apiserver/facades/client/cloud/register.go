@@ -4,28 +4,44 @@
 package cloud
 
 import (
+	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Cloud", 7, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV7(ctx) // Do not set error if forcing credential update.
+	registry.MustRegister("Cloud", 7, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV7(stdCtx, ctx) // Do not set error if forcing credential update.
 	}, reflect.TypeOf((*CloudAPI)(nil)))
 }
 
 // newFacadeV7 is used for API registration.
-func newFacadeV7(context facade.Context) (*CloudAPI, error) {
-	st := NewStateBackend(context.State())
-	pool := NewModelPoolBackend(context.StatePool())
-	systemState, err := pool.SystemState()
+func newFacadeV7(stdCtx context.Context, context facade.ModelContext) (*CloudAPI, error) {
+	domainServices := context.DomainServices()
+	credentialService := domainServices.Credential()
+	modelService := domainServices.Model()
+
+	// Get the controller UUID
+	controllerUUID := context.ControllerUUID()
+
+	// Get the controller cloud name
+	controllerCloud, _, err := modelService.DefaultModelCloudInfo(stdCtx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Errorf("failed to get controller cloud name: %v", err)
 	}
-	ctlrSt := NewStateBackend(systemState)
-	return NewCloudAPI(st, ctlrSt, pool, context.Auth())
+
+	return NewCloudAPI(
+		stdCtx,
+		names.NewControllerTag(controllerUUID),
+		controllerCloud,
+		domainServices.Cloud(),
+		domainServices.Access(),
+		credentialService,
+		context.Auth(), context.Logger().Child("cloud"),
+	)
 }

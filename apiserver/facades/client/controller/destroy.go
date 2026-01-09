@@ -4,14 +4,20 @@
 package controller
 
 import (
+	"context"
+	"time"
+
 	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/apiserver/facade"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
+	modelerrors "github.com/juju/juju/domain/model/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 // DestroyController destroys the controller.
@@ -20,50 +26,145 @@ import (
 // attempt to do so. Otherwise, if the controller has any non-empty,
 // non-Dead hosted models, then an error with the code
 // params.CodeHasHostedModels will be transmitted.
-func (c *ControllerAPI) DestroyController(args params.DestroyControllerArgs) error {
-	return destroyController(c.state, c.statePool, c.authorizer, args)
-}
-
-func destroyController(
-	st Backend,
-	pool *state.StatePool,
-	authorizer facade.Authorizer,
-	args params.DestroyControllerArgs,
-) error {
-	err := authorizer.HasPermission(permission.SuperuserAccess, st.ControllerTag())
+func (c *ControllerAPI) DestroyController(ctx context.Context, args params.DestroyControllerArgs) error {
+	err := c.authorizer.HasPermission(ctx, permission.SuperuserAccess, names.NewControllerTag(c.controllerUUID))
 	if err != nil {
-		return errors.Trace(err)
+		return apiservererrors.ServerError(err)
 	}
 
-	if err := ensureNotBlocked(st); err != nil {
-		return errors.Trace(err)
+	isControllerModel, err := c.modelInfoService.IsControllerModel(ctx)
+	if err != nil && !errors.Is(err, modelerrors.NotFound) {
+		return apiservererrors.ServerError(err)
+	} else if !isControllerModel {
+		return apiservererrors.ServerError(errors.BadRequestf("current model is not the controller model"))
 	}
 
-	model, err := st.Model()
+	modelUUIDs, err := c.modelService.GetHostedModelUUIDs(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return apiservererrors.ServerError(err)
+	}
+	if err := ensureNotBlocked(ctx, c.blockCommandServiceGetter, modelUUIDs, c.logger); err != nil {
+		return apiservererrors.ServerError(err)
 	}
 
 	// If we are destroying models, we need to tolerate living
 	// models but set the controller to dying to prevent new
 	// models sneaking in. If we are not destroying hosted models,
 	// this will fail if any hosted models are found.
-	backend := common.NewModelManagerBackend(model, pool)
-	return errors.Trace(common.DestroyController(
-		backend, args.DestroyModels, args.DestroyStorage,
-		args.Force, args.MaxWait, args.ModelTimeout,
-	))
+	if !args.DestroyModels && len(modelUUIDs) != 0 {
+		return apiservererrors.ParamsErrorf(params.CodeHasHostedModels,
+			"cannot destroy controller with hosted models")
+	}
+
+	for _, uuid := range modelUUIDs {
+		svc, err := c.blockCommandServiceGetter(ctx, uuid)
+		if err != nil {
+			return apiservererrors.ServerError(err)
+		}
+
+		check := common.NewBlockChecker(svc)
+		if err = check.DestroyAllowed(ctx); internalerrors.Is(err, modelerrors.NotFound) {
+			continue
+		} else if err != nil {
+			return apiservererrors.ServerError(err)
+		}
+	}
+
+	if err := checkForceForControllerModel(ctx, c.blockCommandService, c.modelInfoService, args.Force); err != nil {
+		return apiservererrors.ServerError(err)
+	}
+
+	var force bool
+	if args.Force != nil {
+		force = *args.Force
+	}
+
+	var maxWait time.Duration
+	if args.MaxWait != nil {
+		maxWait = *args.MaxWait
+	}
+
+	removalService, err := c.removalServiceGetter(ctx, c.controllerModelUUID)
+	if err != nil {
+		return apiservererrors.ServerError(err)
+	}
+
+	// Remove the controller and controller model. This will return the
+	// hosted models that also need to be removed. We don't do this within
+	// the removal service, as that doesn't have access to select other
+	// databases from inside of the service. I don't think we want to add
+	// that complexity for just this one use case.
+	childModelUUIDs, err := removalService.RemoveController(ctx, force, maxWait)
+	if err != nil {
+		c.logger.Warningf(ctx, "failed destroying controller: %v", err)
+		return apiservererrors.ServerError(err)
+	}
+
+	for _, modelUUID := range childModelUUIDs {
+		c.logger.Infof(ctx, "removing hosted model %s", modelUUID.String())
+		removalService, err := c.removalServiceGetter(ctx, modelUUID)
+		if err != nil {
+			return apiservererrors.ServerError(err)
+		}
+
+		if _, err := removalService.RemoveModel(ctx, modelUUID, force, maxWait); err != nil && !errors.Is(err, modelerrors.NotFound) {
+			c.logger.Warningf(ctx, "failed removing model %q: %v", modelUUID, err)
+			return apiservererrors.ServerError(err)
+		}
+	}
+
+	return nil
 }
 
-func ensureNotBlocked(st Backend) error {
+func ensureNotBlocked(
+	ctx context.Context,
+	blockCommandServiceGetter func(context.Context, model.UUID) (BlockCommandService, error),
+	uuids []model.UUID,
+	logger corelogger.Logger,
+) error {
 	// If there are blocks let the user know.
-	blocks, err := st.AllBlocksForController()
-	if err != nil {
-		logger.Debugf("Unable to get blocks for controller: %s", err)
-		return errors.Trace(err)
+	for _, uuid := range uuids {
+		blockService, err := blockCommandServiceGetter(ctx, uuid)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		blocks, err := blockService.GetBlocks(ctx)
+		if err != nil {
+			logger.Debugf(ctx, "unable to get blocks for controller: %s", err)
+			return errors.Trace(err)
+		}
+
+		if len(blocks) > 0 {
+			return apiservererrors.OperationBlockedError("found blocks in controller models")
+		}
 	}
-	if len(blocks) > 0 {
-		return apiservererrors.OperationBlockedError("found blocks in controller models")
+
+	return nil
+}
+
+func checkForceForControllerModel(
+	ctx context.Context,
+	blockCommandService BlockCommandService,
+	modelInfoService ModelInfoService,
+	force *bool,
+) error {
+	check := common.NewBlockChecker(blockCommandService)
+	if err := check.DestroyAllowed(ctx); err != nil {
+		return internalerrors.Capture(err)
 	}
+
+	notForcing := force == nil || !*force
+	if notForcing {
+		hasValidCredential, err := modelInfoService.HasValidCredential(ctx)
+
+		if err != nil {
+			return internalerrors.Capture(err)
+		}
+		if !hasValidCredential {
+			return internalerrors.Errorf("invalid cloud credential, use --force")
+		}
+	}
+
 	return nil
 }

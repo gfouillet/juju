@@ -4,9 +4,10 @@
 package resolver
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 )
@@ -46,6 +47,7 @@ type Resolver interface {
 	// it will never have any more operations to perform,
 	// and the caller can cease calling.
 	NextOp(
+		context.Context,
 		LocalState,
 		remotestate.Snapshot,
 		operation.Factory,
@@ -82,26 +84,10 @@ type LocalState struct {
 	// remotestate.Snapshot for which a hook has been retried.
 	RetryHookVersion int
 
-	// LeaderSettingsVersion is the version of leader settings from
-	// remotestate.Snapshot for which a leader-settings-changed hook has
-	// been committed.
-	LeaderSettingsVersion int
-
 	// CompletedActions is the set of actions that have been completed.
 	// This is used to prevent us re running actions requested by the
 	// controller.
 	CompletedActions map[string]struct{}
-
-	// UpgradeMachineStatus is the current state of any currently running
-	// upgrade series.
-	UpgradeMachineStatus model.UpgradeSeriesStatus
-
-	// ContainerRunningStatus is the current state of remote containers for CAAS.
-	ContainerRunningStatus *remotestate.ContainerRunningStatus
-
-	// OutdatedRemoteCharm is true when an upgrade has happened but the remotestate
-	// needs an update.
-	OutdatedRemoteCharm bool
 
 	// HookWasShutdown is true if the hook exited due to a SIGTERM.
 	HookWasShutdown bool

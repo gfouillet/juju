@@ -11,7 +11,7 @@ import (
 	"github.com/juju/ansiterm"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/internal/naturalsort"
 )
 

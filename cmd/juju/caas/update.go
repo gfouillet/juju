@@ -4,16 +4,16 @@
 package caas
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"net/url"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas"
 	k8s "github.com/juju/juju/caas/kubernetes"
 	jujucloud "github.com/juju/juju/cloud"
@@ -22,18 +22,17 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	provider "github.com/juju/juju/internal/provider/kubernetes"
-	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/provider/kubernetes"
 	"github.com/juju/juju/internal/provider/kubernetes/proxy"
-	"github.com/juju/juju/jujuclient"
 	"github.com/juju/juju/rpc/params"
 )
 
 // UpdateCloudAPI - Implemented by cloudapi.Client.
 type UpdateCloudAPI interface {
-	Cloud(tag names.CloudTag) (jujucloud.Cloud, error)
-	UpdateCloud(jujucloud.Cloud) error
-	UpdateCloudsCredentials(cloudCredentials map[string]jujucloud.Credential, force bool) ([]params.UpdateCredentialResult, error)
+	Cloud(ctx context.Context, tag names.CloudTag) (jujucloud.Cloud, error)
+	UpdateCloud(context.Context, jujucloud.Cloud) error
+	UpdateCloudsCredentials(ctx context.Context, cloudCredentials map[string]jujucloud.Credential, force bool) ([]params.UpdateCredentialResult, error)
 	Close() error
 }
 
@@ -80,7 +79,7 @@ type UpdateCAASCommand struct {
 	builtInCloudsFunc func(string) (jujucloud.Cloud, *jujucloud.Credential, string, error)
 
 	// updateCloudAPIFunc is used when updating a cluster on a controller.
-	updateCloudAPIFunc func() (UpdateCloudAPI, error)
+	updateCloudAPIFunc func(ctx context.Context) (UpdateCloudAPI, error)
 
 	// brokerGetter returns CAAS broker instance.
 	brokerGetter BrokerGetter
@@ -104,8 +103,8 @@ func newUpdateCAASCommand(cloudMetadataStore CloudMetadataStore) cmd.Command {
 		builtInCloudsFunc:  maybeBuiltInCloud,
 	}
 	command.brokerGetter = command.newK8sClusterBroker
-	command.updateCloudAPIFunc = func() (UpdateCloudAPI, error) {
-		root, err := command.NewAPIRoot(command.Store, command.ControllerName, "")
+	command.updateCloudAPIFunc = func(ctx context.Context) (UpdateCloudAPI, error) {
+		root, err := command.NewAPIRoot(ctx, command.Store, command.ControllerName, "")
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -154,8 +153,8 @@ func (c *UpdateCAASCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *UpdateCAASCommand) newK8sClusterBroker(cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error) {
-	openParams, err := provider.BaseKubeCloudOpenParams(cloud, credential)
+func (c *UpdateCAASCommand) newK8sClusterBroker(ctx context.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) (k8s.ClusterMetadataChecker, error) {
+	openParams, err := kubernetes.BaseKubeCloudOpenParams(cloud, credential)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -167,7 +166,7 @@ func (c *UpdateCAASCommand) newK8sClusterBroker(cloud jujucloud.Cloud, credentia
 		openParams.ControllerUUID = ctrlUUID
 	}
 
-	broker, err := caas.New(stdcontext.TODO(), openParams)
+	broker, err := caas.New(ctx, openParams, environs.NoopCredentialInvalidator())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -221,7 +220,7 @@ func (c *UpdateCAASCommand) Run(ctx *cmd.Context) (err error) {
 	haveBuiltinCloud := false
 	// First, see if we're updating a built-in cloud.
 	builtinCloud, credential, credentialName, err := c.builtInCloudsFunc(c.caasName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	if err == nil {
@@ -254,8 +253,8 @@ func (c *UpdateCAASCommand) Run(ctx *cmd.Context) (err error) {
 		}
 	}
 
-	if newCloud.Type != k8sconstants.CAASProviderType {
-		ctx.Infof("The %q cloud is a %q cloud and not a %q cloud.", c.caasName, newCloud.Type, k8sconstants.CAASProviderType)
+	if newCloud.Type != jujucloud.CloudTypeKubernetes {
+		ctx.Infof("The %q cloud is a %q cloud and not a %q cloud.", c.caasName, newCloud.Type, jujucloud.CloudTypeKubernetes)
 		return cmd.ErrSilent
 	}
 
@@ -265,12 +264,12 @@ func (c *UpdateCAASCommand) Run(ctx *cmd.Context) (err error) {
 
 	// Check the cluster only if we have a credential to use.
 	if credential != nil {
-		broker, err := c.brokerGetter(*newCloud, *credential)
+		broker, err := c.brokerGetter(ctx, *newCloud, *credential)
 		if err != nil {
 			return errors.Trace(err)
 		}
 
-		if _, err := broker.GetClusterMetadata(""); err != nil {
+		if _, err := broker.GetClusterMetadata(ctx, ""); err != nil {
 			return errors.Annotate(err, "unable to update k8s cluster because the cluster is not accessible")
 		}
 	}
@@ -300,22 +299,22 @@ func (c *UpdateCAASCommand) Run(ctx *cmd.Context) (err error) {
 		if err := jujuclient.ValidateControllerName(c.ControllerName); err != nil {
 			return errors.Trace(err)
 		}
-		cloudClient, err := c.updateCloudAPIFunc()
+		cloudClient, err := c.updateCloudAPIFunc(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		defer cloudClient.Close()
 
-		existing, err := cloudClient.Cloud(names.NewCloudTag(newCloud.Name))
-		if err != nil && !errors.IsNotFound(err) {
+		existing, err := cloudClient.Cloud(ctx, names.NewCloudTag(newCloud.Name))
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
-		if existing.Type != k8sconstants.CAASProviderType {
-			ctx.Infof("The %q cloud on the controller is a %q cloud and not a %q cloud.", c.caasName, existing.Type, k8sconstants.CAASProviderType)
+		if existing.Type != jujucloud.CloudTypeKubernetes {
+			ctx.Infof("The %q cloud on the controller is a %q cloud and not a %q cloud.", c.caasName, existing.Type, jujucloud.CloudTypeKubernetes)
 			return cmd.ErrSilent
 		}
 
-		err = cloudClient.UpdateCloud(*newCloud)
+		err = cloudClient.UpdateCloud(ctx, *newCloud)
 		processErr(err, fmt.Sprintf("k8s cloud %q updated on controller %q.", c.caasName, c.ControllerName))
 		if credential != nil {
 			err = c.updateCredentialOnController(ctx, cloudClient, *credential, c.caasName, credentialName)
@@ -385,7 +384,7 @@ func (c *UpdateCAASCommand) updateCredentialOnController(ctx *cmd.Context, apiCl
 
 	toUpdate := map[string]jujucloud.Credential{}
 	toUpdate[cloudCredTag.String()] = newCredential
-	results, err := apiClient.UpdateCloudsCredentials(toUpdate, false)
+	results, err := apiClient.UpdateCloudsCredentials(ctx, toUpdate, false)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -393,7 +392,7 @@ func (c *UpdateCAASCommand) updateCredentialOnController(ctx *cmd.Context, apiCl
 	for _, result := range results {
 		tag, err := names.ParseCloudCredentialTag(result.CredentialTag)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not parse credential tag %q", result.CredentialTag)
 			resultError = cmd.ErrSilent
 		}

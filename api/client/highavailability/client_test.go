@@ -4,51 +4,68 @@
 package highavailability_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/errors"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/highavailability"
-	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/rpc/params"
 )
 
 type clientSuite struct {
 }
 
-var _ = gc.Suite(&clientSuite{})
+func TestClientSuite(t *testing.T) {
+	tc.Run(t, &clientSuite{})
+}
 
-func (s *clientSuite) TestClientEnableHA(c *gc.C) {
+func (s *clientSuite) TestControllerDetails(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	emptyCons := constraints.Value{}
-
-	args := params.ControllersSpecs{Specs: []params.ControllersSpec{{
-		Constraints:    emptyCons,
-		NumControllers: 3,
-		Placement:      nil,
-	},
-	}}
-	res := new(params.ControllersChangeResults)
-	results := params.ControllersChangeResults{
-		Results: []params.ControllersChangeResult{{
-			Result: params.ControllersChanges{
-				Maintained: []string{"machine-0"},
-				Added:      []string{"machine-1", "machine-2"},
-				Removed:    []string{},
-			}},
-		}}
+	res := new(params.ControllerDetailsResults)
+	results := params.ControllerDetailsResults{
+		Results: []params.ControllerDetails{{
+			ControllerId: "666",
+			APIAddresses: []string{"address"},
+		}}}
 
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("EnableHA", args, res).SetArg(2, results).Return(nil)
-	client := highavailability.NewClientFromCaller(mockFacadeCaller)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ControllerDetails", nil, res).SetArg(3, results).Return(nil)
+	mockClient := basemocks.NewMockClientFacade(ctrl)
+	mockClient.EXPECT().BestAPIVersion().Return(3)
+	client := highavailability.NewClientFromCaller(mockFacadeCaller, mockClient)
 
-	result, err := client.EnableHA(3, emptyCons, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	result, err := client.ControllerDetails(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, map[string]highavailability.ControllerDetails{
+		"666": {
+			ControllerID: "666",
+			APIEndpoints: []string{"address"},
+		},
+	})
+}
 
-	c.Assert(result.Maintained, gc.DeepEquals, []string{"machine-0"})
-	c.Assert(result.Added, gc.DeepEquals, []string{"machine-1", "machine-2"})
-	c.Assert(result.Removed, gc.HasLen, 0)
+func (s *clientSuite) TestControllerDetailsNotSupported(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	res := new(params.ControllerDetailsResults)
+	results := params.ControllerDetailsResults{
+		Results: []params.ControllerDetails{{
+			ControllerId: "666",
+			APIAddresses: []string{"address"},
+		}}}
+
+	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ControllerDetails", nil, res).SetArg(3, results).Return(params.Error{Code: params.CodeNotSupported})
+	mockClient := basemocks.NewMockClientFacade(ctrl)
+	mockClient.EXPECT().BestAPIVersion().Return(3)
+	client := highavailability.NewClientFromCaller(mockFacadeCaller, mockClient)
+
+	_, err := client.ControllerDetails(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotSupported)
 }

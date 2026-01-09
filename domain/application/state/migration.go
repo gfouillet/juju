@@ -1,0 +1,540 @@
+// Copyright 2025 Canonical Ltd.
+// Licensed under the AGPLv3, see LICENCE file for details.
+
+package state
+
+import (
+	"context"
+
+	"github.com/canonical/sqlair"
+
+	coreapplication "github.com/juju/juju/core/application"
+	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/network"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/application"
+	"github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/domain/life"
+	domainnetwork "github.com/juju/juju/domain/network"
+	"github.com/juju/juju/internal/errors"
+)
+
+// GetApplicationsForExport returns all the applications in the model.
+// If the model does not exist, an error satisfying
+// [modelerrors.NotFound] is returned.
+// If the application does not exist, an error satisfying
+// [applicationerrors.ApplicationNotFound] is returned.
+func (st *State) GetApplicationsForExport(ctx context.Context) ([]application.ExportApplication, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var app exportApplication
+	query := `SELECT &exportApplication.* FROM v_application_export`
+	stmt, err := st.Prepare(query, app)
+	if err != nil {
+		return nil, errors.Errorf("preparing statement: %w", err)
+	}
+
+	var apps []exportApplication
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt).GetAll(&apps)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return errors.Errorf("getting applications for export: %w", err)
+		}
+
+		for i := range apps {
+			bindings, err := st.getEndpointBindings(ctx, tx, apps[i].UUID)
+			if err != nil {
+				return errors.Errorf("getting endpoing bindings")
+			}
+			apps[i].EndpointBindings = bindings
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	exportApps := make([]application.ExportApplication, len(apps))
+	for i, app := range apps {
+		locator, err := decodeCharmLocator(charmLocator{
+			ReferenceName:  app.CharmReferenceName,
+			Revision:       app.CharmRevision,
+			SourceID:       app.CharmSourceID,
+			ArchitectureID: app.CharmArchitectureID,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var providerID *string
+		if app.K8sServiceProviderID.Valid {
+			providerID = ptr(app.K8sServiceProviderID.String)
+		}
+
+		exportApps[i] = application.ExportApplication{
+			UUID:                 app.UUID,
+			Name:                 app.Name,
+			CharmUUID:            app.CharmUUID,
+			Life:                 app.Life,
+			Subordinate:          app.Subordinate,
+			CharmModifiedVersion: app.CharmModifiedVersion,
+			CharmUpgradeOnError:  app.CharmUpgradeOnError,
+			CharmLocator: charm.CharmLocator{
+				Name:         locator.Name,
+				Revision:     locator.Revision,
+				Source:       locator.Source,
+				Architecture: locator.Architecture,
+			},
+			K8sServiceProviderID: providerID,
+			EndpointBindings:     app.EndpointBindings,
+		}
+	}
+	return exportApps, nil
+}
+
+// GetApplicationUnitsForExport returns all the units for a given
+// application in the model.
+// If the application does not exist, an error satisfying
+// [applicationerrors.ApplicationNotFound] is returned.
+func (st *State) GetApplicationUnitsForExport(ctx context.Context, appID coreapplication.UUID) ([]application.ExportUnit, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var unit exportUnit
+	id := entityUUID{
+		UUID: appID.String(),
+	}
+	query := `
+SELECT &exportUnit.* FROM v_unit_export
+WHERE application_uuid = $entityUUID.uuid
+`
+	stmt, err := st.Prepare(query, unit, id)
+	if err != nil {
+		return nil, errors.Errorf("preparing statement: %w", err)
+	}
+
+	var units []exportUnit
+	if err := db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		err := tx.Query(ctx, stmt, id).GetAll(&units)
+		if errors.Is(err, sqlair.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return errors.Errorf("getting units for application export %q: %w", appID, err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	exportUnits := make([]application.ExportUnit, len(units))
+	for i, unit := range units {
+		exportUnits[i] = application.ExportUnit{
+			UUID:      unit.UUID,
+			Name:      unit.Name,
+			Machine:   unit.Machine,
+			Principal: unit.Principal,
+		}
+	}
+	return exportUnits, nil
+}
+
+// InsertMigratingApplication inserts a migrating application. Returns as
+// error satisfying [applicationerrors.ApplicationAlreadyExists] if the
+// application already exists. If returns as error satisfying
+// [applicationerrors.CharmNotFound] if the charm for the application is
+// not found.
+func (st *State) InsertMigratingApplication(ctx context.Context, name string, args application.InsertApplicationArgs) (coreapplication.UUID, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	a, err := coreapplication.NewUUID()
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	appUUID := a.String()
+
+	charmID, err := corecharm.NewID()
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	charmIDStr := charmID.String()
+
+	appDetails := setApplicationDetails{
+		UUID:      appUUID,
+		Name:      name,
+		CharmUUID: charmIDStr,
+		LifeID:    life.Alive,
+
+		// The space is defaulted to Alpha, which is guaranteed to exist.
+		// However, if there is a default space defined in endpoint bindings
+		// (through a binding with an empty endpoint or by default-space model
+		// config), the application space will be updated later in the
+		// transaction, during the insertion of application_endpoints.
+		// The space defined here will be used as the default space when creating a
+		// relation where application_endpoint doesn't have a defined space.
+		// There is no need to set the space to the default space defined during
+		// migration import, because an application always has a default space
+		// which is passed through endpoint bindings in migration.
+		SpaceUUID: network.AlphaSpaceId.String(),
+	}
+
+	createApplication := `INSERT INTO application (*) VALUES ($setApplicationDetails.*)`
+	createApplicationStmt, err := st.Prepare(createApplication, appDetails)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	scaleInfo := applicationScale{
+		ApplicationID: appUUID,
+		Scale:         args.Scale,
+	}
+	createScale := `INSERT INTO application_scale (*) VALUES ($applicationScale.*)`
+	createScaleStmt, err := st.Prepare(createScale, scaleInfo)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	platformInfo := applicationPlatform{
+		ApplicationID:  appUUID,
+		OSTypeID:       int(args.Platform.OSType),
+		Channel:        args.Platform.Channel,
+		ArchitectureID: int(args.Platform.Architecture),
+	}
+	createPlatform := `INSERT INTO application_platform (*) VALUES ($applicationPlatform.*)`
+	createPlatformStmt, err := st.Prepare(createPlatform, platformInfo)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	var (
+		referenceName = args.Charm.ReferenceName
+		revision      = args.Charm.Revision
+		charmName     = args.Charm.Metadata.Name
+	)
+
+	var (
+		createChannelStmt *sqlair.Statement
+		channelInfo       applicationChannel
+	)
+	if ch := args.Channel; ch != nil {
+		channelInfo = applicationChannel{
+			ApplicationID: appUUID,
+			Track:         ch.Track,
+			Risk:          string(ch.Risk),
+			Branch:        ch.Branch,
+		}
+		createChannel := `INSERT INTO application_channel (*) VALUES ($applicationChannel.*)`
+		if createChannelStmt, err = st.Prepare(createChannel, channelInfo); err != nil {
+			return "", errors.Capture(err)
+		}
+	}
+
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		// Check if the application already exists.
+		if err := st.checkApplicationNameAvailable(ctx, tx, name); err != nil {
+			return errors.Errorf("checking if application %q exists: %w", name, err)
+		}
+
+		shouldInsertCharm := true
+
+		// Check if the charm already exists.
+		existingCharmID, err := st.checkCharmReferenceExists(ctx, tx, referenceName, revision)
+		if err != nil && !errors.Is(err, applicationerrors.CharmAlreadyExists) {
+			return errors.Errorf("checking if charm %q exists: %w", charmName, err)
+		} else if errors.Is(err, applicationerrors.CharmAlreadyExists) {
+			// We already have an existing charm, in this case we just want
+			// to point the application to the existing charm.
+			appDetails.CharmUUID = existingCharmID
+
+			shouldInsertCharm = false
+		}
+
+		if shouldInsertCharm {
+			// When importing a charm, we don't have all the information
+			// about the charm. We could call charmhub store directly, but
+			// that has the potential to block a migration if the charmhub
+			// store is down. If we require that information, then it's
+			// possible to fill this missing information in the charmhub
+			// store using the charmhub identifier.
+			// If the controllers do not have the same charmhub url, then
+			// all bets are off.
+			downloadInfo := &charm.DownloadInfo{Provenance: charm.ProvenanceMigration}
+			if err := st.addCharm(ctx, tx, charmID, args.Charm, downloadInfo); err != nil {
+				return errors.Errorf("setting charm: %w", err)
+			}
+		}
+
+		// If the application doesn't exist, create it.
+		if err := tx.Query(ctx, createApplicationStmt, appDetails).Run(); err != nil {
+			return errors.Errorf("inserting row for application %q: %w", name, err)
+		}
+		if err := tx.Query(ctx, createPlatformStmt, platformInfo).Run(); err != nil {
+			return errors.Errorf("inserting platform row for application %q: %w", name, err)
+		}
+		if err := tx.Query(ctx, createScaleStmt, scaleInfo).Run(); err != nil {
+			return errors.Errorf("inserting scale row for application %q: %w", name, err)
+		}
+		if err := st.createApplicationResources(
+			ctx, tx,
+			insertResourcesArgs{
+				appID:        appDetails.UUID,
+				charmUUID:    appDetails.CharmUUID,
+				charmSource:  args.Charm.Source,
+				appResources: args.Resources,
+			},
+			nil,
+		); err != nil {
+			return errors.Errorf("inserting or resolving resources for application %q: %w", name, err)
+		}
+		if err := st.insertApplicationConfig(ctx, tx, appDetails.UUID, args.Config); err != nil {
+			return errors.Errorf("inserting config for application %q: %w", name, err)
+		}
+		if err := st.insertApplicationSettings(ctx, tx, appDetails.UUID, args.Settings); err != nil {
+			return errors.Errorf("inserting settings for application %q: %w", name, err)
+		}
+		if err := st.updateConfigHash(ctx, tx, entityUUID{UUID: appUUID}); err != nil {
+			return errors.Errorf("refreshing config hash for application %q: %w", name, err)
+		}
+		if err := st.updateDefaultSpace(ctx, tx, appDetails.UUID, args.EndpointBindings); err != nil {
+			return errors.Errorf("updating default space: %w", err)
+		}
+		if err := st.insertApplicationEndpointBindings(ctx, tx, insertApplicationEndpointsParams{
+			appID:    appDetails.UUID,
+			bindings: args.EndpointBindings,
+		}); err != nil {
+			return errors.Errorf("inserting exposed endpoints for application %q: %w", name, err)
+		}
+
+		// The channel is optional for local charms. Although, it would be
+		// nice to have a channel for local charms, it's not a requirement.
+		if createChannelStmt != nil {
+			if err := tx.Query(ctx, createChannelStmt, channelInfo).Run(); err != nil {
+				return errors.Errorf("inserting channel row for application %q: %w", name, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", errors.Errorf("creating application %q: %w", name, err)
+	}
+	return coreapplication.UUID(appUUID), nil
+}
+
+// InsertIAASUnits imports the fully formed units for the specified IAAS
+// application. This is only used when importing units during model migration.
+func (st *State) InsertMigratingIAASUnits(ctx context.Context, appUUID coreapplication.UUID, units ...application.ImportUnitArg) error {
+	if len(units) == 0 {
+		return nil
+	}
+	db, err := st.DB(ctx)
+	if err != nil {
+		return errors.Capture(err)
+	}
+	return db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		for _, arg := range units {
+			if err := st.importIAASUnit(ctx, tx, appUUID.String(), arg); err != nil {
+				return errors.Errorf("importing IAAS unit %q: %w", arg.UnitName, err)
+			}
+		}
+		return nil
+	})
+}
+
+// InsertCAASUnits imports the fully formed units for the specified CAAS
+// application. This is only used when importing units during model migration.
+func (st *State) InsertMigratingCAASUnits(ctx context.Context, appUUID coreapplication.UUID, units ...application.ImportUnitArg) error {
+	if len(units) == 0 {
+		return nil
+	}
+	db, err := st.DB(ctx)
+	if err != nil {
+		return errors.Capture(err)
+	}
+	return db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		for _, arg := range units {
+			if err := st.importCAASUnit(ctx, tx, appUUID.String(), arg); err != nil {
+				return errors.Errorf("importing CAAS unit %q: %w", arg.UnitName, err)
+			}
+		}
+		return nil
+	})
+}
+
+func (st *State) importCAASUnit(
+	ctx context.Context,
+	tx *sqlair.TX,
+	appUUID string,
+	args application.ImportUnitArg,
+) error {
+	err := st.checkUnitExistsByName(ctx, tx, args.UnitName.String())
+	if err == nil {
+		return errors.Errorf("unit %q already exists", args.UnitName).Add(applicationerrors.UnitAlreadyExists)
+	} else if !errors.Is(err, applicationerrors.UnitNotFound) {
+		return errors.Errorf("looking up unit %q: %w", args.UnitName, err)
+	}
+
+	u, err := coreunit.NewUUID()
+	if err != nil {
+		return errors.Capture(err)
+	}
+	unitUUID := u.String()
+
+	charmUUID, err := st.getCharmIDByApplicationUUID(ctx, tx, appUUID)
+	if err != nil {
+		return errors.Errorf("getting charm for application %q: %w", appUUID, err)
+	}
+
+	netNodeUUID, err := domainnetwork.NewNetNodeUUID()
+	if err != nil {
+		return errors.Errorf("generating new net node uuid for imported unit: %w", err)
+	}
+
+	err = st.unitState.insertUnit(
+		ctx, tx, appUUID, unitUUID, netNodeUUID.String(),
+		insertUnitArg{
+			CharmUUID:      charmUUID,
+			UnitName:       args.UnitName.String(),
+			CloudContainer: args.CloudContainer,
+			Password:       args.Password,
+			Constraints:    args.Constraints,
+			UnitStatusArg:  args.UnitStatusArg,
+		},
+	)
+	if err != nil {
+		return errors.Errorf("importing unit for CAAS application %q: %w", appUUID, err)
+	}
+
+	if args.Principal != "" {
+		principalUnitUUID, err := st.GetUnitUUIDByName(ctx, args.Principal)
+		if err != nil {
+			return errors.Errorf(
+				"getting unit uuid for principal unit: %w", err,
+			)
+		}
+		if err = st.recordUnitPrincipal(ctx, tx, principalUnitUUID.String(), unitUUID); err != nil {
+			return errors.Errorf("importing subordinate info for unit %q: %w", args.UnitName, err)
+		}
+	}
+
+	// TODO (TLM): Storage is currently not being set during import migration
+	// of an application. This needs further re-work to be marked as done.
+	// If there is no storage, return early.
+	//if len(args.Storage) == 0 {
+	//	return nil
+	//}
+
+	//attachArgs, err := st.insertUnitStorage(ctx, tx, appUUID, unitUUID, args.Storage, args.StoragePoolKind)
+	//if err != nil {
+	//	return errors.Errorf("importing storage for unit %q: %w", args.UnitName, err)
+	//}
+	//err = st.attachUnitStorage(ctx, tx, args.StoragePoolKind, unitUUID, netNodeUUID, attachArgs)
+	//if err != nil {
+	//	return errors.Errorf("importing storage for unit %q: %w", args.UnitName, err)
+	//}
+	return nil
+}
+
+// recordUnitPrincipal records a subordinate-principal relationship between
+// units.
+//
+// It is expected that the caller has already verified that both unit uuids
+// exist in the model.
+func (st *State) recordUnitPrincipal(
+	ctx context.Context,
+	tx *sqlair.TX,
+	principalUnitUUID, subordinateUnitUUID string,
+) error {
+	type unitPrincipal struct {
+		PrincipalUUID   string `db:"principal_uuid"`
+		SubordinateUUID string `db:"unit_uuid"`
+	}
+	arg := unitPrincipal{
+		PrincipalUUID:   principalUnitUUID,
+		SubordinateUUID: subordinateUnitUUID,
+	}
+	stmt, err := st.Prepare(`
+INSERT INTO unit_principal (*)
+VALUES ($unitPrincipal.*)
+`, arg)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	err = tx.Query(ctx, stmt, arg).Run()
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	return nil
+}
+
+func (st *State) importIAASUnit(
+	ctx context.Context,
+	tx *sqlair.TX,
+	appUUID string,
+	args application.ImportUnitArg,
+) error {
+	err := st.checkUnitExistsByName(ctx, tx, args.UnitName.String())
+	if err == nil {
+		return errors.Errorf("unit %q already exists", args.UnitName).Add(applicationerrors.UnitAlreadyExists)
+	} else if !errors.Is(err, applicationerrors.UnitNotFound) {
+		return errors.Errorf("looking up unit %q: %w", args.UnitName, err)
+	}
+
+	u, err := coreunit.NewUUID()
+	if err != nil {
+		return errors.Capture(err)
+	}
+	unitUUID := u.String()
+
+	netNodeUUID, err := st.getMachineNetNodeUUIDFromName(ctx, tx, args.Machine)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	charmUUID, err := st.getCharmIDByApplicationUUID(ctx, tx, appUUID)
+	if err != nil {
+		return errors.Errorf("getting charm for application %q: %w", appUUID, err)
+	}
+
+	if err := st.unitState.insertUnit(ctx, tx, appUUID, unitUUID, netNodeUUID, insertUnitArg{
+		CharmUUID:      charmUUID,
+		UnitName:       args.UnitName.String(),
+		CloudContainer: args.CloudContainer,
+		Password:       args.Password,
+		Constraints:    args.Constraints,
+		UnitStatusArg:  args.UnitStatusArg,
+	}); err != nil {
+		return errors.Errorf("importing unit for application %q: %w", appUUID, err)
+	}
+
+	if args.Principal != "" {
+		principalUnitUUID, err := st.GetUnitUUIDByName(ctx, args.Principal)
+		if err != nil {
+			return errors.Errorf(
+				"getting unit uuid for principal unit: %w", err,
+			)
+		}
+
+		if err = st.recordUnitPrincipal(ctx, tx, principalUnitUUID.String(), unitUUID); err != nil {
+			return errors.Errorf("importing subordinate info for unit %q: %w", args.UnitName, err)
+		}
+	}
+
+	// TODO (TLM): Storage is currently not being set during import migration
+	// of an application. This needs further re-work to be marked as done.
+	//if _, err := st.insertUnitStorage(ctx, tx, appUUID, unitUUID, args.Storage, args.StoragePoolKind); err != nil {
+	//	return errors.Errorf("importing storage for unit %q: %w", args.UnitName, err)
+	//}
+	return nil
+}

@@ -4,25 +4,27 @@
 package kubernetes_test
 
 import (
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/testing"
 )
 
-var _ = gc.Suite(&ResourcesSuite{})
+func TestResourcesSuite(t *stdtesting.T) {
+	tc.Run(t, &ResourcesSuite{})
+}
 
 type ResourcesSuite struct {
 	BaseSuite
 }
 
-func (s *ResourcesSuite) TestAdoptResources(c *gc.C) {
+func (s *ResourcesSuite) TestAdoptResources(c *tc.C) {
 	ctrl := s.setupController(c)
 	defer ctrl.Finish()
 
@@ -70,6 +72,6 @@ func (s *ResourcesSuite) TestAdoptResources(c *gc.C) {
 			Return(nil, nil),
 	)
 
-	err := s.broker.AdoptResources(context.NewEmptyCloudCallContext(), "uuid", version.MustParse("1.2.3"))
-	c.Assert(err, jc.ErrorIsNil)
+	err := s.broker.AdoptResources(c.Context(), "uuid", semversion.MustParse("1.2.3"))
+	c.Assert(err, tc.ErrorIsNil)
 }

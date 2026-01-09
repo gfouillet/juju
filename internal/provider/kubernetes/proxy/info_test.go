@@ -4,12 +4,11 @@
 package proxy_test
 
 import (
-	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -23,13 +22,15 @@ type infoSuite struct {
 	clock  *testclock.Clock
 }
 
-var _ = gc.Suite(&infoSuite{})
+func TestInfoSuite(t *testing.T) {
+	tc.Run(t, &infoSuite{})
+}
 
-func (i *infoSuite) SetUpTest(c *gc.C) {
+func (i *infoSuite) SetUpTest(c *tc.C) {
 	i.clock = testclock.NewClock(time.Time{})
 
 	i.client = fake.NewSimpleClientset()
-	_, err := i.client.CoreV1().Namespaces().Create(context.TODO(),
+	_, err := i.client.CoreV1().Namespaces().Create(c.Context(),
 		&core.Namespace{
 			ObjectMeta: meta.ObjectMeta{
 				Name: testNamespace,
@@ -37,18 +38,10 @@ func (i *infoSuite) SetUpTest(c *gc.C) {
 		},
 		meta.CreateOptions{},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (i *infoSuite) TestHasControllerProxyFalse(c *gc.C) {
-	has, err := proxy.HasControllerProxy("test",
-		i.client.CoreV1().ConfigMaps(testNamespace),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(has, jc.IsFalse)
-}
-
-func (i *infoSuite) TestHasControllerProxy(c *gc.C) {
+func (i *infoSuite) TestGetControllerProxier(c *tc.C) {
 	config := proxy.ControllerProxyConfig{
 		Name:          "controller-proxy",
 		Namespace:     testNamespace,
@@ -57,7 +50,7 @@ func (i *infoSuite) TestHasControllerProxy(c *gc.C) {
 	}
 
 	// fake k8s client does not populate the token for secret, so we have to do it manually.
-	_, err := i.client.CoreV1().Secrets(testNamespace).Create(context.TODO(), &core.Secret{
+	_, err := i.client.CoreV1().Secrets(testNamespace).Create(c.Context(), &core.Secret{
 		ObjectMeta: meta.ObjectMeta{
 			Labels: labels.Set{},
 			Name:   config.Name,
@@ -70,9 +63,9 @@ func (i *infoSuite) TestHasControllerProxy(c *gc.C) {
 			core.ServiceAccountTokenKey: []byte("token"),
 		},
 	}, meta.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = proxy.CreateControllerProxy(
-		context.Background(),
+		c.Context(),
 		config,
 		labels.Set{},
 		i.clock,
@@ -82,57 +75,15 @@ func (i *infoSuite) TestHasControllerProxy(c *gc.C) {
 		i.client.CoreV1().ServiceAccounts(testNamespace),
 		i.client.CoreV1().Secrets(testNamespace),
 	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	has, err := proxy.HasControllerProxy(config.Name,
-		i.client.CoreV1().ConfigMaps(testNamespace),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(has, jc.IsTrue)
-}
-
-func (i *infoSuite) TestGetControllerProxier(c *gc.C) {
-	config := proxy.ControllerProxyConfig{
-		Name:          "controller-proxy",
-		Namespace:     testNamespace,
-		RemotePort:    "17707",
-		TargetService: "controller-service",
-	}
-
-	// fake k8s client does not populate the token for secret, so we have to do it manually.
-	_, err := i.client.CoreV1().Secrets(testNamespace).Create(context.TODO(), &core.Secret{
-		ObjectMeta: meta.ObjectMeta{
-			Labels: labels.Set{},
-			Name:   config.Name,
-			Annotations: map[string]string{
-				core.ServiceAccountNameKey: config.Name,
-			},
-		},
-		Type: core.SecretTypeServiceAccountToken,
-		Data: map[string][]byte{
-			core.ServiceAccountTokenKey: []byte("token"),
-		},
-	}, meta.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	err = proxy.CreateControllerProxy(
-		context.Background(),
-		config,
-		labels.Set{},
-		i.clock,
-		i.client.CoreV1().ConfigMaps(testNamespace),
-		i.client.RbacV1().Roles(testNamespace),
-		i.client.RbacV1().RoleBindings(testNamespace),
-		i.client.CoreV1().ServiceAccounts(testNamespace),
-		i.client.CoreV1().Secrets(testNamespace),
-	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = proxy.GetControllerProxy(
+		c.Context(),
 		config.Name,
 		"https://localhost:8123",
 		i.client.CoreV1().ConfigMaps(testNamespace),
 		i.client.CoreV1().ServiceAccounts(testNamespace),
 		i.client.CoreV1().Secrets(testNamespace),
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

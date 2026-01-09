@@ -5,9 +5,6 @@
 ## Summary
 Upgrades Juju on a controller.
 
-## Usage
-```juju upgrade-controller [options] ```
-
 ### Options
 | Flag | Default | Usage |
 | --- | --- | --- |
@@ -18,7 +15,6 @@ Upgrades Juju on a controller.
 | `-c`, `--controller` |  | Controller to operate in |
 | `--dry-run` | false | Don't change anything, just report what would be changed |
 | `--ignore-agent-versions` | false | Don't check if all agents have already reached the current version |
-| `--reset-previous-upgrade` | false | Clear the previous (incomplete) upgrade status (use with care) |
 | `--timeout` | 10m0s | Timeout before upgrade is aborted |
 | `-y`, `--yes` | false | Answer 'yes' to confirmation prompts |
 

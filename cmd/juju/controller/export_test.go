@@ -4,17 +4,17 @@
 package controller
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListControllersCommandForTest returns a listControllersCommand with the clientstore provided
@@ -80,7 +80,7 @@ func NewListModelsCommandForTest(modelAPI ModelManagerAPI, sysAPI ModelsSysAPI, 
 
 // NewRegisterCommandForTest returns a RegisterCommand with the function used
 // to open the API connection mocked out.
-func NewRegisterCommandForTest(apiOpen api.OpenFunc, listModels func(jujuclient.ClientStore, string, string) ([]base.UserModel, error), store jujuclient.ClientStore) modelcmd.Command {
+func NewRegisterCommandForTest(apiOpen api.OpenFunc, listModels func(context.Context, jujuclient.ClientStore, string, string) ([]base.UserModel, error), store jujuclient.ClientStore) modelcmd.Command {
 	return modelcmd.WrapBase(&registerCommand{
 		apiOpen:        apiOpen,
 		listModelsFunc: listModels,
@@ -105,17 +105,15 @@ func NewDestroyCommandForTest(
 	store jujuclient.ClientStore,
 	apierr error,
 	controllerModelConfigAPI modelConfigAPI,
-	controllerCredentialAPIFunc newCredentialAPIFunc,
-	environsDestroy func(string, environs.ControllerDestroyer, context.ProviderCallContext, jujuclient.ControllerStore) error,
+	environsDestroy func(string, environs.ControllerDestroyer, context.Context, jujuclient.ControllerStore) error,
 
 ) cmd.Command {
 	cmd := &destroyCommand{
 		destroyCommandBase: destroyCommandBase{
-			api:                         api,
-			apierr:                      apierr,
-			controllerModelConfigAPI:    controllerModelConfigAPI,
-			controllerCredentialAPIFunc: controllerCredentialAPIFunc,
-			environsDestroy:             environsDestroy,
+			api:                      api,
+			apierr:                   apierr,
+			controllerModelConfigAPI: controllerModelConfigAPI,
+			environsDestroy:          environsDestroy,
 		},
 	}
 	cmd.SetClientStore(store)
@@ -135,16 +133,14 @@ func NewKillCommandForTest(
 	controllerModelConfigAPI modelConfigAPI,
 	clock clock.Clock,
 	apiOpen api.OpenFunc,
-	controllerCredentialAPIFunc newCredentialAPIFunc,
-	environsDestroy func(string, environs.ControllerDestroyer, context.ProviderCallContext, jujuclient.ControllerStore) error,
+	environsDestroy func(string, environs.ControllerDestroyer, context.Context, jujuclient.ControllerStore) error,
 ) cmd.Command {
 	kill := &killCommand{
 		destroyCommandBase: destroyCommandBase{
-			api:                         api,
-			apierr:                      apierr,
-			controllerModelConfigAPI:    controllerModelConfigAPI,
-			controllerCredentialAPIFunc: controllerCredentialAPIFunc,
-			environsDestroy:             environsDestroy,
+			api:                      api,
+			apierr:                   apierr,
+			controllerModelConfigAPI: controllerModelConfigAPI,
+			environsDestroy:          environsDestroy,
 		},
 		clock: clock,
 	}
@@ -185,8 +181,8 @@ func FmtModelStatus(data ModelData) string {
 	return fmtModelStatus(modelData(data))
 }
 
-func NewData(api destroyControllerAPI, ctrUUID string) (environmentStatus, error) {
-	return newData(api, ctrUUID)
+func NewData(ctx context.Context, api destroyControllerAPI, ctrUUID string) (environmentStatus, error) {
+	return newData(ctx, api, ctrUUID)
 }
 
 var (

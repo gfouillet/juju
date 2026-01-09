@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StatusSetCommand implements the status-set command.
@@ -167,8 +167,8 @@ func (c *StatusSetCommand) Run(ctx *cmd.Context) error {
 		Info:   c.message,
 	}
 	if c.application {
-		return c.ctx.SetApplicationStatus(statusInfo)
+		return c.ctx.SetApplicationStatus(ctx, statusInfo)
 	}
-	return c.ctx.SetUnitStatus(statusInfo)
+	return c.ctx.SetUnitStatus(ctx, statusInfo)
 
 }

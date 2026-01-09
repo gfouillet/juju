@@ -4,117 +4,190 @@
 package secrets
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/internal"
 	"github.com/juju/juju/core/leadership"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
 	coresecrets "github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/domain/secret"
+	secretservice "github.com/juju/juju/domain/secret/service"
 	"github.com/juju/juju/rpc/params"
-	secretsprovider "github.com/juju/juju/secrets/provider"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
 // SecretsDrainAPI is the implementation for the SecretsDrain facade.
 type SecretsDrainAPI struct {
 	authTag           names.Tag
-	resources         facade.Resources
+	logger            logger.Logger
 	leadershipChecker leadership.Checker
+	watcherRegistry   facade.WatcherRegistry
 
-	model           Model
-	secretsState    SecretsMetaState
-	secretsConsumer SecretsConsumer
+	modelUUID            model.UUID
+	secretService        SecretService
+	secretBackendService SecretBackendService
 }
 
 // NewSecretsDrainAPI returns a new SecretsDrainAPI.
 func NewSecretsDrainAPI(
 	authTag names.Tag,
 	authorizer facade.Authorizer,
-	resources facade.Resources,
+	logger logger.Logger,
 	leadershipChecker leadership.Checker,
-	model Model,
-	secretsState SecretsMetaState,
-	secretsConsumer SecretsConsumer,
+	modelUUID model.UUID,
+	secretService SecretService,
+	secretBackendService SecretBackendService,
+	watcherRegistry facade.WatcherRegistry,
 ) (*SecretsDrainAPI, error) {
-	if !authorizer.AuthUnitAgent() && !authorizer.AuthApplicationAgent() && !authorizer.AuthController() {
+	if !authorizer.AuthUnitAgent() && !authorizer.AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
 	return &SecretsDrainAPI{
-		authTag:           authTag,
-		resources:         resources,
-		leadershipChecker: leadershipChecker,
-		model:             model,
-		secretsState:      secretsState,
-		secretsConsumer:   secretsConsumer,
+		authTag:              authTag,
+		logger:               logger,
+		leadershipChecker:    leadershipChecker,
+		modelUUID:            modelUUID,
+		secretService:        secretService,
+		secretBackendService: secretBackendService,
+		watcherRegistry:      watcherRegistry,
 	}, nil
 }
 
 // GetSecretsToDrain returns metadata for the secrets that need to be drained.
-func (s *SecretsDrainAPI) GetSecretsToDrain() (params.ListSecretResults, error) {
-	modelConfig, err := s.model.ModelConfig()
-	if err != nil {
-		return params.ListSecretResults{}, errors.Trace(err)
-	}
-	modelType := s.model.Type()
-	modelUUID := s.model.UUID()
-	controllerUUID := s.model.ControllerUUID()
-
-	activeBackend := modelConfig.SecretBackend()
-	if activeBackend == secretsprovider.Auto {
-		activeBackend = controllerUUID
-		if modelType == state.ModelTypeCAAS {
-			activeBackend = modelUUID
-		}
-	}
-	return GetSecretMetadataWithRevisions(
-		s.authTag, s.secretsState, s.leadershipChecker,
-		func(md *coresecrets.SecretMetadata, rev *coresecrets.SecretRevisionMetadata) bool {
-			if rev.ValueRef == nil {
-				// Only internal backend secrets have nil ValueRef.
-				if activeBackend == secretsprovider.Internal {
-					return false
-				}
-				if activeBackend == controllerUUID {
-					return false
-				}
-				return true
-			}
-			return rev.ValueRef.BackendID != activeBackend
-		},
+func (s *SecretsDrainAPI) GetSecretsToDrain(ctx context.Context) (params.SecretRevisionsToDrainResults, error) {
+	var (
+		toDrain []*coresecrets.SecretMetadataForDrain
+		err     error
 	)
+	if s.authTag.Kind() == names.ModelTagKind {
+		toDrain, err = s.secretService.ListUserSecretsToDrain(ctx)
+	} else {
+		toDrain, err = s.getCharmSecretsToDrain(ctx)
+	}
+	if err != nil {
+		return params.SecretRevisionsToDrainResults{}, errors.Trace(err)
+	}
+
+	var result params.SecretRevisionsToDrainResults
+	for _, info := range toDrain {
+		secretResult := params.SecretRevisionsToDrainResult{
+			URI: info.URI.String(),
+		}
+		toDrain, err := s.secretBackendService.GetRevisionsToDrain(ctx, s.modelUUID, info.Revisions)
+		if err != nil {
+			return params.SecretRevisionsToDrainResults{}, errors.Trace(err)
+		}
+		for _, r := range toDrain {
+			var valueRef *params.SecretValueRef
+			if r.ValueRef != nil {
+				valueRef = &params.SecretValueRef{
+					BackendID:  r.ValueRef.BackendID,
+					RevisionID: r.ValueRef.RevisionID,
+				}
+			}
+			secretResult.Revisions = append(secretResult.Revisions, params.SecretRevision{
+				Revision: r.Revision,
+				ValueRef: valueRef,
+			})
+		}
+		if len(secretResult.Revisions) == 0 {
+			continue
+		}
+		result.Results = append(result.Results, secretResult)
+	}
+	return result, nil
+}
+
+// OwnerTagFromOwner returns the tag for a given secret owner.
+func OwnerTagFromOwner(owner coresecrets.Owner) (names.Tag, error) {
+	switch owner.Kind {
+	case coresecrets.UnitOwner:
+		return names.NewUnitTag(owner.ID), nil
+	case coresecrets.ApplicationOwner:
+		return names.NewApplicationTag(owner.ID), nil
+	case coresecrets.ModelOwner:
+		return names.NewModelTag(owner.ID), nil
+	}
+	return nil, errors.NotValidf("owner kind %q", owner.Kind)
+}
+
+func secretAccessorFromTag(authTag names.Tag) (secret.SecretAccessor, error) {
+	switch authTag.(type) {
+	case names.UnitTag:
+		return secret.SecretAccessor{
+			Kind: secret.UnitAccessor, ID: authTag.Id(),
+		}, nil
+	case names.ModelTag:
+		return secret.SecretAccessor{
+			Kind: secret.ModelAccessor, ID: authTag.Id(),
+		}, nil
+	}
+	return secret.SecretAccessor{}, errors.NotValidf("auth tag kind %q", authTag.Kind())
+}
+
+// isLeaderUnit returns true if the authenticated caller is the unit leader of its application.
+func isLeaderUnit(authTag names.Tag, leadershipChecker leadership.Checker) (bool, error) {
+	appName, _ := names.UnitApplication(authTag.Id())
+	token := leadershipChecker.LeadershipCheck(appName, authTag.Id())
+	err := token.Check()
+	if err != nil && !leadership.IsNotLeaderError(err) {
+		return false, errors.Trace(err)
+	}
+	return err == nil, nil
+}
+
+func (s *SecretsDrainAPI) getCharmSecretsToDrain(ctx context.Context) ([]*coresecrets.SecretMetadataForDrain, error) {
+	owners := []secret.CharmSecretOwner{{
+		Kind: secret.UnitCharmSecretOwner,
+		ID:   s.authTag.Id(),
+	}}
+	// Unit leaders can also get metadata for secrets owned by the app.
+	isLeader, err := isLeaderUnit(s.authTag, s.leadershipChecker)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if isLeader {
+		appName, _ := names.UnitApplication(s.authTag.Id())
+		owners = append(owners, secret.CharmSecretOwner{
+			Kind: secret.ApplicationCharmSecretOwner,
+			ID:   appName,
+		})
+	}
+	return s.secretService.ListCharmSecretsToDrain(ctx, owners...)
 }
 
 // ChangeSecretBackend updates the backend for the specified secret after migration done.
-func (s *SecretsDrainAPI) ChangeSecretBackend(args params.ChangeSecretBackendArgs) (params.ErrorResults, error) {
+func (s *SecretsDrainAPI) ChangeSecretBackend(ctx context.Context, args params.ChangeSecretBackendArgs) (params.ErrorResults, error) {
 	result := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Args)),
 	}
 	for i, arg := range args.Args {
-		err := s.changeSecretBackendForOne(arg)
+		err := s.changeSecretBackendForOne(ctx, arg)
 		result.Results[i].Error = apiservererrors.ServerError(err)
 	}
 	return result, nil
 }
 
-func (s *SecretsDrainAPI) changeSecretBackendForOne(arg params.ChangeSecretBackendArg) (err error) {
+func (s *SecretsDrainAPI) changeSecretBackendForOne(ctx context.Context, arg params.ChangeSecretBackendArg) (err error) {
 	uri, err := coresecrets.ParseURI(arg.URI)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	token, err := CanManage(s.secretsConsumer, s.leadershipChecker, s.authTag, uri)
+	accessor, err := secretAccessorFromTag(s.authTag)
 	if err != nil {
-		return errors.Trace(err)
+		return
 	}
-	return s.secretsState.ChangeSecretBackend(toChangeSecretBackendParams(token, uri, arg))
+	return s.secretService.ChangeSecretBackend(ctx, uri, arg.Revision, toChangeSecretBackendParams(accessor, arg))
 }
 
-func toChangeSecretBackendParams(token leadership.Token, uri *coresecrets.URI, arg params.ChangeSecretBackendArg) state.ChangeSecretBackendParams {
-	params := state.ChangeSecretBackendParams{
-		Token:    token,
-		URI:      uri,
-		Revision: arg.Revision,
+func toChangeSecretBackendParams(accessor secret.SecretAccessor, arg params.ChangeSecretBackendArg) secretservice.ChangeSecretBackendParams {
+	params := secretservice.ChangeSecretBackendParams{
+		Accessor: accessor,
 		Data:     arg.Content.Data,
 	}
 	if arg.Content.ValueRef != nil {
@@ -127,14 +200,21 @@ func toChangeSecretBackendParams(token leadership.Token, uri *coresecrets.URI, a
 }
 
 // WatchSecretBackendChanged sets up a watcher to notify of changes to the secret backend.
-func (s *SecretsDrainAPI) WatchSecretBackendChanged() (params.NotifyWatchResult, error) {
-	stateWatcher := s.model.WatchForModelConfigChanges()
-	w, err := newSecretBackendModelConfigWatcher(s.model, stateWatcher)
+func (s *SecretsDrainAPI) WatchSecretBackendChanged(ctx context.Context) (params.NotifyWatchResult, error) {
+	w, err := s.secretBackendService.WatchModelSecretBackendChanged(ctx, s.modelUUID)
 	if err != nil {
-		return params.NotifyWatchResult{Error: apiservererrors.ServerError(err)}, nil
+		return params.NotifyWatchResult{
+			Error: apiservererrors.ServerError(err),
+		}, nil
 	}
-	if _, ok := <-w.Changes(); ok {
-		return params.NotifyWatchResult{NotifyWatcherId: s.resources.Register(w)}, nil
+
+	id, _, err := internal.EnsureRegisterWatcher[struct{}](ctx, s.watcherRegistry, w)
+	if err != nil {
+		return params.NotifyWatchResult{
+			Error: apiservererrors.ServerError(err),
+		}, nil
 	}
-	return params.NotifyWatchResult{Error: apiservererrors.ServerError(watcher.EnsureErr(w))}, nil
+	return params.NotifyWatchResult{
+		NotifyWatcherId: id,
+	}, nil
 }

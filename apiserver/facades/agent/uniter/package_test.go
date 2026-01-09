@@ -4,13 +4,149 @@
 package uniter_test
 
 import (
-	stdtesting "testing"
+	"github.com/juju/collections/set"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/facade/facadetest"
+	"github.com/juju/juju/apiserver/facades/agent/uniter"
+	apiservertesting "github.com/juju/juju/apiserver/testing"
+	k8s "github.com/juju/juju/caas/kubernetes"
+	k8stesting "github.com/juju/juju/caas/kubernetes/testing"
+	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/leadership"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/unit"
+	"github.com/juju/juju/internal/featureflag"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/juju/testing"
 )
 
-func TestPackage(t *stdtesting.T) {
-	coretesting.MgoTestPackage(t)
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination clock_mock_test.go github.com/juju/clock Clock
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination secret_mocks_test.go github.com/juju/juju/apiserver/facades/agent/uniter SecretService
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter_test -destination legacy_service_mock_test.go github.com/juju/juju/apiserver/facades/agent/uniter ModelConfigService,ModelInfoService,MachineService
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter_test -destination facade_mock_test.go github.com/juju/juju/internal/worker/watcherregistry WatcherRegistry
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination service_mock_test.go github.com/juju/juju/apiserver/facades/agent/uniter ApplicationService,ResolveService,StatusService,RelationService,ModelInfoService,MachineService,NetworkService,OperationService,RemovalService,StorageProvisioningService,BlockDeviceService,CrossModelRelationService,UnitStateService
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination watcher_registry_mock_test.go github.com/juju/juju/internal/worker/watcherregistry WatcherRegistry
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination apiserver_mock_test.go github.com/juju/juju/apiserver/common APIAddressAccessor
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination relation_mock_test.go github.com/juju/juju/domain/relation RelationUnitsWatcher
+//go:generate go run go.uber.org/mock/mockgen -typed -package uniter -destination watcher_mock_test.go github.com/juju/juju/core/watcher NotifyWatcher
+
+// uniterSuiteBase implements common testing suite for all API versions.
+// It is not intended to be used directly or registered as a suite,
+// but embedded.
+//
+// Suites embedding this base are skipped.
+// Testing factory functionality is removed.
+//
+// Deprecated: Retained for test documentation purposes.
+type uniterSuiteBase struct {
+	testing.ApiServerSuite
+
+	authorizer        apiservertesting.FakeAuthorizer
+	watcherRegistry   *MockWatcherRegistry
+	leadershipRevoker *leadershipRevoker
+	uniter            *uniter.UniterAPI
+
+	leadershipChecker *fakeLeadershipChecker
+
+	store objectstore.ObjectStore
 }
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/newlxdprofile.go github.com/juju/juju/apiserver/facades/agent/uniter LXDProfileBackendV2,LXDProfileMachineV2,LXDProfileUnitV2,LXDProfileCharmV2,LXDProfileModelV2
+func (s *uniterSuiteBase) setUpMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.watcherRegistry = NewMockWatcherRegistry(ctrl)
+
+	return ctrl
+}
+
+func (s *uniterSuiteBase) SetUpTest(c *tc.C) {
+	s.ControllerConfigAttrs = map[string]interface{}{
+		controller.Features: featureflag.RawK8sSpec,
+	}
+	s.WithLeaseManager = true
+
+	s.ApiServerSuite.SetUpTest(c)
+	s.ApiServerSuite.SeedCAASCloud(c)
+
+	s.setupState(c)
+
+	// Create a FakeAuthorizer so we can check permissions,
+	// set up assuming the wordpress unit has logged in.
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag: names.NewUnitTag("wordpress/0"),
+	}
+	s.leadershipRevoker = &leadershipRevoker{
+		revoked: set.NewStrings(),
+	}
+
+	s.leadershipChecker = &fakeLeadershipChecker{false}
+	s.uniter = s.newUniterAPI(c, s.authorizer)
+	s.PatchValue(&k8s.NewK8sClients, k8stesting.NoopFakeK8sClients)
+
+	s.store = testing.NewObjectStore(c, s.ControllerModelUUID())
+}
+
+// setupState creates 2 machines, 2 services and adds a unit to each service.
+func (s *uniterSuiteBase) setupState(c *tc.C) {}
+
+func (s *uniterSuiteBase) facadeContext(c *tc.C) facadetest.ModelContext {
+	return facadetest.ModelContext{
+		WatcherRegistry_:   s.watcherRegistry,
+		Auth_:              s.authorizer,
+		LeadershipChecker_: s.leadershipChecker,
+		DomainServices_:    s.DefaultModelDomainServices(c),
+		ObjectStore_:       testing.NewObjectStore(c, s.ControllerModelUUID()),
+		Logger_:            loggertesting.WrapCheckLog(c),
+	}
+}
+
+func (s *uniterSuiteBase) newUniterAPI(c *tc.C, auth facade.Authorizer) *uniter.UniterAPI {
+	facadeContext := s.facadeContext(c)
+	facadeContext.Auth_ = auth
+	facadeContext.LeadershipRevoker_ = s.leadershipRevoker
+	uniterAPI, err := uniter.NewUniterAPI(c.Context(), facadeContext)
+	c.Assert(err, tc.ErrorIsNil)
+	return uniterAPI
+}
+
+func (s *uniterSuiteBase) newUniterAPIv19(c *tc.C, auth facade.Authorizer) *uniter.UniterAPIv19 {
+	facadeContext := s.facadeContext(c)
+	facadeContext.Auth_ = auth
+	facadeContext.LeadershipRevoker_ = s.leadershipRevoker
+	uniterAPI, err := uniter.NewUniterAPIv19(c.Context(), facadeContext)
+	c.Assert(err, tc.ErrorIsNil)
+	return uniterAPI
+}
+
+type fakeLeadershipChecker struct {
+	isLeader bool
+}
+
+type token struct {
+	isLeader          bool
+	unit, application string
+}
+
+func (t *token) Check() error {
+	if !t.isLeader {
+		return leadership.NewNotLeaderError(t.unit, t.application)
+	}
+	return nil
+}
+
+func (f *fakeLeadershipChecker) LeadershipCheck(applicationName, unitName string) leadership.Token {
+	return &token{isLeader: f.isLeader, unit: unitName, application: applicationName}
+}
+
+type leadershipRevoker struct {
+	revoked set.Strings
+}
+
+func (s *leadershipRevoker) RevokeLeadership(applicationName string, unitName unit.Name) error {
+	s.revoked.Add(unitName.String())
+	return nil
+}

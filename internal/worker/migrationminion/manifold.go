@@ -4,25 +4,19 @@
 package migrationminion
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/fortress"
 )
-
-// Logger represents the methods used for logging messages.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Criticalf(string, ...interface{})
-}
 
 // ManifoldConfig defines the names of the manifolds on which a
 // Worker manifold will depend.
@@ -31,12 +25,12 @@ type ManifoldConfig struct {
 	APICallerName     string
 	FortressName      string
 	Clock             clock.Clock
-	APIOpen           func(*api.Info, api.DialOpts) (api.Connection, error)
-	ValidateMigration func(base.APICaller) error
+	APIOpen           func(context.Context, *api.Info, api.DialOpts) (api.Connection, error)
+	ValidateMigration func(context.Context, base.APICaller) error
 
 	NewFacade func(base.APICaller) (Facade, error)
 	NewWorker func(Config) (worker.Worker, error)
-	Logger    Logger
+	Logger    logger.Logger
 }
 
 // Validate is called by start to check for bad configuration.
@@ -72,20 +66,20 @@ func (config ManifoldConfig) Validate() error {
 }
 
 // start is a StartFunc for a Worker manifold.
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var agent agent.Agent
-	if err := context.Get(config.AgentName, &agent); err != nil {
+	if err := getter.Get(config.AgentName, &agent); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var apiCaller base.APICaller
-	if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+	if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var guard fortress.Guard
-	if err := context.Get(config.FortressName, &guard); err != nil {
+	if err := getter.Get(config.FortressName, &guard); err != nil {
 		return nil, errors.Trace(err)
 	}
 

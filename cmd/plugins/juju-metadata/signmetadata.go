@@ -4,17 +4,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
+	"github.com/juju/loggo/v2"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/environs/simplestreams"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func newSignMetadataCommand() cmd.Command {
@@ -22,11 +23,11 @@ func newSignMetadataCommand() cmd.Command {
 }
 
 var signMetadataDoc = `
-sign searches for json files in the specified directory tree and inline signs
+sign searches for JSON files in the specified directory tree and inline signs
 them using the private key in the specified keyring file. For each .json file, a
-corresponding .sjson file is procduced.
+corresponding .sjson file is produced.
 
-The specified keyring file is expected to contain an amored private key. If the key
+The specified keyring file is expected to contain an armored private key. If the key
 is encrypted, then the specified passphrase is used to decrypt the key.
 `
 
@@ -43,6 +44,12 @@ func (c *signMetadataCommand) Info() *cmd.Info {
 		Name:    "sign",
 		Purpose: "sign simplestreams metadata",
 		Doc:     signMetadataDoc,
+		SeeAlso: []string{
+			"generate-agents",
+			"generate-images",
+			"validate-agents",
+			"validate-images",
+		},
 	})
 }
 
@@ -78,17 +85,17 @@ func (c *signMetadataCommand) Run(context *cmd.Context) error {
 }
 
 func process(dir, key, passphrase string) error {
-	logger.Debugf("processing directory %q", dir)
+	logger.Debugf(context.TODO(), "processing directory %q", dir)
 	// Do any json files in dir
 	filenames, err := filepath.Glob(filepath.Join(dir, "*"+simplestreams.UnsignedSuffix))
 	if err != nil {
 		return err
 	}
 	if len(filenames) > 0 {
-		logger.Infof("signing %d file(s) in %q", len(filenames), dir)
+		logger.Infof(context.TODO(), "signing %d file(s) in %q", len(filenames), dir)
 	}
 	for _, filename := range filenames {
-		logger.Infof("signing file %q", filename)
+		logger.Infof(context.TODO(), "signing file %q", filename)
 		f, err := os.Open(filename)
 		if err != nil {
 			return errors.Errorf("opening file %q: %v", filename, err)

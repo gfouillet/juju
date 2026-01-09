@@ -4,19 +4,20 @@
 package crossmodel
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/applicationoffers"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	jujucrossmodel "github.com/juju/juju/core/crossmodel"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -38,8 +39,8 @@ an offer name is explicitly specified.
 // NewOfferCommand constructs commands that enables endpoints for export.
 func NewOfferCommand() cmd.Command {
 	offerCmd := &offerCommand{}
-	offerCmd.newAPIFunc = func() (OfferAPI, error) {
-		return offerCmd.NewApplicationOffersAPI()
+	offerCmd.newAPIFunc = func(ctx context.Context) (OfferAPI, error) {
+		return offerCmd.NewApplicationOffersAPI(ctx)
 	}
 	offerCmd.refreshModels = offerCmd.ControllerCommandBase.RefreshModels
 	return modelcmd.WrapController(offerCmd)
@@ -47,8 +48,8 @@ func NewOfferCommand() cmd.Command {
 
 type offerCommand struct {
 	modelcmd.ControllerCommandBase
-	newAPIFunc    func() (OfferAPI, error)
-	refreshModels func(jujuclient.ClientStore, string) error
+	newAPIFunc    func(ctx context.Context) (OfferAPI, error)
+	refreshModels func(context.Context, jujuclient.ClientStore, string) error
 	endpointsSpec string
 
 	// Application stores application name to be offered.
@@ -66,8 +67,8 @@ type offerCommand struct {
 
 // NewApplicationOffersAPI returns an application offers api for the root api endpoint
 // that the command returns.
-func (c *offerCommand) NewApplicationOffersAPI() (*applicationoffers.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *offerCommand) NewApplicationOffersAPI(ctx context.Context) (*applicationoffers.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +123,7 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 	if c.QualifiedModelName == "" {
 		c.QualifiedModelName, err = c.ClientStore().CurrentModel(controllerName)
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if errors.Is(err, errors.NotFound) {
 				return errors.New("no current model, use juju switch to select a model on which to operate")
 			} else {
 				return errors.Annotate(err, "cannot load current model")
@@ -130,7 +131,7 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -138,8 +139,8 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 
 	store := c.ClientStore()
 	modelDetails, err := store.ModelByName(controllerName, c.QualifiedModelName)
-	if errors.IsNotFound(err) {
-		if err := c.refreshModels(store, controllerName); err != nil {
+	if errors.Is(err, errors.NotFound) {
+		if err := c.refreshModels(ctx, store, controllerName); err != nil {
 			return errors.Annotate(err, "refreshing models cache")
 		}
 		// Now try again.
@@ -158,7 +159,7 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 	}
 	loggedInUser := accountDetails.User
 	// TODO (anastasiamac 2015-11-16) Add a sensible way for user to specify long-ish (at times) description when offering
-	results, err := api.Offer(modelDetails.ModelUUID, c.Application, c.Endpoints, loggedInUser, c.OfferName, "")
+	results, err := api.Offer(ctx, modelDetails.ModelUUID, c.Application, c.Endpoints, loggedInUser, c.OfferName, "")
 	if err != nil {
 		return err
 	}
@@ -166,11 +167,11 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 		return err
 	}
 
-	unqualifiedModelName, ownerTag, err := jujuclient.SplitModelName(c.QualifiedModelName)
+	unqualifiedModelName, qualifier, err := jujuclient.SplitFullyQualifiedModelName(c.QualifiedModelName)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	url := jujucrossmodel.MakeURL(ownerTag.Id(), unqualifiedModelName, c.OfferName, "")
+	url := jujucrossmodel.MakeURL(qualifier, unqualifiedModelName, c.OfferName, "")
 	ep := strings.Join(c.Endpoints, ", ")
 	ctx.Infof("Application %q endpoints [%s] available at %q", c.Application, ep, url)
 	return nil
@@ -179,7 +180,7 @@ func (c *offerCommand) Run(ctx *cmd.Context) error {
 // OfferAPI defines the API methods that the offer command uses.
 type OfferAPI interface {
 	Close() error
-	Offer(modelUUID, application string, endpoints []string, owner, offerName, desc string) ([]params.ErrorResult, error)
+	Offer(ctx context.Context, modelUUID, application string, endpoints []string, owner, offerName, desc string) ([]params.ErrorResult, error)
 }
 
 // applicationParse is used to split an application string
@@ -208,7 +209,7 @@ func (c *offerCommand) parseEndpoints(controllerName, arg string) error {
 		}
 	} else if modelNameArg != "" {
 		c.QualifiedModelName = modelNameArg
-		modelName, _, err = jujuclient.SplitModelName(modelNameArg)
+		modelName, _, err = jujuclient.SplitFullyQualifiedModelName(modelNameArg)
 		if err != nil {
 			return errors.Trace(err)
 		}

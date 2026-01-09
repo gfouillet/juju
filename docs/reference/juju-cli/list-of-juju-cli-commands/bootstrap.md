@@ -12,23 +12,19 @@ Initializes a cloud environment.
 | Flag | Default | Usage |
 | --- | --- | --- |
 | `-B`, `--no-browser-login` | false | Do not use web browser for authentication |
-| `--add-model` |  | Name of an initial model to create on the new controller |
 | `--agent-version` |  | Version of agent binaries to use for Juju agents |
 | `--auto-upgrade` | false | After bootstrap, upgrade to the latest patch release |
 | `--bootstrap-base` |  | Specify the base of the bootstrap machine |
 | `--bootstrap-constraints` | [] | Specify bootstrap machine constraints |
 | `--bootstrap-image` |  | Specify the image of the bootstrap machine (requires `--bootstrap-constraints` specifying architecture) |
-| `--bootstrap-series` |  | Specify the series of the bootstrap machine (deprecated; use `bootstrap-base`) |
 | `--build-agent` | false | Build local version of agent binary before bootstrapping |
 | `--clouds` | false | Print the available clouds which can be used to bootstrap a Juju environment |
 | `--config` |  | Specify a controller configuration file, or one or more configuration options. Model config keys only affect the controller model.     (`--config config.yaml [--config key=value ...])` |
 | `--constraints` | [] | Set model constraints |
-| `--controller-charm-channel` | 3.6/stable | The Charmhub channel to download the controller charm from (if not using a local charm) |
+| `--controller-charm-channel` | 4.0/stable | The Charmhub channel to download the controller charm from (if not using a local charm) |
 | `--controller-charm-path` |  | Path to a locally built controller charm |
 | `--credential` |  | Credentials to use when bootstrapping |
-| `--db-snap` |  | Path to a locally built `.snap` to use as the internal `juju-db` service. |
-| `--db-snap-asserts` |  | Path to a local `.assert` file. Requires `--db-snap` |
-| `--force` | false | Allow the bypassing of checks such as supported series |
+| `--force` | false | Allow the bypassing of checks such as supported base |
 | `--keep-broken` | false | Do not destroy the provisioned controller instance if bootstrap fails |
 | `--metadata-source` |  | Local path to use as agent and/or image metadata source |
 | `--model-default` |  | Specify a configuration file, or one or more configuration     options to be set for all models, unless otherwise specified     (`--model-default config.yaml [--model-default key=value ...])` |
@@ -110,9 +106,6 @@ An error is emitted if the determined base is not supported. Using the
 
     juju bootstrap --bootstrap-base=ubuntu@22.04 --force
 
-The `--bootstrap-series` flag can be still used, but is deprecated in favour
-of `--bootstrap-base`.
-
 Private clouds may need to specify their own custom image metadata and
 tools/agent. Use `--metadata-source` whose value is a local directory.
 
@@ -122,9 +115,9 @@ of the Juju client used to perform the bootstrap.
 However, a user can specify a different agent version via the `--agent-version`
 option to bootstrap command. Juju will use this version for models' agents
 as long as the client's version is from the same Juju release base.
-In other words, a 3.6.1 client can bootstrap any 3.6.x agents but cannot
-bootstrap any 3.5.x or 3.4.x agents.
-The agent version can be specified a simple numeric version, e.g. 3.6.9.
+In other words, a 4.1.1 client can bootstrap any 4.1.x agents but cannot
+bootstrap any 4.0.x or 4.2.x agents.
+The agent version can be specified a simple numeric version, e.g. 4.1.1.
 
 For example, at the time when 3.6.0, 3.6.1 and 3.6.2 are released and your
 agent stream is 'released' (default), then a 3.6.1 client can bootstrap:
@@ -161,6 +154,15 @@ other controllers for cross-model (cross-controller, actually) relations to work
 If a storage pool is specified using `--storage-pool`, this will be created
 in the controller model.
 
+By default the bootstrap command will add the user's ssh public keys as
+authorized keys for ssh onto the controller machine and controller model.
+Bootstrap will read common public keys from the users .ssh directory and also
+create a default ssh key pair in the juju home directory. These keys will be
+added as authorized keys during bootstrap.
+
+Authorized keys can be set by using --config authorized-keys and or
+--config authorized-keys-path.
+
 
 Available keys for use with `--config` are:
 
@@ -169,6 +171,14 @@ Bootstrap configuration keys:
     admin-secret:
       type: string
       description: Sets the Juju administrator password
+    authorized-keys:
+      type: string
+      description: Additional authorized SSH public keys for the initial controller model,
+        as found in a ~/.ssh/authorized_keys file. Multiple keys are delimited by ';'
+    authorized-keys-path:
+      type: string
+      description: Additional authorized SSH public keys to be read from a ~/.ssh/authorized_keys
+        file. Keys defined in this file are appended to those already defined in authorized-keys
     bootstrap-addresses-delay:
       type: int
       description: Controls the amount of time in seconds in between refreshing the bootstrap
@@ -183,11 +193,11 @@ Bootstrap configuration keys:
         considering it failed in seconds
     ca-cert:
       type: string
-      description: Sets the bootstrapped controller's CA cert to use and issue certificates
+      description: Sets the bootstrapped controllers CA cert to use and issue certificates
         from, used in conjunction with ca-private-key
     ca-private-key:
       type: string
-      description: Sets the bootstrapped controller's CA cert private key to sign certificates
+      description: Sets the bootstrapped controllers CA cert private key to sign certificates
         with, used in conjunction with ca-cert
     controller-external-ips:
       type: list
@@ -223,17 +233,13 @@ Controller configuration keys:
       description: The time taken to add a new token to the ratelimit bucket
     allow-model-access:
       type: bool
-      description: "Determines if the controller allows users to \nconnect to models they
-        have been authorized for even when \nthey don't have any access rights to the
-        controller itself"
+      description: |-
+        Determines if the controller allows users to
+        connect to models they have been authorized for even when
+        they don't have any access rights to the controller itself
     api-port:
       type: int
       description: The port used for api connections
-    api-port-open-delay:
-      type: string
-      description: "The duration that the controller will wait \nbetween when the controller
-        has been deemed to be ready to open \nthe api-port and when the api-port is actually
-        opened \n(only used when a controller-api-port value is set)."
     application-resource-download-limit:
       type: int
       description: The maximum number of concurrent resources downloads per application
@@ -241,9 +247,9 @@ Controller configuration keys:
       type: bool
       description: Determines if the audit log contains the arguments passed to API methods
     audit-log-exclude-methods:
-      type: list
-      description: The list of Facade.Method names that aren't interesting for audit logging
-        purposes.
+      type: string
+      description: A comma-delimited list of Facade.Method names that aren't interesting
+        for audit logging purposes.
     audit-log-max-backups:
       type: int
       description: The number of old audit log files to keep (compressed)
@@ -268,14 +274,6 @@ Controller configuration keys:
       description: |-
         (deprecated) The url of the docker image used for the application operator.
         Use "caas-image-repo" instead.
-    controller-api-port:
-      type: int
-      description: |-
-        An optional port that may be set for controllers
-        that have a very heavy load. If this port is set, this port is used by
-        the controllers to talk to each other - used for the local API connection
-        as well as the pubsub forwarders, and the raft workers. If this value is
-        set, the api-port isn't opened until the controllers have started properly.
     controller-name:
       type: string
       description: The canonical name of the controller
@@ -283,9 +281,16 @@ Controller configuration keys:
       type: int
       description: The maximum number of concurrent resources downloads across all the
         applications on the controller
+    dqlite-busy-timeout:
+      type: string
+      description: |-
+        The timeout for how long a database operation will wait for a lock
+        to be released before returning an error, that is the amount of
+        time a writer will wait for others to finish writing on the
+        same database.
     features:
-      type: list
-      description: A list of runtime changeable features to be updated
+      type: string
+      description: A comma-delimited list of runtime changeable features to be updated
     identity-public-key:
       type: string
       description: The public key of the identity manager
@@ -298,13 +303,6 @@ Controller configuration keys:
         The time the controller will wait between
         resets of all idle connections. By default, every 10 minutes
         the controller will close all idle connections.
-    juju-db-snap-channel:
-      type: string
-      description: Sets channel for installing mongo snaps when bootstrapping on focal
-        or later
-    juju-ha-space:
-      type: string
-      description: The network space within which the MongoDB replica-set should communicate
     juju-mgmt-space:
       type: string
       description: The network space that agents should use to communicate with controllers
@@ -335,9 +333,6 @@ Controller configuration keys:
     max-txn-log-size:
       type: string
       description: The maximum size the of capped txn log collection
-    metering-url:
-      type: string
-      description: The url for metrics
     migration-agent-wait-time:
       type: string
       description: The maximum during model migrations that the migration worker will
@@ -349,12 +344,39 @@ Controller configuration keys:
       type: string
       description: The maximum size of the log file written out by the controller on behalf
         of workers running for a model
-    model-logs-size:
+    object-store-s3-endpoint:
       type: string
-      description: The size of the capped collections used to hold the logs for the models
-    mongo-memory-profile:
+      description: The s3 endpoint for the object store backend
+    object-store-s3-static-key:
       type: string
-      description: Sets mongo memory profile
+      description: The s3 static key for the object store backend
+    object-store-s3-static-secret:
+      type: string
+      description: The s3 static secret for the object store backend
+    object-store-s3-static-session:
+      type: string
+      description: The s3 static session for the object store backend
+    object-store-type:
+      type: string
+      description: The type of object store backend to use for storing blobs
+    open-telemetry-enabled:
+      type: bool
+      description: Enable open telemetry tracing
+    open-telemetry-endpoint:
+      type: string
+      description: Endpoint open telemetry tracing
+    open-telemetry-insecure:
+      type: bool
+      description: Allows insecure endpoint for open telemetry tracing
+    open-telemetry-sample-ratio:
+      type: string
+      description: Allows defining a sample ratio open telemetry tracing
+    open-telemetry-stack-traces:
+      type: bool
+      description: Allows stack traces open telemetry tracing per span
+    open-telemetry-tail-sampling-threshold:
+      type: string
+      description: Allows defining a tail sampling threshold open telemetry tracing
     prune-txn-query-count:
       type: int
       description: The number of transactions to read in a single query
@@ -369,9 +391,10 @@ Controller configuration keys:
       description: Enable query tracing for the dqlite driver
     query-tracing-threshold:
       type: string
-      description: "The minimum duration of a query for it to be traced. The lower the
-        \nthreshold, the more queries will be output. A value of 0 means all queries \nwill
-        be output if tracing is enabled."
+      description: |-
+        The minimum duration of a query for it to be traced. The lower the
+        threshold, the more queries will be output. A value of 0 means all
+        queries will be output if tracing is enabled.
     set-numa-control-policy:
       type: bool
       description: Determines if the NUMA control policy is set
@@ -381,9 +404,9 @@ Controller configuration keys:
     ssh-server-port:
       type: int
       description: The port used for ssh connections to the controller
-    state-port:
-      type: int
-      description: The port used for mongo connections
+    system-ssh-keys:
+      type: string
+      description: Defines the system ssh keys
     
 Model configuration keys (affecting the controller model):
 
@@ -408,10 +431,6 @@ Model configuration keys (affecting the controller model):
     apt-no-proxy:
       type: string
       description: List of domain addresses not to be proxied for APT (comma-separated)
-    authorized-keys:
-      type: string
-      description: Any authorized SSH public keys for the model, as found in a ~/.ssh/authorized_keys
-        file
     automatically-retry-hooks:
       type: bool
       description: Determines whether the uniter should automatically retry failed hooks
@@ -443,7 +462,8 @@ Model configuration keys (affecting the controller model):
         created in this model (comma-separated)
     container-networking-method:
       type: string
-      description: Method of container networking setup - one of fan, provider, local
+      description: Method of container networking setup - one of "provider", "local",
+        or "" (auto-configure).
     default-base:
       type: string
       description: The default base image to use for deploying charms, will act like --base
@@ -475,34 +495,20 @@ Model configuration keys (affecting the controller model):
     extra-info:
       type: string
       description: Arbitrary user specified string data that is stored against the model.
-    fan-config:
-      type: string
-      description: Configuration for fan networking for this model
     firewall-mode:
       type: string
-      description: |-
-        The mode to use for network firewalling.
-    
-        'instance' requests the use of an individual firewall per instance.
-    
-        'global' uses a single firewall for all instances (access
-        for a network port is enabled to one instance if any instance requires
-        that port).
-    
-        'none' requests that no firewalling should be performed
-        inside the model. It's useful for clouds without support for either
-        global or per instance security groups.
+      description: The mode to use for network firewalling.
     ftp-proxy:
       type: string
-      description: The FTP proxy value to configure on instances, in the FTP_PROXY environment
+      description: The FTP proxy value to configure on instances, in the `FTP_PROXY` environment
         variable
     http-proxy:
       type: string
-      description: The HTTP proxy value to configure on instances, in the HTTP_PROXY environment
-        variable
+      description: The HTTP proxy value to configure on instances, in the `HTTP_PROXY`
+        environment variable
     https-proxy:
       type: string
-      description: The HTTPS proxy value to configure on instances, in the HTTPS_PROXY
+      description: The HTTPS proxy value to configure on instances, in the `HTTPS_PROXY`
         environment variable
     ignore-machine-addresses:
       type: bool
@@ -519,30 +525,25 @@ Model configuration keys (affecting the controller model):
         when starting an instance.
     juju-ftp-proxy:
       type: string
-      description: The FTP proxy value to pass to charms in the JUJU_CHARM_FTP_PROXY environment
-        variable
+      description: The FTP proxy value to pass to charms in the `JUJU_CHARM_FTP_PROXY`
+        environment variable
     juju-http-proxy:
       type: string
-      description: The HTTP proxy value to pass to charms in the JUJU_CHARM_HTTP_PROXY
+      description: The HTTP proxy value to pass to charms in the `JUJU_CHARM_HTTP_PROXY`
         environment variable
     juju-https-proxy:
       type: string
-      description: The HTTPS proxy value to pass to charms in the JUJU_CHARM_HTTPS_PROXY
+      description: The HTTPS proxy value to pass to charms in the `JUJU_CHARM_HTTPS_PROXY`
         environment variable
     juju-no-proxy:
       type: string
       description: List of domain addresses not to be proxied (comma-separated), may contain
-        CIDRs. Passed to charms in the JUJU_CHARM_NO_PROXY environment variable
-    logforward-enabled:
-      type: bool
-      description: Whether syslog forwarding is enabled.
+        CIDRs. Passed to charms in the `JUJU_CHARM_NO_PROXY` environment variable
     logging-config:
       type: string
       description: The configuration string to use when configuring Juju agent logging
-        (see http://godoc.org/github.com/juju/loggo#ParseConfigurationString for details)
-    logging-output:
-      type: string
-      description: 'The logging output destination: database and/or syslog. (default "")'
+        (see [this link](https://pkg.go.dev/github.com/juju/loggo#ParseConfigString) for
+        details)
     lxd-snap-channel:
       type: string
       description: The channel to use when installing LXD from a snap (cosmic and later)
@@ -554,14 +555,6 @@ Model configuration keys (affecting the controller model):
       type: string
       description: The maximum size for the action collection, in human-readable memory
         format
-    max-status-history-age:
-      type: string
-      description: The maximum age for status history entries before they are pruned,
-        in human-readable time format
-    max-status-history-size:
-      type: string
-      description: The maximum size for the status history collection, in human-readable
-        memory format
     mode:
       type: string
       description: |-
@@ -583,9 +576,6 @@ Model configuration keys (affecting the controller model):
     num-provision-workers:
       type: int
       description: The number of provisioning workers to use per model
-    provisioner-harvest-mode:
-      type: string
-      description: What to do with unknown machines (default destroyed)
     proxy-ssh:
       type: bool
       description: Whether SSH commands should be proxied through the API server
@@ -597,9 +587,6 @@ Model configuration keys (affecting the controller model):
       description: |-
         Application-offer ingress allowlist is a comma-separated list of
         CIDRs specifying what ingress can be applied to offers in this model.
-    secret-backend:
-      type: string
-      description: The name of the secret store backend. (default "auto")
     snap-http-proxy:
       type: string
       description: The HTTP proxy value for installing snaps
@@ -620,7 +607,7 @@ Model configuration keys (affecting the controller model):
       description: |-
         SSH allowlist is a comma-separated list of CIDRs from
         which machines in this model will accept connections to the SSH service.
-        Currently only the aws, gce, openstack providers support ssh-allow
+        Currently only the aws, gce, and openstack providers support ssh-allow
     ssl-hostname-verification:
       type: bool
       description: Whether SSL hostname verification is enabled (default true)
@@ -630,19 +617,6 @@ Model configuration keys (affecting the controller model):
     storage-default-filesystem-source:
       type: string
       description: The default filesystem storage source for the model
-    syslog-ca-cert:
-      type: string
-      description: The certificate of the CA that signed the syslog server certificate,
-        in PEM format.
-    syslog-client-cert:
-      type: string
-      description: The syslog client certificate in PEM format.
-    syslog-client-key:
-      type: string
-      description: The syslog client key in PEM format.
-    syslog-host:
-      type: string
-      description: The hostname:port of the syslog server.
     test-mode:
       type: bool
       description: |-

@@ -4,8 +4,8 @@
 package params
 
 import (
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/assumes"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/assumes"
 )
 
 // ApplicationCharmResults contains a set of ApplicationCharmResults.
@@ -50,11 +50,6 @@ type CharmsListResult struct {
 	CharmURLs []string `json:"charm-urls"`
 }
 
-// IsMeteredResult stores result from a charms.IsMetered call
-type IsMeteredResult struct {
-	Metered bool `json:"metered"`
-}
-
 // CharmOption mirrors charm.Option
 type CharmOption struct {
 	Type        string      `json:"type"`
@@ -95,12 +90,6 @@ type CharmDevice struct {
 	CountMax    int64  `bson:"count-max"`
 }
 
-// CharmPayloadClass mirrors charm.PayloadClass.
-type CharmPayloadClass struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-
 // CharmResourceMeta mirrors charm.ResourceMeta.
 type CharmResourceMeta struct {
 	Name        string `json:"name"`
@@ -121,11 +110,8 @@ type CharmMeta struct {
 	ExtraBindings  map[string]string            `json:"extra-bindings,omitempty"`
 	Categories     []string                     `json:"categories,omitempty"`
 	Tags           []string                     `json:"tags,omitempty"`
-	Series         []string                     `json:"series,omitempty"`
 	Storage        map[string]CharmStorage      `json:"storage,omitempty"`
 	Devices        map[string]CharmDevice       `json:"devices,omitempty"`
-	Deployment     *CharmDeployment             `json:"deployment,omitempty"`
-	PayloadClasses map[string]CharmPayloadClass `json:"payload-classes,omitempty"`
 	Resources      map[string]CharmResourceMeta `json:"resources,omitempty"`
 	Terms          []string                     `json:"terms,omitempty"`
 	MinJujuVersion string                       `json:"min-juju-version,omitempty"`
@@ -142,9 +128,9 @@ type Charm struct {
 	Config     map[string]CharmOption `json:"config"`
 	Meta       *CharmMeta             `json:"meta,omitempty"`
 	Actions    *CharmActions          `json:"actions,omitempty"`
-	Metrics    *CharmMetrics          `json:"metrics,omitempty"`
 	Manifest   *CharmManifest         `json:"manifest,omitempty"`
 	LXDProfile *CharmLXDProfile       `json:"lxd-profile,omitempty"`
+	Version    string                 `json:"version,omitempty"`
 }
 
 // CharmActions mirrors charm.Actions.
@@ -154,8 +140,10 @@ type CharmActions struct {
 
 // CharmActionSpec mirrors charm.ActionSpec.
 type CharmActionSpec struct {
-	Description string                 `json:"description"`
-	Params      map[string]interface{} `json:"params"`
+	Description    string                 `json:"description"`
+	Parallel       bool                   `json:"parallel,omitempty"`
+	Params         map[string]interface{} `json:"params"`
+	ExecutionGroup string                 `json:"execution-group,omitempty"`
 }
 
 // CharmMetric mirrors charm.Metric.
@@ -167,20 +155,6 @@ type CharmMetric struct {
 // CharmPlan mirrors charm.Plan
 type CharmPlan struct {
 	Required bool `json:"required"`
-}
-
-// CharmMetrics mirrors charm.Metrics.
-type CharmMetrics struct {
-	Metrics map[string]CharmMetric `json:"metrics"`
-	Plan    CharmPlan              `json:"plan"`
-}
-
-// CharmDeployment mirrors charm.Deployment.
-type CharmDeployment struct {
-	DeploymentType string `json:"type"`
-	DeploymentMode string `json:"mode"`
-	ServiceType    string `json:"service"`
-	MinVersion     string `json:"min-version"`
 }
 
 // CharmManifest mirrors charm.Manifest
@@ -241,7 +215,7 @@ type ContainerProfileResults struct {
 	Results []ContainerProfileResult `json:"results"`
 }
 
-func ToCharmOptionMap(config *charm.Config) map[string]CharmOption {
+func ToCharmOptionMap(config *charm.ConfigSpec) map[string]CharmOption {
 	if config == nil {
 		return nil
 	}
@@ -260,11 +234,11 @@ func toParamsCharmOption(opt charm.Option) CharmOption {
 	}
 }
 
-func FromCharmOptionMap(config map[string]CharmOption) *charm.Config {
+func FromCharmOptionMap(config map[string]CharmOption) *charm.ConfigSpec {
 	if len(config) == 0 {
 		return nil
 	}
-	result := &charm.Config{
+	result := &charm.ConfigSpec{
 		Options: make(map[string]charm.Option),
 	}
 	for key, value := range config {

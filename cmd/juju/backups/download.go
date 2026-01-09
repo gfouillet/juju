@@ -8,12 +8,12 @@ import (
 	"io"
 	"path/filepath"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const downloadDoc = `
@@ -76,17 +76,17 @@ func (c *downloadCommand) Init(args []string) error {
 
 // Run implements Command.Run.
 func (c *downloadCommand) Run(ctx *cmd.Context) error {
-	if err := c.validateIaasController(c.Info().Name); err != nil {
+	if err := c.validateIaasController(ctx, c.Info().Name); err != nil {
 		return errors.Trace(err)
 	}
-	client, err := c.NewAPIClient()
+	client, err := c.NewAPIClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer client.Close()
 
 	// Download the archive.
-	resultArchive, err := client.Download(c.RemoteFilename)
+	resultArchive, err := client.Download(ctx, c.RemoteFilename)
 	if err != nil {
 		if errors.Is(err, errors.NotFound) {
 			ctx.Errorf("Download of backup archive files is not supported by this controller.")

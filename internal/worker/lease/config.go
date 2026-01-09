@@ -11,46 +11,28 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/trace"
 )
-
-// Secretary is responsible for validating the sanity of lease and holder names
-// before bothering the manager with them.
-type Secretary interface {
-
-	// CheckLease returns an error if the supplied lease name is not valid.
-	CheckLease(key lease.Key) error
-
-	// CheckHolder returns an error if the supplied holder name is not valid.
-	CheckHolder(name string) error
-
-	// CheckDuration returns an error if the supplied duration is not valid.
-	CheckDuration(duration time.Duration) error
-}
-
-// Logger represents the logging methods we use from a loggo.Logger.
-type Logger interface {
-	Tracef(string, ...interface{})
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-	Warningf(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // ManagerConfig contains the resources and information required to create a
 // Manager.
 type ManagerConfig struct {
 
-	// Secretary determines validation given a namespace. The
+	// SecretaryFinder determines validation given a namespace. The
 	// secretary returned is responsible for validating lease names
 	// and holder names for that namespace.
-	Secretary func(namespace string) (Secretary, error)
+	SecretaryFinder lease.SecretaryFinder
 
 	// Store is responsible for recording, retrieving, and expiring leases.
 	Store lease.Store
 
+	// Tracer is used to record tracing information as the manager runs.
+	Tracer trace.Tracer
+
 	// Logger is used to report debugging/status information as the
 	// manager runs.
-	Logger Logger
+	Logger logger.Logger
 
 	// Clock is responsible for reporting the passage of time.
 	Clock clock.Clock
@@ -73,11 +55,14 @@ type ManagerConfig struct {
 // Validate returns an error if the configuration contains invalid information
 // or missing resources.
 func (config ManagerConfig) Validate() error {
-	if config.Secretary == nil {
-		return errors.NotValidf("nil Secretary")
+	if config.SecretaryFinder == nil {
+		return errors.NotValidf("nil SecretaryFinder")
 	}
 	if config.Store == nil {
 		return errors.NotValidf("nil Store")
+	}
+	if config.Tracer == nil {
+		return errors.NotValidf("nil Tracer")
 	}
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")

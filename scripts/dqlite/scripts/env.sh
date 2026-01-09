@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
 PROJECT_DIR=$(pwd)
+PROJECT_BRANCH="4.0"
 
 DEBUG_MODE=${DEBUG_MODE:-false}
 
@@ -52,20 +53,20 @@ check_dependencies() {
 
 CURRENT_ARCH=$(current_arch)
 
-BUILD_IMAGE=ubuntu:22.04
+BUILD_IMAGE=ubuntu:24.04
 BUILD_CONTAINER=lib-build-server
 BUILD_MACHINE=$(uname -m)
 BUILD_ARCH=$(go env GOARCH 2>/dev/null || echo "amd64")
 
 EXTRACTED_DEPS_PATH=${PROJECT_DIR}/_deps
-EXTRACTED_DEPS_ARCH_PATH=${EXTRACTED_DEPS_PATH}/dqlite-deps-${BUILD_ARCH}
+EXTRACTED_DEPS_ARCH_PATH=${EXTRACTED_DEPS_PATH}/dqlite-deps-${PROJECT_BRANCH}-${BUILD_ARCH}
 
 TAG_LIBTIRPC=upstream/1.3.3
-TAG_LIBNSL=v2.0.0
-TAG_LIBUV=v1.46.0
+TAG_LIBNSL=v2.0.1
+TAG_LIBUV=v1.51.0
 TAG_LIBLZ4=v1.9.4
-TAG_SQLITE=version-3.46.0
-TAG_DQLITE=v1.16.7
+TAG_SQLITE=version-3.47.0
+TAG_DQLITE=v1.18.3-fixed
 
 S3_BUCKET=s3://dqlite-static-libs
 S3_ARCHIVE_NAME=$(date -u +"%Y-%m-%d")-dqlite-deps-${BUILD_ARCH}.tar.bz2

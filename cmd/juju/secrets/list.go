@@ -4,28 +4,29 @@
 package secrets
 
 import (
+	"context"
 	"io"
 	"sort"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apisecrets "github.com/juju/juju/api/client/secrets"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type listSecretsCommand struct {
 	modelcmd.ModelCommandBase
 	out cmd.Output
 
-	listSecretsAPIFunc func() (ListSecretsAPI, error)
+	listSecretsAPIFunc func(ctx context.Context) (ListSecretsAPI, error)
 	revealSecrets      bool
 	owner              string
 }
@@ -41,7 +42,7 @@ const listSecretsExamples = `
 
 // ListSecretsAPI is the secrets client API.
 type ListSecretsAPI interface {
-	ListSecrets(bool, secrets.Filter) ([]apisecrets.SecretDetails, error)
+	ListSecrets(context.Context, bool, secrets.Filter) ([]apisecrets.SecretDetails, error)
 	Close() error
 }
 
@@ -53,8 +54,8 @@ func NewListSecretsCommand() cmd.Command {
 	return modelcmd.Wrap(c)
 }
 
-func (c *listSecretsCommand) secretsAPI() (ListSecretsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *listSecretsCommand) secretsAPI(ctx context.Context) (ListSecretsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -151,7 +152,7 @@ func (c *listSecretsCommand) Run(ctxt *cmd.Context) error {
 		c.revealSecrets = false
 	}
 
-	api, err := c.listSecretsAPIFunc()
+	api, err := c.listSecretsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -163,15 +164,33 @@ func (c *listSecretsCommand) Run(ctxt *cmd.Context) error {
 		if err != nil {
 			return errors.Maskf(err, "invalid owner %q", c.owner)
 		}
-		owner := ownerTag.String()
-		filter.OwnerTag = &owner
+		switch ownerTag.Kind() {
+		case names.ApplicationTagKind:
+			filter.Owner = &secrets.Owner{Kind: secrets.ApplicationOwner, ID: ownerTag.Id()}
+		case names.UnitTagKind:
+			filter.Owner = &secrets.Owner{Kind: secrets.UnitOwner, ID: ownerTag.Id()}
+		default:
+			return errors.Errorf("invalid owner %q", c.owner)
+		}
 	}
-	result, err := api.ListSecrets(c.revealSecrets, filter)
+	result, err := api.ListSecrets(ctxt, c.revealSecrets, filter)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	details := gatherSecretInfo(result, c.revealSecrets, false, false)
 	return c.out.Write(ctxt, details)
+}
+
+func ownerTagFromOwner(owner secrets.Owner) (names.Tag, error) {
+	switch owner.Kind {
+	case secrets.UnitOwner:
+		return names.NewUnitTag(owner.ID), nil
+	case secrets.ApplicationOwner:
+		return names.NewApplicationTag(owner.ID), nil
+	case secrets.ModelOwner:
+		return names.NewModelTag(owner.ID), nil
+	}
+	return nil, errors.NotValidf("owner kind %q", owner.Kind)
 }
 
 func gatherSecretInfo(
@@ -182,7 +201,7 @@ func gatherSecretInfo(
 		ownerId := ""
 		name := ""
 		label := m.Metadata.Label
-		if owner, err := names.ParseTag(m.Metadata.OwnerTag); err == nil {
+		if owner, err := ownerTagFromOwner(m.Metadata.Owner); err == nil {
 			ownerId = owner.Id()
 			if owner.Kind() == names.ModelTagKind {
 				// Model owned (user) secrets have a name, not a label.

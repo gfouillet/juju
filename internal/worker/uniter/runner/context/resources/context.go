@@ -4,19 +4,22 @@
 package resources
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
+
+	"github.com/juju/juju/core/logger"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 )
 
 // ResourcesHookContext is the implementation of runner.ContextResources.
 type ResourcesHookContext struct {
 	Client       OpenedResourceClient
 	ResourcesDir string
-	Logger       Logger
+	Logger       logger.Logger
 }
 
 // DownloadResource downloads the named resource and returns the path
@@ -24,12 +27,12 @@ type ResourcesHookContext struct {
 // not been uploaded yet then errors.NotFound is returned.
 //
 // Note that the downloaded file is checked for correctness.
-func (ctx *ResourcesHookContext) DownloadResource(name string) (filePath string, _ error) {
+func (ctx *ResourcesHookContext) DownloadResource(stdCtx context.Context, name string) (filePath string, _ error) {
 	// TODO(katco): Potential race-condition: two commands running at
 	// once. Solve via collision using os.Mkdir() with a uniform
 	// temp dir name (e.g. "<resourcesDir>/.<res name>.download")?
 
-	remote, err := OpenResource(name, ctx.Client)
+	remote, err := OpenResource(stdCtx, name, ctx.Client)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

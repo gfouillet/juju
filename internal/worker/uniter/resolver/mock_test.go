@@ -4,8 +4,9 @@
 package resolver_test
 
 import (
-	"github.com/juju/testing"
+	"context"
 
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/fortress"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
@@ -28,7 +29,7 @@ func (w *mockRemoteStateWatcher) Snapshot() remotestate.Snapshot {
 
 type mockOpFactory struct {
 	operation.Factory
-	testing.Stub
+	testhelpers.Stub
 	op mockOp
 }
 
@@ -62,7 +63,7 @@ func (f *mockOpFactory) NewSkipHook(info hook.Info) (operation.Operation, error)
 	return f.op, f.NextErr()
 }
 
-func (f *mockOpFactory) NewAction(id string) (operation.Operation, error) {
+func (f *mockOpFactory) NewAction(_ context.Context, id string) (operation.Operation, error) {
 	f.MethodCall(f, "NewAction", id)
 	return f.op, f.NextErr()
 }
@@ -72,19 +73,9 @@ func (f *mockOpFactory) NewFailAction(id string) (operation.Operation, error) {
 	return f.op, f.NextErr()
 }
 
-func (f *mockOpFactory) NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (operation.Operation, error) {
-	f.MethodCall(f, "NewRemoteInit", runningStatus)
-	return f.op, f.NextErr()
-}
-
-func (f *mockOpFactory) NewSkipRemoteInit(retry bool) (operation.Operation, error) {
-	f.MethodCall(f, "NewSkipRemoteInit", retry)
-	return f.op, f.NextErr()
-}
-
 type mockOpExecutor struct {
 	operation.Executor
-	testing.Stub
+	testhelpers.Stub
 	st  operation.State
 	run func(operation.Operation, <-chan remotestate.Snapshot) error
 }
@@ -94,7 +85,7 @@ func (e *mockOpExecutor) State() operation.State {
 	return e.st
 }
 
-func (e *mockOpExecutor) Run(op operation.Operation, rs <-chan remotestate.Snapshot) error {
+func (e *mockOpExecutor) Run(ctx context.Context, op operation.Operation, rs <-chan remotestate.Snapshot) error {
 	e.MethodCall(e, "Run", op, rs)
 	if e.run != nil {
 		return e.run(op, rs)
@@ -108,14 +99,14 @@ type mockOp struct {
 	prepare func(operation.State) (*operation.State, error)
 }
 
-func (op mockOp) Prepare(st operation.State) (*operation.State, error) {
+func (op mockOp) Prepare(ctx context.Context, st operation.State) (*operation.State, error) {
 	if op.prepare != nil {
 		return op.prepare(st)
 	}
 	return &st, nil
 }
 
-func (op mockOp) Commit(st operation.State) (*operation.State, error) {
+func (op mockOp) Commit(ctx context.Context, st operation.State) (*operation.State, error) {
 	if op.commit != nil {
 		return op.commit(st)
 	}
@@ -124,15 +115,15 @@ func (op mockOp) Commit(st operation.State) (*operation.State, error) {
 
 type mockCharmDirGuard struct {
 	fortress.Guard
-	testing.Stub
+	testhelpers.Stub
 }
 
-func (l *mockCharmDirGuard) Unlock() error {
+func (l *mockCharmDirGuard) Unlock(context.Context) error {
 	l.MethodCall(l, "Unlock")
 	return l.NextErr()
 }
 
-func (l *mockCharmDirGuard) Lockdown(abort fortress.Abort) error {
-	l.MethodCall(l, "Lockdown", abort)
+func (l *mockCharmDirGuard) Lockdown(context.Context) error {
+	l.MethodCall(l, "Lockdown")
 	return l.NextErr()
 }

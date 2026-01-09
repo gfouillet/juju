@@ -4,13 +4,15 @@
 package relation
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
 	"github.com/kr/pretty"
 	"gopkg.in/yaml.v2"
 
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 )
 
@@ -97,10 +99,10 @@ func (s *State) Validate(hi hook.Info) (err error) {
 // It must be called after the respective hook was executed successfully.
 // UpdateStateForHook doesn't validate hi but guarantees that successive
 // changes of the same hi are idempotent.
-func (s *State) UpdateStateForHook(hi hook.Info, logger Logger) {
-	if logger.IsTraceEnabled() {
+func (s *State) UpdateStateForHook(hi hook.Info, log logger.Logger) {
+	if log.IsLevelEnabled(logger.TRACE) {
 		defer func() {
-			logger.Tracef("updated relation state %# v\nfor hook %# v", pretty.Formatter(s), pretty.Formatter(hi))
+			log.Tracef(context.Background(), "updated relation state %# v\nfor hook %# v", pretty.Formatter(s), pretty.Formatter(hi))
 		}()
 	}
 	if hi.Kind == hooks.RelationBroken {

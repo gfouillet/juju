@@ -5,7 +5,6 @@
 :hidden:
 
 controller-config-audit-log-exclude-methods
-controller-config-juju-ha-space
 controller-config-juju-mgmt-space
 ```
 
@@ -55,7 +54,7 @@ ratelimit the agent connections to the API server.
 `agent-ratelimit-rate` is the interval at which a new token is added to
 the token bucket, in milliseconds (ms).
 
-**Type:** duration
+**Type:** TimeDurationString
 
 **Default value:** 250ms
 
@@ -86,21 +85,6 @@ they don't have any access rights to the controller itself.
 **Default value:** 17070
 
 **Can be changed after bootstrap:** no
-
-
-(controller-config-api-port-open-delay)=
-## `api-port-open-delay`
-
-`api-port-open-delay` is a duration that the controller will wait
-between when the controller has been deemed to be ready to open
-the api-port and when the api-port is actually opened. This value
-is only used when a controller-api-port value is set.
-
-**Type:** duration
-
-**Default value:** 2s
-
-**Can be changed after bootstrap:** yes
 
 
 (controller-config-application-resource-download-limit)=
@@ -139,7 +123,7 @@ with only calls to these will be excluded from the
 log. (They'll still appear in conversations that have other
 interesting calls though.).
 
-**Type:** list[string]
+**Type:** string
 
 **Can be changed after bootstrap:** yes
 
@@ -235,26 +219,12 @@ for the jujud operator and mongo images.
 
 `caas-operator-image-path` sets the URL of the docker image
 used for the application operator.
+//
 Deprecated: use `caas-image-repo`.
 
 **Type:** string
 
 **Can be changed after bootstrap:** no
-
-
-(controller-config-controller-api-port)=
-## `controller-api-port`
-
-`controller-api-port` is an optional port that may be set for controllers
-that have a very heavy load. If this port is set, this port is used by
-the controllers to talk to each other - used for the local API connection
-as well as the pubsub forwarders, and the raft workers. If this value is
-set, the api-port isn't opened until the controllers have started
-properly.
-
-**Type:** integer
-
-**Can be changed after bootstrap:** yes
 
 
 (controller-config-controller-name)=
@@ -290,12 +260,27 @@ Use a value of 0 to disable the limit.
 **Can be changed after bootstrap:** no
 
 
+(controller-config-dqlite-busy-timeout)=
+## `dqlite-busy-timeout`
+
+`dqlite-busy-timeout` sets the timeout for how long a database operation will
+wait for a lock to be released before returning an error, that is the
+amount of time a writer will wait for others to finish writing on the
+same database.
+
+**Type:** TimeDurationString
+
+**Default value:** 1s
+
+**Can be changed after bootstrap:** yes
+
+
 (controller-config-features)=
 ## `features`
 
 `features` allows a list of runtime changeable features to be updated.
 
-**Type:** list[string]
+**Type:** string
 
 **Can be changed after bootstrap:** yes
 
@@ -332,30 +317,6 @@ created locally on the controller.
 **Type:** duration
 
 **Default value:** 30s
-
-**Can be changed after bootstrap:** yes
-
-
-(controller-config-juju-db-snap-channel)=
-## `juju-db-snap-channel`
-
-`juju-db-snap-channel` selects the channel to use when installing Mongo
-snaps for focal or later. The value is ignored for older releases.
-
-**Type:** string
-
-**Default value:** 4.4/stable
-
-**Can be changed after bootstrap:** no
-
-
-(controller-config-juju-ha-space)=
-## `juju-ha-space`
-
-`juju-ha-space` is the network space within which the MongoDB replica-set
-should communicate.
-
-**Type:** string
 
 **Can be changed after bootstrap:** yes
 
@@ -438,7 +399,7 @@ leaving the debug-log process running. This causes unnecessary load on
 the API server. The max debug-log duration has a default of 24 hours,
 which should be more than enough time for a debugging session.
 
-**Type:** duration
+**Type:** TimeDurationString
 
 **Default value:** 24h0m0s
 
@@ -490,18 +451,6 @@ will be used instead.
 **Can be changed after bootstrap:** no
 
 
-(controller-config-metering-url)=
-## `metering-url`
-
-`metering-url` is the URL to use for metrics.
-
-**Type:** string
-
-**Default value:** https://api.jujucharms.com/omnibus/v3
-
-**Can be changed after bootstrap:** no
-
-
 (controller-config-migration-agent-wait-time)=
 ## `migration-agent-wait-time`
 
@@ -509,7 +458,7 @@ will be used instead.
 worker will wait for agents to report for a migration phase when
 executing a model migration.
 
-**Type:** duration
+**Type:** TimeDurationString
 
 **Default value:** 15m0s
 
@@ -542,29 +491,132 @@ controller on behalf of workers running for a model.
 **Can be changed after bootstrap:** yes
 
 
-(controller-config-model-logs-size)=
-## `model-logs-size`
+(controller-config-object-store-s3-endpoint)=
+## `object-store-s3-endpoint`
 
-`model-logs-size` is the size of the capped collections used to hold the
-logs for the models, eg "20M". Size is per model.
+`object-store-s3-endpoint` is the endpoint to use for S3 object stores.
 
 **Type:** string
-
-**Default value:** 20M
 
 **Can be changed after bootstrap:** yes
 
 
-(controller-config-mongo-memory-profile)=
-## `mongo-memory-profile`
+(controller-config-object-store-s3-static-key)=
+## `object-store-s3-static-key`
 
-`mongo-memory-profile` sets the memory profile for MongoDB. Valid values are:
-- "low": use the least possible memory
-- "default": use the default memory profile.
+`object-store-s3-static-key` is the static key to use for S3 object stores.
 
 **Type:** string
 
-**Default value:** default
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-object-store-s3-static-secret)=
+## `object-store-s3-static-secret`
+
+`object-store-s3-static-secret` is the static secret to use for S3 object
+stores.
+
+**Type:** string
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-object-store-s3-static-session)=
+## `object-store-s3-static-session`
+
+`object-store-s3-static-session` is the static session token to use for S3
+object stores.
+
+**Type:** string
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-object-store-type)=
+## `object-store-type`
+
+`object-store-type` is the type of object store to use for storing blobs.
+This isn't currently allowed to be changed dynamically, that will come
+when we support multiple object store types (not including state).
+
+**Type:** string
+
+**Default value:** file
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-enabled)=
+## `open-telemetry-enabled`
+
+`open-telemetry-enabled` returns whether open telemetry is enabled.
+
+**Type:** boolean
+
+**Default value:** false
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-endpoint)=
+## `open-telemetry-endpoint`
+
+`open-telemetry-endpoint` returns the endpoint at which the telemetry will
+be pushed to.
+
+**Type:** string
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-insecure)=
+## `open-telemetry-insecure`
+
+`open-telemetry-insecure` returns if the telemetry collector endpoint is
+insecure or not. Useful for debug or local testing.
+
+**Type:** boolean
+
+**Default value:** false
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-sample-ratio)=
+## `open-telemetry-sample-ratio`
+
+`open-telemetry-sample-ratio` returns the sample ratio for open telemetry.
+
+**Type:** string
+
+**Default value:** 0.10
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-stack-traces)=
+## `open-telemetry-stack-traces`
+
+`open-telemetry-stack-traces` return whether stack traces should be added per
+span.
+
+**Type:** boolean
+
+**Default value:** false
+
+**Can be changed after bootstrap:** yes
+
+
+(controller-config-open-telemetry-tail-sampling-threshold)=
+## `open-telemetry-tail-sampling-threshold`
+
+`open-telemetry-tail-sampling-threshold` returns the tail sampling threshold
+for open telemetry as a duration.
+
+**Type:** TimeDurationString
+
+**Default value:** 1ms
 
 **Can be changed after bootstrap:** yes
 
@@ -593,7 +645,7 @@ slowdown, but allows other systems to operate concurrently.
 A negative number will indicate to use the default, a value of 0
 indicates to not sleep at all.
 
-**Type:** duration
+**Type:** TimeDurationString
 
 **Default value:** 10ms
 
@@ -631,7 +683,7 @@ queries which take longer than this value will be logged (if query tracing
 is enabled). The lower the threshold, the more queries will be output. A
 value of 0 means all queries will be output.
 
-**Type:** duration
+**Type:** TimeDurationString
 
 **Default value:** 1s
 
@@ -678,14 +730,13 @@ connections to the controller.
 **Can be changed after bootstrap:** no
 
 
-(controller-config-state-port)=
-## `state-port`
+(controller-config-system-ssh-keys)=
+## `system-ssh-keys`
 
-`state-port` is the port used for mongo connections.
+`system-ssh-keys` returns the set of ssh keys that should be trusted by
+agents of this controller regardless of the model.
 
-**Type:** integer
-
-**Default value:** 37017
+**Type:** string
 
 **Can be changed after bootstrap:** no
 

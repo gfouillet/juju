@@ -4,8 +4,10 @@
 package connector
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
@@ -94,10 +96,10 @@ func NewSimple(opts SimpleConfig, dialOptions ...api.DialOption) (*SimpleConnect
 }
 
 // Connect returns a Connection according to c's configuration.
-func (c *SimpleConnector) Connect(dialOptions ...api.DialOption) (api.Connection, error) {
+func (c *SimpleConnector) Connect(ctx context.Context, dialOptions ...api.DialOption) (api.Connection, error) {
 	opts := c.defaultDialOpts
 	for _, f := range dialOptions {
 		f(&opts)
 	}
-	return apiOpen(&c.info, opts)
+	return apiOpen(ctx, &c.info, opts)
 }

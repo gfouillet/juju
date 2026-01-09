@@ -4,32 +4,34 @@
 package caasmodelconfigmanager_test
 
 import (
-	"github.com/juju/testing"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/apiserver/facade/facadetest"
 	"github.com/juju/juju/apiserver/facades/controller/caasmodelconfigmanager"
 	"github.com/juju/juju/apiserver/facades/controller/caasmodelconfigmanager/mocks"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-var _ = gc.Suite(&caasmodelconfigmanagerSuite{})
-
-type caasmodelconfigmanagerSuite struct {
-	testing.IsolationSuite
+func TestCaasmodelconfigmanagerSuite(t *testing.T) {
+	tc.Run(t, &caasmodelconfigmanagerSuite{})
 }
 
-func (s *caasmodelconfigmanagerSuite) TestAuth(c *gc.C) {
+type caasmodelconfigmanagerSuite struct {
+	testhelpers.IsolationSuite
+}
+
+func (s *caasmodelconfigmanagerSuite) TestAuth(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	ctx := mocks.NewMockContext(ctrl)
 	authorizer := mocks.NewMockAuthorizer(ctrl)
+	authorizer.EXPECT().AuthController().Return(false)
 
-	gomock.InOrder(
-		ctx.EXPECT().Auth().Return(authorizer),
-		authorizer.EXPECT().AuthController().Return(false),
-	)
-
-	_, err := caasmodelconfigmanager.NewFacade(ctx)
-	c.Assert(err, gc.ErrorMatches, `permission denied`)
+	_, err := caasmodelconfigmanager.NewFacade(facadetest.ModelContext{
+		Auth_: authorizer,
+	})
+	c.Assert(err, tc.ErrorMatches, `permission denied`)
 }

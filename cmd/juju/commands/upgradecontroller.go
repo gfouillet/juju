@@ -4,35 +4,33 @@
 package commands
 
 import (
-	"bufio"
+	"context"
 	"fmt"
-	"io"
 	"os"
 	"path"
-	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/modelconfig"
 	"github.com/juju/juju/api/client/modelupgrader"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/sync"
 	"github.com/juju/juju/environs/tools"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var usageUpgradeControllerSummary = `
@@ -72,14 +70,13 @@ func newUpgradeControllerCommand(options ...modelcmd.WrapControllerOption) cmd.C
 type upgradeControllerCommand struct {
 	modelcmd.ControllerCommandBase
 
-	vers          string
-	Version       version.Number
-	BuildAgent    bool
-	DryRun        bool
-	ResetPrevious bool
-	AssumeYes     bool
-	AgentStream   string
-	timeout       time.Duration
+	vers        string
+	Version     semversion.Number
+	BuildAgent  bool
+	DryRun      bool
+	AssumeYes   bool
+	AgentStream string
+	timeout     time.Duration
 	// IgnoreAgentVersions is used to allow an admin to request an agent
 	// version without waiting for all agents to be at the right version.
 	IgnoreAgentVersions bool
@@ -109,7 +106,6 @@ func (c *upgradeControllerCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.AgentStream, "agent-stream", "", "Check this agent stream for upgrades")
 	f.BoolVar(&c.BuildAgent, "build-agent", false, "Build a local version of the agent binary; for development use only")
 	f.BoolVar(&c.DryRun, "dry-run", false, "Don't change anything, just report what would be changed")
-	f.BoolVar(&c.ResetPrevious, "reset-previous-upgrade", false, "Clear the previous (incomplete) upgrade status (use with care)")
 	f.BoolVar(&c.AssumeYes, "y", false, "Answer 'yes' to confirmation prompts")
 	f.BoolVar(&c.AssumeYes, "yes", false, "")
 	f.BoolVar(&c.IgnoreAgentVersions, "ignore-agent-versions", false,
@@ -119,7 +115,7 @@ func (c *upgradeControllerCommand) SetFlags(f *gnuflag.FlagSet) {
 
 func (c *upgradeControllerCommand) Init(args []string) error {
 	if c.vers != "" {
-		vers, err := version.Parse(c.vers)
+		vers, err := semversion.Parse(c.vers)
 		if err != nil {
 			return err
 		}
@@ -137,22 +133,22 @@ func (c *upgradeControllerCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args)
 }
 
-func (c *upgradeControllerCommand) getModelUpgraderAPI() (ModelUpgraderAPI, error) {
+func (c *upgradeControllerCommand) getModelUpgraderAPI(ctx context.Context) (ModelUpgraderAPI, error) {
 	if c.modelUpgraderAPI != nil {
 		return c.modelUpgraderAPI, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewModelAPIRoot(ctx, bootstrap.ControllerModelName)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return modelupgrader.NewClient(root), nil
 }
 
-func (c *upgradeControllerCommand) getModelConfigAPI() (ModelConfigAPI, error) {
+func (c *upgradeControllerCommand) getModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.modelConfigAPI != nil {
 		return c.modelConfigAPI, nil
 	}
-	api, err := c.NewAPIRoot()
+	api, err := c.NewModelAPIRoot(ctx, bootstrap.ControllerModelName)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -191,8 +187,8 @@ func (c *upgradeControllerCommand) Run(ctx *cmd.Context) (err error) {
 		return errors.Errorf("upgrade not possible missing"+
 			" permissions, current level %q, need: %q", accDetails.LastKnownAccess, permission.SuperuserAccess)
 	}
-	controllerModel := jujuclient.JoinOwnerModelName(
-		names.NewUserTag(environs.AdminUser), bootstrap.ControllerModelName)
+	controllerModel := jujuclient.QualifyModelName(
+		environs.AdminUser, bootstrap.ControllerModelName)
 	c.controllerModelDetails, err = store.ModelByName(controllerName, controllerModel)
 	if err != nil {
 		return errors.Annotatef(err, "cannot get controller model")
@@ -208,11 +204,11 @@ func (c *upgradeControllerCommand) Run(ctx *cmd.Context) (err error) {
 }
 
 func (c *upgradeControllerCommand) uploadTools(
-	modelUpgrader ModelUpgraderAPI, buildAgent, officialOnly bool, agentVersion version.Number, dryRun bool,
-) (targetVersion version.Number, err error) {
+	ctx context.Context, modelUpgrader ModelUpgraderAPI, buildAgent, officialOnly bool, agentVersion semversion.Number, dryRun bool,
+) (targetVersion semversion.Number, err error) {
 	builtTools, err := sync.BuildAgentTarball(
 		buildAgent, "upgrade",
-		func(builtVersion version.Number) version.Number {
+		func(builtVersion semversion.Number) semversion.Number {
 			builtVersion.Build++
 			if agentVersion.Build >= builtVersion.Build {
 				builtVersion.Build = agentVersion.Build + 1
@@ -231,7 +227,7 @@ func (c *upgradeControllerCommand) uploadTools(
 	}
 
 	if dryRun {
-		logger.Debugf("dryrun, skipping upload agent binary")
+		logger.Debugf(ctx, "dryrun, skipping upload agent binary")
 		return targetVersion, nil
 	}
 
@@ -239,14 +235,14 @@ func (c *upgradeControllerCommand) uploadTools(
 	uploadToolsVersion.Number = targetVersion
 
 	toolsPath := path.Join(builtTools.Dir, builtTools.StorageName)
-	logger.Infof("uploading agent binary %v (%dkB) to Juju controller", targetVersion, (builtTools.Size+512)/1024)
+	logger.Infof(ctx, "uploading agent binary %v (%dkB) to Juju controller", targetVersion, (builtTools.Size+512)/1024)
 	f, err := os.Open(toolsPath)
 	if err != nil {
 		return targetVersion, errors.Trace(err)
 	}
 	defer f.Close()
 
-	_, err = modelUpgrader.UploadTools(f, uploadToolsVersion)
+	_, err = modelUpgrader.UploadTools(ctx, f, uploadToolsVersion)
 	if err != nil {
 		return targetVersion, errors.Trace(err)
 	}
@@ -255,13 +251,13 @@ func (c *upgradeControllerCommand) uploadTools(
 
 func (c *upgradeControllerCommand) upgradeWithTargetVersion(
 	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, dryRun bool,
-	modelType model.ModelType, targetVersion, agentVersion version.Number,
-) (chosenVersion version.Number, err error) {
+	modelType model.ModelType, targetVersion, agentVersion semversion.Number,
+) (chosenVersion semversion.Number, err error) {
 	chosenVersion, err = c.notifyControllerUpgrade(ctx, modelUpgrader, targetVersion, dryRun)
 	if err == nil {
 		// All good!
 		// Upgraded to the provided target version.
-		logger.Debugf("upgraded to the provided target version %q", targetVersion)
+		logger.Debugf(ctx, "upgraded to the provided target version %q", targetVersion)
 		return chosenVersion, nil
 	}
 	if !errors.Is(err, errors.NotFound) && !errors.Is(err, errUpToDate) {
@@ -270,17 +266,17 @@ func (c *upgradeControllerCommand) upgradeWithTargetVersion(
 
 	// If target version is the current local binary version, then try to upload.
 	canImplicitUpload := CheckCanImplicitUpload(
-		modelType, isOfficialClient(), jujuversion.Current, jujuversion.Grade, agentVersion,
+		ctx, modelType, isOfficialClient(), jujuversion.Current, jujuversion.Grade, agentVersion,
 	)
 	if !canImplicitUpload {
 		// expecting to upload a local binary but we are not allowed to upload, so pretend there
 		// is no more recent version available.
-		logger.Debugf("no available binary found, and we are not allowed to upload, err %v", err)
+		logger.Debugf(ctx, "no available binary found, and we are not allowed to upload, err %v", err)
 		return chosenVersion, errUpToDate
 	}
 
 	if targetVersion.Compare(jujuversion.Current.ToPatch()) != 0 {
-		logger.Warningf(
+		logger.Warningf(ctx,
 			"try again with --agent-version=%s if you want to upgrade using the local packaged jujud from the snap",
 			jujuversion.Current.ToPatch(),
 		)
@@ -288,7 +284,7 @@ func (c *upgradeControllerCommand) upgradeWithTargetVersion(
 	}
 
 	// found a best target version but a local binary is required to be uploaded.
-	if chosenVersion, err = c.uploadTools(modelUpgrader, false, true, agentVersion, dryRun); err != nil {
+	if chosenVersion, err = c.uploadTools(ctx, modelUpgrader, false, true, agentVersion, dryRun); err != nil {
 		return chosenVersion, block.ProcessBlockedError(err, block.BlockChange)
 	}
 	fmt.Fprintf(ctx.Stdout,
@@ -327,23 +323,23 @@ func (c *upgradeControllerCommand) upgradeController(
 			err = nil
 		}
 		if err != nil {
-			logger.Debugf("upgradeController failed %v", err)
+			logger.Debugf(ctx, "upgradeController failed %v", err)
 		}
 	}()
 
-	modelUpgrader, err := c.getModelUpgraderAPI()
+	modelUpgrader, err := c.getModelUpgraderAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelUpgrader.Close()
 
-	modelConfigClient, err := c.getModelConfigAPI()
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelConfigClient.Close()
 
-	attrs, err := modelConfigClient.ModelGet()
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -363,13 +359,13 @@ func (c *upgradeControllerCommand) upgradeController(
 	}
 
 	if c.BuildAgent {
-		if targetVersion != version.Zero {
+		if targetVersion != semversion.Zero {
 			return errors.Errorf("--build-agent cannot be used with --agent-version together")
 		}
 	}
 
 	// Decide the target version to upgrade.
-	if targetVersion != version.Zero {
+	if targetVersion != semversion.Zero {
 		targetVersion, err = c.upgradeWithTargetVersion(
 			ctx, modelUpgrader, c.DryRun,
 			modelType, targetVersion, agentVersion,
@@ -377,7 +373,7 @@ func (c *upgradeControllerCommand) upgradeController(
 		return err
 	}
 	if c.BuildAgent {
-		if targetVersion, err = c.uploadTools(modelUpgrader, c.BuildAgent, false, agentVersion, c.DryRun); err != nil {
+		if targetVersion, err = c.uploadTools(ctx, modelUpgrader, c.BuildAgent, false, agentVersion, c.DryRun); err != nil {
 			return block.ProcessBlockedError(err, block.BlockChange)
 		}
 		builtMsg := " (built from source)"
@@ -392,13 +388,13 @@ func (c *upgradeControllerCommand) upgradeController(
 	// or juju upgrade-model without --agent-version
 	targetVersion, err = c.notifyControllerUpgrade(
 		ctx, modelUpgrader,
-		version.Zero, // no target version provided, we figure it out on the server side.
+		semversion.Zero, // no target version provided, we figure it out on the server side.
 		c.DryRun,
 	)
 	if err == nil {
 		// All good!
 		// Upgraded to a next stable version or the newest stable version.
-		logger.Debugf("upgraded to a next version or latest stable version")
+		logger.Debugf(ctx, "upgraded to a next version or latest stable version")
 		return nil
 	}
 	if errors.Is(err, errors.NotFound) {
@@ -408,30 +404,16 @@ func (c *upgradeControllerCommand) upgradeController(
 }
 
 func (c *upgradeControllerCommand) notifyControllerUpgrade(
-	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion version.Number, dryRun bool,
-) (chosenVersion version.Number, err error) {
+	ctx *cmd.Context, modelUpgrader ModelUpgraderAPI, targetVersion semversion.Number, dryRun bool,
+) (chosenVersion semversion.Number, err error) {
 	modelTag := names.NewModelTag(c.controllerModelDetails.ModelUUID)
-
-	if c.ResetPrevious {
-		if ok, err := c.confirmResetPreviousUpgrade(ctx); !ok || err != nil {
-			const message = "previous upgrade not reset and no new upgrade triggered"
-			if err != nil {
-				return chosenVersion, errors.Annotate(err, message)
-			}
-			return chosenVersion, errors.New(message)
-		}
-		if err := modelUpgrader.AbortModelUpgrade(modelTag.Id()); err != nil {
-			return chosenVersion, block.ProcessBlockedError(err, block.BlockChange)
-		}
-	}
 	if chosenVersion, err = modelUpgrader.UpgradeModel(
+		ctx,
 		modelTag.Id(), targetVersion, c.AgentStream, c.IgnoreAgentVersions, dryRun,
 	); err != nil {
 		if params.IsCodeUpgradeInProgress(err) {
 			return chosenVersion, errors.Errorf("%s\n\n"+
-				"Please wait for the upgrade to complete or if there was a problem with\n"+
-				"the last upgrade that has been resolved, consider running the\n"+
-				"upgrade-model command with the --reset-previous-upgrade option.", err,
+				"Please wait for the upgrade to complete.", err,
 			)
 		}
 		if errors.Is(err, errors.AlreadyExists) {
@@ -442,55 +424,34 @@ func (c *upgradeControllerCommand) notifyControllerUpgrade(
 	return chosenVersion, nil
 }
 
-const resetPreviousUpgradeMessage = `
-WARNING! using --reset-previous-upgrade when an upgrade is in progress
-will cause the upgrade to fail. Only use this option to clear an
-incomplete upgrade where the root cause has been resolved.
-
-Continue [y/N]? `
-
-func (c *upgradeControllerCommand) confirmResetPreviousUpgrade(ctx *cmd.Context) (bool, error) {
-	if c.AssumeYes {
-		return true, nil
-	}
-	fmt.Fprint(ctx.Stdout, resetPreviousUpgradeMessage)
-	scanner := bufio.NewScanner(ctx.Stdin)
-	scanner.Scan()
-	err := scanner.Err()
-	if err != nil && err != io.EOF {
-		return false, err
-	}
-	answer := strings.ToLower(scanner.Text())
-	return answer == "y" || answer == "yes", nil
-}
-
 // For test.
 var CheckCanImplicitUpload = checkCanImplicitUpload
 
 func checkCanImplicitUpload(
+	ctx context.Context,
 	modelType model.ModelType, isOfficialClient bool,
-	clientVersion version.Number, clientGrade string, agentVersion version.Number,
+	clientVersion semversion.Number, clientGrade string, agentVersion semversion.Number,
 ) bool {
 	if modelType != model.IAAS {
-		logger.Tracef("the model is not IAAS model")
+		logger.Tracef(ctx, "the model is not IAAS model")
 		return false
 	}
 
 	if !isOfficialClient {
-		logger.Tracef("the client is not an official client")
+		logger.Tracef(ctx, "the client is not an official client")
 		// For non official (under $GOPATH) client, always use --build-agent explicitly.
 		return false
 	}
 	newerClient := clientVersion.Compare(agentVersion.ToPatch()) >= 0
 	if !newerClient && clientGrade != jujuversion.GradeDevel {
-		logger.Tracef(
+		logger.Tracef(ctx,
 			"the client version(%s) is not newer than agent version(%s)",
 			clientVersion, agentVersion.ToPatch(),
 		)
 		return false
 	}
 
-	logger.Tracef("the client version(%s) the agent version(%s)", clientVersion, agentVersion)
+	logger.Tracef(ctx, "the client version(%s) the agent version(%s)", clientVersion, agentVersion)
 	if agentVersion.Build > 0 || clientVersion.Build > 0 || clientGrade == jujuversion.GradeDevel {
 		return true
 	}

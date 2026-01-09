@@ -5,33 +5,35 @@ package resources
 
 import (
 	"bytes"
+	"context"
 	"io"
 
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
 	"gopkg.in/httprequest.v1"
 	"gopkg.in/yaml.v2"
 
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/docker"
 )
 
 // OpenedResourceClient exposes the API functionality needed by OpenResource.
 type OpenedResourceClient interface {
 	// GetResource returns the resource info and content for the given
 	// name (and unit-implied application).
-	GetResource(resourceName string) (resources.Resource, io.ReadCloser, error)
+	GetResource(ctx context.Context, resourceName string) (resource.Resource, io.ReadCloser, error)
 }
 
 // OpenedResource wraps the resource info and reader returned
 // from the API.
 type OpenedResource struct {
-	resources.Resource
+	resource.Resource
 	io.ReadCloser
 }
 
 // OpenResource opens the identified resource using the provided client.
-func OpenResource(name string, client OpenedResourceClient) (*OpenedResource, error) {
-	info, reader, err := client.GetResource(name)
+func OpenResource(ctx context.Context, name string, client OpenedResourceClient) (*OpenedResource, error) {
+	info, reader, err := client.GetResource(ctx, name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -46,7 +48,7 @@ func OpenResource(name string, client OpenedResourceClient) (*OpenedResource, er
 		if err := reader.Close(); err != nil {
 			return nil, errors.Trace(err)
 		}
-		yamlBody, err := resources.UnmarshalDockerResource(data)
+		yamlBody, err := docker.UnmarshalDockerResource(data)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

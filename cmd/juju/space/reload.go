@@ -6,12 +6,12 @@ package space
 import (
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListCommand returns a command used to list spaces.
@@ -51,9 +51,9 @@ func (c *ReloadCommand) Info() *cmd.Info {
 // Run implements Command.Run.
 func (c *ReloadCommand) Run(ctx *cmd.Context) error {
 	return c.RunWithSpaceAPI(ctx, func(api SpaceAPI, ctx *cmd.Context) error {
-		err := api.ReloadSpaces()
+		err := api.ReloadSpaces(ctx)
 		if err != nil {
-			if errors.IsNotSupported(err) {
+			if errors.Is(err, errors.NotSupported) {
 				ctx.Infof("cannot reload spaces: %v", err)
 			}
 			return block.ProcessBlockedError(errors.Annotate(err, "could not reload spaces"), block.BlockChange)

@@ -14,18 +14,17 @@ import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
-	coremacaroon "github.com/juju/juju/core/macaroon"
-	"github.com/juju/juju/feature"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/featureflag"
+	jujuhttp "github.com/juju/juju/internal/http"
+	jujumacaroon "github.com/juju/juju/internal/macaroon"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // NewLegacyLoginProvider returns a LoginProvider implementation that
@@ -114,7 +113,7 @@ func (p *legacyLoginProvider) addCookiesToHeader(h http.Header) error {
 		// logtransfer connection for a migration.)
 		// See https://bugs.launchpad.net/juju/+bug/1650451
 		for _, macaroon := range p.macaroons {
-			cookie, err := httpbakery.NewCookie(coremacaroon.MacaroonNamespace, macaroon)
+			cookie, err := httpbakery.NewCookie(jujumacaroon.MacaroonNamespace, macaroon)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -150,7 +149,7 @@ func (p *legacyLoginProvider) Login(ctx context.Context, caller base.APICaller) 
 	// If we are in developer mode, add the stack location as user data to the
 	// login request. This will allow the apiserver to connect connection ids
 	// to the particular place that initiated the connection.
-	if featureflag.Enabled(feature.DeveloperMode) {
+	if featureflag.Enabled(featureflag.DeveloperMode) {
 		request.UserData = string(debug.Stack())
 	}
 
@@ -162,13 +161,13 @@ func (p *legacyLoginProvider) Login(ctx context.Context, caller base.APICaller) 
 		)
 	}
 	var result params.LoginResult
-	err := caller.APICall("Admin", 3, "", "Login", request, &result)
+	err := caller.APICall(ctx, "Admin", 3, "", "Login", request, &result)
 	if err != nil {
 		if !params.IsRedirect(err) {
 			return nil, errors.Trace(err)
 		}
 
-		if rpcErr, ok := errors.Cause(err).(*rpc.RequestError); ok {
+		if rpcErr, ok := errors.AsType[*rpc.RequestError](err); ok {
 			var redirInfo params.RedirectErrorInfo
 			err := rpcErr.UnmarshalInfo(&redirInfo)
 			if err == nil && redirInfo.CACert != "" && len(redirInfo.Servers) != 0 {
@@ -194,7 +193,7 @@ func (p *legacyLoginProvider) Login(ctx context.Context, caller base.APICaller) 
 		// an error, we'd probably put this information in the Login response,
 		// but we can't do that currently.
 		var resp params.RedirectInfoResult
-		if err := caller.APICall("Admin", 3, "", "RedirectInfo", nil, &resp); err != nil {
+		if err := caller.APICall(ctx, "Admin", 3, "", "RedirectInfo", nil, &resp); err != nil {
 			return nil, errors.Annotatef(err, "cannot get redirect addresses")
 		}
 		return nil, &RedirectError{
@@ -239,7 +238,7 @@ func (p *legacyLoginProvider) Login(ctx context.Context, caller base.APICaller) 
 		// Add the macaroons that have been saved by HandleError to our login request.
 		request.Macaroons = httpbakery.MacaroonsForURL(p.bakeryClient.CookieJar(), p.cookieURL)
 		result = params.LoginResult{} // zero result
-		err = caller.APICall("Admin", 3, "", "Login", request, &result)
+		err = caller.APICall(ctx, "Admin", 3, "", "Login", request, &result)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

@@ -10,8 +10,7 @@
 
 > See also: {ref}`write-a-unit-test`
 
-Unit testing `juju` currently involves the [`gocheck` package](https://labix.org/gocheck) and the `go test` CLI
-command.
+Unit testing `juju` uses the `go test` CLI and a test suite and check libary called [`tc`](https://github.com/juju/tc").
 
 A typical unit testing package is placed alongside the code package that you want to test (in the same directory) and
 consists of:
@@ -45,3 +44,8 @@ github.com/juju/juju/internal/provider/magic:
 
 -->
 <!-- to provide a checkers and assert methods for the test writers.**-->
+
+> See more:
+> - [Unit test suite](unit-test-suite.md)
+    >     - [Util suite](util-suite)
+> - [Checker](checker.md)

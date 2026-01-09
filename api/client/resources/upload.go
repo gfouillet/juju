@@ -9,16 +9,16 @@ import (
 	"mime"
 	"net/http"
 
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 )
 
 // UploadRequest defines a single upload request.
 type UploadRequest struct {
-	// Application is the application ID.
+	// Application is the application name.
 	Application string
 
 	// Name is the resource name.
@@ -33,7 +33,9 @@ type UploadRequest struct {
 	// Fingerprint is the fingerprint of the uploaded data.
 	Fingerprint charmresource.Fingerprint
 
-	// PendingID is the pending ID to associate with this upload, if any.
+	// PendingID is the pending ID to associate with this upload.
+	// Should only be provided if the application has not yet been
+	// created.
 	PendingID string
 
 	// Content is the content to upload.
@@ -46,7 +48,7 @@ func NewUploadRequest(application, name, filename string, r io.ReadSeeker) (Uplo
 		return UploadRequest{}, errors.Errorf("invalid application %q", application)
 	}
 
-	content, err := resources.GenerateContent(r)
+	content, err := resource.GenerateContent(r)
 	if err != nil {
 		return UploadRequest{}, errors.Trace(err)
 	}

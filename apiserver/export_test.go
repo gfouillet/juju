@@ -4,36 +4,32 @@
 package apiserver
 
 import (
+	"context"
 	"sync"
 
 	"github.com/juju/clock"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/lestrrat-go/jwx/v2/jwt"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
-	authjwt "github.com/juju/juju/apiserver/authentication/jwt"
-	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/apiserver/stateauthenticator"
-	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
+	coretrace "github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/trace"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 	"github.com/juju/juju/rpc"
-	"github.com/juju/juju/state"
 )
 
 var (
-	NewPingTimeout        = newPingTimeout
 	MaxClientPingInterval = maxClientPingInterval
-	NewBackups            = &newBackups
-	SetResource           = setResource
 )
 
-func APIHandlerWithEntity(entity state.Entity) *apiHandler {
+func APIHandlerWithEntity(tag names.Tag) *apiHandler {
 	return &apiHandler{
 		authInfo: authentication.AuthInfo{
-			Entity: entity,
+			Tag: tag,
 		},
 	}
 }
@@ -44,7 +40,31 @@ func NewErrRoot(err error) *errRoot {
 
 type testingAPIRootHandler struct{}
 
-func (testingAPIRootHandler) State() *state.State {
+func (testingAPIRootHandler) DomainServices() services.DomainServices {
+	return nil
+}
+
+func (testingAPIRootHandler) DomainServicesGetter() services.DomainServicesGetter {
+	return nil
+}
+
+func (testingAPIRootHandler) Tracer() coretrace.Tracer {
+	return nil
+}
+
+func (testingAPIRootHandler) FlightRecorder() flightrecorder.FlightRecorder {
+	return flightrecorder.NoopRecorder{}
+}
+
+func (testingAPIRootHandler) ObjectStore() objectstore.ObjectStore {
+	return nil
+}
+
+func (testingAPIRootHandler) ObjectStoreGetter() objectstore.ObjectStoreGetter {
+	return nil
+}
+
+func (testingAPIRootHandler) ControllerObjectStore() objectstore.ObjectStore {
 	return nil
 }
 
@@ -56,15 +76,26 @@ func (testingAPIRootHandler) Authorizer() facade.Authorizer {
 	return nil
 }
 
-func (testingAPIRootHandler) Resources() *common.Resources {
-	return common.NewResources()
+func (testingAPIRootHandler) ModelUUID() model.UUID {
+	return ""
 }
+
+func (testingAPIRootHandler) CrossModelAuthContext() facade.CrossModelAuthContext {
+	return nil
+}
+
+// WatcherRegistry returns a new WatcherRegistry.
+func (testingAPIRootHandler) WatcherRegistry() watcherregistry.WatcherRegistry {
+	return nil
+}
+
+func (testingAPIRootHandler) Kill() {}
 
 // TestingAPIRoot gives you an APIRoot as a rpc.Methodfinder that is
 // *barely* connected to anything.  Just enough to let you probe some
 // of the interfaces, but not enough to actually do any RPC calls.
 func TestingAPIRoot(facades *facade.Registry) rpc.Root {
-	root, err := newAPIRoot(clock.WallClock, facades, testingAPIRootHandler{}, nil)
+	root, err := newAPIRoot(testingAPIRootHandler{}, facades, nil, clock.WallClock)
 	if err != nil {
 		// While not ideal, this is only in test code, and there are a bunch of other functions
 		// that depend on this one that don't return errors either.
@@ -73,51 +104,24 @@ func TestingAPIRoot(facades *facade.Registry) rpc.Root {
 	return root
 }
 
-// TestingAPIHandler gives you an APIHandler that isn't connected to
-// anything real. It's enough to let test some basic functionality though.
-func TestingAPIHandler(c *gc.C, pool *state.StatePool, st *state.State) (*apiHandler, *common.Resources) {
-	authenticator, err := stateauthenticator.NewAuthenticator(pool, clock.WallClock)
-	c.Assert(err, jc.ErrorIsNil)
-	offerAuthCtxt, err := newOfferAuthcontext(pool)
-	c.Assert(err, jc.ErrorIsNil)
-	srv := &Server{
-		httpAuthenticators:  []authentication.HTTPAuthenticator{authenticator},
-		loginAuthenticators: []authentication.LoginAuthenticator{authenticator},
-		offerAuthCtxt:       offerAuthCtxt,
-		shared:              &sharedServerContext{statePool: pool},
-		tag:                 names.NewMachineTag("0"),
-	}
-	h, err := newAPIHandler(srv, st, nil, st.ModelUUID(), 6543, "testing.invalid:1234")
-	c.Assert(err, jc.ErrorIsNil)
-	return h, h.Resources()
+type StubDomainServicesGetter struct{}
+
+func (s *StubDomainServicesGetter) ServicesForModel(context.Context, model.UUID) (services.DomainServices, error) {
+	return nil, nil
 }
 
-// TestingAPIHandlerWithEntity gives you the sane kind of APIHandler as
-// TestingAPIHandler but sets the passed entity as the apiHandler
-// entity.
-func TestingAPIHandlerWithEntity(c *gc.C, pool *state.StatePool, st *state.State, entity state.Entity) (*apiHandler, *common.Resources) {
-	h, hr := TestingAPIHandler(c, pool, st)
-	h.authInfo.Entity = entity
-	h.authInfo.Delegator = &stateauthenticator.PermissionDelegator{st.UserPermission}
-	return h, hr
+type StubWatcherRegistryGetter struct{}
+
+func (s *StubWatcherRegistryGetter) GetWatcherRegistry(context.Context, uint64) (watcherregistry.WatcherRegistry, error) {
+	return nil, nil
 }
 
-// TestingAPIHandlerWithToken gives you the sane kind of APIHandler as
-// TestingAPIHandler but sets the passed token as the apiHandler
-// login token.
-func TestingAPIHandlerWithToken(
-	c *gc.C,
-	pool *state.StatePool,
-	st *state.State,
-	jwt jwt.Token,
-	delegator authentication.PermissionDelegator,
-) (*apiHandler, *common.Resources) {
-	h, hr := TestingAPIHandler(c, pool, st)
-	user, err := names.ParseUserTag(jwt.Subject())
-	c.Assert(err, jc.ErrorIsNil)
-	h.authInfo.Entity = authjwt.TokenEntity{User: user}
-	h.authInfo.Delegator = delegator
-	return h, hr
+type StubTracerGetter struct {
+	trace.TracerGetter
+}
+
+type StubObjectStoreGetter struct {
+	objectstore.ObjectStoreGetter
 }
 
 // TestingUpgradingRoot returns a resricted srvRoot in an upgrade
@@ -168,58 +172,19 @@ func TestingRestrictedRoot(check func(string, string) error) rpc.Root {
 	return restrictRoot(r, check)
 }
 
-// PatchGetMigrationBackend overrides the getMigrationBackend function
-// to support testing.
-func PatchGetMigrationBackend(p Patcher, ctrlSt controllerBackend, st migrationBackend) {
-	p.PatchValue(&getMigrationBackend, func(*state.State) migrationBackend {
-		return st
-	})
-	p.PatchValue(&getControllerBackend, func(pool *state.StatePool) (controllerBackend, error) {
-		return ctrlSt, nil
-	})
-}
-
-// PatchGetControllerCACert overrides the getControllerCACert function
-// to support testing.
-func PatchGetControllerCACert(p Patcher, caCert string) {
-	p.PatchValue(&getControllerCACert, func(backend controllerBackend) (string, error) {
-		return caCert, nil
-	})
-}
-
 // ServerWaitGroup exposes the underlying wait group used to track running API calls
 // to allow tests to hold a server open.
 func ServerWaitGroup(server *Server) *sync.WaitGroup {
 	return &server.wg
 }
 
+// SetAllowModelAccess updates the server's allowModelAccess attribute.
+func SetAllowModelAccess(server *Server, allow bool) {
+	server.allowModelAccess = allow
+}
+
 // Patcher defines an interface that matches the PatchValue method on
 // CleanupSuite
 type Patcher interface {
 	PatchValue(ptr, value interface{})
-}
-
-func AssertHasPermission(c *gc.C, handler *apiHandler, access permission.Access, tag names.Tag, expect bool) {
-	err := handler.HasPermission(access, tag)
-	c.Assert(err == nil, gc.Equals, expect)
-	if expect {
-		c.Assert(err, jc.ErrorIsNil)
-	}
-}
-
-func CheckHasPermission(st *state.State, entity names.Tag, operation permission.Access, target names.Tag) (bool, error) {
-	if operation != permission.SuperuserAccess || entity.Kind() != names.UserTagKind {
-		return false, errors.Errorf("%s is not a user", names.ReadableString(entity))
-	}
-	if target.Kind() != names.ControllerTagKind || target.Id() != st.ControllerUUID() {
-		return false, errors.Errorf("%s is not a valid controller", names.ReadableString(target))
-	}
-	isAdmin, err := st.IsControllerAdmin(entity.(names.UserTag))
-	if err != nil {
-		return false, err
-	}
-	if !isAdmin {
-		return false, errors.Errorf("%s is not a controller admin", names.ReadableString(entity))
-	}
-	return true, nil
 }

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -66,10 +65,10 @@ func (t *Tunnel) Close() {
 
 // findSuitablePodForService when tunneling to a kubernetes service we need to
 // introspection.
-func (t *Tunnel) findSuitablePodForService() (*corev1.Pod, error) {
+func (t *Tunnel) findSuitablePodForService(ctx context.Context) (*corev1.Pod, error) {
 	clientSet := kubernetes.New(t.client)
 	service, err := clientSet.CoreV1().Services(t.Namespace).
-		Get(context.TODO(), t.Target, meta.GetOptions{})
+		Get(ctx, t.Target, meta.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NewNotFound(err, "can't find service "+t.Target)
 	} else if err != nil {
@@ -77,7 +76,7 @@ func (t *Tunnel) findSuitablePodForService() (*corev1.Pod, error) {
 	}
 
 	pods, err := clientSet.CoreV1().Pods(t.Namespace).
-		List(context.TODO(), meta.ListOptions{
+		List(ctx, meta.ListOptions{
 			LabelSelector: labels.SelectorFromSet(service.Spec.Selector).String(),
 		})
 
@@ -95,18 +94,18 @@ func (t *Tunnel) findSuitablePodForService() (*corev1.Pod, error) {
 	return &pods.Items[rand.Intn(podCount-1)], nil
 }
 
-func (t *Tunnel) ForwardPort() error {
+func (t *Tunnel) ForwardPort(ctx context.Context) error {
 	if !t.IsValidTunnelKind() {
 		return fmt.Errorf("invalid tunnel kind %s", t.Kind)
 	}
 
-	ctx, cancelFunc := context.WithTimeout(context.Background(), ForwardPortTimeout)
+	ctx, cancelFunc := context.WithTimeout(ctx, ForwardPortTimeout)
 	defer cancelFunc()
 
 	podName := t.Target
 
 	if t.Kind == TunnelKindServices {
-		pod, err := t.findSuitablePodForService()
+		pod, err := t.findSuitablePodForService(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -228,8 +227,6 @@ func NewTunnel(
 	}
 }
 
-var logger = loggo.GetLogger("juju.caas.kubernetes.tunnel")
-
 // waitForPodReady waits for the provided pod name relative to this tunnels
 // namespace to become fully ready in the pod conditions. This func will block
 // until the pod is ready of the context dead line has fired.
@@ -311,7 +308,7 @@ func (t *Tunnel) waitForPodReady(ctx context.Context, podName string) error {
 
 	err = informer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
 		if !errors.Is(err, context.Canceled) {
-			logger.Errorf("error watching pod %s: %v", podName, err)
+			logger.Errorf(ctx, "error watching pod %s: %v", podName, err)
 		}
 	})
 	if err != nil {

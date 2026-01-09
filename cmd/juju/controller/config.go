@@ -5,23 +5,24 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"gopkg.in/juju/environschema.v1"
 
 	apicontroller "github.com/juju/juju/api/controller/controller"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/config"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/configschema"
 )
 
 var ctrConfigBase = config.ConfigCommandBase{
@@ -142,15 +143,15 @@ func (c *configCommand) Init(args []string) error {
 
 type controllerAPI interface {
 	Close() error
-	ControllerConfig() (controller.Config, error)
-	ConfigSet(map[string]interface{}) error
+	ControllerConfig(context.Context) (controller.Config, error)
+	ConfigSet(context.Context, map[string]interface{}) error
 }
 
-func (c *configCommand) getAPI() (controllerAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (controllerAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -160,7 +161,7 @@ func (c *configCommand) getAPI() (controllerAPI, error) {
 // Run executes the command as directed by the options and
 // arguments. It's part of cmd.Command.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -172,14 +173,14 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		case config.GetOne:
 			err = c.getConfig(client, ctx)
 		case config.SetArgs:
-			err = c.setConfig(client, c.configBase.ValsToSet)
+			err = c.setConfig(ctx, client, c.configBase.ValsToSet)
 		case config.SetFile:
 			var attrs config.Attrs
 			attrs, err = c.configBase.ReadFile(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			err = c.setConfig(client, attrs)
+			err = c.setConfig(ctx, client, attrs)
 		default:
 			err = c.getAllConfig(client, ctx)
 		}
@@ -192,7 +193,7 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 
 // getAllConfig returns the entire configuration for the selected controller.
 func (c *configCommand) getAllConfig(client controllerAPI, ctx *cmd.Context) error {
-	attrs, err := client.ControllerConfig()
+	attrs, err := client.ControllerConfig(ctx.Context)
 	if err != nil {
 		return err
 	}
@@ -206,7 +207,7 @@ func (c *configCommand) getConfig(client controllerAPI, ctx *cmd.Context) error 
 	if err != nil {
 		return errors.Trace(err)
 	}
-	attrs, err := client.ControllerConfig()
+	attrs, err := client.ControllerConfig(ctx.Context)
 	if err != nil {
 		return err
 	}
@@ -226,7 +227,8 @@ func (c *configCommand) getConfig(client controllerAPI, ctx *cmd.Context) error 
 		c.configBase.KeysToGet[0], controllerName)
 }
 
-// filterOutReadOnly removes in-situ read-only attributes from the provided configuration attributes map.
+// filterOutReadOnly removes in-situ read-only attributes from the provided
+// configuration attributes map.
 func (c *configCommand) filterOutReadOnly(attrs config.Attrs) error {
 	extraValues := set.NewStrings()
 	for k := range attrs {
@@ -244,12 +246,12 @@ func (c *configCommand) filterOutReadOnly(attrs config.Attrs) error {
 		return errors.Errorf("invalid or read-only controller config values cannot be updated: %v", extraValues.SortedValues())
 	}
 
-	logger.Warningf("invalid or read-only controller config values ignored: %v", extraValues.SortedValues())
+	logger.Warningf(context.TODO(), "invalid or read-only controller config values ignored: %v", extraValues.SortedValues())
 	return nil
 }
 
 // setConfig sets config values from the provided config.Attrs.
-func (c *configCommand) setConfig(client controllerAPI, attrs config.Attrs) error {
+func (c *configCommand) setConfig(ctx context.Context, client controllerAPI, attrs config.Attrs) error {
 	err := c.filterOutReadOnly(attrs)
 	if err != nil {
 		return errors.Trace(err)
@@ -292,7 +294,7 @@ func (c *configCommand) setConfig(client controllerAPI, attrs config.Attrs) erro
 		}
 	}
 
-	return errors.Trace(client.ConfigSet(values))
+	return errors.Trace(client.ConfigSet(ctx, values))
 }
 
 // ConfigDetailsUpdatable gets information about the controller config
@@ -318,7 +320,7 @@ func ConfigDetailsAll() (map[string]common.PrintConfigSchema, error) {
 	return specifics, nil
 }
 
-func attrToPrintSchema(attr environschema.Attr) common.PrintConfigSchema {
+func attrToPrintSchema(attr configschema.Attr) common.PrintConfigSchema {
 	return common.PrintConfigSchema{
 		Description: attr.Description,
 		Type:        string(attr.Type),
@@ -332,7 +334,7 @@ func formatConfigTabular(writer io.Writer, value interface{}) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 
 	valueNames := make(set.Strings)
 	for name := range controllerConfig {

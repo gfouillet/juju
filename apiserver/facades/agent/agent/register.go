@@ -4,61 +4,40 @@
 package agent
 
 import (
+	"context"
 	"reflect"
 
-	"github.com/juju/errors"
-
-	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/cloudspec"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Agent", 3, func(ctx facade.Context) (facade.Facade, error) {
-		return newAgentAPIV3(ctx)
+	registry.MustRegister("Agent", 3, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return NewAgentAPIV3(ctx)
 	}, reflect.TypeOf((*AgentAPI)(nil)))
 }
 
-// newAgentAPIV3 returns an object implementing version 3 of the Agent API
+// NewAgentAPIV3 returns an object implementing version 3 of the Agent API
 // with the given authorizer representing the currently logged in client.
-func newAgentAPIV3(ctx facade.Context) (*AgentAPI, error) {
-	auth := ctx.Auth()
+func NewAgentAPIV3(ctx facade.ModelContext) (*AgentAPI, error) {
 	// Agents are defined to be any user that's not a client user.
-	if !auth.AuthMachineAgent() && !auth.AuthUnitAgent() {
+	if !ctx.Auth().AuthMachineAgent() && !ctx.Auth().AuthUnitAgent() {
 		return nil, apiservererrors.ErrPerm
 	}
-	getCanChange := func() (common.AuthFunc, error) {
-		return auth.AuthOwner, nil
-	}
+	services := ctx.DomainServices()
 
-	st := ctx.State()
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	resources := ctx.Resources()
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &AgentAPI{
-		PasswordChanger:     common.NewPasswordChanger(st, getCanChange),
-		RebootFlagClearer:   common.NewRebootFlagClearer(st, getCanChange),
-		ModelWatcher:        common.NewModelWatcher(model, resources, auth),
-		ControllerConfigAPI: common.NewStateControllerConfig(systemState),
-		CloudSpecer: cloudspec.NewCloudSpecV2(
-			resources,
-			cloudspec.MakeCloudSpecGetterForModel(st),
-			cloudspec.MakeCloudSpecWatcherForModel(st),
-			cloudspec.MakeCloudSpecCredentialWatcherForModel(st),
-			cloudspec.MakeCloudSpecCredentialContentWatcherForModel(st),
-			common.AuthFuncForTag(model.ModelTag()),
-		),
-		st:        st,
-		auth:      auth,
-		resources: resources,
-	}, nil
+	return NewAgentAPI(
+		ctx.Auth(),
+		ctx.WatcherRegistry(),
+		services.AgentPassword(),
+		services.Controller(),
+		services.ControllerConfig(),
+		services.ControllerNode(),
+		services.ExternalController(),
+		services.Model(),
+		services.Machine(),
+		services.Config(),
+		services.Application(),
+	), nil
 }

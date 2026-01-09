@@ -5,35 +5,37 @@ package network_test
 
 import (
 	"net"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type subnetSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&subnetSuite{})
+func TestSubnetSuite(t *testing.T) {
+	tc.Run(t, &subnetSuite{})
+}
 
-func (*subnetSuite) TestFindSubnetIDsForAZ(c *gc.C) {
+func (*subnetSuite) TestFindSubnetIDsForAZ(c *tc.C) {
 	testCases := []struct {
 		name           string
 		zoneName       string
 		subnetsToZones map[network.Id][]string
 		expected       []network.Id
-		expectedErr    func(error) bool
+		expectedErr    error
 	}{
 		{
 			name:           "empty",
 			zoneName:       "",
 			subnetsToZones: make(map[network.Id][]string),
 			expected:       make([]network.Id, 0),
-			expectedErr:    errors.IsNotFound,
+			expectedErr:    coreerrors.NotFound,
 		},
 		{
 			name:     "no match",
@@ -42,7 +44,7 @@ func (*subnetSuite) TestFindSubnetIDsForAZ(c *gc.C) {
 				"bar": {"foo", "baz"},
 			},
 			expected:    make([]network.Id, 0),
-			expectedErr: errors.IsNotFound,
+			expectedErr: coreerrors.NotFound,
 		},
 		{
 			name:     "match",
@@ -77,15 +79,15 @@ func (*subnetSuite) TestFindSubnetIDsForAZ(c *gc.C) {
 
 		res, err := network.FindSubnetIDsForAvailabilityZone(t.zoneName, t.subnetsToZones)
 		if t.expectedErr != nil {
-			c.Check(t.expectedErr(err), jc.IsTrue)
+			c.Check(err, tc.ErrorIs, t.expectedErr)
 		} else {
-			c.Assert(err, gc.IsNil)
-			c.Check(res, gc.DeepEquals, t.expected)
+			c.Assert(err, tc.IsNil)
+			c.Check(res, tc.DeepEquals, t.expected)
 		}
 	}
 }
 
-func (*subnetSuite) TestFilterInFanNetwork(c *gc.C) {
+func (*subnetSuite) TestFilterInFanNetwork(c *tc.C) {
 	testCases := []struct {
 		name     string
 		subnets  []network.Id
@@ -125,11 +127,11 @@ func (*subnetSuite) TestFilterInFanNetwork(c *gc.C) {
 		c.Logf("test %d: %s", i, t.name)
 
 		res := network.FilterInFanNetwork(t.subnets)
-		c.Check(res, gc.DeepEquals, t.expected)
+		c.Check(res, tc.DeepEquals, t.expected)
 	}
 }
 
-func (*subnetSuite) TestIsInFanNetwork(c *gc.C) {
+func (*subnetSuite) TestIsInFanNetwork(c *tc.C) {
 	testCases := []struct {
 		name     string
 		subnet   network.Id
@@ -156,11 +158,11 @@ func (*subnetSuite) TestIsInFanNetwork(c *gc.C) {
 		c.Logf("test %d: %s", i, t.name)
 
 		res := network.IsInFanNetwork(t.subnet)
-		c.Check(res, gc.Equals, t.expected)
+		c.Check(res, tc.Equals, t.expected)
 	}
 }
 
-func (*subnetSuite) TestSubnetInfosEquality(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosEquality(c *tc.C) {
 	s1 := network.SubnetInfos{
 		{ID: "1"},
 		{ID: "2"},
@@ -173,53 +175,21 @@ func (*subnetSuite) TestSubnetInfosEquality(c *gc.C) {
 
 	s3 := append(s2, network.SubnetInfo{ID: "3"})
 
-	c.Check(s1.EqualTo(s2), jc.IsTrue)
-	c.Check(s1.EqualTo(s3), jc.IsFalse)
+	c.Check(s1.EqualTo(s2), tc.IsTrue)
+	c.Check(s1.EqualTo(s3), tc.IsFalse)
 }
 
-func (*subnetSuite) TestSubnetInfosSpaceIDs(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosSpaceIDs(c *tc.C) {
 	s := network.SubnetInfos{
 		{ID: "1", SpaceID: network.AlphaSpaceId},
 		{ID: "2", SpaceID: network.AlphaSpaceId},
 		{ID: "3", SpaceID: "666"},
 	}
 
-	c.Check(s.SpaceIDs().SortedValues(), jc.DeepEquals, []string{network.AlphaSpaceId, "666"})
+	c.Check(s.SpaceIDs().SortedValues(), tc.DeepEquals, []string{network.AlphaSpaceId.String(), "666"})
 }
 
-func (*subnetSuite) TestSubnetInfosGetByUnderLayCIDR(c *gc.C) {
-	s := network.SubnetInfos{
-		{
-			ID:      "1",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "10.10.10.0/24"},
-		},
-		{
-			ID:      "2",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "20.20.20.0/24"},
-		},
-		{
-			ID:      "3",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "20.20.20.0/24"},
-		},
-	}
-
-	_, err := s.GetByUnderlayCIDR("invalid")
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-
-	overlays, err := s.GetByUnderlayCIDR(s[0].FanLocalUnderlay())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(overlays, gc.DeepEquals, network.SubnetInfos{s[0]})
-
-	overlays, err = s.GetByUnderlayCIDR(s[1].FanLocalUnderlay())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(overlays, gc.DeepEquals, network.SubnetInfos{s[1], s[2]})
-
-	overlays, err = s.GetByUnderlayCIDR("30.30.30.0/24")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(overlays, gc.HasLen, 0)
-}
-
-func (*subnetSuite) TestSubnetInfosGetByCIDR(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosGetByCIDR(c *tc.C) {
 	s := network.SubnetInfos{
 		{ID: "1", CIDR: "10.10.10.0/25", ProviderId: "1"},
 		{ID: "2", CIDR: "10.10.10.0/25", ProviderId: "2"},
@@ -227,48 +197,48 @@ func (*subnetSuite) TestSubnetInfosGetByCIDR(c *gc.C) {
 	}
 
 	_, err := s.GetByCIDR("invalid")
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
+	c.Check(err, tc.ErrorIs, coreerrors.NotValid)
 
 	subs, err := s.GetByCIDR("30.30.30.0/25")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subs, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(subs, tc.HasLen, 0)
 
 	subs, err = s.GetByCIDR("10.10.10.0/25")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(subs.EqualTo(s[:2]), jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subs.EqualTo(s[:2]), tc.IsTrue)
 
 	// Check fallback CIDR-in-CIDR matching when CIDR is carved out of a
 	// subnet CIDR.
 	subs, err = s.GetByCIDR("10.10.10.0/31")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(subs.EqualTo(s[:2]), jc.IsTrue, gc.Commentf("expected input that is a subset of the subnet CIDRs to be matched to a subnet"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subs.EqualTo(s[:2]), tc.IsTrue, tc.Commentf("expected input that is a subset of the subnet CIDRs to be matched to a subnet"))
 
 	// Same check as above but using a different network IP which is still
 	// contained within the 10.10.10.0/25 subnets from the SubnetInfos list.
 	subs, err = s.GetByCIDR("10.10.10.8/31")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(subs.EqualTo(s[:2]), jc.IsTrue, gc.Commentf("expected input that is a subset of the subnet CIDRs to be matched to a subnet"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subs.EqualTo(s[:2]), tc.IsTrue, tc.Commentf("expected input that is a subset of the subnet CIDRs to be matched to a subnet"))
 
 	subs, err = s.GetByCIDR("10.10.0.0/24")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(subs, gc.HasLen, 0, gc.Commentf("expected input that is a superset of the subnet CIDRs not to be matched to any subnet"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subs, tc.HasLen, 0, tc.Commentf("expected input that is a superset of the subnet CIDRs not to be matched to any subnet"))
 }
 
-func (*subnetSuite) TestSubnetInfosGetByID(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosGetByID(c *tc.C) {
 	s := network.SubnetInfos{
 		{ID: "1"},
 		{ID: "2"},
 		{ID: "3"},
 	}
 
-	c.Check(s.GetByID("1"), gc.NotNil)
-	c.Check(s.ContainsID("1"), jc.IsTrue)
+	c.Check(s.GetByID("1"), tc.NotNil)
+	c.Check(s.ContainsID("1"), tc.IsTrue)
 
-	c.Check(s.GetByID("9"), gc.IsNil)
-	c.Check(s.ContainsID("9"), jc.IsFalse)
+	c.Check(s.GetByID("9"), tc.IsNil)
+	c.Check(s.ContainsID("9"), tc.IsFalse)
 }
 
-func (*subnetSuite) TestSubnetInfosGetByAddress(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosGetByAddress(c *tc.C) {
 	s := network.SubnetInfos{
 		{ID: "1", CIDR: "10.10.10.0/24", ProviderId: "1"},
 		{ID: "2", CIDR: "10.10.10.0/24", ProviderId: "2"},
@@ -276,71 +246,23 @@ func (*subnetSuite) TestSubnetInfosGetByAddress(c *gc.C) {
 	}
 
 	_, err := s.GetByAddress("invalid")
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
+	c.Check(err, tc.ErrorIs, coreerrors.NotValid)
 
 	subs, err := s.GetByAddress("10.10.10.5")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// We need to check these explicitly, because the IPNets of the original
 	// members will now be populated, making them differ.
-	c.Assert(subs, gc.HasLen, 2)
-	c.Check(subs[0].ProviderId, gc.Equals, network.Id("1"))
-	c.Check(subs[1].ProviderId, gc.Equals, network.Id("2"))
+	c.Assert(subs, tc.HasLen, 2)
+	c.Check(subs[0].ProviderId, tc.Equals, network.Id("1"))
+	c.Check(subs[1].ProviderId, tc.Equals, network.Id("2"))
 
 	subs, err = s.GetByAddress("30.30.30.5")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subs, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(subs, tc.HasLen, 0)
 }
 
-func (*subnetSuite) TestSubnetInfosGetBySpaceID(c *gc.C) {
-	s := network.SubnetInfos{
-		{
-			ID:      "1",
-			CIDR:    "10.10.10.0/24",
-			SpaceID: "666",
-		},
-		{
-			ID:      "2",
-			CIDR:    "222.0.0.0/8",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "10.10.10.0/24"},
-		},
-		{
-			ID:      "3",
-			CIDR:    "20.20.20.0/24",
-			SpaceID: "999",
-		},
-		{
-			ID:      "4",
-			CIDR:    "223.0.0.0/8",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "20.20.20.0/24"},
-			// This is to check that we don't get duplicates when retrieving
-			// by the underlay CIDR.
-			SpaceID: "999",
-		},
-	}
-
-	subs, err := s.GetBySpaceID("666")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subs, gc.DeepEquals, network.SubnetInfos{
-		{
-			ID:      "1",
-			CIDR:    "10.10.10.0/24",
-			SpaceID: "666",
-		},
-		{
-			ID:      "2",
-			CIDR:    "222.0.0.0/8",
-			FanInfo: &network.FanCIDRs{FanLocalUnderlay: "10.10.10.0/24"},
-			SpaceID: "666",
-		},
-	})
-
-	subs, err = s.GetBySpaceID("999")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(subs, gc.DeepEquals, s[2:])
-}
-
-func (*subnetSuite) TestSubnetInfosAllSubnetInfos(c *gc.C) {
+func (*subnetSuite) TestSubnetInfosAllSubnetInfos(c *tc.C) {
 	s := network.SubnetInfos{
 		{ID: "1", CIDR: "10.10.10.0/24", ProviderId: "1"},
 		{ID: "2", CIDR: "10.10.10.0/24", ProviderId: "2"},
@@ -348,11 +270,11 @@ func (*subnetSuite) TestSubnetInfosAllSubnetInfos(c *gc.C) {
 	}
 
 	allSubs, err := s.AllSubnetInfos()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(allSubs, gc.DeepEquals, s)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(allSubs, tc.DeepEquals, s)
 }
 
-func (*subnetSuite) TestIPRangeForCIDR(c *gc.C) {
+func (*subnetSuite) TestIPRangeForCIDR(c *tc.C) {
 	specs := []struct {
 		cidr     string
 		expFirst net.IP
@@ -393,8 +315,8 @@ func (*subnetSuite) TestIPRangeForCIDR(c *gc.C) {
 	for i, spec := range specs {
 		c.Logf("%d. check that range for %q is [%s, %s]", i, spec.cidr, spec.expFirst, spec.expLast)
 		gotFirst, gotLast, err := network.IPRangeForCIDR(spec.cidr)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(gotFirst.String(), gc.Equals, spec.expFirst.String())
-		c.Assert(gotLast.String(), gc.Equals, spec.expLast.String())
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(gotFirst.String(), tc.Equals, spec.expFirst.String())
+		c.Assert(gotLast.String(), tc.Equals, spec.expLast.String())
 	}
 }

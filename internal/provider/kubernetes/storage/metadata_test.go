@@ -4,7 +4,9 @@
 package storage_test
 
 import (
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 	storagev1 "k8s.io/api/storage/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -13,9 +15,11 @@ import (
 
 type metadataSuite struct{}
 
-var _ = gc.Suite(&metadataSuite{})
+func TestMetadataSuite(t *testing.T) {
+	tc.Run(t, &metadataSuite{})
+}
 
-func (*metadataSuite) TestPreferredStorageAny(c *gc.C) {
+func (*metadataSuite) TestPreferredStorageAny(c *tc.C) {
 	tests := []struct {
 		Name         string
 		StorageClass *storagev1.StorageClass
@@ -40,11 +44,11 @@ func (*metadataSuite) TestPreferredStorageAny(c *gc.C) {
 	for _, test := range tests {
 		c.Logf("running test %s", test.Name)
 		any := storage.PreferredStorageAny{}
-		c.Assert(any.Matches(test.StorageClass), gc.Equals, test.Result)
+		c.Assert(any.Matches(test.StorageClass), tc.Equals, test.Result)
 	}
 }
 
-func (*metadataSuite) TestPreferredStorageNominated(c *gc.C) {
+func (*metadataSuite) TestPreferredStorageNominated(c *tc.C) {
 	tests := []struct {
 		Name             string
 		StorageClass     *storagev1.StorageClass
@@ -92,69 +96,18 @@ func (*metadataSuite) TestPreferredStorageNominated(c *gc.C) {
 	for _, test := range tests {
 		c.Logf("running test %s", test.Name)
 		nominated := storage.PreferredStorageNominated{StorageClassName: test.NominatedStorage}
-		c.Assert(nominated.Matches(test.StorageClass), gc.Equals, test.Result)
+		c.Assert(nominated.Matches(test.StorageClass), tc.Equals, test.Result)
 	}
 }
 
-func (*metadataSuite) TestPreferredStorageOperatorAnnotation(c *gc.C) {
+func (*metadataSuite) TestPreferredStorageWorkloadAnnotation(c *tc.C) {
 	tests := []struct {
 		Name         string
 		StorageClass *storagev1.StorageClass
 		Result       bool
 	}{
 		{
-			Name: "Test operator storage annotation matches",
-			StorageClass: &storagev1.StorageClass{
-				ObjectMeta: meta.ObjectMeta{
-					Name: "test1",
-					Annotations: map[string]string{
-						"juju.is/operator-storage": "true",
-					},
-				},
-			},
-			Result: true,
-		},
-		{
-			Name: "Test operator storage doesn't match bad value",
-			StorageClass: &storagev1.StorageClass{
-				ObjectMeta: meta.ObjectMeta{
-					Name: "test1",
-					Annotations: map[string]string{
-						"juju.is/operator-storage": "false",
-					},
-				},
-			},
-			Result: false,
-		},
-		{
-			Name: "Test operator storage doesn't match workload storage",
-			StorageClass: &storagev1.StorageClass{
-				ObjectMeta: meta.ObjectMeta{
-					Name: "test1",
-					Annotations: map[string]string{
-						"juju.is/workload-storage": "true",
-					},
-				},
-			},
-			Result: false,
-		},
-	}
-
-	for _, test := range tests {
-		c.Logf("running test %s", test.Name)
-		annotation := storage.PreferredStorageOperatorAnnotation{}
-		c.Assert(annotation.Matches(test.StorageClass), gc.Equals, test.Result)
-	}
-}
-
-func (*metadataSuite) TestPreferredStorageWorkloadAnnotation(c *gc.C) {
-	tests := []struct {
-		Name         string
-		StorageClass *storagev1.StorageClass
-		Result       bool
-	}{
-		{
-			Name: "Test operator storage annotation matches",
+			Name: "Test workload storage annotation matches",
 			StorageClass: &storagev1.StorageClass{
 				ObjectMeta: meta.ObjectMeta{
 					Name: "test1",
@@ -166,7 +119,7 @@ func (*metadataSuite) TestPreferredStorageWorkloadAnnotation(c *gc.C) {
 			Result: true,
 		},
 		{
-			Name: "Test operator storage doesn't match bad value",
+			Name: "Test workload storage doesn't match bad value",
 			StorageClass: &storagev1.StorageClass{
 				ObjectMeta: meta.ObjectMeta{
 					Name: "test1",
@@ -177,28 +130,16 @@ func (*metadataSuite) TestPreferredStorageWorkloadAnnotation(c *gc.C) {
 			},
 			Result: false,
 		},
-		{
-			Name: "Test operator storage doesn't match operator storage",
-			StorageClass: &storagev1.StorageClass{
-				ObjectMeta: meta.ObjectMeta{
-					Name: "test1",
-					Annotations: map[string]string{
-						"juju.is/operator-storage": "true",
-					},
-				},
-			},
-			Result: false,
-		},
 	}
 
 	for _, test := range tests {
 		c.Logf("running test %s", test.Name)
 		annotation := storage.PreferredStorageWorkloadAnnotation{}
-		c.Assert(annotation.Matches(test.StorageClass), gc.Equals, test.Result)
+		c.Assert(annotation.Matches(test.StorageClass), tc.Equals, test.Result)
 	}
 }
 
-func (*metadataSuite) TestPreferredStorageDefault(c *gc.C) {
+func (*metadataSuite) TestPreferredStorageDefault(c *tc.C) {
 	tests := []struct {
 		Name         string
 		StorageClass *storagev1.StorageClass
@@ -283,11 +224,11 @@ func (*metadataSuite) TestPreferredStorageDefault(c *gc.C) {
 	for _, test := range tests {
 		c.Logf("running test %s", test.Name)
 		defStorage := storage.PreferredStorageDefault{}
-		c.Assert(defStorage.Matches(test.StorageClass), gc.Equals, test.Result)
+		c.Assert(defStorage.Matches(test.StorageClass), tc.Equals, test.Result)
 	}
 }
 
-func (*metadataSuite) TestPreferredStorageProvisioner(c *gc.C) {
+func (*metadataSuite) TestPreferredStorageProvisioner(c *tc.C) {
 	tests := []struct {
 		Name         string
 		StorageClass *storagev1.StorageClass
@@ -346,6 +287,6 @@ func (*metadataSuite) TestPreferredStorageProvisioner(c *gc.C) {
 			NameVal:     "test-storage-provisioner",
 			Provisioner: test.Provisioner,
 		}
-		c.Assert(provisioner.Matches(test.StorageClass), gc.Equals, test.Result)
+		c.Assert(provisioner.Matches(test.StorageClass), tc.Equals, test.Result)
 	}
 }

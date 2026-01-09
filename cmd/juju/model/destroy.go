@@ -4,6 +4,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,25 +13,25 @@ import (
 	"time"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/output"
 	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.model")
+var logger = internallogger.GetLogger("juju.cmd.juju.model")
 
 // NewDestroyCommand returns a command used to destroy a model.
 func NewDestroyCommand() cmd.Command {
@@ -66,7 +67,7 @@ var destroyDoc = `
 Destroys the specified model. This will result in the non-recoverable
 removal of all the units operating in the model and any resources stored
 there. Due to the irreversible nature of the command, it will prompt for
-confirmation (unless overridden with the ` + "`-y`" + ` option) before taking any
+confirmation (unless overridden with the ` + "`--no-prompt`" + ` option) before taking any
 action.
 
 If there is persistent storage in any of the models managed by the
@@ -133,8 +134,8 @@ into another Juju model.
 // API that the destroy command calls. It is exported for mocking in tests.
 type DestroyModelAPI interface {
 	Close() error
-	DestroyModel(tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error
-	ModelStatus(models ...names.ModelTag) ([]base.ModelStatus, error)
+	DestroyModel(ctx context.Context, tag names.ModelTag, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error
+	ModelStatus(ctx context.Context, models ...names.ModelTag) ([]base.ModelStatus, error)
 }
 
 // Info implements Command.Info.
@@ -187,11 +188,11 @@ func (c *destroyCommand) Init(args []string) error {
 	}
 }
 
-func (c *destroyCommand) getAPI() (DestroyModelAPI, error) {
+func (c *destroyCommand) getAPI(ctx context.Context) (DestroyModelAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewControllerAPIRoot()
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -256,7 +257,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Annotate(err, "cannot read controller details")
 	}
-	modelName, modelDetails, err := c.ModelDetails()
+	modelName, modelDetails, err := c.ModelDetails(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -265,14 +266,14 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	}
 
 	// Attempt to connect to the API.  If we can't, fail the destroy.
-	api, err := c.getAPI()
+	api, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Annotate(err, "cannot connect to API")
 	}
 	defer func() { _ = api.Close() }()
 
 	modelTag := names.NewModelTag(modelDetails.ModelUUID)
-	modelStatus, err := getModelStatus(modelTag, api)
+	modelStatus, err := getModelStatus(ctx, modelTag, api)
 	if err != nil {
 		return err
 	}
@@ -294,7 +295,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	}
 
 	// Attempt to destroy the model.
-	_, _ = fmt.Fprint(ctx.Stderr, "Destroying model")
+	_, _ = fmt.Fprintln(ctx.Stderr, "Destroying model")
 	var destroyStorage *bool
 	if c.destroyStorage || c.releaseStorage {
 		destroyStorage = &c.destroyStorage
@@ -304,8 +305,8 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	if c.Force {
 		force = &c.Force
 		if c.NoWait {
-			zeroSec := 0 * time.Second
-			maxWait = &zeroSec
+			zero := 0 * time.Second
+			maxWait = &zero
 		}
 	}
 
@@ -313,14 +314,14 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 	if c.timeout >= 0 {
 		timeout = &c.timeout
 	}
-	if err := api.DestroyModel(modelTag, destroyStorage, force, maxWait, timeout); err != nil {
+	if err := api.DestroyModel(ctx, modelTag, destroyStorage, force, maxWait, timeout); err != nil {
 		err = errors.Annotate(err, "cannot destroy model")
 
 		if params.IsCodeOperationBlocked(err) {
 			return block.ProcessBlockedError(err, block.BlockDestroy)
 		}
 		if params.IsCodeHasPersistentStorage(err) {
-			modelStatus, err := getModelStatus(modelTag, api)
+			modelStatus, err := getModelStatus(ctx, modelTag, api)
 			if err != nil {
 				return err
 			}
@@ -328,7 +329,7 @@ func (c *destroyCommand) Run(ctx *cmd.Context) error {
 			persistentVolumes, persistentFilesystems := countDetachableStorage(modelStatus)
 			return generatePersistentStorageErrorMsg(modelName, persistentVolumes, persistentFilesystems)
 		}
-		logger.Errorf(`failed to destroy model %q`, modelName)
+		logger.Errorf(context.TODO(), `failed to destroy model %q`, modelName)
 		return err
 	}
 
@@ -404,7 +405,7 @@ func waitForModelDestroyed(
 				fmt.Fprint(ctx.Stderr, ".")
 				lineLength++
 			} else {
-				fmt.Fprint(ctx.Stderr, fmt.Sprintf("\n%v...", msg))
+				fmt.Fprintf(ctx.Stderr, "\n%v...", msg)
 				reported = msg
 				lineLength = len(msg) + 3
 			}
@@ -436,7 +437,7 @@ func (s modelResourceErrorStatusSummary) PrettyPrint(writer io.Writer) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 	w.Println(`
 The following errors were encountered during destroying the model.
 You can fix the problem causing the errors and run destroy-model again.
@@ -462,14 +463,14 @@ You can fix the problem causing the errors and run destroy-model again.
 func summarizeModelStatus(ctx *cmd.Context, api DestroyModelAPI, tag names.ModelTag) (*modelData, modelResourceErrorStatusSummary) {
 	var erroredStatuses modelResourceErrorStatusSummary
 
-	status, err := api.ModelStatus(tag)
+	status, err := api.ModelStatus(ctx, tag)
 	if err == nil && len(status) == 1 && status[0].Error != nil {
 		// In 2.2 an error of one model generate an error for the entire request,
 		// in 2.3 this was corrected to just be an error for the requested model.
 		err = status[0].Error
 	}
 	if err != nil {
-		if params.IsCodeNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			ctx.Infof("\nModel destroyed.")
 		} else {
 			ctx.Infof("Unable to get the model status from the API: %v.", err)
@@ -535,7 +536,7 @@ func formatDestroyModelInfo(data *modelData) string {
 		out += fmt.Sprintf(", %d volume(s)", data.volumeCount)
 	}
 	if data.filesystemCount > 0 {
-		out += fmt.Sprintf(", %d filesystems(s)", data.filesystemCount)
+		out += fmt.Sprintf(", %d filesystem(s)", data.filesystemCount)
 	}
 	return out
 }
@@ -554,7 +555,7 @@ func formatDestroyModelAbortInfo(data *modelData, timeout, force bool) string {
 			out += fmt.Sprintf("\n - %d volume(s)", data.volumeCount)
 		}
 		if data.filesystemCount > 0 {
-			out += fmt.Sprintf("\n - %d filesystems(s)", data.filesystemCount)
+			out += fmt.Sprintf("\n - %d filesystem(s)", data.filesystemCount)
 		}
 	}
 	if !timeout {
@@ -567,8 +568,8 @@ func formatDestroyModelAbortInfo(data *modelData, timeout, force bool) string {
 	return out
 }
 
-func getModelStatus(modelTag names.ModelTag, api DestroyModelAPI) (*base.ModelStatus, error) {
-	modelStatuses, err := api.ModelStatus(modelTag)
+func getModelStatus(ctx context.Context, modelTag names.ModelTag, api DestroyModelAPI) (*base.ModelStatus, error) {
+	modelStatuses, err := api.ModelStatus(ctx, modelTag)
 	if err != nil {
 		return nil, errors.Annotate(err, "getting model status")
 	}
@@ -582,6 +583,11 @@ func getModelStatus(modelTag names.ModelTag, api DestroyModelAPI) (*base.ModelSt
 		return nil, errors.Errorf("model not found, it may have been destroyed during this operation")
 	}
 	if modelStatus.Error != nil {
+		if errors.Is(modelStatus.Error, errors.NotFound) {
+			// This most likely occurred because a model was
+			// destroyed half-way through the call.
+			return nil, errors.Errorf("model not found, it may have been destroyed during this operation")
+		}
 		return nil, errors.Annotate(modelStatus.Error, "getting model status")
 	}
 	return &modelStatus, nil

@@ -4,6 +4,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/retry"
@@ -19,12 +19,12 @@ import (
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/client/client"
-	apiclient "github.com/juju/juju/api/client/client"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/jujuclient"
-	jujussh "github.com/juju/juju/network/ssh"
+	"github.com/juju/juju/internal/cmd"
+	jujussh "github.com/juju/juju/internal/network/ssh"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -56,7 +56,7 @@ The SSH host keys of the target are verified. The ` + "`--no-host-key-checks`" +
 can be used to disable these checks. Use of this option is not recommended as
 it opens up the possibility of a man-in-the-middle attack.
 
-The default identity known to Juju and used by this command is ` + "`~/.ssh/id_rsa`" + `.
+The default identity known to Juju and used by this command is ` + "`~/.ssh/id_ed25519`" + `.
 
 Options can be passed to the local OpenSSH client (ssh) on platforms
 where it is available. This is done by inserting them between the target and
@@ -123,13 +123,13 @@ Interact with the Pebble instance in the workload container via the charm contai
 
 **For k8s controller:**
 
-Connect to the api server pod:
+Connect to the controller api-server container:
 
-    juju ssh --container api-server 0
+    juju ssh 0
 
-Connect to the mongo db pod:
+Connect to the controller charm container:
 
-    juju ssh --container mongodb 0
+    juju ssh --container charm 0
 `
 
 const (
@@ -211,7 +211,7 @@ func (c *sshCommand) Init(args []string) (err error) {
 	if len(args) == 0 {
 		return errors.Errorf("no target name specified")
 	}
-	if c.modelType, err = c.ModelType(); err != nil {
+	if c.modelType, err = c.ModelType(context.TODO()); err != nil {
 		return err
 	}
 	if c.modelType == model.CAAS {
@@ -229,23 +229,23 @@ func (c *sshCommand) Init(args []string) (err error) {
 
 // ModelCommand defines methods of the model command.
 type ModelCommand interface {
-	NewControllerAPIRoot() (api.Connection, error)
-	ModelDetails() (string, *jujuclient.ModelDetails, error)
-	ControllerDetails() (*jujuclient.ControllerDetails, error)
-	NewAPIRoot() (api.Connection, error)
-	NewAPIClient() (*apiclient.Client, error)
+	NewControllerAPIRoot(ctx context.Context) (api.Connection, error)
+	ModelDetails(ctx context.Context) (string, *jujuclient.ModelDetails, error)
+	NewAPIRoot(ctx context.Context) (api.Connection, error)
+	NewAPIClient(ctx context.Context) (*client.Client, error)
 	ModelIdentifier() (string, error)
+	ControllerDetails() (*jujuclient.ControllerDetails, error)
 }
 
 // sshProvider is implemented by either a CaaS or IaaS model instance.
 type sshProvider interface {
-	initRun(ModelCommand) error
+	initRun(context.Context, ModelCommand) error
 	cleanupRun()
-	setLeaderAPI(leaderAPI LeaderAPI)
+	setLeaderAPI(ctx context.Context, leaderAPI LeaderAPI)
 	setHostChecker(checker jujussh.ReachableChecker)
-	resolveTarget(string) (*resolvedTarget, error)
-	maybePopulateTargetViaField(*resolvedTarget, func(*client.StatusArgs) (*params.FullStatus, error)) error
-	maybeResolveLeaderUnit(string) (string, error)
+	resolveTarget(context.Context, string) (*resolvedTarget, error)
+	maybePopulateTargetViaField(context.Context, *resolvedTarget, func(context.Context, *client.StatusArgs) (*params.FullStatus, error)) error
+	maybeResolveLeaderUnit(context.Context, string) (string, error)
 	ssh(ctx Context, enablePty bool, target *resolvedTarget) error
 	copy(Context) error
 
@@ -262,12 +262,12 @@ type sshProvider interface {
 // Run resolves the given target to a machine or unit, then opens
 // an SSH connection to this target.
 func (c *sshCommand) Run(ctx *cmd.Context) error {
-	if err := c.provider.initRun(&c.ModelCommandBase); err != nil {
+	if err := c.provider.initRun(ctx.Context, &c.ModelCommandBase); err != nil {
 		return errors.Trace(err)
 	}
 	defer c.provider.cleanupRun()
 
-	target, err := c.provider.resolveTarget(c.provider.getTarget())
+	target, err := c.provider.resolveTarget(ctx, c.provider.getTarget())
 	if err != nil {
 		return err
 	}
@@ -277,7 +277,7 @@ func (c *sshCommand) Run(ctx *cmd.Context) error {
 		// we need to route the traffic via the machine that hosts it.
 		// This is required as the controller is unable to route fan
 		// traffic across subnets.
-		if err = c.provider.maybePopulateTargetViaField(target, c.statusClient.Status); err != nil {
+		if err = c.provider.maybePopulateTargetViaField(ctx, target, c.statusClient.Status); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -333,7 +333,7 @@ func (b *autoBoolValue) IsBoolFlag() bool { return true }
 // LeaderAPI is implemented by types that can query for a Leader based on
 // application name.
 type LeaderAPI interface {
-	Leader(string) (string, error)
+	Leader(context.Context, string) (string, error)
 	Close() error
 }
 
@@ -342,7 +342,7 @@ type leaderResolver struct {
 	resolvedLeader string
 }
 
-func (c *leaderResolver) maybeResolveLeaderUnit(target string) (string, error) {
+func (c *leaderResolver) maybeResolveLeaderUnit(ctx context.Context, target string) (string, error) {
 	if !strings.HasSuffix(target, "/leader") {
 		return target, nil
 	}
@@ -355,7 +355,7 @@ func (c *leaderResolver) maybeResolveLeaderUnit(target string) (string, error) {
 	// Do not call leaderAPI.Close() here, it's used again
 	// upstream from here.
 	var err error
-	c.resolvedLeader, err = c.leaderAPI.Leader(app)
+	c.resolvedLeader, err = c.leaderAPI.Leader(ctx, app)
 	return c.resolvedLeader, errors.Trace(err)
 }
 

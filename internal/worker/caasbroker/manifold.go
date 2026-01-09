@@ -4,30 +4,27 @@
 package caasbroker
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/api/agent/caasagent"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/worker/caasadmission"
 	"github.com/juju/juju/internal/worker/caasrbacmapper"
-	"github.com/juju/juju/storage"
 )
-
-// Logger represents the methods used by the worker to log details.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-}
 
 // ManifoldConfig describes the resources used by a Tracker.
 type ManifoldConfig struct {
 	APICallerName          string
 	NewContainerBrokerFunc caas.NewContainerBrokerFunc
-	Logger                 Logger
+	Logger                 logger.Logger
 }
 
 // Manifold returns a Manifold that encapsulates a *Tracker and exposes it as
@@ -38,16 +35,16 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.APICallerName,
 		},
 		Output: manifoldOutput,
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, errors.Trace(err)
 			}
 			api, err := caasagent.NewClient(apiCaller)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			w, err := NewTracker(Config{
+			w, err := NewTracker(ctx, Config{
 				ConfigAPI:              api,
 				NewContainerBrokerFunc: config.NewContainerBrokerFunc,
 				Logger:                 config.Logger,

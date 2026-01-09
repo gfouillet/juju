@@ -1,40 +1,41 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package hostkeyreporter_test
+package hostkeyreporter
 
 import (
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
 
-	"github.com/juju/juju/apiserver/facades/agent/hostkeyreporter"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	gomock "go.uber.org/mock/gomock"
+
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	machine "github.com/juju/juju/core/machine"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing"
 )
 
 type facadeSuite struct {
 	testing.BaseSuite
-	backend    *mockBackend
-	authorizer *apiservertesting.FakeAuthorizer
-	facade     *hostkeyreporter.Facade
+
+	machineService *MockMachineService
 }
 
-var _ = gc.Suite(&facadeSuite{})
-
-func (s *facadeSuite) SetUpTest(c *gc.C) {
-	s.backend = new(mockBackend)
-	s.authorizer = new(apiservertesting.FakeAuthorizer)
-	facade, err := hostkeyreporter.New(s.backend, nil, s.authorizer)
-	c.Assert(err, jc.ErrorIsNil)
-	s.facade = facade
+func TestFacadeSuite(t *stdtesting.T) {
+	tc.Run(t, &facadeSuite{})
 }
 
-func (s *facadeSuite) TestReportKeys(c *gc.C) {
-	s.authorizer.Tag = names.NewMachineTag("1")
+func (s *facadeSuite) TestReportKeys(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.machineService.EXPECT().GetMachineUUID(c.Context(), machine.Name("0")).Return(machine.UUID("0"), nil)
+	s.machineService.EXPECT().SetSSHHostKeys(c.Context(), machine.UUID("0"), []string{"rsa0", "dsa0"}).Return(nil)
+
+	facade, err := New(s.machineService, apiservertesting.FakeAuthorizer{
+		Tag: names.NewMachineTag("0"),
+	})
+	c.Assert(err, tc.ErrorIsNil)
 
 	args := params.SSHHostKeySet{
 		EntityKeys: []params.SSHHostKeys{
@@ -47,29 +48,20 @@ func (s *facadeSuite) TestReportKeys(c *gc.C) {
 			},
 		},
 	}
-	result, err := s.facade.ReportKeys(args)
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(result, gc.DeepEquals, params.ErrorResults{
+	result, err := facade.ReportKeys(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(result, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{
-			{Error: apiservertesting.ErrUnauthorized},
-			{nil},
+			{Error: nil},
+			{Error: &params.Error{Message: "permission denied", Code: params.CodeUnauthorized}},
 		},
 	})
-	s.backend.stub.CheckCalls(c, []jujutesting.StubCall{{
-		"SetSSHHostKeys",
-		[]interface{}{
-			names.NewMachineTag("1"),
-			state.SSHHostKeys{"rsa1", "dsa1"},
-		},
-	}})
 }
 
-type mockBackend struct {
-	stub jujutesting.Stub
-}
+func (s *facadeSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
 
-func (backend *mockBackend) SetSSHHostKeys(tag names.MachineTag, keys state.SSHHostKeys) error {
-	backend.stub.AddCall("SetSSHHostKeys", tag, keys)
-	return nil
+	s.machineService = NewMockMachineService(ctrl)
+
+	return ctrl
 }

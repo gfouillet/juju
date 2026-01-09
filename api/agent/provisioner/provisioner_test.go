@@ -4,293 +4,489 @@
 package provisioner_test
 
 import (
-	"fmt"
-	"time"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/agent/provisioner"
-	apimocks "github.com/juju/juju/api/base/mocks"
-	apitesting "github.com/juju/juju/api/testing"
-	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/container"
-	"github.com/juju/juju/core/arch"
-	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/api/agent/provisioner/mocks"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	corenetwork "github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/core/watcher/watchertest"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/network"
+	"github.com/juju/juju/domain/network"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/storage/poolmanager"
-	"github.com/juju/juju/storage/provider"
-	coretesting "github.com/juju/juju/testing"
-	coretools "github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
 )
 
 type provisionerSuite struct {
-	testing.JujuConnSuite
-	*apitesting.ModelWatcherTests
-	*apitesting.APIAddresserTests
-
-	st      api.Connection
-	machine *state.Machine
-
-	provisioner *provisioner.State
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&provisionerSuite{})
+func TestProvisionerSuite(t *testing.T) {
+	tc.Run(t, &provisionerSuite{})
+}
 
-func (s *provisionerSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
+func (s *provisionerSuite) SetUpTest(c *tc.C) {
+	s.IsolationSuite.SetUpTest(c)
+}
 
-	var err error
-	s.machine, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
-	c.Assert(err, jc.ErrorIsNil)
-	password, err := utils.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.SetPassword(password)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.SetInstanceInfo("i-manager", "", "fake_nonce", nil, nil, nil, nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.st = s.OpenAPIAsMachine(c, s.machine.Tag(), password, "fake_nonce")
-	c.Assert(s.st, gc.NotNil)
-	err = s.machine.SetProviderAddresses(corenetwork.NewSpaceAddress("0.1.2.3"))
-	c.Assert(err, jc.ErrorIsNil)
+func (s *provisionerSuite) setupCaller(ctrl *gomock.Controller) *mocks.MockAPICaller {
+	caller := mocks.NewMockAPICaller(ctrl)
+	caller.EXPECT().BestFacadeVersion("Provisioner").Return(666)
+	return caller
+}
 
-	// Create the provisioner API facade.
-	s.provisioner = provisioner.NewState(s.st)
-	c.Assert(s.provisioner, gc.NotNil)
+func (s *provisionerSuite) TestNew(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	s.ModelWatcherTests = apitesting.NewModelWatcherTests(s.provisioner, s.BackingState, s.Model)
-	waitForModelWatchersIdle := func(c *gc.C) {
-		s.JujuConnSuite.WaitForModelWatchersIdle(c, s.BackingState.ModelUUID())
+	caller := s.setupCaller(ctrl)
+	client := provisioner.NewClient(caller)
+	c.Assert(client.APIAddresser, tc.NotNil)
+	c.Assert(client.ModelConfigWatcher, tc.NotNil)
+	c.Assert(client.ControllerConfigAPI, tc.NotNil)
+}
+
+func (s *provisionerSuite) expectCall(caller *mocks.MockAPICaller, method, args, results interface{}) {
+	caller.EXPECT().APICall(gomock.Any(), "Provisioner", 666, "", method, args, gomock.Any()).SetArg(6, results).Return(nil)
+}
+
+func (s *provisionerSuite) TestMachines(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}, {Tag: "machine-42"}},
 	}
-	systemState, err := s.StatePool.SystemState()
-	c.Assert(err, jc.ErrorIsNil)
-	s.APIAddresserTests = apitesting.NewAPIAddresserTests(s.provisioner, systemState, s.BackingState, waitForModelWatchersIdle)
-}
-
-func (s *provisionerSuite) assertGetOneMachine(c *gc.C, tag names.MachineTag) provisioner.MachineProvisioner {
-	result, err := s.provisioner.Machines(tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result), gc.Equals, 1)
-	c.Assert(result[0].Err, gc.IsNil)
-	return result[0].Machine
-}
-
-func (s *provisionerSuite) TestMachinesTagAndId(c *gc.C) {
-	result, err := s.provisioner.Machines(names.NewMachineTag("42"), s.machine.MachineTag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result), gc.Equals, 2)
-
-	c.Assert(result[0].Err, gc.ErrorMatches, "machine 42 not found")
-	c.Assert(result[0].Err, jc.Satisfies, params.IsCodeNotFound)
-	c.Assert(result[0].Machine, gc.IsNil)
-
-	c.Assert(result[1].Err, gc.IsNil)
-	c.Assert(result[1].Machine.Tag(), gc.Equals, s.machine.Tag())
-	c.Assert(result[1].Machine.Id(), gc.Equals, s.machine.Id())
-}
-
-func (s *provisionerSuite) TestGetSetStatus(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-
-	machineStatus, info, err := apiMachine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machineStatus, gc.Equals, status.Pending)
-	c.Assert(info, gc.Equals, "")
-
-	err = apiMachine.SetStatus(status.Started, "blah", nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	machineStatus, info, err = apiMachine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machineStatus, gc.Equals, status.Started)
-	c.Assert(info, gc.Equals, "blah")
-	statusInfo, err := s.machine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Data, gc.HasLen, 0)
-}
-
-func (s *provisionerSuite) TestGetSetInstanceStatus(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	instanceStatus, info, err := apiMachine.InstanceStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instanceStatus, gc.Equals, status.Pending)
-	c.Assert(info, gc.Equals, "")
-	err = apiMachine.SetInstanceStatus(status.Running, "blah", nil)
-	c.Assert(err, jc.ErrorIsNil)
-	instanceStatus, info, err = apiMachine.InstanceStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instanceStatus, gc.Equals, status.Running)
-	c.Assert(info, gc.Equals, "blah")
-	statusInfo, err := s.machine.InstanceStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Data, gc.HasLen, 0)
-}
-
-func (s *provisionerSuite) TestGetSetStatusWithData(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	err := apiMachine.SetStatus(status.Error, "blah", map[string]interface{}{"foo": "bar"})
-	c.Assert(err, jc.ErrorIsNil)
-
-	machineStatus, info, err := apiMachine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machineStatus, gc.Equals, status.Error)
-	c.Assert(info, gc.Equals, "blah")
-	statusInfo, err := s.machine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Data, gc.DeepEquals, map[string]interface{}{"foo": "bar"})
-}
-
-func (s *provisionerSuite) TestMachinesWithTransientErrors(c *gc.C) {
-	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.ProvisioningError,
-		Message: "blah",
-		Data:    map[string]interface{}{"transient": true},
-		Since:   &now,
+	results := params.LifeResults{
+		Results: []params.LifeResult{{
+			Life: "alive",
+		}, {
+			Error: &params.Error{Message: "FAIL"},
+		}},
 	}
-	err = machine.SetInstanceStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-	result, err := s.provisioner.MachinesWithTransientErrors()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, gc.HasLen, 1)
 
-	c.Assert(result[0].Machine.Id(), gc.Equals, "1")
-	c.Assert(result[0].Status, gc.DeepEquals, params.StatusResult{
-		Id:     "1",
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "Life", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.Machines(c.Context(), names.NewMachineTag("666"), names.NewMachineTag("42"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.HasLen, 2)
+	c.Assert(result[1].Err.Message, tc.Equals, "FAIL")
+
+	machine := result[0].Machine
+	c.Assert(machine, tc.FitsTypeOf, &provisioner.Machine{})
+	c.Assert(machine.Tag(), tc.Equals, names.NewMachineTag("666"))
+	c.Assert(machine.Id(), tc.Equals, "666")
+	c.Assert(machine.Life(), tc.Equals, life.Alive)
+}
+
+func (s *provisionerSuite) TestMachinesWithTransientErrors(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	results := params.StatusResults{
+		Results: []params.StatusResult{{
+			Id:     "666",
+			Life:   "alive",
+			Status: "error",
+			Info:   "provisioning error",
+			Data:   map[string]interface{}{"transient": true},
+		}},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "MachinesWithTransientErrors", nil, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.MachinesWithTransientErrors(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	machine := result[0].Machine
+	c.Assert(machine, tc.FitsTypeOf, &provisioner.Machine{})
+	c.Assert(machine.Tag(), tc.Equals, names.NewMachineTag("666"))
+	c.Assert(machine.Id(), tc.Equals, "666")
+	c.Assert(machine.Life(), tc.Equals, life.Alive)
+	c.Assert(result[0].Status, tc.DeepEquals, params.StatusResult{
+		Id:     "666",
 		Life:   "alive",
-		Status: "provisioning error",
-		Info:   "blah",
+		Status: "error",
+		Info:   "provisioning error",
 		Data:   map[string]interface{}{"transient": true},
 	})
 }
 
-func (s *provisionerSuite) TestEnsureDeadAndRemove(c *gc.C) {
-	// Create a fresh machine to test the complete scenario.
-	otherMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(otherMachine.Life(), gc.Equals, state.Alive)
+func (s *provisionerSuite) TestDistributionGroupByMachineId(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	apiMachine := s.assertGetOneMachine(c, otherMachine.MachineTag())
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = apiMachine.Remove()
-	c.Assert(err, gc.ErrorMatches, `cannot remove entity "machine-1": still alive`)
-	err = apiMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = otherMachine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(otherMachine.Life(), gc.Equals, state.Dead)
-
-	err = apiMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = otherMachine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(otherMachine.Life(), gc.Equals, state.Dead)
-
-	err = apiMachine.Remove()
-	c.Assert(err, jc.ErrorIsNil)
-	err = otherMachine.Refresh()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-
-	err = apiMachine.EnsureDead()
-	c.Assert(err, gc.ErrorMatches, "machine 1 not found")
-	c.Assert(err, jc.Satisfies, params.IsCodeNotFound)
-
-	// Now try to EnsureDead machine 0 - should fail.
-	apiMachine = s.assertGetOneMachine(c, s.machine.MachineTag())
-	err = apiMachine.EnsureDead()
-	c.Assert(err, gc.ErrorMatches, "machine 0 is still a non-voting controller member")
-}
-
-func (s *provisionerSuite) TestMarkForRemoval(c *gc.C) {
-	machine, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	apiMachine := s.assertGetOneMachine(c, machine.MachineTag())
-
-	err = apiMachine.MarkForRemoval()
-	c.Assert(err, gc.ErrorMatches, "cannot remove machine 1: machine is not dead")
-
-	err = machine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = apiMachine.MarkForRemoval()
-	c.Assert(err, jc.ErrorIsNil)
-
-	removals, err := s.State.AllMachineRemovals()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(removals, jc.SameContents, []string{"1"})
-}
-
-func (s *provisionerSuite) TestRefreshAndLife(c *gc.C) {
-	// Create a fresh machine to test the complete scenario.
-	otherMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(otherMachine.Life(), gc.Equals, state.Alive)
-
-	apiMachine := s.assertGetOneMachine(c, otherMachine.MachineTag())
-	c.Assert(apiMachine.Life(), gc.Equals, life.Alive)
-
-	err = apiMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apiMachine.Life(), gc.Equals, life.Alive)
-
-	err = apiMachine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apiMachine.Life(), gc.Equals, life.Dead)
-}
-
-func (s *provisionerSuite) TestSetInstanceInfo(c *gc.C) {
-	pm := poolmanager.New(state.NewStateSettings(s.State), provider.CommonStorageProviders())
-	_, err := pm.Create("loop-pool", provider.LoopProviderType, map[string]interface{}{"foo": "bar"})
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Create a fresh machine, since machine 0 is already provisioned.
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-		Volumes: []state.HostVolumeParams{{
-			Volume: state.VolumeParams{
-				Pool: "loop-pool",
-				Size: 123,
-			}},
-		},
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
 	}
-	notProvisionedMachine, err := s.State.AddOneMachine(template)
-	c.Assert(err, jc.ErrorIsNil)
+	results := params.StringsResults{
+		Results: []params.StringsResult{{
+			Result: []string{"id-1", "id-2"},
+		}},
+	}
 
-	apiMachine := s.assertGetOneMachine(c, notProvisionedMachine.MachineTag())
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "DistributionGroupByMachineId", args, results)
 
-	instanceId, err := apiMachine.InstanceId()
-	c.Assert(err, jc.Satisfies, params.IsCodeNotProvisioned)
-	c.Assert(err, gc.ErrorMatches, "machine 1 not provisioned")
-	c.Assert(instanceId, gc.Equals, instance.Id(""))
+	client := provisioner.NewClient(caller)
+	result, err := client.DistributionGroupByMachineId(c.Context(), names.NewMachineTag("666"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, []provisioner.DistributionGroupResult{{
+		MachineIds: []string{"id-1", "id-2"},
+	}})
+}
+
+func (s *provisionerSuite) TestProvisioningInfo(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.ProvisioningInfoResults{
+		Results: []params.ProvisioningInfoResult{{
+			Result: &params.ProvisioningInfo{},
+		}},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "ProvisioningInfo", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.ProvisioningInfo(c.Context(), []names.MachineTag{names.NewMachineTag("666")})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, results)
+}
+
+func (s *provisionerSuite) TestHostChangesForContainer(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.HostNetworkChangeResults{
+		Results: []params.HostNetworkChange{{
+			NewBridges: []params.DeviceBridgeInfo{{
+				HostDeviceName: "host",
+				BridgeName:     "bridge",
+				MACAddress:     "mac",
+			}},
+		}},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "HostChangesForContainers", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.HostChangesForContainer(c.Context(), names.NewMachineTag("666"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, []network.DeviceToBridge{{
+		DeviceName: "host",
+		BridgeName: "bridge",
+		MACAddress: "mac",
+	}})
+}
+
+func (s *provisionerSuite) TestContainerManagerConfig(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	args := params.ContainerManagerConfigParams{
+		Type: "lxd",
+	}
+	results := params.ContainerManagerConfig{
+		ManagerConfig: map[string]string{"foo": "bar"},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "ContainerManagerConfig", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.ContainerManagerConfig(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, results)
+}
+
+func (s *provisionerSuite) TestFindTools(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	vers := semversion.MustParse("6.6.6")
+	args := params.FindToolsParams{
+		Number:       vers,
+		MajorVersion: 0,
+		Arch:         "arm64",
+		OSType:       "ubuntu",
+	}
+	results := params.FindToolsResult{
+		List: tools.List{{
+			Version: semversion.MustParseBinary("6.6.6-ubuntu-arm64"),
+			URL:     "http://here",
+			SHA256:  "deadbeaf",
+			Size:    666,
+		}},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "FindTools", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.FindTools(c.Context(), vers, "ubuntu", "arm64")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, tools.List{{
+		Version: semversion.MustParseBinary("6.6.6-ubuntu-arm64"),
+		URL:     "http://here",
+		SHA256:  "deadbeaf",
+		Size:    666,
+	}})
+}
+
+func (s *provisionerSuite) TestContainerConfig(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	cfg := params.ContainerConfig{
+		ProviderType: "ec2",
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "ContainerConfig", nil, cfg)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.ContainerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, cfg)
+}
+
+func (s *provisionerSuite) TestWatchModelMachines(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	results := params.StringsWatchResult{
+		Error: &params.Error{Message: "FAIL"},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "WatchModelMachines", nil, results)
+
+	client := provisioner.NewClient(caller)
+	_, err := client.WatchModelMachines(c.Context())
+	c.Assert(err, tc.ErrorMatches, "FAIL")
+}
+
+func (s *provisionerSuite) setupMachines(c *tc.C, ctrl *gomock.Controller) (*mocks.MockAPICaller, provisioner.MachineProvisioner) {
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.LifeResults{
+		Results: []params.LifeResult{{Life: "alive"}},
+	}
+
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "Life", args, results)
+
+	client := provisioner.NewClient(caller)
+	result, err := client.Machines(c.Context(), names.NewMachineTag("666"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.HasLen, 1)
+	return caller, result[0].Machine
+}
+
+func (s *provisionerSuite) TestSetStatus(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.SetStatus{
+		Entities: []params.EntityStatusArgs{{
+			Tag:    "machine-666",
+			Status: "error",
+			Info:   "failed",
+			Data:   map[string]interface{}{"foo": "bar"},
+		}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+	s.expectCall(caller, "SetStatus", args, results)
+
+	err := machine.SetStatus(c.Context(), status.Error, "failed", map[string]interface{}{"foo": "bar"})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *provisionerSuite) TestStatus(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.StatusResults{
+		Results: []params.StatusResult{{
+			Status: "error",
+			Info:   "failed",
+		}},
+	}
+
+	s.expectCall(caller, "Status", args, results)
+
+	st, info, err := machine.Status(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(st, tc.Equals, status.Error)
+	c.Assert(info, tc.Equals, "failed")
+}
+
+func (s *provisionerSuite) TestSetInstanceStatus(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.SetStatus{
+		Entities: []params.EntityStatusArgs{{
+			Tag:    "machine-666",
+			Status: "error",
+			Info:   "failed",
+			Data:   map[string]interface{}{"foo": "bar"},
+		}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+	s.expectCall(caller, "SetInstanceStatus", args, results)
+
+	err := machine.SetInstanceStatus(c.Context(), status.Error, "failed", map[string]interface{}{"foo": "bar"})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *provisionerSuite) TestInstanceStatus(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.StatusResults{
+		Results: []params.StatusResult{{
+			Status: "error",
+			Info:   "failed",
+		}},
+	}
+
+	s.expectCall(caller, "InstanceStatus", args, results)
+
+	st, info, err := machine.InstanceStatus(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(st, tc.Equals, status.Error)
+	c.Assert(info, tc.Equals, "failed")
+}
+
+func (s *provisionerSuite) TestEnsureDead(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+
+	s.expectCall(caller, "EnsureDead", args, results)
+
+	err := machine.EnsureDead(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *provisionerSuite) TestMarkForRemoval(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+
+	s.expectCall(caller, "MarkMachinesForRemoval", args, results)
+
+	err := machine.MarkForRemoval(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *provisionerSuite) TestRefresh(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.LifeResults{
+		Results: []params.LifeResult{{Life: "dying"}},
+	}
+	s.expectCall(caller, "Life", args, results)
+	err := machine.Refresh(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(machine.Life(), tc.Equals, life.Dying)
+}
+
+func (s *provisionerSuite) TestInstanceId(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.StringResults{
+		Results: []params.StringResult{{
+			Result: "id-666",
+		}},
+	}
+
+	s.expectCall(caller, "InstanceId", args, results)
+
+	id, err := machine.InstanceId(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(id, tc.Equals, instance.Id("id-666"))
+}
+
+func (s *provisionerSuite) TestSetInstanceInfo(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
 
 	hwChars := instance.MustParseHardware("cores=123", "mem=4G")
 
 	volumes := []params.Volume{{
 		VolumeTag: "volume-1-0",
 		Info: params.VolumeInfo{
-			VolumeId: "vol-123",
-			Size:     124,
+			ProviderId: "vol-123",
+			SizeMiB:    124,
 		},
 	}}
 	volumeAttachments := map[string]params.VolumeAttachmentInfo{
@@ -299,563 +495,214 @@ func (s *provisionerSuite) TestSetInstanceInfo(c *gc.C) {
 		},
 	}
 
-	err = apiMachine.SetInstanceInfo(
-		"i-will", "", "fake_nonce", &hwChars, nil, volumes, volumeAttachments, nil,
+	args := params.InstancesInfo{
+		Machines: []params.InstanceInfo{{
+			Tag:               "machine-666",
+			InstanceId:        "i-will",
+			DisplayName:       "my machine",
+			Nonce:             "fake_nonce",
+			Characteristics:   &hwChars,
+			Volumes:           volumes,
+			VolumeAttachments: volumeAttachments,
+			CharmProfiles:     []string{"profile1"},
+		}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+
+	s.expectCall(caller, "SetInstanceInfo", args, results)
+
+	err := machine.SetInstanceInfo(
+		c.Context(),
+		"i-will", "my machine", "fake_nonce", &hwChars, nil, volumes, volumeAttachments, []string{"profile1"},
 	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	instanceId, err = apiMachine.InstanceId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instanceId, gc.Equals, instance.Id("i-will"))
-
-	// Try it again - should fail.
-	err = apiMachine.SetInstanceInfo("i-wont", "", "fake", nil, nil, nil, nil, nil)
-	c.Assert(err, gc.ErrorMatches, `cannot record provisioning info for "i-wont": cannot set instance data for machine "1": already set`)
-
-	// Now try to get machine 0's instance id.
-	apiMachine = s.assertGetOneMachine(c, s.machine.MachineTag())
-	instanceId, err = apiMachine.InstanceId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instanceId, gc.Equals, instance.Id("i-manager"))
-
-	// Now check volumes and volume attachments.
-	sb, err := state.NewStorageBackend(s.State)
-	c.Assert(err, jc.ErrorIsNil)
-	volume, err := sb.Volume(names.NewVolumeTag("1/0"))
-	c.Assert(err, jc.ErrorIsNil)
-	volumeInfo, err := volume.Info()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(volumeInfo, gc.Equals, state.VolumeInfo{
-		VolumeId: "vol-123",
-		Pool:     "loop-pool",
-		Size:     124,
-	})
-	stateVolumeAttachments, err := sb.MachineVolumeAttachments(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(stateVolumeAttachments, gc.HasLen, 1)
-	volumeAttachmentInfo, err := stateVolumeAttachments[0].Info()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(volumeAttachmentInfo, gc.Equals, state.VolumeAttachmentInfo{
-		DeviceName: "xvdf1",
-	})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *provisionerSuite) TestAvailabilityZone(c *gc.C) {
-	// Create a fresh machine, since machine 0 is already provisioned.
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("16.04"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
+func (s *provisionerSuite) TestAvailabilityZone(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
 	}
-	notProvisionedMachine, err := s.State.AddOneMachine(template)
-	c.Assert(err, jc.ErrorIsNil)
-
-	apiMachine := s.assertGetOneMachine(c, notProvisionedMachine.MachineTag())
-
-	instanceId, err := apiMachine.InstanceId()
-	c.Assert(err, jc.Satisfies, params.IsCodeNotProvisioned)
-	c.Assert(err, gc.ErrorMatches, "machine 1 not provisioned")
-	c.Assert(instanceId, gc.Equals, instance.Id(""))
-
-	availabilityZone := "ru-north-siberia"
-	hwChars := instance.MustParseHardware(fmt.Sprintf("availability-zone=%s", availabilityZone))
-
-	err = apiMachine.SetInstanceInfo(
-		"azinst", "", "nonce", &hwChars, nil, nil, nil, nil,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	retAvailabilityZone, err := apiMachine.AvailabilityZone()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(availabilityZone, gc.Equals, retAvailabilityZone)
-}
-
-func (s *provisionerSuite) TestSetInstanceInfoProfiles(c *gc.C) {
-	// Create a fresh machine, since machine 0 is already provisioned.
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("16.04"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	}
-	notProvisionedMachine, err := s.State.AddOneMachine(template)
-	c.Assert(err, jc.ErrorIsNil)
-
-	apiMachine := s.assertGetOneMachine(c, notProvisionedMachine.MachineTag())
-
-	instanceId, err := apiMachine.InstanceId()
-	c.Assert(err, jc.Satisfies, params.IsCodeNotProvisioned)
-	c.Assert(err, gc.ErrorMatches, "machine 1 not provisioned")
-	c.Assert(instanceId, gc.Equals, instance.Id(""))
-
-	hwChars := instance.MustParseHardware("cores=123", "mem=4G")
-
-	profiles := []string{"juju-default-profile-0", "juju-default-lxd-2"}
-	err = apiMachine.SetInstanceInfo(
-		"profileinst", "", "nonce", &hwChars, nil, nil, nil, profiles,
-	)
-	c.Assert(err, jc.ErrorIsNil)
-
-	mach, err := s.State.Machine(apiMachine.Id())
-	c.Assert(err, jc.ErrorIsNil)
-	obtainedProfiles, err := mach.CharmProfiles()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(profiles, jc.SameContents, obtainedProfiles)
-}
-
-func (s *provisionerSuite) TestSetCharmProfiles(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-
-	profiles := []string{"juju-default-profile-0", "juju-default-lxd-2"}
-	err := apiMachine.SetCharmProfiles(profiles)
-	c.Assert(err, jc.ErrorIsNil)
-
-	mach, err := s.State.Machine(apiMachine.Id())
-	c.Assert(err, jc.ErrorIsNil)
-	obtainedProfiles, err := mach.CharmProfiles()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(profiles, jc.SameContents, obtainedProfiles)
-}
-
-func (s *provisionerSuite) TestKeepInstance(c *gc.C) {
-	err := s.machine.SetKeepInstance(true)
-	c.Assert(err, jc.ErrorIsNil)
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	keep, err := apiMachine.KeepInstance()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(keep, jc.IsTrue)
-}
-
-func (s *provisionerSuite) TestDistributionGroup(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	instances, err := apiMachine.DistributionGroup()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instances, gc.DeepEquals, []instance.Id{"i-manager"})
-
-	machine1, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	apiMachine = s.assertGetOneMachine(c, machine1.MachineTag())
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-
-	err = apiMachine.SetInstanceInfo("i-d", "", "fake", nil, nil, nil, nil, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	instances, err = apiMachine.DistributionGroup()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(instances, gc.HasLen, 0) // no units assigned
-
-	var unitNames []string
-	for i := 0; i < 3; i++ {
-		unit, err := wordpress.AddUnit(state.AddUnitParams{})
-		c.Assert(err, jc.ErrorIsNil)
-		unitNames = append(unitNames, unit.Name())
-		err = unit.AssignToMachine(machine1)
-		c.Assert(err, jc.ErrorIsNil)
-		instances, err := apiMachine.DistributionGroup()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(instances, gc.DeepEquals, []instance.Id{"i-d"})
-	}
-}
-
-func (s *provisionerSuite) TestDistributionGroupMachineNotFound(c *gc.C) {
-	stateMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	apiMachine := s.assertGetOneMachine(c, stateMachine.MachineTag())
-	err = apiMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = apiMachine.Remove()
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = apiMachine.DistributionGroup()
-	c.Assert(err, gc.ErrorMatches, "machine 1 not found")
-	c.Assert(err, jc.Satisfies, params.IsCodeNotFound)
-}
-
-func (s *provisionerSuite) TestDistributionGroupByMachineId(c *gc.C) {
-	results, err := s.provisioner.DistributionGroupByMachineId(s.machine.MachineTag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 1)
-	c.Assert(results, gc.DeepEquals, []provisioner.DistributionGroupResult{
-		{MachineIds: nil, Err: nil},
-	})
-
-	machine1, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	unit, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	err = unit.AssignToMachine(machine1)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results, err = s.provisioner.DistributionGroupByMachineId(
-		s.machine.MachineTag(),
-		machine1.MachineTag(),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 2)
-	c.Assert(results, gc.DeepEquals, []provisioner.DistributionGroupResult{
-		{MachineIds: nil, Err: nil},
-		{MachineIds: nil, Err: nil},
-	})
-
-	machine2, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	unit2, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	err = unit2.AssignToMachine(machine2)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results, err = s.provisioner.DistributionGroupByMachineId(
-		s.machine.MachineTag(),
-		machine1.MachineTag(),
-		machine2.MachineTag(),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 3)
-	c.Assert(results, gc.DeepEquals, []provisioner.DistributionGroupResult{
-		{MachineIds: nil, Err: nil},
-		{MachineIds: []string{"2"}, Err: nil},
-		{MachineIds: []string{"1"}, Err: nil},
-	})
-}
-
-func (s *provisionerSuite) TestDistributionGroupByMachineIdNotFound(c *gc.C) {
-	stateMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	machineTag := stateMachine.MachineTag()
-	apiMachine := s.assertGetOneMachine(c, machineTag)
-	err = apiMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = apiMachine.Remove()
-	c.Assert(err, jc.ErrorIsNil)
-	results, err := s.provisioner.DistributionGroupByMachineId(machineTag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results), gc.Equals, 1)
-	c.Assert(results[0].Err, gc.ErrorMatches, "machine 1 not found")
-	c.Assert(results[0].Err, jc.Satisfies, params.IsCodeNotFound)
-}
-
-func (s *provisionerSuite) TestProvisioningInfo(c *gc.C) {
-	// Add a couple of spaces.
-	space1, err := s.State.AddSpace("space1", "", nil, true)
-	c.Assert(err, jc.ErrorIsNil)
-	space2, err := s.State.AddSpace("space2", "", nil, false)
-	c.Assert(err, jc.ErrorIsNil)
-	// Add 2 subnets into each space.
-	// Each subnet is in a matching zone (e.g "subnet-#" in "zone#").
-	testing.AddSubnetsWithTemplate(c, s.State, 4, corenetwork.SubnetInfo{
-		CIDR:              "10.{{.}}.0.0/16",
-		ProviderId:        "subnet-{{.}}",
-		AvailabilityZones: []string{"zone{{.}}"},
-		SpaceID:           fmt.Sprintf("{{if (lt . 2)}}%s{{else}}%s{{end}}", space1.Id(), space2.Id()),
-	})
-
-	cons := constraints.MustParse("cores=12 mem=8G spaces=^space1,space2")
-	template := state.MachineTemplate{
-		Base:        state.UbuntuBase("12.10"),
-		Jobs:        []state.MachineJob{state.JobHostUnits},
-		Placement:   "valid",
-		Constraints: cons,
-	}
-	machine, err := s.State.AddOneMachine(template)
-	c.Assert(err, jc.ErrorIsNil)
-
-	res, err := s.provisioner.ProvisioningInfo([]names.MachineTag{machine.MachineTag()})
-	c.Assert(err, jc.ErrorIsNil)
-
-	results := res.Results
-	c.Assert(results, gc.HasLen, 1)
-
-	provisioningInfo := results[0].Result
-	c.Assert(provisioningInfo.Base, jc.DeepEquals, params.Base{Name: "ubuntu", Channel: "12.10/stable"})
-	c.Assert(provisioningInfo.Placement, gc.Equals, template.Placement)
-	c.Assert(provisioningInfo.Constraints, jc.DeepEquals, template.Constraints)
-
-	c.Assert(provisioningInfo.SubnetAZs, jc.DeepEquals, map[string][]string{
-		"subnet-2": {"zone2"},
-		"subnet-3": {"zone3"},
-	})
-
-	c.Assert(provisioningInfo.SpaceSubnets, gc.HasLen, 1)
-	c.Assert(provisioningInfo.SpaceSubnets["space2"], jc.SameContents, []string{"subnet-2", "subnet-3"})
-}
-
-func (s *provisionerSuite) TestProvisioningInfoMachineNotFound(c *gc.C) {
-	res, err := s.provisioner.ProvisioningInfo([]names.MachineTag{names.NewMachineTag("1")})
-	c.Assert(err, jc.ErrorIsNil)
-
-	results := res.Results
-	c.Assert(results, gc.HasLen, 1)
-	c.Assert(results[0].Error, gc.ErrorMatches, "machine 1 not found")
-	c.Assert(results[0].Error, jc.Satisfies, params.IsCodeNotFound)
-}
-
-func (s *provisionerSuite) TestWatchContainers(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-
-	// Add one LXD container.
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	}
-	container, err := s.State.AddMachineInsideMachine(template, s.machine.Id(), instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
-
-	w, err := apiMachine.WatchContainers(instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
-	wc := watchertest.NewStringsWatcherC(c, w)
-	defer wc.AssertStops()
-
-	// Initial event.
-	wc.AssertChange(container.Id())
-
-	// Change something other than the containers and make sure it's
-	// not detected.
-	err = apiMachine.SetStatus(status.Started, "not really", nil)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-
-	// Add a KVM container and make sure it's not detected.
-	container, err = s.State.AddMachineInsideMachine(template, s.machine.Id(), instance.KVM)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-
-	// Add another LXD container and make sure it's detected.
-	container, err = s.State.AddMachineInsideMachine(template, s.machine.Id(), instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChange(container.Id())
-}
-
-func (s *provisionerSuite) TestWatchContainersAcceptsSupportedContainers(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-
-	for _, ctype := range instance.ContainerTypes {
-		w, err := apiMachine.WatchContainers(ctype)
-		c.Assert(w, gc.NotNil)
-		c.Assert(err, jc.ErrorIsNil)
-	}
-}
-
-func (s *provisionerSuite) TestWatchContainersErrors(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-
-	_, err := apiMachine.WatchContainers(instance.NONE)
-	c.Assert(err, gc.ErrorMatches, `unsupported container type "none"`)
-
-	_, err = apiMachine.WatchContainers("")
-	c.Assert(err, gc.ErrorMatches, "container type must be specified")
-}
-
-func (s *provisionerSuite) TestWatchModelMachines(c *gc.C) {
-	w, err := s.provisioner.WatchModelMachines()
-	c.Assert(err, jc.ErrorIsNil)
-	wc := watchertest.NewStringsWatcherC(c, w)
-	defer wc.AssertStops()
-
-	// Initial event.
-	wc.AssertChange(s.machine.Id())
-
-	// Add another 2 machines make sure they are detected.
-	_, err = s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	otherMachine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChange("1", "2")
-
-	// Change the lifecycle of last machine.
-	err = otherMachine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertChange("2")
-
-	// Add a container and make sure it's not detected.
-	template := state.MachineTemplate{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	}
-	_, err = s.State.AddMachineInsideMachine(template, s.machine.Id(), instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-}
-
-func (s *provisionerSuite) getManagerConfig(c *gc.C, typ instance.ContainerType) map[string]string {
-	args := params.ContainerManagerConfigParams{Type: typ}
-	result, err := s.provisioner.ContainerManagerConfig(args)
-	c.Assert(err, jc.ErrorIsNil)
-	return result.ManagerConfig
-}
-
-func (s *provisionerSuite) TestContainerManagerConfigKVM(c *gc.C) {
-	cfg := s.getManagerConfig(c, instance.KVM)
-	c.Assert(cfg, jc.DeepEquals, map[string]string{
-		container.ConfigModelUUID:        coretesting.ModelTag.Id(),
-		config.ContainerImageStreamKey:   "released",
-		config.ContainerNetworkingMethod: config.ConfigDefaults()[config.ContainerNetworkingMethod].(string),
-	})
-}
-
-func (s *provisionerSuite) TestContainerManagerConfigPermissive(c *gc.C) {
-	// ContainerManagerConfig is permissive of container types, and
-	// will just return the basic type-independent configuration.
-	cfg := s.getManagerConfig(c, "invalid")
-	c.Assert(cfg, jc.DeepEquals, map[string]string{
-		container.ConfigModelUUID:        coretesting.ModelTag.Id(),
-		config.ContainerImageStreamKey:   "released",
-		config.ContainerNetworkingMethod: config.ConfigDefaults()[config.ContainerNetworkingMethod].(string),
-	})
-}
-
-func (s *provisionerSuite) TestContainerConfig(c *gc.C) {
-	result, err := s.provisioner.ContainerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.ProviderType, gc.Equals, "dummy")
-	c.Assert(result.AuthorizedKeys, gc.Equals, s.Environ.Config().AuthorizedKeys())
-	c.Assert(result.SSLHostnameVerification, jc.IsTrue)
-}
-
-func (s *provisionerSuite) TestSetSupportedContainers(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	err := apiMachine.SetSupportedContainers(instance.LXD, instance.KVM)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	containers, ok := s.machine.SupportedContainers()
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(containers, gc.DeepEquals, []instance.ContainerType{instance.LXD, instance.KVM})
-}
-
-func (s *provisionerSuite) TestSupportedContainers(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	err := apiMachine.SetSupportedContainers(instance.LXD, instance.KVM)
-	c.Assert(err, jc.ErrorIsNil)
-
-	containers, ok, err := apiMachine.SupportedContainers()
-	c.Assert(err, gc.IsNil)
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(containers, gc.DeepEquals, []instance.ContainerType{instance.LXD, instance.KVM})
-}
-
-func (s *provisionerSuite) TestSupportsNoContainers(c *gc.C) {
-	apiMachine := s.assertGetOneMachine(c, s.machine.MachineTag())
-	err := apiMachine.SupportsNoContainers()
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	containers, ok := s.machine.SupportedContainers()
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(containers, gc.DeepEquals, []instance.ContainerType{})
-}
-
-func (s *provisionerSuite) TestFindToolsNoArch(c *gc.C) {
-	s.testFindTools(c, false, nil, nil)
-}
-
-func (s *provisionerSuite) TestFindToolsArch(c *gc.C) {
-	s.testFindTools(c, true, nil, nil)
-}
-
-func (s *provisionerSuite) TestFindToolsAPIError(c *gc.C) {
-	apiError := errors.New("everything's broken")
-	s.testFindTools(c, false, apiError, nil)
-}
-
-func (s *provisionerSuite) TestFindToolsLogicError(c *gc.C) {
-	logicError := errors.NotFoundf("tools")
-	s.testFindTools(c, false, nil, logicError)
-}
-
-func (s *provisionerSuite) testFindTools(c *gc.C, matchArch bool, apiError, logicError error) {
-	current := coretesting.CurrentVersion()
-	var toolsList = coretools.List{&coretools.Tools{Version: current}}
-	var called bool
-	var a string
-	if matchArch {
-		// if matchArch is true, this will be overwriten with the host's arch, otherwise
-		// leave a blank.
-		a = arch.HostArch()
+	results := params.StringResults{
+		Results: []params.StringResult{{
+			Result: "az-666",
+		}},
 	}
 
-	provisioner.PatchFacadeCall(s, s.provisioner, func(request string, args, response interface{}) error {
-		called = true
-		c.Assert(request, gc.Equals, "FindTools")
-		expected := params.FindToolsParams{
-			Number: jujuversion.Current,
-			OSType: "ubuntu",
-			Arch:   a,
-		}
-		c.Assert(args, gc.Equals, expected)
-		result := response.(*params.FindToolsResult)
-		result.List = toolsList
-		if logicError != nil {
-			result.Error = apiservererrors.ServerError(logicError)
-		}
-		return apiError
-	})
-	apiList, err := s.provisioner.FindTools(jujuversion.Current, "ubuntu", a)
-	c.Assert(called, jc.IsTrue)
-	if apiError != nil {
-		c.Assert(err, gc.Equals, apiError)
-	} else if logicError != nil {
-		c.Assert(err.Error(), gc.Equals, logicError.Error())
-	} else {
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(apiList, jc.SameContents, toolsList)
-	}
+	s.expectCall(caller, "AvailabilityZone", args, results)
+
+	zone, err := machine.AvailabilityZone(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(zone, tc.Equals, "az-666")
 }
 
-func (s *provisionerSuite) TestHostChangesForContainer(c *gc.C) {
-	// Create a machine, put it in "default" space with a single NIC. Create
-	// a container that is also in the "default" space, and request the
-	// HostChangesForContainer to see that it wants to bridge that NIC
-	space, err := s.State.AddSpace("default", corenetwork.Id("default"), nil, true)
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddSubnet(corenetwork.SubnetInfo{
-		CIDR:    "10.0.0.0/24",
-		SpaceID: space.Id(),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.SetLinkLayerDevices(
-		state.LinkLayerDeviceArgs{
-			Name:       "ens3",
-			Type:       corenetwork.EthernetDevice,
-			ParentName: "",
-			IsUp:       true,
+func (s *provisionerSuite) TestSetCharmProfiles(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.SetProfileArgs{
+		Args: []params.SetProfileArg{{
+			Entity:   params.Entity{Tag: "machine-666"},
+			Profiles: []string{"profile"},
+		}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+
+	s.expectCall(caller, "SetCharmProfiles", args, results)
+
+	err := machine.SetCharmProfiles(c.Context(), []string{"profile"})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *provisionerSuite) TestKeepInstance(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.BoolResults{
+		Results: []params.BoolResult{{Result: true}},
+	}
+
+	s.expectCall(caller, "KeepInstance", args, results)
+
+	result, err := machine.KeepInstance(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.IsTrue)
+}
+
+func (s *provisionerSuite) TestDistributionGroup(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.DistributionGroupResults{
+		Results: []params.DistributionGroupResult{{Result: []instance.Id{"id-1", "id-2"}}},
+	}
+
+	s.expectCall(caller, "DistributionGroup", args, results)
+
+	result, err := machine.DistributionGroup(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.SameContents, []instance.Id{"id-1", "id-2"})
+}
+
+func (s *provisionerSuite) TestWatchContainers(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.WatchContainers{
+		Params: []params.WatchContainer{
+			{MachineTag: "machine-666", ContainerType: "lxd"},
 		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.SetDevicesAddresses(
-		state.LinkLayerDeviceAddress{
-			DeviceName:   "ens3",
-			CIDRAddress:  "10.0.0.10/24",
-			ConfigMethod: corenetwork.ConfigStatic,
-		},
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	containerTemplate := state.MachineTemplate{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
 	}
-	machine, err := s.State.AddMachineInsideMachine(containerTemplate, s.machine.Id(), instance.LXD)
-	c.Assert(err, jc.ErrorIsNil)
 
-	changes, reconfigureDelay, err := s.provisioner.HostChangesForContainer(machine.MachineTag())
-	c.Assert(err, gc.ErrorMatches, "dummy provider network config not supported.*")
-	c.Skip("can't test without network support")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(changes, gc.DeepEquals, []network.DeviceToBridge{{
-		BridgeName: "br-ens3",
-		DeviceName: "ens3",
-	}})
-	c.Check(reconfigureDelay, gc.Equals, 0)
+	results := params.StringsWatchResults{
+		Results: []params.StringsWatchResult{{
+			Error: &params.Error{Message: "FAIL"},
+		}},
+	}
+
+	s.expectCall(caller, "WatchContainers", args, results)
+
+	_, err := machine.WatchContainers(c.Context(), instance.LXD)
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }
 
-var _ = gc.Suite(&provisionerContainerSuite{})
+func (s *provisionerSuite) TestWatchContainersUnSupportedContainers(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	_, machine := s.setupMachines(c, ctrl)
+
+	_, err := machine.WatchContainers(c.Context(), "foo")
+	c.Assert(err, tc.ErrorMatches, `unsupported container type "foo"`)
+}
+
+func (s *provisionerSuite) TestSetSupportedContainers(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.MachineContainersParams{
+		Params: []params.MachineContainers{{
+			MachineTag:     "machine-666",
+			ContainerTypes: []instance.ContainerType{"lxd"},
+		}},
+	}
+	results := params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	}
+	s.expectCall(caller, "SetSupportedContainers", args, results)
+
+	err := machine.SetSupportedContainers(c.Context(), []instance.ContainerType{"lxd"}...)
+	c.Assert(err, tc.ErrorIsNil)
+
+}
+
+func (s *provisionerSuite) TestSupportedContainers(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	caller, machine := s.setupMachines(c, ctrl)
+
+	args := params.Entities{
+		Entities: []params.Entity{{Tag: "machine-666"}},
+	}
+	results := params.MachineContainerResults{
+		Results: []params.MachineContainerResult{{ContainerTypes: []instance.ContainerType{"lxd"}, Determined: true}},
+	}
+
+	s.expectCall(caller, "SupportedContainers", args, results)
+
+	result, determined, err := machine.SupportedContainers(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.SameContents, []instance.ContainerType{"lxd"})
+	c.Assert(determined, tc.IsTrue)
+}
+func TestProvisionerContainerSuite(t *testing.T) {
+	tc.Run(t, &provisionerContainerSuite{})
+}
 
 type provisionerContainerSuite struct {
 	containerTag names.MachineTag
 }
 
-func (s *provisionerContainerSuite) SetUpTest(c *gc.C) {
+func (s *provisionerContainerSuite) SetUpTest(_ *tc.C) {
 	s.containerTag = names.NewMachineTag("0/lxd/0")
 }
 
-func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoNoValues(c *gc.C) {
+func (s *provisionerContainerSuite) setupCaller(ctrl *gomock.Controller) *mocks.MockAPICaller {
+	caller := mocks.NewMockAPICaller(ctrl)
+	caller.EXPECT().BestFacadeVersion("Provisioner").Return(666)
+	return caller
+}
+
+func (s *provisionerContainerSuite) expectCall(caller *mocks.MockAPICaller, method, args, results interface{}) {
+	caller.EXPECT().APICall(gomock.Any(), "Provisioner", 666, "", method, args, gomock.Any()).SetArg(6, results).Return(nil)
+}
+
+func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoNoValues(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -867,18 +714,16 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoNoValues(c 
 		Error:  nil,
 	}}}
 
-	facadeCaller := apimocks.NewMockFacadeCaller(ctrl)
-	fExp := facadeCaller.EXPECT()
-	fExp.FacadeCall("PrepareContainerInterfaceInfo", args, gomock.Any()).SetArg(2, results).Return(nil)
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "PrepareContainerInterfaceInfo", args, results)
+	provisionerApi := provisioner.NewClient(caller)
 
-	provisionerApi := provisioner.NewStateFromFacade(facadeCaller)
-
-	networkInfo, err := provisionerApi.PrepareContainerInterfaceInfo(s.containerTag)
-	c.Assert(err, gc.IsNil)
-	c.Check(networkInfo, jc.DeepEquals, corenetwork.InterfaceInfos{})
+	networkInfo, err := provisionerApi.PrepareContainerInterfaceInfo(c.Context(), s.containerTag)
+	c.Assert(err, tc.IsNil)
+	c.Check(networkInfo, tc.DeepEquals, corenetwork.InterfaceInfos{})
 }
 
-func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c *gc.C) {
+func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -890,12 +735,9 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c
 			Config: []params.NetworkConfig{{
 				DeviceIndex:         1,
 				MACAddress:          "de:ad:be:ff:11:22",
-				CIDR:                "192.168.0.5/24",
 				MTU:                 9000,
 				ProviderId:          "prov-id",
-				ProviderSubnetId:    "prov-sub-id",
 				ProviderSpaceId:     "prov-space-id",
-				ProviderAddressId:   "prov-address-id",
 				ProviderVLANId:      "prov-vlan-id",
 				VLANTag:             25,
 				InterfaceName:       "eth5",
@@ -904,10 +746,15 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c
 				Disabled:            false,
 				NoAutoStart:         false,
 				ConfigType:          "static",
-				Address:             "192.168.0.6",
-				DNSServers:          []string{"8.8.8.8"},
-				DNSSearchDomains:    []string{"mydomain"},
-				GatewayAddress:      "192.168.0.1",
+				Addresses: []params.Address{{
+					Value: "192.168.0.6",
+					Type:  "ipv4",
+					Scope: "local-cloud",
+					CIDR:  "192.168.0.5/24",
+				}},
+				DNSServers:       []string{"8.8.8.8"},
+				DNSSearchDomains: []string{"mydomain"},
+				GatewayAddress:   "192.168.0.1",
 				Routes: []params.NetworkRoute{{
 					DestinationCIDR: "10.0.0.0/16",
 					GatewayIP:       "192.168.0.1",
@@ -918,21 +765,18 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c
 		}},
 	}
 
-	facadeCaller := apimocks.NewMockFacadeCaller(ctrl)
-	fExp := facadeCaller.EXPECT()
-	fExp.FacadeCall("PrepareContainerInterfaceInfo", args, gomock.Any()).SetArg(2, results).Return(nil)
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "PrepareContainerInterfaceInfo", args, results)
+	provisionerApi := provisioner.NewClient(caller)
 
-	provisionerApi := provisioner.NewStateFromFacade(facadeCaller)
-	networkInfo, err := provisionerApi.PrepareContainerInterfaceInfo(s.containerTag)
-	c.Assert(err, gc.IsNil)
-	c.Check(networkInfo, jc.DeepEquals, corenetwork.InterfaceInfos{{
+	networkInfo, err := provisionerApi.PrepareContainerInterfaceInfo(c.Context(), s.containerTag)
+	c.Assert(err, tc.IsNil)
+	c.Check(networkInfo, tc.DeepEquals, corenetwork.InterfaceInfos{{
 		DeviceIndex:         1,
 		MACAddress:          "de:ad:be:ff:11:22",
 		MTU:                 9000,
 		ProviderId:          "prov-id",
-		ProviderSubnetId:    "prov-sub-id",
 		ProviderSpaceId:     "prov-space-id",
-		ProviderAddressId:   "prov-address-id",
 		ProviderVLANId:      "prov-vlan-id",
 		VLANTag:             25,
 		InterfaceName:       "eth5",
@@ -944,7 +788,7 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c
 		Addresses: corenetwork.ProviderAddresses{corenetwork.NewMachineAddress(
 			"192.168.0.6", corenetwork.WithCIDR("192.168.0.5/24"), corenetwork.WithConfigType(corenetwork.ConfigStatic),
 		).AsProviderAddress()},
-		DNSServers:       corenetwork.NewMachineAddresses([]string{"8.8.8.8"}).AsProviderAddresses(),
+		DNSServers:       []string{"8.8.8.8"},
 		DNSSearchDomains: []string{"mydomain"},
 		GatewayAddress:   corenetwork.NewMachineAddress("192.168.0.1").AsProviderAddress(),
 		Routes: []corenetwork.Route{{
@@ -955,7 +799,7 @@ func (s *provisionerContainerSuite) TestPrepareContainerInterfaceInfoSingleNIC(c
 	}})
 }
 
-func (s *provisionerContainerSuite) TestGetContainerProfileInfo(c *gc.C) {
+func (s *provisionerContainerSuite) TestGetContainerProfileInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -990,15 +834,13 @@ func (s *provisionerContainerSuite) TestGetContainerProfileInfo(c *gc.C) {
 			}},
 	}
 
-	facadeCaller := apimocks.NewMockFacadeCaller(ctrl)
-	fExp := facadeCaller.EXPECT()
-	fExp.FacadeCall("GetContainerProfileInfo", args, gomock.Any()).SetArg(2, results).Return(nil)
+	caller := s.setupCaller(ctrl)
+	s.expectCall(caller, "GetContainerProfileInfo", args, results)
+	provisionerApi := provisioner.NewClient(caller)
 
-	provisionerApi := provisioner.NewStateFromFacade(facadeCaller)
-
-	obtainedResults, err := provisionerApi.GetContainerProfileInfo(s.containerTag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtainedResults, gc.DeepEquals, []*provisioner.LXDProfileResult{
+	obtainedResults, err := provisionerApi.GetContainerProfileInfo(c.Context(), s.containerTag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtainedResults, tc.DeepEquals, []*provisioner.LXDProfileResult{
 		{
 			Config: map[string]string{
 				"security.nesting":    "true",

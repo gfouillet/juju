@@ -4,43 +4,48 @@
 package filenotifywatcher
 
 import (
+	"testing"
+
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
 type manifoldSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&manifoldSuite{})
-
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
-
-	cfg.Clock = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.Logger = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.NewWatcher = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.NewINotifyWatcher = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
 }
 
-func (s *manifoldSuite) getConfig() ManifoldConfig {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	cfg := s.getConfig(c)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
+
+	cfg.Clock = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.Logger = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.NewWatcher = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.NewINotifyWatcher = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+}
+
+func (s *manifoldSuite) getConfig(c *tc.C) ManifoldConfig {
 	return ManifoldConfig{
 		Clock:  s.clock,
-		Logger: s.logger,
+		Logger: loggertesting.WrapCheckLog(c),
 		NewWatcher: func(string, ...Option) (FileWatcher, error) {
 			return nil, nil
 		},

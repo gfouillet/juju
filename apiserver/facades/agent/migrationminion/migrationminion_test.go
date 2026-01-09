@@ -4,149 +4,162 @@
 package migrationminion_test
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	"github.com/juju/juju/apiserver/common"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
+	gomock "go.uber.org/mock/gomock"
+
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/apiserver/facades/agent/migrationminion"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	"github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/migration"
+	"github.com/juju/juju/core/unit"
+	"github.com/juju/juju/core/watcher/watchertest"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
 )
-
-// Ensure that Backend remains compatible with *state.State
-var _ migrationminion.Backend = (*state.State)(nil)
 
 type Suite struct {
 	coretesting.BaseSuite
 
-	stub       *testing.Stub
-	backend    *stubBackend
-	resources  *common.Resources
-	authorizer apiservertesting.FakeAuthorizer
+	authorizer            apiservertesting.FakeAuthorizer
+	modelMigrationService *MockModelMigrationService
+	watcherRegistry       *facademocks.MockWatcherRegistry
 }
 
-var _ = gc.Suite(&Suite{})
+func TestSuite(t *testing.T) {
+	tc.Run(t, &Suite{})
+}
 
-func (s *Suite) SetUpTest(c *gc.C) {
+func (s *Suite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
-
-	s.stub = &testing.Stub{}
-	s.backend = &stubBackend{stub: s.stub}
-
-	s.resources = common.NewResources()
-	s.AddCleanup(func(*gc.C) { s.resources.StopAll() })
 
 	s.authorizer = apiservertesting.FakeAuthorizer{
 		Tag: names.NewMachineTag("99"),
 	}
 }
 
-func (s *Suite) TestAuthMachineAgent(c *gc.C) {
+func (s *Suite) setUpMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.modelMigrationService = NewMockModelMigrationService(ctrl)
+	s.watcherRegistry = facademocks.NewMockWatcherRegistry(ctrl)
+
+	c.Cleanup(func() {
+		s.modelMigrationService = nil
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
+}
+
+func (s *Suite) TestAuthMachineAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
 	s.authorizer.Tag = names.NewMachineTag("42")
 	s.mustMakeAPI(c)
 }
 
-func (s *Suite) TestAuthUnitAgent(c *gc.C) {
+func (s *Suite) TestAuthUnitAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
 	s.authorizer.Tag = names.NewUnitTag("foo/0")
 	s.mustMakeAPI(c)
 }
 
-func (s *Suite) TestAuthApplicationAgent(c *gc.C) {
-	s.authorizer.Tag = names.NewApplicationTag("foo")
-	s.mustMakeAPI(c)
-}
+func (s *Suite) TestAuthNotAgent(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
 
-func (s *Suite) TestAuthNotAgent(c *gc.C) {
 	s.authorizer.Tag = names.NewUserTag("dorothy")
 	_, err := s.makeAPI()
-	c.Assert(err, gc.Equals, apiservererrors.ErrPerm)
+	c.Assert(err, tc.Equals, apiservererrors.ErrPerm)
 }
 
-func (s *Suite) TestWatch(c *gc.C) {
+func (s *Suite) TestWatch(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	ch := make(chan struct{}, 1)
+	ch <- struct{}{}
+	w := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.CleanKill(c, w)
+
+	s.modelMigrationService.EXPECT().WatchForMigration(gomock.Any()).Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("123", nil)
 	api := s.mustMakeAPI(c)
-	result, err := api.Watch()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.resources.Get(result.NotifyWatcherId), gc.NotNil)
+	result, err := api.Watch(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Error, tc.IsNil)
+	c.Assert(result.NotifyWatcherId, tc.Equals, "123")
 }
 
-func (s *Suite) TestReport(c *gc.C) {
+func (s *Suite) TestReportMachine(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	s.modelMigrationService.EXPECT().ReportFromMachine(gomock.Any(), machine.Name("99"), migration.IMPORT).Return(nil)
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag: names.NewMachineTag("99"),
+	}
 	api := s.mustMakeAPI(c)
-	err := api.Report(params.MinionReport{
+	err := api.Report(c.Context(), params.MinionReport{
 		MigrationId: "id",
 		Phase:       "IMPORT",
 		Success:     true,
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	s.stub.CheckCalls(c, []testing.StubCall{
-		{"Migration", []interface{}{"id"}},
-		{"Report", []interface{}{s.authorizer.Tag, migration.IMPORT, true}},
-	})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *Suite) TestReportInvalidPhase(c *gc.C) {
+func (s *Suite) TestReportUnit(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	s.modelMigrationService.EXPECT().ReportFromUnit(gomock.Any(), unit.Name("a/123"), migration.IMPORT).Return(nil)
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag: names.NewUnitTag("a/123"),
+	}
 	api := s.mustMakeAPI(c)
-	err := api.Report(params.MinionReport{
+	err := api.Report(c.Context(), params.MinionReport{
+		MigrationId: "id",
+		Phase:       "IMPORT",
+		Success:     true,
+	})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *Suite) TestReportInvalidPhase(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	api := s.mustMakeAPI(c)
+	err := api.Report(c.Context(), params.MinionReport{
 		MigrationId: "id",
 		Phase:       "WTF",
 		Success:     true,
 	})
-	c.Assert(err, gc.ErrorMatches, "unable to parse phase")
+	c.Assert(err, tc.ErrorMatches, "unable to parse phase")
 }
 
-func (s *Suite) TestReportNoSuchMigration(c *gc.C) {
-	failure := errors.NotFoundf("model")
-	s.backend.modelLookupErr = failure
+func (s *Suite) TestReportNoSuchMigration(c *tc.C) {
+	defer s.setUpMocks(c).Finish()
+
+	s.modelMigrationService.EXPECT().ReportFromMachine(gomock.Any(), machine.Name("99"), migration.QUIESCE).Return(errors.NotFoundf("model"))
 	api := s.mustMakeAPI(c)
-	err := api.Report(params.MinionReport{
+	err := api.Report(c.Context(), params.MinionReport{
 		MigrationId: "id",
 		Phase:       "QUIESCE",
 		Success:     false,
 	})
-	c.Assert(errors.Cause(err), gc.Equals, failure)
+	c.Assert(errors.Cause(err), tc.ErrorMatches, `model not found`)
 }
 
 func (s *Suite) makeAPI() (*migrationminion.API, error) {
-	return migrationminion.NewAPI(s.backend, s.resources, s.authorizer)
+	return migrationminion.NewAPI(s.watcherRegistry, s.authorizer, s.modelMigrationService)
 }
 
-func (s *Suite) mustMakeAPI(c *gc.C) *migrationminion.API {
+func (s *Suite) mustMakeAPI(c *tc.C) *migrationminion.API {
 	api, err := s.makeAPI()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return api
-}
-
-type stubBackend struct {
-	migrationminion.Backend
-	stub           *testing.Stub
-	modelLookupErr error
-}
-
-func (b *stubBackend) WatchMigrationStatus() state.NotifyWatcher {
-	b.stub.AddCall("WatchMigrationStatus")
-	return apiservertesting.NewFakeNotifyWatcher()
-}
-
-func (b *stubBackend) Migration(id string) (state.ModelMigration, error) {
-	b.stub.AddCall("Migration", id)
-	if b.modelLookupErr != nil {
-		return nil, b.modelLookupErr
-	}
-	return &stubModelMigration{stub: b.stub}, nil
-}
-
-type stubModelMigration struct {
-	state.ModelMigration
-	stub *testing.Stub
-}
-
-func (m *stubModelMigration) SubmitMinionReport(tag names.Tag, phase migration.Phase, success bool) error {
-	m.stub.AddCall("Report", tag, phase, success)
-	return nil
 }

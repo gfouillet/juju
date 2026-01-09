@@ -1,34 +1,39 @@
 // Copyright 2018 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package status_test
+package status
 
 import (
+	"context"
 	"errors"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/client/client"
-	"github.com/juju/juju/cmd/juju/status"
+	"github.com/juju/juju/api/jujuclient"
+	coremodel "github.com/juju/juju/core/model"
 	corestatus "github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
 )
 
 type MinimalStatusSuite struct {
 	testing.BaseSuite
 
+	store     jujuclient.ClientStore
 	statusapi *fakeStatusAPI
 	clock     *timeRecorder
 }
 
-var _ = gc.Suite(&MinimalStatusSuite{})
+func TestMinimalStatusSuite(t *stdtesting.T) {
+	tc.Run(t, &MinimalStatusSuite{})
+}
 
-func (s *MinimalStatusSuite) SetUpTest(c *gc.C) {
+func (s *MinimalStatusSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 	s.statusapi = &fakeStatusAPI{
 		result: &params.FullStatus{
@@ -39,21 +44,33 @@ func (s *MinimalStatusSuite) SetUpTest(c *gc.C) {
 		},
 	}
 	s.clock = &timeRecorder{}
-	s.SetModelAndController(c, "test", "admin/test")
+	store := jujuclient.NewMemStore()
+	store.CurrentControllerName = "kontroll"
+	store.Controllers["kontroll"] = jujuclient.ControllerDetails{}
+	store.Models["kontroll"] = &jujuclient.ControllerModels{
+		CurrentModel: "test",
+		Models: map[string]jujuclient.ModelDetails{"admin/test": {
+			ModelType: coremodel.IAAS,
+		}},
+	}
+	store.Accounts["kontroll"] = jujuclient.AccountDetails{
+		User: "admin",
+	}
+	s.store = store
 }
 
-func (s *MinimalStatusSuite) runStatus(c *gc.C, args ...string) (*cmd.Context, error) {
-	statusCmd := status.NewTestStatusCommand(s.statusapi, s.clock)
+func (s *MinimalStatusSuite) runStatus(c *tc.C, args ...string) (*cmd.Context, error) {
+	statusCmd := NewStatusCommandForTest(s.store, s.statusapi, s.clock)
 	return cmdtesting.RunCommand(c, statusCmd, args...)
 }
 
-func (s *MinimalStatusSuite) TestGoodCall(c *gc.C) {
+func (s *MinimalStatusSuite) TestGoodCall(c *tc.C) {
 	_, err := s.runStatus(c)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.clock.waits, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(s.clock.waits, tc.HasLen, 0)
 }
 
-func (s *MinimalStatusSuite) TestGoodCallWithStorage(c *gc.C) {
+func (s *MinimalStatusSuite) TestGoodCallWithStorage(c *tc.C) {
 	t := time.Now()
 	s.statusapi.expectIncludeStorage = true
 	s.statusapi.result.Storage = storageDetails(t)
@@ -61,13 +78,13 @@ func (s *MinimalStatusSuite) TestGoodCallWithStorage(c *gc.C) {
 	s.statusapi.result.Volumes = volumeDetails(t)
 
 	context, err := s.runStatus(c, "--no-color", "--storage")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.clock.waits, gc.HasLen, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(s.clock.waits, tc.HasLen, 0)
 
 	obtainedValid := cmdtesting.Stdout(context)
-	c.Assert(obtainedValid, gc.Equals, `
+	c.Assert(obtainedValid, tc.Equals, `
 Model  Controller  Cloud/Region  Version
-test   test        foo           
+test   kontroll    foo           
 
 Storage Unit  Storage ID    Type        Pool      Mountpoint  Size     Status    Message
               persistent/1  filesystem                                 detached  
@@ -78,32 +95,32 @@ transcode/1   shared-fs/0   filesystem  radiance  /mnt/huang  1.0 GiB  attached
 `[1:])
 }
 
-func (s *MinimalStatusSuite) TestRetryOnError(c *gc.C) {
+func (s *MinimalStatusSuite) TestRetryOnError(c *tc.C) {
 	s.statusapi.errors = []error{
 		errors.New("boom"),
 		errors.New("splat"),
 	}
 
 	_, err := s.runStatus(c, "--no-color")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	delay := 100 * time.Millisecond
 	// Two delays of the default time.
-	c.Assert(s.clock.waits, jc.DeepEquals, []time.Duration{delay, delay})
+	c.Assert(s.clock.waits, tc.DeepEquals, []time.Duration{delay, delay})
 }
 
-func (s *MinimalStatusSuite) TestRetryDelays(c *gc.C) {
+func (s *MinimalStatusSuite) TestRetryDelays(c *tc.C) {
 	s.statusapi.errors = []error{
 		errors.New("boom"),
 		errors.New("splat"),
 	}
 
 	_, err := s.runStatus(c, "--no-color", "--retry-delay", "250ms")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	delay := 250 * time.Millisecond
-	c.Assert(s.clock.waits, jc.DeepEquals, []time.Duration{delay, delay})
+	c.Assert(s.clock.waits, tc.DeepEquals, []time.Duration{delay, delay})
 }
 
-func (s *MinimalStatusSuite) TestRetryCount(c *gc.C) {
+func (s *MinimalStatusSuite) TestRetryCount(c *tc.C) {
 	s.statusapi.errors = []error{
 		errors.New("error 1"),
 		errors.New("error 2"),
@@ -115,13 +132,13 @@ func (s *MinimalStatusSuite) TestRetryCount(c *gc.C) {
 	}
 
 	_, err := s.runStatus(c, "--no-color", "--retry-count", "5")
-	c.Assert(err.Error(), gc.Equals, "error 6")
+	c.Assert(err.Error(), tc.Equals, "error 6")
 	// We expect five waits of the default duration.
 	delay := 100 * time.Millisecond
-	c.Assert(s.clock.waits, jc.DeepEquals, []time.Duration{delay, delay, delay, delay, delay})
+	c.Assert(s.clock.waits, tc.DeepEquals, []time.Duration{delay, delay, delay, delay, delay})
 }
 
-func (s *MinimalStatusSuite) TestRetryCountOfZero(c *gc.C) {
+func (s *MinimalStatusSuite) TestRetryCountOfZero(c *tc.C) {
 	s.statusapi.errors = []error{
 		errors.New("error 1"),
 		errors.New("error 2"),
@@ -129,21 +146,23 @@ func (s *MinimalStatusSuite) TestRetryCountOfZero(c *gc.C) {
 	}
 
 	_, err := s.runStatus(c, "--no-color", "--retry-count", "0")
-	c.Assert(err.Error(), gc.Equals, "error 1")
+	c.Assert(err.Error(), tc.Equals, "error 1")
 	// No delays.
-	c.Assert(s.clock.waits, gc.HasLen, 0)
+	c.Assert(s.clock.waits, tc.HasLen, 0)
 }
 
 type fakeStatusAPI struct {
 	expectIncludeStorage bool
 	result               *params.FullStatus
+	patterns             []string
 	errors               []error
 }
 
-func (f *fakeStatusAPI) Status(args *client.StatusArgs) (*params.FullStatus, error) {
+func (f *fakeStatusAPI) Status(ctx context.Context, args *client.StatusArgs) (*params.FullStatus, error) {
 	if f.expectIncludeStorage != args.IncludeStorage {
 		return nil, errors.New("IncludeStorage arg mismatch")
 	}
+	f.patterns = args.Patterns
 	if len(f.errors) > 0 {
 		err, rest := f.errors[0], f.errors[1:]
 		f.errors = rest
@@ -243,8 +262,8 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 			FilesystemTag: "filesystem-0-0",
 			VolumeTag:     "volume-0-1",
 			Info: params.FilesystemInfo{
-				FilesystemId: "provider-supplied-filesystem-0-0",
-				Size:         512,
+				ProviderId: "provider-supplied-filesystem-0-0",
+				SizeMiB:    512,
 			},
 			Life:   "alive",
 			Status: createTestStatus(corestatus.Attached, "", t),
@@ -277,8 +296,8 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 		{
 			FilesystemTag: "filesystem-1",
 			Info: params.FilesystemInfo{
-				FilesystemId: "provider-supplied-filesystem-1",
-				Size:         2048,
+				ProviderId: "provider-supplied-filesystem-1",
+				SizeMiB:    2048,
 			},
 			Status: createTestStatus(corestatus.Attaching, "failed to attach, will retry", t),
 			MachineAttachments: map[string]params.FilesystemAttachmentDetails{
@@ -290,7 +309,7 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 		{
 			FilesystemTag: "filesystem-3",
 			Info: params.FilesystemInfo{
-				Size: 42,
+				SizeMiB: 42,
 			},
 			Status: createTestStatus(corestatus.Pending, "", t),
 			MachineAttachments: map[string]params.FilesystemAttachmentDetails{
@@ -302,8 +321,8 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 		{
 			FilesystemTag: "filesystem-2",
 			Info: params.FilesystemInfo{
-				FilesystemId: "provider-supplied-filesystem-2",
-				Size:         3,
+				ProviderId: "provider-supplied-filesystem-2",
+				SizeMiB:    3,
 			},
 			Status: createTestStatus(corestatus.Attached, "", t),
 			MachineAttachments: map[string]params.FilesystemAttachmentDetails{
@@ -319,9 +338,9 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 		{
 			FilesystemTag: "filesystem-4",
 			Info: params.FilesystemInfo{
-				FilesystemId: "provider-supplied-filesystem-4",
-				Pool:         "radiance",
-				Size:         1024,
+				ProviderId: "provider-supplied-filesystem-4",
+				Pool:       "radiance",
+				SizeMiB:    1024,
 			},
 			Status: createTestStatus(corestatus.Attached, "", t),
 			MachineAttachments: map[string]params.FilesystemAttachmentDetails{
@@ -363,8 +382,8 @@ func filesystemDetails(t time.Time) []params.FilesystemDetails {
 			// attached to any machines.
 			FilesystemTag: "filesystem-5",
 			Info: params.FilesystemInfo{
-				FilesystemId: "provider-supplied-filesystem-5",
-				Size:         3,
+				ProviderId: "provider-supplied-filesystem-5",
+				SizeMiB:    3,
 			},
 			Status: createTestStatus(corestatus.Attached, "", t),
 			Storage: &params.StorageDetails{
@@ -393,9 +412,9 @@ func volumeDetails(t time.Time) []params.VolumeDetails {
 		{
 			VolumeTag: "volume-0-0",
 			Info: params.VolumeInfo{
-				VolumeId: "provider-supplied-volume-0-0",
-				Pool:     "radiance",
-				Size:     512,
+				ProviderId: "provider-supplied-volume-0-0",
+				Pool:       "radiance",
+				SizeMiB:    512,
 			},
 			Life:   "alive",
 			Status: createTestStatus(corestatus.Attached, "", t),
@@ -428,10 +447,10 @@ func volumeDetails(t time.Time) []params.VolumeDetails {
 		{
 			VolumeTag: "volume-1",
 			Info: params.VolumeInfo{
-				VolumeId:   "provider-supplied-volume-1",
+				ProviderId: "provider-supplied-volume-1",
 				HardwareId: "serial blah blah",
 				Persistent: true,
-				Size:       2048,
+				SizeMiB:    2048,
 			},
 			Status: createTestStatus(corestatus.Attaching, "failed to attach, will retry", t),
 			MachineAttachments: map[string]params.VolumeAttachmentDetails{
@@ -443,7 +462,7 @@ func volumeDetails(t time.Time) []params.VolumeDetails {
 		{
 			VolumeTag: "volume-3",
 			Info: params.VolumeInfo{
-				Size: 42,
+				SizeMiB: 42,
 			},
 			Status: createTestStatus(corestatus.Pending, "", t),
 			MachineAttachments: map[string]params.VolumeAttachmentDetails{
@@ -455,8 +474,8 @@ func volumeDetails(t time.Time) []params.VolumeDetails {
 		{
 			VolumeTag: "volume-2",
 			Info: params.VolumeInfo{
-				VolumeId: "provider-supplied-volume-2",
-				Size:     3,
+				ProviderId: "provider-supplied-volume-2",
+				SizeMiB:    3,
 			},
 			Status: createTestStatus(corestatus.Attached, "", t),
 			MachineAttachments: map[string]params.VolumeAttachmentDetails{
@@ -472,9 +491,9 @@ func volumeDetails(t time.Time) []params.VolumeDetails {
 		{
 			VolumeTag: "volume-4",
 			Info: params.VolumeInfo{
-				VolumeId:   "provider-supplied-volume-4",
+				ProviderId: "provider-supplied-volume-4",
 				Persistent: true,
-				Size:       1024,
+				SizeMiB:    1024,
 			},
 			Status: createTestStatus(corestatus.Attached, "", t),
 			MachineAttachments: map[string]params.VolumeAttachmentDetails{

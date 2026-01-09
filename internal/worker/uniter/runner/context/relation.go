@@ -4,51 +4,24 @@
 package context
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/rpc/params"
 )
 
-type Relation interface {
-	// Id returns the integer internal relation key.
-	Id() int
-
-	// Refresh refreshes the contents of the relation from the underlying
-	// state.
-	Refresh() error
-
-	// Suspended returns the relation's current suspended status.
-	Suspended() bool
-
-	// SetStatus updates the status of the relation.
-	SetStatus(status relation.Status) error
-
-	// Tag returns the relation tag.
-	Tag() names.RelationTag
-
-	// OtherApplication returns the name of the application on the other
-	// end of the relation (from this unit's perspective).
-	OtherApplication() string
-
-	// OtherModelUUID returns the UUID of the model hosting the
-	// application on the other end of the relation.
-	OtherModelUUID() string
-
-	// Life returns the relation's current life state.
-	Life() life.Value
-}
-
 type RelationUnit interface {
 	// ApplicationSettings returns a Settings which allows access to this unit's
 	// application settings within the relation.
-	ApplicationSettings() (*uniter.Settings, error)
+	ApplicationSettings(context.Context) (*uniter.Settings, error)
 
 	// Endpoint returns the relation endpoint that defines the unit's
 	// participation in the relation.
@@ -56,22 +29,14 @@ type RelationUnit interface {
 
 	// ReadSettings returns a map holding the settings of the unit with the
 	// supplied name within this relation.
-	ReadSettings(name string) (params.Settings, error)
+	ReadSettings(ctx context.Context, name string) (params.Settings, error)
 
 	// Relation returns the relation associated with the unit.
-	Relation() Relation
+	Relation() api.Relation
 
 	// Settings returns a Settings which allows access to the unit's settings
 	// within the relation.
-	Settings() (*uniter.Settings, error)
-}
-
-type RelationUnitShim struct {
-	*uniter.RelationUnit
-}
-
-func (r *RelationUnitShim) Relation() Relation {
-	return r.RelationUnit.Relation()
+	Settings(context.Context) (*uniter.Settings, error)
 }
 
 type RelationInfo struct {
@@ -108,81 +73,81 @@ func NewContextRelation(ru RelationUnit, cache *RelationCache, broken bool) *Con
 	}
 }
 
-func (ctx *ContextRelation) Id() int {
-	return ctx.relationId
+func (c *ContextRelation) Id() int {
+	return c.relationId
 }
 
-func (ctx *ContextRelation) Name() string {
-	return ctx.endpointName
+func (c *ContextRelation) Name() string {
+	return c.endpointName
 }
 
-func (ctx *ContextRelation) RelationTag() names.RelationTag {
-	return ctx.ru.Relation().Tag()
+func (c *ContextRelation) RelationTag() names.RelationTag {
+	return c.ru.Relation().Tag()
 }
 
-func (ctx *ContextRelation) FakeId() string {
-	return fmt.Sprintf("%s:%d", ctx.endpointName, ctx.relationId)
+func (c *ContextRelation) FakeId() string {
+	return fmt.Sprintf("%s:%d", c.endpointName, c.relationId)
 }
 
-func (ctx *ContextRelation) UnitNames() []string {
-	return ctx.cache.MemberNames()
+func (c *ContextRelation) UnitNames() []string {
+	return c.cache.MemberNames()
 }
 
-func (ctx *ContextRelation) ReadSettings(unit string) (settings params.Settings, err error) {
-	return ctx.cache.Settings(unit)
+func (c *ContextRelation) ReadSettings(ctx context.Context, unit string) (settings params.Settings, err error) {
+	return c.cache.Settings(ctx, unit)
 }
 
-func (ctx *ContextRelation) ReadApplicationSettings(app string) (settings params.Settings, err error) {
-	return ctx.cache.ApplicationSettings(app)
+func (c *ContextRelation) ReadApplicationSettings(ctx context.Context, app string) (settings params.Settings, err error) {
+	return c.cache.ApplicationSettings(ctx, app)
 }
 
-func (ctx *ContextRelation) Settings() (jujuc.Settings, error) {
-	if ctx.settings == nil {
-		node, err := ctx.ru.Settings()
+func (c *ContextRelation) Settings(ctx context.Context) (jujuc.Settings, error) {
+	if c.settings == nil {
+		node, err := c.ru.Settings(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		ctx.settings = node
+		c.settings = node
 	}
-	return ctx.settings, nil
+	return c.settings, nil
 }
 
-func (ctx *ContextRelation) ApplicationSettings() (jujuc.Settings, error) {
-	if ctx.applicationSettings == nil {
-		settings, err := ctx.ru.ApplicationSettings()
+func (c *ContextRelation) ApplicationSettings(ctx context.Context) (jujuc.Settings, error) {
+	if c.applicationSettings == nil {
+		settings, err := c.ru.ApplicationSettings(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		ctx.applicationSettings = settings
+		c.applicationSettings = settings
 	}
-	return ctx.applicationSettings, nil
+	return c.applicationSettings, nil
 }
 
 // FinalSettings returns the changes made to the relation settings (unit and application)
-func (ctx *ContextRelation) FinalSettings() (unitSettings, appSettings params.Settings) {
-	if ctx.applicationSettings != nil && ctx.applicationSettings.IsDirty() {
-		appSettings = ctx.applicationSettings.FinalResult()
+func (c *ContextRelation) FinalSettings() (unitSettings, appSettings params.Settings) {
+	if c.applicationSettings != nil && c.applicationSettings.IsDirty() {
+		appSettings = c.applicationSettings.FinalResult()
 	}
-	if ctx.settings != nil {
-		unitSettings = ctx.settings.FinalResult()
+	if c.settings != nil {
+		unitSettings = c.settings.FinalResult()
 	}
 	return unitSettings, appSettings
 }
 
 // Suspended returns true if the relation is suspended.
-func (ctx *ContextRelation) Suspended() bool {
-	return ctx.ru.Relation().Suspended()
+func (c *ContextRelation) Suspended() bool {
+	return c.ru.Relation().Suspended()
 }
 
 // SetStatus sets the relation's status.
-func (ctx *ContextRelation) SetStatus(status relation.Status) error {
-	return errors.Trace(ctx.ru.Relation().SetStatus(status))
+func (c *ContextRelation) SetStatus(ctx context.Context, status relation.Status) error {
+	return errors.Trace(c.ru.Relation().SetStatus(ctx, status))
 }
 
 // RemoteApplicationName returns the application on the other end of this
 // relation from the perspective of this unit.
-func (ctx *ContextRelation) RemoteApplicationName() string {
-	return ctx.ru.Relation().OtherApplication()
+func (c *ContextRelation) RemoteApplicationName() string {
+	return c.ru.Relation().OtherApplication()
 }
 
 // RemoteModelUUID returns the UUID of the model hosting the
@@ -192,6 +157,6 @@ func (ctx *ContextRelation) RemoteModelUUID() string {
 }
 
 // Life returns the relation's current life state.
-func (ctx *ContextRelation) Life() life.Value {
-	return ctx.ru.Relation().Life()
+func (c *ContextRelation) Life() life.Value {
+	return c.ru.Relation().Life()
 }

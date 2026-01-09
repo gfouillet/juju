@@ -4,18 +4,18 @@
 package apiserver_test
 
 import (
+	"testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
-	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/apiserver"
-	"github.com/juju/juju/rpc"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/domain/controllernode"
+	coretesting "github.com/juju/juju/internal/testing"
+	jujutesting "github.com/juju/juju/juju/testing"
 )
 
 // pingerSuite exercises the apiserver's ping timeout functionality
@@ -23,135 +23,60 @@ import (
 // API server to ensure that the server shuts down the API connection
 // as expected once there's been no pings within the timeout period.
 type pingerSuite struct {
-	apiserverBaseSuite
+	jujutesting.ApiServerSuite
 }
 
-var _ = gc.Suite(&pingerSuite{})
-
-func (s *pingerSuite) newServerWithTestClock(c *gc.C) (*apiserver.Server, *testclock.Clock) {
-	clock := testclock.NewClock(time.Now())
-	config := s.config
-	config.PingClock = clock
-	server := s.newServer(c, config)
-	return server, clock
+func TestPingerSuite(t *testing.T) {
+	tc.Run(t, &pingerSuite{})
 }
 
-func (s *pingerSuite) TestConnectionBrokenDetection(c *gc.C) {
-	server, clock := s.newServerWithTestClock(c)
-	conn, _ := s.OpenAPIAsNewMachine(c, server)
+func (s *pingerSuite) SetUpTest(c *tc.C) {
+	s.Clock = testclock.NewDilatedWallClock(time.Millisecond)
+	s.ApiServerSuite.SetUpTest(c)
 
-	clock.Advance(api.PingPeriod)
-	// Connection still alive
-	select {
-	case <-conn.Broken():
-		c.Fatalf("connection should be alive still")
-	case <-time.After(coretesting.ShortWait):
-		// all good, connection still there
+	controllerNodeService := s.ControllerDomainServices(c).ControllerNode()
+	addrs := network.SpaceHostPorts{
+		{
+			SpaceAddress: network.SpaceAddress{
+				MachineAddress: network.MachineAddress{
+					Value: "10.9.9.32",
+				},
+			},
+			NetPort: 42,
+		},
 	}
-
-	conn.Close()
-
-	clock.Advance(api.PingPeriod + time.Second)
-	// Check it's detected
-	select {
-	case <-time.After(coretesting.ShortWait):
-		c.Fatalf("connection not closed as expected")
-	case <-conn.Broken():
-		return
-	}
+	err := controllerNodeService.SetAPIAddresses(c.Context(), controllernode.SetAPIAddressArgs{
+		APIAddresses: map[string]network.SpaceHostPorts{
+			"0": addrs,
+		},
+	})
+	c.Assert(err, tc.IsNil)
 }
 
-func (s *pingerSuite) TestPing(c *gc.C) {
-	tw := &loggo.TestWriter{}
-	c.Assert(loggo.RegisterWriter("ping-tester", tw), gc.IsNil)
+func (s *pingerSuite) TestStub(c *tc.C) {
+	c.Skipf(`This suite is missing tests for the following scenarios:
 
-	server, _ := s.newServerWithTestClock(c)
-	conn, _ := s.OpenAPIAsNewMachine(c, server)
-
-	c.Assert(pingConn(conn), jc.ErrorIsNil)
-	c.Assert(conn.Close(), jc.ErrorIsNil)
-	c.Assert(errors.Cause(pingConn(conn)), gc.Equals, rpc.ErrShutdown)
-
-	// Make sure that ping messages have not been logged.
-	for _, m := range tw.Log() {
-		c.Logf("checking %q", m.Message)
-		c.Check(m.Message, gc.Not(gc.Matches), `.*"Request":"Ping".*`)
-	}
+- Test connection broken detection using machines.
+- Test ping
+- Test agent connection shuts down with no ping.
+- Test agent connection delays shutdown with ping.
+- Test agent connection shut down when API server dies.`)
 }
 
-func (s *pingerSuite) TestClientNoNeedToPing(c *gc.C) {
-	server, clock := s.newServerWithTestClock(c)
-	conn := s.OpenAPIAsAdmin(c, server)
+func (s *pingerSuite) TestClientNoNeedToPing(c *tc.C) {
+	conn := s.OpenControllerModelAPI(c)
 
 	// Here we have a conundrum, we can't wait for a clock alarm because
 	// one isn't set because we don't have pingers for clients. So just
 	// a short wait then.
 	time.Sleep(coretesting.ShortWait)
 
-	clock.Advance(apiserver.MaxClientPingInterval * 2)
+	s.Clock.Advance(apiserver.MaxClientPingInterval * 2)
 	time.Sleep(coretesting.ShortWait)
-	c.Assert(pingConn(conn), jc.ErrorIsNil)
+	c.Assert(pingConn(c, conn), tc.ErrorIsNil)
 }
 
-func (s *pingerSuite) TestAgentConnectionShutsDownWithNoPing(c *gc.C) {
-	coretesting.SkipFlaky(c, "lp:1627086")
-	server, clock := s.newServerWithTestClock(c)
-	conn, _ := s.OpenAPIAsNewMachine(c, server)
-
-	waitAndAdvance(c, clock, apiserver.MaxClientPingInterval*2)
-	checkConnectionDies(c, conn)
-}
-
-func (s *pingerSuite) TestAgentConnectionDelaysShutdownWithPing(c *gc.C) {
-	coretesting.SkipFlaky(c, "lp:1632485")
-	server, clock := s.newServerWithTestClock(c)
-	conn, _ := s.OpenAPIAsNewMachine(c, server)
-
-	// As long as we don't wait too long, the connection stays open
-	attemptDelay := apiserver.MaxClientPingInterval / 2
-	for i := 0; i < 10; i++ {
-		waitAndAdvance(c, clock, attemptDelay)
-		c.Assert(pingConn(conn), jc.ErrorIsNil)
-	}
-
-	// However, once we stop pinging for too long, the connection dies
-	waitAndAdvance(c, clock, apiserver.MaxClientPingInterval*2)
-	checkConnectionDies(c, conn)
-}
-
-func (s *pingerSuite) TestAgentConnectionsShutDownWhenAPIServerDies(c *gc.C) {
-	server := s.newServerDirtyKill(c, s.config)
-	conn, _ := s.OpenAPIAsNewMachine(c, server)
-
-	err := pingConn(conn)
-	c.Assert(err, jc.ErrorIsNil)
-	server.Kill()
-
-	checkConnectionDies(c, conn)
-}
-
-func waitAndAdvance(c *gc.C, clock *testclock.Clock, delta time.Duration) {
-	waitForClock(c, clock)
-	clock.Advance(delta)
-}
-
-func waitForClock(c *gc.C, clock *testclock.Clock) {
-	select {
-	case <-clock.Alarms():
-	case <-time.After(coretesting.LongWait):
-		c.Fatal("timed out waiting for clock")
-	}
-}
-
-func checkConnectionDies(c *gc.C, conn api.Connection) {
-	select {
-	case <-conn.Broken():
-	case <-time.After(coretesting.LongWait):
-		c.Fatal("connection didn't get shut down")
-	}
-}
-
-func pingConn(conn api.Connection) error {
+func pingConn(c *tc.C, conn api.Connection) error {
 	version := conn.BestFacadeVersion("Pinger")
-	return conn.APICall("Pinger", version, "", "Ping", nil, nil)
+	return conn.APICall(c.Context(), "Pinger", version, "", "Ping", nil, nil)
 }

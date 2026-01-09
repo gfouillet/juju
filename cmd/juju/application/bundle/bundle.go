@@ -4,23 +4,26 @@
 package bundle
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+	"gopkg.in/yaml.v3"
 
 	corebase "github.com/juju/juju/core/base"
-	bundlechanges "github.com/juju/juju/core/bundle/changes"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/storage"
+	bundlechanges "github.com/juju/juju/internal/bundle/changes"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
 // This file contains functionality required by both the application
@@ -29,6 +32,7 @@ import (
 // BuildModelRepresentation creates a buildchanges.Model, representing
 // the existing deployment, to be used while deploying or diffing a bundle.
 func BuildModelRepresentation(
+	ctx context.Context,
 	status *params.FullStatus,
 	modelExtractor ModelExtractor,
 	useExistingMachines bool,
@@ -148,7 +152,7 @@ func BuildModelRepresentation(
 		})
 	}
 	// Get all the annotations.
-	annotations, err := modelExtractor.GetAnnotations(annotationTags)
+	annotations, err := modelExtractor.GetAnnotations(ctx, annotationTags)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -170,16 +174,15 @@ func BuildModelRepresentation(
 		}
 	}
 	// Add in the model sequences.
-	sequences, err := modelExtractor.Sequences()
+	sequences, err := modelExtractor.Sequences(ctx)
 	if err == nil {
 		mod.Sequence = sequences
-	} else if !errors.IsNotSupported(err) {
+	} else if !errors.Is(err, errors.NotSupported) {
 		return nil, errors.Annotate(err, "getting model sequences")
 	}
 
-	// When dealing with bundles the current model generation is always used.
 	sort.Strings(appNames)
-	configValues, err := modelExtractor.GetConfig(model.GenerationMaster, appNames...)
+	configValues, err := modelExtractor.GetConfig(ctx, appNames...)
 	if err != nil {
 		return nil, errors.Annotate(err, "getting application options")
 	}
@@ -206,7 +209,7 @@ func BuildModelRepresentation(
 	}
 	// Lastly get all the application constraints.
 	sort.Strings(principalApps)
-	constraintValues, err := modelExtractor.GetConstraints(principalApps...)
+	constraintValues, err := modelExtractor.GetConstraints(ctx, principalApps...)
 	if err != nil {
 		return nil, errors.Annotate(err, "getting application constraints")
 	}
@@ -252,7 +255,6 @@ func applicationConfigValue(key string, valueMap interface{}) (interface{}, erro
 // processing the bundle. They are for informational purposes and do
 // not require failing the bundle deployment.
 func ComposeAndVerifyBundle(ctx *cmd.Context, base BundleDataSource, pathToOverlays []string) (*charm.BundleData, []error, error) {
-
 	verifyConstraints := func(s string) error {
 		_, err := constraints.Parse(s)
 		return err
@@ -283,11 +285,11 @@ func ComposeAndVerifyBundle(ctx *cmd.Context, base BundleDataSource, pathToOverl
 	}
 
 	// verify composed (base + overlay bundles)
-	if err = verifyBundle(bundleData, base.BasePath(), verifyConstraints); err != nil {
+	if err = verifyBundle(bundleData, dsList, base.BasePath(), verifyConstraints); err != nil {
 		return nil, nil, errors.Trace(err)
 	}
 
-	deprecationWarningForSeries(ctx, bundleData)
+	warnSeries(ctx, dsList)
 
 	return bundleData, unMarshallErrors, nil
 }
@@ -320,12 +322,12 @@ func verifyBaseBundle(base BundleDataSource) error {
 		return nil
 	}
 
-	return verifyBundle(parts[0].Data, base.BasePath(), verifyBaseConstraints)
+	return verifyBundle(parts[0].Data, []charm.BundleDataSource{base}, base.BasePath(), verifyBaseConstraints)
 }
 
-func verifyBundle(data *charm.BundleData, bundleDir string, verifyConstraints func(string) error) error {
+func verifyBundle(data *charm.BundleData, dsList []charm.BundleDataSource, bundleDir string, verifyConstraints func(string) error) error {
 	verifyStorage := func(s string) error {
-		_, err := storage.ParseConstraints(s)
+		_, err := storage.ParseDirective(s)
 		return err
 	}
 	verifyDevices := func(s string) error {
@@ -334,14 +336,6 @@ func verifyBundle(data *charm.BundleData, bundleDir string, verifyConstraints fu
 	}
 
 	var errs []string
-	// This method cannot be included within data.Verify because
-	// to verify corresponding series and base match we need to be
-	// able to compare them. The charm package, however, treats bases
-	// and series generically and is unable to do this.
-	if err := verifyMixedSeriesBasesMatch(data); err != nil {
-		errs = append(errs, err.Error())
-	}
-
 	var verifyError error
 	if bundleDir == "" {
 		verifyError = data.Verify(verifyConstraints, verifyStorage, verifyDevices)
@@ -353,82 +347,88 @@ func verifyBundle(data *charm.BundleData, bundleDir string, verifyConstraints fu
 		for _, err := range verr.Errors {
 			errs = append(errs, err.Error())
 		}
+	}
+
+	if len(errs) > 0 {
 		return errors.New("the provided bundle has the following errors:\n" + strings.Join(errs, "\n"))
 	}
-	return errors.Trace(verifyError)
-}
-
-func deprecationWarningForSeries(ctx *cmd.Context, data *charm.BundleData) {
-	includeSeries := false
-	if data.Series != "" {
-		includeSeries = true
-	}
-	for _, m := range data.Machines {
-		if m != nil && m.Series != "" {
-			includeSeries = true
-			break
-		}
-	}
-	for _, app := range data.Applications {
-		if app != nil && app.Series != "" {
-			includeSeries = true
-			break
-		}
-	}
-
-	if includeSeries {
-		ctx.Warningf("series are being deprecated in favour of bases. For more information about the transition to bases see https://discourse.charmhub.io/t/transition-from-series-to-base-in-juju-4-0/14127")
-	}
-}
-
-func verifyMixedSeriesBasesMatch(data *charm.BundleData) error {
-	if data == nil {
-		return nil
-	}
-	if data.Series != "" && data.DefaultBase != "" {
-		b, err := corebase.ParseBaseFromString(data.DefaultBase)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		s, err := corebase.GetSeriesFromBase(b)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if s != data.Series {
-			return errors.NewNotValid(nil, fmt.Sprintf("bundle series %q and base %q must match if both supplied", data.Series, data.DefaultBase))
-		}
-	}
-
-	for name, m := range data.Machines {
-		if m != nil && m.Series != "" && m.Base != "" {
-			b, err := corebase.ParseBaseFromString(m.Base)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			s, err := corebase.GetSeriesFromBase(b)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if s != m.Series {
-				return errors.NewNotValid(nil, fmt.Sprintf("machine %q series %q and base %q must match if both supplied", name, m.Series, m.Base))
-			}
-		}
-	}
-
-	for name, app := range data.Applications {
-		if app != nil && app.Series != "" && app.Base != "" {
-			b, err := corebase.ParseBaseFromString(app.Base)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			s, err := corebase.GetSeriesFromBase(b)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if s != app.Series {
-				return errors.NewNotValid(nil, fmt.Sprintf("application %q series %q and base %q must match if both supplied", name, app.Series, app.Base))
-			}
-		}
-	}
 	return nil
+}
+
+type bundleSeriesData struct {
+	Series      string `yaml:"series"`
+	DefaultBase string `yaml:"default-base"`
+
+	Applications map[string]struct {
+		Series string `yaml:"series"`
+		Base   string `yaml:"base"`
+	} `yaml:"applications"`
+
+	Machines map[string]struct {
+		Series string `yaml:"series"`
+		Base   string `yaml:"base"`
+	} `yaml:"machines"`
+}
+
+// warnSeries shows a warning if the bundle being deployed contains the 'series' key.
+// However, there is no need to warn if both series and base are provided. In Juju 3.x
+// we allowed both series and base to be provided in bundles, but checked they match.
+//
+// This means that realistically the only potential error case we need to worry about is
+// for bundles which include a series, but no base.
+func warnSeries(ctx *cmd.Context, dslist []charm.BundleDataSource) {
+	if len(dslist) == 0 {
+		return
+	}
+
+	// The first dslist is always the bundle itself
+	bundleErrs := verifyBundleNoSeriesWithoutBase(dslist[0].BundleBytes())
+	if len(bundleErrs) != 0 {
+		ctx.Warningf("unsupported key 'series' detected without a base in the base bundle. Ignoring:\n- %v", strings.Join(bundleErrs, "\n- "))
+	}
+
+	// The rest are overlays
+	for i, ds := range dslist[1:] {
+		overlayErrs := verifyBundleNoSeriesWithoutBase(ds.BundleBytes())
+		if len(overlayErrs) != 0 {
+			ctx.Warningf("unsupported key 'series' detected without a base in overlay index %d. Ignoring:\n- %v", i, strings.Join(overlayErrs, "\n- "))
+		}
+	}
+}
+
+func verifyBundleNoSeriesWithoutBase(bundleBytes []byte) []string {
+	dec := yaml.NewDecoder(bytes.NewReader(bundleBytes))
+
+	var errs []string
+	for docIdx := 0; ; docIdx++ {
+		var data *bundleSeriesData
+
+		err := dec.Decode(&data)
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			// The bundle should already have been parsed if we're
+			// calling this check, so we should not see this
+			return []string{err.Error()}
+		}
+
+		if data == nil {
+			continue
+		}
+
+		if data.Series != "" && data.DefaultBase == "" {
+			errs = append(errs, fmt.Sprintf("document %d; bundle contains top level series. Please use default-base", docIdx))
+		}
+		for name, app := range data.Applications {
+			if app.Series != "" && app.Base == "" {
+				errs = append(errs, fmt.Sprintf("document %d; bundle application %q contains series. Please use base", docIdx, name))
+			}
+		}
+		for name, m := range data.Machines {
+			if m.Series != "" && m.Base == "" {
+				errs = append(errs, fmt.Sprintf("document %d; bundle machine %q contains series. Please use base", docIdx, name))
+			}
+		}
+	}
+	return errs
 }

@@ -4,23 +4,34 @@
 package resource
 
 import (
+	"context"
 	"io"
 
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
 
 	apiresources "github.com/juju/juju/api/client/resources"
 	"github.com/juju/juju/cmd/modelcmd"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 )
 
 // DeployClient exposes the functionality of the resources API needed
 // for deploy.
 type DeployClient interface {
-	// AddPendingResources adds pending metadata for store-based resources.
-	AddPendingResources(applicationID string, chID apiresources.CharmID, resources []charmresource.Resource) (ids []string, err error)
+	// AddPendingResources adds pending metadata for store based resources
+	// and returns the new resource id.
+	AddPendingResources(
+		ctx context.Context,
+		applicationID string,
+		chID apiresources.CharmID,
+		resources []charmresource.Resource,
+	) (ids []string, err error)
 
-	// UploadPendingResource uploads data and metadata for a pending resource for the given application.
-	UploadPendingResource(applicationID string, resource charmresource.Resource, filename string, r io.ReadSeeker) (id string, err error)
+	// UploadPendingResource sends the provided resource blob up to Juju
+	// returns the new resource id.
+	UploadPendingResource(
+		ctx context.Context,
+		args apiresources.UploadPendingResourceArgs,
+	) (pendingID string, err error)
 }
 
 // DeployResourcesArgs holds the arguments to DeployResources().
@@ -53,7 +64,7 @@ type DeployResourcesArgs struct {
 // DeployResources uploads the bytes for the given files to the server and
 // creates pending resource metadata for the all resource mentioned in the
 // metadata. It returns a map of resource name to pending resource IDs.
-func DeployResources(args DeployResourcesArgs) (ids map[string]string, err error) {
+func DeployResources(ctx context.Context, args DeployResourcesArgs) (ids map[string]string, err error) {
 	d := deployUploader{
 		applicationID: args.ApplicationID,
 		chID:          args.CharmID,
@@ -62,7 +73,7 @@ func DeployResources(args DeployResourcesArgs) (ids map[string]string, err error
 		filesystem:    args.Filesystem,
 	}
 
-	ids, err = d.upload(args.ResourceValues, args.Revisions)
+	ids, err = d.upload(ctx, args.ResourceValues, args.Revisions)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -77,7 +88,7 @@ type deployUploader struct {
 	filesystem    modelcmd.Filesystem
 }
 
-func (d deployUploader) upload(resourceValues map[string]string, revisions map[string]int) (map[string]string, error) {
+func (d deployUploader) upload(ctx context.Context, resourceValues map[string]string, revisions map[string]int) (map[string]string, error) {
 	if err := ValidateResources(d.resources); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -93,8 +104,7 @@ func (d deployUploader) upload(resourceValues map[string]string, revisions map[s
 	storeResources := d.storeResources(resourceValues, revisions)
 	pending := map[string]string{}
 	if len(storeResources) > 0 {
-
-		ids, err := d.client.AddPendingResources(d.applicationID, d.chID, storeResources)
+		ids, err := d.client.AddPendingResources(ctx, d.applicationID, d.chID, storeResources)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -109,7 +119,7 @@ func (d deployUploader) upload(resourceValues map[string]string, revisions map[s
 		if err != nil {
 			return nil, errors.Annotatef(err, "resource %q", name)
 		}
-		id, err := d.uploadPendingResource(name, resValue, r)
+		id, err := d.uploadPendingResource(ctx, name, resValue, r)
 		if err != nil {
 			return nil, errors.Annotatef(err, "resource %q", name)
 		}
@@ -145,11 +155,17 @@ func (d deployUploader) storeResources(uploads map[string]string, revisions map[
 	return resources
 }
 
-func (d deployUploader) uploadPendingResource(resourcename, resourcevalue string, data io.ReadSeeker) (id string, err error) {
-	res := charmresource.Resource{
-		Meta:   d.resources[resourcename],
-		Origin: charmresource.OriginUpload,
+func (d deployUploader) uploadPendingResource(ctx context.Context, resourceName, resourceValue string, data io.ReadSeeker) (string, error) {
+	args := apiresources.UploadPendingResourceArgs{
+		ApplicationID: d.applicationID,
+		CharmID:       d.chID,
+		Resource: charmresource.Resource{
+			Meta:   d.resources[resourceName],
+			Origin: charmresource.OriginUpload,
+		},
+		Filename: resourceValue,
+		Reader:   data,
 	}
 
-	return d.client.UploadPendingResource(d.applicationID, res, resourcevalue, data)
+	return d.client.UploadPendingResource(ctx, args)
 }

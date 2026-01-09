@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,9 +16,6 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-	"github.com/juju/version/v2"
 	"github.com/kr/pretty"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -38,22 +36,26 @@ import (
 	"k8s.io/utils/pointer"
 
 	"github.com/juju/juju/caas"
-	"github.com/juju/juju/cloudconfig/podcfg"
 	"github.com/juju/juju/core/annotations"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/pebble"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	"github.com/juju/juju/internal/provider/kubernetes/storage"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
 	k8swatcher "github.com/juju/juju/internal/provider/kubernetes/watcher"
+	jujustorage "github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/juju/osenv"
-	jujustorage "github.com/juju/juju/storage"
 )
 
-var logger = loggo.GetLogger("juju.kubernetes.provider.application")
+var logger = internallogger.GetLogger("juju.kubernetes.provider.application")
 
 const (
 	containerAgentPebblePort = "38812"
@@ -81,12 +83,12 @@ const (
 )
 
 var (
-	containerAgentPebbleVersion   = version.MustParse("2.9.37")
-	profileDirVersion             = version.MustParse("3.5-beta1")
-	pebbleCopyOnceVersion         = version.MustParse("3.5-beta1")
-	pebbleIdentitiesVersion       = version.MustParse("3.6-beta2")
-	startupProbeVersion           = version.MustParse("3.6-beta3")
-	charmContainerResourceVersion = version.MustParse("3.6.8")
+	containerAgentPebbleVersion   = semversion.MustParse("2.9.37")
+	profileDirVersion             = semversion.MustParse("3.5-beta1")
+	pebbleCopyOnceVersion         = semversion.MustParse("3.5-beta1")
+	pebbleIdentitiesVersion       = semversion.MustParse("3.6-beta2")
+	startupProbeVersion           = semversion.MustParse("3.6-beta3")
+	charmContainerResourceVersion = semversion.MustParse("3.6.8")
 )
 
 type app struct {
@@ -101,9 +103,6 @@ type app struct {
 	dynamicClient  dynamic.Interface
 	newWatcher     k8swatcher.NewK8sWatcherFunc
 	clock          clock.Clock
-
-	// randomPrefix generates an annotation for stateful sets.
-	randomPrefix utils.RandomPrefixFunc
 
 	newApplier     func() resources.Applier
 	controllerUUID string
@@ -129,7 +128,6 @@ func NewApplication(
 	dynamicClient dynamic.Interface,
 	newWatcher k8swatcher.NewK8sWatcherFunc,
 	clock clock.Clock,
-	randomPrefix utils.RandomPrefixFunc,
 	controllerUUID string,
 ) caas.Application {
 	return newApplication(
@@ -144,7 +142,6 @@ func NewApplication(
 		dynamicClient,
 		newWatcher,
 		clock,
-		randomPrefix,
 		resources.NewApplier,
 		controllerUUID,
 	)
@@ -162,7 +159,6 @@ func newApplication(
 	dynamicClient dynamic.Interface,
 	newWatcher k8swatcher.NewK8sWatcherFunc,
 	clock clock.Clock,
-	randomPrefix utils.RandomPrefixFunc,
 	newApplier func() resources.Applier,
 	controllerUUID string,
 ) *app {
@@ -178,7 +174,6 @@ func newApplication(
 		dynamicClient:  dynamicClient,
 		newWatcher:     newWatcher,
 		clock:          clock,
-		randomPrefix:   randomPrefix,
 		newApplier:     newApplier,
 		controllerUUID: controllerUUID,
 	}
@@ -191,10 +186,10 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 	// TODO: storage handling for deployment/daemonset enhancement.
 	defer func() {
 		if err != nil {
-			logger.Errorf("Ensure %s", err)
+			logger.Errorf(context.TODO(), "Ensure %s", err)
 		}
 	}()
-	logger.Debugf("creating/updating %s application", a.name)
+	logger.Debugf(context.TODO(), "creating/updating %s application", a.name)
 
 	applier := a.newApplier()
 
@@ -213,36 +208,39 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 		return errors.Annotate(err, "generating application podspec")
 	}
 
-	var handleVolume handleVolumeFunc = func(v corev1.Volume, mountPath string, readOnly bool) (*corev1.VolumeMount, error) {
+	var handleVolume handleVolumeFunc = func(
+		v corev1.Volume,
+		attachParams jujustorage.KubernetesFilesystemAttachmentParams,
+	) (*corev1.VolumeMount, error) {
 		if err := storage.PushUniqueVolume(podSpec, v, false); err != nil {
 			return nil, errors.Trace(err)
 		}
 		return &corev1.VolumeMount{
 			Name:      v.Name,
-			ReadOnly:  readOnly,
-			MountPath: mountPath,
+			ReadOnly:  attachParams.ReadOnly,
+			MountPath: attachParams.Path,
 		}, nil
 	}
-	var handleVolumeMount handleVolumeMountFunc = func(storageName string, m corev1.VolumeMount) error {
-		for i := range podSpec.Containers {
-			name := podSpec.Containers[i].Name
-			if name == constants.ApplicationCharmContainer {
-				podSpec.Containers[i].VolumeMounts = append(podSpec.Containers[i].VolumeMounts, m)
-				continue
-			}
-			for _, mount := range config.Containers[name].Mounts {
-				if mount.StorageName == storageName {
-					volumeMountCopy := m
-					// TODO(sidecar): volumeMountCopy.MountPath was defined in `caas.ApplicationConfig.Filesystems[*].Attachment.Path`.
-					// Consolidate `caas.ApplicationConfig.Filesystems[*].Attachment.Path` and `caas.ApplicationConfig.Containers[*].Mounts[*].Path`!!!
-					volumeMountCopy.MountPath = mount.Path
-					podSpec.Containers[i].VolumeMounts = append(podSpec.Containers[i].VolumeMounts, volumeMountCopy)
-				}
-			}
+
+	var handleVolumeMount handleVolumeMountFunc = func(
+		storageName string,
+		m corev1.VolumeMount,
+		containerName string,
+	) error {
+		idx := slices.IndexFunc(podSpec.Containers, func(container corev1.Container) bool {
+			return container.Name == containerName
+		})
+		if idx == -1 {
+			return errors.Errorf("cannot find container %q to mount %q", containerName, m.MountPath)
 		}
+		storage.PushUniqueVolumeMount(&podSpec.Containers[idx], m)
 		return nil
 	}
-	var handlePVCForStatelessResource handlePVCFunc = func(pvc corev1.PersistentVolumeClaim, mountPath string, readOnly bool) (*corev1.VolumeMount, error) {
+
+	var handlePVCForStatelessResource handlePVCFunc = func(
+		pvc corev1.PersistentVolumeClaim,
+		attachParams jujustorage.KubernetesFilesystemAttachmentParams,
+	) (*corev1.VolumeMount, error) {
 		// Ensure PVC.
 		r := resources.NewPersistentVolumeClaim(a.client.CoreV1().PersistentVolumeClaims(a.namespace), a.namespace, pvc.GetName(), &pvc)
 		applier.Apply(r)
@@ -253,13 +251,13 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: r.GetName(),
-					ReadOnly:  readOnly,
+					ReadOnly:  attachParams.ReadOnly,
 				},
 			},
 		}
-		return handleVolume(vol, mountPath, readOnly)
+		return handleVolume(vol, attachParams)
 	}
-	storageClasses, err := resources.ListStorageClass(context.Background(), a.client.StorageV1().StorageClasses(), metav1.ListOptions{})
+	storageClasses, err := resources.ListStorageClass(context.TODO(), a.client.StorageV1().StorageClasses(), metav1.ListOptions{})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -284,30 +282,42 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 			return errors.Annotatef(err, "creating or updating headless service for %q %q", a.deploymentType, a.name)
 		}
 		exists := true
-		ss, getErr := a.getStatefulSet()
-		if errors.IsNotFound(getErr) {
+		_, getErr := a.getStatefulSet()
+		if errors.Is(getErr, errors.NotFound) {
 			exists = false
 		} else if getErr != nil {
 			return errors.Trace(getErr)
-		}
-		storageUniqueID, err := a.getStorageUniqPrefix(func() (annotationGetter, error) {
-			return ss, getErr
-		})
-		if err != nil {
-			return errors.Trace(err)
 		}
 		var numPods *int32
 		if !exists {
 			numPods = pointer.Int32(int32(config.InitialScale))
 		}
 
+		var volumeClaimTemplates []corev1.PersistentVolumeClaim
+		if err = configureStorage(
+			config.StorageUniqueID,
+			func(pvc corev1.PersistentVolumeClaim,
+				attachParams jujustorage.KubernetesFilesystemAttachmentParams,
+			) (*corev1.VolumeMount, error) {
+				if err := storage.PushUniqueVolumeClaimTemplate(&volumeClaimTemplates, pvc); err != nil {
+					return nil, errors.Trace(err)
+				}
+				return &corev1.VolumeMount{
+					Name:      pvc.GetName(),
+					ReadOnly:  attachParams.ReadOnly,
+					MountPath: attachParams.Path,
+				}, nil
+			},
+		); err != nil {
+			return errors.Trace(err)
+		}
 		sts := &appsv1.StatefulSet{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      a.name,
 				Namespace: a.namespace,
 				Labels:    a.labels(),
 				Annotations: a.annotations(config).
-					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), storageUniqueID),
+					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), config.StorageUniqueID),
 			},
 			Spec: appsv1.StatefulSetSpec{
 				Replicas: numPods,
@@ -321,49 +331,29 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 					},
 					Spec: *podSpec,
 				},
-				PodManagementPolicy: appsv1.ParallelPodManagement,
-				ServiceName:         HeadlessServiceName(a.name),
+				VolumeClaimTemplates: volumeClaimTemplates,
+				PodManagementPolicy:  appsv1.ParallelPodManagement,
+				ServiceName:          HeadlessServiceName(a.name),
 			},
 		}
 		statefulset := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, sts)
 
-		if err = configureStorage(
-			storageUniqueID,
-			func(pvc corev1.PersistentVolumeClaim, mountPath string, readOnly bool) (*corev1.VolumeMount, error) {
-				if err := storage.PushUniqueVolumeClaimTemplate(&statefulset.Spec, pvc); err != nil {
-					return nil, errors.Trace(err)
-				}
-				return &corev1.VolumeMount{
-					Name:      pvc.GetName(),
-					ReadOnly:  readOnly,
-					MountPath: mountPath,
-				}, nil
-			},
-		); err != nil {
-			return errors.Trace(err)
-		}
-
 		applier.Apply(statefulset)
 	case caas.DeploymentStateless:
 		exists := true
-		d, getErr := a.getDeployment()
-		if errors.IsNotFound(getErr) {
+		_, getErr := a.getDeployment()
+		if errors.Is(getErr, errors.NotFound) {
 			exists = false
 		} else if getErr != nil {
 			return errors.Trace(getErr)
 		}
-		storageUniqueID, err := a.getStorageUniqPrefix(func() (annotationGetter, error) {
-			return d, getErr
-		})
-		if err != nil {
-			return errors.Trace(err)
-		}
+
 		var numPods *int32
 		if !exists {
 			numPods = pointer.Int32(int32(config.InitialScale))
 		}
 		// Config storage to update the podspec with storage info.
-		if err = configureStorage(storageUniqueID, handlePVCForStatelessResource); err != nil {
+		if err = configureStorage(config.StorageUniqueID, handlePVCForStatelessResource); err != nil {
 			return errors.Trace(err)
 		}
 
@@ -373,7 +363,7 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 				Namespace: a.namespace,
 				Labels:    a.labels(),
 				Annotations: a.annotations(config).
-					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), storageUniqueID),
+					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), config.StorageUniqueID),
 			},
 			Spec: appsv1.DeploymentSpec{
 				Replicas: numPods,
@@ -393,14 +383,8 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 
 		applier.Apply(deployment)
 	case caas.DeploymentDaemon:
-		storageUniqueID, err := a.getStorageUniqPrefix(func() (annotationGetter, error) {
-			return a.getDaemonSet()
-		})
-		if err != nil {
-			return errors.Trace(err)
-		}
 		// Config storage to update the podspec with storage info.
-		if err = configureStorage(storageUniqueID, handlePVCForStatelessResource); err != nil {
+		if err = configureStorage(config.StorageUniqueID, handlePVCForStatelessResource); err != nil {
 			return errors.Trace(err)
 		}
 		ds := &appsv1.DaemonSet{
@@ -409,7 +393,7 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 				Namespace: a.namespace,
 				Labels:    a.labels(),
 				Annotations: a.annotations(config).
-					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), storageUniqueID),
+					Add(utils.AnnotationKeyApplicationUUID(a.labelVersion), config.StorageUniqueID),
 			},
 			Spec: appsv1.DaemonSetSpec{
 				Selector: &metav1.LabelSelector{
@@ -430,7 +414,7 @@ func (a *app) Ensure(config caas.ApplicationConfig) (err error) {
 		return errors.NotSupportedf("unknown deployment type")
 	}
 
-	return applier.Run(context.Background(), false)
+	return applier.Run(context.TODO(), false)
 }
 
 func (a *app) applyServiceAccountAndSecrets(applier resources.Applier, config caas.ApplicationConfig) error {
@@ -534,7 +518,7 @@ func (a *app) applyServiceAccountAndSecrets(applier resources.Applier, config ca
 }
 
 // Upgrade upgrades the app to the specified version.
-func (a *app) Upgrade(ver version.Number) error {
+func (a *app) Upgrade(ver semversion.Number) error {
 	// TODO(sidecar): Unify this with Ensure
 	applier := a.newApplier()
 
@@ -554,7 +538,7 @@ func (a *app) Upgrade(ver version.Number) error {
 		resources.NewClusterRoleBinding(a.client.RbacV1().ClusterRoleBindings(), a.qualifiedClusterName(), nil),
 		resources.NewService(a.client.CoreV1().Services(a.namespace), a.namespace, a.name, nil),
 	} {
-		if err := r.Get(context.Background()); err != nil {
+		if err := r.Get(context.TODO()); err != nil {
 			return errors.Trace(err)
 		}
 		existingAnnotations := annotations.New(r.GetAnnotations())
@@ -562,7 +546,7 @@ func (a *app) Upgrade(ver version.Number) error {
 		applier.Apply(r)
 	}
 
-	return applier.Run(context.Background(), false)
+	return applier.Run(context.TODO(), false)
 }
 
 type annotationUpdater interface {
@@ -571,9 +555,9 @@ type annotationUpdater interface {
 	SetAnnotations(annotations map[string]string)
 }
 
-func (a *app) upgradeHeadlessService(applier resources.Applier, ver version.Number) error {
+func (a *app) upgradeHeadlessService(applier resources.Applier, ver semversion.Number) error {
 	r := resources.NewService(a.client.CoreV1().Services(a.namespace), a.namespace, HeadlessServiceName(a.name), nil)
-	if err := r.Get(context.Background()); err != nil {
+	if err := r.Get(context.TODO()); err != nil {
 		return errors.Trace(err)
 	}
 	r.SetAnnotations(a.upgradeAnnotations(annotations.New(r.GetAnnotations()), ver))
@@ -581,7 +565,7 @@ func (a *app) upgradeHeadlessService(applier resources.Applier, ver version.Numb
 	return nil
 }
 
-func (a *app) upgradeMainResource(applier resources.Applier, ver version.Number) error {
+func (a *app) upgradeMainResource(applier resources.Applier, ver semversion.Number) error {
 	switch a.deploymentType {
 	case caas.DeploymentStateful:
 		if err := a.upgradeHeadlessService(applier, ver); err != nil {
@@ -589,7 +573,7 @@ func (a *app) upgradeMainResource(applier resources.Applier, ver version.Number)
 		}
 
 		ss := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, nil)
-		if err := ss.Get(context.Background()); err != nil {
+		if err := ss.Get(context.TODO()); err != nil {
 			return errors.Trace(err)
 		}
 		initContainers := ss.Spec.Template.Spec.InitContainers
@@ -660,7 +644,7 @@ func (a *app) Exists() (caas.DeploymentState, error) {
 		if terminating || c.forceTerminating {
 			// Terminating is always set to true regardless of whether the resource is failed as terminating
 			// since it's the overall state that is reported baca.
-			logger.Debugf("application %q exists and is terminating due to dangling %s resource(s)", a.name, c.label)
+			logger.Debugf(context.TODO(), "application %q exists and is terminating due to dangling %s resource(s)", a.name, c.label)
 			return caas.DeploymentState{Exists: true, Terminating: true}, nil
 		}
 	}
@@ -687,7 +671,7 @@ func (a *app) configureHeadlessService(name string, annotation annotations.Annot
 			PublishNotReadyAddresses: true,
 		},
 	})
-	return svc.Apply(context.Background())
+	return svc.Apply(context.TODO())
 }
 
 const (
@@ -712,7 +696,7 @@ func (a *app) configureDefaultService(annotation annotations.Annotation) (err er
 			}},
 		},
 	})
-	return svc.Apply(context.Background())
+	return svc.Apply(context.TODO())
 }
 
 // UpdateService updates the default service with specific service type and port mappings.
@@ -736,7 +720,7 @@ func (a *app) UpdateService(param caas.ServiceParam) error {
 	if err := a.updateContainerPorts(applier, svc.Service.Spec.Ports); err != nil {
 		return errors.Trace(err)
 	}
-	return applier.Run(context.Background(), false)
+	return applier.Run(context.TODO(), false)
 }
 
 func convertServicePort(port caas.ServicePort) (out corev1.ServicePort, err error) {
@@ -763,7 +747,7 @@ func convertServicePort(port caas.ServicePort) (out corev1.ServicePort, err erro
 
 func (a *app) getService() (*resources.Service, error) {
 	svc := resources.NewService(a.client.CoreV1().Services(a.namespace), a.namespace, a.name, nil)
-	if err := svc.Get(context.Background()); err != nil {
+	if err := svc.Get(context.TODO()); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil, errors.NotFoundf("service %q", a.name)
 		}
@@ -814,7 +798,7 @@ func (a *app) UpdatePorts(ports []caas.ServicePort, updateContainerPorts bool) e
 			return errors.Trace(err)
 		}
 	}
-	err = applier.Run(context.Background(), false)
+	err = applier.Run(context.TODO(), false)
 	return errors.Trace(err)
 }
 
@@ -844,7 +828,7 @@ func (a *app) updateContainerPorts(applier resources.Applier, ports []corev1.Ser
 	switch a.deploymentType {
 	case caas.DeploymentStateful:
 		ss := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, nil)
-		if err := ss.Get(context.Background()); err != nil {
+		if err := ss.Get(context.TODO()); err != nil {
 			return errors.Trace(err)
 		}
 
@@ -852,7 +836,7 @@ func (a *app) updateContainerPorts(applier resources.Applier, ports []corev1.Ser
 		applier.Apply(ss)
 	case caas.DeploymentStateless:
 		d := resources.NewDeployment(a.client.AppsV1().Deployments(a.namespace), a.namespace, a.name, nil)
-		if err := d.Get(context.Background()); err != nil {
+		if err := d.Get(context.TODO()); err != nil {
 			return errors.Trace(err)
 		}
 
@@ -860,7 +844,7 @@ func (a *app) updateContainerPorts(applier resources.Applier, ports []corev1.Ser
 		applier.Apply(d)
 	case caas.DeploymentDaemon:
 		d := resources.NewDaemonSet(a.client.AppsV1().DaemonSets(a.namespace), a.namespace, a.name, nil)
-		if err := d.Get(context.Background()); err != nil {
+		if err := d.Get(context.TODO()); err != nil {
 			return errors.Trace(err)
 		}
 
@@ -874,7 +858,7 @@ func (a *app) updateContainerPorts(applier resources.Applier, ports []corev1.Ser
 
 func (a *app) getStatefulSet() (*resources.StatefulSet, error) {
 	ss := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, nil)
-	if err := ss.Get(context.Background()); err != nil {
+	if err := ss.Get(context.TODO()); err != nil {
 		return nil, err
 	}
 	return ss, nil
@@ -882,15 +866,7 @@ func (a *app) getStatefulSet() (*resources.StatefulSet, error) {
 
 func (a *app) getDeployment() (*resources.Deployment, error) {
 	ss := resources.NewDeployment(a.client.AppsV1().Deployments(a.namespace), a.namespace, a.name, nil)
-	if err := ss.Get(context.Background()); err != nil {
-		return nil, err
-	}
-	return ss, nil
-}
-
-func (a *app) getDaemonSet() (*resources.DaemonSet, error) {
-	ss := resources.NewDaemonSet(a.client.AppsV1().DaemonSets(a.namespace), a.namespace, a.name, nil)
-	if err := ss.Get(context.Background()); err != nil {
+	if err := ss.Get(context.TODO()); err != nil {
 		return nil, err
 	}
 	return ss, nil
@@ -898,7 +874,7 @@ func (a *app) getDaemonSet() (*resources.DaemonSet, error) {
 
 func (a *app) statefulSetExists() (exists bool, terminating bool, err error) {
 	ss := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, nil)
-	err = ss.Get(context.Background())
+	err = ss.Get(context.TODO())
 	if errors.IsNotFound(err) {
 		return false, false, nil
 	} else if err != nil {
@@ -909,8 +885,8 @@ func (a *app) statefulSetExists() (exists bool, terminating bool, err error) {
 
 func (a *app) deploymentExists() (exists bool, terminating bool, err error) {
 	ss := resources.NewDeployment(a.client.AppsV1().Deployments(a.namespace), a.namespace, a.name, nil)
-	err = ss.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = ss.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -920,8 +896,8 @@ func (a *app) deploymentExists() (exists bool, terminating bool, err error) {
 
 func (a *app) daemonSetExists() (exists bool, terminating bool, err error) {
 	ss := resources.NewDaemonSet(a.client.AppsV1().DaemonSets(a.namespace), a.namespace, a.name, nil)
-	err = ss.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = ss.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -931,8 +907,8 @@ func (a *app) daemonSetExists() (exists bool, terminating bool, err error) {
 
 func (a *app) secretExists() (exists bool, terminating bool, err error) {
 	ss := resources.NewSecret(a.client.CoreV1().Secrets(a.namespace), a.namespace, a.secretName(), nil)
-	err = ss.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = ss.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -942,8 +918,8 @@ func (a *app) secretExists() (exists bool, terminating bool, err error) {
 
 func (a *app) serviceExists() (exists bool, terminating bool, err error) {
 	ss := resources.NewService(a.client.CoreV1().Services(a.namespace), a.namespace, a.name, nil)
-	err = ss.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = ss.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -953,8 +929,8 @@ func (a *app) serviceExists() (exists bool, terminating bool, err error) {
 
 func (a *app) roleExists() (exists bool, terminating bool, err error) {
 	r := resources.NewRole(a.client.RbacV1().Roles(a.namespace), a.namespace, a.serviceAccountName(), nil)
-	err = r.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = r.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -964,8 +940,8 @@ func (a *app) roleExists() (exists bool, terminating bool, err error) {
 
 func (a *app) roleBindingExists() (exists bool, terminating bool, err error) {
 	rb := resources.NewRoleBinding(a.client.RbacV1().RoleBindings(a.namespace), a.namespace, a.serviceAccountName(), nil)
-	err = rb.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = rb.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -975,8 +951,8 @@ func (a *app) roleBindingExists() (exists bool, terminating bool, err error) {
 
 func (a *app) clusterRoleExists() (exists bool, terminating bool, err error) {
 	r := resources.NewClusterRole(a.client.RbacV1().ClusterRoles(), a.qualifiedClusterName(), nil)
-	err = r.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = r.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -986,8 +962,8 @@ func (a *app) clusterRoleExists() (exists bool, terminating bool, err error) {
 
 func (a *app) clusterRoleBindingExists() (exists bool, terminating bool, err error) {
 	rb := resources.NewClusterRoleBinding(a.client.RbacV1().ClusterRoleBindings(), a.qualifiedClusterName(), nil)
-	err = rb.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = rb.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -997,8 +973,8 @@ func (a *app) clusterRoleBindingExists() (exists bool, terminating bool, err err
 
 func (a *app) serviceAccountExists() (exists bool, terminating bool, err error) {
 	sa := resources.NewServiceAccount(a.client.CoreV1().ServiceAccounts(a.namespace), a.namespace, a.serviceAccountName(), nil)
-	err = sa.Get(context.Background())
-	if errors.IsNotFound(err) {
+	err = sa.Get(context.TODO())
+	if errors.Is(err, errors.NotFound) {
 		return false, false, nil
 	} else if err != nil {
 		return false, false, errors.Trace(err)
@@ -1008,8 +984,8 @@ func (a *app) serviceAccountExists() (exists bool, terminating bool, err error) 
 
 // Delete deletes the specified application.
 func (a *app) Delete() error {
-	ctx := context.Background()
-	logger.Debugf("deleting %s application", a.name)
+	ctx := context.TODO()
+	logger.Debugf(ctx, "deleting %s application", a.name)
 	applier := a.newApplier()
 	switch a.deploymentType {
 	case caas.DeploymentStateful:
@@ -1234,12 +1210,12 @@ func (a *app) Delete() error {
 		applier.Delete(resourcesToDelete...)
 	}
 
-	return applier.Run(context.Background(), false)
+	return applier.Run(context.TODO(), false)
 }
 
 // Watch returns a watcher which notifies when there
 // are changes to the application of the specified application.
-func (a *app) Watch() (watcher.NotifyWatcher, error) {
+func (a *app) Watch(ctx context.Context) (watcher.NotifyWatcher, error) {
 	factory := informers.NewSharedInformerFactoryWithOptions(a.client, 0,
 		informers.WithNamespace(a.namespace),
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
@@ -1265,7 +1241,7 @@ func (a *app) Watch() (watcher.NotifyWatcher, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return watcher.NewMultiNotifyWatcher(w1, w2), nil
+	return eventsource.NewMultiNotifyWatcher(ctx, w1, w2)
 }
 
 func (a *app) WatchReplicas() (watcher.NotifyWatcher, error) {
@@ -1283,7 +1259,7 @@ func (a *app) State() (caas.ApplicationState, error) {
 	switch a.deploymentType {
 	case caas.DeploymentStateful:
 		ss := resources.NewStatefulSet(a.client.AppsV1().StatefulSets(a.namespace), a.namespace, a.name, nil)
-		err := ss.Get(context.Background())
+		err := ss.Get(context.TODO())
 		if err != nil {
 			return caas.ApplicationState{}, errors.Trace(err)
 		}
@@ -1293,7 +1269,7 @@ func (a *app) State() (caas.ApplicationState, error) {
 		state.DesiredReplicas = int(*ss.Spec.Replicas)
 	case caas.DeploymentStateless:
 		d := resources.NewDeployment(a.client.AppsV1().Deployments(a.namespace), a.namespace, a.name, nil)
-		err := d.Get(context.Background())
+		err := d.Get(context.TODO())
 		if err != nil {
 			return caas.ApplicationState{}, errors.Trace(err)
 		}
@@ -1303,7 +1279,7 @@ func (a *app) State() (caas.ApplicationState, error) {
 		state.DesiredReplicas = int(*d.Spec.Replicas)
 	case caas.DeploymentDaemon:
 		d := resources.NewDaemonSet(a.client.AppsV1().DaemonSets(a.namespace), a.namespace, a.name, nil)
-		err := d.Get(context.Background())
+		err := d.Get(context.TODO())
 		if err != nil {
 			return caas.ApplicationState{}, errors.Trace(err)
 		}
@@ -1313,7 +1289,7 @@ func (a *app) State() (caas.ApplicationState, error) {
 	}
 	next := ""
 	for {
-		res, err := a.client.CoreV1().Pods(a.namespace).List(context.Background(), metav1.ListOptions{
+		res, err := a.client.CoreV1().Pods(a.namespace).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: a.labelSelector(),
 			Continue:      next,
 		})
@@ -1338,7 +1314,7 @@ func (a *app) Service() (*caas.Service, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	ctx := context.Background()
+	ctx := context.TODO()
 	now := a.clock.Now()
 	statusMessage, svcStatus, since, err := a.computeStatus(ctx, now)
 	if err != nil {
@@ -1392,7 +1368,7 @@ func (a *app) computeStatus(ctx context.Context, now time.Time) (string, status.
 
 // Units of the application fetched from kubernetes by matching pod labels.
 func (a *app) Units() ([]caas.Unit, error) {
-	ctx := context.Background()
+	ctx := context.TODO()
 	now := a.clock.Now()
 	var units []caas.Unit
 	pods, err := resources.ListPods(ctx, a.client, a.namespace, metav1.ListOptions{
@@ -1439,7 +1415,7 @@ func (a *app) Units() ([]caas.Unit, error) {
 			}
 			vol, ok := volumesByName[volMount.Name]
 			if !ok {
-				logger.Warningf("volume for volume mount %q not found", volMount.Name)
+				logger.Warningf(context.TODO(), "volume for volume mount %q not found", volMount.Name)
 				continue
 			}
 
@@ -1447,23 +1423,23 @@ func (a *app) Units() ([]caas.Unit, error) {
 			// See: https://discourse.charmhub.io/t/k8s-spec-v3-changes/2698
 			if vol.Secret != nil &&
 				(strings.Contains(vol.Secret.SecretName, "-token") || strings.HasPrefix(vol.Secret.SecretName, "controller-")) {
-				logger.Tracef("ignoring volume source for service account secret: %v", vol.Name)
+				logger.Tracef(context.TODO(), "ignoring volume source for service account secret: %v", vol.Name)
 				continue
 			}
 			if vol.Projected != nil {
-				logger.Tracef("ignoring volume source for projected volume: %v", vol.Name)
+				logger.Tracef(context.TODO(), "ignoring volume source for projected volume: %v", vol.Name)
 				continue
 			}
 			if vol.ConfigMap != nil {
-				logger.Tracef("ignoring volume source for configMap volume: %v", vol.Name)
+				logger.Tracef(context.TODO(), "ignoring volume source for configMap volume: %v", vol.Name)
 				continue
 			}
 			if vol.HostPath != nil {
-				logger.Tracef("ignoring volume source for hostPath volume: %v", vol.Name)
+				logger.Tracef(context.TODO(), "ignoring volume source for hostPath volume: %v", vol.Name)
 				continue
 			}
 			if vol.EmptyDir != nil {
-				logger.Tracef("ignoring volume source for emptyDir volume: %v", vol.Name)
+				logger.Tracef(context.TODO(), "ignoring volume source for emptyDir volume: %v", vol.Name)
 				continue
 			}
 
@@ -1481,7 +1457,7 @@ func (a *app) Units() ([]caas.Unit, error) {
 					fsInfo.StorageName = constants.PVNameRegexp.ReplaceAllString(volMount.Name, "$storageName")
 				}
 			}
-			logger.Tracef("filesystem info for %v: %+v", volMount.Name, *fsInfo)
+			logger.Tracef(context.TODO(), "filesystem info for %v: %+v", volMount.Name, *fsInfo)
 			unitInfo.FilesystemInfo = append(unitInfo.FilesystemInfo, *fsInfo)
 		}
 		units = append(units, unitInfo)
@@ -1943,7 +1919,6 @@ func (a *app) ApplicationPodSpec(config caas.ApplicationConfig) (*corev1.PodSpec
 				MountPath: "/charm/bin",
 				SubPath:   "charm/bin",
 			},
-			// DO we need this in init container????
 			{
 				Name:      constants.CharmVolumeName,
 				MountPath: "/charm/containers",
@@ -2050,7 +2025,7 @@ func (a *app) applyImagePullSecrets(applier resources.Applier, config caas.Appli
 		desired = append(desired, secret)
 	}
 
-	secrets, err := resources.ListSecrets(context.Background(), a.client.CoreV1().Secrets(a.namespace), a.namespace, metav1.ListOptions{
+	secrets, err := resources.ListSecrets(context.TODO(), a.client.CoreV1().Secrets(a.namespace), a.namespace, metav1.ListOptions{
 		LabelSelector: a.labelSelector(),
 	})
 	if err != nil {
@@ -2074,7 +2049,7 @@ func (a *app) annotations(config caas.ApplicationConfig) annotations.Annotation 
 		Merge(utils.AnnotationsForVersion(config.AgentVersion.String(), a.labelVersion))
 }
 
-func (a *app) upgradeAnnotations(anns annotations.Annotation, ver version.Number) annotations.Annotation {
+func (a *app) upgradeAnnotations(anns annotations.Annotation, ver semversion.Number) annotations.Annotation {
 	return anns.Merge(utils.AnnotationsForVersion(ver.String(), a.labelVersion))
 }
 
@@ -2125,25 +2100,17 @@ func (a *app) matchImagePullSecret(name string) bool {
 	return strings.HasPrefix(name, a.name+"-") && strings.HasSuffix(name, "-secret")
 }
 
-type annotationGetter interface {
-	GetAnnotations() map[string]string
-}
+type handleVolumeFunc func(
+	corev1.Volume, jujustorage.KubernetesFilesystemAttachmentParams,
+) (*corev1.VolumeMount, error)
 
-func (a *app) getStorageUniqPrefix(getMeta func() (annotationGetter, error)) (string, error) {
-	if r, err := getMeta(); err == nil {
-		// TODO: remove this function with existing one once we consolidated the annotation keys.
-		if uniqID := r.GetAnnotations()[utils.AnnotationKeyApplicationUUID(a.labelVersion)]; len(uniqID) > 0 {
-			return uniqID, nil
-		}
-	} else if !errors.IsNotFound(err) {
-		return "", errors.Trace(err)
-	}
-	return a.randomPrefix()
-}
+type handlePVCFunc func(
+	corev1.PersistentVolumeClaim,
+	jujustorage.KubernetesFilesystemAttachmentParams,
+) (*corev1.VolumeMount, error)
 
-type handleVolumeFunc func(vol corev1.Volume, mountPath string, readOnly bool) (*corev1.VolumeMount, error)
-type handlePVCFunc func(pvc corev1.PersistentVolumeClaim, mountPath string, readOnly bool) (*corev1.VolumeMount, error)
-type handleVolumeMountFunc func(string, corev1.VolumeMount) error
+type handleVolumeMountFunc func(string, corev1.VolumeMount, string) error
+
 type handleStorageClassFunc func(storagev1.StorageClass) error
 
 func (a *app) volumeName(storageName string) string {
@@ -2160,7 +2127,7 @@ func (a *app) pvcNames(storagePrefix string) (map[string]string, error) {
 	opts := metav1.ListOptions{
 		LabelSelector: utils.LabelsToSelector(labelSelectors).String(),
 	}
-	pvcs, err := resources.ListPersistentVolumeClaims(context.Background(), a.client, a.namespace, opts)
+	pvcs, err := resources.ListPersistentVolumeClaims(context.TODO(), a.client, a.namespace, opts)
 	if err != nil {
 		return nil, errors.Annotate(err, "fetching persistent volume claims")
 	}
@@ -2216,21 +2183,17 @@ func (a *app) configureStorage(
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logger.Tracef("persistent volume claim name mapping = %v", pvcNames)
+	logger.Tracef(context.TODO(), "persistent volume claim name mapping = %v", pvcNames)
 
 	fsNames := set.NewStrings()
-	for index, fs := range filesystems {
+
+	for _, fs := range filesystems {
 		if fsNames.Contains(fs.StorageName) {
 			return errors.NotValidf("duplicated storage name %q for %q", fs.StorageName, a.name)
 		}
 		fsNames.Add(fs.StorageName)
 
-		logger.Debugf("%s has filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(fs))
-
-		readOnly := false
-		if fs.Attachment != nil {
-			readOnly = fs.Attachment.ReadOnly
-		}
+		logger.Debugf(context.TODO(), "%s has filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(fs))
 
 		name := a.volumeName(fs.StorageName)
 		pvcNameGetter := a.pvcNameGetter(pvcNames, storageUniqueID)
@@ -2240,33 +2203,38 @@ func (a *app) configureStorage(
 			return errors.Trace(err)
 		}
 
-		var volumeMount *corev1.VolumeMount
-		mountPath := storage.GetMountPathForFilesystem(index, a.name, fs)
-		if vol != nil && handleVolume != nil {
-			logger.Debugf("using volume for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*vol))
-			volumeMount, err = handleVolume(*vol, mountPath, readOnly)
-			if err != nil {
-				return errors.Trace(err)
+		for _, attachment := range fs.Attachments {
+			var volumeMount *corev1.VolumeMount
+			if vol != nil && handleVolume != nil {
+				logger.Debugf(context.TODO(), "using volume for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*vol))
+				volumeMount, err = handleVolume(*vol, attachment)
+				if err != nil {
+					return errors.Trace(err)
+				}
 			}
-		}
-		if sc != nil && handleStorageClass != nil {
-			logger.Debugf("creating storage class for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*sc))
-			if err = handleStorageClass(*sc); err != nil {
-				return errors.Trace(err)
+			if sc != nil && handleStorageClass != nil {
+				logger.Debugf(context.TODO(), "creating storage class for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*sc))
+				if err = handleStorageClass(*sc); err != nil {
+					return errors.Trace(err)
+				}
+				storageClassMap[sc.Name] = resources.StorageClass{StorageClass: *sc}
 			}
-			storageClassMap[sc.Name] = resources.StorageClass{StorageClass: *sc}
-		}
-		if pvc != nil && handlePVC != nil {
-			logger.Debugf("using persistent volume claim for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*pvc))
-			volumeMount, err = handlePVC(*pvc, mountPath, readOnly)
-			if err != nil {
-				return errors.Trace(err)
+			if pvc != nil && handlePVC != nil {
+				logger.Debugf(context.TODO(), "using persistent volume claim for %s filesystem %s: %s", a.name, fs.StorageName, pretty.Sprint(*pvc))
+				volumeMount, err = handlePVC(*pvc, attachment)
+				if err != nil {
+					return errors.Trace(err)
+				}
 			}
-		}
 
-		if volumeMount != nil {
-			if err = handleVolumeMount(fs.StorageName, *volumeMount); err != nil {
-				return errors.Trace(err)
+			if volumeMount != nil {
+				if err = handleVolumeMount(
+					fs.StorageName,
+					*volumeMount,
+					attachment.ContainerName,
+				); err != nil {
+					return errors.Trace(err)
+				}
 			}
 		}
 	}
@@ -2296,6 +2264,11 @@ func (a *app) filesystemToVolumeInfo(
 		return vol, nil, nil, nil
 	}
 
+	if fs.Provider != constants.StorageProviderType {
+		return nil, nil, nil, errors.Errorf("unsupported storage provider %q",
+			fs.Provider)
+	}
+
 	params, err := storage.ParseVolumeParams(pvcNameGetter(name), fsSize, fs.Attributes)
 	if err != nil {
 		return nil, nil, nil, errors.Annotatef(err, "getting volume params for %s", fs.StorageName)
@@ -2303,7 +2276,10 @@ func (a *app) filesystemToVolumeInfo(
 
 	var newStorageClass *storagev1.StorageClass
 	qualifiedStorageClassName := constants.QualifiedStorageClassName(a.namespace, params.StorageConfig.StorageClass)
-	if _, ok := storageClasses[params.StorageConfig.StorageClass]; ok {
+	if params.StorageConfig.StorageClass == "" {
+		// Fallback to default storage class.
+		// TODO(storage): ensure a default storage class is selected earlier.
+	} else if _, ok := storageClasses[params.StorageConfig.StorageClass]; ok {
 		// Do nothing
 	} else if _, ok := storageClasses[qualifiedStorageClassName]; ok {
 		params.StorageConfig.StorageClass = qualifiedStorageClassName
@@ -2363,7 +2339,7 @@ func (a *app) handleVolumeAttachment(
 
 		err := persistentVolumeClaim.Get(context.Background())
 		if errors.Is(err, errors.NotFound) {
-			logger.Debugf("pvc %s not found, create pvc with VolumeName %s", pvcName, attachment.VolumeId)
+			logger.Debugf(context.TODO(), "pvc %s not found, create pvc with VolumeName %s", pvcName, attachment.VolumeId)
 			persistentVolumeClaim.Spec.VolumeName = attachment.VolumeId
 			applier.Apply(persistentVolumeClaim)
 		} else if err != nil {
@@ -2384,7 +2360,7 @@ func (a *app) handleVolumeAttachment(
 func (a *app) pvcNameGetter(pvcNames map[string]string, storageUniqueID string) func(string) string {
 	return func(volName string) string {
 		if n, ok := pvcNames[volName]; ok {
-			logger.Debugf("using existing persistent volume claim %q (volume %q)", n, volName)
+			logger.Debugf(context.TODO(), "using existing persistent volume claim %q (volume %q)", n, volName)
 			return n
 		}
 		return fmt.Sprintf("%s-%s", volName, storageUniqueID)

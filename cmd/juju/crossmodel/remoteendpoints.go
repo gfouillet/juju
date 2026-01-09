@@ -4,10 +4,11 @@
 package crossmodel
 
 import (
-	"github.com/juju/charm/v12"
+	"context"
 
 	"github.com/juju/juju/api/client/applicationoffers"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/charm"
 )
 
 // RemoteEndpointsCommandBase is a base for various cross model commands.
@@ -17,8 +18,8 @@ type RemoteEndpointsCommandBase struct {
 
 // NewRemoteEndpointsAPI returns a remote endpoints api for the root api endpoint
 // that the command returns.
-func (c *RemoteEndpointsCommandBase) NewRemoteEndpointsAPI(controllerName string) (*applicationoffers.Client, error) {
-	root, err := c.CommandBase.NewAPIRoot(c.ClientStore(), controllerName, "")
+func (c *RemoteEndpointsCommandBase) NewRemoteEndpointsAPI(ctx context.Context, controllerName string) (*applicationoffers.Client, error) {
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), controllerName, "")
 	if err != nil {
 		return nil, err
 	}

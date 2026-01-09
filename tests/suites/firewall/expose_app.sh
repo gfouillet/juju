@@ -6,7 +6,7 @@ run_expose_app_ec2() {
 	ensure "expose-app" "${file}"
 
 	# Deploy test charm
-	juju deploy jameinel-ubuntu-lite
+	juju deploy ubuntu-lite
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	# Open ports and verify hook tool behavior
@@ -66,31 +66,25 @@ assert_ingress_cidrs_for_exposed_app() {
 }
 
 assert_export_bundle_output_includes_exposed_endpoints() {
-	echo "==> Checking that export-bundle output contains the exposed endpoint settings"
 
-	got=$(juju export-bundle | sed -n '/---/,$p' | tail +1)
+	echo "==> Checking that show-application output contains the exposed endpoint settings"
+
 	exp=$(
-		cat <<-EOF
-			--- # overlay.yaml
-			applications:
-			  ubuntu-lite:
-			    exposed-endpoints:
-			      "":
-			        expose-to-cidrs:
-			        - 10.0.0.0/24
-			        - 192.168.0.0/24
-			      ubuntu:
-			        expose-to-cidrs:
-			        - 10.42.0.0/16
-			        - 2002:0:0:1234::/64
-		EOF
+		cat <<'EOF'
+ "":
+   expose-to-cidrs:
+   - 10.0.0.0/24
+   - 192.168.0.0/24
+ ubuntu:
+   expose-to-cidrs:
+   - 10.42.0.0/16
+   - 2002:0:0:1234::/64
+EOF
 	)
 
-	if [ "$got" != "$exp" ]; then
-		# shellcheck disable=SC2046
-		echo $(red "expected exported bundle to be:\n${exp}\nGOT:\n${got}")
-		exit 1
-	fi
+	got=$(juju show-application ubuntu-lite | yq -r '.["ubuntu-lite"]["exposed-endpoints"]')
+
+	check_contains "$got" "$exp"
 }
 
 test_expose_app_ec2() {

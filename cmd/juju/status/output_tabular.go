@@ -4,6 +4,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"regexp"
@@ -13,21 +14,21 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/juju/ansiterm"
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	cmdcrossmodel "github.com/juju/juju/cmd/juju/crossmodel"
 	"github.com/juju/juju/cmd/juju/storage"
-	"github.com/juju/juju/cmd/output"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/naturalsort"
-	jujuversion "github.com/juju/juju/version"
 )
 
 const (
@@ -63,11 +64,6 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	values := []interface{}{fs.Model.Name, fs.Model.Controller, cloudRegion}
 	// Optional table output if values exist
 	message := getModelMessage(fs.Model)
-	if fs.Model.SLA != "" {
-		header = append(header, "SLA")
-		values = append(values, fs.Model.SLA)
-
-	}
 	if cs := fs.Controller; cs != nil && cs.Timestamp != "" {
 		header = append(header, "Timestamp")
 		values = append(values, cs.Timestamp)
@@ -81,7 +77,7 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	versionPos := indexOf("Version", header)
 	w.Print(values[:versionPos]...)
 	if fs.Model.Version != "" {
-		modelVersionNum, err := version.Parse(fs.Model.Version)
+		modelVersionNum, err := semversion.Parse(fs.Model.Version)
 		if err == nil && jujuversion.Current.Compare(modelVersionNum) > 0 {
 			w.PrintColor(output.WarningHighlight, fs.Model.Version)
 		} else {
@@ -90,9 +86,6 @@ func FormatTabular(writer io.Writer, forceColor bool, value interface{}) error {
 	}
 
 	w.Println(values[versionPos:]...)
-	if len(fs.Branches) > 0 {
-		printBranches(tw, fs.Branches)
-	}
 
 	if len(fs.RemoteApplications) > 0 {
 		printRemoteApplications(tw, fs.RemoteApplications)
@@ -143,7 +136,6 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 	}
 	truncatedWidth := maxVersionWidth - len(ellipsis)
 
-	metering := fs.Model.MeterStatus != nil
 	units := make(map[string]unitStatus)
 	var w *output.Wrapper
 	if fs.Model.Type == caasModelType {
@@ -236,9 +228,6 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		w.Println()
 		for un, u := range app.Units {
 			units[un] = u
-			if u.MeterStatus != nil {
-				metering = true
-			}
 		}
 	}
 	endSection(tw)
@@ -255,9 +244,6 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		}
 		if u.Leader {
 			name += "*"
-		}
-		if u.Branch != "" {
-			name += " " + u.Branch
 		}
 		w.Print(indent("", level*2, name))
 		w.PrintStatus(u.WorkloadStatusInfo.Current)
@@ -292,28 +278,6 @@ func printApplications(tw *ansiterm.TabWriter, fs formattedStatus) {
 		endSection(tw)
 	}
 
-	if !metering {
-		return
-	}
-
-	startSection(tw, false, "Entity", "Meter status", "Message")
-	if fs.Model.MeterStatus != nil {
-		w.Print("model")
-		outputColor := fromMeterStatusColor(fs.Model.MeterStatus.Color)
-		w.PrintColor(outputColor, fs.Model.MeterStatus.Color)
-		w.PrintColor(outputColor, truncateMessage(fs.Model.MeterStatus.Message))
-		w.Println()
-	}
-	for _, name := range naturalsort.Sort(stringKeysFromMap(units)) {
-		u := units[name]
-		if u.MeterStatus != nil {
-			w.Print(name)
-			outputColor := fromMeterStatusColor(u.MeterStatus.Color)
-			w.PrintColor(outputColor, u.MeterStatus.Color)
-			w.PrintColor(outputColor, truncateMessage(u.MeterStatus.Message))
-			w.Println()
-		}
-	}
 	endSection(tw)
 }
 
@@ -461,17 +425,6 @@ func printPorts(w OutputWriter, ps []string) {
 	w.Print("") //Print empty tab after the ports
 }
 
-func printBranches(tw *ansiterm.TabWriter, branches map[string]branchStatus) {
-	w := startSection(tw, false, "Branch", "Ref", "Created", "Created By")
-	for _, branchName := range naturalsort.Sort(stringKeysFromMap(branches)) {
-		b := branches[branchName]
-		if b.Active {
-			branchName = branchName + "*"
-		}
-		w.Println(branchName, b.Ref, b.Created, b.CreatedBy)
-	}
-}
-
 func printRemoteApplications(tw *ansiterm.TabWriter, remoteApplications map[string]remoteApplicationStatus) {
 	w := startSection(tw, false, "SAAS", "Status", "Store", "URL")
 	for _, appName := range naturalsort.Sort(stringKeysFromMap(remoteApplications)) {
@@ -487,7 +440,7 @@ func printRemoteApplications(tw *ansiterm.TabWriter, remoteApplications map[stri
 			}
 		} else {
 			// This is not expected.
-			logger.Errorf("invalid offer URL %q: %v", app.OfferURL, err)
+			logger.Errorf(context.TODO(), "invalid offer URL %q: %v", app.OfferURL, err)
 			store = "unknown"
 			urlPath = app.OfferURL
 		}
@@ -569,18 +522,6 @@ func printOffers(tw *ansiterm.TabWriter, offers map[string]offerStatus) error {
 	return nil
 }
 
-func fromMeterStatusColor(msColor string) *ansiterm.Context {
-	switch msColor {
-	case "green":
-		return output.GoodHighlight
-	case "amber":
-		return output.WarningHighlight
-	case "red":
-		return output.ErrorHighlight
-	}
-	return nil
-}
-
 func getModelMessage(model modelStatus) string {
 	// Select the most important message about the model (if any).
 	switch {
@@ -605,7 +546,7 @@ func printMachine(w *output.Wrapper, m machineStatus) {
 	// We want to display availability zone so extract from hardware info".
 	hw, err := instance.ParseHardware(m.Hardware)
 	if err != nil {
-		logger.Warningf("invalid hardware info %s for machine %v", m.Hardware, m)
+		logger.Warningf(context.TODO(), "invalid hardware info %s for machine %v", m.Hardware, m)
 	}
 	az := ""
 	if hw.AvailabilityZone != nil {

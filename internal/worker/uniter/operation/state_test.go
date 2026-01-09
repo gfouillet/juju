@@ -4,13 +4,14 @@
 package operation_test
 
 import (
-	"github.com/juju/charm/v12/hooks"
+	"testing"
+
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/yaml.v2"
 
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/operation/mocks"
@@ -21,10 +22,15 @@ type StateOpsSuite struct {
 	mockStateRW *mocks.MockUnitStateReadWriter
 }
 
-var _ = gc.Suite(&StateOpsSuite{})
+func TestStateOpsSuite(t *testing.T) {
+	tc.Run(t, &StateOpsSuite{})
+}
+
+func (s *StateOpsSuite) TearDownTest(c *tc.C) {
+	s.mockStateRW = nil
+}
 
 var stcurl = "ch:quantal/application-name-123"
-
 var relhook = &hook.Info{
 	Kind:              hooks.RelationJoined,
 	RemoteUnit:        "some-thing/123",
@@ -243,70 +249,70 @@ var stateTests = []stateTest{
 	},
 }
 
-func (s *StateOpsSuite) TestStates(c *gc.C) {
+func (s *StateOpsSuite) TestStates(c *tc.C) {
 	for i, t := range stateTests {
 		c.Logf("test %d: %s", i, t.description)
 		s.runTest(c, t)
 	}
 }
 
-func (s *StateOpsSuite) runTest(c *gc.C, t stateTest) {
+func (s *StateOpsSuite) runTest(c *tc.C, t stateTest) {
 	defer s.setupMocks(c).Finish()
 	ops := operation.NewStateOps(s.mockStateRW)
-	_, err := ops.Read()
-	c.Assert(err, gc.Equals, operation.ErrNoSavedState)
+	_, err := ops.Read(c.Context())
+	c.Assert(err, tc.Equals, operation.ErrNoSavedState)
 
 	if t.err == "" {
 		s.expectSetState(c, t.st, t.err)
 	}
-	err = ops.Write(&t.st)
+	err = ops.Write(c.Context(), &t.st)
 	if t.err == "" {
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	} else {
-		c.Assert(err, gc.ErrorMatches, "invalid operation state: "+t.err)
+		c.Assert(err, tc.ErrorMatches, "invalid operation state: "+t.err)
 		s.expectState(c, t.st)
-		_, err = ops.Read()
-		c.Assert(err, gc.ErrorMatches, `validation of uniter state: invalid operation state: `+t.err)
+		_, err = ops.Read(c.Context())
+		c.Assert(err, tc.ErrorMatches, `validation of uniter state: invalid operation state: `+t.err)
 		return
 	}
 	s.expectState(c, t.st)
-	st, err := ops.Read()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(st, jc.DeepEquals, &t.st)
+	st, err := ops.Read(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(st, tc.DeepEquals, &t.st)
 }
 
-func (s *StateOpsSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *StateOpsSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctlr := gomock.NewController(c)
 	s.mockStateRW = mocks.NewMockUnitStateReadWriter(ctlr)
 
 	mExp := s.mockStateRW.EXPECT()
-	mExp.State().Return(params.UnitStateResult{}, nil)
+	mExp.State(gomock.Any()).Return(params.UnitStateResult{}, nil)
 	return ctlr
 }
 
-func (s *StateOpsSuite) expectSetState(c *gc.C, st operation.State, errStr string) {
+func (s *StateOpsSuite) expectSetState(c *tc.C, st operation.State, errStr string) {
 	data, err := yaml.Marshal(st)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	strUniterState := string(data)
 	if errStr != "" {
 		err = errors.New(`validation of uniter state: invalid operation state: ` + errStr)
 	}
 
 	mExp := s.mockStateRW.EXPECT()
-	mExp.SetState(unitStateMatcher{c: c, expected: strUniterState}).Return(err)
+	mExp.SetState(gomock.Any(), unitStateMatcher{c: c, expected: strUniterState}).Return(err)
 }
 
-func (s *StateOpsSuite) expectState(c *gc.C, st operation.State) {
+func (s *StateOpsSuite) expectState(c *tc.C, st operation.State) {
 	data, err := yaml.Marshal(st)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	stStr := string(data)
 
 	mExp := s.mockStateRW.EXPECT()
-	mExp.State().Return(params.UnitStateResult{UniterState: stStr}, nil)
+	mExp.State(gomock.Any()).Return(params.UnitStateResult{UniterState: stStr}, nil)
 }
 
 type unitStateMatcher struct {
-	c        *gc.C
+	c        *tc.C
 	expected string
 }
 

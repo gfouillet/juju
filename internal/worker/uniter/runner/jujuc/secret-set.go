@@ -4,11 +4,11 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretUpdateCommand struct {
@@ -76,5 +76,5 @@ func (c *secretUpdateCommand) Init(args []string) error {
 
 // Run implements cmd.Command.
 func (c *secretUpdateCommand) Run(ctx *cmd.Context) error {
-	return c.ctx.UpdateSecret(c.secretURI, c.marshallArg())
+	return c.ctx.UpdateSecret(ctx, c.secretURI, c.marshallArg())
 }

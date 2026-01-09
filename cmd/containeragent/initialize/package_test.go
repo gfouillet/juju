@@ -7,21 +7,18 @@ import (
 	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
 
 type importSuite struct{}
 
-var _ = gc.Suite(&importSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &importSuite{})
+}
 
-func (*importSuite) TestImports(c *gc.C) {
+func (*importSuite) TestImports(c *tc.C) {
 	found := set.NewStrings(
 		coretesting.FindJujuCoreImports(c, "github.com/juju/juju/cmd/containeragent/initialize")...)
 
@@ -34,92 +31,98 @@ func (*importSuite) TestImports(c *gc.C) {
 		"api/agent/keyupdater",
 		"api/base",
 		"api/common",
-		"api/common/cloudspec",
 		"api/watcher",
 		"apiserver/errors",
-		"charmhub",
-		"charmhub/path",
-		"charmhub/transport",
-		"cloud",
 		"cmd",
 		"cmd/constants",
 		"cmd/containeragent/utils",
-		"cmd/output",
 		"controller",
 		"core/arch",
+		"core/backups",
 		"core/base",
 		"core/charm/metrics",
 		"core/constraints",
+		"core/credential",
 		"core/devices",
+		"core/errors",
 		"core/facades",
+		"core/flightrecorder",
+		"core/http",
 		"core/instance",
 		"core/leadership",
 		"core/lease",
 		"core/life",
 		"core/logger",
-		"core/macaroon",
 		"core/machinelock",
 		"core/migration",
 		"core/model",
+		"core/modelconfig",
 		"core/network",
-		"core/os",
+		"core/objectstore",
 		"core/os/ostype",
 		"core/paths",
 		"core/permission",
-		"core/presence",
 		"core/relation",
-		"core/resources",
+		"core/resource",
 		"core/secrets",
+		"core/semversion",
 		"core/status",
+		"core/storage",
+		"core/trace",
+		"core/unit",
+		"core/upgrade",
+		"core/user",
+		"core/version",
 		"core/watcher",
-		"docker",
-		"environs/cloudspec",
+		"domain/model/errors",
+		"domain/secret/errors",
+		"domain/secretbackend/errors",
 		"environs/config",
-		"environs/context",
 		"environs/tags",
-		"feature",
-		"internal/provider/lxd/lxdnames",
+		"internal/charm",
+		"internal/charm/assumes",
+		"internal/charm/hooks",
+		"internal/charm/resource",
+		"internal/charmhub",
+		"internal/charmhub/path",
+		"internal/charmhub/transport",
+		"internal/cmd",
+		"internal/configschema",
+		"internal/errors",
+		"internal/featureflag",
+		"internal/http",
+		"internal/logger",
+		"internal/macaroon",
+		"internal/password",
+		"internal/pki",
+		"internal/proxy",
+		"internal/proxy/config",
 		"internal/provider/kubernetes/constants",
+		"internal/rpcreflect",
+		"internal/service/pebble/identity",
+		"internal/service/pebble/plan",
+		"internal/storage",
+		"internal/stringcompare",
+		"internal/tools",
+		"internal/uuid",
 		"internal/worker/apicaller",
 		"internal/worker/introspection",
+		"internal/worker/introspection/flightrecorder",
 		"internal/worker/introspection/pprof",
 		"juju/osenv",
 		"juju/sockets",
-		"logfwd",
-		"logfwd/syslog",
-		"mongo",
-		"network",
-		"network/debinterfaces",
-		"network/netplan",
-		"packaging",
-		"packaging/dependency",
-		"pki",
-		"proxy",
-		"pubsub/agent",
 		"rpc",
 		"rpc/jsoncodec",
 		"rpc/params",
-		"service/common",
-		"service/pebble/identity",
-		"service/pebble/plan",
-		"service/snap",
-		"service/systemd",
-		"state/errors",
-		"storage",
-		"tools",
-		"utils/proxy",
-		"utils/scriptrunner",
-		"version",
-		"utils/stringcompare",
 	)
 
 	unexpected := found.Difference(expected)
 	// TODO: review if there are any un-expected imports!
 	// Show the values rather than just checking the length so a failing
 	// test shows them.
-	c.Check(unexpected.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unexpected.SortedValues(), tc.DeepEquals, []string{})
 	// If unneeded show any values this is good as we've reduced
 	// dependencies, and they should be removed from expected above.
 	unneeded := expected.Difference(found)
-	c.Check(unneeded.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unneeded.SortedValues(), tc.DeepEquals, []string{})
 }

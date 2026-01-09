@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/errors"
-
-	corebase "github.com/juju/juju/core/base"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Source represents the source of the charm.
@@ -32,8 +31,14 @@ const (
 	CharmHub Source = "charm-hub"
 )
 
+// MinSHA256PrefixLength is the minimum length of a SHA256 prefix. This value
+// is the minimum length of a SHA256 hash prefix that can be used to identify
+// a charm. Ideally, this value should be increased to reduce the risk of
+// collisions.
+const MinSHA256PrefixLength = 7
+
 // Origin holds the original source of a charm. Information about where the
-// charm was installed from (charm-hub, charm-store, local) and any additional
+// charm was installed from (charm-hub, local) and any additional
 // information we can utilise when making modelling decisions for upgrading or
 // changing.
 type Origin struct {
@@ -56,11 +61,25 @@ type Origin struct {
 	InstanceKey string
 }
 
+// Validate returns an error if the origin is invalid.
+func (o Origin) Validate() error {
+	if CharmHub.Matches(o.Source.String()) && o.Platform.Architecture == "" {
+		return errors.Errorf("empty architecture %w", coreerrors.NotValid)
+	}
+	return nil
+}
+
+func (o Origin) String() string {
+	return fmt.Sprintf("(source: %q, id: %s, hash: %s, revision: %v, channel: %v, platform: %s)",
+		o.Source, o.ID, o.Hash, o.Revision, o.Channel, o.Platform)
+}
+
 // Platform describes the platform used to install the charm with.
 type Platform struct {
 	Architecture string
-	OS           string
-	Channel      string
+	// TODO: This should be of type ostype.OSType
+	OS      string
+	Channel string
 }
 
 // MustParsePlatform parses a given string or returns a panic.
@@ -78,19 +97,16 @@ func MustParsePlatform(s string) Platform {
 //  1. Architecture is mandatory.
 //  2. OS is optional and can be dropped. Release is mandatory if OS wants
 //     to be displayed.
-//  3. Release is also optional.
-//
-// To indicate something is missing `unknown` can be used in place.
+//  3. Release is also optional. Release can also optionally include a risk
 //
 // Examples:
 //
 //  1. `<arch>/<os>/<channel>`
-//  2. `<arch>`
-//  3. `<arch>/<series>`
-//  4. `<arch>/unknown/<series>`
+//  2. `<arch>/<os>/<track>/<risk>`
+//  3. `<arch>`
 func ParsePlatform(s string) (Platform, error) {
 	if s == "" {
-		return Platform{}, errors.BadRequestf("platform cannot be empty")
+		return Platform{}, errors.Errorf("platform cannot be empty").Add(coreerrors.BadRequest)
 	}
 
 	p := strings.Split(s, "/")
@@ -99,55 +115,36 @@ func ParsePlatform(s string) (Platform, error) {
 	switch len(p) {
 	case 1:
 		arch = &p[0]
-	case 2:
-		arch = &p[0]
-		channel = &p[1]
 	case 3:
 		arch, os, channel = &p[0], &p[1], &p[2]
 	case 4:
-		arch, os, channel = &p[0], &p[1], strptr(fmt.Sprintf("%s/%s", p[2], p[3]))
+		arch, os, channel = &p[0], &p[1], ptr(fmt.Sprintf("%s/%s", p[2], p[3]))
 	default:
-		return Platform{}, errors.Errorf("platform is malformed and has too many components %q", s)
+		return Platform{}, errors.Errorf("platform is malformed; it has an invalid number of components %q", s)
 	}
 
 	platform := Platform{}
 	if arch != nil {
 		if *arch == "" {
-			return Platform{}, errors.NotValidf("architecture in platform %q", s)
+			return Platform{}, errors.Errorf("architecture in platform %q %w", s, coreerrors.NotValid)
 		}
 		platform.Architecture = *arch
 	}
 	if os != nil {
 		if *os == "" {
-			return Platform{}, errors.NotValidf("os in platform %q", s)
+			return Platform{}, errors.Errorf("os in platform %q %w", s, coreerrors.NotValid)
+		}
+		if channel == nil || *channel == "" {
+			return Platform{}, errors.Errorf("channel in platform %q %w", s, coreerrors.NotValid)
 		}
 		platform.OS = *os
-	}
-	if channel != nil {
-		if *channel == "" {
-			return Platform{}, errors.NotValidf("channel in platform %q", s)
-		}
-		if *channel != "unknown" {
-			// Channel might be a series, eg "jammy" or an os version, eg "22.04".
-			// We are transitioning away from series but still need to support it.
-			// If an os version is specified, os is mandatory.
-			series := *channel
-			vers, err := corebase.SeriesVersion(series)
-			if err == nil {
-				osType, _ := corebase.GetOSFromSeries(series)
-				platform.OS = strings.ToLower(osType.String())
-				*channel = vers
-			} else if platform.OS == "" {
-				return Platform{}, errors.NotValidf("channel without os name in platform %q", s)
-			}
-			platform.Channel = *channel
-		}
+		platform.Channel = *channel
 	}
 
 	return platform, nil
 }
 
-func strptr(s string) *string {
+func ptr[T any](s T) *T {
 	return &s
 }
 
@@ -156,7 +153,7 @@ func strptr(s string) *string {
 func ParsePlatformNormalize(s string) (Platform, error) {
 	platform, err := ParsePlatform(s)
 	if err != nil {
-		return Platform{}, errors.Trace(err)
+		return Platform{}, errors.Capture(err)
 	}
 	return platform.Normalize(), nil
 }

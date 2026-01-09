@@ -4,51 +4,41 @@
 package uniter
 
 import (
-	"github.com/juju/juju/apiserver/common"
+	"github.com/juju/clock"
+	"github.com/juju/tc"
+
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/apiserver/facades/agent/meterstatus"
 	"github.com/juju/juju/caas"
-	"github.com/juju/juju/state"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
 var (
-	GetZone                = &getZone
-	WatchStorageAttachment = watchStorageAttachment
-
-	NewUniterAPI = newUniterAPI
-
-	_ meterstatus.MeterStatus = (*UniterAPI)(nil)
+	NewUniterAPI             = newUniterAPI
+	NewUniterAPIv19          = newUniterAPIv19
+	NewUniterAPIWithServices = newUniterAPIWithServices
 )
 
-type (
-	Backend                    backend
-	StorageStateInterface      storageInterface
-	StorageVolumeInterface     = storageVolumeInterface
-	StorageFilesystemInterface = storageFilesystemInterface
-)
+func NewTestAPI(
+	c *tc.C,
+	authorizer facade.Authorizer,
+	secretService SecretService,
+	applicationService ApplicationService,
+	clock clock.Clock,
+) (*UniterAPI, error) {
+	if !authorizer.AuthUnitAgent() {
+		return nil, apiservererrors.ErrPerm
+	}
 
-func NewStorageAPI(
-	backend backend,
-	storage storageAccess,
-	resources facade.Resources,
-	accessUnit common.GetAuthFunc,
-) (*StorageAPI, error) {
-	return newStorageAPI(backend, storage, resources, accessUnit)
+	return &UniterAPI{
+		auth:               authorizer,
+		secretService:      secretService,
+		applicationService: applicationService,
+		clock:              clock,
+		logger:             loggertesting.WrapCheckLog(c),
+	}, nil
 }
 
 func SetNewContainerBrokerFunc(api *UniterAPI, newBroker caas.NewContainerBrokerFunc) {
 	api.containerBrokerFunc = newBroker
-}
-
-type patcher interface {
-	PatchValue(interface{}, interface{})
-}
-
-func PatchGetStorageStateError(patcher patcher, err error) {
-	patcher.PatchValue(&getStorageState, func(st *state.State) (storageAccess, error) { return nil, err })
-}
-
-func (n *NetworkInfoIAAS) MachineNetworkInfos() (map[string][]NetInfoAddress, error) {
-	err := n.populateMachineAddresses()
-	return n.machineAddresses, err
 }

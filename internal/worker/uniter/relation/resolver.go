@@ -4,39 +4,26 @@
 package relation
 
 import (
-	"github.com/juju/charm/v12/hooks"
+	"context"
+
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
 )
 
-// Logger is here to stop the desire of creating a package level Logger.
-// Don't do this, instead use the one passed into the new resolver function.
-type logger interface{}
-
-var _ logger = struct{}{}
-
-// Logger represents the logging methods used in this package.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	Tracef(string, ...interface{})
-	IsTraceEnabled() bool
-}
-
 // NewRelationResolver returns a resolver that handles all relation-related
 // hooks (except relation-created) and is wired to the provided RelationStateTracker
 // instance.
-func NewRelationResolver(stateTracker RelationStateTracker, subordinateDestroyer SubordinateDestroyer, logger Logger) resolver.Resolver {
+func NewRelationResolver(stateTracker RelationStateTracker, subordinateDestroyer SubordinateDestroyer, logger logger.Logger) resolver.Resolver {
 	return &relationsResolver{
 		stateTracker:         stateTracker,
 		subordinateDestroyer: subordinateDestroyer,
@@ -47,22 +34,22 @@ func NewRelationResolver(stateTracker RelationStateTracker, subordinateDestroyer
 type relationsResolver struct {
 	stateTracker         RelationStateTracker
 	subordinateDestroyer SubordinateDestroyer
-	logger               Logger
+	logger               logger.Logger
 }
 
 // NextOp implements resolver.Resolver.
 func (r *relationsResolver) NextOp(
-	localState resolver.LocalState, remoteState remotestate.Snapshot, opFactory operation.Factory,
+	ctx context.Context, localState resolver.LocalState, remoteState remotestate.Snapshot, opFactory operation.Factory,
 ) (_ operation.Operation, err error) {
-	if r.logger.IsTraceEnabled() {
-		r.logger.Tracef("relation resolver next op for new remote relations %# v", pretty.Formatter(remoteState.Relations))
+	if r.logger.IsLevelEnabled(logger.TRACE) {
+		r.logger.Tracef(ctx, "relation resolver next op for new remote relations %# v", pretty.Formatter(remoteState.Relations))
 		defer func() {
 			if errors.Is(err, resolver.ErrNoOperation) {
-				r.logger.Tracef("no relation operation to run")
+				r.logger.Tracef(ctx, "no relation operation to run")
 			}
 		}()
 	}
-	if err := r.maybeDestroySubordinates(remoteState); err != nil {
+	if err := r.maybeDestroySubordinates(ctx, remoteState); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -70,7 +57,7 @@ func (r *relationsResolver) NextOp(
 		return nil, resolver.ErrNoOperation
 	}
 
-	if err := r.stateTracker.SynchronizeScopes(remoteState); err != nil {
+	if err := r.stateTracker.SynchronizeScopes(ctx, remoteState); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -87,7 +74,7 @@ func (r *relationsResolver) NextOp(
 			continue
 		}
 
-		op, err := r.processRelationSnapshot(relationID, relationSnapshot, remoteState, opFactory)
+		op, err := r.processRelationSnapshot(ctx, relationID, relationSnapshot, remoteState, opFactory)
 		if err != nil {
 			if errors.Is(err, resolver.ErrNoOperation) {
 				continue
@@ -101,7 +88,7 @@ func (r *relationsResolver) NextOp(
 	for _, relationID := range peerRelations {
 		relationSnapshot := remoteState.Relations[relationID]
 
-		op, err := r.processRelationSnapshot(relationID, relationSnapshot, remoteState, opFactory)
+		op, err := r.processRelationSnapshot(ctx, relationID, relationSnapshot, remoteState, opFactory)
 		if err != nil {
 			if errors.Is(err, resolver.ErrNoOperation) {
 				continue
@@ -117,13 +104,14 @@ func (r *relationsResolver) NextOp(
 // processRelationSnapshot reconciles the local and remote states for a
 // single relation and determines what hoof (if any) should be fired.
 func (r *relationsResolver) processRelationSnapshot(
+	ctx context.Context,
 	relationID int,
 	relationSnapshot remotestate.RelationSnapshot,
 	remoteState remotestate.Snapshot,
 	opFactory operation.Factory,
 ) (operation.Operation, error) {
 	if !r.stateTracker.IsKnown(relationID) {
-		r.logger.Infof("unknown relation %d resolving next op", relationID)
+		r.logger.Infof(ctx, "unknown relation %d resolving next op", relationID)
 		return nil, resolver.ErrNoOperation
 	} else if isImplicit, _ := r.stateTracker.IsImplicit(relationID); isImplicit {
 		return nil, resolver.ErrNoOperation
@@ -146,7 +134,7 @@ func (r *relationsResolver) processRelationSnapshot(
 		}
 		relState = NewState(relationID)
 	}
-	hInfo, err := r.nextHookForRelation(relState, relationSnapshot, remoteBroken)
+	hInfo, err := r.nextHookForRelation(ctx, relState, relationSnapshot, remoteBroken)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -156,7 +144,7 @@ func (r *relationsResolver) processRelationSnapshot(
 // maybeDestroySubordinates checks whether the remote state indicates that the
 // unit is dying and ensures that any related subordinates are properly
 // destroyed.
-func (r *relationsResolver) maybeDestroySubordinates(remoteState remotestate.Snapshot) error {
+func (r *relationsResolver) maybeDestroySubordinates(ctx context.Context, remoteState remotestate.Snapshot) error {
 	if remoteState.Life != life.Dying {
 		return nil
 	}
@@ -176,13 +164,13 @@ func (r *relationsResolver) maybeDestroySubordinates(remoteState remotestate.Sna
 	}
 
 	if destroyAllSubordinates {
-		return r.subordinateDestroyer.DestroyAllSubordinates()
+		return r.subordinateDestroyer.DestroyAllSubordinates(ctx)
 	}
 
 	return nil
 }
 
-func (r *relationsResolver) nextHookForRelation(localState *State, remote remotestate.RelationSnapshot, remoteBroken bool) (hook.Info, error) {
+func (r *relationsResolver) nextHookForRelation(ctx context.Context, localState *State, remote remotestate.RelationSnapshot, remoteBroken bool) (hook.Info, error) {
 	// If there's a guaranteed next hook, return that.
 	relationId := localState.RelationId
 	if localState.ChangedPending != "" {
@@ -244,7 +232,7 @@ func (r *relationsResolver) nextHookForRelation(localState *State, remote remote
 			// figure out if its the localState or the remote unit going
 			// away. Note that if the app is removed, the unit will
 			// still be alive but its parent app will by dying.
-			localUnitLife, localAppLife, err := r.stateTracker.LocalUnitAndApplicationLife()
+			localUnitLife, localAppLife, err := r.stateTracker.LocalUnitAndApplicationLife(ctx)
 			if err != nil {
 				return hook.Info{}, errors.Trace(err)
 			}
@@ -311,7 +299,7 @@ func (r *relationsResolver) nextHookForRelation(localState *State, remote remote
 	for _, unitName := range sortedUnitNames {
 		changeVersion, found := remote.Members[unitName]
 		if !found {
-			r.logger.Tracef("cannot join relation %d, no known Members for %q", relationId, unitName)
+			r.logger.Tracef(ctx, "cannot join relation %d, no known Members for %q", relationId, unitName)
 			continue
 		}
 		if _, found := localState.Members[unitName]; !found {
@@ -327,7 +315,7 @@ func (r *relationsResolver) nextHookForRelation(localState *State, remote remote
 				ChangeVersion:     changeVersion,
 			}, nil
 		} else {
-			r.logger.Debugf("unit %q already joined relation %d", unitName, relationId)
+			r.logger.Debugf(ctx, "unit %q already joined relation %d", unitName, relationId)
 		}
 	}
 
@@ -367,7 +355,7 @@ func (r *relationsResolver) nextHookForRelation(localState *State, remote remote
 
 // NewCreatedRelationResolver returns a resolver that handles relation-created
 // hooks and is wired to the provided RelationStateTracker instance.
-func NewCreatedRelationResolver(stateTracker RelationStateTracker, logger Logger) resolver.Resolver {
+func NewCreatedRelationResolver(stateTracker RelationStateTracker, logger logger.Logger) resolver.Resolver {
 	return &createdRelationsResolver{
 		stateTracker: stateTracker,
 		logger:       logger,
@@ -376,20 +364,21 @@ func NewCreatedRelationResolver(stateTracker RelationStateTracker, logger Logger
 
 type createdRelationsResolver struct {
 	stateTracker RelationStateTracker
-	logger       Logger
+	logger       logger.Logger
 }
 
 // NextOp implements resolver.Resolver.
 func (r *createdRelationsResolver) NextOp(
+	ctx context.Context,
 	localState resolver.LocalState,
 	remoteState remotestate.Snapshot,
 	opFactory operation.Factory,
 ) (_ operation.Operation, err error) {
-	if r.logger.IsTraceEnabled() {
-		r.logger.Tracef("create relation resolver next op for new remote relations %# v", pretty.Formatter(remoteState.Relations))
+	if r.logger.IsLevelEnabled(logger.TRACE) {
+		r.logger.Tracef(ctx, "create relation resolver next op for new remote relations %# v", pretty.Formatter(remoteState.Relations))
 		defer func() {
 			if errors.Is(err, resolver.ErrNoOperation) {
-				r.logger.Tracef("no create relation operation to run")
+				r.logger.Tracef(ctx, "no create relation operation to run")
 			}
 		}()
 	}
@@ -403,7 +392,7 @@ func (r *createdRelationsResolver) NextOp(
 		return nil, resolver.ErrNoOperation
 	}
 
-	if err := r.stateTracker.SynchronizeScopes(remoteState); err != nil {
+	if err := r.stateTracker.SynchronizeScopes(ctx, remoteState); err != nil {
 		return nil, errors.Trace(err)
 	}
 

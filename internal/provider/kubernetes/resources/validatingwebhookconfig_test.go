@@ -5,11 +5,10 @@ package resources_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +17,7 @@ import (
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	providerutils "github.com/juju/juju/internal/provider/kubernetes/utils"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type validatingWebhookConfigSuite struct {
@@ -25,14 +25,16 @@ type validatingWebhookConfigSuite struct {
 	validatingWebhookClient admissionclient.ValidatingWebhookConfigurationInterface
 }
 
-var _ = gc.Suite(&validatingWebhookConfigSuite{})
+func TestValidatingWebhookConfigSuite(t *testing.T) {
+	tc.Run(t, &validatingWebhookConfigSuite{})
+}
 
-func (s *validatingWebhookConfigSuite) SetUpTest(c *gc.C) {
+func (s *validatingWebhookConfigSuite) SetUpTest(c *tc.C) {
 	s.resourceSuite.SetUpTest(c)
 	s.validatingWebhookClient = s.client.AdmissionregistrationV1().ValidatingWebhookConfigurations()
 }
 
-func (s *validatingWebhookConfigSuite) TestApply(c *gc.C) {
+func (s *validatingWebhookConfigSuite) TestApply(c *tc.C) {
 	vw := &admissionv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "vw1",
@@ -41,26 +43,26 @@ func (s *validatingWebhookConfigSuite) TestApply(c *gc.C) {
 
 	// Create.
 	res := resources.NewValidatingWebhookConfig(s.validatingWebhookClient, "vw1", vw)
-	c.Assert(res.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(res.Apply(c.Context()), tc.ErrorIsNil)
 
 	// Get.
-	result, err := s.validatingWebhookClient.Get(context.TODO(), "vw1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result.GetAnnotations()), gc.Equals, 0)
+	result, err := s.validatingWebhookClient.Get(c.Context(), "vw1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(result.GetAnnotations()), tc.Equals, 0)
 
 	// Apply.
 	vw.SetAnnotations(map[string]string{"a": "b"})
 	res = resources.NewValidatingWebhookConfig(s.validatingWebhookClient, "vw1", vw)
-	c.Assert(res.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(res.Apply(c.Context()), tc.ErrorIsNil)
 
 	// Get again to test apply successful.
-	result, err = s.validatingWebhookClient.Get(context.TODO(), "vw1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `vw1`)
-	c.Assert(result.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	result, err = s.validatingWebhookClient.Get(c.Context(), "vw1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `vw1`)
+	c.Assert(result.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *validatingWebhookConfigSuite) TestGet(c *gc.C) {
+func (s *validatingWebhookConfigSuite) TestGet(c *tc.C) {
 	template := admissionv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "vw1",
@@ -70,21 +72,21 @@ func (s *validatingWebhookConfigSuite) TestGet(c *gc.C) {
 
 	// Create vw with annotations.
 	vw.SetAnnotations(map[string]string{"a": "b"})
-	_, err := s.validatingWebhookClient.Create(context.TODO(), &vw, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.validatingWebhookClient.Create(c.Context(), &vw, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create new object that has no annotations.
 	res := resources.NewValidatingWebhookConfig(s.validatingWebhookClient, "vw1", &template)
-	c.Assert(len(res.GetAnnotations()), gc.Equals, 0)
+	c.Assert(len(res.GetAnnotations()), tc.Equals, 0)
 
 	// Get actual resource that has annotations using k8s api.
-	err = res.Get(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res.GetName(), gc.Equals, `vw1`)
-	c.Assert(res.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	err = res.Get(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.GetName(), tc.Equals, `vw1`)
+	c.Assert(res.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *validatingWebhookConfigSuite) TestDelete(c *gc.C) {
+func (s *validatingWebhookConfigSuite) TestDelete(c *tc.C) {
 	vw := &admissionv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "vw1",
@@ -92,39 +94,39 @@ func (s *validatingWebhookConfigSuite) TestDelete(c *gc.C) {
 	}
 
 	// Create vw1.
-	_, err := s.validatingWebhookClient.Create(context.TODO(), vw, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.validatingWebhookClient.Create(c.Context(), vw, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Get vw1 to ensure it exists.
-	result, err := s.validatingWebhookClient.Get(context.TODO(), "vw1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `vw1`)
+	result, err := s.validatingWebhookClient.Get(c.Context(), "vw1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `vw1`)
 
 	// Create new object for deletion.
 	res := resources.NewValidatingWebhookConfig(s.validatingWebhookClient, "vw1", vw)
 
 	// Delete vw1
-	err = res.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
+	err = res.Delete(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Delete vw1 again.
-	err = res.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err = res.Delete(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	err = res.Get(context.TODO())
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	err = res.Get(c.Context())
+	c.Assert(err, tc.Satisfies, errors.IsNotFound)
 
-	_, err = s.validatingWebhookClient.Get(context.TODO(), "vw1", metav1.GetOptions{})
-	c.Assert(err, jc.Satisfies, k8serrors.IsNotFound)
+	_, err = s.validatingWebhookClient.Get(c.Context(), "vw1", metav1.GetOptions{})
+	c.Assert(err, tc.Satisfies, k8serrors.IsNotFound)
 }
 
-func (s *validatingWebhookConfigSuite) TestListValidatingWebhookConfiguration(c *gc.C) {
+func (s *validatingWebhookConfigSuite) TestListValidatingWebhookConfiguration(c *tc.C) {
 	// Set up labels for model and app to list resource
-	controllerUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	controllerUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
-	modelUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	modelUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	modelName := "testmodel"
 
@@ -142,8 +144,8 @@ func (s *validatingWebhookConfigSuite) TestListValidatingWebhookConfiguration(c 
 			Labels: labelSet,
 		},
 	}
-	_, err = s.validatingWebhookClient.Create(context.TODO(), vw1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.validatingWebhookClient.Create(c.Context(), vw1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create vw2
 	vw2Name := "vw2"
@@ -153,15 +155,15 @@ func (s *validatingWebhookConfigSuite) TestListValidatingWebhookConfiguration(c 
 			Labels: labelSet,
 		},
 	}
-	_, err = s.validatingWebhookClient.Create(context.TODO(), vw2, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.validatingWebhookClient.Create(c.Context(), vw2, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// List resources
 	crds, err := resources.ListValidatingWebhookConfigs(context.Background(), s.validatingWebhookClient, metav1.ListOptions{
 		LabelSelector: labelSet.String(),
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(crds), gc.Equals, 2)
-	c.Assert(crds[0].GetName(), gc.Equals, vw1Name)
-	c.Assert(crds[1].GetName(), gc.Equals, vw2Name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(crds), tc.Equals, 2)
+	c.Assert(crds[0].GetName(), tc.Equals, vw1Name)
+	c.Assert(crds[1].GetName(), tc.Equals, vw2Name)
 }

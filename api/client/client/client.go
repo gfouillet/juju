@@ -11,36 +11,37 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/api/client/storage"
 	"github.com/juju/juju/api/common"
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/tools"
 )
 
-// Logger is the interface used by the client to log errors.
-type Logger interface {
-	Errorf(string, ...interface{})
-}
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client represents the client-accessible part of the state.
 type Client struct {
 	base.ClientFacade
 	facade base.FacadeCaller
 	conn   api.Connection
-	logger Logger
+	logger logger.Logger
 }
 
 // NewClient returns an object that can be used to access client-specific
 // functionality.
-func NewClient(c api.Connection, logger Logger) *Client {
-	frontend, backend := base.NewClientFacade(c, "Client")
+func NewClient(c api.Connection, logger logger.Logger, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(c, "Client", options...)
 	return &Client{
 		ClientFacade: frontend,
 		facade:       backend,
@@ -59,63 +60,14 @@ type StatusArgs struct {
 }
 
 // Status returns the status of the juju model.
-func (c *Client) Status(args *StatusArgs) (*params.FullStatus, error) {
+func (c *Client) Status(ctx context.Context, args *StatusArgs) (*params.FullStatus, error) {
 	if args == nil {
 		args = &StatusArgs{}
 	}
-	if c.BestAPIVersion() <= 6 {
-		return c.statusV6(args.Patterns, args.IncludeStorage)
-	}
 	var result params.FullStatus
 	p := params.StatusParams{Patterns: args.Patterns, IncludeStorage: args.IncludeStorage}
-	if err := c.facade.FacadeCall("FullStatus", p, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "FullStatus", p, &result); err != nil {
 		return nil, err
-	}
-	return &result, nil
-}
-
-func (c *Client) statusV6(patterns []string, includeStorage bool) (*params.FullStatus, error) {
-	var result params.FullStatus
-	p := params.StatusParams{Patterns: patterns}
-	if err := c.facade.FacadeCall("FullStatus", p, &result); err != nil {
-		return nil, err
-	}
-	// Older servers don't fill out model type, but
-	// we know a missing type is an "iaas" model.
-	if result.Model.Type == "" {
-		result.Model.Type = model.IAAS.String()
-	}
-	if includeStorage {
-		storageClient := storage.NewClient(c.conn)
-		storageDetails, err := storageClient.ListStorageDetails()
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot list storage details")
-		}
-		result.Storage = storageDetails
-
-		filesystemResult, err := storageClient.ListFilesystems(nil)
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot list filesystem details")
-		}
-		if len(filesystemResult) != 1 {
-			return nil, errors.Errorf("cannot list filesystem details: expected one result got %d", len(filesystemResult))
-		}
-		if err := filesystemResult[0].Error; err != nil {
-			return nil, errors.Annotatef(err, "cannot list filesystem details")
-		}
-		result.Filesystems = filesystemResult[0].Result
-
-		volumeResult, err := storageClient.ListVolumes(nil)
-		if err != nil {
-			return nil, errors.Annotatef(err, "cannot list volume details")
-		}
-		if len(volumeResult) != 1 {
-			return nil, errors.Errorf("cannot list volume details: expected one result got %d", len(volumeResult))
-		}
-		if err := volumeResult[0].Error; err != nil {
-			return nil, errors.Annotatef(err, "cannot list volume details")
-		}
-		result.Volumes = volumeResult[0].Result
 	}
 	return &result, nil
 }
@@ -123,7 +75,7 @@ func (c *Client) statusV6(patterns []string, includeStorage bool) (*params.FullS
 // StatusHistory retrieves the last <size> results of
 // <kind:combined|agent|workload|machine|machineinstance|container|containerinstance> status
 // for <name> unit
-func (c *Client) StatusHistory(kind status.HistoryKind, tag names.Tag, filter status.StatusHistoryFilter) (status.History, error) {
+func (c *Client) StatusHistory(ctx context.Context, kind status.HistoryKind, tag names.Tag, filter status.StatusHistoryFilter) (status.History, error) {
 	var results params.StatusHistoryResults
 	args := params.StatusHistoryRequest{
 		Kind: string(kind),
@@ -136,7 +88,7 @@ func (c *Client) StatusHistory(kind status.HistoryKind, tag names.Tag, filter st
 		Tag: tag.String(),
 	}
 	bulkArgs := params.StatusHistoryRequests{Requests: []params.StatusHistoryRequest{args}}
-	err := c.facade.FacadeCall("StatusHistory", bulkArgs, &results)
+	err := c.facade.FacadeCall(ctx, "StatusHistory", bulkArgs, &results)
 	if err != nil {
 		return status.History{}, errors.Trace(err)
 	}
@@ -160,20 +112,10 @@ func (c *Client) StatusHistory(kind status.HistoryKind, tag names.Tag, filter st
 		}
 		// TODO(perrito666) https://launchpad.net/bugs/1577589
 		if !history[i].Kind.Valid() {
-			c.logger.Errorf("history returned an unknown status kind %q", h.Kind)
+			c.logger.Errorf(context.TODO(), "history returned an unknown status kind %q", h.Kind)
 		}
 	}
 	return history, nil
-}
-
-// WatchAll returns an AllWatcher, from which you can request the Next
-// collection of Deltas.
-func (c *Client) WatchAll() (*api.AllWatcher, error) {
-	var info params.AllWatcherId
-	if err := c.facade.FacadeCall("WatchAll", nil, &info); err != nil {
-		return nil, err
-	}
-	return api.NewAllWatcher(c.conn, &info.AllWatcherId), nil
 }
 
 // Close closes the Client's underlying State connection
@@ -186,33 +128,27 @@ func (c *Client) Close() error {
 
 // SetModelAgentVersion sets the model agent-version setting
 // to the given value.
-func (c *Client) SetModelAgentVersion(version version.Number, stream string, ignoreAgentVersions bool) error {
+func (c *Client) SetModelAgentVersion(ctx context.Context, version semversion.Number, stream string, ignoreAgentVersions bool) error {
 	args := params.SetModelAgentVersion{
 		Version:             version,
 		AgentStream:         stream,
 		IgnoreAgentVersions: ignoreAgentVersions,
 	}
-	return c.facade.FacadeCall("SetModelAgentVersion", args, nil)
-}
-
-// AbortCurrentUpgrade aborts and archives the current upgrade
-// synchronisation record, if any.
-func (c *Client) AbortCurrentUpgrade() error {
-	return c.facade.FacadeCall("AbortCurrentUpgrade", nil, nil)
+	return c.facade.FacadeCall(ctx, "SetModelAgentVersion", args, nil)
 }
 
 // UploadTools uploads tools at the specified location to the API server over HTTPS.
-func (c *Client) UploadTools(r io.ReadSeeker, vers version.Binary, additionalSeries ...string) (tools.List, error) {
+func (c *Client) UploadTools(ctx context.Context, r io.ReadSeeker, vers semversion.Binary, additionalSeries ...string) (tools.List, error) {
 	endpoint := fmt.Sprintf("/tools?binaryVersion=%s&series=%s", vers, strings.Join(additionalSeries, ","))
 	contentType := "application/x-tar-gz"
 	var resp params.ToolsResult
-	if err := c.httpPost(r, endpoint, contentType, &resp); err != nil {
+	if err := c.httpPost(ctx, r, endpoint, contentType, &resp); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return resp.ToolsList, nil
 }
 
-func (c *Client) httpPost(content io.ReadSeeker, endpoint, contentType string, response interface{}) error {
+func (c *Client) httpPost(ctx context.Context, content io.ReadSeeker, endpoint, contentType string, response interface{}) error {
 	req, err := http.NewRequest("POST", endpoint, content)
 	if err != nil {
 		return errors.Annotate(err, "cannot create upload request")
@@ -225,7 +161,7 @@ func (c *Client) httpPost(content io.ReadSeeker, endpoint, contentType string, r
 		return errors.Trace(err)
 	}
 
-	if err := httpClient.Do(c.facade.RawAPICaller().Context(), req, response); err != nil {
+	if err := httpClient.Do(ctx, req, response); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -233,6 +169,6 @@ func (c *Client) httpPost(content io.ReadSeeker, endpoint, contentType string, r
 
 // WatchDebugLog returns a channel of structured Log Messages. Only log entries
 // that match the filtering specified in the DebugLogParams are returned.
-func (c *Client) WatchDebugLog(args common.DebugLogParams) (<-chan common.LogMessage, error) {
-	return common.StreamDebugLog(context.TODO(), c.conn, args)
+func (c *Client) WatchDebugLog(ctx context.Context, args common.DebugLogParams) (<-chan common.LogMessage, error) {
+	return common.StreamDebugLog(ctx, c.conn, args)
 }

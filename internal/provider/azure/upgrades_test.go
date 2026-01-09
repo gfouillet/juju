@@ -4,22 +4,21 @@
 package azure_test
 
 import (
-	stdcontext "context"
+	"context"
 	"net/http"
+	stdtesting "testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/internal/provider/azure"
 	"github.com/juju/juju/internal/provider/azure/internal/azuretesting"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type environUpgradeSuite struct {
@@ -30,13 +29,15 @@ type environUpgradeSuite struct {
 	provider environs.EnvironProvider
 	env      environs.Environ
 
-	callCtx           *context.CloudCallContext
-	invalidCredential bool
+	credentialInvalidator environs.CredentialInvalidator
+	invalidatedCredential bool
 }
 
-var _ = gc.Suite(&environUpgradeSuite{})
+func TestEnvironUpgradeSuite(t *stdtesting.T) {
+	tc.Run(t, &environUpgradeSuite{})
+}
 
-func (s *environUpgradeSuite) SetUpTest(c *gc.C) {
+func (s *environUpgradeSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 	s.sender = nil
 	s.requests = nil
@@ -48,34 +49,32 @@ func (s *environUpgradeSuite) SetUpTest(c *gc.C) {
 			return &azuretesting.FakeCredential{}, nil
 		},
 	})
-	s.env = openEnviron(c, s.provider, &s.sender)
+	s.env = openEnviron(c, s.provider, s.credentialInvalidator, &s.sender)
 	s.requests = nil
-	s.invalidCredential = false
-	s.callCtx = &context.CloudCallContext{
-		Context: stdcontext.TODO(),
-		InvalidateCredentialFunc: func(string) error {
-			s.invalidCredential = true
-			return nil
-		},
-	}
+
+	s.invalidatedCredential = false
+	s.credentialInvalidator = azure.CredentialInvalidator(func(context.Context, environs.CredentialInvalidReason) error {
+		s.invalidatedCredential = true
+		return nil
+	})
 }
 
-func (s *environUpgradeSuite) TestEnvironImplementsUpgrader(c *gc.C) {
-	c.Assert(s.env, gc.Implements, new(environs.Upgrader))
+func (s *environUpgradeSuite) TestEnvironImplementsUpgrader(c *tc.C) {
+	c.Assert(s.env, tc.Implements, new(environs.Upgrader))
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperations(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperations(c *tc.C) {
 	upgrader := s.env.(environs.Upgrader)
-	ops := upgrader.UpgradeOperations(s.callCtx, environs.UpgradeOperationsParams{})
-	c.Assert(ops, gc.HasLen, 1)
-	c.Assert(ops[0].TargetVersion, gc.Equals, 1)
-	c.Assert(ops[0].Steps, gc.HasLen, 1)
-	c.Assert(ops[0].Steps[0].Description(), gc.Equals, "Create common resource deployment")
+	ops := upgrader.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})
+	c.Assert(ops, tc.HasLen, 1)
+	c.Assert(ops[0].TargetVersion, tc.Equals, 1)
+	c.Assert(ops[0].Steps, tc.HasLen, 1)
+	c.Assert(ops[0].Steps[0].Description(), tc.Equals, "Create common resource deployment")
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeployment(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeployment(c *tc.C) {
 	upgrader := s.env.(environs.Upgrader)
-	op0 := upgrader.UpgradeOperations(s.callCtx, environs.UpgradeOperationsParams{})[0]
+	op0 := upgrader.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})[0]
 
 	// The existing NSG has two rules: one for Juju API traffic,
 	// and an application-specific rule. Only the latter should
@@ -122,21 +121,21 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeployment(
 	deploymentSender := azuretesting.NewSenderWithValue(&armresources.Deployment{})
 	deploymentSender.PathPattern = ".*/deployments/common"
 	s.sender = append(s.sender, vmListSender, nsgSender, deploymentSender)
-	c.Assert(op0.Steps[0].Run(s.callCtx), jc.ErrorIsNil)
-	c.Assert(s.requests, gc.HasLen, 3)
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.ErrorIsNil)
+	c.Assert(s.requests, tc.HasLen, 3)
 
 	var actual armresources.Deployment
 	unmarshalRequestBody(c, s.requests[2], &actual)
-	c.Assert(actual.Properties, gc.NotNil)
-	c.Assert(actual.Properties.Template, gc.NotNil)
+	c.Assert(actual.Properties, tc.NotNil)
+	c.Assert(actual.Properties.Template, tc.NotNil)
 	resources, ok := actual.Properties.Template.(map[string]interface{})["resources"].([]interface{})
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(resources, gc.HasLen, 2)
+	c.Assert(ok, tc.IsTrue)
+	c.Assert(resources, tc.HasLen, 2)
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentControllerModel(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentControllerModel(c *tc.C) {
 	s.sender = nil
-	env := openEnviron(c, s.provider, &s.sender, testing.Attrs{"name": "controller"})
+	env := openEnviron(c, s.provider, s.credentialInvalidator, &s.sender, testing.Attrs{"name": "controller"})
 	s.requests = nil
 	upgrader := env.(environs.Upgrader)
 
@@ -154,14 +153,14 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentC
 	vmListSender.PathPattern = ".*/virtualMachines"
 	s.sender = append(s.sender, vmListSender)
 
-	op0 := upgrader.UpgradeOperations(s.callCtx, environs.UpgradeOperationsParams{})[0]
-	c.Assert(op0.Steps[0].Run(s.callCtx), jc.ErrorIsNil)
+	op0 := upgrader.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})[0]
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.ErrorIsNil)
 }
 
-func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentControllerModelWithInvalidCredential(c *gc.C) {
+func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentControllerModelWithInvalidCredential(c *tc.C) {
 	s.sender = nil
 	s.requests = nil
-	env := openEnviron(c, s.provider, &s.sender, testing.Attrs{"name": "controller"})
+	env := openEnviron(c, s.provider, s.credentialInvalidator, &s.sender, testing.Attrs{"name": "controller"})
 	upgrader := env.(environs.Upgrader)
 
 	controllerTags := make(map[string]*string)
@@ -172,8 +171,8 @@ func (s *environUpgradeSuite) TestEnvironUpgradeOperationCreateCommonDeploymentC
 	unauthSender.AppendAndRepeatResponse(azuretesting.NewResponseWithStatus("401 Unauthorized", http.StatusUnauthorized), 3) //nolint:bodyclose
 	s.sender = append(s.sender, unauthSender, unauthSender, unauthSender)
 
-	c.Assert(s.invalidCredential, jc.IsFalse)
-	op0 := upgrader.UpgradeOperations(s.callCtx, environs.UpgradeOperationsParams{})[0]
-	c.Assert(op0.Steps[0].Run(s.callCtx), gc.NotNil)
-	c.Assert(s.invalidCredential, jc.IsTrue)
+	c.Assert(s.invalidatedCredential, tc.IsFalse)
+	op0 := upgrader.UpgradeOperations(c.Context(), environs.UpgradeOperationsParams{})[0]
+	c.Assert(op0.Steps[0].Run(c.Context()), tc.NotNil)
+	c.Assert(s.invalidatedCredential, tc.IsTrue)
 }

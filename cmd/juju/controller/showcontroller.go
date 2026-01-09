@@ -4,25 +4,25 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelconfig"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/bootstrap"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/pki"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -99,37 +99,36 @@ func (c *showControllerCommand) SetClientStore(store jujuclient.ClientStore) {
 
 // ControllerAccessAPI defines a subset of the api/controller/Client API.
 type ControllerAccessAPI interface {
-	GetControllerAccess(user string) (permission.Access, error)
-	ModelStatus(models ...names.ModelTag) ([]base.ModelStatus, error)
-	AllModels() ([]base.UserModel, error)
-	MongoVersion() (string, error)
-	IdentityProviderURL() (string, error)
-	ControllerVersion() (controller.ControllerVersion, error)
+	GetControllerAccess(ctx context.Context, user string) (permission.Access, error)
+	ModelStatus(ctx context.Context, models ...names.ModelTag) ([]base.ModelStatus, error)
+	AllModels(ctx context.Context) ([]base.UserModel, error)
+	IdentityProviderURL(ctx context.Context) (string, error)
+	ControllerVersion(ctx context.Context) (controller.ControllerVersion, error)
 	Close() error
 }
 
 // ModelConfigAPI defines a subset of the model config API.
 type ModelConfigAPI interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 	Close() error
 }
 
-func (c *showControllerCommand) getAPI(controllerName string) (ControllerAccessAPI, error) {
+func (c *showControllerCommand) getAPI(ctx context.Context, controllerName string) (ControllerAccessAPI, error) {
 	if c.api != nil {
 		return c.api(controllerName), nil
 	}
-	api, err := c.NewAPIRoot(c.store, controllerName, "")
+	api, err := c.NewAPIRoot(ctx, c.store, controllerName, "")
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
 	return controller.NewClient(api), nil
 }
 
-func (c *showControllerCommand) getModelConfigAPI(controllerName string) (ModelConfigAPI, error) {
+func (c *showControllerCommand) getModelConfigAPI(ctx context.Context, controllerName string) (ModelConfigAPI, error) {
 	if c.api != nil {
 		return c.modelConfigAPI(controllerName), nil
 	}
-	api, err := c.NewAPIRoot(c.store, controllerName, "")
+	api, err := c.NewAPIRoot(ctx, c.store, controllerName, "")
 	if err != nil {
 		return nil, fmt.Errorf("opening API connection for controller %q: %w", controllerName, err)
 	}
@@ -141,7 +140,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 	controllerNames := c.controllerNames
 	if len(controllerNames) == 0 {
 		currentController, err := modelcmd.DetermineCurrentController(c.store)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			return errors.New("there is no active controller")
 		} else if err != nil {
 			return errors.Trace(err)
@@ -157,13 +156,13 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 			return err
 		}
 		var access string
-		client, err := c.getAPI(controllerName)
+		client, err := c.getAPI(ctx, controllerName)
 		if err != nil {
 			return err
 		}
 		defer client.Close()
 
-		modelConfigClient, err := c.getModelConfigAPI(controllerName)
+		modelConfigClient, err := c.getModelConfigAPI(ctx, controllerName)
 		if err != nil {
 			return err
 		}
@@ -172,7 +171,6 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 		var (
 			details           ShowControllerDetails
 			allModels         []base.UserModel
-			mongoVersion      string
 			controllerVersion string
 			agentGitCommit    string
 		)
@@ -186,11 +184,11 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 			controllerVersion = c.controllerModelVersion(modelConfigClient, ctx)
 		}
 
-		ver, err := client.ControllerVersion()
-		if err != nil && !errors.IsNotSupported(err) {
+		ver, err := client.ControllerVersion(ctx)
+		if err != nil && !errors.Is(err, errors.NotSupported) {
 			details.Errors = append(details.Errors, err.Error())
 			agentGitCommit = "(error)"
-		} else if !errors.IsNotSupported(err) {
+		} else if !errors.Is(err, errors.NotSupported) {
 			one.AgentVersion = ver.Version
 			agentGitCommit = ver.GitCommit
 		}
@@ -208,7 +206,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 		// has Superuser access we default to an empty model list which
 		// allows us to display non-model controller details.
 		if permission.Access(access).EqualOrGreaterControllerAccessThan(permission.SuperuserAccess) {
-			if allModels, err = client.AllModels(); err != nil {
+			if allModels, err = client.AllModels(ctx); err != nil {
 				details.Errors = append(details.Errors, err.Error())
 			} else {
 				// Update client store.
@@ -216,17 +214,11 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 					details.Errors = append(details.Errors, err.Error())
 				}
 			}
-			// Fetch mongoVersion if the apiserver supports it
-			mongoVersion, err = client.MongoVersion()
-			if err != nil && !errors.IsNotSupported(err) {
-				details.Errors = append(details.Errors, err.Error())
-				mongoVersion = "(error)"
-			}
 		}
 
 		// Fetch identityURL if the apiserver supports it
-		identityURL, err := client.IdentityProviderURL()
-		if err != nil && !errors.IsNotSupported(err) {
+		identityURL, err := client.IdentityProviderURL(ctx)
+		if err != nil && !errors.Is(err, errors.NotSupported) {
 			details.Errors = append(details.Errors, err.Error())
 			identityURL = "(error)"
 		}
@@ -239,7 +231,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 				controllerModelUUID = m.UUID
 			}
 		}
-		modelStatusResults, err := client.ModelStatus(modelTags...)
+		modelStatusResults, err := client.ModelStatus(ctx.Context, modelTags...)
 		if err != nil {
 			details.Errors = append(details.Errors, err.Error())
 		}
@@ -248,7 +240,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 		machineCount := 0
 		for _, r := range modelStatusResults {
 			if r.Error != nil {
-				if !errors.IsNotFound(r.Error) {
+				if !errors.Is(r.Error, errors.NotFound) {
 					details.Errors = append(details.Errors, r.Error.Error())
 				}
 				continue
@@ -267,7 +259,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 		}
 
 		c.convertControllerForShow(&details, controllerName, one, access, allModels,
-			modelStatusResults, mongoVersion, controllerVersion, agentGitCommit, identityURL)
+			modelStatusResults, controllerVersion, agentGitCommit, identityURL)
 		controllers[controllerName] = details
 	}
 	return c.out.Write(ctx, controllers)
@@ -275,7 +267,7 @@ func (c *showControllerCommand) Run(ctx *cmd.Context) error {
 
 func (c *showControllerCommand) userAccess(client ControllerAccessAPI, ctx *cmd.Context, user string) string {
 	var access string
-	userAccess, err := client.GetControllerAccess(user)
+	userAccess, err := client.GetControllerAccess(ctx, user)
 	if err == nil {
 		access = string(userAccess)
 	} else {
@@ -292,7 +284,7 @@ func (c *showControllerCommand) userAccess(client ControllerAccessAPI, ctx *cmd.
 
 func (c *showControllerCommand) controllerModelVersion(client ModelConfigAPI, ctx *cmd.Context) string {
 	var ver string
-	mc, err := client.ModelGet()
+	mc, err := client.ModelGet(ctx)
 	if err != nil {
 		code := params.ErrCode(err)
 		if code != "" {
@@ -377,12 +369,6 @@ type MachineDetails struct {
 
 	// InstanceID holds the cloud instance id of the machine.
 	InstanceID string `yaml:"instance-id,omitempty" json:"instance-id,omitempty"`
-
-	// HAStatus holds information informing of the HA status of the machine.
-	HAStatus string `yaml:"ha-status,omitempty" json:"ha-status,omitempty"`
-
-	// HAPrimary is set to true for a primary controller machine in HA.
-	HAPrimary bool `yaml:"ha-primary,omitempty" json:"ha-primary,omitempty"`
 }
 
 // ModelDetails holds details of a model to show.
@@ -419,7 +405,6 @@ func (c *showControllerCommand) convertControllerForShow(
 	access string,
 	allModels []base.UserModel,
 	modelStatusResults []base.ModelStatus,
-	mongoVersion string,
 	controllerVersion string,
 	agentGitCommit string,
 	identityURL string,
@@ -437,7 +422,6 @@ func (c *showControllerCommand) convertControllerForShow(
 		AgentVersion:           details.AgentVersion,
 		AgentGitCommit:         agentGitCommit,
 		ControllerModelVersion: controllerVersion,
-		MongoVersion:           mongoVersion,
 		IdentityURL:            identityURL,
 	}
 	c.convertModelsForShow(controllerName, controller, allModels, modelStatusResults)
@@ -472,7 +456,7 @@ func (c *showControllerCommand) convertControllerForShow(
 
 func (c *showControllerCommand) convertAccountsForShow(controllerName string, controller *ShowControllerDetails, access string) {
 	storeDetails, err := c.store.AccountDetails(controllerName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		controller.Errors = append(controller.Errors, err.Error())
 	}
 	if storeDetails == nil {
@@ -505,7 +489,7 @@ func (c *showControllerCommand) convertModelsForShow(
 		}
 		result := modelStatus[i]
 		if result.Error != nil {
-			if !errors.IsNotFound(result.Error) {
+			if !errors.Is(result.Error, errors.NotFound) {
 				controller.Errors = append(controller.Errors, errors.Annotatef(result.Error, "model uuid %v", m.UUID).Error())
 			}
 		} else {
@@ -529,7 +513,7 @@ func (c *showControllerCommand) convertModelsForShow(
 	}
 	var err error
 	controller.CurrentModel, err = c.store.CurrentModel(controllerName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		controller.Errors = append(controller.Errors, err.Error())
 	}
 }
@@ -548,42 +532,12 @@ func (c *showControllerCommand) convertMachinesForShow(
 		nodes = controller.Machines
 	}
 
-	numControllers := 0
 	for _, m := range controllerModel.Machines {
-		if !m.WantsVote {
-			continue
-		}
-		numControllers++
-	}
-	for _, m := range controllerModel.Machines {
-		if !m.WantsVote {
-			// Skip non controller machines.
-			continue
-		}
 		instId := m.InstanceId
 		if instId == "" {
 			instId = "(unprovisioned)"
 		}
 		details := MachineDetails{InstanceID: instId}
-		if numControllers > 1 {
-			details.HAStatus = haStatus(m.HasVote, m.WantsVote, m.Status)
-			if m.HAPrimary != nil && *m.HAPrimary {
-				details.HAPrimary = *m.HAPrimary
-			}
-		}
 		nodes[m.Id] = details
 	}
-}
-
-func haStatus(hasVote bool, wantsVote bool, statusStr string) string {
-	if statusStr == string(status.Down) {
-		return "down, lost connection"
-	}
-	if !wantsVote {
-		return ""
-	}
-	if hasVote {
-		return "ha-enabled"
-	}
-	return "ha-pending"
 }

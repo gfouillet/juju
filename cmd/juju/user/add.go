@@ -4,16 +4,17 @@
 package user
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -40,7 +41,7 @@ const usageExamples = `
 
 // AddUserAPI defines the usermanager API methods that the add command uses.
 type AddUserAPI interface {
-	AddUser(username, displayName, password string) (names.UserTag, []byte, error)
+	AddUser(ctx context.Context, username, displayName, password string) (names.UserTag, []byte, error)
 	Close() error
 }
 
@@ -95,7 +96,7 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 	api := c.api
 	if api == nil {
 		var err error
-		api, err = c.NewUserManagerAPIClient()
+		api, err = c.NewUserManagerAPIClient(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -105,7 +106,7 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 	// Add a user without a password. This will generate a temporary
 	// secret key, which we'll print out for the user to supply to
 	// "juju register".
-	_, secretKey, err := api.AddUser(c.User, c.DisplayName, "")
+	_, secretKey, err := api.AddUser(ctx, c.User, c.DisplayName, "")
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "add a user")

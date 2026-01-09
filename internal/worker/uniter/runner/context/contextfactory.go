@@ -4,28 +4,28 @@
 package context
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/juju/api/types"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/internal/worker/uniter/runner/context/payloads"
 	"github.com/juju/juju/internal/worker/uniter/runner/context/resources"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/rpc/params"
-	jujusecrets "github.com/juju/juju/secrets"
 )
 
 // CommandInfo specifies the information necessary to run a command.
@@ -43,13 +43,13 @@ type CommandInfo struct {
 // relevant to a specific unit.
 type ContextFactory interface {
 	// CommandContext creates a new context for running a juju command.
-	CommandContext(commandInfo CommandInfo) (*HookContext, error)
+	CommandContext(ctx context.Context, commandInfo CommandInfo) (*HookContext, error)
 
 	// HookContext creates a new context for running a juju hook.
-	HookContext(hookInfo hook.Info) (*HookContext, error)
+	HookContext(ctx context.Context, hookInfo hook.Info) (*HookContext, error)
 
 	// ActionContext creates a new context for running a juju action.
-	ActionContext(actionData *ActionData) (*HookContext, error)
+	ActionContext(ctx context.Context, actionData *ActionData) (*HookContext, error)
 }
 
 // StorageContextAccessor is an interface providing access to StorageContexts
@@ -65,29 +65,8 @@ type StorageContextAccessor interface {
 	Storage(names.StorageTag) (jujuc.ContextStorageAttachment, error)
 }
 
-// SecretsAccessor is used by the hook context to access the secrets backend.
-type SecretsAccessor interface {
-	// CreateSecretURIs is used by secret-add to get URIs
-	// for added secrets.
-	CreateSecretURIs(int) ([]*secrets.URI, error)
-
-	// SecretMetadata is used by secrets-get to fetch
-	// metadata for secrets.
-	SecretMetadata() ([]secrets.SecretMetadata, error)
-
-	// UnitOwnedSecretsAndRevisions returns all the secrets owned by the unit
-	// with all the associated revisions.
-	UnitOwnedSecretsAndRevisions(unit names.UnitTag) ([]secrets.SecretURIWithRevisions, error)
-
-	// OwnedSecretRevisions returns the revisions for a secret.
-	OwnedSecretRevisions(names.UnitTag, *secrets.URI) ([]int, error)
-
-	// SecretRotated records the outcome of rotating a secret.
-	SecretRotated(uri string, oldRevision int) error
-}
-
 // SecretsBackendGetter creates a secrets backend client.
-type SecretsBackendGetter func() (jujusecrets.BackendsClient, error)
+type SecretsBackendGetter func() (api.SecretsBackend, error)
 
 // RelationsFunc is used to get snapshots of relation membership at context
 // creation time.
@@ -95,15 +74,14 @@ type RelationsFunc func() map[int]*RelationInfo
 
 type contextFactory struct {
 	// API connection fields; unit should be deprecated, but isn't yet.
-	unit                 *uniter.Unit
-	state                *uniter.State
-	resources            *uniter.ResourcesFacadeClient
-	payloads             *uniter.PayloadFacadeClient
-	secretsClient        SecretsAccessor
+	unit                 api.Unit
+	client               api.UniterClient
+	resources            resources.OpenedResourceClient
+	secretsClient        api.SecretsAccessor
 	secretsBackendGetter SecretsBackendGetter
 	tracker              leadership.Tracker
 
-	logger loggo.Logger
+	logger logger.Logger
 
 	// Fields that shouldn't change in a factory's lifetime.
 	paths      Paths
@@ -123,42 +101,48 @@ type contextFactory struct {
 // FactoryConfig contains configuration values
 // for the context factory.
 type FactoryConfig struct {
-	State                *uniter.State
-	SecretsClient        SecretsAccessor
+	Uniter               api.UniterClient
+	SecretsClient        api.SecretsAccessor
 	SecretsBackendGetter SecretsBackendGetter
-	Unit                 *uniter.Unit
-	Resources            *uniter.ResourcesFacadeClient
-	Payloads             *uniter.PayloadFacadeClient
+	Unit                 api.Unit
+	Resources            resources.OpenedResourceClient
 	Tracker              leadership.Tracker
 	GetRelationInfos     RelationsFunc
 	Paths                Paths
 	Clock                Clock
-	Logger               loggo.Logger
+	Logger               logger.Logger
 }
 
 // NewContextFactory returns a ContextFactory capable of creating execution contexts backed
 // by the supplied unit's supplied API connection.
-func NewContextFactory(config FactoryConfig) (ContextFactory, error) {
-	m, err := config.State.Model()
+func NewContextFactory(ctx context.Context, config FactoryConfig) (ContextFactory, error) {
+	m, err := config.Uniter.Model(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+
+	// Convert the API model type to the internal model type.
+	modelType := model.ModelType(m.ModelType)
+	if !modelType.IsValid() {
+		return nil, errors.Errorf("invalid model type: %q", m.ModelType)
+	}
+
 	var (
 		machineTag names.MachineTag
 		zone       string
 	)
-	if m.ModelType == model.IAAS {
-		machineTag, err = config.Unit.AssignedMachine()
+	if m.ModelType == types.IAAS {
+		machineTag, err = config.Unit.AssignedMachine(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
-		zone, err = config.Unit.AvailabilityZone()
+		zone, err = config.Unit.AvailabilityZone(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
-	principal, ok, err := config.Unit.PrincipalName()
+	principal, ok, err := config.Unit.PrincipalName(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	} else if !ok {
@@ -167,9 +151,8 @@ func NewContextFactory(config FactoryConfig) (ContextFactory, error) {
 
 	f := &contextFactory{
 		unit:                 config.Unit,
-		state:                config.State,
+		client:               config.Uniter,
 		resources:            config.Resources,
-		payloads:             config.Payloads,
 		secretsClient:        config.SecretsClient,
 		secretsBackendGetter: config.SecretsBackendGetter,
 		tracker:              config.Tracker,
@@ -183,7 +166,7 @@ func NewContextFactory(config FactoryConfig) (ContextFactory, error) {
 		clock:                config.Clock,
 		zone:                 zone,
 		principal:            principal,
-		modelType:            m.ModelType,
+		modelType:            modelType,
 	}
 	return f, nil
 }
@@ -201,15 +184,13 @@ func (f *contextFactory) newId(name string) (string, error) {
 }
 
 // coreContext creates a new context with all unspecialised fields filled in.
-func (f *contextFactory) coreContext() (*HookContext, error) {
-	leadershipContext := newLeadershipContext(
-		f.state.LeadershipSettings,
+func (f *contextFactory) coreContext(stdCtx context.Context) (*HookContext, error) {
+	leadershipContext := NewLeadershipContext(
 		f.tracker,
-		f.unit.Name(),
 	)
 	ctx := &HookContext{
 		unit:                 f.unit,
-		state:                f.state,
+		uniter:               f.client,
 		secretsClient:        f.secretsClient,
 		secretsBackendGetter: f.secretsBackendGetter,
 		LeadershipContext:    leadershipContext,
@@ -231,23 +212,18 @@ func (f *contextFactory) coreContext() (*HookContext, error) {
 		},
 		storageAttachmentCache: make(map[names.StorageTag]jujuc.ContextStorageAttachment),
 	}
-	payloadCtx, err := payloads.NewContext(f.payloads)
-	if err != nil {
-		return nil, err
-	}
-	ctx.PayloadsHookContext = payloadCtx
-	if err := f.updateContext(ctx); err != nil {
+	if err := f.updateContext(stdCtx, ctx); err != nil {
 		return nil, err
 	}
 	return ctx, nil
 }
 
 // ActionContext is part of the ContextFactory interface.
-func (f *contextFactory) ActionContext(actionData *ActionData) (*HookContext, error) {
+func (f *contextFactory) ActionContext(stdCtx context.Context, actionData *ActionData) (*HookContext, error) {
 	if actionData == nil {
 		return nil, errors.New("nil actionData specified")
 	}
-	ctx, err := f.coreContext()
+	ctx, err := f.coreContext(stdCtx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -260,8 +236,8 @@ func (f *contextFactory) ActionContext(actionData *ActionData) (*HookContext, er
 }
 
 // HookContext is part of the ContextFactory interface.
-func (f *contextFactory) HookContext(hookInfo hook.Info) (*HookContext, error) {
-	ctx, err := f.coreContext()
+func (f *contextFactory) HookContext(stdCtx context.Context, hookInfo hook.Info) (*HookContext, error) {
+	ctx, err := f.coreContext(stdCtx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -293,7 +269,7 @@ func (f *contextFactory) HookContext(hookInfo hook.Info) (*HookContext, error) {
 		}
 		hookName = fmt.Sprintf("%s-%s", storageName, hookName)
 		// Cache the storage this hook context is for.
-		_, err = ctx.Storage(ctx.storageTag)
+		_, err = ctx.Storage(stdCtx, ctx.storageTag)
 		if err != nil && !errors.Is(err, errors.NotProvisioned) {
 			return nil, errors.Annotatef(err, "could not retrieve storage for id: %v", hookInfo.StorageId)
 		}
@@ -310,9 +286,6 @@ func (f *contextFactory) HookContext(hookInfo hook.Info) (*HookContext, error) {
 			ctx.checkName = hookInfo.CheckName
 		}
 	}
-	if hookInfo.Kind == hooks.PreSeriesUpgrade {
-		ctx.baseUpgradeTarget = hookInfo.MachineUpgradeTarget
-	}
 	if hookInfo.Kind.IsSecret() {
 		ctx.secretURI = hookInfo.SecretURI
 		ctx.secretLabel = hookInfo.SecretLabel
@@ -320,7 +293,7 @@ func (f *contextFactory) HookContext(hookInfo hook.Info) (*HookContext, error) {
 			ctx.secretRevision = hookInfo.SecretRevision
 		}
 		if ctx.secretLabel == "" {
-			info, err := ctx.SecretMetadata()
+			info, err := ctx.SecretMetadata(stdCtx)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -341,8 +314,8 @@ func (f *contextFactory) HookContext(hookInfo hook.Info) (*HookContext, error) {
 }
 
 // CommandContext is part of the ContextFactory interface.
-func (f *contextFactory) CommandContext(commandInfo CommandInfo) (*HookContext, error) {
-	ctx, err := f.coreContext()
+func (f *contextFactory) CommandContext(stdCtx context.Context, commandInfo CommandInfo) (*HookContext, error) {
+	ctx, err := f.coreContext(stdCtx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -399,31 +372,23 @@ func (f *contextFactory) getContextRelations() map[int]*ContextRelation {
 // piece of information we expose to the charm but which we fail to report changes
 // to via hooks. Furthermore, the fact that we make multiple API calls at this
 // time, rather than grabbing everything we need in one go, is unforgivably yucky.
-func (f *contextFactory) updateContext(ctx *HookContext) (err error) {
+func (f *contextFactory) updateContext(stdCtx context.Context, ctx *HookContext) (err error) {
 	defer func() { err = errors.Trace(err) }()
 
-	ctx.apiAddrs, err = f.state.APIAddresses()
+	ctx.apiAddrs, err = f.client.APIAddresses(stdCtx)
 	if err != nil {
 		return err
 	}
 
-	// SLA level is removed in 4.0, so the facade is not available.
-	// Setting the SLA level to empty string is a valid SLA level (slaNone).
-	sla, err := f.state.SLALevel()
-	if err != nil && !errors.Is(err, errors.NotImplemented) {
-		return errors.Annotate(err, "could not retrieve the SLA level")
-	}
-	ctx.slaLevel = sla
-
-	apiVersion, err := f.state.CloudAPIVersion()
+	apiVersion, err := f.client.CloudAPIVersion(stdCtx)
 	if err != nil {
-		f.logger.Warningf("could not retrieve the cloud API version: %v", err)
+		f.logger.Warningf(stdCtx, "could not retrieve the cloud API version: %v", err)
 	}
 	ctx.cloudAPIVersion = apiVersion
 
 	// TODO(fwereade) 23-10-2014 bug 1384572
 	// Nothing here should ever be getting the environ config directly.
-	modelConfig, err := f.state.ModelConfig()
+	modelConfig, err := f.client.ModelConfig(stdCtx)
 	if err != nil {
 		return err
 	}
@@ -434,16 +399,16 @@ func (f *contextFactory) updateContext(ctx *HookContext) (err error) {
 	var appPortRanges map[names.UnitTag]network.GroupedPortRanges
 	switch f.modelType {
 	case model.IAAS:
-		if machPortRanges, err = f.state.OpenedMachinePortRangesByEndpoint(f.machineTag); err != nil {
+		if machPortRanges, err = f.client.OpenedMachinePortRangesByEndpoint(stdCtx, f.machineTag); err != nil {
 			return errors.Trace(err)
 		}
 
-		ctx.privateAddress, err = f.unit.PrivateAddress()
+		ctx.privateAddress, err = f.unit.PrivateAddress(stdCtx)
 		if err != nil && !params.IsCodeNoAddressSet(err) {
-			f.logger.Warningf("cannot get legacy private address for %v: %v", f.unit.Name(), err)
+			f.logger.Warningf(stdCtx, "cannot get legacy private address for %v: %v", f.unit.Name(), err)
 		}
 	case model.CAAS:
-		if appPortRanges, err = f.state.OpenedPortRangesByEndpoint(); err != nil && !errors.Is(err, errors.NotSupported) {
+		if appPortRanges, err = f.client.OpenedPortRangesByEndpoint(stdCtx); err != nil && !errors.Is(err, errors.NotSupported) {
 			return errors.Trace(err)
 		}
 	}

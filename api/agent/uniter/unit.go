@@ -4,31 +4,30 @@
 package uniter
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/common"
 	apiwatcher "github.com/juju/juju/api/watcher"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
 )
 
 // Unit represents a juju unit as seen by a uniter worker.
 type Unit struct {
-	st           *State
-	tag          names.UnitTag
-	life         life.Value
-	resolvedMode params.ResolvedMode
-	providerID   string
+	client     *Client
+	tag        names.UnitTag
+	life       life.Value
+	providerID string
 }
 
 // Tag returns the unit's tag.
@@ -57,19 +56,44 @@ func (u *Unit) Life() life.Value {
 }
 
 // Resolved returns the unit's resolved mode value.
-func (u *Unit) Resolved() params.ResolvedMode {
-	return u.resolvedMode
+func (u *Unit) Resolved(ctx context.Context) (params.ResolvedMode, error) {
+	var results params.ResolvedModeResults
+	args := params.Entities{
+		Entities: []params.Entity{
+			{Tag: u.tag.String()},
+		},
+	}
+	err := u.client.facade.FacadeCall(ctx, "Resolved", args, &results)
+	if err != nil {
+		return "", errors.Trace(apiservererrors.RestoreError(err))
+	}
+	if len(results.Results) != 1 {
+		return "", errors.Errorf("expected 1 result, got %d", len(results.Results))
+	}
+	result := results.Results[0]
+	if result.Error != nil {
+		// We should be able to use apiserver.common.RestoreError here,
+		// but because of poor design, it causes import errors.
+		if params.IsCodeNotFound(result.Error) {
+			return "", errors.NewNotFound(result.Error, "")
+		}
+		return "", errors.Trace(result.Error)
+	}
+
+	return result.Mode, nil
 }
 
 // Refresh updates the cached local copy of the unit's data.
-func (u *Unit) Refresh() error {
+//
+// Deprecated: Please use a purpose-built getter instead.
+func (u *Unit) Refresh(ctx context.Context) error {
 	var results params.UnitRefreshResults
 	args := params.Entities{
 		Entities: []params.Entity{
 			{Tag: u.tag.String()},
 		},
 	}
-	err := u.st.facade.FacadeCall("Refresh", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "Refresh", args, &results)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -87,20 +111,19 @@ func (u *Unit) Refresh() error {
 	}
 
 	u.life = result.Life
-	u.resolvedMode = result.Resolved
 	u.providerID = result.ProviderID
 	return nil
 }
 
 // SetUnitStatus sets the status of the unit.
-func (u *Unit) SetUnitStatus(unitStatus status.Status, info string, data map[string]interface{}) error {
+func (u *Unit) SetUnitStatus(ctx context.Context, unitStatus status.Status, info string, data map[string]interface{}) error {
 	var result params.ErrorResults
 	args := params.SetStatus{
 		Entities: []params.EntityStatusArgs{
 			{Tag: u.tag.String(), Status: unitStatus.String(), Info: info, Data: data},
 		},
 	}
-	err := u.st.facade.FacadeCall("SetUnitStatus", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "SetUnitStatus", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -108,14 +131,14 @@ func (u *Unit) SetUnitStatus(unitStatus status.Status, info string, data map[str
 }
 
 // UnitStatus gets the status details of the unit.
-func (u *Unit) UnitStatus() (params.StatusResult, error) {
+func (u *Unit) UnitStatus(ctx context.Context) (params.StatusResult, error) {
 	var results params.StatusResults
 	args := params.Entities{
 		Entities: []params.Entity{
 			{Tag: u.tag.String()},
 		},
 	}
-	err := u.st.facade.FacadeCall("UnitStatus", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "UnitStatus", args, &results)
 	if err != nil {
 		return params.StatusResult{}, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -130,14 +153,14 @@ func (u *Unit) UnitStatus() (params.StatusResult, error) {
 }
 
 // SetAgentStatus sets the status of the unit agent.
-func (u *Unit) SetAgentStatus(agentStatus status.Status, info string, data map[string]interface{}) error {
+func (u *Unit) SetAgentStatus(ctx context.Context, agentStatus status.Status, info string, data map[string]interface{}) error {
 	var result params.ErrorResults
 	args := params.SetStatus{
 		Entities: []params.EntityStatusArgs{
 			{Tag: u.tag.String(), Status: agentStatus.String(), Info: info, Data: data},
 		},
 	}
-	err := u.st.facade.FacadeCall("SetAgentStatus", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "SetAgentStatus", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -146,31 +169,59 @@ func (u *Unit) SetAgentStatus(agentStatus status.Status, info string, data map[s
 
 // EnsureDead sets the unit lifecycle to Dead if it is Alive or
 // Dying. It does nothing otherwise.
-func (u *Unit) EnsureDead() error {
+func (u *Unit) EnsureDead(ctx context.Context) error {
 	var result params.ErrorResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("EnsureDead", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "EnsureDead", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
 	return result.OneError()
 }
 
-// Watch returns a watcher for observing changes to the unit.
-func (u *Unit) Watch() (watcher.NotifyWatcher, error) {
-	return common.Watch(u.st.facade, "Watch", u.tag)
+// Watch returns a watcher for observing changes to an application.
+func (s *Unit) Watch(ctx context.Context) (watcher.NotifyWatcher, error) {
+	arg := params.Entity{Tag: s.tag.String()}
+	var result params.NotifyWatchResult
+
+	err := s.client.facade.FacadeCall(ctx, "WatchUnit", arg, &result)
+	if err != nil {
+		return nil, errors.Trace(apiservererrors.RestoreError(err))
+	}
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return apiwatcher.NewNotifyWatcher(s.client.facade.RawAPICaller(), result), nil
+}
+
+// WatchResolveMode returns a NotifyWatcher that will send notifications when
+// the resolve mode of the unit changes.
+func (s *Unit) WatchResolveMode(ctx context.Context) (watcher.NotifyWatcher, error) {
+	arg := params.Entity{Tag: s.tag.String()}
+	var result params.NotifyWatchResult
+
+	err := s.client.facade.FacadeCall(ctx, "WatchUnitResolveMode", arg, &result)
+	if err != nil {
+		return nil, errors.Trace(apiservererrors.RestoreError(err))
+	}
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return apiwatcher.NewNotifyWatcher(s.client.facade.RawAPICaller(), result), nil
 }
 
 // WatchRelations returns a StringsWatcher that notifies of changes to
 // the lifecycles of relations involving u.
-func (u *Unit) WatchRelations() (watcher.StringsWatcher, error) {
+func (u *Unit) WatchRelations(ctx context.Context) (watcher.StringsWatcher, error) {
 	var results params.StringsWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("WatchUnitRelations", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "WatchUnitRelations", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -181,19 +232,19 @@ func (u *Unit) WatchRelations() (watcher.StringsWatcher, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	w := apiwatcher.NewStringsWatcher(u.st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewStringsWatcher(u.client.facade.RawAPICaller(), result)
 	return w, nil
 }
 
 // Application returns the unit's application.
-func (u *Unit) Application() (*Application, error) {
+func (u *Unit) Application(ctx context.Context) (*Application, error) {
 	application := &Application{
-		st:  u.st,
-		tag: u.ApplicationTag(),
+		client: u.client,
+		tag:    u.ApplicationTag(),
 	}
 	// Call Refresh() immediately to get the up-to-date
 	// life and other needed locally cached fields.
-	err := application.Refresh()
+	err := application.Refresh(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -204,12 +255,12 @@ func (u *Unit) Application() (*Application, error) {
 // available to the unit. Unset values will be replaced with the default
 // value for the associated option, and may thus be nil when no default is
 // specified.
-func (u *Unit) ConfigSettings() (charm.Settings, error) {
+func (u *Unit) ConfigSettings(ctx context.Context) (charm.Config, error) {
 	var results params.ConfigSettingsResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("ConfigSettings", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "ConfigSettings", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -220,7 +271,7 @@ func (u *Unit) ConfigSettings() (charm.Settings, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	return charm.Settings(result.Settings), nil
+	return charm.Config(result.Settings), nil
 }
 
 // ApplicationName returns the application name.
@@ -242,12 +293,12 @@ func (u *Unit) ApplicationTag() names.ApplicationTag {
 // life is just set to Dying; but if a principal unit that is not assigned
 // to a provisioned machine is Destroyed, it will be removed from state
 // directly.
-func (u *Unit) Destroy() error {
+func (u *Unit) Destroy(ctx context.Context) error {
 	var result params.ErrorResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("Destroy", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "Destroy", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -255,12 +306,12 @@ func (u *Unit) Destroy() error {
 }
 
 // DestroyAllSubordinates destroys all subordinates of the unit.
-func (u *Unit) DestroyAllSubordinates() error {
+func (u *Unit) DestroyAllSubordinates(ctx context.Context) error {
 	var result params.ErrorResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("DestroyAllSubordinates", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "DestroyAllSubordinates", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -270,13 +321,13 @@ func (u *Unit) DestroyAllSubordinates() error {
 // AssignedMachine returns the unit's assigned machine tag or an error
 // satisfying params.IsCodeNotAssigned when the unit has no assigned
 // machine..
-func (u *Unit) AssignedMachine() (names.MachineTag, error) {
+func (u *Unit) AssignedMachine(ctx context.Context) (names.MachineTag, error) {
 	var invalidTag names.MachineTag
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("AssignedMachine", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "AssignedMachine", args, &results)
 	if err != nil {
 		return invalidTag, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -295,12 +346,12 @@ func (u *Unit) AssignedMachine() (names.MachineTag, error) {
 //
 // NOTE: This differs from state.Unit.PrincipalName() by returning an
 // error as well, because it needs to make an API call.
-func (u *Unit) PrincipalName() (string, bool, error) {
+func (u *Unit) PrincipalName(ctx context.Context) (string, bool, error) {
 	var results params.StringBoolResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("GetPrincipal", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "GetPrincipal", args, &results)
 	if err != nil {
 		return "", false, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -323,12 +374,12 @@ func (u *Unit) PrincipalName() (string, bool, error) {
 }
 
 // HasSubordinates returns the tags of any subordinate units.
-func (u *Unit) HasSubordinates() (bool, error) {
+func (u *Unit) HasSubordinates(ctx context.Context) (bool, error) {
 	var results params.BoolResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("HasSubordinates", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "HasSubordinates", args, &results)
 	if err != nil {
 		return false, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -350,12 +401,12 @@ func (u *Unit) HasSubordinates() (bool, error) {
 //
 // TODO(dimitern): We might be able to drop this, once we have machine
 // addresses implemented fully. See also LP bug 1221798.
-func (u *Unit) PublicAddress() (string, error) {
+func (u *Unit) PublicAddress(ctx context.Context) (string, error) {
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("PublicAddress", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "PublicAddress", args, &results)
 	if err != nil {
 		return "", errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -377,12 +428,12 @@ func (u *Unit) PublicAddress() (string, error) {
 //
 // TODO(dimitern): We might be able to drop this, once we have machine
 // addresses implemented fully. See also LP bug 1221798.
-func (u *Unit) PrivateAddress() (string, error) {
+func (u *Unit) PrivateAddress(ctx context.Context) (string, error) {
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("PrivateAddress", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "PrivateAddress", args, &results)
 	if err != nil {
 		return "", errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -397,12 +448,12 @@ func (u *Unit) PrivateAddress() (string, error) {
 }
 
 // AvailabilityZone returns the availability zone of the unit.
-func (u *Unit) AvailabilityZone() (string, error) {
+func (u *Unit) AvailabilityZone(ctx context.Context) (string, error) {
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	if err := u.st.facade.FacadeCall("AvailabilityZone", args, &results); err != nil {
+	if err := u.client.facade.FacadeCall(ctx, "AvailabilityZone", args, &results); err != nil {
 		return "", errors.Trace(apiservererrors.RestoreError(err))
 	}
 	if len(results.Results) != 1 {
@@ -418,12 +469,12 @@ func (u *Unit) AvailabilityZone() (string, error) {
 var ErrNoCharmURLSet = errors.New("unit has no charm url set")
 
 // CharmURL returns the charm URL this unit is currently using.
-func (u *Unit) CharmURL() (string, error) {
+func (u *Unit) CharmURL(ctx context.Context) (string, error) {
 	var results params.StringBoolResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("CharmURL", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "CharmURL", args, &results)
 	if err != nil {
 		return "", errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -440,9 +491,9 @@ func (u *Unit) CharmURL() (string, error) {
 	return "", ErrNoCharmURLSet
 }
 
-// SetCharmURL marks the unit as currently using the supplied charm URL.
+// SetCharm marks the unit as currently using the supplied charm URL.
 // An error will be returned if the unit is dead, or the charm URL not known.
-func (u *Unit) SetCharmURL(curl string) error {
+func (u *Unit) SetCharm(ctx context.Context, curl string) error {
 	if curl == "" {
 		return errors.Errorf("charm URL cannot be nil")
 	}
@@ -452,7 +503,7 @@ func (u *Unit) SetCharmURL(curl string) error {
 			{Tag: u.tag.String(), CharmURL: curl},
 		},
 	}
-	err := u.st.facade.FacadeCall("SetCharmURL", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "SetCharm", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -460,12 +511,12 @@ func (u *Unit) SetCharmURL(curl string) error {
 }
 
 // ClearResolved removes any resolved setting on the unit.
-func (u *Unit) ClearResolved() error {
+func (u *Unit) ClearResolved(ctx context.Context) error {
 	var result params.ErrorResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("ClearResolved", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "ClearResolved", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -478,24 +529,24 @@ func (u *Unit) ClearResolved() error {
 // it was last seen by the uniter). The unit must have a charm URL set
 // before this method is called, and the returned watcher will be
 // valid only while the unit's charm URL is not changed.
-func (u *Unit) WatchConfigSettingsHash() (watcher.StringsWatcher, error) {
-	return getHashWatcher(u, "WatchConfigSettingsHash")
+func (u *Unit) WatchConfigSettingsHash(ctx context.Context) (watcher.StringsWatcher, error) {
+	return getHashWatcher(ctx, u, "WatchConfigSettingsHash")
 }
 
 // WatchTrustConfigSettingsHash returns a watcher for observing changes to
 // the unit's application configuration settings (with a hash of the
 // settings content so we can determine whether it has changed since
 // it was last seen by the uniter).
-func (u *Unit) WatchTrustConfigSettingsHash() (watcher.StringsWatcher, error) {
-	return getHashWatcher(u, "WatchTrustConfigSettingsHash")
+func (u *Unit) WatchTrustConfigSettingsHash(ctx context.Context) (watcher.StringsWatcher, error) {
+	return getHashWatcher(ctx, u, "WatchTrustConfigSettingsHash")
 }
 
-func getHashWatcher(u *Unit, methodName string) (watcher.StringsWatcher, error) {
+func getHashWatcher(ctx context.Context, u *Unit, methodName string) (watcher.StringsWatcher, error) {
 	var results params.StringsWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall(methodName, args, &results)
+	err := u.client.facade.FacadeCall(ctx, methodName, args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -506,7 +557,7 @@ func getHashWatcher(u *Unit, methodName string) (watcher.StringsWatcher, error) 
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	w := apiwatcher.NewStringsWatcher(u.st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewStringsWatcher(u.client.facade.RawAPICaller(), result)
 	return w, nil
 }
 
@@ -517,19 +568,19 @@ func getHashWatcher(u *Unit, methodName string) (watcher.StringsWatcher, error) 
 // only while the unit's assigned machine is not changed.
 // For CAAS models, the watcher observes changes to the address
 // of the pod associated with the unit.
-func (u *Unit) WatchAddressesHash() (watcher.StringsWatcher, error) {
-	return getHashWatcher(u, "WatchUnitAddressesHash")
+func (u *Unit) WatchAddressesHash(ctx context.Context) (watcher.StringsWatcher, error) {
+	return getHashWatcher(ctx, u, "WatchUnitAddressesHash")
 }
 
 // WatchActionNotifications returns a StringsWatcher for observing the
 // ids of Actions added to the Unit. The initial event will contain the
 // ids of any Actions pending at the time the Watcher is made.
-func (u *Unit) WatchActionNotifications() (watcher.StringsWatcher, error) {
+func (u *Unit) WatchActionNotifications(ctx context.Context) (watcher.StringsWatcher, error) {
 	var results params.StringsWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("WatchActionNotifications", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "WatchActionNotifications", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -540,42 +591,26 @@ func (u *Unit) WatchActionNotifications() (watcher.StringsWatcher, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	w := apiwatcher.NewStringsWatcher(u.st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewStringsWatcher(u.client.facade.RawAPICaller(), result)
 	return w, nil
 }
 
-// WatchUpgradeSeriesNotifications returns a NotifyWatcher for observing the
-// state of a series upgrade.
-func (u *Unit) WatchUpgradeSeriesNotifications() (watcher.NotifyWatcher, error) {
-	return u.st.WatchUpgradeSeriesNotifications()
-}
-
 // LogActionMessage logs a progress message for the specified action.
-func (u *Unit) LogActionMessage(tag names.ActionTag, message string) error {
+func (u *Unit) LogActionMessage(ctx context.Context, tag names.ActionTag, message string) error {
 	var result params.ErrorResults
 	args := params.ActionMessageParams{
 		Messages: []params.EntityString{{Tag: tag.String(), Value: message}},
 	}
-	err := u.st.facade.FacadeCall("LogActionsMessages", args, &result)
+	err := u.client.facade.FacadeCall(ctx, "LogActionsMessages", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
 	return result.OneError()
 }
 
-// UpgradeSeriesStatus returns the upgrade series status of a unit from remote state
-func (u *Unit) UpgradeSeriesStatus() (model.UpgradeSeriesStatus, string, error) {
-	return u.st.UpgradeSeriesUnitStatus()
-}
-
-// SetUpgradeSeriesStatus sets the upgrade series status of the unit in the remote state
-func (u *Unit) SetUpgradeSeriesStatus(status model.UpgradeSeriesStatus, reason string) error {
-	return u.st.SetUpgradeSeriesUnitStatus(status, reason)
-}
-
 // RequestReboot sets the reboot flag for its machine agent
-func (u *Unit) RequestReboot() error {
-	machineId, err := u.AssignedMachine()
+func (u *Unit) RequestReboot(ctx context.Context) error {
+	machineId, err := u.AssignedMachine(ctx)
 	if err != nil {
 		return err
 	}
@@ -583,7 +618,7 @@ func (u *Unit) RequestReboot() error {
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: machineId.String()}},
 	}
-	err = u.st.facade.FacadeCall("RequestReboot", args, &result)
+	err = u.client.facade.FacadeCall(ctx, "RequestReboot", args, &result)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -604,12 +639,12 @@ type RelationStatus struct {
 
 // RelationsStatus returns the tags of the relations the unit has joined
 // and entered scope, or the relation is suspended.
-func (u *Unit) RelationsStatus() ([]RelationStatus, error) {
+func (u *Unit) RelationsStatus(ctx context.Context) ([]RelationStatus, error) {
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
 	var results params.RelationUnitStatusResults
-	err := u.st.facade.FacadeCall("RelationsStatus", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "RelationsStatus", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -637,19 +672,19 @@ func (u *Unit) RelationsStatus() ([]RelationStatus, error) {
 
 // WatchStorage returns a watcher for observing changes to the
 // unit's storage attachments.
-func (u *Unit) WatchStorage() (watcher.StringsWatcher, error) {
-	return u.st.WatchUnitStorageAttachments(u.tag)
+func (u *Unit) WatchStorage(ctx context.Context) (watcher.StringsWatcher, error) {
+	return u.client.WatchUnitStorageAttachments(ctx, u.tag)
 }
 
 // WatchInstanceData returns a watcher for observing changes to the
 // instanceData of the unit's machine.  Primarily used for watching
 // LXDProfile changes.
-func (u *Unit) WatchInstanceData() (watcher.NotifyWatcher, error) {
+func (u *Unit) WatchInstanceData(ctx context.Context) (watcher.NotifyWatcher, error) {
 	var results params.NotifyWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("WatchInstanceData", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "WatchInstanceData", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -660,18 +695,18 @@ func (u *Unit) WatchInstanceData() (watcher.NotifyWatcher, error) {
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	w := apiwatcher.NewNotifyWatcher(u.st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewNotifyWatcher(u.client.facade.RawAPICaller(), result)
 	return w, nil
 }
 
 // LXDProfileName returns the name of the lxd profile applied to the unit's
 // machine for the current charm version.
-func (u *Unit) LXDProfileName() (string, error) {
+func (u *Unit) LXDProfileName(ctx context.Context) (string, error) {
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("LXDProfileName", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "LXDProfileName", args, &results)
 	if err != nil {
 		return "", errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -687,12 +722,12 @@ func (u *Unit) LXDProfileName() (string, error) {
 
 // CanApplyLXDProfile returns true if an lxd profile can be applied to
 // this unit, e.g. this is an lxd machine or container and not maunal
-func (u *Unit) CanApplyLXDProfile() (bool, error) {
+func (u *Unit) CanApplyLXDProfile(ctx context.Context) (bool, error) {
 	var results params.BoolResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: u.tag.String()}},
 	}
-	err := u.st.facade.FacadeCall("CanApplyLXDProfile", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "CanApplyLXDProfile", args, &results)
 	if err != nil {
 		return false, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -707,7 +742,7 @@ func (u *Unit) CanApplyLXDProfile() (bool, error) {
 }
 
 // NetworkInfo returns network interfaces/addresses for specified bindings.
-func (u *Unit) NetworkInfo(bindings []string, relationId *int) (map[string]params.NetworkInfoResult, error) {
+func (u *Unit) NetworkInfo(ctx context.Context, bindings []string, relationId *int) (map[string]params.NetworkInfoResult, error) {
 	var results params.NetworkInfoResults
 	args := params.NetworkInfoParams{
 		Unit:       u.tag.String(),
@@ -715,7 +750,7 @@ func (u *Unit) NetworkInfo(bindings []string, relationId *int) (map[string]param
 		RelationId: relationId,
 	}
 
-	err := u.st.facade.FacadeCall("NetworkInfo", args, &results)
+	err := u.client.facade.FacadeCall(ctx, "NetworkInfo", args, &results)
 	if err != nil {
 		return nil, errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -725,22 +760,22 @@ func (u *Unit) NetworkInfo(bindings []string, relationId *int) (map[string]param
 
 // State returns the state persisted by the charm running in this unit
 // and the state internal to the uniter for this unit.
-func (u *Unit) State() (params.UnitStateResult, error) {
-	return u.st.State()
+func (u *Unit) State(ctx context.Context) (params.UnitStateResult, error) {
+	return u.client.State(ctx)
 }
 
 // SetState sets the state persisted by the charm running in this unit
 // and the state internal to the uniter for this unit.
-func (u *Unit) SetState(unitState params.SetUnitStateArg) error {
-	return u.st.SetState(unitState)
+func (u *Unit) SetState(ctx context.Context, unitState params.SetUnitStateArg) error {
+	return u.client.SetState(ctx, unitState)
 }
 
 // CommitHookChanges batches together all required API calls for applying
 // a set of changes after a hook successfully completes and executes them in a
 // single transaction.
-func (u *Unit) CommitHookChanges(req params.CommitHookChangesArgs) error {
+func (u *Unit) CommitHookChanges(ctx context.Context, req params.CommitHookChangesArgs) error {
 	var results params.ErrorResults
-	err := u.st.facade.FacadeCall("CommitHookChanges", req, &results)
+	err := u.client.facade.FacadeCall(ctx, "CommitHookChanges", req, &results)
 	if err != nil {
 		return errors.Trace(apiservererrors.RestoreError(err))
 	}
@@ -817,35 +852,19 @@ func (b *CommitHookParamsBuilder) UpdateCharmState(state map[string]string) {
 }
 
 // AddStorage records a request for adding storage.
-func (b *CommitHookParamsBuilder) AddStorage(constraints map[string][]params.StorageConstraints) {
+func (b *CommitHookParamsBuilder) AddStorage(constraints map[string][]params.StorageDirectives) {
 	storageReqs := make([]params.StorageAddParams, 0, len(constraints))
 	for storage, cons := range constraints {
 		for _, one := range cons {
 			storageReqs = append(storageReqs, params.StorageAddParams{
 				UnitTag:     b.arg.Tag,
 				StorageName: storage,
-				Constraints: one,
+				Directives:  one,
 			})
 		}
 	}
 
 	b.arg.AddStorage = storageReqs
-}
-
-// SetPodSpec records a request to update the PodSpec for an application.
-func (b *CommitHookParamsBuilder) SetPodSpec(appTag names.ApplicationTag, spec *string) {
-	b.arg.SetPodSpec = &params.PodSpec{
-		Tag:  appTag.String(),
-		Spec: spec,
-	}
-}
-
-// SetRawK8sSpec records a request to update the PodSpec for an application.
-func (b *CommitHookParamsBuilder) SetRawK8sSpec(appTag names.ApplicationTag, spec *string) {
-	b.arg.SetRawK8sSpec = &params.PodSpec{
-		Tag:  appTag.String(),
-		Spec: spec,
-	}
 }
 
 // SecretUpsertArg holds parameters for creating or updating a secret.
@@ -863,7 +882,7 @@ type SecretUpsertArg struct {
 // SecretCreateArg holds parameters for creating a secret.
 type SecretCreateArg struct {
 	SecretUpsertArg
-	OwnerTag names.Tag
+	Owner secrets.Owner
 }
 
 // SecretUpdateArg holds parameters for updating a secret.
@@ -879,9 +898,9 @@ type SecretDeleteArg struct {
 }
 
 // AddSecretCreates records requests to create secrets.
-func (b *CommitHookParamsBuilder) AddSecretCreates(creates []SecretCreateArg) {
+func (b *CommitHookParamsBuilder) AddSecretCreates(creates []SecretCreateArg) error {
 	if len(creates) == 0 {
-		return
+		return nil
 	}
 	b.arg.SecretCreates = make([]params.CreateSecretArg, len(creates))
 	for i, c := range creates {
@@ -903,6 +922,10 @@ func (b *CommitHookParamsBuilder) AddSecretCreates(creates []SecretCreateArg) {
 			}
 		}
 
+		ownerTag, err := common.OwnerTagFromSecretOwner(c.Owner)
+		if err != nil {
+			return errors.Trace(err)
+		}
 		b.arg.SecretCreates[i] = params.CreateSecretArg{
 			UpsertSecretArg: params.UpsertSecretArg{
 				RotatePolicy: c.RotatePolicy,
@@ -916,9 +939,10 @@ func (b *CommitHookParamsBuilder) AddSecretCreates(creates []SecretCreateArg) {
 				},
 			},
 			URI:      &uriStr,
-			OwnerTag: c.OwnerTag.String(),
+			OwnerTag: ownerTag.String(),
 		}
 	}
+	return nil
 }
 
 // AddSecretUpdates records requests to update secrets.
@@ -1070,13 +1094,6 @@ func (b *CommitHookParamsBuilder) changeCount() int {
 	if b.arg.SetUnitState != nil {
 		count++
 	}
-	if b.arg.SetPodSpec != nil {
-		count++
-	}
-	if b.arg.SetRawK8sSpec != nil {
-		count++
-	}
-
 	count += len(b.arg.RelationUnitSettings)
 	count += len(b.arg.OpenPorts)
 	count += len(b.arg.ClosePorts)

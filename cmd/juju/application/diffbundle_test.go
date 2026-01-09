@@ -4,42 +4,46 @@
 package application_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/base"
 	commoncharm "github.com/juju/juju/api/common/charm"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/juju/application"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
 )
 
 type diffSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	apiRoot     *mockAPIRoot
 	charmHub    *mockCharmHub
 	modelClient *mockModelClient
 	dir         string
 }
 
-var _ = gc.Suite(&diffSuite{})
+func TestDiffSuite(t *stdtesting.T) {
+	tc.Run(t, &diffSuite{})
+}
 
-func (s *diffSuite) SetUpTest(c *gc.C) {
+func (s *diffSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.apiRoot = &mockAPIRoot{
 		responses: makeAPIResponses(),
@@ -51,17 +55,17 @@ func (s *diffSuite) SetUpTest(c *gc.C) {
 	s.dir = c.MkDir()
 }
 
-func (s *diffSuite) runDiffBundle(c *gc.C, args ...string) (*cmd.Context, error) {
-	return s.runDiffBundleWithCharmAdapter(c, func(base.APICallCloser, *charm.URL) (application.BundleResolver, error) {
+func (s *diffSuite) runDiffBundle(c *tc.C, args ...string) (*cmd.Context, error) {
+	return s.runDiffBundleWithCharmAdaptor(c, func(base.APICallCloser, *charm.URL) (application.BundleResolver, error) {
 		return s.charmHub, nil
-	}, func() (application.ModelConstraintsClient, error) {
+	}, func(ctx context.Context) (application.ModelConstraintsClient, error) {
 		return s.modelClient, nil
 	}, args...)
 }
 
-func (s *diffSuite) runDiffBundleWithCharmAdapter(c *gc.C,
+func (s *diffSuite) runDiffBundleWithCharmAdaptor(c *tc.C,
 	charmAdataperFn func(base.APICallCloser, *charm.URL) (application.BundleResolver, error),
-	modelConsFn func() (application.ModelConstraintsClient, error),
+	modelConsFn func(ctx context.Context) (application.ModelConstraintsClient, error),
 	args ...string,
 ) (*cmd.Context, error) {
 	store := jujuclienttesting.MinimalStore()
@@ -75,49 +79,48 @@ func (s *diffSuite) runDiffBundleWithCharmAdapter(c *gc.C,
 	return cmdtesting.RunCommandInDir(c, command, args, s.dir)
 }
 
-func (s *diffSuite) TestNoArgs(c *gc.C) {
+func (s *diffSuite) TestNoArgs(c *tc.C) {
 	_, err := s.runDiffBundle(c)
-	c.Assert(err, gc.ErrorMatches, "no bundle specified")
+	c.Assert(err, tc.ErrorMatches, "no bundle specified")
 }
 
-func (s *diffSuite) TestTooManyArgs(c *gc.C) {
+func (s *diffSuite) TestTooManyArgs(c *tc.C) {
 	_, err := s.runDiffBundle(c, "bundle", "somethingelse")
-	c.Assert(err, gc.ErrorMatches, `unrecognized args: \["somethingelse"\]`)
+	c.Assert(err, tc.ErrorMatches, `unrecognized args: \["somethingelse"\]`)
 }
 
-func (s *diffSuite) TestVerifiesBundle(c *gc.C) {
+func (s *diffSuite) TestVerifiesBundle(c *tc.C) {
 	_, err := s.runDiffBundle(c, s.writeLocalBundle(c, invalidBundle))
-	c.Assert(err, gc.ErrorMatches, "(?s)the provided bundle has the following errors:.*")
+	c.Assert(err, tc.ErrorMatches, "(?s)the provided bundle has the following errors:.*")
 }
 
-func (s *diffSuite) TestNotABundle(c *gc.C) {
+func (s *diffSuite) TestNotABundle(c *tc.C) {
 	s.charmHub.url = &charm.URL{
 		Schema:   "ch",
 		Name:     "prometheus",
 		Revision: 23,
-		Series:   "xenial",
 	}
 	s.apiRoot.responses["ModelConfig.ModelGet"] = params.ModelConfigResults{
 		Config: map[string]params.ConfigValue{
 			"uuid":           {Value: testing.ModelTag.Id()},
 			"type":           {Value: "iaas"},
 			"name":           {Value: "horse"},
-			"default-series": {Value: "xenial"},
+			"default-base":   {Value: "ubuntu@16.04/stable"},
 			"secret-backend": {Value: "auto"},
 		},
 	}
 	s.charmHub.stub.SetErrors(nil, errors.NotValidf("not a bundle"))
 	_, err := s.runDiffBundle(c, "prometheus")
-	c.Logf(errors.ErrorStack(err))
+	c.Logf("%s", errors.ErrorStack(err))
 	// Fails because the series that comes back from the charm store
 	// is xenial rather than "bundle" (and there's no local bundle).
-	c.Assert(err, jc.Satisfies, errors.IsNotValid)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *diffSuite) TestLocalBundle(c *gc.C) {
+func (s *diffSuite) TestLocalBundle(c *tc.C) {
 	ctx, err := s.runDiffBundle(c, s.writeLocalBundle(c, testCharmHubBundle))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -135,16 +138,16 @@ machines:
 `[1:])
 }
 
-func (s *diffSuite) TestLocalBundleInvalidYaml(c *gc.C) {
+func (s *diffSuite) TestLocalBundleInvalidYaml(c *tc.C) {
 	_, err := s.runDiffBundle(c, s.writeLocalBundle(c, invalidYaml))
-	c.Assert(err, jc.Satisfies, errors.IsNotValid)
-	c.Assert(err, gc.ErrorMatches, `.*cannot unmarshal bundle contents.*`[1:])
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
+	c.Assert(err, tc.ErrorMatches, `.*cannot unmarshal bundle contents.*`[1:])
 }
 
-func (s *diffSuite) TestIncludeAnnotations(c *gc.C) {
+func (s *diffSuite) TestIncludeAnnotations(c *tc.C) {
 	ctx, err := s.runDiffBundle(c, "--annotations", s.writeLocalBundle(c, testCharmHubBundle))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -166,11 +169,11 @@ machines:
 `[1:])
 }
 
-func (s *diffSuite) TestHandlesIncludes(c *gc.C) {
+func (s *diffSuite) TestHandlesIncludes(c *tc.C) {
 	s.writeFile(c, "include.yaml", "hume")
 	ctx, err := s.runDiffBundle(c, s.writeLocalBundle(c, withInclude))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -188,15 +191,15 @@ machines:
 `[1:])
 }
 
-func (s *diffSuite) TestHandlesOverlays(c *gc.C) {
+func (s *diffSuite) TestHandlesOverlays(c *tc.C) {
 	path1 := s.writeFile(c, "overlay1.yaml", overlay1)
 	path2 := s.writeFile(c, "overlay2.yaml", overlay2)
 	ctx, err := s.runDiffBundle(c,
 		"--overlay", path1,
 		"--overlay", path2,
 		s.writeLocalBundle(c, testCharmHubBundle))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -223,36 +226,35 @@ relations:
 `[1:])
 }
 
-func (s *diffSuite) TestCharmSeriesBundle(c *gc.C) {
+func (s *diffSuite) TestCharmSeriesBundle(c *tc.C) {
 	bundleData, err := charm.ReadBundleData(strings.NewReader(withSeries))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.charmHub.url = &charm.URL{
 		Schema: "ch",
 		Name:   "my-bundle",
-		Series: "bundle",
 	}
 	s.charmHub.bundle = &mockBundle{data: bundleData}
 
 	ctx, err := s.runDiffBundle(c, "my-bundle")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 {}
 `[1:])
 }
 
-func (s *diffSuite) TestBundleNotFound(c *gc.C) {
+func (s *diffSuite) TestBundleNotFound(c *tc.C) {
 	s.charmHub.stub.SetErrors(errors.NotFoundf(`cannot resolve URL "ch:my-bundle": charm or bundle`))
 	_, err := s.runDiffBundle(c, "ch:my-bundle")
-	c.Assert(err, gc.ErrorMatches, `cannot resolve URL "ch:my-bundle": charm or bundle not found`)
+	c.Assert(err, tc.ErrorMatches, `cannot resolve URL "ch:my-bundle": charm or bundle not found`)
 }
 
-func (s *diffSuite) TestMachineMap(c *gc.C) {
+func (s *diffSuite) TestMachineMap(c *tc.C) {
 	ctx, err := s.runDiffBundle(c,
 		"--map-machines", "0=1",
 		s.writeLocalBundle(c, testCharmHubBundle))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -268,26 +270,25 @@ machines:
   "0":
     missing: bundle
   "1":
-    series:
-      bundle: xenial
-      model: bionic
+    base:
+      bundle: ubuntu@16.04/stable
+      model: ubuntu@18.04/stable
 `[1:])
 }
 
-func (s *diffSuite) TestCharmHubBundle(c *gc.C) {
+func (s *diffSuite) TestCharmHubBundle(c *tc.C) {
 	bundleData, err := charm.ReadBundleData(strings.NewReader(testCharmHubBundle))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.charmHub.url = &charm.URL{
 		Schema: "ch",
 		Name:   "my-bundle",
-		Series: "bundle",
 	}
 	s.charmHub.bundle = &mockBundle{data: bundleData}
 
 	ctx, err := s.runDiffBundle(c, "my-bundle")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, `
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, `
 applications:
   grafana:
     missing: bundle
@@ -305,12 +306,12 @@ machines:
 `[1:])
 }
 
-func (s *diffSuite) TestRelationsWithMissingEndpoints(c *gc.C) {
+func (s *diffSuite) TestRelationsWithMissingEndpoints(c *tc.C) {
 	rels := []params.RelationStatus{
 		{
 			Endpoints: []params.EndpointStatus{
-				{ApplicationName: "prometheus", Name: "juju-info"},
-				{ApplicationName: "grafana", Name: "juju-info"},
+				{ApplicationName: "prometheus", Name: relation.JujuInfo},
+				{ApplicationName: "grafana", Name: relation.JujuInfo},
 			},
 		},
 	}
@@ -319,7 +320,7 @@ func (s *diffSuite) TestRelationsWithMissingEndpoints(c *gc.C) {
 	}
 
 	ctx, err := s.runDiffBundle(c, s.writeLocalBundle(c, withMissingRelationEndpoints))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Note: the logger output is not captured so only the relevant diff
 	// output is checked here.
@@ -332,10 +333,10 @@ relations:
   - - grafana:juju-info
     - prometheus:juju-info`
 
-	c.Assert(strings.Contains(cmdtesting.Stdout(ctx), exp[1:]), jc.IsTrue)
+	c.Assert(strings.Contains(cmdtesting.Stdout(ctx), exp[1:]), tc.IsTrue)
 }
 
-func (s *diffSuite) TestExposedEndpoints(c *gc.C) {
+func (s *diffSuite) TestExposedEndpoints(c *tc.C) {
 	specs := []struct {
 		descr                 string
 		modelExposedEndpoints map[string]params.ExposedEndpoint
@@ -357,13 +358,13 @@ applications:
     revision: 7
     channel: stable
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     expose: true
     to:
       - 0
 machines:
   '0':
-    series: xenial
+    base: ubuntu@16.04/stable
 `[1:],
 			expDiff: `
 applications:
@@ -396,12 +397,12 @@ applications:
     revision: 7
     channel: stable
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     to:
       - 0
 machines:
   '0':
-    series: xenial
+    base: ubuntu@16.04/stable
 ---
 applications:
   prometheus:
@@ -443,21 +444,21 @@ applications:
 		}
 
 		ctx, err := s.runDiffBundle(c, s.writeLocalBundle(c, spec.bundle))
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 
 		c.Log(cmdtesting.Stdout(ctx))
-		c.Assert(cmdtesting.Stdout(ctx), gc.Equals, spec.expDiff)
+		c.Assert(cmdtesting.Stdout(ctx), tc.Equals, spec.expDiff)
 	}
 }
 
-func (s *diffSuite) writeLocalBundle(c *gc.C, content string) string {
+func (s *diffSuite) writeLocalBundle(c *tc.C, content string) string {
 	return s.writeFile(c, "bundle.yaml", content)
 }
 
-func (s *diffSuite) writeFile(c *gc.C, name, content string) string {
+func (s *diffSuite) writeFile(c *tc.C, name, content string) string {
 	path := filepath.Join(s.dir, name)
 	err := os.WriteFile(path, []byte(content), 0666)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return path
 }
 
@@ -473,7 +474,7 @@ func makeAPIResponsesWithRelations(relations []params.RelationStatus) map[string
 				"uuid":           {Value: testing.ModelTag.Id()},
 				"type":           {Value: "iaas"},
 				"name":           {Value: "horse"},
-				"default-series": {Value: "xenial"},
+				"default-base":   {Value: "ubuntu@16.04/stable"},
 				"secret-backend": {Value: "auto"},
 			},
 		},
@@ -545,7 +546,7 @@ func makeAPIResponsesWithExposedEndpoints(exposedEndpoints map[string]params.Exp
 				"uuid":           {Value: testing.ModelTag.Id()},
 				"type":           {Value: "iaas"},
 				"name":           {Value: "horse"},
-				"default-series": {Value: "xenial"},
+				"default-base":   {Value: "ubuntu@16.04/stable"},
 				"secret-backend": {Value: "auto"},
 			},
 		},
@@ -578,11 +579,11 @@ func makeAPIResponsesWithExposedEndpoints(exposedEndpoints map[string]params.Exp
 }
 
 type mockModelClient struct {
-	stub        jujutesting.Stub
+	stub        testhelpers.Stub
 	constraints constraints.Value
 }
 
-func (s *mockModelClient) GetModelConstraints() (constraints.Value, error) {
+func (s *mockModelClient) GetModelConstraints(ctx context.Context) (constraints.Value, error) {
 	s.stub.AddCall("GetModelConstraints")
 	return s.constraints, nil
 }
@@ -593,18 +594,18 @@ func (s *mockModelClient) Close() error {
 }
 
 type mockCharmHub struct {
-	stub   jujutesting.Stub
+	stub   testhelpers.Stub
 	url    *charm.URL
 	origin commoncharm.Origin
 	bundle *mockBundle
 }
 
-func (s *mockCharmHub) ResolveBundleURL(url *charm.URL, preferredOrigin commoncharm.Origin) (*charm.URL, commoncharm.Origin, error) {
+func (s *mockCharmHub) ResolveBundleURL(ctx context.Context, url *charm.URL, preferredOrigin commoncharm.Origin) (*charm.URL, commoncharm.Origin, error) {
 	s.stub.AddCall("ResolveBundleURL", url, preferredOrigin)
 	return s.url, s.origin, s.stub.NextErr()
 }
 
-func (s *mockCharmHub) GetBundle(url *charm.URL, _ commoncharm.Origin, path string) (charm.Bundle, error) {
+func (s *mockCharmHub) GetBundle(_ context.Context, url *charm.URL, _ commoncharm.Origin, path string) (charm.Bundle, error) {
 	s.stub.AddCall("GetBundle", url, path)
 	return s.bundle, s.stub.NextErr()
 }
@@ -614,13 +615,14 @@ type mockBundle struct {
 }
 
 func (b *mockBundle) Data() *charm.BundleData { return b.data }
+func (b *mockBundle) BundleBytes() []byte     { return []byte{} }
 func (b *mockBundle) ReadMe() string          { return "" }
 func (b *mockBundle) ContainsOverlays() bool  { return false }
 
 type mockAPIRoot struct {
 	base.APICallCloser
 
-	stub      jujutesting.Stub
+	stub      testhelpers.Stub
 	responses map[string]interface{}
 }
 
@@ -629,7 +631,7 @@ func (r *mockAPIRoot) BestFacadeVersion(name string) int {
 	return 42
 }
 
-func (r *mockAPIRoot) APICall(objType string, version int, id, request string, params, response interface{}) error {
+func (r *mockAPIRoot) APICall(ctx context.Context, objType string, version int, id, request string, params, response interface{}) error {
 	call := objType + "." + request
 	r.stub.AddCall(call, version, params)
 	value := r.responses[call]
@@ -658,7 +660,7 @@ applications:
     revision: 47
     channel: stable
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     options:
       ontology: anselm
     annotations:
@@ -668,7 +670,7 @@ applications:
       - 0
 machines:
   '0':
-    series: xenial
+    base: ubuntu@16.04/stable
 `
 	withInclude = `
 applications:
@@ -677,7 +679,7 @@ applications:
     revision: 47
     channel: stable
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     options:
       ontology: include-file://include.yaml
     annotations:
@@ -687,7 +689,7 @@ applications:
       - 0
 machines:
   '0':
-    series: xenial
+    base: ubuntu@16.04/stable
 `
 	invalidBundle = `
 machines:
@@ -717,12 +719,12 @@ relations:
 `
 
 	withMissingRelationEndpoints = `
-series: xenial
+default-base: ubuntu@16.04/stable
 applications:
   prometheus:
     charm: 'ch:prometheus2'
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     options:
       ontology: anselm
     annotations:
@@ -731,20 +733,20 @@ applications:
   grafana:
     charm: 'ch:grafana'
     num_units: 1
-    series: bionic
+    base: ubuntu@18.04/stable
 relations:
 - - prometheus:juju-info
   - grafana
 `
 	withSeries = `
-series: bionic
+default-base: ubuntu@18.04/stable
 applications:
   prometheus:
     charm: 'prometheus2'
     revision: 47
     channel: stable
     num_units: 1
-    series: xenial
+    base: ubuntu@16.04/stable
     constraints: 'cores=3'
     options:
       ontology: kant
@@ -762,7 +764,7 @@ applications:
       - 1
 machines:
   "0":
-    series: xenial
+    base: ubuntu@16.04/stable
   "1": {}
 relations:
 bundle-additions:

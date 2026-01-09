@@ -4,28 +4,26 @@
 package imageutils
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 
 	corearch "github.com/juju/juju/core/arch"
 	jujubase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/os/ostype"
-	"github.com/juju/juju/environs/context"
+	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
 )
 
-var logger = loggo.GetLogger("juju.provider.azure")
+var logger = internallogger.GetLogger("juju.provider.azure")
 
 const (
-	centOSPublisher = "OpenLogic"
-	centOSOffering  = "CentOS"
-
 	ubuntuPublisher = "Canonical"
 
 	dailyStream = "daily"
@@ -48,7 +46,8 @@ const (
 // For Ubuntu, we query the SKUs to determine the most recent point release
 // for a series.
 func BaseImage(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
+	invalidator environs.CredentialInvalidator,
 	base jujubase.Base, stream, location, arch string,
 	client *armcompute.VirtualMachineImagesClient,
 	preferGen1Image bool,
@@ -64,22 +63,9 @@ func BaseImage(
 	case ostype.Ubuntu:
 		publisher = ubuntuPublisher
 		var err error
-		sku, offering, err = ubuntuSKU(ctx, base, stream, location, arch, client, preferGen1Image)
+		sku, offering, err = ubuntuSKU(ctx, invalidator, base, stream, location, arch, client, preferGen1Image)
 		if err != nil {
 			return nil, errors.Annotatef(err, "selecting SKU for %s", base.DisplayString())
-		}
-
-	case ostype.CentOS:
-		publisher = centOSPublisher
-		offering = centOSOffering
-		switch base.Channel.Track {
-		case "7", "8": // TODO: this doesn't look right. Add support for centos 9 stream.
-			sku = "7.3"
-		default:
-			return nil, errors.NotSupportedf("deploying %s", base)
-		}
-		if arch != "" && arch != corearch.AMD64 {
-			return nil, errors.NotSupportedf("deploying %s", arch)
 		}
 
 	default:
@@ -137,12 +123,13 @@ func ubuntuBaseIslegacy(base jujubase.Base) bool {
 
 // ubuntuSKU returns the best SKU for the Canonical:UbuntuServer offering,
 // matching the given series.
-func ubuntuSKU(
-	ctx context.ProviderCallContext, base jujubase.Base, stream, location, arch string,
+func ubuntuSKU(ctx context.Context,
+	invalidator environs.CredentialInvalidator,
+	base jujubase.Base, stream, location, arch string,
 	client *armcompute.VirtualMachineImagesClient, preferGen1Image bool,
 ) (string, string, error) {
 	if ubuntuBaseIslegacy(base) {
-		return legacyUbuntuSKU(ctx, base, stream, location, arch, client, preferGen1Image)
+		return legacyUbuntuSKU(ctx, invalidator, base, stream, location, arch, client, preferGen1Image)
 	}
 
 	if arch != corearch.AMD64 && preferGen1Image {
@@ -157,10 +144,11 @@ func ubuntuSKU(
 		offer = fmt.Sprintf("%s-daily", offer)
 	}
 
-	logger.Debugf("listing SKUs: Location=%s, Publisher=%s, Offer=%s", location, ubuntuPublisher, offer)
+	logger.Debugf(ctx, "listing SKUs: Location=%s, Publisher=%s, Offer=%s", location, ubuntuPublisher, offer)
 	result, err := client.ListSKUs(ctx, location, ubuntuPublisher, offer, nil)
 	if err != nil {
-		return "", "", errorutils.HandleCredentialError(errors.Annotate(err, "listing Ubuntu SKUs"), ctx)
+		_, invalidationErr := errorutils.HandleCredentialError(ctx, invalidator, errors.Annotate(err, "listing Ubuntu SKUs"))
+		return "", "", invalidationErr
 	}
 	// We prefer to use v2 SKU if available.
 	// If we don't find any v2 SKU, we return the v1 SKU.
@@ -171,7 +159,7 @@ func ubuntuSKU(
 
 		if skuName == planARM64 {
 			if arch == corearch.ARM64 {
-				logger.Debugf("found Azure SKU Name: %q for arch %q", skuName, arch)
+				logger.Debugf(ctx, "found Azure SKU Name: %q for arch %q", skuName, arch)
 				return skuName, offer, nil
 			}
 			continue
@@ -181,14 +169,14 @@ func ubuntuSKU(
 		}
 
 		if skuName == planV2 && !preferGen1Image {
-			logger.Debugf("found Azure SKU Name: %v", skuName)
+			logger.Debugf(ctx, "found Azure SKU Name: %v", skuName)
 			return skuName, offer, nil
 		}
 		if skuName == planV1 {
 			v1SKU = skuName
 			continue
 		}
-		logger.Debugf("ignoring Azure SKU Name: %v", skuName)
+		logger.Debugf(ctx, "ignoring Azure SKU Name: %v", skuName)
 	}
 	if v1SKU != "" {
 		return v1SKU, offer, nil
@@ -196,8 +184,9 @@ func ubuntuSKU(
 	return "", "", errors.NotFoundf("ubuntu %q SKUs for %v stream", base, stream)
 }
 
-func legacyUbuntuSKU(
-	ctx context.ProviderCallContext, base jujubase.Base, stream, location, arch string,
+func legacyUbuntuSKU(ctx context.Context,
+	invalidator environs.CredentialInvalidator,
+	base jujubase.Base, stream, location, arch string,
 	client *armcompute.VirtualMachineImagesClient, preferGen1Image bool,
 ) (string, string, error) {
 	series, err := jujubase.GetSeriesFromBase(base)
@@ -209,16 +198,17 @@ func legacyUbuntuSKU(
 		offer = fmt.Sprintf("%s-daily", offer)
 	}
 
-	logger.Debugf(
+	logger.Debugf(ctx,
 		"listing SKUs: Base=%s, Series=%s, Location=%s, Arch=%s, Stream=%s, Publisher=%s, Offer=%s",
 		base.Channel.Track, series, location, arch, stream, ubuntuPublisher, offer,
 	)
 	result, err := client.ListSKUs(ctx, location, ubuntuPublisher, offer, nil)
 	if err != nil {
-		return "", "", errorutils.HandleCredentialError(errors.Annotate(err, "listing Ubuntu SKUs"), ctx)
+		_, invalidationErr := errorutils.HandleCredentialError(ctx, invalidator, errors.Annotate(err, "listing Ubuntu SKUs"))
+		return "", "", invalidationErr
 	}
 
-	skuName, err := selectUbuntuSKULegacy(base, series, stream, arch, result.VirtualMachineImageResourceArray, preferGen1Image)
+	skuName, err := selectUbuntuSKULegacy(ctx, base, series, stream, arch, result.VirtualMachineImageResourceArray, preferGen1Image)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -226,6 +216,7 @@ func legacyUbuntuSKU(
 }
 
 func selectUbuntuSKULegacy(
+	ctx context.Context,
 	base jujubase.Base, series, stream, arch string,
 	images []*armcompute.VirtualMachineImageResource, preferGen1Image bool,
 ) (string, error) {
@@ -241,7 +232,7 @@ func selectUbuntuSKULegacy(
 		}
 
 		tag := getLegacyUbuntuSKUTag(skuName)
-		logger.Debugf("SKU %q has tag %q", skuName, tag)
+		logger.Debugf(ctx, "SKU %q has tag %q", skuName, tag)
 		var skuStream string
 		switch tag {
 		case "", "LTS":
@@ -250,7 +241,7 @@ func selectUbuntuSKULegacy(
 			skuStream = dailyStream
 		}
 		if skuStream == "" || skuStream != stream {
-			logger.Debugf("ignoring SKU %q (not in %q stream)", skuName, stream)
+			logger.Debugf(ctx, "ignoring SKU %q (not in %q stream)", skuName, stream)
 			return false
 		}
 		return true
@@ -258,9 +249,9 @@ func selectUbuntuSKULegacy(
 
 	for _, img := range images {
 		skuName := *img.Name
-		logger.Debugf("Azure SKU Name: %v", skuName)
+		logger.Debugf(ctx, "Azure SKU Name: %v", skuName)
 		if !strings.HasPrefix(skuName, desiredSKUVersionPrefix) {
-			logger.Debugf("ignoring SKU %q (does not match series %q)", skuName, series)
+			logger.Debugf(ctx, "ignoring SKU %q (does not match series %q)", skuName, series)
 			continue
 		}
 

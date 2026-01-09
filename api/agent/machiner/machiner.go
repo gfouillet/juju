@@ -4,45 +4,54 @@
 package machiner
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/common"
 	"github.com/juju/juju/core/life"
 )
 
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
 const machinerFacade = "Machiner"
 
-// State provides access to the Machiner API facade.
-type State struct {
+// Client provides access to the Machiner API facade.
+type Client struct {
 	facade base.FacadeCaller
 	*common.APIAddresser
 }
 
-// NewState creates a new client-side Machiner facade.
-func NewState(caller base.APICaller) *State {
-	facadeCaller := base.NewFacadeCaller(caller, machinerFacade)
-	return &State{
+// NewClient creates a new client-side Machiner facade.
+func NewClient(caller base.APICaller, options ...Option) *Client {
+	facadeCaller := base.NewFacadeCaller(caller, machinerFacade, options...)
+	return &Client{
 		facade:       facadeCaller,
 		APIAddresser: common.NewAPIAddresser(facadeCaller),
 	}
 }
 
 // machineLife requests the lifecycle of the given machine from the server.
-func (st *State) machineLife(tag names.MachineTag) (life.Value, error) {
-	return common.OneLife(st.facade, tag)
+func (c *Client) machineLife(ctx context.Context, tag names.MachineTag) (life.Value, error) {
+	return common.OneLife(ctx, c.facade, tag)
 }
 
-// Machine provides access to methods of a state.Machine through the facade.
-func (st *State) Machine(tag names.MachineTag) (*Machine, error) {
-	life, err := st.machineLife(tag)
+// Machine provides access to methods of a machine through the facade.
+func (c *Client) Machine(ctx context.Context, tag names.MachineTag) (*Machine, error) {
+	life, err := c.machineLife(ctx, tag)
 	if err != nil {
 		return nil, errors.Annotate(err, "can't get life for machine")
 	}
 	return &Machine{
-		tag:  tag,
-		life: life,
-		st:   st,
+		tag:    tag,
+		life:   life,
+		client: c,
 	}, nil
 }

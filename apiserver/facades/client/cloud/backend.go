@@ -4,123 +4,60 @@
 package cloud
 
 import (
-	"github.com/juju/names/v5"
+	"context"
 
-	"github.com/juju/juju/apiserver/common/credentialcommon"
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/credential"
+	corepermission "github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/user"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/domain/access"
+	credentialservice "github.com/juju/juju/domain/credential/service"
 )
 
-type Backend interface {
-	state.CloudAccessor
-
-	ControllerTag() names.ControllerTag
-	Model() (Model, error)
-	ModelConfig() (*config.Config, error)
-	User(tag names.UserTag) (User, error)
-
-	CloudCredentials(user names.UserTag, cloudName string) (map[string]state.Credential, error)
-	UpdateCloudCredential(names.CloudCredentialTag, cloud.Credential) error
-	RemoveCloudCredential(names.CloudCredentialTag) error
-	AddCloud(cloud.Cloud, string) error
-	UpdateCloud(cloud.Cloud) error
-	RemoveCloud(string) error
-	AllCloudCredentials(user names.UserTag) ([]state.Credential, error)
-	CredentialModelsAndOwnerAccess(tag names.CloudCredentialTag) ([]state.CredentialOwnerModelAccess, error)
-	CredentialModels(tag names.CloudCredentialTag) (map[string]string, error)
-	RemoveModelsCredential(tag names.CloudCredentialTag) error
-
-	ControllerConfig() (controller.Config, error)
-	ControllerInfo() (*state.ControllerInfo, error)
-	GetCloudAccess(cloud string, user names.UserTag) (permission.Access, error)
-	GetCloudUsers(cloud string) (map[string]permission.Access, error)
-	CreateCloudAccess(cloud string, user names.UserTag, access permission.Access) error
-	UpdateCloudAccess(cloud string, user names.UserTag, access permission.Access) error
-	RemoveCloudAccess(cloud string, user names.UserTag) error
-	CloudsForUser(user names.UserTag, isSuperuser bool) ([]state.CloudInfo, error)
+// CloudService provides access to clouds.
+type CloudService interface {
+	// ListAll returns a slice Clouds representing all clouds.
+	ListAll(context.Context) ([]cloud.Cloud, error)
+	// Cloud return Cloud data for the requested cloud.
+	Cloud(context.Context, string) (*cloud.Cloud, error)
+	// CreateCloud creates a new cloud including setting Admin permission
+	// for the owner.
+	CreateCloud(ctx context.Context, ownerName user.Name, cloud cloud.Cloud) error
+	// UpdateCloud updates the definition of a current cloud.
+	UpdateCloud(ctx context.Context, cld cloud.Cloud) error
+	// DeleteCloud removes a cloud, and any permissions associated with it.
+	DeleteCloud(ctx context.Context, name string) error
 }
 
-type stateShim struct {
-	*state.State
+// CloudAccessService provides access to cloud permissions.
+type CloudAccessService interface {
+	// ReadUserAccessLevelForTarget returns the access level for the provided
+	// subject (user) for the given target (cloud).
+	ReadUserAccessLevelForTarget(ctx context.Context, subject user.Name, target corepermission.ID) (corepermission.Access, error)
+	// ReadAllUserAccessForTarget  returns the user access for all users for
+	// the given target (cloud).
+	ReadAllUserAccessForTarget(ctx context.Context, target corepermission.ID) ([]corepermission.UserAccess, error)
+	// CreatePermission sets the access level for a user on the given cloud.
+	CreatePermission(ctx context.Context, spec corepermission.UserAccessSpec) (corepermission.UserAccess, error)
+	// UpdatePermission updates the access level for a user on the given cloud.
+	UpdatePermission(ctx context.Context, args access.UpdatePermissionArgs) error
+	// ReadAllAccessForUserAndObjectType returns UserAccess for the given
+	// subject (user) for all clouds based on objectType.
+	ReadAllAccessForUserAndObjectType(ctx context.Context, subject user.Name, objectType corepermission.ObjectType) ([]corepermission.UserAccess, error)
+	// AllModelAccessForCloudCredential for a given (cloud) credential key, return all
+	// model name and model access levels.
+	AllModelAccessForCloudCredential(ctx context.Context, key credential.Key) ([]access.CredentialOwnerModelAccess, error)
 }
 
-func NewStateBackend(st *state.State) Backend {
-	return stateShim{st}
-}
-
-func (s stateShim) ModelConfig() (*config.Config, error) {
-	model, err := s.State.Model()
-	if err != nil {
-		return nil, err
-	}
-
-	cfg, err := model.ModelConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
-}
-
-func (s stateShim) Model() (Model, error) {
-	m, err := s.State.Model()
-	if err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-type Model interface {
-	UUID() string
-	CloudName() string
-	Cloud() (cloud.Cloud, error)
-	CloudCredential() (state.Credential, bool, error)
-	CloudRegion() string
-}
-
-// ModelCallContextReleaser is a function that releases the model state.
-// Returns true if the model was successfully released.
-type ModelCallContextReleaser func() bool
-
-// ModelPoolBackend defines a pool of models.
-type ModelPoolBackend interface {
-	// GetModelCallContext gets everything that is needed to make cloud calls on behalf of the given model.
-	GetModelCallContext(modelUUID string) (credentialcommon.PersistentBackend, context.ProviderCallContext, ModelCallContextReleaser, error)
-
-	// SystemState allows access to an underlying controller state.
-	SystemState() (*state.State, error)
-}
-
-type statePoolShim struct {
-	*state.StatePool
-}
-
-// NewModelPoolBackend creates a model pool backend based on state.StatePool.
-func NewModelPoolBackend(st *state.StatePool) ModelPoolBackend {
-	return statePoolShim{StatePool: st}
-}
-
-// GetModelCallContext implements ModelPoolBackend.GetModelCallContext.
-// The responsibility of releasing the model state is left to the caller.
-func (s statePoolShim) GetModelCallContext(modelUUID string) (credentialcommon.PersistentBackend, context.ProviderCallContext, ModelCallContextReleaser, error) {
-	modelState, err := s.StatePool.Get(modelUUID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return credentialcommon.NewPersistentBackend(modelState.State),
-		context.CallContext(modelState.State),
-		modelState.Release,
-		err
-}
-
-type User interface {
-	DisplayName() string
-}
-
-func (s stateShim) User(tag names.UserTag) (User, error) {
-	return s.State.User(tag)
+// CredentialService provides access to the credential domain service.
+type CredentialService interface {
+	CloudCredential(ctx context.Context, key credential.Key) (cloud.Credential, error)
+	AllCloudCredentialsForOwner(ctx context.Context, owner user.Name) (map[credential.Key]cloud.Credential, error)
+	CloudCredentialsForOwner(ctx context.Context, owner user.Name, cloudName string) (map[string]cloud.Credential, error)
+	UpdateCloudCredential(ctx context.Context, key credential.Key, cred cloud.Credential) error
+	RemoveCloudCredential(ctx context.Context, key credential.Key) error
+	WatchCredential(ctx context.Context, key credential.Key) (watcher.NotifyWatcher, error)
+	CheckAndUpdateCredential(ctx context.Context, key credential.Key, cred cloud.Credential, force bool) ([]credentialservice.UpdateCredentialModelResult, error)
+	CheckAndRevokeCredential(ctx context.Context, key credential.Key, force bool) error
 }

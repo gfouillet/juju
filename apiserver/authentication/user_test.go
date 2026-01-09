@@ -5,6 +5,7 @@ package authentication_test
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
@@ -14,157 +15,341 @@ import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/apiserver/authentication"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/permission"
+	usertesting "github.com/juju/juju/core/user/testing"
+	"github.com/juju/juju/domain/access/service"
+	"github.com/juju/juju/internal/auth"
+	"github.com/juju/juju/internal/testhelpers"
 	jujutesting "github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testing/factory"
 )
 
 type userAuthenticatorSuite struct {
-	jujutesting.JujuConnSuite
+	jujutesting.ApiServerSuite
 }
 
-var _ = gc.Suite(&userAuthenticatorSuite{})
+func TestUserAuthenticatorSuite(t *testing.T) {
+	tc.Run(t, &userAuthenticatorSuite{})
+}
 
-func (s *userAuthenticatorSuite) TestMachineLoginFails(c *gc.C) {
-	// add machine for testing machine agent authentication
-	machine, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	nonce, err := utils.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = machine.SetProvisioned("foo", "", nonce, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	password, err := utils.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = machine.SetPassword(password)
-	c.Assert(err, jc.ErrorIsNil)
-	machinePassword := password
+func (s *userAuthenticatorSuite) TestMachineLoginFails(c *tc.C) {
 
-	// attempt machine login
 	authenticator := &authentication.LocalUserAuthenticator{}
-	_, err = authenticator.Authenticate(context.TODO(), nil, authentication.AuthParams{
-		AuthTag:     machine.Tag(),
-		Credentials: machinePassword,
-		Nonce:       nonce,
+	_, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewMachineTag("0"),
+		Credentials: "I am a machine",
+		Nonce:       "Ya nonce!",
 	})
-	c.Assert(err, gc.ErrorMatches, "invalid request")
+	c.Assert(err, tc.ErrorMatches, "invalid request")
 }
 
-func (s *userAuthenticatorSuite) TestUnitLoginFails(c *gc.C) {
-	// add a unit for testing unit agent authentication
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	unit, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	password, err := utils.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = unit.SetPassword(password)
-	c.Assert(err, jc.ErrorIsNil)
-	unitPassword := password
-
-	// Attempt unit login
+func (s *userAuthenticatorSuite) TestUnitLoginFails(c *tc.C) {
+	// Attempt unit login,
 	authenticator := &authentication.LocalUserAuthenticator{}
-	_, err = authenticator.Authenticate(context.TODO(), nil, authentication.AuthParams{
-		AuthTag:     unit.UnitTag(),
-		Credentials: unitPassword,
+	_, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewUnitTag("vault/0"),
+		Credentials: "I am a unit",
 	})
-	c.Assert(err, gc.ErrorMatches, "invalid request")
+	c.Assert(err, tc.ErrorMatches, "invalid request")
 }
 
-func (s *userAuthenticatorSuite) TestValidUserLogin(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{
-		Name:        "bobbrown",
+func (s *userAuthenticatorSuite) TestValidUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        usertesting.GenNewName(c, "bobbrown"),
 		DisplayName: "Bob Brown",
-		Password:    "password",
+		CreatorUUID: s.AdminUserUUID,
+		Password:    ptr(auth.NewPassword("password")),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
+	c.Assert(err, tc.ErrorIsNil)
 
-	// User login
-	authenticator := &authentication.LocalUserAuthenticator{}
-	_, err := authenticator.Authenticate(context.TODO(), s.State, authentication.AuthParams{
-		AuthTag:     user.Tag(),
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+	}
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewUserTag("bobbrown"),
 		Credentials: "password",
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.Equals, names.NewUserTag("bobbrown"))
 }
 
-func (s *userAuthenticatorSuite) TestUserLoginWrongPassword(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{
-		Name:        "bobbrown",
+func (s *userAuthenticatorSuite) TestDisabledUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
 		DisplayName: "Bob Brown",
-		Password:    "password",
+		CreatorUUID: s.AdminUserUUID,
+		Password:    ptr(auth.NewPassword("password")),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
+	c.Assert(err, tc.ErrorIsNil)
+	err = userService.DisableUserAuthentication(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
+
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewUserTag("bobbrown"),
+		Credentials: "password",
+	})
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrUnauthorized)
+}
+
+func (s *userAuthenticatorSuite) TestRemovedUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Password:    ptr(auth.NewPassword("password")),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	err = userService.RemoveUser(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// User login
-	authenticator := &authentication.LocalUserAuthenticator{}
-	_, err := authenticator.Authenticate(context.TODO(), s.State, authentication.AuthParams{
-		AuthTag:     user.Tag(),
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewUserTag("bobbrown"),
+		Credentials: "password",
+	})
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrUnauthorized)
+}
+
+func (s *userAuthenticatorSuite) TestUserLoginWrongPassword(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Password:    ptr(auth.NewPassword("password")),
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+	// User login
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewUserTag(name.Name()),
 		Credentials: "wrongpassword",
 	})
-	c.Assert(err, gc.ErrorMatches, "invalid entity name or password")
-
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrUnauthorized)
 }
 
-func (s *userAuthenticatorSuite) TestInvalidRelationLogin(c *gc.C) {
-
-	// add relation
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wordpressEP, err := wordpress.Endpoint("db")
-	c.Assert(err, jc.ErrorIsNil)
-	mysql := s.AddTestingApplication(c, "mysql", s.AddTestingCharm(c, "mysql"))
-	mysqlEP, err := mysql.Endpoint("server")
-	c.Assert(err, jc.ErrorIsNil)
-	relation, err := s.State.AddRelation(wordpressEP, mysqlEP)
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Attempt relation login
-	authenticator := &authentication.LocalUserAuthenticator{}
-	_, err = authenticator.Authenticate(context.TODO(), nil, authentication.AuthParams{
-		AuthTag:     relation.Tag(),
-		Credentials: "dummy-secret",
+func (s *userAuthenticatorSuite) TestValidMacaroonUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bob")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
 	})
-	c.Assert(err, gc.ErrorMatches, "invalid request")
-}
+	c.Assert(err, tc.ErrorIsNil)
 
-func (s *userAuthenticatorSuite) TestValidMacaroonUserLogin(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{
-		Name: "bob",
-	})
 	mac, err := macaroon.New(nil, nil, "", macaroon.LatestVersion)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = mac.AddFirstPartyCaveat([]byte("declared username bob"))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	macaroons := []macaroon.Slice{{mac}}
-	service := mockBakeryService{}
+	bakeryService := mockBakeryService{}
 
 	// User login
-	authenticator := &authentication.LocalUserAuthenticator{Bakery: &service, Clock: testclock.NewClock(time.Time{})}
-	_, err = authenticator.Authenticate(context.TODO(), s.State, authentication.AuthParams{
-		AuthTag:   user.Tag(),
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+		Bakery:      &bakeryService,
+		Clock:       testclock.NewClock(time.Time{}),
+	}
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:   names.NewUserTag(name.Name()),
 		Macaroons: macaroons,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	service.CheckCallNames(c, "Auth")
-	call := service.Calls()[0]
-	c.Assert(call.Args, gc.HasLen, 1)
-	c.Assert(call.Args[0], jc.DeepEquals, macaroons)
+	bakeryService.CheckCallNames(c, "Auth")
+	call := bakeryService.Calls()[0]
+	c.Assert(call.Args, tc.HasLen, 1)
+	c.Assert(call.Args[0], tc.DeepEquals, macaroons)
+	c.Check(authenticatedTag, tc.Equals, names.NewUserTag(name.Name()))
 }
 
-func (s *userAuthenticatorSuite) TestCreateLocalLoginMacaroon(c *gc.C) {
+func (s *userAuthenticatorSuite) TestInvalidMacaroonUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        usertesting.GenNewName(c, "bobbrown"),
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+	mac, err := macaroon.New(nil, nil, "", macaroon.LatestVersion)
+	c.Assert(err, tc.ErrorIsNil)
+	err = mac.AddFirstPartyCaveat([]byte("declared username fred"))
+	c.Assert(err, tc.ErrorIsNil)
+	macaroons := []macaroon.Slice{{mac}}
+	bakeryService := mockBakeryService{}
+
+	// User login
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+		Bakery:      &bakeryService,
+		Clock:       testclock.NewClock(time.Time{}),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:   names.NewUserTag("bob"),
+		Macaroons: macaroons,
+	})
+	c.Assert(err, tc.ErrorIs, authentication.ErrInvalidLoginMacaroon)
+}
+
+func (s *userAuthenticatorSuite) TestDisabledMacaroonUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	err = userService.DisableUserAuthentication(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
+
+	mac, err := macaroon.New(nil, nil, "", macaroon.LatestVersion)
+	c.Assert(err, tc.ErrorIsNil)
+	err = mac.AddFirstPartyCaveat([]byte("declared username bob"))
+	c.Assert(err, tc.ErrorIsNil)
+	macaroons := []macaroon.Slice{{mac}}
+	bakeryService := mockBakeryService{}
+
+	// User login
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+		Bakery:      &bakeryService,
+		Clock:       testclock.NewClock(time.Time{}),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:   names.NewUserTag("bob"),
+		Macaroons: macaroons,
+	})
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrUnauthorized)
+}
+
+func (s *userAuthenticatorSuite) TestRemovedMacaroonUserLogin(c *tc.C) {
+	userService := s.ControllerDomainServices(c).Access()
+	name := usertesting.GenNewName(c, "bobbrown")
+	_, _, err := userService.AddUser(c.Context(), service.AddUserArg{
+		Name:        name,
+		DisplayName: "Bob Brown",
+		CreatorUUID: s.AdminUserUUID,
+		Permission: permission.AccessSpec{
+			Access: permission.LoginAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.ControllerUUID,
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	err = userService.RemoveUser(c.Context(), name)
+	c.Assert(err, tc.ErrorIsNil)
+
+	mac, err := macaroon.New(nil, nil, "", macaroon.LatestVersion)
+	c.Assert(err, tc.ErrorIsNil)
+	err = mac.AddFirstPartyCaveat([]byte("declared username bob"))
+	c.Assert(err, tc.ErrorIsNil)
+	macaroons := []macaroon.Slice{{mac}}
+	bakeryService := mockBakeryService{}
+
+	// User login.
+	authenticator := &authentication.LocalUserAuthenticator{
+		UserService: s.ControllerDomainServices(c).Access(),
+		Bakery:      &bakeryService,
+		Clock:       testclock.NewClock(time.Time{}),
+	}
+	_, err = authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:   names.NewUserTag("bob"),
+		Macaroons: macaroons,
+	})
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrUnauthorized)
+}
+
+func (s *userAuthenticatorSuite) TestInvalidRelationLogin(c *tc.C) {
+	authenticator := &authentication.LocalUserAuthenticator{}
+	_, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     names.NewRelationTag("this-app:rel that-app:rel"),
+		Credentials: "I am a relation",
+	})
+	c.Assert(err, tc.ErrorMatches, "invalid request")
+}
+
+func (s *userAuthenticatorSuite) TestCreateLocalLoginMacaroon(c *tc.C) {
 	service := mockBakeryService{}
 	clock := testclock.NewClock(time.Time{})
 	_, err := authentication.CreateLocalLoginMacaroon(
-		context.TODO(),
+		c.Context(),
 		names.NewUserTag("bobbrown"), &service, clock, bakery.LatestVersion,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	service.CheckCallNames(c, "NewMacaroon")
 	service.CheckCall(c, 0, "NewMacaroon", []checkers.Caveat{
 		{Condition: "is-authenticated-user bobbrown"},
@@ -172,7 +357,7 @@ func (s *userAuthenticatorSuite) TestCreateLocalLoginMacaroon(c *gc.C) {
 	})
 }
 
-func (s *userAuthenticatorSuite) TestAuthenticateLocalLoginMacaroon(c *gc.C) {
+func (s *userAuthenticatorSuite) TestAuthenticateLocalLoginMacaroon(c *tc.C) {
 	service := mockBakeryService{}
 	clock := testclock.NewClock(time.Time{})
 	authenticator := &authentication.LocalUserAuthenticator{
@@ -183,20 +368,21 @@ func (s *userAuthenticatorSuite) TestAuthenticateLocalLoginMacaroon(c *gc.C) {
 
 	service.SetErrors(nil, &bakery.VerificationError{})
 	_, err := authenticator.Authenticate(
-		context.TODO(),
-		authentication.EntityFinder(nil),
+		c.Context(),
 		authentication.AuthParams{
 			AuthTag: names.NewUserTag("bobbrown"),
 		},
 	)
-	c.Assert(err, gc.FitsTypeOf, &apiservererrors.DischargeRequiredError{})
+	c.Assert(err, tc.FitsTypeOf, &apiservererrors.DischargeRequiredError{})
 
-	service.CheckCallNames(c, "Auth", "ExpireStorageAfter", "NewMacaroon")
+	service.CheckCallNames(c, "Auth", "NewMacaroon")
 	calls := service.Calls()
-	c.Assert(calls[1].Args, jc.DeepEquals, []interface{}{24 * time.Hour})
-	c.Assert(calls[2].Args, jc.DeepEquals, []interface{}{
+	c.Assert(calls, tc.HasLen, 2)
+	c.Check(calls[1].Args, tc.SameContents, []interface{}{
 		[]checkers.Caveat{
-			{Condition: "time-before 0001-01-02T00:00:00Z", Namespace: "std"},
+			{
+				Condition: "time-before 0001-01-02T00:00:00Z", Namespace: "std",
+			},
 			checkers.NeedDeclaredCaveat(
 				checkers.Caveat{
 					Location:  "https://testing.invalid:1234/auth",
@@ -210,10 +396,10 @@ func (s *userAuthenticatorSuite) TestAuthenticateLocalLoginMacaroon(c *gc.C) {
 }
 
 type mockBakeryService struct {
-	testing.Stub
+	testhelpers.Stub
 }
 
-func (s *mockBakeryService) Auth(mss ...macaroon.Slice) *bakery.AuthChecker {
+func (s *mockBakeryService) Auth(_ context.Context, mss ...macaroon.Slice) *bakery.AuthChecker {
 	s.MethodCall(s, "Auth", mss)
 	checker := bakery.NewChecker(bakery.CheckerParams{
 		OpsAuthorizer:    mockAuthorizer{},
@@ -231,9 +417,10 @@ func (s *mockBakeryService) NewMacaroon(ctx context.Context, version bakery.Vers
 	return bakery.NewLegacyMacaroon(mac)
 }
 
-func (s *mockBakeryService) ExpireStorageAfter(t time.Duration) (authentication.ExpirableStorageBakery, error) {
+func (s *mockBakeryService) ExpireStorageAfter(t time.Duration) (authentication.Bakery, error) {
 	s.MethodCall(s, "ExpireStorageAfter", t)
-	return s, s.NextErr()
+	err := s.NextErr()
+	return s, err
 }
 
 type mockAuthorizer struct{}
@@ -253,44 +440,37 @@ func (mockVerifier) VerifyMacaroon(ctx context.Context, ms macaroon.Slice) ([]ba
 }
 
 type macaroonAuthenticatorSuite struct {
-	jujutesting.JujuConnSuite
+	jujutesting.ApiServerSuite
 	// username holds the username that will be
 	// declared in the discharger's caveats.
 	username string
 }
 
-var _ = gc.Suite(&macaroonAuthenticatorSuite{})
+func TestMacaroonAuthenticatorSuite(t *testing.T) {
+	tc.Run(t, &macaroonAuthenticatorSuite{})
+}
 
 var authenticateSuccessTests = []struct {
 	about              string
 	dischargedUsername string
-	finder             authentication.EntityFinder
 	expectTag          string
 	expectError        string
 }{{
 	about:              "user that can be found",
 	dischargedUsername: "bobbrown@somewhere",
 	expectTag:          "user-bobbrown@somewhere",
-	finder:             simpleEntityFinder{},
 }, {
 	about:              "user with no @ domain",
 	dischargedUsername: "bobbrown",
-	finder: simpleEntityFinder{
-		"user-bobbrown@external": true,
-	},
-	expectTag: "user-bobbrown@external",
+	expectTag:          "user-bobbrown@external",
 }, {
 	about:              "invalid user name",
 	dischargedUsername: "--",
-	finder:             simpleEntityFinder{},
 	expectError:        `"--" is an invalid user name`,
 }, {
 	about:              "ostensibly local name",
 	dischargedUsername: "cheat@local",
-	finder: simpleEntityFinder{
-		"cheat@local": true,
-	},
-	expectError: `external identity provider has provided ostensibly local name "cheat@local"`,
+	expectError:        `external identity provider has provided ostensibly local name "cheat@local"`,
 }}
 
 type alwaysIdent struct {
@@ -308,7 +488,7 @@ func (alwaysIdent) DeclaredIdentity(ctx context.Context, declared map[string]str
 	return identchecker.SimpleIdentity(user), nil
 }
 
-func (s *macaroonAuthenticatorSuite) TestMacaroonAuthentication(c *gc.C) {
+func (s *macaroonAuthenticatorSuite) TestMacaroonAuthentication(c *tc.C) {
 	discharger := bakerytest.NewDischarger(nil)
 	defer discharger.Close()
 	for i, test := range authenticateSuccessTests {
@@ -326,46 +506,28 @@ func (s *macaroonAuthenticatorSuite) TestMacaroonAuthentication(c *gc.C) {
 		}
 
 		// Authenticate once to obtain the macaroon to be discharged.
-		_, err := authenticator.Authenticate(context.TODO(), test.finder, authentication.AuthParams{})
+		_, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{})
 
 		// Discharge the macaroon.
 		dischargeErr := errors.Cause(err).(*apiservererrors.DischargeRequiredError)
 		client := httpbakery.NewClient()
-		ms, err := client.DischargeAll(context.Background(), dischargeErr.Macaroon)
-		c.Assert(err, jc.ErrorIsNil)
+		ms, err := client.DischargeAll(c.Context(), dischargeErr.Macaroon)
+		c.Assert(err, tc.ErrorIsNil)
 
 		// Authenticate again with the discharged macaroon.
-		entity, err := authenticator.Authenticate(context.TODO(), test.finder, authentication.AuthParams{
+		authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
 			Macaroons: []macaroon.Slice{ms},
 		})
 		if test.expectError != "" {
-			c.Assert(err, gc.ErrorMatches, test.expectError)
-			c.Assert(entity, gc.Equals, nil)
+			c.Assert(err, tc.ErrorMatches, test.expectError)
+			c.Assert(authenticatedTag, tc.Equals, nil)
 		} else {
-			c.Assert(err, jc.ErrorIsNil)
-			c.Assert(entity.Tag().String(), gc.Equals, test.expectTag)
+			c.Assert(err, tc.ErrorIsNil)
+			c.Assert(authenticatedTag.String(), tc.Equals, test.expectTag)
 		}
 	}
 }
 
-type simpleEntityFinder map[string]bool
-
-func (f simpleEntityFinder) FindEntity(tag names.Tag) (state.Entity, error) {
-	if utag, ok := tag.(names.UserTag); ok {
-		// It's a user tag which we need to be in canonical form
-		// so we can look it up unambiguously.
-		tag = names.NewUserTag(utag.Id())
-	}
-	if f[tag.String()] {
-		return &simpleEntity{tag}, nil
-	}
-	return nil, errors.NotFoundf("entity %q", tag)
-}
-
-type simpleEntity struct {
-	tag names.Tag
-}
-
-func (e *simpleEntity) Tag() names.Tag {
-	return e.tag
+func ptr[T any](t T) *T {
+	return &t
 }

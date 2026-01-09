@@ -4,13 +4,18 @@
 package filenotifywatcher
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
-	"k8s.io/utils/inotify"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
+	"gopkg.in/tomb.v2"
+
+	"github.com/juju/juju/core/logger"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
 const (
@@ -32,7 +37,7 @@ type INotifyWatcher interface {
 	Watch(path string) error
 
 	// Events returns the next event.
-	Events() <-chan *inotify.Event
+	Events() <-chan fsnotify.Event
 
 	// Errors returns the next error.
 	Errors() <-chan error
@@ -43,7 +48,7 @@ type INotifyWatcher interface {
 
 type option struct {
 	path      string
-	logger    Logger
+	logger    logger.Logger
 	watcherFn func() (INotifyWatcher, error)
 }
 
@@ -57,7 +62,7 @@ func WithPath(path string) Option {
 }
 
 // WithLogger is an option for NewWatcher that specifies the logger to use.
-func WithLogger(logger Logger) Option {
+func WithLogger(logger logger.Logger) Option {
 	return func(o *option) {
 		o.logger = logger
 	}
@@ -74,7 +79,7 @@ func WithINotifyWatcherFn(watcherFn func() (INotifyWatcher, error)) Option {
 func newOption() *option {
 	return &option{
 		path:      defaultWatcherPath,
-		logger:    loggo.GetLogger("juju.worker.filenotifywatcher"),
+		logger:    internallogger.GetLogger("juju.worker.filenotifywatcher"),
 		watcherFn: newWatcher,
 	}
 }
@@ -91,21 +96,36 @@ type Watcher struct {
 	watchPath string
 	watcher   INotifyWatcher
 
-	logger Logger
+	logger logger.Logger
 }
 
+// NewWatcher returns a new FileWatcher that watches the given fileName in the
+// given path.
 func NewWatcher(fileName string, opts ...Option) (FileWatcher, error) {
 	o := newOption()
 	for _, opt := range opts {
 		opt(o)
 	}
 
+	// Ensure that we create the watch path.
+	if _, err := os.Stat(o.path); err != nil && os.IsNotExist(err) {
+		if err := os.MkdirAll(o.path, 0755); err != nil {
+			o.logger.Infof(context.Background(), "failed watching file %q in path %q: %v", fileName, o.path, err)
+			return newNoopFileWatcher(), nil
+		}
+	}
+
 	watcher, err := o.watcherFn()
 	if err != nil {
 		return nil, errors.Annotatef(err, "creating watcher for file %q in path %q", fileName, o.path)
 	}
+
 	if err := watcher.Watch(o.path); err != nil {
-		return nil, errors.Annotatef(err, "watching file %q in path %q", fileName, o.path)
+		// As this is only used for debugging, we don't want to fail if we can't
+		// watch the folder.
+		o.logger.Infof(context.Background(), "failed watching file %q in path %q: %v", fileName, o.path, err)
+		_ = watcher.Close()
+		return newNoopFileWatcher(), nil
 	}
 
 	w := &Watcher{
@@ -117,6 +137,7 @@ func NewWatcher(fileName string, opts ...Option) (FileWatcher, error) {
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "file-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -142,6 +163,9 @@ func (w *Watcher) Changes() <-chan bool {
 }
 
 func (w *Watcher) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	defer func() {
 		_ = w.watcher.Close()
 		close(w.changes)
@@ -152,49 +176,82 @@ func (w *Watcher) loop() error {
 		case <-w.catacomb.Dying():
 			return w.catacomb.ErrDying()
 		case event := <-w.watcher.Events():
-			if w.logger.IsTraceEnabled() {
-				w.logger.Tracef("inotify event for %v", event)
+			if w.logger.IsLevelEnabled(logger.TRACE) {
+				w.logger.Tracef(ctx, "inotify event for %v", event)
 			}
 			// Ignore events for other files in the directory.
 			if event.Name != w.watchPath {
 				continue
 			}
 			// If the event is not a create or delete event, ignore it.
-			if maskType(event.Mask) == unknown {
+			opType := parseOpType(event.Op)
+			if opType == unknown {
 				continue
 			}
 
-			created := event.Mask&inotify.InCreate != 0
-
-			if w.logger.IsTraceEnabled() {
-				w.logger.Tracef("dispatch event for fileName %q: %v", w.fileName, event)
+			if w.logger.IsLevelEnabled(logger.TRACE) {
+				w.logger.Tracef(ctx, "dispatch event for fileName %q: %v", w.fileName, event)
 			}
 
-			w.changes <- created
+			w.changes <- opType == created
 
 		case err := <-w.watcher.Errors():
-			w.logger.Errorf("error watching fileName %q with %v", w.fileName, err)
+			w.logger.Errorf(ctx, "error watching fileName %q with %v", w.fileName, err)
 		}
 	}
 }
 
-// eventType normalizes the inotify event type, to known types.
-type eventType int
+func (w *Watcher) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
+}
+
+// opType normalizes the fsnotify op type, to known types.
+type opType int
 
 const (
-	unknown eventType = iota
+	unknown opType = iota
 	created
 	deleted
 )
 
-// makeType returns the event type for the given mask.
+// parseOpType returns the op type for the given op.
 // It expects that created and deleted can never be set at the same time.
-func maskType(m uint32) eventType {
-	if m&inotify.InCreate != 0 {
+func parseOpType(m fsnotify.Op) opType {
+	if m.Has(fsnotify.Create) {
 		return created
 	}
-	if m&inotify.InDelete != 0 {
+	if m.Has(fsnotify.Remove) {
 		return deleted
 	}
 	return unknown
+}
+
+type noopFileWatcher struct {
+	tomb tomb.Tomb
+	ch   chan bool
+}
+
+func newNoopFileWatcher() *noopFileWatcher {
+	w := &noopFileWatcher{
+		ch: make(chan bool),
+	}
+
+	w.tomb.Go(func() error {
+		<-w.tomb.Dying()
+		return tomb.ErrDying
+	})
+
+	return w
+}
+
+func (w *noopFileWatcher) Kill() {
+	w.tomb.Kill(nil)
+}
+
+func (w *noopFileWatcher) Wait() error {
+	return w.tomb.Wait()
+}
+
+func (w *noopFileWatcher) Changes() <-chan bool {
+	return w.ch
 }

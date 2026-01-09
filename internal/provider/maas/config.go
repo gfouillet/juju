@@ -4,13 +4,15 @@
 package maas
 
 import (
+	"context"
+
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
-var configSchema = environschema.Fields{}
+var configSchema = configschema.Fields{}
 
 var configFields = func() schema.Fields {
 	fs, _, err := configSchema.ValidationSchema()
@@ -27,8 +29,8 @@ type maasModelConfig struct {
 	attrs map[string]interface{}
 }
 
-func (p EnvironProvider) newConfig(cfg *config.Config) (*maasModelConfig, error) {
-	validCfg, err := p.Validate(cfg, nil)
+func (p EnvironProvider) newConfig(ctx context.Context, cfg *config.Config) (*maasModelConfig, error) {
+	validCfg, err := p.Validate(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -39,12 +41,18 @@ func (p EnvironProvider) newConfig(cfg *config.Config) (*maasModelConfig, error)
 }
 
 // Schema returns the configuration schema for an environment.
-func (EnvironProvider) Schema() environschema.Fields {
+func (EnvironProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
 	}
 	return fields
+}
+
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p EnvironProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return map[string]any{}, nil
 }
 
 // ConfigSchema returns extra config attributes specific
@@ -59,9 +67,9 @@ func (p EnvironProvider) ConfigDefaults() schema.Defaults {
 	return configDefaults
 }
 
-func (p EnvironProvider) Validate(cfg, oldCfg *config.Config) (*config.Config, error) {
+func (p EnvironProvider) Validate(ctx context.Context, cfg, oldCfg *config.Config) (*config.Config, error) {
 	// Validate base configuration change before validating MAAS specifics.
-	err := config.Validate(cfg, oldCfg)
+	err := config.Validate(ctx, cfg, oldCfg)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@
 package openstack
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 
 	"github.com/go-goose/goose/v5/identity"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 	"gopkg.in/ini.v1"
 
 	"github.com/juju/juju/cloud"
@@ -112,7 +113,7 @@ func (c OpenstackCredentials) DetectCredentials(cloudName string) (*cloud.CloudC
 	}
 
 	// Try just using environment variables
-	creds, user, region, err := c.detectCredential()
+	creds, user, region, err := c.detectCredential(context.TODO())
 	if err == nil {
 		result.DefaultRegion = region
 		result.AuthCredentials[user] = *creds
@@ -131,7 +132,7 @@ func (c OpenstackCredentials) DetectCredentials(cloudName string) (*cloud.CloudC
 			k = stripExport.ReplaceAllString(k, "")
 			os.Setenv(k, v)
 		}
-		creds, user, region, err := c.detectCredential()
+		creds, user, region, err := c.detectCredential(context.TODO())
 		if err == nil {
 			result.DefaultRegion = region
 			result.AuthCredentials[user] = *creds
@@ -143,16 +144,16 @@ func (c OpenstackCredentials) DetectCredentials(cloudName string) (*cloud.CloudC
 	return &result, nil
 }
 
-func (c OpenstackCredentials) detectCredential() (*cloud.Credential, string, string, error) {
+func (c OpenstackCredentials) detectCredential(ctx context.Context) (*cloud.Credential, string, string, error) {
 	creds, err := identity.CredentialsFromEnv()
 	if err != nil {
 		return nil, "", "", errors.Errorf("failed to retrieve credential from env : %v", err)
 	}
 	if creds.TenantName == "" {
-		logger.Debugf("neither OS_TENANT_NAME nor OS_PROJECT_NAME environment variable not set")
+		logger.Debugf(ctx, "neither OS_TENANT_NAME nor OS_PROJECT_NAME environment variable not set")
 	}
 	if creds.TenantID == "" {
-		logger.Debugf("neither OS_TENANT_ID nor OS_PROJECT_ID environment variable not set")
+		logger.Debugf(ctx, "neither OS_TENANT_ID nor OS_PROJECT_ID environment variable not set")
 	}
 	if creds.User == "" {
 		return nil, "", "", errors.NewNotFound(nil, "neither OS_USERNAME nor OS_ACCESS_KEY environment variable not set")

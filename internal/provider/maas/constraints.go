@@ -4,6 +4,7 @@
 package maas
 
 import (
+	"context"
 	"net/url"
 	"strings"
 
@@ -12,7 +13,6 @@ import (
 
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs/context"
 )
 
 var unsupportedConstraints = []string{
@@ -23,7 +23,7 @@ var unsupportedConstraints = []string{
 }
 
 // ConstraintsValidator is defined on the Environs interface.
-func (env *maasEnviron) ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error) {
+func (env *maasEnviron) ConstraintsValidator(ctx context.Context) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
 	validator.RegisterUnsupported(unsupportedConstraints)
 	supportedArches, err := env.getSupportedArchitectures(ctx)
@@ -64,7 +64,7 @@ func convertConstraints(cons constraints.Value) gomaasapi.AllocateMachineArgs {
 		}
 	}
 	if cons.CpuPower != nil {
-		logger.Warningf("ignoring unsupported constraint 'cpu-power'")
+		logger.Warningf(context.TODO(), "ignoring unsupported constraint 'cpu-power'")
 	}
 	return params
 }

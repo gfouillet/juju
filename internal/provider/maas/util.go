@@ -9,18 +9,18 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 	goyaml "gopkg.in/yaml.v2"
 
-	"github.com/juju/juju/cloudconfig/cloudinit"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/internal/cloudconfig/cloudinit"
 )
 
 // extractSystemId extracts the 'system_id' part from an InstanceId.
 // "/MAAS/api/1.0/nodes/system_id/" => "system_id"
 func extractSystemId(instanceId instance.Id) string {
-	trimmed := strings.TrimRight(string(instanceId), "/")
+	trimmed := strings.TrimRight(instanceId.String(), "/")
 	split := strings.Split(trimmed, "/")
 	return split[len(split)-1]
 }

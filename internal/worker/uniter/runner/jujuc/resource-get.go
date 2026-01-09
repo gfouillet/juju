@@ -6,10 +6,10 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewResourceGetCmd creates a new ResourceGetCmd for the given hook context.
@@ -107,7 +107,7 @@ func (c *ResourceGetCmd) Init(args []string) error {
 
 // Run implements cmd.Command.
 func (c ResourceGetCmd) Run(ctx *cmd.Context) error {
-	filePath, err := c.ctx.DownloadResource(c.resourceName)
+	filePath, err := c.ctx.DownloadResource(ctx, c.resourceName)
 	if err != nil {
 		return errors.Annotate(err, "could not download resource")
 	}

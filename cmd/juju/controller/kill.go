@@ -4,16 +4,14 @@
 package controller
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
-	"github.com/juju/juju/api/client/credentialmanager"
 	"github.com/juju/juju/api/controller/controller"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/caas"
@@ -23,6 +21,7 @@ import (
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const killDoc = `
@@ -46,7 +45,6 @@ stop watching and destroy the models directly through the cloud provider.
 // forceful destroy.
 func NewKillCommand() modelcmd.Command {
 	cmd := killCommand{clock: clock.WallClock}
-	cmd.controllerCredentialAPIFunc = cmd.credentialAPIForControllerModel
 	cmd.environsDestroy = environs.Destroy
 	return wrapKillCommand(&cmd)
 }
@@ -106,7 +104,7 @@ func (c *killCommand) Run(ctx *cmd.Context) error {
 	store := c.ClientStore()
 
 	// Attempt to connect to the API.
-	api, err := c.getControllerAPIWithTimeout(10 * time.Second)
+	api, err := c.getControllerAPIWithTimeout(ctx, 10*time.Second)
 	switch errors.Cause(err) {
 	case nil:
 		defer api.Close()
@@ -116,7 +114,7 @@ func (c *killCommand) Run(ctx *cmd.Context) error {
 		ctx.Infof("Unable to open API: %s\n", err)
 	}
 
-	controllerModelConfigAPI, err := c.getControllerModelConfigAPI()
+	controllerModelConfigAPI, err := c.getControllerModelConfigAPI(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot connect to model config API: %w", err)
 	}
@@ -127,12 +125,11 @@ func (c *killCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return errors.Annotate(err, "getting controller environ")
 	}
-	cloudCallCtx := cloudCallContext(c.controllerCredentialAPIFunc)
 	// If we were unable to connect to the API, just destroy the controller through
 	// the environs interface.
 	if api == nil {
 		ctx.Infof("Unable to connect to the API server, destroying through provider")
-		return c.environsDestroy(controllerName, controllerEnviron, cloudCallCtx, store)
+		return c.environsDestroy(controllerName, controllerEnviron, ctx, store)
 	}
 
 	if c.DestroyConfirmationCommandBase.NeedsConfirmation() {
@@ -149,20 +146,20 @@ func (c *killCommand) Run(ctx *cmd.Context) error {
 
 	// Attempt to destroy the controller and all models and storage.
 	destroyStorage := true
-	err = api.DestroyController(controller.DestroyControllerParams{
+	err = api.DestroyController(ctx, controller.DestroyControllerParams{
 		DestroyModels:  true,
 		DestroyStorage: &destroyStorage,
 	})
 	if err != nil {
 		ctx.Infof("Unable to destroy controller through the API: %s\nDestroying through provider", err)
-		return c.environsDestroy(controllerName, controllerEnviron, cloudCallCtx, store)
+		return c.environsDestroy(controllerName, controllerEnviron, ctx, store)
 	}
 
 	ctx.Infof("Destroying controller %q\nWaiting for resources to be reclaimed", controllerName)
 
 	controllerCloudSpec, err := c.getControllerCloudSpecFromStore(ctx, store, controllerName)
 	if err != nil {
-		logger.Debugf("unable to get controller %q cloud spec from local store", controllerName)
+		logger.Debugf(ctx, "unable to get controller %q cloud spec from local store", controllerName)
 		controllerCloudSpec = cloudspec.CloudSpec{}
 	}
 
@@ -170,10 +167,10 @@ func (c *killCommand) Run(ctx *cmd.Context) error {
 	if err := c.WaitForModels(ctx, api, uuid); err != nil {
 		c.DirectDestroyRemaining(ctx, api, controllerCloudSpec)
 	}
-	return c.environsDestroy(controllerName, controllerEnviron, cloudCallCtx, store)
+	return c.environsDestroy(controllerName, controllerEnviron, ctx, store)
 }
 
-func (c *killCommand) getControllerAPIWithTimeout(timeout time.Duration) (destroyControllerAPI, error) {
+func (c *killCommand) getControllerAPIWithTimeout(ctx context.Context, timeout time.Duration) (destroyControllerAPI, error) {
 	type result struct {
 		c   destroyControllerAPI
 		err error
@@ -181,7 +178,7 @@ func (c *killCommand) getControllerAPIWithTimeout(timeout time.Duration) (destro
 	resultC := make(chan result)
 	done := make(chan struct{})
 	go func() {
-		api, err := c.getControllerAPI()
+		api, err := c.getControllerAPI(ctx)
 		select {
 		case resultC <- result{api, err}:
 		case <-done:
@@ -193,6 +190,9 @@ func (c *killCommand) getControllerAPIWithTimeout(timeout time.Duration) (destro
 	select {
 	case r := <-resultC:
 		return r.c, r.err
+	case <-ctx.Done():
+		close(done)
+		return nil, ctx.Err()
 	case <-c.clock.After(timeout):
 		close(done)
 		return nil, errConnTimedOut
@@ -207,46 +207,45 @@ func (c *killCommand) DirectDestroyRemaining(
 	controllerCloudSpec cloudspec.CloudSpec) {
 
 	hasErrors := false
-	hostedConfig, err := api.HostedModelConfigs()
+	hostedConfig, err := api.HostedModelConfigs(ctx)
 	if err != nil {
 		hasErrors = true
-		logger.Warningf("unable to retrieve hosted model config: %v", err)
+		logger.Warningf(ctx, "unable to retrieve hosted model config: %v", err)
 	}
 	ctrlUUID := ""
 	// try to get controller UUID or just ignore.
-	if ctrlCfg, err := api.ControllerConfig(); err == nil {
+	if ctrlCfg, err := api.ControllerConfig(ctx.Context); err == nil {
 		ctrlUUID = ctrlCfg.ControllerUUID()
 	} else {
-		logger.Warningf("getting controller config from API: %v", err)
+		logger.Warningf(ctx, "getting controller config from API: %v", err)
 	}
 	for _, model := range hostedConfig {
 		if model.Error != nil {
 			// We can only display model name here since
-			// the error coming from api can be anything
-			// including the parsing of the model owner tag.
+			// the error coming from api can be anything.
 			// Only model name is guaranteed to be set in the result
 			// when an error is returned.
 			hasErrors = true
-			logger.Warningf("could not kill %s directly: %v", model.Name, model.Error)
+			logger.Warningf(ctx, "could not kill %s directly: %v", model.Name, model.Error)
 			continue
 		}
-		ctx.Infof("Killing %s/%s directly", model.Owner.Id(), model.Name)
+		ctx.Infof("Killing %s/%s directly", model.Qualifier, model.Name)
 		cfg, err := config.New(config.NoDefaults, model.Config)
 		if err != nil {
-			logger.Warningf(err.Error())
+			logger.Warningf(ctx, err.Error())
 			hasErrors = true
 			continue
 		}
 		p, err := environs.Provider(model.CloudSpec.Type)
 		if err != nil {
-			logger.Warningf(err.Error())
+			logger.Warningf(ctx, err.Error())
 			hasErrors = true
 			continue
 		}
 
 		modelCloudSpec, err := transformModelCloudSpecForInstanceRoles(model.Name, model.CloudSpec, controllerCloudSpec)
 		if err != nil {
-			logger.Warningf("could not kill %s directly: %v", model.Name, err)
+			logger.Warningf(ctx, "could not kill %s directly: %v", model.Name, err)
 			continue
 		}
 
@@ -258,18 +257,17 @@ func (c *killCommand) DirectDestroyRemaining(
 			}
 			var env environs.CloudDestroyer
 			if cloud.CloudTypeIsCAAS(model.CloudSpec.Type) {
-				env, err = caas.Open(stdcontext.TODO(), cloudProvider, openParams)
+				env, err = caas.Open(ctx, cloudProvider, openParams, environs.NoopCredentialInvalidator())
 			} else {
-				env, err = environs.Open(stdcontext.TODO(), cloudProvider, openParams)
+				env, err = environs.Open(ctx, cloudProvider, openParams, environs.NoopCredentialInvalidator())
 			}
 			if err != nil {
-				logger.Warningf(err.Error())
+				logger.Warningf(ctx, err.Error())
 				hasErrors = true
 				continue
 			}
-			cloudCallCtx := cloudCallContext(c.credentialAPIFunctionForModel(model.Name))
-			if err := env.Destroy(cloudCallCtx); err != nil {
-				logger.Warningf(err.Error())
+			if err := env.Destroy(ctx); err != nil {
+				logger.Warningf(ctx, err.Error())
 				hasErrors = true
 				continue
 			}
@@ -277,7 +275,7 @@ func (c *killCommand) DirectDestroyRemaining(
 		ctx.Infof("  done")
 	}
 	if hasErrors {
-		logger.Warningf("there were problems destroying some models, manual intervention may be necessary to ensure resources are released")
+		logger.Warningf(ctx, "there were problems destroying some models, manual intervention may be necessary to ensure resources are released")
 	} else {
 		ctx.Infof("All models destroyed, cleaning up controller machines")
 	}
@@ -312,19 +310,6 @@ func transformModelCloudSpecForInstanceRoles(
 		return controllerCloudSpec, nil
 	}
 	return modelCloudSpec, nil
-}
-
-func (c *killCommand) credentialAPIFunctionForModel(modelName string) newCredentialAPIFunc {
-	f := func(api CredentialAPI, err error) newCredentialAPIFunc {
-		return func() (CredentialAPI, error) {
-			return api, err
-		}
-	}
-	root, err := c.NewModelAPIRoot(modelName)
-	if err != nil {
-		return f(nil, errors.Trace(err))
-	}
-	return f(credentialmanager.NewClient(root), nil)
 }
 
 // WaitForModels will wait for the models to bring themselves down nicely.

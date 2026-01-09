@@ -8,14 +8,14 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -24,7 +24,7 @@ import (
 // detected, meaning Juju cannot choose one automatically.
 var ErrMultipleDetectedCredentials = errors.New("multiple detected credentials")
 
-//go:generate go run go.uber.org/mock/mockgen -package common -destination credentialstore_mock_test.go github.com/juju/juju/jujuclient CredentialStore
+//go:generate go run go.uber.org/mock/mockgen -typed -package common -destination credentialstore_mock_test.go github.com/juju/juju/api/jujuclient CredentialStore
 
 // RegisterCredentials will attempt to register any credentials that a provider
 // has to offer.
@@ -36,7 +36,7 @@ func RegisterCredentials(
 ) error {
 	credentials, err := modelcmd.RegisterCredentials(provider, args)
 	switch {
-	case errors.IsNotFound(err):
+	case errors.Is(err, errors.NotFound):
 		return nil
 	case err != nil:
 		return errors.Trace(err)
@@ -81,7 +81,7 @@ func GetOrDetectCredential(
 		}
 	}()
 	credential, chosenCredentialName, regionName, err := modelcmd.GetCredentials(ctx, store, args)
-	if !errors.IsNotFound(err) || args.CredentialName != "" {
+	if !errors.Is(err, errors.NotFound) || args.CredentialName != "" {
 		return credential, chosenCredentialName, regionName, false, err
 	}
 
@@ -189,7 +189,7 @@ func OutputUpdateCredentialModelResult(ctx *cmd.Context, models []params.UpdateC
 	}
 }
 
-//go:generate go run go.uber.org/mock/mockgen -package common -destination cloudprovider_mock_test.go github.com/juju/juju/cmd/juju/common TestCloudProvider
+//go:generate go run go.uber.org/mock/mockgen -typed -package common -destination cloudprovider_mock_test.go github.com/juju/juju/cmd/juju/common TestCloudProvider
 
 // TestCloudProvider is used for testing.
 type TestCloudProvider interface {

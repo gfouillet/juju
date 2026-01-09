@@ -4,27 +4,30 @@
 package secrets_test
 
 import (
-	"github.com/juju/cmd/v3/cmdtesting"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/secrets"
 	"github.com/juju/juju/cmd/juju/secrets/mocks"
 	coresecrets "github.com/juju/juju/core/secrets"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type removeSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 	store      *jujuclient.MemStore
 	secretsAPI *mocks.MockRemoveSecretsAPI
 }
 
-var _ = gc.Suite(&removeSuite{})
+func TestRemoveSuite(t *testing.T) {
+	tc.Run(t, &removeSuite{})
+}
 
-func (s *removeSuite) SetUpTest(c *gc.C) {
+func (s *removeSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	store := jujuclient.NewMemStore()
 	store.Controllers["mycontroller"] = jujuclient.ControllerDetails{}
@@ -32,47 +35,47 @@ func (s *removeSuite) SetUpTest(c *gc.C) {
 	s.store = store
 }
 
-func (s *removeSuite) setup(c *gc.C) *gomock.Controller {
+func (s *removeSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.secretsAPI = mocks.NewMockRemoveSecretsAPI(ctrl)
 	return ctrl
 }
 
-func (s *removeSuite) TestRemoveMissingArg(c *gc.C) {
+func (s *removeSuite) TestRemoveMissingArg(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRemoveCommandForTest(s.store, s.secretsAPI), "--revision", "4")
-	c.Assert(err, gc.ErrorMatches, `missing secret URI`)
+	c.Assert(err, tc.ErrorMatches, `missing secret URI`)
 }
 
-func (s *removeSuite) TestRemoveWithRevision(c *gc.C) {
+func (s *removeSuite) TestRemoveWithRevision(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	uri := coresecrets.NewURI()
-	s.secretsAPI.EXPECT().RemoveSecret(uri, "", ptr(4)).Return(nil)
+	s.secretsAPI.EXPECT().RemoveSecret(gomock.Any(), uri, "", ptr(4)).Return(nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRemoveCommandForTest(s.store, s.secretsAPI), uri.String(), "--revision", "4")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *removeSuite) TestRemove(c *gc.C) {
+func (s *removeSuite) TestRemove(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	uri := coresecrets.NewURI()
-	s.secretsAPI.EXPECT().RemoveSecret(uri, "", nil).Return(nil)
+	s.secretsAPI.EXPECT().RemoveSecret(gomock.Any(), uri, "", nil).Return(nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRemoveCommandForTest(s.store, s.secretsAPI), uri.String())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *removeSuite) TestRemoveByName(c *gc.C) {
+func (s *removeSuite) TestRemoveByName(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.secretsAPI.EXPECT().RemoveSecret(nil, "my-secret", nil).Return(nil)
+	s.secretsAPI.EXPECT().RemoveSecret(gomock.Any(), nil, "my-secret", nil).Return(nil)
 	s.secretsAPI.EXPECT().Close().Return(nil)
 
 	_, err := cmdtesting.RunCommand(c, secrets.NewRemoveCommandForTest(s.store, s.secretsAPI), "my-secret")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

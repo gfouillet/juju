@@ -4,28 +4,33 @@
 package lxd_test
 
 import (
-	"github.com/juju/errors"
-	gitjujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	containerlxd "github.com/juju/juju/container/lxd"
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
+	containerlxd "github.com/juju/juju/internal/container/lxd"
 	"github.com/juju/juju/internal/provider/lxd"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type environInstSuite struct {
 	lxd.BaseSuite
 }
 
-var _ = gc.Suite(&environInstSuite{})
+func TestEnvironInstSuite(t *testing.T) {
+	tc.Run(t, &environInstSuite{})
+}
 
-func (s *environInstSuite) TestInstancesOkay(c *gc.C) {
+func (s *environInstSuite) TestInstancesOkay(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	ids := []instance.Id{"spam", "eggs", "ham"}
 	var containers []containerlxd.Container
 	var expected []instances.Instance
@@ -35,17 +40,19 @@ func (s *environInstSuite) TestInstancesOkay(c *gc.C) {
 	}
 	s.Client.Containers = containers
 
-	insts, err := s.Env.Instances(context.NewEmptyCloudCallContext(), ids)
-	c.Assert(err, jc.ErrorIsNil)
+	insts, err := s.Env.Instances(c.Context(), ids)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(insts, jc.DeepEquals, expected)
+	c.Check(insts, tc.DeepEquals, expected)
 }
 
-func (s *environInstSuite) TestInstancesAPI(c *gc.C) {
-	ids := []instance.Id{"spam", "eggs", "ham"}
-	s.Env.Instances(context.NewEmptyCloudCallContext(), ids)
+func (s *environInstSuite) TestInstancesAPI(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
 
-	s.Stub.CheckCalls(c, []gitjujutesting.StubCall{{
+	ids := []instance.Id{"spam", "eggs", "ham"}
+	s.Env.Instances(c.Context(), ids)
+
+	s.Stub.CheckCalls(c, []testhelpers.StubCall{{
 		FuncName: "AliveContainers",
 		Args: []interface{}{
 			s.Prefix(),
@@ -53,119 +60,127 @@ func (s *environInstSuite) TestInstancesAPI(c *gc.C) {
 	}})
 }
 
-func (s *environInstSuite) TestInstancesEmptyArg(c *gc.C) {
-	insts, err := s.Env.Instances(context.NewEmptyCloudCallContext(), nil)
+func (s *environInstSuite) TestInstancesEmptyArg(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
 
-	c.Check(insts, gc.HasLen, 0)
-	c.Check(errors.Cause(err), gc.Equals, environs.ErrNoInstances)
+	insts, err := s.Env.Instances(c.Context(), nil)
+
+	c.Check(insts, tc.HasLen, 0)
+	c.Check(errors.Cause(err), tc.Equals, environs.ErrNoInstances)
 }
 
-func (s *environInstSuite) TestInstancesInstancesFailed(c *gc.C) {
+func (s *environInstSuite) TestInstancesInstancesFailed(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	failure := errors.New("<unknown>")
 	s.Stub.SetErrors(failure)
 
 	ids := []instance.Id{"spam"}
-	insts, err := s.Env.Instances(context.NewEmptyCloudCallContext(), ids)
+	insts, err := s.Env.Instances(c.Context(), ids)
 
-	c.Check(insts, jc.DeepEquals, []instances.Instance{nil})
-	c.Check(errors.Cause(err), gc.Equals, failure)
+	c.Check(insts, tc.DeepEquals, []instances.Instance{nil})
+	c.Check(errors.Cause(err), tc.Equals, failure)
 }
 
-func (s *environInstSuite) TestInstancesPartialMatch(c *gc.C) {
+func (s *environInstSuite) TestInstancesPartialMatch(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	container := s.NewContainer(c, "spam")
 	expected := s.NewInstance(c, "spam")
 	s.Client.Containers = []containerlxd.Container{*container}
 
 	ids := []instance.Id{"spam", "eggs"}
-	insts, err := s.Env.Instances(context.NewEmptyCloudCallContext(), ids)
+	insts, err := s.Env.Instances(c.Context(), ids)
 
-	c.Check(insts, jc.DeepEquals, []instances.Instance{expected, nil})
-	c.Check(errors.Cause(err), gc.Equals, environs.ErrPartialInstances)
+	c.Check(insts, tc.DeepEquals, []instances.Instance{expected, nil})
+	c.Check(errors.Cause(err), tc.Equals, environs.ErrPartialInstances)
 }
 
-func (s *environInstSuite) TestInstancesNoMatch(c *gc.C) {
+func (s *environInstSuite) TestInstancesNoMatch(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	container := s.NewContainer(c, "spam")
 	s.Client.Containers = []containerlxd.Container{*container}
 
 	ids := []instance.Id{"eggs"}
-	insts, err := s.Env.Instances(context.NewEmptyCloudCallContext(), ids)
+	insts, err := s.Env.Instances(c.Context(), ids)
 
-	c.Check(insts, jc.DeepEquals, []instances.Instance{nil})
-	c.Check(errors.Cause(err), gc.Equals, environs.ErrNoInstances)
+	c.Check(insts, tc.DeepEquals, []instances.Instance{nil})
+	c.Check(errors.Cause(err), tc.Equals, environs.ErrNoInstances)
 }
 
-func (s *environInstSuite) TestInstancesInvalidCredentials(c *gc.C) {
-	var invalidCred = false
+func (s *environInstSuite) TestInstancesInvalidCredentials(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
+	s.Invalidator.EXPECT().InvalidateCredentials(gomock.Any(), gomock.Any()).Return(nil)
 	// allInstances will ultimately return the error.
 	s.Client.Stub.SetErrors(errTestUnAuth)
 
 	ids := []instance.Id{"eggs"}
-	_, err := s.Env.Instances(&context.CloudCallContext{
-		InvalidateCredentialFunc: func(string) error {
-			invalidCred = true
-			return nil
-		},
-	}, ids)
+	_, err := s.Env.Instances(c.Context(), ids)
 
-	c.Check(err, gc.ErrorMatches, "not authorized")
-	c.Assert(invalidCred, jc.IsTrue)
+	c.Check(err, tc.ErrorMatches, "not authorized")
 }
 
-func (s *environInstSuite) TestControllerInstancesOkay(c *gc.C) {
+func (s *environInstSuite) TestControllerInstancesOkay(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	s.Client.Containers = []containerlxd.Container{*s.Container}
 
-	ids, err := s.Env.ControllerInstances(context.NewEmptyCloudCallContext(), coretesting.ControllerTag.Id())
-	c.Assert(err, jc.ErrorIsNil)
+	ids, err := s.Env.ControllerInstances(c.Context(), coretesting.ControllerTag.Id())
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(ids, jc.DeepEquals, []instance.Id{"spam"})
+	c.Check(ids, tc.DeepEquals, []instance.Id{"spam"})
 	s.BaseSuite.Client.CheckCallNames(c, "AliveContainers")
 	s.BaseSuite.Client.CheckCall(
 		c, 0, "AliveContainers", "juju-",
 	)
 }
 
-func (s *environInstSuite) TestControllerInstancesNotBootstrapped(c *gc.C) {
-	_, err := s.Env.ControllerInstances(context.NewEmptyCloudCallContext(), "not-used")
+func (s *environInstSuite) TestControllerInstancesNotBootstrapped(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
 
-	c.Check(err, gc.Equals, environs.ErrNotBootstrapped)
+	_, err := s.Env.ControllerInstances(c.Context(), "not-used")
+
+	c.Check(err, tc.Equals, environs.ErrNotBootstrapped)
 }
 
-func (s *environInstSuite) TestControllerInstancesMixed(c *gc.C) {
+func (s *environInstSuite) TestControllerInstancesMixed(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	other := containerlxd.Container{}
 	s.Client.Containers = []containerlxd.Container{*s.Container}
 	s.Client.Containers = []containerlxd.Container{*s.Container, other}
 
-	ids, err := s.Env.ControllerInstances(context.NewEmptyCloudCallContext(), coretesting.ControllerTag.Id())
-	c.Assert(err, jc.ErrorIsNil)
+	ids, err := s.Env.ControllerInstances(c.Context(), coretesting.ControllerTag.Id())
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(ids, jc.DeepEquals, []instance.Id{"spam"})
+	c.Check(ids, tc.DeepEquals, []instance.Id{"spam"})
 }
 
-func (s *environInstSuite) TestControllerInvalidCredentials(c *gc.C) {
-	var invalidCred = false
+func (s *environInstSuite) TestControllerInvalidCredentials(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
+	s.Invalidator.EXPECT().InvalidateCredentials(gomock.Any(), gomock.Any()).Return(nil)
+
 	// AliveContainers will return an error.
 	s.Client.Stub.SetErrors(errTestUnAuth)
 
-	_, err := s.Env.ControllerInstances(
-		&context.CloudCallContext{
-			InvalidateCredentialFunc: func(string) error {
-				invalidCred = true
-				return nil
-			},
-		}, coretesting.ControllerTag.Id())
-	c.Check(err, gc.ErrorMatches, "not authorized")
-	c.Assert(invalidCred, jc.IsTrue)
+	_, err := s.Env.ControllerInstances(c.Context(), coretesting.ControllerTag.Id())
+	c.Check(err, tc.ErrorMatches, "not authorized")
 }
 
-func (s *environInstSuite) TestAdoptResources(c *gc.C) {
+func (s *environInstSuite) TestAdoptResources(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	one := s.NewContainer(c, "smoosh")
 	two := s.NewContainer(c, "guild-league")
 	three := s.NewContainer(c, "tall-dwarfs")
 	s.Client.Containers = []containerlxd.Container{*one, *two, *three}
 
-	err := s.Env.AdoptResources(context.NewEmptyCloudCallContext(), "target-uuid", version.MustParse("3.4.5"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.BaseSuite.Client.Calls(), gc.HasLen, 4)
+	err := s.Env.AdoptResources(c.Context(), "target-uuid", semversion.MustParse("3.4.5"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(s.BaseSuite.Client.Calls(), tc.HasLen, 4)
 	s.BaseSuite.Client.CheckCall(c, 0, "AliveContainers", "juju-f75cba-")
 	s.BaseSuite.Client.CheckCall(
 		c, 1, "UpdateContainerConfig", "smoosh", map[string]string{"user.juju-controller-uuid": "target-uuid"})
@@ -175,16 +190,18 @@ func (s *environInstSuite) TestAdoptResources(c *gc.C) {
 		c, 3, "UpdateContainerConfig", "tall-dwarfs", map[string]string{"user.juju-controller-uuid": "target-uuid"})
 }
 
-func (s *environInstSuite) TestAdoptResourcesError(c *gc.C) {
+func (s *environInstSuite) TestAdoptResourcesError(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
 	one := s.NewContainer(c, "smoosh")
 	two := s.NewContainer(c, "guild-league")
 	three := s.NewContainer(c, "tall-dwarfs")
 	s.Client.Containers = []containerlxd.Container{*one, *two, *three}
 	s.Client.SetErrors(nil, nil, errors.New("blammo"))
 
-	err := s.Env.AdoptResources(context.NewEmptyCloudCallContext(), "target-uuid", version.MustParse("5.3.3"))
-	c.Assert(err, gc.ErrorMatches, `failed to update controller for some instances: \[guild-league\]`)
-	c.Assert(s.BaseSuite.Client.Calls(), gc.HasLen, 4)
+	err := s.Env.AdoptResources(c.Context(), "target-uuid", semversion.MustParse("5.3.3"))
+	c.Assert(err, tc.ErrorMatches, `failed to update controller for some instances: \[guild-league\]`)
+	c.Assert(s.BaseSuite.Client.Calls(), tc.HasLen, 4)
 	s.BaseSuite.Client.CheckCall(c, 0, "AliveContainers", "juju-f75cba-")
 	s.BaseSuite.Client.CheckCall(
 		c, 1, "UpdateContainerConfig", "smoosh", map[string]string{"user.juju-controller-uuid": "target-uuid"})
@@ -194,19 +211,16 @@ func (s *environInstSuite) TestAdoptResourcesError(c *gc.C) {
 		c, 3, "UpdateContainerConfig", "tall-dwarfs", map[string]string{"user.juju-controller-uuid": "target-uuid"})
 }
 
-func (s *environInstSuite) TestAdoptResourcesInvalidResources(c *gc.C) {
-	var invalidCred = false
+func (s *environInstSuite) TestAdoptResourcesInvalidResources(c *tc.C) {
+	defer s.SetupMocks(c).Finish()
+
+	s.Invalidator.EXPECT().InvalidateCredentials(gomock.Any(), gomock.Any()).Return(nil)
+
 	// allInstances will ultimately return the error.
 	s.Client.Stub.SetErrors(errTestUnAuth)
 
-	err := s.Env.AdoptResources(&context.CloudCallContext{
-		InvalidateCredentialFunc: func(string) error {
-			invalidCred = true
-			return nil
-		},
-	}, "target-uuid", version.MustParse("3.4.5"))
+	err := s.Env.AdoptResources(c.Context(), "target-uuid", semversion.MustParse("3.4.5"))
 
-	c.Check(err, gc.ErrorMatches, ".*not authorized")
-	c.Assert(invalidCred, jc.IsTrue)
+	c.Check(err, tc.ErrorMatches, ".*not authorized")
 	s.BaseSuite.Client.CheckCall(c, 0, "AliveContainers", "juju-f75cba-")
 }

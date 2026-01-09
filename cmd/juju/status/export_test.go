@@ -4,16 +4,17 @@
 package status
 
 import (
-	"github.com/juju/cmd/v3"
-
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
-func NewTestStatusHistoryCommand(api HistoryAPI) cmd.Command {
-	return &statusHistoryCommand{api: api}
+func NewStatusHistoryCommandForTest(clients []HistoryAPI) cmd.Command {
+	return &statusHistoryCommand{clients: clients}
 }
 
-func NewTestStatusCommand(statusapi statusAPI, clock Clock) cmd.Command {
-	return modelcmd.Wrap(
-		&statusCommand{statusAPI: statusapi, clock: clock})
+func NewStatusCommandForTest(store jujuclient.ClientStore, statusapi statusAPI, clock Clock) cmd.Command {
+	cmd := &statusCommand{statusAPI: statusapi, clock: clock}
+	cmd.SetClientStore(store)
+	return modelcmd.Wrap(cmd)
 }

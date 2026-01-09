@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/errors"
 	"github.com/rs/xid"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // SecretConfig is used when creating a secret.
@@ -27,7 +29,7 @@ type SecretConfig struct {
 // Validate returns an error if params are invalid.
 func (c *SecretConfig) Validate() error {
 	if c.RotatePolicy != nil && !c.RotatePolicy.IsValid() {
-		return errors.NotValidf("secret rotate policy %q", c.RotatePolicy)
+		return errors.Errorf("secret rotate policy %q %w", c.RotatePolicy, coreerrors.NotValid)
 	}
 	if c.RotatePolicy.WillRotate() && c.NextRotateTime == nil {
 		return errors.New("cannot specify a secret rotate policy without a next rotate time")
@@ -62,15 +64,15 @@ var secretURIParse = regexp.MustCompile(`^` +
 func ParseURI(str string) (*URI, error) {
 	u, err := url.Parse(str)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	if u.Scheme == "" {
 		u.Scheme = SecretScheme
 	} else if u.Scheme != SecretScheme {
-		return nil, errors.NotValidf("secret URI scheme %q", u.Scheme)
+		return nil, errors.Errorf("secret URI scheme %q %w", u.Scheme, coreerrors.NotValid)
 	}
 	if u.Host != "" && !validUUID.MatchString(u.Host) {
-		return nil, errors.NotValidf("host controller UUID %q", u.Host)
+		return nil, errors.Errorf("host controller UUID %q %w", u.Host, coreerrors.NotValid)
 	}
 
 	idStr := strings.TrimLeft(u.Path, "/")
@@ -79,7 +81,7 @@ func ParseURI(str string) (*URI, error) {
 	}
 	valid := secretURIParse.MatchString(idStr)
 	if !valid {
-		return nil, errors.NotValidf("secret URI %q", str)
+		return nil, errors.Errorf("secret URI %q %w", str, coreerrors.NotValid)
 	}
 	sourceUUID := secretURIParse.ReplaceAllString(idStr, "$source")
 	if sourceUUID == "" {
@@ -88,7 +90,7 @@ func ParseURI(str string) (*URI, error) {
 	idPart := secretURIParse.ReplaceAllString(idStr, "$id")
 	id, err := xid.FromString(idPart)
 	if err != nil {
-		return nil, errors.NotValidf("secret URI %q", str)
+		return nil, errors.Errorf("secret URI %q %w", str, coreerrors.NotValid)
 	}
 	result := &URI{
 		SourceUUID: sourceUUID,
@@ -144,6 +146,26 @@ func (u *URI) String() string {
 	return urlValue.String()
 }
 
+// OwnerKind represents the kind of a secret owner entity.
+type OwnerKind string
+
+// These represent the kinds of secret owner.
+const (
+	ApplicationOwner OwnerKind = "application"
+	UnitOwner        OwnerKind = "unit"
+	ModelOwner       OwnerKind = "model"
+)
+
+// Owner is the owner of a secret.
+type Owner struct {
+	Kind OwnerKind
+	ID   string
+}
+
+func (o Owner) String() string {
+	return fmt.Sprintf("%s-%s", o.Kind, strings.ReplaceAll(o.ID, "/", "-"))
+}
+
 // SecretMetadataOwnerIdent contains enough information to identify a secret for
 // an owner.
 type SecretMetadataOwnerIdent struct {
@@ -175,8 +197,8 @@ type SecretMetadata struct {
 
 	// Set by service on creation/update.
 
-	// OwnerTag is the entity which created the secret.
-	OwnerTag string
+	// Owner is the entity which created the secret.
+	Owner Owner
 
 	CreateTime time.Time
 	UpdateTime time.Time
@@ -184,7 +206,9 @@ type SecretMetadata struct {
 	// These are denormalised here for ease of access.
 
 	// LatestRevision is the most recent secret revision.
-	LatestRevision         int
+	LatestRevision int
+	// LatestRevisionChecksum is the checksum of the most
+	// recent revision content.
 	LatestRevisionChecksum string
 	// LatestExpireTime is the expire time of the most recent revision.
 	LatestExpireTime *time.Time
@@ -205,6 +229,32 @@ type AccessInfo struct {
 	Role   SecretRole
 }
 
+// AccessorKind represents the kind of a secret accessor entity.
+type AccessorKind string
+
+// These represent the kinds of secret accessor.
+const (
+	UnitAccessor  AccessorKind = "unit"
+	ModelAccessor AccessorKind = "model"
+)
+
+// Accessor is the accessor of a secret.
+type Accessor struct {
+	Kind AccessorKind
+	ID   string
+}
+
+func (a Accessor) String() string {
+	return fmt.Sprintf("%s-%s", a.Kind, strings.ReplaceAll(a.ID, "/", "-"))
+}
+
+// SecretRevisionRef is a reference to a secret revision
+// stored in a secret backend.
+type SecretRevisionRef struct {
+	URI        *URI
+	RevisionID string
+}
+
 // SecretRevisionMetadata holds metadata about a secret revision.
 type SecretRevisionMetadata struct {
 	Revision    int
@@ -215,16 +265,16 @@ type SecretRevisionMetadata struct {
 	ExpireTime  *time.Time
 }
 
-// SecretOwnerMetadata holds a secret metadata and any backend references of revisions.
-type SecretOwnerMetadata struct {
-	Metadata  SecretMetadata
-	Revisions []int
+// SecretExternalRevision holds metadata about an external secret revision.
+type SecretExternalRevision struct {
+	Revision int
+	ValueRef *ValueRef
 }
 
-// SecretMetadataForDrain holds a secret URI and any backend references of revisions for drain.
+// SecretMetadataForDrain holds a secret metadata and any backend references of revisions for drain.
 type SecretMetadataForDrain struct {
 	URI       *URI
-	Revisions []SecretRevisionMetadata
+	Revisions []SecretExternalRevision
 }
 
 // SecretConsumerMetadata holds metadata about a secret
@@ -236,14 +286,12 @@ type SecretConsumerMetadata struct {
 	// CurrentRevision is current revision the
 	// consumer wants to read.
 	CurrentRevision int
-	// LatestRevision is the latest secret revision.
-	LatestRevision int
 }
 
 // SecretRevisionInfo holds info used to read a secret vale.
 type SecretRevisionInfo struct {
-	Revision int
-	Label    string
+	LatestRevision int
+	Label          string
 }
 
 // Filter is used when querying secrets.
@@ -251,5 +299,5 @@ type Filter struct {
 	URI      *URI
 	Label    *string
 	Revision *int
-	OwnerTag *string
+	Owner    *Owner
 }

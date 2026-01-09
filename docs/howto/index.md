@@ -9,7 +9,6 @@
 
 Manage your deployment <manage-your-deployment>
 Manage juju <manage-juju>
-Manage plugins <manage-plugins>
 Manage clouds <manage-clouds>
 Manage credentials <manage-credentials>
 Manage metadata <manage-metadata>
@@ -20,7 +19,7 @@ Manage secret backends <manage-secret-backends>
 Manage logs <manage-logs>
 Manage SSH keys <manage-ssh-keys>
 Manage users <manage-users>
-Manage charms or bundles <manage-charms>
+Manage charms <manage-charms>
 Manage applications <manage-applications>
 Manage resources <manage-charm-resources>
 Manage actions <manage-actions>
@@ -34,7 +33,6 @@ Manage storage pools <manage-storage-pools>
 Manage spaces <manage-spaces>
 Manage subnets <manage-subnets>
 Define resource tags in a cloud <define-resource-tags-in-a-cloud>
-Fan container networking <fan-container-networking>
 
 ```
 
@@ -49,10 +47,9 @@ Get a quick sense of how to do things in Juju, from preparing your deployment en
 
 ## Set up Juju
 
-Install the `juju` client and any plugins, add a cloud to the client, bootstrap a Juju controller, connect further clouds to the client or an existing controller, set up the Juju dashboard, add models, configure secret backends, configure logs.
+Install the `juju` client, add a cloud to the client, bootstrap a Juju controller, connect further clouds to the client or an existing controller, set up the Juju dashboard, add models, configure secret backends, configure logs.
 
 - {ref}`Manage the juju CLI <manage-juju>`
-- {ref}`Manage plugins <manage-plugins>`
 - {ref}`Manage clouds <manage-clouds>`
 - {ref}`Manage credentials <manage-credentials>`
 - {ref}`Manage metadata <manage-metadata>`

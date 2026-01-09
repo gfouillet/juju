@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/internal/errors"
 )
 
 // The following constants list the supported constraint attribute names, as defined
@@ -37,6 +37,10 @@ const (
 	Zones            = "zones"
 	AllocatePublicIP = "allocate-public-ip"
 	ImageID          = "image-id"
+
+	// excludedPrefix is the prefix Juju expects to be in front of a value when
+	// it is to be considered excluded as part of constraints.
+	excludedPrefix = "^"
 )
 
 // Value describes a user's requirements of the hardware on which units
@@ -181,17 +185,34 @@ func (v *Value) HasInstanceType() bool {
 	return v.InstanceType != nil && *v.InstanceType != ""
 }
 
+// AddSpace is responsible for adding a space constraint to [Value]. If [Value]
+// currently has a nil slice of spaces a new slice will be allocated. If the
+// space to be added is considered "excluded" then an exclude prefix will be
+// applied to the name of the constraint.
+func (v *Value) AddSpace(space string, excluded bool) {
+	if v.Spaces == nil {
+		spaces := []string{}
+		v.Spaces = &spaces
+	}
+
+	prefix := excludedPrefix
+	if !excluded {
+		prefix = ""
+	}
+	*v.Spaces = append(*v.Spaces, fmt.Sprintf("%s%s", prefix, space))
+}
+
 // extractItems returns the list of entries in the given field which
 // are either positive (included) or negative (!included; with prefix
 // "^").
 func (v *Value) extractItems(field []string, included bool) []string {
 	var items []string
 	for _, name := range field {
-		prefixed := strings.HasPrefix(name, "^")
-		if prefixed && !included {
+		isExcluded := strings.HasPrefix(name, excludedPrefix)
+		if isExcluded && !included {
 			// has prefix and we want negatives.
-			items = append(items, strings.TrimPrefix(name, "^"))
-		} else if !prefixed && included {
+			items = append(items, strings.TrimPrefix(name, excludedPrefix))
+		} else if !isExcluded && included {
 			// no prefix and we want positives.
 			items = append(items, name)
 		}
@@ -405,14 +426,14 @@ func ParseWithAliases(args ...string) (cons Value, aliases map[string]string, er
 			}
 			name, val, err := splitRaw(raw)
 			if err != nil {
-				return Value{}, nil, errors.Trace(err)
+				return Value{}, nil, errors.Capture(err)
 			}
 			if canonical, ok := rawAliases[name]; ok {
 				aliases[name] = canonical
 				name = canonical
 			}
 			if err := cons.setRaw(name, val); err != nil {
-				return Value{}, aliases, errors.Trace(err)
+				return Value{}, aliases, errors.Capture(err)
 			}
 		}
 	}
@@ -543,7 +564,7 @@ func (v *Value) setRaw(name, str string) error {
 		return errors.Errorf("unknown constraint %q", name)
 	}
 	if err != nil {
-		return errors.Annotatef(err, "bad %q constraint", name)
+		return errors.Errorf("bad %q constraint: %w", name, err)
 	}
 	return nil
 }
@@ -557,7 +578,7 @@ func (v *Value) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	values := map[interface{}]interface{}{}
 	err := unmarshal(&values)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	canonicals := map[string]string{}
 	for k, val := range values {
@@ -598,7 +619,7 @@ func (v *Value) UnmarshalYAML(unmarshal func(interface{}) error) error {
 			var spaces *[]string
 			spaces, err = parseYamlStrings("spaces", val)
 			if err != nil {
-				return errors.Trace(err)
+				return errors.Capture(err)
 			}
 			err = v.validateSpaces(spaces)
 			if err == nil {
@@ -616,7 +637,7 @@ func (v *Value) UnmarshalYAML(unmarshal func(interface{}) error) error {
 			return errors.Errorf("unknown constraint value: %v", k)
 		}
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Capture(err)
 		}
 	}
 	return nil

@@ -15,8 +15,7 @@ import (
 
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 	"github.com/kballard/go-shellquote"
 	"golang.org/x/crypto/ssh/terminal"
 	core "k8s.io/api/core/v1"
@@ -28,11 +27,12 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 
+	k8s "github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/environs/cloudspec"
-	provider "github.com/juju/juju/internal/provider/kubernetes"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.kubernetes.provider.exec")
+var logger = internallogger.GetLogger("juju.kubernetes.provider.exec")
 
 const (
 	sigkillRetryDelay = 100 * time.Millisecond
@@ -42,7 +42,7 @@ const (
 
 var randomString = utils.RandomString
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/remotecommand_mock.go k8s.io/client-go/tools/remotecommand Executor
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/remotecommand_mock.go k8s.io/client-go/tools/remotecommand Executor
 type client struct {
 	namespace               string
 	clientset               kubernetes.Interface
@@ -55,9 +55,9 @@ type client struct {
 
 // Executor provides the API to exec or cp on a pod inside the cluster.
 type Executor interface {
-	Status(params StatusParams) (*Status, error)
-	Exec(params ExecParams, cancel <-chan struct{}) error
-	Copy(params CopyParams, cancel <-chan struct{}) error
+	Status(ctx context.Context, params StatusParams) (*Status, error)
+	Exec(ctx context.Context, params ExecParams, cancel <-chan struct{}) error
+	Copy(ctx context.Context, params CopyParams, cancel <-chan struct{}) error
 	RawClient() kubernetes.Interface
 	NameSpace() string
 }
@@ -83,7 +83,7 @@ func NewForJujuCloudSpec(
 	namespace string,
 	cloudSpec cloudspec.CloudSpec,
 ) (Executor, error) {
-	restCfg, err := provider.CloudSpecToK8sRestConfig(cloudSpec)
+	restCfg, err := k8s.CloudSpecToK8sRestConfig(cloudSpec)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -144,13 +144,13 @@ type ExecParams struct {
 	Signal <-chan syscall.Signal
 }
 
-func (ep *ExecParams) validate(podGetter typedcorev1.PodInterface) (err error) {
+func (ep *ExecParams) validate(ctx context.Context, podGetter typedcorev1.PodInterface) (err error) {
 	if len(ep.Commands) == 0 {
 		return errors.NotValidf("empty commands")
 	}
 
 	if ep.PodName, ep.ContainerName, err = getValidatedPodContainer(
-		podGetter, ep.PodName, ep.ContainerName,
+		ctx, podGetter, ep.PodName, ep.ContainerName,
 	); err != nil {
 		return errors.Trace(err)
 	}
@@ -168,8 +168,8 @@ func (c client) NameSpace() string {
 }
 
 // Exec runs commands on a pod in the cluster.
-func (c client) Exec(params ExecParams, cancel <-chan struct{}) error {
-	if err := params.validate(c.podGetter); err != nil {
+func (c client) Exec(ctx context.Context, params ExecParams, cancel <-chan struct{}) error {
+	if err := params.validate(ctx, c.podGetter); err != nil {
 		return errors.Trace(err)
 	}
 	return errors.Trace(c.exec(params, cancel))
@@ -233,7 +233,7 @@ func (c client) exec(opts ExecParams, cancel <-chan struct{}) (err error) {
 	cmd += fmt.Sprintf("mkdir -p /tmp; echo $$ > %s; ", pidFile)
 	cmd += fmt.Sprintf("exec sh -c %s; ", shellquote.Join(strings.Join(opts.Commands, " ")))
 	cmdArgs := []string{"sh", "-c", cmd}
-	logger.Debugf("exec on pod %q for cmd %+q", opts.PodName, cmdArgs)
+	logger.Debugf(context.TODO(), "exec on pod %q for cmd %+q", opts.PodName, cmdArgs)
 	req := c.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(opts.PodName).
@@ -293,7 +293,7 @@ func (c client) exec(opts ExecParams, cancel <-chan struct{}) (err error) {
 		if exitErr, ok := err.(ExitError); ok {
 			// Ignore exitcode from kill, as the process may have already exited or
 			// the pid file hasn't yet been written.
-			logger.Debugf("%q exited with code %d", strings.Join(cmd, " "), exitErr.ExitStatus())
+			logger.Debugf(context.TODO(), "%q exited with code %d", strings.Join(cmd, " "), exitErr.ExitStatus())
 			return nil
 		}
 		return err
@@ -365,19 +365,19 @@ func parsePodName(podName string) (string, error) {
 	return podName, nil
 }
 
-func getValidatedPod(podGetter typedcorev1.PodInterface, podName string) (pod *core.Pod, err error) {
+func getValidatedPod(ctx context.Context, podGetter typedcorev1.PodInterface, podName string) (pod *core.Pod, err error) {
 	if podName, err = parsePodName(podName); err != nil {
 		return nil, errors.Trace(err)
 	}
-	if pod, err = podGetter.Get(context.TODO(), podName, metav1.GetOptions{}); err == nil {
+	if pod, err = podGetter.Get(ctx, podName, metav1.GetOptions{}); err == nil {
 		return pod, nil
 	} else if !k8serrors.IsNotFound(err) {
 		return nil, errors.Trace(err)
 	}
 
-	logger.Debugf("no pod named %q found", podName)
-	logger.Debugf("try get pod by UID for %q", podName)
-	pods, err := podGetter.List(context.TODO(), metav1.ListOptions{})
+	logger.Debugf(context.TODO(), "no pod named %q found", podName)
+	logger.Debugf(context.TODO(), "try get pod by UID for %q", podName)
+	pods, err := podGetter.List(ctx, metav1.ListOptions{})
 	// TODO(caas): remove getting pod by Id (a bit expensive) once we started to store podName in cloudContainer doc.
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -392,9 +392,10 @@ func getValidatedPod(podGetter typedcorev1.PodInterface, podName string) (pod *c
 }
 
 func getValidatedPodContainer(
+	ctx context.Context,
 	podGetter typedcorev1.PodInterface, podName, containerName string,
 ) (string, string, error) {
-	pod, err := getValidatedPod(podGetter, podName)
+	pod, err := getValidatedPod(ctx, podGetter, podName)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -431,7 +432,7 @@ func getValidatedPodContainer(
 		}
 	} else {
 		containerName = pod.Spec.Containers[0].Name
-		logger.Debugf("choose first container %q to exec", containerName)
+		logger.Debugf(context.TODO(), "choose first container %q to exec", containerName)
 	}
 
 	matchContainerStatus := func(name string) (*core.ContainerStatus, error) {

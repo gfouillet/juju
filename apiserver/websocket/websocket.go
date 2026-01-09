@@ -10,13 +10,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.apiserver.websocket")
+var logger = internallogger.GetLogger("juju.apiserver.websocket")
 
 const (
 	// PongDelay is how long the server will wait for a pong to be sent
@@ -49,7 +49,7 @@ type Conn struct {
 func Serve(w http.ResponseWriter, req *http.Request, handler func(ws *Conn)) {
 	conn, err := websocketUpgrader.Upgrade(w, req, nil)
 	if err != nil {
-		logger.Errorf("problem initiating websocket: %v", err)
+		logger.Errorf(req.Context(), "problem initiating websocket: %v", err)
 		return
 	}
 	handler(&Conn{conn})

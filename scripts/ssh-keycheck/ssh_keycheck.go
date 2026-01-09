@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,11 +15,12 @@ import (
 	"time"
 
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
+	"github.com/juju/loggo/v2"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/juju/juju/core/network"
-	jujussh "github.com/juju/juju/network/ssh"
+	internallogger "github.com/juju/juju/internal/logger"
+	jujussh "github.com/juju/juju/internal/network/ssh"
 )
 
 func knownHostFilename() string {
@@ -57,7 +59,7 @@ func getKnownHostKeys(fname string) []string {
 	return pubKeys
 }
 
-var logger = loggo.GetLogger("juju.ssh_keyscan")
+var logger = internallogger.GetLogger("juju.ssh_keyscan")
 
 func main() {
 	var verbose bool
@@ -93,9 +95,9 @@ func main() {
 	for i, addr := range dialAddresses {
 		addrs[i] = network.DialAddress(addr)
 	}
-	logger.Infof("host ports: %v\n", addrs)
-	logger.Infof("found %d known hosts\n", len(pubKeys))
-	logger.Debugf("known hosts: %v\n", pubKeys)
+	logger.Infof(context.TODO(), "host ports: %v\n", addrs)
+	logger.Infof(context.TODO(), "found %d known hosts\n", len(pubKeys))
+	logger.Debugf(context.TODO(), "known hosts: %v\n", pubKeys)
 
 	dialer := &net.Dialer{Timeout: time.Duration(dialTimeout) * time.Millisecond}
 	checker := jujussh.NewReachableChecker(dialer, time.Duration(waitTimeout)*time.Millisecond)

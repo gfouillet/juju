@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env -S bash -e
 # juju_version will return only the version and not the architecture/substrate
 # of the juju version. If JUJU_VERSION is defined in CI this value will be used
 # otherwise we interrogate the juju binary on path.
@@ -23,8 +23,15 @@ jujud_version() {
 	echo "${version}"
 }
 
-# ensure will check if there is a bootstrapped controller that it can take
-# advantage of, failing that it will bootstrap a new controller for you.
+# ensure will bootstrap a controller if there are none available. It will then
+# add the named model to the controller. If the model already exists it will
+# fail.
+#
+# TODO (aflynn50 2024-02-15): Implement the expected behaviour:
+# ensure should check if there is a bootstrapped controller that it can take
+# advantage of, failing that it should bootstrap a new controller for you.
+# It should then check if the expected model present on the controller and add it
+# if not.
 #
 # ```
 # ensure <model name> <file to output logs>
@@ -42,9 +49,15 @@ ensure() {
 	bootstrap "${model}" "${output}"
 }
 
-# bootstrap will attempt to bootstrap a controller on the correct cloud.
-# It will check if there is an existing controller with the same name and bail,
-# if there is.
+# bootstrap creates a new controller with a random name and then adds the
+# specified model to it.
+#
+# If BOOTSTRAP_REUSE is set it should reuse the
+# controller named in BOOTSTRAP_REUSE_LOCAL, if this is blank it will use any
+# existing test controller.
+#
+# If BOOTSTRAP_PROVIDER is set to "manual" or "unmanaged" (>= Juju 4) then <cloud-name> should be provided
+# as the first arg.
 #
 # The name of the controller is randomised, but the model name is used to
 # override the default model name for that controller. That way we have a
@@ -52,10 +65,9 @@ ensure() {
 # This helps with providing encapsulated tests without having to bootstrap a
 # controller for every test in a suite.
 #
-# The stdout of the file can be piped to an optional output file.
-#
+# The stdout is piped to the specified log file.
 # ```
-# bootstrap <cloud name> <controller name> <file to output logs> <model name>
+# bootstrap <model name> <file to output logs>
 # ```
 bootstrap() {
 	local cloud name output model bootstrapped_name
@@ -79,6 +91,9 @@ bootstrap() {
 	"azure")
 		cloud="azure"
 		;;
+	"microk8s")
+		cloud="microk8s"
+		;;
 	"lxd")
 		cloud="${BOOTSTRAP_CLOUD:-localhost}"
 		;;
@@ -98,6 +113,12 @@ bootstrap() {
 
 		cloud="${manual_name}"
 		;;
+  "unmanaged")
+    unmanaged_name=${1}
+    shift
+
+    cloud="${unmanaged_name}"
+    ;;
 	*)
 		echo "Unexpected bootstrap provider (${BOOTSTRAP_PROVIDER})."
 		exit 1
@@ -130,10 +151,10 @@ bootstrap() {
 	fi
 	if [[ ${BOOTSTRAP_REUSE} == "true" && ${BOOTSTRAP_PROVIDER} != "k8s" ]]; then
 		# juju show-machine not supported with k8s controllers
-		OUT=$(juju show-machine -m "${bootstrapped_name}":controller --format=json | jq -r ".machines | .[] | .series")
+		OUT=$(juju show-machine -m "${bootstrapped_name}":controller --format=json | jq -r '.machines | .[] | .base | (.name + "@" + .channel)')
 		if [[ -n ${OUT} ]]; then
-			OUT=$(echo "${OUT}" | grep -oh "${BOOTSTRAP_SERIES}" || true)
-			if [[ ${OUT} != "${BOOTSTRAP_SERIES}" ]]; then
+			OUT=$(echo "${OUT}" | grep -oh "${BOOTSTRAP_BASE}" || true)
+			if [[ ${OUT} != "${BOOTSTRAP_BASE}" ]]; then
 				echo "====> Unable to reuse bootstrapped juju"
 				export BOOTSTRAP_REUSE="false"
 			fi
@@ -214,18 +235,18 @@ add_model() {
 # add_images_for_vsphere is used to add-image with known vSphere template paths for LTS series
 # and shouldn't be used by any of the tests directly.
 add_images_for_vsphere() {
-	juju metadata add-image juju-ci-root/templates/jammy-test-template --series jammy
-	juju metadata add-image juju-ci-root/templates/focal-test-template --series focal
+	juju metadata add-image juju-ci-root/templates/jammy-test-template --base ubuntu@22.04
+	juju metadata add-image juju-ci-root/templates/focal-test-template --base ubuntu@20.04
 }
 
 # setup_vsphere_simplestreams generates image metadata for use during vSphere bootstrap.  There is
 # an assumption made with regards to the template name in the Boston vSphere.  This is for internal
 # use only and shouldn't be used by any of the tests directly.
 setup_vsphere_simplestreams() {
-	local dir series
+	local dir base
 
 	dir=${1}
-	series=${2:-"jammy"}
+	base=${2:-"ubuntu@22.04"}
 
 	if [[ ! -f ${dir} ]]; then
 		mkdir "${dir}" || true
@@ -233,7 +254,7 @@ setup_vsphere_simplestreams() {
 
 	cloud_endpoint=$(juju clouds --client --format=json | jq -r ".[\"$BOOTSTRAP_CLOUD\"] | .endpoint")
 	# pipe output to test dir, otherwise becomes part of the return value.
-	juju metadata generate-image -i juju-ci-root/templates/"${series}"-test-template -r "${BOOTSTRAP_REGION}" -d "${dir}" -u "${cloud_endpoint}" -s "${series}" >>"${TEST_DIR}"/simplestreams 2>&1
+	juju metadata generate-image -i juju-ci-root/templates/"${base}"-test-template -r "${BOOTSTRAP_REGION}" -d "${dir}" -u "${cloud_endpoint}" --base "${base}" >>"${TEST_DIR}"/simplestreams 2>&1
 }
 
 # juju_bootstrap is used to bootstrap a model for tracking. This is for internal
@@ -253,26 +274,36 @@ juju_bootstrap() {
 	output=${1}
 	shift
 
-	series=
+	base=
 	if [[ ${BOOTSTRAP_PROVIDER} != "k8s" ]]; then
-		case "${BOOTSTRAP_SERIES}" in
+		case "${BOOTSTRAP_BASE}" in
 		"${CURRENT_LTS}")
-			series="--bootstrap-series=${BOOTSTRAP_SERIES} --config image-stream=daily --force"
+			base="--bootstrap-base=${BOOTSTRAP_BASE} --config image-stream=daily --force"
 			;;
 		"") ;;
 
 		*)
-			series="--bootstrap-series=${BOOTSTRAP_SERIES}"
+			base="--bootstrap-base=${BOOTSTRAP_BASE}"
 			;;
 		esac
 	fi
 
 	pre_bootstrap
 
-	command="juju bootstrap ${series} ${cloud_region} ${name} --add-model ${model} --model-default mode= ${BOOTSTRAP_ADDITIONAL_ARGS}"
-	# keep $@ here, otherwise hit SC2124
-	${command} "$@" 2>&1 | OUTPUT "${output}"
+	command="juju bootstrap ${base} ${cloud_region} ${name} --model-default mode= ${BOOTSTRAP_ADDITIONAL_ARGS}"
+	# We run the command through the bash interpreter here to avoid some
+	# weird shell expansion behaviour when using --config and other arguments
+	# with white space.
+	bash -c "exec ${command} $*" 2>&1 | OUTPUT "${output}"
 	echo "${name}" >>"${TEST_DIR}/jujus"
+
+	if [[ ${BOOTSTRAP_PROVIDER} != "k8s" ]]; then
+		juju switch "${name}:controller"
+		wait_for_machine_agent_status "0" "started"
+	fi
+
+	# Adding the initial model.
+	juju add-model --show-log "${model}" 2>&1
 
 	post_bootstrap "${name}" "${model}"
 }
@@ -287,7 +318,7 @@ pre_bootstrap() {
 		echo "====> Creating image simplestream metadata for juju ($(green "${version}:${cloud}"))"
 
 		image_streams_dir=${TEST_DIR}/image-streams
-		setup_vsphere_simplestreams "${image_streams_dir}" "${BOOTSTRAP_SERIES}"
+		setup_vsphere_simplestreams "${image_streams_dir}" "${BOOTSTRAP_BASE}"
 		export BOOTSTRAP_ADDITIONAL_ARGS="${BOOTSTRAP_ADDITIONAL_ARGS} --metadata-source ${image_streams_dir}"
 		;;
 	esac
@@ -402,19 +433,65 @@ post_add_model() {
 	if [[ -n ${MODEL_ARCH} ]]; then
 		juju set-model-constraints "arch=${MODEL_ARCH}"
 	fi
+
+	if [[ ${BOOTSTRAP_PROVIDER:-} != "k8s" ]]; then
+		# As of Juju 4.0, the user's SSH keys are no longer added automatically to newly
+		# created models. To ensure that `juju ssh`` works in tests for newly created models,
+		# we add the SSH key generated by the Juju client to the model.
+		add_client_ssh_key_to_juju_model "${model}"
+	fi
+}
+
+# add_client_ssh_key_to_juju_model adds juju client public SSH key to the specified Juju model
+# usage: add_client_ssh_key_to_juju_model <model_name>
+add_client_ssh_key_to_juju_model() {
+	local model_name="$1"
+	local ssh_key_file="${JUJU_DATA:-${HOME}/.local/share/juju}/ssh/juju_id_ed25519.pub"
+
+	# Check if model name is provided
+	if [[ -z $model_name ]]; then
+		echo "Error: Invalid usage. The function signature should be: add_client_ssh_key_to_juju_model <model_name>"
+		return
+	fi
+
+	# Check if the SSH key file exists
+	if [[ ! -f $ssh_key_file ]]; then
+		echo "Error: SSH key file '$ssh_key_file' not found."
+		return
+	fi
+
+	# Validate SSH key
+	if ssh-keygen -l -f "${ssh_key_file}" >/dev/null 2>&1; then
+		output=$(juju add-ssh-key -m "${model_name}" "$(cat "${ssh_key_file}")" 2>&1)
+		exit_code=$?
+		if [[ $exit_code -ne 0 ]]; then
+			echo "Error adding SSH key to model '${model_name}': $output"
+			return
+		fi
+	else
+		echo "Error: The file '${ssh_key_file}' does not contain a valid SSH public key."
+		return
+	fi
+
+	echo "SSH key added successfully to model '${model_name}'."
+	return
 }
 
 # destroy_model takes a model name and destroys a model. It first checks if the
 # model is found before attempting to do so.
 #
 # ```
-# destroy_model <model name> [<timeout>]
+# destroy_model <model name>
 # ```
 destroy_model() {
-	local name timeout
+	if [[ -n ${SKIP_DESTROY} ]]; then
+		echo "====> Skipping destroy model"
+		return
+	fi
+
+	local name
 
 	name=${1}
-	timeout=${2:-30m}
 	shift
 
 	# shellcheck disable=SC2034
@@ -427,12 +504,17 @@ destroy_model() {
 	output="${TEST_DIR}/${name}-destroy.log"
 
 	echo "====> Destroying juju model ${name}"
-	echo "${name}" | xargs -I % timeout "$timeout" juju destroy-model --no-prompt --destroy-storage % >"${output}" 2>&1 || true
+	echo "${name}" | xargs -I % timeout "${DESTROY_TIMEOUT}" juju destroy-model --no-prompt --destroy-storage --force % >"${output}" 2>&1 || true
 	CHK=$(cat "${output}" | grep -i "ERROR\|Unable to get the model status from the API" || true)
 	if [[ -n ${CHK} ]]; then
 		printf '\nFound some issues destroying model\n'
 		cat "${output}"
-		exit 1
+		# WARNING. This is a workaround for broken teardown process,
+		# where the model is not destroyed properly. This is a known issue
+		# and return will be reverted once the Clean-up infrastructure will
+		# be fixed. That will help to be move focus on issues in CI tests,
+		# rather than on the teardown.
+		#		return
 	fi
 	echo "====> Destroyed juju model ${name}"
 }
@@ -444,6 +526,11 @@ destroy_model() {
 # destroy_controller <controller name>
 # ```
 destroy_controller() {
+	if [[ -n ${SKIP_DESTROY} ]]; then
+		echo "====> Skipping destroy controller"
+		return
+	fi
+
 	local name
 
 	name=${1}
@@ -461,7 +548,7 @@ destroy_controller() {
 		echo "====> Destroying model ($(green "${name}"))"
 
 		output="${TEST_DIR}/${name}-destroy-model.log"
-		echo "${name}" | xargs -I % juju destroy-model --no-prompt % >"${output}" 2>&1 || true
+		echo "${name}" | xargs -I % timeout "${DESTROY_TIMEOUT}" juju destroy-model --no-prompt % >"${output}" 2>&1 || true
 
 		echo "====> Destroyed model ($(green "${name}"))"
 		return
@@ -486,9 +573,9 @@ destroy_controller() {
 
 	echo "====> Destroying juju ($(green "${name}"))"
 	if [[ ${KILL_CONTROLLER:-} != "true" ]]; then
-		echo "${name}" | xargs -I % juju destroy-controller --destroy-all-models --destroy-storage --no-prompt % 2>&1 | OUTPUT "${output}"
+		echo "${name}" | xargs -I % timeout "${DESTROY_TIMEOUT}" juju destroy-controller --destroy-all-models --destroy-storage --no-prompt % 2>&1 | OUTPUT "${output}" || true
 	else
-		echo "${name}" | xargs -I % juju kill-controller -t 0 --no-prompt % 2>&1 | OUTPUT "${output}"
+		echo "${name}" | xargs -I % timeout "${DESTROY_TIMEOUT}" juju kill-controller -t 0 --no-prompt % 2>&1 | OUTPUT "${output}" || true
 	fi
 
 	set +e
@@ -496,7 +583,12 @@ destroy_controller() {
 	if [[ -n ${CHK} ]]; then
 		printf '\nFound some issues destroying controller\n'
 		cat "${output}"
-		exit 1
+		# WARNING. This is a workaround for broken teardown process,
+		# where the model is not destroyed properly. This is a known issue
+		# and exit code will be reverted once the Clean-up infrastructure will
+		# be fixed. That will help to be move focus on issues in CI tests,
+		# rather than on the teardown.
+		#		exit 1
 	fi
 	set_verbosity
 
@@ -524,7 +616,7 @@ introspect_controller() {
 
 	name=${1}
 
-	if [[ ${BOOTSTRAP_PROVIDER} == "k8s" ]]; then
+	if [[ ${BOOTSTRAP_PROVIDER} == "k8s" || ${BOOTSTRAP_PROVIDER} == "microk8s" ]]; then
 		echo "====> TODO: Implement introspection for k8s"
 		return
 	fi

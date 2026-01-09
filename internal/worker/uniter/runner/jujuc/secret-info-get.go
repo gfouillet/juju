@@ -6,12 +6,12 @@ package jujuc
 import (
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretInfoGetCommand struct {
@@ -107,7 +107,7 @@ func toAccessInfo(grants []secrets.AccessInfo) []accessInfo {
 
 // Run implements cmd.Command.
 func (c *secretInfoGetCommand) Run(ctx *cmd.Context) error {
-	all, err := c.ctx.SecretMetadata()
+	all, err := c.ctx.SecretMetadata(ctx)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func (c *secretInfoGetCommand) Run(ctx *cmd.Context) error {
 			id: {
 				LatestRevision:   md.LatestRevision,
 				Label:            md.Label,
-				Owner:            md.Owner.Kind(),
+				Owner:            string(md.Owner.Kind),
 				Description:      md.Description,
 				RotatePolicy:     md.RotatePolicy,
 				LatestExpireTime: md.LatestExpireTime,

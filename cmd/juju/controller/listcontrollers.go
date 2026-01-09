@@ -4,22 +4,23 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs/bootstrap"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var helpControllersSummary = `
@@ -85,11 +86,11 @@ func (c *listControllersCommand) SetClientStore(store jujuclient.ClientStore) {
 	c.store = store
 }
 
-func (c *listControllersCommand) getAPI(controllerName string) (ControllerAccessAPI, error) {
+func (c *listControllersCommand) getAPI(ctx context.Context, controllerName string) (ControllerAccessAPI, error) {
 	if c.api != nil {
 		return c.api(controllerName), nil
 	}
-	api, err := c.NewAPIRoot(c.store, controllerName, "")
+	api, err := c.NewAPIRoot(ctx, c.store, controllerName, "")
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
@@ -112,13 +113,13 @@ func (c *listControllersCommand) Run(ctx *cmd.Context) error {
 			name := controllerName
 			go func() {
 				defer wg.Done()
-				client, err := c.getAPI(name)
+				client, err := c.getAPI(ctx, name)
 				if err != nil {
 					fmt.Fprintf(ctx.GetStderr(), "error connecting to api for %q: %v\n", name, err)
 					return
 				}
 				defer client.Close()
-				if err := c.refreshControllerDetails(client, name); err != nil {
+				if err := c.refreshControllerDetails(ctx, client, name); err != nil {
 					fmt.Fprintf(ctx.GetStderr(), "error updating cached details for %q: %v\n", name, err)
 				}
 			}()
@@ -135,7 +136,7 @@ func (c *listControllersCommand) Run(ctx *cmd.Context) error {
 		fmt.Fprintln(ctx.Stderr, strings.Join(errs, "\n"))
 	}
 	currentController, err := modelcmd.DetermineCurrentController(c.store)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		currentController = ""
 	} else if err != nil {
 		return errors.Annotate(err, "getting current controller")
@@ -147,9 +148,9 @@ func (c *listControllersCommand) Run(ctx *cmd.Context) error {
 	return c.out.Write(ctx, controllerSet)
 }
 
-func (c *listControllersCommand) refreshControllerDetails(client ControllerAccessAPI, controllerName string) error {
+func (c *listControllersCommand) refreshControllerDetails(ctx context.Context, client ControllerAccessAPI, controllerName string) error {
 	// First, get all the models the user can see, and their details.
-	allModels, err := client.AllModels()
+	allModels, err := client.AllModels(ctx)
 	if err != nil {
 		return err
 	}
@@ -166,7 +167,7 @@ func (c *listControllersCommand) refreshControllerDetails(client ControllerAcces
 			controllerModelUUID = m.UUID
 		}
 	}
-	modelStatus, err := client.ModelStatus(modelTags...)
+	modelStatus, err := client.ModelStatus(ctx, modelTags...)
 	if err != nil {
 		return err
 	}
@@ -182,7 +183,7 @@ func (c *listControllersCommand) refreshControllerDetails(client ControllerAcces
 	machineCount := 0
 	for _, s := range modelStatus {
 		if s.Error != nil {
-			if errors.IsNotFound(s.Error) {
+			if errors.Is(s.Error, errors.NotFound) {
 				// This most likely occurred because a model was
 				// destroyed half-way through the call.
 				continue
@@ -207,11 +208,8 @@ func ControllerMachineCounts(controllerModelUUID string, modelStatusResults []ba
 			continue
 		}
 		for _, m := range s.Machines {
-			if !m.WantsVote {
-				continue
-			}
 			totalCount++
-			if m.Status != string(status.Down) && m.HasVote {
+			if m.Status != string(status.Down) {
 				activeCount++
 			}
 		}

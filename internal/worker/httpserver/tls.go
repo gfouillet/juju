@@ -4,57 +4,79 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/tls"
+	"fmt"
+	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/http/v2"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/http"
 )
 
+// SNIGetterFunc is a helper function that aids the TLS SNI process by working
+// out if a certificate can be provided that satisfies the TLS ClientHello
+// message. If no the function has no matches then a error that satisfies
+// NotFound should be returned. Alternatively if the function can not help in
+// the process of finding a certificate a error that satisfies NotImplemented
+// should be returned.
 type SNIGetterFunc func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
-func aggregateSNIGetter(getters ...SNIGetterFunc) SNIGetterFunc {
-	return SNIGetterFunc(func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		lastErr := errors.Errorf("unable to find certificate for %s",
-			hello.ServerName)
+const (
+	// errorHostWhiteList is an error to indicate that the requested host name
+	// is not in the approved list.
+	errorHostWhitelist = errors.ConstError("host not in whitelist")
+)
+
+// autocertHostWhitelist is a wrapper around the autocert host policy func. We
+// wrap this, so we can return typed errors that Juju can switch on.
+func autocertHostWhitelist(hosts ...string) autocert.HostPolicy {
+	return func(ctx context.Context, host string) error {
+		fn := autocert.HostWhitelist(hosts...)
+		err := fn(ctx, host)
+		if err != nil {
+			err = fmt.Errorf("%w %q: %w", errorHostWhitelist, host, err)
+		}
+		return err
+	}
+}
+
+func aggregateSNIGetter(logger logger.Logger, getters ...SNIGetterFunc) SNIGetterFunc {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		for _, getter := range getters {
 			cert, err := getter(hello)
-			if err != nil {
-				lastErr = err
-				continue
+			if err != nil && !errors.Is(err, errors.NotFound) && !errors.Is(err, errors.NotImplemented) {
+				logger.Errorf(context.Background(), "finding certificate with SNI getter: %v", err)
 			}
 			if cert != nil {
 				return cert, nil
 			}
 		}
-		return nil, lastErr
-	})
+		logger.Warningf(context.Background(), "unable to find certificate for server name %q", hello.ServerName)
+		return nil, fmt.Errorf("%w certificate for server name %q", errors.NotFound, hello.ServerName)
+	}
 }
 
 // NewTLSConfig returns the TLS configuration for the HTTP server to use
 // based on controller configuration stored in the state database.
-func NewTLSConfig(st *state.State, defaultSNI SNIGetterFunc, logger Logger) (*tls.Config, error) {
-	controllerConfig, err := st.ControllerConfig()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+func NewTLSConfig(certDNSName, certURL string, certCache autocert.Cache, defaultSNI SNIGetterFunc, logger logger.Logger) *tls.Config {
 	return newTLSConfig(
-		controllerConfig.AutocertDNSName(),
-		controllerConfig.AutocertURL(),
-		st.AutocertCache(),
+		certDNSName,
+		certURL,
+		certCache,
 		defaultSNI,
 		logger,
-	), nil
+	)
 }
 
 func newTLSConfig(
 	autocertDNSName, autocertURL string,
 	autocertCache autocert.Cache,
 	defaultSNI SNIGetterFunc,
-	logger Logger,
+	logger logger.Logger,
 ) *tls.Config {
 	tlsConfig := http.SecureTLSConfig()
 	if autocertDNSName == "" {
@@ -63,32 +85,54 @@ func newTLSConfig(
 		return tlsConfig
 	}
 
-	m := autocert.Manager{
+	autoCertManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		Cache:      autocertCache,
-		HostPolicy: autocert.HostWhitelist(autocertDNSName),
+		HostPolicy: autocertHostWhitelist(autocertDNSName),
 	}
 	if autocertURL != "" {
-		m.Client = &acme.Client{
+		autoCertManager.Client = &acme.Client{
 			DirectoryURL: autocertURL,
 		}
 	}
 	certLogger := SNIGetterFunc(func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		logger.Infof("getting certificate for server name %q", h.ServerName)
-		return nil, nil
+		logger.Debugf(context.Background(), "getting certificate for server name %q", h.ServerName)
+		return nil, errors.NotImplemented
 	})
 
 	autoCertGetter := SNIGetterFunc(func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		c, err := m.GetCertificate(h)
-		if err != nil {
-			logger.Errorf("cannot get autocert certificate for %q: %v",
-				h.ServerName, err)
+		// If the ServerName doesn't contain any '.' then it's not a valid dns
+		// name and we can't use autocert with it. Bail out early.
+		if !strings.Contains(strings.Trim(h.ServerName, "."), ".") {
+			return nil, fmt.Errorf(
+				"autocert not able to provide certificate for %q%w",
+				h.ServerName,
+				errors.Hide(errors.NotImplemented),
+			)
+		}
+
+		c, err := autoCertManager.GetCertificate(h)
+		if errors.Is(err, errorHostWhitelist) {
+			err = fmt.Errorf(
+				"server name %q not in auto cert whitelist%w",
+				h.ServerName,
+				errors.Hide(errors.NotFound),
+			)
+		} else if err != nil {
+			err = fmt.Errorf("getting autocert certificate for %q: %w",
+				h.ServerName,
+				err,
+			)
 		}
 		return c, err
 	})
 
 	tlsConfig.GetCertificate = aggregateSNIGetter(
-		certLogger, autoCertGetter, defaultSNI)
+		logger,
+		certLogger,
+		autoCertGetter,
+		defaultSNI,
+	)
 	tlsConfig.NextProtos = []string{
 		"h2", "http/1.1", // Enable HTTP/2.
 		acme.ALPNProto, // Enable TLS-ALPN ACME challenges.

@@ -4,40 +4,229 @@
 package caasagent_test
 
 import (
-	"github.com/juju/names/v5"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
-	"github.com/juju/juju/apiserver/common"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	"github.com/juju/juju/apiserver/common/model"
 	"github.com/juju/juju/apiserver/facade/facadetest"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/apiserver/facades/agent/caasagent"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/cloud"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/environs/cloudspec"
+	"github.com/juju/juju/internal/errors"
+	coretesting "github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/internal/uuid"
+	"github.com/juju/juju/rpc/params"
 )
 
-var _ = gc.Suite(&caasagentSuite{})
+func TestCaasagentSuite(t *testing.T) {
+	tc.Run(t, &caasagentSuite{})
+}
 
 type caasagentSuite struct {
 	coretesting.BaseSuite
 
-	resources  *common.Resources
-	authorizer *apiservertesting.FakeAuthorizer
+	modelUUID coremodel.UUID
+
+	modelService                 *MockModelService
+	modelConfigService           *MockModelConfigService
+	controllerConfigService      *MockControllerConfigService
+	apiHostPortsForAgentsGetter  *MockAPIHostPortsForAgentsGetter
+	externalControllerService    *MockExternalControllerService
+	modelProviderServicebService *MockModelProviderService
+	watcherRegistry              *facademocks.MockWatcherRegistry
+
+	facade *caasagent.FacadeV2
+	result cloudspec.CloudSpec
 }
 
-func (s *caasagentSuite) SetUpTest(c *gc.C) {
+func (s *caasagentSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 
-	s.resources = common.NewResources()
-	s.AddCleanup(func(_ *gc.C) { s.resources.StopAll() })
+	s.modelUUID = tc.Must0(c, coremodel.NewUUID)
 
-	s.authorizer = &apiservertesting.FakeAuthorizer{
-		Tag: names.NewMachineTag("0"),
+	credential := cloud.NewCredential("auth-type", map[string]string{"k": "v"})
+	s.result = cloudspec.CloudSpec{
+		Type:             "type",
+		Name:             "name",
+		Region:           "region",
+		Endpoint:         "endpoint",
+		IdentityEndpoint: "identity-endpoint",
+		StorageEndpoint:  "storage-endpoint",
+		Credential:       &credential,
+		CACertificates:   []string{coretesting.CACert},
+		SkipTLSVerify:    true,
 	}
 }
 
-func (s *caasagentSuite) TestPermission(c *gc.C) {
-	s.authorizer = &apiservertesting.FakeAuthorizer{
+func (s *caasagentSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.modelProviderServicebService = NewMockModelProviderService(ctrl)
+	s.modelService = NewMockModelService(ctrl)
+	s.controllerConfigService = NewMockControllerConfigService(ctrl)
+	s.apiHostPortsForAgentsGetter = NewMockAPIHostPortsForAgentsGetter(ctrl)
+	s.modelConfigService = NewMockModelConfigService(ctrl)
+	s.externalControllerService = NewMockExternalControllerService(ctrl)
+
+	s.watcherRegistry = facademocks.NewMockWatcherRegistry(ctrl)
+
+	modelConfigAPI := model.NewModelConfigWatcher(
+		s.modelConfigService, s.watcherRegistry,
+	)
+	s.facade = caasagent.NewFacadeV2(
+		s.modelUUID, s.watcherRegistry, modelConfigAPI,
+		nil,
+		s.modelProviderServicebService,
+		func(ctx context.Context) (watcher.NotifyWatcher, error) {
+			return s.modelService.WatchModelCloudCredential(ctx, s.modelUUID)
+		})
+
+	return ctrl
+}
+
+func (s *caasagentSuite) TestPermission(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	authorizer := &apiservertesting.FakeAuthorizer{
 		Tag: names.NewApplicationTag("someapp"),
 	}
-	_, err := caasagent.NewStateFacadeV2(facadetest.Context{Auth_: s.authorizer})
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+
+	_, err := caasagent.NewFacadeV2AuthCheck(facadetest.ModelContext{
+		Auth_:      authorizer,
+		ModelUUID_: s.modelUUID,
+	})
+	c.Assert(err, tc.ErrorMatches, "permission denied")
+}
+
+func (s *caasagentSuite) TestCloudSpec(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.modelProviderServicebService.EXPECT().GetCloudSpec(gomock.Any()).Return(s.result, nil)
+
+	otherModelTag := names.NewModelTag(tc.Must0(c, coremodel.NewUUID).String())
+	machineTag := names.NewMachineTag("42")
+	result, err := s.facade.CloudSpec(
+		c.Context(),
+		params.Entities{Entities: []params.Entity{
+			{Tag: names.NewModelTag(s.modelUUID.String()).String()},
+			{Tag: otherModelTag.String()},
+			{Tag: machineTag.String()},
+		}},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.DeepEquals, []params.CloudSpecResult{{
+		Result: &params.CloudSpec{
+			Type:             "type",
+			Name:             "name",
+			Region:           "region",
+			Endpoint:         "endpoint",
+			IdentityEndpoint: "identity-endpoint",
+			StorageEndpoint:  "storage-endpoint",
+			Credential: &params.CloudCredential{
+				AuthType:   "auth-type",
+				Attributes: map[string]string{"k": "v"},
+			},
+			CACertificates: []string{coretesting.CACert},
+			SkipTLSVerify:  true,
+		},
+	}, {
+		Error: &params.Error{
+			Code:    params.CodeUnauthorized,
+			Message: "permission denied",
+		},
+	}, {
+		Error: &params.Error{
+			Message: `"machine-42" is not a valid model tag`,
+		},
+	}})
+}
+
+func (s *caasagentSuite) TestCloudSpecCloudSpecError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.modelProviderServicebService.EXPECT().GetCloudSpec(gomock.Any()).Return(cloudspec.CloudSpec{}, errors.New("error"))
+
+	result, err := s.facade.CloudSpec(
+		c.Context(),
+		params.Entities{Entities: []params.Entity{
+			{Tag: names.NewModelTag(s.modelUUID.String()).String()},
+		}},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.DeepEquals, []params.CloudSpecResult{{
+		Error: &params.Error{
+			Message: `error`,
+		},
+	}})
+}
+
+func (s *caasagentSuite) TestWatchCloudSpecsChanges(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	ch := make(chan struct{}, 1)
+	// Initial event.
+	ch <- struct{}{}
+	w := watchertest.NewMockNotifyWatcher(ch)
+	s.modelService.EXPECT().WatchModelCloudCredential(gomock.Any(), s.modelUUID).Return(w, nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("w-1", nil)
+
+	otherModelTag := names.NewModelTag(uuid.MustNewUUID().String())
+	machineTag := names.NewMachineTag("42")
+	result, err := s.facade.WatchCloudSpecsChanges(
+		c.Context(),
+		params.Entities{Entities: []params.Entity{
+			{Tag: names.NewModelTag(s.modelUUID.String()).String()},
+			{Tag: otherModelTag.String()},
+			{Tag: machineTag.String()},
+		}},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.DeepEquals, []params.NotifyWatchResult{{
+		NotifyWatcherId: "w-1",
+	}, {
+		Error: &params.Error{
+			Code:    params.CodeUnauthorized,
+			Message: "permission denied",
+		},
+	}, {
+		Error: &params.Error{
+			Message: `"machine-42" is not a valid model tag`,
+		},
+	}})
+}
+
+func (s *caasagentSuite) TestCloudSpecNilCredential(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.result.Credential = nil
+
+	s.modelProviderServicebService.EXPECT().GetCloudSpec(gomock.Any()).Return(s.result, nil)
+
+	result, err := s.facade.CloudSpec(
+		c.Context(),
+		params.Entities{Entities: []params.Entity{
+			{Tag: names.NewModelTag(s.modelUUID.String()).String()},
+		}},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.DeepEquals, []params.CloudSpecResult{{
+		Result: &params.CloudSpec{
+			Type:             "type",
+			Name:             "name",
+			Region:           "region",
+			Endpoint:         "endpoint",
+			IdentityEndpoint: "identity-endpoint",
+			StorageEndpoint:  "storage-endpoint",
+			CACertificates:   []string{coretesting.CACert},
+			SkipTLSVerify:    true,
+		},
+	}})
 }

@@ -4,21 +4,22 @@
 package user
 
 import (
+	"context"
 	"io"
 
 	"github.com/juju/ansiterm"
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/usermanager"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -67,14 +68,14 @@ type listCommand struct {
 // users command calls.
 type modelUsersAPI interface {
 	Close() error
-	ModelUserInfo(modelUUID string) ([]params.ModelUserInfo, error)
+	ModelUserInfo(ctx context.Context, modelUUID string) ([]params.ModelUserInfo, error)
 }
 
-func (c *listCommand) getModelUsersAPI() (modelUsersAPI, error) {
+func (c *listCommand) getModelUsersAPI(ctx context.Context) (modelUsersAPI, error) {
 	if c.modelUserAPI != nil {
 		return c.modelUserAPI, nil
 	}
-	return c.NewUserManagerAPIClient()
+	return c.NewUserManagerAPIClient(ctx)
 }
 
 // Info implements Command.Info.
@@ -99,7 +100,7 @@ func (c *listCommand) Info() *cmd.Info {
 // SetFlags implements Command.SetFlags.
 func (c *listCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.infoCommandBase.SetFlags(f)
-	f.BoolVar(&c.All, "all", false, "Include disabled users")
+	f.BoolVar(&c.All, "all", false, "Include disabled users (on controller only)")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
 		"yaml":    cmd.FormatYaml,
 		"json":    cmd.FormatJson,
@@ -134,17 +135,20 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 }
 
 func (c *listCommand) modelUsers(ctx *cmd.Context) error {
-	client, err := c.getModelUsersAPI()
+	client, err := c.getModelUsersAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	uuids, err := c.ModelUUIDs([]string{c.modelName})
+	uuids, err := c.ModelUUIDs(ctx, []string{c.modelName})
 	if err != nil {
 		return err
 	}
-	result, err := client.ModelUserInfo(uuids[0])
+	if len(uuids) == 0 {
+		return errors.Errorf("model %q not found", c.modelName)
+	}
+	result, err := client.ModelUserInfo(ctx, uuids[0])
 	if err != nil {
 		return err
 	}
@@ -158,13 +162,13 @@ func (c *listCommand) modelUsers(ctx *cmd.Context) error {
 func (c *listCommand) controllerUsers(ctx *cmd.Context) error {
 	// Note: the InfoCommandBase and the UserInfo struct are defined
 	// in info.go.
-	client, err := c.getUserInfoAPI()
+	client, err := c.getUserInfoAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	result, err := client.UserInfo(nil, usermanager.IncludeDisabled(c.All))
+	result, err := client.UserInfo(ctx, nil, usermanager.IncludeDisabled(c.All))
 	if err != nil {
 		return err
 	}

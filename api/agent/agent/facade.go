@@ -4,8 +4,10 @@
 package agent
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/rpc/params"
@@ -28,17 +30,15 @@ const (
 // apiserver level somewhere? -- but:
 //  1. this feels like a convenient/transitional method grouping, not a
 //     fundamental *role*; and
-//  2. at least it's a narrowed interface, and eschews the object-style
-//     sins of *State/*Entity.
 //
 // Progress not perfection.
 type ConnFacade interface {
 
 	// Life returns Alive, Dying, Dead, ErrDenied, or some other error.
-	Life(names.Tag) (Life, error)
+	Life(context.Context, names.Tag) (Life, error)
 
 	// SetPassword returns nil, ErrDenied, or some other error.
-	SetPassword(names.Tag, string) error
+	SetPassword(context.Context, names.Tag, string) error
 }
 
 // ErrDenied is returned by Life and SetPassword to indicate that the
@@ -61,12 +61,12 @@ type connFacade struct {
 }
 
 // Life is part of the ConnFacade interface.
-func (facade *connFacade) Life(entity names.Tag) (Life, error) {
+func (facade *connFacade) Life(ctx context.Context, entity names.Tag) (Life, error) {
 	var results params.AgentGetEntitiesResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: entity.String()}},
 	}
-	err := facade.caller.FacadeCall("GetEntities", args, &results)
+	err := facade.caller.FacadeCall(ctx, "GetEntities", args, &results)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -88,7 +88,7 @@ func (facade *connFacade) Life(entity names.Tag) (Life, error) {
 }
 
 // SetPassword is part of the ConnFacade interface.
-func (facade *connFacade) SetPassword(entity names.Tag, password string) error {
+func (facade *connFacade) SetPassword(ctx context.Context, entity names.Tag, password string) error {
 	var results params.ErrorResults
 	args := params.EntityPasswords{
 		Changes: []params.EntityPassword{{
@@ -96,7 +96,7 @@ func (facade *connFacade) SetPassword(entity names.Tag, password string) error {
 			Password: password,
 		}},
 	}
-	err := facade.caller.FacadeCall("SetPasswords", args, &results)
+	err := facade.caller.FacadeCall(ctx, "SetPasswords", args, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}

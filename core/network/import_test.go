@@ -4,22 +4,38 @@
 package network_test
 
 import (
-	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/collections/set"
+	"github.com/juju/tc"
+
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type ImportSuite struct{}
 
-var _ = gc.Suite(&ImportSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &ImportSuite{})
+}
 
-var allowedCoreImports = set.NewStrings("core/life")
+var allowedCoreImports = set.NewStrings(
+	"core/credential",
+	"core/errors",
+	"core/life",
+	"core/logger",
+	"core/model",
+	"core/permission",
+	"core/semversion",
+	"core/status",
+	"core/trace",
+	"core/user",
+	"internal/errors",
+	"internal/logger",
+	"internal/uuid",
+)
 
-func (*ImportSuite) TestImports(c *gc.C) {
+func (*ImportSuite) TestImports(c *tc.C) {
 	found := coretesting.FindJujuCoreImports(c, "github.com/juju/juju/core/network")
-	for _, packageImport := range found {
-		c.Assert(allowedCoreImports.Contains(packageImport), jc.IsTrue)
-	}
+
+	c.Assert(found, tc.SameContents, allowedCoreImports.SortedValues())
 }

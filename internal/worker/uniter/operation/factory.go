@@ -4,14 +4,15 @@
 package operation
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"context"
 
-	"github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/rpc/params"
 )
@@ -21,10 +22,9 @@ type FactoryParams struct {
 	Deployer       charm.Deployer
 	RunnerFactory  runner.Factory
 	Callbacks      Callbacks
-	State          *uniter.State
-	Abort          <-chan struct{}
+	ActionGetter   ActionGetter
 	MetricSpoolDir string
-	Logger         Logger
+	Logger         logger.Logger
 }
 
 // NewFactory returns a Factory that creates Operations backed by the supplied
@@ -56,7 +56,6 @@ func (f *factory) newDeploy(kind Kind, charmURL string, revert, resolved bool) (
 		resolved:  resolved,
 		callbacks: f.config.Callbacks,
 		deployer:  f.config.Deployer,
-		abort:     f.config.Abort,
 	}
 	return op, nil
 }
@@ -69,23 +68,6 @@ func (f *factory) NewInstall(charmURL string) (Operation, error) {
 // NewUpgrade is part of the Factory interface.
 func (f *factory) NewUpgrade(charmURL string) (Operation, error) {
 	return f.newDeploy(Upgrade, charmURL, false, false)
-}
-
-// NewRemoteInit is part of the Factory interface.
-func (f *factory) NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (Operation, error) {
-	return &remoteInit{
-		callbacks:     f.config.Callbacks,
-		abort:         f.config.Abort,
-		runningStatus: runningStatus,
-	}, nil
-}
-
-func (f *factory) NewSkipRemoteInit(retry bool) (Operation, error) {
-	return &skipRemoteInit{retry}, nil
-}
-
-func (f *factory) NewNoOpFinishUpgradeSeries() (Operation, error) {
-	return &noOpFinishUpgradeSeries{&skipOperation{}}, nil
 }
 
 // NewRevertUpgrade is part of the Factory interface.
@@ -131,13 +113,13 @@ func (f *factory) NewNoOpSecretsRemoved(deletedRevisions, deletedObsoleteRevisio
 }
 
 // NewAction is part of the Factory interface.
-func (f *factory) NewAction(actionId string) (Operation, error) {
+func (f *factory) NewAction(ctx context.Context, actionId string) (Operation, error) {
 	if !names.IsValidAction(actionId) {
 		return nil, errors.Errorf("invalid action id %q", actionId)
 	}
 
 	tag := names.NewActionTag(actionId)
-	action, err := f.config.State.Action(tag)
+	action, err := f.config.ActionGetter.Action(ctx, tag)
 	if params.IsCodeNotFoundOrCodeUnauthorized(err) {
 		return nil, charmrunner.ErrActionNotAvailable
 	} else if params.IsCodeActionNotAvailable(err) {

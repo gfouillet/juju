@@ -4,11 +4,11 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // CredentialGetCommand implements the leader-get command.
@@ -48,7 +48,7 @@ func (c *CredentialGetCommand) Init(args []string) error {
 
 // Run is part of the cmd.Command interface.
 func (c *CredentialGetCommand) Run(ctx *cmd.Context) error {
-	credential, err := c.ctx.CloudSpec()
+	credential, err := c.ctx.CloudSpec(ctx)
 	if err != nil {
 		return errors.Annotatef(err, "cannot access cloud credentials")
 	}

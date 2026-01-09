@@ -4,23 +4,26 @@
 package charmhub
 
 import (
-	"github.com/juju/charm/v12"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	"github.com/juju/juju/charmhub/transport"
+	"github.com/juju/tc"
+
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charmhub/transport"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type filterSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&filterSuite{})
+func TestFilterSuite(t *testing.T) {
+	tc.Run(t, &filterSuite{})
+}
 
-func (filterSuite) TestFilterChannels(c *gc.C) {
+func (s *filterSuite) TestFilterChannels(c *tc.C) {
 	tests := []struct {
 		Name     string
 		Arch     string
@@ -550,7 +553,7 @@ func (filterSuite) TestFilterChannels(c *gc.C) {
 	for k, v := range tests {
 		c.Logf("Test %d %s", k, v.Name)
 		_, got, err := filterChannels(v.Input, v.Arch, v.Risk, v.Revision, v.Track, v.Base)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(got, jc.DeepEquals, v.Expected)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(got, tc.DeepEquals, v.Expected)
 	}
 }

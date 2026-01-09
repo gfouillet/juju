@@ -6,8 +6,8 @@ package settings
 import (
 	"fmt"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/errors"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/errors"
 )
 
 const (
@@ -104,7 +104,7 @@ type ItemChanges []ItemChange
 func (c ItemChanges) ApplyDeltaSource(oldChanges ItemChanges) (ItemChanges, error) {
 	m, err := oldChanges.Map()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 
 	res := make(ItemChanges, len(c))
@@ -147,7 +147,7 @@ func (c ItemChanges) ApplyDeltaSource(oldChanges ItemChanges) (ItemChanges, erro
 
 // EffectiveChanges returns the effective changes resulting from the
 // application of these changes to the input defaults.
-func (c ItemChanges) EffectiveChanges(defaults charm.Settings) map[string]interface{} {
+func (c ItemChanges) EffectiveChanges(defaults charm.Config) map[string]interface{} {
 	result := make(map[string]interface{})
 	for _, change := range c {
 		key := change.Key

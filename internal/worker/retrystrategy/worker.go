@@ -5,19 +5,22 @@
 package retrystrategy
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
 
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
 )
 
 // Facade defines the capabilities required by the worker from the API.
 type Facade interface {
-	RetryStrategy(names.Tag) (params.RetryStrategy, error)
-	WatchRetryStrategy(names.Tag) (watcher.NotifyWatcher, error)
+	RetryStrategy(context.Context, names.Tag) (params.RetryStrategy, error)
+	WatchRetryStrategy(context.Context, names.Tag) (watcher.NotifyWatcher, error)
 }
 
 // WorkerConfig defines the worker's dependencies.
@@ -25,7 +28,7 @@ type WorkerConfig struct {
 	Facade        Facade
 	AgentTag      names.Tag
 	RetryStrategy params.RetryStrategy
-	Logger        Logger
+	Logger        logger.Logger
 }
 
 // Validate returns an error if the configuration is not complete.
@@ -57,12 +60,12 @@ func NewRetryStrategyWorker(config WorkerConfig) (worker.Worker, error) {
 		return nil, errors.Trace(err)
 	}
 	w, err := watcher.NewNotifyWorker(watcher.NotifyConfig{
-		Handler: retryStrategyHandler{config},
+		Handler: retryStrategyHandler{config: config},
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &RetryStrategyWorker{w, config.RetryStrategy}, nil
+	return &RetryStrategyWorker{NotifyWorker: w, retryStrategy: config.RetryStrategy}, nil
 }
 
 // GetRetryStrategy returns the current hook retry strategy
@@ -76,20 +79,20 @@ type retryStrategyHandler struct {
 }
 
 // SetUp is part of the watcher.NotifyHandler interface.
-func (h retryStrategyHandler) SetUp() (watcher.NotifyWatcher, error) {
-	return h.config.Facade.WatchRetryStrategy(h.config.AgentTag)
+func (h retryStrategyHandler) SetUp(ctx context.Context) (watcher.NotifyWatcher, error) {
+	return h.config.Facade.WatchRetryStrategy(ctx, h.config.AgentTag)
 }
 
 // Handle is part of the watcher.NotifyHandler interface.
 // Whenever a valid change is encountered the worker bounces,
 // making the dependents bounce and get the new value
-func (h retryStrategyHandler) Handle(_ <-chan struct{}) error {
-	newRetryStrategy, err := h.config.Facade.RetryStrategy(h.config.AgentTag)
+func (h retryStrategyHandler) Handle(ctx context.Context) error {
+	newRetryStrategy, err := h.config.Facade.RetryStrategy(ctx, h.config.AgentTag)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if newRetryStrategy != h.config.RetryStrategy {
-		h.config.Logger.Debugf("bouncing retrystrategy worker to get new values")
+		h.config.Logger.Debugf(ctx, "bouncing retrystrategy worker to get new values")
 		return dependency.ErrBounce
 	}
 	return nil

@@ -4,20 +4,21 @@
 package instances
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 	"github.com/kr/pretty"
 
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs/imagemetadata"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.environs.instances")
+var logger = internallogger.GetLogger("juju.environs.instances")
 
 // InstanceConstraint constrains the possible instances that may be
 // chosen by the environment provider.
@@ -64,13 +65,13 @@ type InstanceSpec struct {
 // which instances can be run. The InstanceConstraint is used to filter allInstanceTypes and then a suitable image
 // compatible with the matching instance types is returned.
 func FindInstanceSpec(possibleImages []Image, ic *InstanceConstraint, allInstanceTypes []InstanceType) (*InstanceSpec, error) {
-	logger.Debugf("instance constraints %+v", ic)
+	logger.Debugf(context.TODO(), "instance constraints %+v", ic)
 	if len(possibleImages) == 0 {
 		return nil, errors.Errorf("no metadata for %q images in %s with arch %s",
 			ic.Base.DisplayString(), ic.Region, ic.Arch)
 	}
 
-	logger.Debugf("matching constraints %v against possible image metadata %s", ic, pretty.Sprint(possibleImages))
+	logger.Debugf(context.TODO(), "matching constraints %v against possible image metadata %s", ic, pretty.Sprint(possibleImages))
 	// If no constraints arch is specified, we need to ensure instances are filtered
 	// on the arch of the agent binary.
 	cons := ic.Constraints
@@ -122,7 +123,7 @@ func FindInstanceSpec(possibleImages []Image, ic *InstanceConstraint, allInstanc
 		sort.Sort(byArch(specsWithoutSev))
 		sort.Sort(byArch(specsWithSev))
 		specs = slices.Concat(specsWithoutSev, specsWithSev)
-		logger.Infof("find instance - using %v image of type %v with id: %v", specs[0].Image.Arch, specs[0].InstanceType.Name, specs[0].Image.Id)
+		logger.Infof(context.TODO(), "find instance - using %v image of type %v with id: %v", specs[0].Image.Arch, specs[0].InstanceType.Name, specs[0].Image.Id)
 		return specs[0], nil
 	}
 

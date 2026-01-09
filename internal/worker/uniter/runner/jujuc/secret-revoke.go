@@ -4,13 +4,13 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretRevokeCommand struct {
@@ -109,7 +109,7 @@ func (c *secretRevokeCommand) Init(args []string) error {
 }
 
 // Run implements cmd.Command.
-func (c *secretRevokeCommand) Run(_ *cmd.Context) error {
+func (c *secretRevokeCommand) Run(ctx *cmd.Context) error {
 	args := &SecretGrantRevokeArgs{}
 	if c.app != "" {
 		args.ApplicationName = &c.app
@@ -118,5 +118,5 @@ func (c *secretRevokeCommand) Run(_ *cmd.Context) error {
 		args.UnitName = &c.unit
 	}
 
-	return c.ctx.RevokeSecret(c.secretURL, args)
+	return c.ctx.RevokeSecret(ctx, c.secretURL, args)
 }

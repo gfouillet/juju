@@ -8,34 +8,53 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	jujutesting "github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/rpc/params"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	apiservertesting "github.com/juju/juju/apiserver/testing"
+	jujuhttp "github.com/juju/juju/internal/http"
+	"github.com/juju/juju/internal/testing"
 	jujuparams "github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-type clientCredentialsLoginProviderSuite struct {
-	jujutesting.JujuConnSuite
+type clientCredentialsLoginProviderProviderSuite struct {
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&clientCredentialsLoginProviderSuite{})
+func TestClientCredentialsLoginProviderProviderSuite(t *stdtesting.T) {
+	tc.Run(t, &clientCredentialsLoginProviderProviderSuite{})
+}
+func (s *clientCredentialsLoginProviderProviderSuite) APIInfo() *api.Info {
+	srv := apiservertesting.NewAPIServer(func(modelUUID string) (interface{}, error) {
+		var err error
+		if modelUUID != "" && modelUUID != testing.ModelTag.Id() {
+			err = fmt.Errorf("%w: %q", apiservererrors.UnknownModelError, modelUUID)
+		}
+		return &testRootAPI{}, err
+	})
+	s.AddCleanup(func(_ *tc.C) { srv.Close() })
+	info := &api.Info{
+		Addrs:          srv.Addrs,
+		CACert:         testing.CACert,
+		ControllerUUID: testing.ControllerTag.Id(),
+		ModelTag:       testing.ModelTag,
+	}
+	return info
+}
 
-func (s *clientCredentialsLoginProviderSuite) TestClientCredentialsLogin(c *gc.C) {
-	info := s.APIInfo(c)
+func (s *clientCredentialsLoginProviderProviderSuite) TestClientCredentialsLogin(c *tc.C) {
+	info := s.APIInfo()
 
 	clientID := "test-client-id"
 	clientSecret := "test-client-secret"
 
-	s.PatchValue(api.LoginWithClientCredentialsAPICall, func(_ base.APICaller, request interface{}, response interface{}) error {
+	s.PatchValue(api.LoginWithClientCredentialsAPICall, func(ctx context.Context, _ base.APICaller, request interface{}, response interface{}) error {
 		data, err := json.Marshal(request)
 		if err != nil {
 			return errors.Trace(err)
@@ -58,13 +77,13 @@ func (s *clientCredentialsLoginProviderSuite) TestClientCredentialsLogin(c *gc.C
 			return errors.Unauthorized
 		}
 
-		loginResult, ok := response.(*params.LoginResult)
+		loginResult, ok := response.(*jujuparams.LoginResult)
 		if !ok {
 			return errors.Errorf("expected %T, received %T for response type", loginResult, response)
 		}
 		loginResult.ControllerTag = names.NewControllerTag(info.ControllerUUID).String()
 		loginResult.ServerVersion = "3.4.0"
-		loginResult.UserInfo = &params.AuthUserInfo{
+		loginResult.UserInfo = &jujuparams.AuthUserInfo{
 			DisplayName:      "alice@external",
 			Identity:         names.NewUserTag("alice@external").String(),
 			ControllerAccess: "superuser",
@@ -73,43 +92,44 @@ func (s *clientCredentialsLoginProviderSuite) TestClientCredentialsLogin(c *gc.C
 	})
 
 	lp := api.NewClientCredentialsLoginProvider(clientID, clientSecret)
-	apiState, err := api.Open(&api.Info{
+	apiState, err := api.Open(c.Context(), &api.Info{
 		Addrs:          info.Addrs,
 		ControllerUUID: info.ControllerUUID,
 		CACert:         info.CACert,
 	}, api.DialOpts{
 		LoginProvider: lp,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = apiState.Close() }()
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(err, tc.ErrorIsNil)
 }
 
 // A separate suite for tests that don't need to communicate with a Juju controller.
 type clientCredentialsLoginProviderBasicSuite struct {
-	coretesting.BaseSuite
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&clientCredentialsLoginProviderBasicSuite{})
-
-func (s *clientCredentialsLoginProviderBasicSuite) TestClientCredentialsAuthHeader(c *gc.C) {
+func TestClientCredentialsLoginProviderBasicSuite(t *stdtesting.T) {
+	tc.Run(t, &clientCredentialsLoginProviderBasicSuite{})
+}
+func (s *clientCredentialsLoginProviderBasicSuite) TestClientCredentialsAuthHeader(c *tc.C) {
 	clientID := "test-client-id"
 	clientSecret := "test-client-secret"
 	lp := api.NewClientCredentialsLoginProvider(clientID, clientSecret)
 	expectedHeader := jujuhttp.BasicAuthHeader(clientID, clientSecret)
 	got, err := lp.AuthHeader()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(got, jc.DeepEquals, expectedHeader)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(got, tc.DeepEquals, expectedHeader)
 }
 
-func (s *clientCredentialsLoginProviderBasicSuite) TestNewClientCredentialsLoginProviderFromEnvironment_NotSet(c *gc.C) {
+func (s *clientCredentialsLoginProviderBasicSuite) TestNewClientCredentialsLoginProviderFromEnvironment_NotSet(c *tc.C) {
 	ctx := context.Background()
 
 	_, err := api.NewClientCredentialsLoginProviderFromEnvironment(func() {}).Login(ctx, nil)
-	c.Assert(err, gc.ErrorMatches, "both client id and client secret must be set")
+	c.Assert(err, tc.ErrorMatches, "both client id and client secret must be set")
 }
 
-func (s *clientCredentialsLoginProviderBasicSuite) TestNewClientCredentialsLoginProviderFromEnvironment(c *gc.C) {
+func (s *clientCredentialsLoginProviderBasicSuite) TestNewClientCredentialsLoginProviderFromEnvironment(c *tc.C) {
 	ctx := context.Background()
 
 	os.Setenv("JUJU_CLIENT_ID", "test-client-id")
@@ -119,15 +139,15 @@ func (s *clientCredentialsLoginProviderBasicSuite) TestNewClientCredentialsLogin
 		os.Unsetenv("JUJU_CLIENT_SECRET")
 	}()
 	res, err := api.NewClientCredentialsLoginProviderFromEnvironment(func() {}).Login(ctx, callStub{})
-	c.Assert(err, gc.IsNil)
-	c.Assert(res, gc.NotNil)
+	c.Assert(err, tc.IsNil)
+	c.Assert(res, tc.NotNil)
 }
 
 type callStub struct {
 	base.APICaller
 }
 
-func (c callStub) APICall(objType string, version int, id string, request string, params interface{}, response interface{}) error {
+func (c callStub) APICall(_ context.Context, objType string, version int, id string, request string, params interface{}, response interface{}) error {
 	if r, ok := response.(*jujuparams.LoginResult); ok {
 		r.ServerVersion = "3.6.9"
 	} else {

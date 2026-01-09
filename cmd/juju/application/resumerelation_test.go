@@ -4,65 +4,68 @@
 package application
 
 import (
-	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type ResumeRelationSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	mockAPI *mockResumeAPI
 }
 
-func (s *ResumeRelationSuite) SetUpTest(c *gc.C) {
+func (s *ResumeRelationSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
-	s.mockAPI = &mockResumeAPI{Stub: &testing.Stub{}}
+	s.mockAPI = &mockResumeAPI{Stub: &testhelpers.Stub{}}
 	s.mockAPI.setRelationSuspendedFunc = func(relationIds []int, suspended bool, message string) error {
 		return s.mockAPI.NextErr()
 	}
 }
+func TestResumeRelationSuite(t *testing.T) {
+	tc.Run(t, &ResumeRelationSuite{})
+}
 
-var _ = gc.Suite(&ResumeRelationSuite{})
-
-func (s *ResumeRelationSuite) runResumeRelation(c *gc.C, args ...string) error {
+func (s *ResumeRelationSuite) runResumeRelation(c *tc.C, args ...string) error {
 	store := jujuclienttesting.MinimalStore()
 	_, err := cmdtesting.RunCommand(c, NewResumeRelationCommandForTest(s.mockAPI, store), args...)
 	return err
 }
 
-func (s *ResumeRelationSuite) TestResumeRelationInvalidArguments(c *gc.C) {
+func (s *ResumeRelationSuite) TestResumeRelationInvalidArguments(c *tc.C) {
 	// No arguments
 	err := s.runResumeRelation(c)
-	c.Assert(err, gc.ErrorMatches, "no relation ids specified")
+	c.Assert(err, tc.ErrorMatches, "no relation ids specified")
 
 	// argument not an integer
 	err = s.runResumeRelation(c, "application1")
-	c.Assert(err, gc.ErrorMatches, `relation ID "application1" not valid`)
+	c.Assert(err, tc.ErrorMatches, `relation ID "application1" not valid`)
 }
 
-func (s *ResumeRelationSuite) TestResumeRelationSuccess(c *gc.C) {
+func (s *ResumeRelationSuite) TestResumeRelationSuccess(c *tc.C) {
 	err := s.runResumeRelation(c, "123")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.mockAPI.CheckCall(c, 0, "SetRelationSuspended", []int{123}, false, "")
 	s.mockAPI.CheckCall(c, 1, "Close")
 }
 
-func (s *ResumeRelationSuite) TestResumeRelationFail(c *gc.C) {
+func (s *ResumeRelationSuite) TestResumeRelationFail(c *tc.C) {
 	msg := "fail resume-relation at API"
 	s.mockAPI.SetErrors(errors.New(msg))
 	err := s.runResumeRelation(c, "123", "456")
-	c.Assert(err, gc.ErrorMatches, msg)
+	c.Assert(err, tc.ErrorMatches, msg)
 	s.mockAPI.CheckCall(c, 0, "SetRelationSuspended", []int{123, 456}, false, "")
 	s.mockAPI.CheckCall(c, 1, "Close")
 }
 
-func (s *ResumeRelationSuite) TestResumeRelationBlocked(c *gc.C) {
+func (s *ResumeRelationSuite) TestResumeRelationBlocked(c *tc.C) {
 	s.mockAPI.SetErrors(apiservererrors.OperationBlockedError("TestResumeRelationBlocked"))
 	err := s.runResumeRelation(c, "123")
 	coretesting.AssertOperationWasBlocked(c, err, ".*TestResumeRelationBlocked.*")
@@ -71,7 +74,7 @@ func (s *ResumeRelationSuite) TestResumeRelationBlocked(c *gc.C) {
 }
 
 type mockResumeAPI struct {
-	*testing.Stub
+	*testhelpers.Stub
 	setRelationSuspendedFunc func(relationIds []int, suspended bool, message string) error
 }
 
@@ -80,7 +83,7 @@ func (s mockResumeAPI) Close() error {
 	return s.NextErr()
 }
 
-func (s mockResumeAPI) SetRelationSuspended(relationIds []int, suspended bool, message string) error {
+func (s mockResumeAPI) SetRelationSuspended(ctx context.Context, relationIds []int, suspended bool, message string) error {
 	s.MethodCall(s, "SetRelationSuspended", relationIds, suspended, message)
 	return s.setRelationSuspendedFunc(relationIds, suspended, message)
 }

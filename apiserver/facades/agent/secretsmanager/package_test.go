@@ -4,45 +4,38 @@
 package secretsmanager
 
 import (
-	"testing"
+	"context"
 
 	"github.com/juju/clock"
-	"github.com/juju/names/v5"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
-	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/leadership"
-	coresecrets "github.com/juju/juju/core/secrets"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/core/secrets"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
-
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsstate.go github.com/juju/juju/apiserver/facades/agent/secretsmanager SecretsState
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsconsumer.go github.com/juju/juju/apiserver/facades/agent/secretsmanager SecretsConsumer
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/crossmodel.go github.com/juju/juju/apiserver/facades/agent/secretsmanager CrossModelState,CrossModelSecretsClient
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretswatcher.go github.com/juju/juju/state StringsWatcher
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secrettriggers.go github.com/juju/juju/apiserver/facades/agent/secretsmanager SecretTriggers
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/leadershipchecker.go github.com/juju/juju/core/leadership Checker,Token
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsriggerwatcher.go github.com/juju/juju/state SecretsTriggerWatcher
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/secretsprovider.go github.com/juju/juju/secrets/provider SecretBackendProvider
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secrets.go -source service.go
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/crossmodel.go github.com/juju/juju/apiserver/facades/agent/secretsmanager CrossModelSecretsClient
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secretsriggerwatcher.go github.com/juju/juju/core/watcher SecretTriggerWatcher
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/secretswatcher.go github.com/juju/juju/core/watcher StringsWatcher
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/leadershipchecker.go github.com/juju/juju/core/leadership Checker,Token
 
 func NewTestAPI(
+	c *tc.C,
 	authorizer facade.Authorizer,
-	resources facade.Resources,
+	watcherRegistry facade.WatcherRegistry,
 	leadership leadership.Checker,
-	secretsState SecretsState,
+	secretService SecretService,
 	consumer SecretsConsumer,
 	secretTriggers SecretTriggers,
-	backendConfigGetter commonsecrets.BackendConfigGetter,
-	adminConfigGetter commonsecrets.BackendAdminConfigGetter,
-	drainConfigGetter commonsecrets.BackendDrainConfigGetter,
-	remoteClientGetter func(uri *coresecrets.URI) (CrossModelSecretsClient, error),
-	crossModelState CrossModelState,
+	secretBackendService SecretBackendService,
+	applicationService ApplicationService,
+	crossModelRelationService CrossModelRelationService,
+	remoteClient CrossModelSecretsClient,
 	authTag names.Tag,
 	clock clock.Clock,
 ) (*SecretsManagerAPI, error) {
@@ -51,20 +44,22 @@ func NewTestAPI(
 	}
 
 	return &SecretsManagerAPI{
-		authTag:             authTag,
-		authorizer:          authorizer,
-		resources:           resources,
-		leadershipChecker:   leadership,
-		secretsState:        secretsState,
-		secretsConsumer:     consumer,
-		secretsTriggers:     secretTriggers,
-		backendConfigGetter: backendConfigGetter,
-		adminConfigGetter:   adminConfigGetter,
-		drainConfigGetter:   drainConfigGetter,
-		remoteClientGetter:  remoteClientGetter,
-		crossModelState:     crossModelState,
-		clock:               clock,
-		controllerUUID:      coretesting.ControllerTag.Id(),
-		modelUUID:           coretesting.ModelTag.Id(),
+		authTag:                   authTag,
+		watcherRegistry:           watcherRegistry,
+		authorizer:                authorizer,
+		leadershipChecker:         leadership,
+		secretBackendService:      secretBackendService,
+		secretService:             secretService,
+		secretsConsumer:           consumer,
+		secretsTriggers:           secretTriggers,
+		applicationService:        applicationService,
+		crossModelRelationService: crossModelRelationService,
+		remoteClientGetter: func(ctx context.Context, uri *secrets.URI) (CrossModelSecretsClient, error) {
+			return remoteClient, nil
+		},
+		clock:          clock,
+		controllerUUID: coretesting.ControllerTag.Id(),
+		modelUUID:      coretesting.ModelTag.Id(),
+		logger:         loggertesting.WrapCheckLog(c),
 	}, nil
 }

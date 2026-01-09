@@ -4,9 +4,10 @@
 package annotations
 
 import (
+	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -14,25 +15,21 @@ import (
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Annotations", 2, func(ctx facade.Context) (facade.Facade, error) {
+	registry.MustRegister("Annotations", 2, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
 		return newAPI(ctx)
 	}, reflect.TypeOf((*API)(nil)))
 }
 
 // newAPI returns a new charm annotator API facade.
-func newAPI(ctx facade.Context) (*API, error) {
+func newAPI(ctx facade.ModelContext) (*API, error) {
 	authorizer := ctx.Auth()
 	if !authorizer.AuthClient() {
 		return nil, apiservererrors.ErrPerm
 	}
-	st := ctx.State()
-	m, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 
 	return &API{
-		access:     getState(st, m),
-		authorizer: authorizer,
+		modelTag:          names.NewModelTag(ctx.ModelUUID().String()),
+		annotationService: ctx.DomainServices().Annotation(),
+		authorizer:        authorizer,
 	}, nil
 }

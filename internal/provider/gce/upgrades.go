@@ -4,16 +4,16 @@
 package gce
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 // UpgradeOperations is part of the upgrades.OperationSource interface.
-func (env *environ) UpgradeOperations(ctx context.ProviderCallContext, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
+func (env *environ) UpgradeOperations(ctx context.Context, args environs.UpgradeOperationsParams) []environs.UpgradeOperation {
 	return []environs.UpgradeOperation{{
 		providerVersion1,
 		[]environs.UpgradeStep{
@@ -35,11 +35,11 @@ func (diskLabelsUpgradeStep) Description() string {
 }
 
 // Run is part of the environs.UpgradeStep interface.
-func (step diskLabelsUpgradeStep) Run(ctx context.ProviderCallContext) error {
+func (step diskLabelsUpgradeStep) Run(ctx context.Context) error {
 	env := step.env
 	disks, err := env.gce.Disks(ctx)
 	if err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, err)
 	}
 	for _, disk := range disks {
 		if !isValidVolume(disk.GetName()) {
@@ -57,7 +57,7 @@ func (step diskLabelsUpgradeStep) Run(ctx context.ProviderCallContext) error {
 		disk.Labels[tags.JujuModel] = env.uuid
 		disk.Labels[tags.JujuController] = step.controllerUUID
 		if err := env.gce.SetDiskLabels(ctx, disk.GetZone(), disk.GetName(), disk.GetLabelFingerprint(), disk.GetLabels()); err != nil {
-			return google.HandleCredentialError(errors.Annotatef(err, "cannot set labels on volume %q", disk.GetName()), ctx)
+			return errors.Annotatef(env.HandleCredentialError(ctx, err), "cannot set labels on volume %q", disk.GetName())
 		}
 	}
 	return nil

@@ -6,12 +6,11 @@ package watchertest
 import (
 	"time"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
-	tomb "gopkg.in/tomb.v2"
+	"github.com/juju/tc"
+	"gopkg.in/tomb.v2"
 
+	"github.com/juju/juju/core/testing"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/testing"
 )
 
 type MockNotifyWatcher struct {
@@ -28,8 +27,8 @@ func NewMockNotifyWatcher(ch <-chan struct{}) *MockNotifyWatcher {
 	return w
 }
 
-func (w *MockNotifyWatcher) Changes() watcher.NotifyChannel {
-	return watcher.NotifyChannel(w.ch)
+func (w *MockNotifyWatcher) Changes() <-chan struct{} {
+	return w.ch
 }
 
 func (w *MockNotifyWatcher) Stop() error {
@@ -55,7 +54,7 @@ func (w *MockNotifyWatcher) Wait() error {
 	return w.tomb.Wait()
 }
 
-func NewNotifyWatcherC(c *gc.C, watcher watcher.NotifyWatcher) NotifyWatcherC {
+func NewNotifyWatcherC(c *tc.C, watcher watcher.NotifyWatcher) NotifyWatcherC {
 	return NotifyWatcherC{
 		C:       c,
 		Watcher: watcher,
@@ -63,7 +62,7 @@ func NewNotifyWatcherC(c *gc.C, watcher watcher.NotifyWatcher) NotifyWatcherC {
 }
 
 type NotifyWatcherC struct {
-	*gc.C
+	*tc.C
 	Watcher watcher.NotifyWatcher
 }
 
@@ -73,11 +72,74 @@ type NotifyWatcherC struct {
 func (c NotifyWatcherC) AssertOneChange() {
 	select {
 	case _, ok := <-c.Watcher.Changes():
-		c.Assert(ok, jc.IsTrue)
-	case <-time.After(testing.LongWait):
+		c.Assert(ok, tc.IsTrue)
+	case <-c.Context().Done():
 		c.Fatalf("watcher did not send change")
 	}
 	c.AssertNoChange()
+}
+
+// AssertAtLeastOneChange fails if no change is sent before a long time has
+// passed.
+func (c NotifyWatcherC) AssertAtLeastOneChange() {
+	select {
+	case _, ok := <-c.Watcher.Changes():
+		c.Assert(ok, tc.IsTrue)
+	case <-c.Context().Done():
+		c.Fatalf("watcher did not send change")
+	}
+}
+
+// AssertChanges asserts that there was a series of changes for a given
+// duration. If there are any more changes after that period, then it
+// will fail.
+func (c NotifyWatcherC) AssertChanges(duration time.Duration) {
+	if duration >= testing.LongWait {
+		c.Fatalf("duration must be less than testing.LongWait")
+	}
+
+	done := time.After(duration)
+	for {
+		select {
+		case _, ok := <-c.Watcher.Changes():
+			c.Check(ok, tc.IsTrue)
+		case <-done:
+			// Ensure we have no more changes after we've waited
+			// for a given time.
+			c.AssertNoChange()
+			return
+		case <-c.Context().Done():
+			c.Fatalf("watcher did not send a change")
+		}
+	}
+}
+
+// AssertNChanges fails if it does not receive n changes before a long time has passed.
+func (c NotifyWatcherC) AssertNChanges(n int) {
+	if n <= 1 {
+		c.Fatalf("n must be greater than 1")
+	}
+	received := 0
+	for {
+		select {
+		case _, ok := <-c.Watcher.Changes():
+			c.Check(ok, tc.IsTrue)
+			received++
+
+			if received < n {
+				continue
+			}
+			// Ensure we have no more changes.
+			c.AssertNoChange()
+			return
+		case <-c.Context().Done():
+			if received == 0 {
+				c.Fatalf("watcher did not send any changes")
+			} else {
+				c.Fatalf("watcher received %d changes, expected %d", received, n)
+			}
+		}
+	}
 }
 
 // AssertNoChange fails if it manages to read a value from Changes before a
@@ -97,10 +159,10 @@ func (c NotifyWatcherC) assertStops(changesClosed bool) {
 		wait <- c.Watcher.Wait()
 	}()
 	select {
-	case <-time.After(testing.LongWait):
+	case <-c.Context().Done():
 		c.Fatalf("watcher never stopped")
 	case err := <-wait:
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
 	select {

@@ -3,33 +3,51 @@
 
 package logger
 
-// Label represents a common logger label type.
-type Label = string
+// Tag represents a common logger tag type.
+type Tag = string
 
 const (
-	// API defines a common API label to enable logging of all API connections and requests.
-	API Label = "api"
+	// API defines a common API tag to enable logging of all API connections and requests.
+	API Tag = "api"
 
-	// HTTP defines a common HTTP request label.
-	HTTP Label = "http"
+	// HTTP defines a common HTTP request tag.
+	HTTP Tag = "http"
 
-	// METRICS defines a common label for dealing with metric output. This
+	// METRICS defines a common tag for dealing with metric output. This
 	// should be used as a fallback for when prometheus isn't available.
-	METRICS Label = "metrics"
+	METRICS Tag = "metrics"
 
-	// CHARMHUB defines a common label for dealing with the charmhub client
+	// CHARMHUB defines a common tag for dealing with the charmhub client
 	// and callers.
-	CHARMHUB Label = "charmhub"
+	CHARMHUB Tag = "charmhub"
 
-	// CMR defines a common label for dealing with cross model relations.
-	CMR Label = "cmr"
+	// CMR defines a common tag for dealing with cross model relations.
+	CMR Tag = "cmr"
 
-	// CMR_AUTH defines a common label for dealing with cross model relations auth.
-	CMR_AUTH Label = "cmr-auth"
+	// CMR_AUTH defines a common tag for dealing with cross model relations auth.
+	CMR_AUTH Tag = "cmr-auth"
 
-	// SECRETS defines a common label for dealing with secrets.
-	SECRETS Label = "secrets"
+	// SECRETS defines a common tag for dealing with secrets.
+	SECRETS Tag = "secrets"
 
-	// MIGRATION defines a common label for dealing with migration.
-	MIGRATION Label = "migration"
+	// WATCHERS defines a common tag for dealing with watchers.
+	WATCHERS Tag = "watchers"
+
+	// MIGRATION defines a common tag for dealing with migration.
+	MIGRATION Tag = "migration"
+
+	// OBJECTSTORE defines a common tag for dealing with objectstore.
+	OBJECTSTORE Tag = "objectstore"
+
+	// SSHIMPORTER defines a common tag for dealing with ssh key importer.
+	SSHIMPORTER Tag = "ssh-importer"
+
+	// STATUS_HISTORY defines a common tag for dealing with status history.
+	STATUS_HISTORY Tag = "status-history"
+
+	// MACAROON defines a common tag for dealing with macaroons.
+	MACAROON Tag = "macaroon"
+
+	// SIMPLESTREAM defines a common tag for dealing with simplestreams.
+	SIMPLESTREAM Tag = "simplestreams"
 )

@@ -4,14 +4,15 @@
 package jujuc
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -100,8 +101,8 @@ of the relation.
 	if name, err := c.ctx.RemoteUnitName(); err == nil {
 		args = "[<key> [<unit id>]]"
 		doc += fmt.Sprintf("Current default unit id is %q.", name)
-	} else if !errors.IsNotFound(err) {
-		logger.Errorf("Failed to retrieve remote unit name: %v", err)
+	} else if !errors.Is(err, errors.NotFound) {
+		logger.Errorf(context.Background(), "Failed to retrieve remote unit name: %v", err)
 	}
 	return jujucmd.Info(&cmd.Info{
 		Name:     "relation-get",
@@ -171,7 +172,7 @@ func (c *RelationGetCommand) determineUnitOrAppName(args *[]string) error {
 	if name, err := c.ctx.RemoteUnitName(); err == nil {
 		c.UnitOrAppName = name
 		return nil
-	} else if !errors.IsNotFound(err) {
+	} else if !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	// Unit name not found, look for app context
@@ -180,7 +181,7 @@ func (c *RelationGetCommand) determineUnitOrAppName(args *[]string) error {
 		c.UnitOrAppName = name
 		c.Application = true
 		return nil
-	} else if !errors.IsNotFound(err) {
+	} else if !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	// If we got this far, there is no default value to give and nothing was
@@ -223,7 +224,7 @@ func (c *RelationGetCommand) Run(ctx *cmd.Context) error {
 		settingsReaderFn = c.readRemoteUnitOrAppSettings
 	}
 
-	settings, err := settingsReaderFn(r)
+	settings, err := settingsReaderFn(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -261,16 +262,16 @@ func (c *RelationGetCommand) mustReadSettingsFromController() (bool, error) {
 	return true, nil
 }
 
-func (c *RelationGetCommand) readLocalUnitOrAppSettings(r ContextRelation) (params.Settings, error) {
+func (c *RelationGetCommand) readLocalUnitOrAppSettings(ctx context.Context, r ContextRelation) (params.Settings, error) {
 	var (
 		node Settings
 		err  error
 	)
 
 	if c.Application {
-		node, err = r.ApplicationSettings()
+		node, err = r.ApplicationSettings(ctx)
 	} else {
-		node, err = r.Settings()
+		node, err = r.Settings(ctx)
 	}
 	if err != nil {
 		return nil, err
@@ -279,10 +280,10 @@ func (c *RelationGetCommand) readLocalUnitOrAppSettings(r ContextRelation) (para
 	return node.Map(), nil
 }
 
-func (c *RelationGetCommand) readRemoteUnitOrAppSettings(r ContextRelation) (params.Settings, error) {
+func (c *RelationGetCommand) readRemoteUnitOrAppSettings(ctx context.Context, r ContextRelation) (params.Settings, error) {
 	if !c.Application {
-		return r.ReadSettings(c.UnitOrAppName)
+		return r.ReadSettings(ctx, c.UnitOrAppName)
 	}
 
-	return r.ReadApplicationSettings(c.UnitOrAppName)
+	return r.ReadApplicationSettings(ctx, c.UnitOrAppName)
 }

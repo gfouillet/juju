@@ -8,40 +8,85 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
-	"time"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/dbrootkeystore"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/identchecker"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
+	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/bakeryutil"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/core/macaroon"
-	"github.com/juju/juju/state"
+	coremodel "github.com/juju/juju/core/model"
+	corepermission "github.com/juju/juju/core/permission"
+	coreuser "github.com/juju/juju/core/user"
+	"github.com/juju/juju/internal/auth"
+	internalmacaroon "github.com/juju/juju/internal/macaroon"
 )
+
+var errMacaroonAuthNotConfigured = errors.New("macaroon authentication is not configured")
 
 const (
 	localUserIdentityLocationPath = "/auth"
 )
 
+// AccessService defines a interface for interacting the users and permissions
+// of a controller.
+type AccessService interface {
+	// GetUserByAuth returns the user with the given name and password.
+	GetUserByAuth(ctx context.Context, name coreuser.Name, password auth.Password) (coreuser.User, error)
+
+	// GetUserByName returns the user with the given name.
+	GetUserByName(ctx context.Context, name coreuser.Name) (coreuser.User, error)
+
+	// UpdateLastModelLogin updates the last login time for the user with the
+	// given name.
+	UpdateLastModelLogin(ctx context.Context, name coreuser.Name, modelUUID coremodel.UUID) error
+
+	// EnsureExternalUserIfAuthorized checks if an external user is missing from the
+	// database and has permissions on an object. If they do then they will be
+	// added. This ensures that juju has a record of external users that have
+	// inherited their permissions from everyone@external.
+	EnsureExternalUserIfAuthorized(ctx context.Context, subject coreuser.Name, target corepermission.ID) error
+
+	// ReadUserAccessLevelForTarget returns the user access level for the given
+	// user on the given target. A NotValid error is returned if the subject
+	// (user) string is empty, or the target is not valid. Any errors from the
+	// state layer are passed through. If the access level of a user cannot be
+	// found then [accesserrors.AccessNotFound] is returned.
+	ReadUserAccessLevelForTarget(ctx context.Context, subject coreuser.Name, target corepermission.ID) (corepermission.Access, error)
+}
+
+// AgentAuthenticatorGetter is a getter for creating authenticators, which
+// can create authenticators for a given state.
+type AgentAuthenticatorGetter interface {
+	// Authenticator returns an authenticator using the controller model.
+	Authenticator() authentication.EntityAuthenticator
+
+	// AuthenticatorForModel returns an authenticator for the given model.
+	AuthenticatorForModel(authentication.AgentPasswordService) authentication.EntityAuthenticator
+}
+
 // authContext holds authentication context shared
 // between all API endpoints.
 type authContext struct {
-	st *state.State
+	controllerConfigService ControllerConfigService
+	accessService           AccessService
+	macaroonService         MacaroonService
 
-	clock     clock.Clock
-	agentAuth authentication.AgentAuthenticator
+	clock           clock.Clock
+	agentAuthGetter AgentAuthenticatorGetter
 
 	// localUserBakery is the bakery.Bakery used by the controller
 	// for authenticating local users. In time, we may want to use this for
 	// both local and external users. Note that this service does not
 	// discharge the third-party caveats.
-	localUserBakery *bakeryutil.ExpirableStorageBakery
+	localUserBakery *bakeryutil.StorageBakery
 
 	// localUserThirdPartyBakery is the bakery.Bakery used by the
 	// controller for discharging third-party caveats for local users.
@@ -64,7 +109,7 @@ type OpenLoginAuthorizer struct{}
 
 // AuthorizeOps implements OpsAuthorizer.AuthorizeOps.
 func (OpenLoginAuthorizer) AuthorizeOps(ctx context.Context, authorizedOp bakery.Op, queryOps []bakery.Op) ([]bool, []checkers.Caveat, error) {
-	logger.Debugf("authorize query ops check for %v: %v", authorizedOp, queryOps)
+	logger.Debugf(ctx, "authorize query ops check for %v: %v", authorizedOp, queryOps)
 	allowed := make([]bool, len(queryOps))
 	for i := range allowed {
 		allowed[i] = queryOps[i] == identchecker.LoginOp
@@ -74,62 +119,71 @@ func (OpenLoginAuthorizer) AuthorizeOps(ctx context.Context, authorizedOp bakery
 
 // newAuthContext creates a new authentication context for st.
 func newAuthContext(
-	st *state.State,
-	clock clock.Clock,
+	ctx context.Context,
+	controllerModelUUID coremodel.UUID,
+	controllerConfigService ControllerConfigService,
+	accessService AccessService,
+	macaroonService MacaroonService,
+	agentAuthGetter AgentAuthenticatorGetter,
+	ctxClock clock.Clock,
 ) (*authContext, error) {
 	ctxt := &authContext{
-		st:                    st,
-		clock:                 clock,
-		localUserInteractions: authentication.NewInteractions(),
+		clock:                   ctxClock,
+		controllerConfigService: controllerConfigService,
+		accessService:           accessService,
+		macaroonService:         macaroonService,
+		localUserInteractions:   authentication.NewInteractions(),
+		agentAuthGetter:         agentAuthGetter,
 	}
 
 	// Create a bakery for discharging third-party caveats for
 	// local user authentication. This service does not persist keys;
 	// its macaroons should be very short-lived.
-	checker := checkers.New(macaroon.MacaroonNamespace)
-	checker.Register("is-authenticated-user", macaroon.MacaroonURI,
+	checker := checkers.New(internalmacaroon.MacaroonNamespace)
+	checker.Register("is-authenticated-user", internalmacaroon.MacaroonURI,
 		// Having a macaroon with an is-authenticated-user
 		// caveat is proof that the user is "logged in".
 		// "is-authenticated-user",
 		func(ctx context.Context, cond, arg string) error { return nil },
 	)
 
-	bakeryConfig := st.NewBakeryConfig()
-	location := "juju model " + st.ModelUUID()
+	location := "juju model " + controllerModelUUID.String()
 	var err error
-	ctxt.localUserThirdPartyBakeryKey, err = bakeryConfig.GetLocalUsersThirdPartyKey()
+	ctxt.localUserThirdPartyBakeryKey, err = macaroonService.GetLocalUsersThirdPartyKey(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "generating key for local user third party bakery key")
 	}
-	ctxt.localUserThirdPartyBakery = bakery.New(
-		bakery.BakeryParams{
-			Checker:       checker,
-			Key:           ctxt.localUserThirdPartyBakeryKey,
-			OpsAuthorizer: OpenLoginAuthorizer{},
-			Location:      location,
-		})
+
+	locator := bakeryutil.BakeryThirdPartyLocator{
+		PublicKey: ctxt.localUserThirdPartyBakeryKey.Public,
+	}
+
+	ctxt.localUserThirdPartyBakery = bakery.New(bakery.BakeryParams{
+		Checker:       checker,
+		Key:           ctxt.localUserThirdPartyBakeryKey,
+		OpsAuthorizer: OpenLoginAuthorizer{},
+		Location:      location,
+		Locator:       locator,
+	})
 
 	// Create a bakery service for local user authentication. This service
-	// persists keys into MongoDB in a TTL collection.
-	store, err := st.NewBakeryStorage()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	locator := bakeryutil.BakeryThirdPartyLocator{PublicKey: ctxt.localUserThirdPartyBakeryKey.Public}
-	localUserBakeryKey, err := bakeryConfig.GetLocalUsersKey()
+	// persists keys into DQLite in a TTL collection.
+	store := internalmacaroon.NewRootKeyStore(macaroonService, internalmacaroon.DefaultPolicy, ctxClock)
+
+	localUserBakeryKey, err := macaroonService.GetLocalUsersKey(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "generating key for local user bakery key")
 	}
-	localUserBakery := bakery.New(
-		bakery.BakeryParams{
-			RootKeyStore:  store,
-			Key:           localUserBakeryKey,
-			OpsAuthorizer: OpenLoginAuthorizer{},
-			Location:      location,
-		})
+	localUserBakery := bakery.New(bakery.BakeryParams{
+		RootKeyStore:  store,
+		Key:           localUserBakeryKey,
+		OpsAuthorizer: OpenLoginAuthorizer{},
+		Location:      location,
+		Locator:       locator,
+	})
 
-	ctxt.localUserBakery = &bakeryutil.ExpirableStorageBakery{
-		localUserBakery, location, localUserBakeryKey, store, locator,
+	ctxt.localUserBakery = &bakeryutil.StorageBakery{
+		Bakery: localUserBakery,
 	}
 	return ctxt, nil
 }
@@ -150,12 +204,18 @@ func (ctxt *authContext) CheckLocalLoginCaveat(caveat string) (names.UserTag, er
 	return authentication.CheckLocalLoginCaveat(caveat)
 }
 
+type macaroonAuthFunc func(mss ...macaroon.Slice) *bakery.AuthChecker
+
+func (f macaroonAuthFunc) Auth(_ context.Context, mss ...macaroon.Slice) *bakery.AuthChecker {
+	return f(mss...)
+}
+
 // CheckLocalLoginRequest checks that the given HTTP request contains at least
 // one valid local login macaroon minted using CreateLocalLoginMacaroon. It
 // returns an error with a *bakery.VerificationError cause if the macaroon
 // verification failed.
 func (ctxt *authContext) CheckLocalLoginRequest(ctx context.Context, req *http.Request) error {
-	return authentication.CheckLocalLoginRequest(ctx, ctxt.localUserThirdPartyBakery.Checker, req)
+	return authentication.CheckLocalLoginRequest(ctx, macaroonAuthFunc(ctxt.localUserThirdPartyBakery.Checker.Auth), req)
 }
 
 // DischargeCaveats returns the caveats to add to a login discharge macaroon.
@@ -163,17 +223,32 @@ func (ctxt *authContext) DischargeCaveats(tag names.UserTag) []checkers.Caveat {
 	return authentication.DischargeCaveats(tag, ctxt.clock)
 }
 
+// authenticatorForModel returns an authenticator.Authenticator for the API
+// connection associated with the specified API server host and model.
+func (ctxt *authContext) authenticatorForModel(serverHost string, agentPasswordService authentication.AgentPasswordService) authenticator {
+	return authenticator{
+		ctxt:               ctxt,
+		serverHost:         serverHost,
+		agentAuthenticator: ctxt.agentAuthGetter.AuthenticatorForModel(agentPasswordService),
+	}
+}
+
 // authenticator returns an authenticator.Authenticator for the API
 // connection associated with the specified API server host.
 func (ctxt *authContext) authenticator(serverHost string) authenticator {
-	return authenticator{ctxt: ctxt, serverHost: serverHost}
+	return authenticator{
+		ctxt:               ctxt,
+		serverHost:         serverHost,
+		agentAuthenticator: ctxt.agentAuthGetter.Authenticator(),
+	}
 }
 
 // authenticator implements authenticator.Authenticator, delegating
 // to the appropriate authenticator based on the tag kind.
 type authenticator struct {
-	ctxt       *authContext
-	serverHost string
+	ctxt               *authContext
+	serverHost         string
+	agentAuthenticator authentication.EntityAuthenticator
 }
 
 // Authenticate implements authentication.Authenticator
@@ -181,19 +256,18 @@ type authenticator struct {
 // tag.
 func (a authenticator) Authenticate(
 	ctx context.Context,
-	entityFinder authentication.EntityFinder,
 	authParams authentication.AuthParams,
-) (state.Entity, error) {
-	auth, err := a.authenticatorForTag(authParams.AuthTag)
+) (names.Tag, error) {
+	auth, err := a.authenticatorForTag(ctx, authParams.AuthTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return auth.Authenticate(ctx, entityFinder, authParams)
+	return auth.Authenticate(ctx, authParams)
 }
 
 // authenticatorForTag returns the authenticator appropriate
 // to use for a login with the given possibly-nil tag.
-func (a authenticator) authenticatorForTag(tag names.Tag) (authentication.EntityAuthenticator, error) {
+func (a authenticator) authenticatorForTag(ctx context.Context, tag names.Tag) (authentication.EntityAuthenticator, error) {
 	if tag == nil || tag.Kind() == names.UserTagKind {
 		// Poorly written older controllers pass in an external user
 		// when doing api calls to the target controller during migration,
@@ -201,7 +275,7 @@ func (a authenticator) authenticatorForTag(tag names.Tag) (authentication.Entity
 		if tag != nil && tag.(names.UserTag).IsLocal() {
 			return a.localUserAuth(), nil
 		}
-		auth, err := a.ctxt.externalMacaroonAuth(nil)
+		auth, err := a.ctxt.externalMacaroonAuth(ctx, nil)
 		if errors.Cause(err) == errMacaroonAuthNotConfigured {
 			err = errors.Trace(apiservererrors.ErrNoCreds)
 		}
@@ -210,9 +284,13 @@ func (a authenticator) authenticatorForTag(tag names.Tag) (authentication.Entity
 		}
 		return auth, nil
 	}
-	for _, agentKind := range AgentTags {
-		if tag.Kind() == agentKind {
-			return &a.ctxt.agentAuth, nil
+	// If the tag is not a user tag, it must be an agent tag, attempt to locate
+	// it.
+	// TODO (stickupkid): This should just be a switch. We don't need to loop
+	// through all the agent tags, it's pointless.
+	for _, kind := range AgentTags {
+		if tag.Kind() == kind {
+			return a.agentAuthenticator, nil
 		}
 	}
 	return nil, errors.Annotatef(apiservererrors.ErrBadRequest, "unexpected login entity tag")
@@ -227,6 +305,7 @@ func (a authenticator) localUserAuth() *authentication.LocalUserAuthenticator {
 		Path:   localUserIdentityLocationPath,
 	}
 	return &authentication.LocalUserAuthenticator{
+		UserService:               a.ctxt.accessService,
 		Bakery:                    a.ctxt.localUserBakery,
 		Clock:                     a.ctxt.clock,
 		LocalUserIdentityLocation: localUserIdentityLocation.String(),
@@ -235,9 +314,15 @@ func (a authenticator) localUserAuth() *authentication.LocalUserAuthenticator {
 
 // externalMacaroonAuth returns an authenticator that can authenticate macaroon-based
 // logins for external users. If it fails once, it will always fail.
-func (ctxt *authContext) externalMacaroonAuth(identClient identchecker.IdentityClient) (authentication.EntityAuthenticator, error) {
+func (ctxt *authContext) externalMacaroonAuth(ctx context.Context, identClient identchecker.IdentityClient) (authentication.EntityAuthenticator, error) {
 	ctxt.macaroonAuthOnce.Do(func() {
-		ctxt._macaroonAuth, ctxt._macaroonAuthError = newExternalMacaroonAuth(ctxt.st, ctxt.clock, externalLoginExpiryTime, identClient)
+		ctxt._macaroonAuth, ctxt._macaroonAuthError = newExternalMacaroonAuth(ctx, externalMacaroonAuthenticatorConfig{
+			controllerConfigService: ctxt.controllerConfigService,
+			macaroonService:         ctxt.macaroonService,
+			clock:                   ctxt.clock,
+			policy:                  internalmacaroon.DefaultPolicy,
+			identClient:             identClient,
+		})
 	})
 	if ctxt._macaroonAuth == nil {
 		return nil, errors.Trace(ctxt._macaroonAuthError)
@@ -245,28 +330,28 @@ func (ctxt *authContext) externalMacaroonAuth(identClient identchecker.IdentityC
 	return ctxt._macaroonAuth, nil
 }
 
-var errMacaroonAuthNotConfigured = errors.New("macaroon authentication is not configured")
-
-const (
-	// TODO make this configurable via model config.
-	externalLoginExpiryTime = 24 * time.Hour
-)
+type externalMacaroonAuthenticatorConfig struct {
+	controllerConfigService ControllerConfigService
+	macaroonService         MacaroonService
+	clock                   clock.Clock
+	policy                  dbrootkeystore.Policy
+	identClient             identchecker.IdentityClient
+}
 
 // newExternalMacaroonAuth returns an authenticator that can authenticate
 // macaroon-based logins for external users. This is just a helper function
 // for authCtxt.externalMacaroonAuth.
-func newExternalMacaroonAuth(st *state.State, clock clock.Clock, expiryTime time.Duration, identClient identchecker.IdentityClient) (*authentication.ExternalMacaroonAuthenticator, error) {
-	controllerCfg, err := st.ControllerConfig()
+func newExternalMacaroonAuth(ctx context.Context, cfg externalMacaroonAuthenticatorConfig) (*authentication.ExternalMacaroonAuthenticator, error) {
+	controllerCfg, err := cfg.controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "cannot get model config")
+		return nil, errors.Annotate(err, "cannot get controller config")
 	}
 	idURL := controllerCfg.IdentityURL()
 	if idURL == "" {
 		return nil, errMacaroonAuthNotConfigured
 	}
 	idPK := controllerCfg.IdentityPublicKey()
-	bakeryConfig := st.NewBakeryConfig()
-	key, err := bakeryConfig.GetExternalUsersThirdPartyKey()
+	key, err := cfg.macaroonService.GetExternalUsersThirdPartyKey(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -281,23 +366,18 @@ func newExternalMacaroonAuth(st *state.State, clock clock.Clock, expiryTime time
 	}
 
 	auth := authentication.ExternalMacaroonAuthenticator{
-		Clock:            clock,
+		Clock:            cfg.clock,
 		IdentityLocation: idURL,
 	}
-
-	store, err := st.NewBakeryStorage()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	store = store.ExpireAfter(expiryTime)
-	if identClient == nil {
-		identClient = &auth
+	store := internalmacaroon.NewRootKeyStore(cfg.macaroonService, cfg.policy, cfg.clock)
+	if cfg.identClient == nil {
+		cfg.identClient = &auth
 	}
 	identBakery := identchecker.NewBakery(identchecker.BakeryParams{
 		Checker:        httpbakery.NewChecker(),
 		Locator:        pkLocator,
 		Key:            key,
-		IdentityClient: identClient,
+		IdentityClient: cfg.identClient,
 		RootKeyStore:   store,
 		Authorizer: identchecker.ACLAuthorizer{
 			GetACL: func(ctx context.Context, op bakery.Op) ([]string, bool, error) {

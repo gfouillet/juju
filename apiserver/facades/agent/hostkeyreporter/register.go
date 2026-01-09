@@ -4,6 +4,7 @@
 package hostkeyreporter
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
@@ -13,14 +14,17 @@ import (
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("HostKeyReporter", 1, func(ctx facade.Context) (facade.Facade, error) {
+	registry.MustRegister("HostKeyReporter", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
 		return newFacade(ctx)
 	}, reflect.TypeOf((*Facade)(nil)))
 }
 
 // newFacade wraps New to express the supplied *state.State as a Backend.
-func newFacade(ctx facade.Context) (*Facade, error) {
-	facade, err := New(ctx.State(), ctx.Resources(), ctx.Auth())
+func newFacade(ctx facade.ModelContext) (*Facade, error) {
+	domainServices := ctx.DomainServices()
+	machineService := domainServices.Machine()
+
+	facade, err := New(machineService, ctx.Auth())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

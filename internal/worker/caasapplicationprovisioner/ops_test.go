@@ -4,223 +4,90 @@
 package caasapplicationprovisioner_test
 
 import (
-	"github.com/juju/charm/v12"
+	"bytes"
+	"context"
+	"io"
+	"testing"
+	"time"
+
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	charmscommon "github.com/juju/juju/api/common/charms"
 	api "github.com/juju/juju/api/controller/caasapplicationprovisioner"
 	"github.com/juju/juju/caas"
 	caasmocks "github.com/juju/juju/caas/mocks"
+	"github.com/juju/juju/core/application"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/resources"
+	coreresource "github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/core/watcher/watchertest"
-	"github.com/juju/juju/docker"
+	"github.com/juju/juju/core/unit"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	"github.com/juju/juju/domain/storageprovisioning"
+	"github.com/juju/juju/internal/charm"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/storage"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/caasapplicationprovisioner"
 	"github.com/juju/juju/internal/worker/caasapplicationprovisioner/mocks"
-	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&OpsSuite{})
+func TestOpsSuite(t *testing.T) {
+	tc.Run(t, &OpsSuite{})
+}
 
 type OpsSuite struct {
 	coretesting.BaseSuite
 
 	modelTag names.ModelTag
-	logger   loggo.Logger
+	logger   logger.Logger
 }
 
-func (s *OpsSuite) SetUpTest(c *gc.C) {
+func (s *OpsSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 
 	s.modelTag = names.NewModelTag("ffffffff-ffff-ffff-ffff-ffffffffffff")
-	s.logger = loggo.GetLogger("test")
+	s.logger = loggertesting.WrapCheckLog(c)
 }
 
-func (s *OpsSuite) TestVerifyCharmUpgraded(c *gc.C) {
+func (s *OpsSuite) TestEnsureTrust(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	charmInfoV1 := &charmscommon.CharmInfo{
-		Meta: &charm.Meta{Name: "test"},
-	}
-	charmInfoV2 := &charmscommon.CharmInfo{
-		Meta:     &charm.Meta{Name: "test"},
-		Manifest: &charm.Manifest{Bases: []charm.Base{{}}},
-	}
-
-	appStateChan := make(chan struct{}, 1)
-	appStateWatcher := watchertest.NewMockNotifyWatcher(appStateChan)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	done := make(chan struct{})
-	defer close(done)
-	tomb := &mockTomb{done}
-
-	gomock.InOrder(
-		// Wait till charm is v2
-		facade.EXPECT().WatchApplication("test").Return(appStateWatcher, nil),
-		facade.EXPECT().ApplicationCharmInfo("test").Return(charmInfoV1, nil),
-		facade.EXPECT().Life("test").DoAndReturn(func(appName string) (life.Value, error) {
-			appStateChan <- struct{}{}
-			return life.Alive, nil
-		}),
-		facade.EXPECT().ApplicationCharmInfo("test").Return(charmInfoV2, nil),
-	)
-
-	shouldExit, err := caasapplicationprovisioner.AppOps.VerifyCharmUpgraded("test", facade, tomb, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(shouldExit, jc.IsFalse)
-}
-
-func (s *OpsSuite) TestVerifyCharmUpgradeLifeDead(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	charmInfoV1 := &charmscommon.CharmInfo{
-		Meta: &charm.Meta{Name: "test"},
-	}
-
-	appStateChan := make(chan struct{}, 1)
-	appStateWatcher := watchertest.NewMockNotifyWatcher(appStateChan)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	done := make(chan struct{})
-	tomb := &mockTomb{done}
-
-	gomock.InOrder(
-		// Wait till charm is v2
-		facade.EXPECT().WatchApplication("test").Return(appStateWatcher, nil),
-		facade.EXPECT().ApplicationCharmInfo("test").Return(charmInfoV1, nil),
-		facade.EXPECT().Life("test").DoAndReturn(func(appName string) (life.Value, error) {
-			close(done)
-			return life.Dead, nil
-		}),
-	)
-
-	shouldExit, err := caasapplicationprovisioner.AppOps.VerifyCharmUpgraded("test", facade, tomb, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(shouldExit, jc.IsTrue)
-}
-
-func (s *OpsSuite) TestVerifyCharmUpgradeLifeNotFound(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	charmInfoV1 := &charmscommon.CharmInfo{
-		Meta: &charm.Meta{Name: "test"},
-	}
-
-	appStateChan := make(chan struct{}, 1)
-	appStateWatcher := watchertest.NewMockNotifyWatcher(appStateChan)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	done := make(chan struct{})
-	tomb := &mockTomb{done}
-
-	gomock.InOrder(
-		// Wait till charm is v2
-		facade.EXPECT().WatchApplication("test").Return(appStateWatcher, nil),
-		facade.EXPECT().ApplicationCharmInfo("test").Return(charmInfoV1, nil),
-		facade.EXPECT().Life("test").DoAndReturn(func(appName string) (life.Value, error) {
-			close(done)
-			return "", errors.NotFoundf("test charm")
-		}),
-	)
-
-	shouldExit, err := caasapplicationprovisioner.AppOps.VerifyCharmUpgraded("test", facade, tomb, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(shouldExit, jc.IsTrue)
-}
-
-func (s *OpsSuite) TestVerifyCharmUpgradeInfoNotFound(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	appStateChan := make(chan struct{}, 1)
-	appStateWatcher := watchertest.NewMockNotifyWatcher(appStateChan)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	done := make(chan struct{})
-	tomb := &mockTomb{done}
-
-	gomock.InOrder(
-		// Wait till charm is v2
-		facade.EXPECT().WatchApplication("test").Return(appStateWatcher, nil),
-		facade.EXPECT().ApplicationCharmInfo("test").DoAndReturn(func(appName string) (*charmscommon.CharmInfo, error) {
-			close(done)
-			return nil, errors.NotFoundf("test charm")
-		}),
-	)
-
-	shouldExit, err := caasapplicationprovisioner.AppOps.VerifyCharmUpgraded("test", facade, tomb, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(shouldExit, jc.IsTrue)
-}
-
-func (s *OpsSuite) TestUpgradePodSpec(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	broker := mocks.NewMockCAASBroker(ctrl)
-
-	done := make(chan struct{})
-	defer close(done)
-	tomb := &mockTomb{done}
-
-	clk := testclock.NewDilatedWallClock(coretesting.ShortWait)
-
-	gomock.InOrder(
-		broker.EXPECT().OperatorExists("test").Return(caas.DeploymentState{Exists: true}, nil),
-		broker.EXPECT().DeleteService("test").Return(nil),
-		broker.EXPECT().Units("test", caas.ModeWorkload).Return([]caas.Unit{}, nil),
-		broker.EXPECT().DeleteOperator("test").Return(nil),
-		broker.EXPECT().OperatorExists("test").Return(caas.DeploymentState{Exists: false}, nil),
-	)
-
-	err := caasapplicationprovisioner.AppOps.UpgradePodSpec("test", broker, clk, tomb, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *OpsSuite) TestEnsureTrust(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
 	app := caasmocks.NewMockApplication(ctrl)
 
 	gomock.InOrder(
-		unitFacade.EXPECT().ApplicationTrust("test").Return(true, nil),
+		applicationService.EXPECT().GetApplicationTrustSetting(gomock.Any(), "test").Return(true, nil),
 		app.EXPECT().Trust(true).Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.EnsureTrust("test", app, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.EnsureTrust(c.Context(), "test", app, applicationService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestUpdateState(c *gc.C) {
+func (s *OpsSuite) TestUpdateState(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	broker := mocks.NewMockCAASBroker(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
+	now := time.Now()
+	clk := testclock.NewClock(now)
 
-	appTag := names.NewApplicationTag("test").String()
 	service := &caas.Service{
 		Id: "provider-id",
 		Status: status.StatusInfo{
@@ -235,30 +102,20 @@ func (s *OpsSuite) TestUpdateState(c *gc.C) {
 			SpaceName:      "space-name",
 		}},
 	}
-	updateServiceArg := params.UpdateApplicationServiceArg{
-		ApplicationTag: appTag,
-		ProviderId:     "provider-id",
-		Addresses: []params.Address{{
-			Value:     "1.2.3.4",
-			SpaceName: "space-name",
-			Type:      "ipv4",
-			Scope:     "public",
-		}},
-	}
 	units := []caas.Unit{{
 		Id:       "a",
 		Address:  "1.2.3.5",
 		Ports:    []string{"80", "443"},
 		Stateful: true,
 		Status: status.StatusInfo{
-			Status:  status.Active,
+			Status:  status.Running,
 			Message: "different",
 		},
 		FilesystemInfo: []caas.FilesystemInfo{{
-			StorageName:  "s",
-			FilesystemId: "fsid",
+			StorageName:               "s",
+			PersistentVolumeClaimName: "fsid",
 			Volume: caas.VolumeInfo{
-				VolumeId: "vid",
+				PersistentVolumeName: "vid",
 			},
 		}},
 	}, {
@@ -271,97 +128,150 @@ func (s *OpsSuite) TestUpdateState(c *gc.C) {
 			Message: "same",
 		},
 	}}
-	updateUnitsArg := params.UpdateApplicationUnits{
-		ApplicationTag: appTag,
-		Status: params.EntityStatus{
-			Status: status.Active,
-			Info:   "nice message",
-			Data: map[string]interface{}{
-				"nice": "data",
-			},
+	appStatus := status.StatusInfo{
+		Status:  status.Active,
+		Message: "nice message",
+		Data: map[string]any{
+			"nice": "data",
 		},
-		Scale: nil,
-		Units: []params.ApplicationUnitParams{{
-			ProviderId: "a",
-			Address:    "1.2.3.5",
-			Ports:      []string{"80", "443"},
-			Stateful:   true,
-			Status:     "active",
-			Info:       "different",
-			FilesystemInfo: []params.KubernetesFilesystemInfo{{
-				StorageName:  "s",
-				FilesystemId: "fsid",
-				Volume: params.KubernetesVolumeInfo{
-					VolumeId: "vid",
-				},
-			}},
-		}, {
-			ProviderId: "b",
-			Address:    "1.2.3.6",
-			Ports:      []string{"80", "443"},
-			Stateful:   true,
-			Status:     "unknown",
-		}},
+		Since: &now,
 	}
-	appUnitInfo := &params.UpdateApplicationUnitsInfo{
-		Units: []params.ApplicationUnitInfo{{
-			UnitTag:    "unit-test-0",
-			ProviderId: "a",
-		}, {
-			UnitTag:    "unit-test-1",
-			ProviderId: "b",
-		}},
+	cloudContainerIDs := map[unit.Name]string{
+		"test/0": "a",
+		"test/1": "b",
 	}
+
+	unit0Update := applicationservice.UpdateCAASUnitParams{
+		ProviderID: ptr("a"),
+		Address:    ptr("1.2.3.5"),
+		Ports:      ptr([]string{"80", "443"}),
+		AgentStatus: &status.StatusInfo{
+			Status: status.Idle,
+			Since:  &now,
+		},
+		CloudContainerStatus: &status.StatusInfo{
+			Status:  status.Running,
+			Message: "different",
+			Since:   &now,
+		},
+	}
+
 	gomock.InOrder(
 		app.EXPECT().Service().Return(service, nil),
-		unitFacade.EXPECT().UpdateApplicationService(updateServiceArg).Return(nil),
+		applicationService.EXPECT().UpdateCloudService(gomock.Any(), "test", "provider-id", network.ProviderAddresses{{
+			MachineAddress: network.NewMachineAddress("1.2.3.4"),
+			SpaceName:      "space-name",
+		}}).Return(nil),
+		statusService.EXPECT().SetOperatorStatus(gomock.Any(), "test", appStatus).Return(nil),
+		applicationService.EXPECT().GetAllUnitCloudContainerIDsForApplication(gomock.Any(), appId).Return(cloudContainerIDs, nil),
 		app.EXPECT().Units().Return(units, nil),
-		facade.EXPECT().UpdateUnits(updateUnitsArg).Return(appUnitInfo, nil),
-		broker.EXPECT().AnnotateUnit("test", caas.ModeSidecar, "a", names.NewUnitTag("test/0")).Return(nil),
-		broker.EXPECT().AnnotateUnit("test", caas.ModeSidecar, "b", names.NewUnitTag("test/1")).Return(nil),
+		applicationService.EXPECT().UpdateCAASUnit(gomock.Any(), unit.Name("test/0"), gomock.Any()).DoAndReturn(func(_ context.Context, _ unit.Name, args applicationservice.UpdateCAASUnitParams) error {
+			c.Check(args.ProviderID, tc.DeepEquals, unit0Update.ProviderID)
+			c.Check(args.Address, tc.DeepEquals, unit0Update.Address)
+			c.Check(args.Ports, tc.DeepEquals, unit0Update.Ports)
+			c.Assert(args.AgentStatus, tc.NotNil, tc.Commentf("AgentStatus should not be nil"))
+			c.Assert(args.AgentStatus.Since, tc.NotNil, tc.Commentf("AgentStatus.Since should not be nil"))
+			c.Check(*args.AgentStatus.Since, tc.Equals, now, tc.Commentf("AgentStatus.Since should be set to current time"))
+			c.Assert(args.CloudContainerStatus, tc.NotNil, tc.Commentf("CloudContainerStatus should not be nil"))
+			c.Assert(args.CloudContainerStatus.Since, tc.NotNil, tc.Commentf("CloudContainerStatus.Since should not be nil"))
+			c.Check(*args.CloudContainerStatus.Since, tc.Equals, now, tc.Commentf("CloudContainerStatus.Since should be set to current time"))
+			return nil
+		}),
+		broker.EXPECT().AnnotateUnit(gomock.Any(), "test", "a", names.NewUnitTag("test/0")).Return(nil),
 	)
 
-	lastReportedStatus := map[string]status.StatusInfo{
-		"b": {
-			Status:  status.Allocating,
-			Message: "same",
+	lastReportedStatus := caasapplicationprovisioner.UpdateStatusState{
+		"test/1": {
+			ProviderID: ptr("b"),
+			Address:    ptr("1.2.3.6"),
+			Ports:      ptr([]string{"80", "443"}),
+			AgentStatus: &status.StatusInfo{
+				Status:  status.Allocating,
+				Message: "same",
+				Since:   &now,
+			},
+			CloudContainerStatus: &status.StatusInfo{
+				Status:  status.Waiting,
+				Message: "same",
+				Since:   &now,
+			},
 		},
 	}
-	currentReportedStatus, err := caasapplicationprovisioner.AppOps.UpdateState("test", app, lastReportedStatus, broker, facade, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(currentReportedStatus, jc.DeepEquals, map[string]status.StatusInfo{
-		"a": {Status: "active", Message: "different"},
-		"b": {Status: "allocating", Message: "same"},
+	currentReportedStatus, err := caasapplicationprovisioner.AppOps.UpdateState(c.Context(), "test", appId, app, lastReportedStatus, broker, applicationService, statusService, clk, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(currentReportedStatus, tc.DeepEquals, caasapplicationprovisioner.UpdateStatusState{
+		"test/0": {
+			ProviderID: ptr("a"),
+			Address:    ptr("1.2.3.5"),
+			Ports:      ptr([]string{"80", "443"}),
+			AgentStatus: &status.StatusInfo{
+				Status: status.Idle,
+				Since:  &now,
+			},
+			CloudContainerStatus: &status.StatusInfo{
+				Status:  status.Running,
+				Message: "different",
+				Since:   &now,
+			},
+		},
+		"test/1": {
+			ProviderID: ptr("b"),
+			Address:    ptr("1.2.3.6"),
+			Ports:      ptr([]string{"80", "443"}),
+			AgentStatus: &status.StatusInfo{
+				Status:  status.Allocating,
+				Message: "same",
+				Since:   &now,
+			},
+			CloudContainerStatus: &status.StatusInfo{
+				Status:  status.Waiting,
+				Message: "same",
+				Since:   &now,
+			},
+		},
 	})
 }
 
-func (s *OpsSuite) TestRefreshApplicationStatus(c *gc.C) {
+func (s *OpsSuite) TestRefreshApplicationStatus(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	appLife := life.Alive
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
+	clk := testclock.NewDilatedWallClock(coretesting.ShortWait)
 
 	appState := caas.ApplicationState{
 		DesiredReplicas: 2,
 	}
-	units := []params.CAASUnit{{
-		UnitStatus: &params.UnitStatus{AgentStatus: params.DetailedStatus{Status: "active"}},
-	}, {
-		UnitStatus: &params.UnitStatus{AgentStatus: params.DetailedStatus{Status: "allocating"}},
-	}}
+	units := map[unit.Name]status.StatusInfo{
+		"test/0": {
+			Status: status.Active,
+		},
+		"test/1": {
+			Status: status.Allocating,
+		},
+	}
 	gomock.InOrder(
 		app.EXPECT().State().Return(appState, nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().SetOperatorStatus("test", status.Waiting, "waiting for units to settle down", nil).Return(nil),
+		statusService.EXPECT().GetUnitAgentStatusesForApplication(gomock.Any(), appId).Return(units, nil),
+		statusService.EXPECT().SetOperatorStatus(gomock.Any(), "test", gomock.Any()).DoAndReturn(func(ctx context.Context, name string, si status.StatusInfo) error {
+			mc := tc.NewMultiChecker()
+			mc.AddExpr("_.Since", tc.NotNil)
+			c.Check(si, mc, status.StatusInfo{
+				Status:  status.Waiting,
+				Message: "waiting for units to settle down",
+			})
+			return nil
+		}),
 	)
 
-	err := caasapplicationprovisioner.AppOps.RefreshApplicationStatus("test", app, appLife, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.RefreshApplicationStatus(c.Context(), "test", appId, app, appLife, statusService, clk, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestWaitForTerminated(c *gc.C) {
+func (s *OpsSuite) TestWaitForTerminated(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -374,7 +284,7 @@ func (s *OpsSuite) TestWaitForTerminated(c *gc.C) {
 		}, nil),
 	)
 	err := caasapplicationprovisioner.AppOps.WaitForTerminated("test", app, clk)
-	c.Assert(err, gc.ErrorMatches, `application "test" should be terminating but is now running`)
+	c.Assert(err, tc.ErrorMatches, `application "test" should be terminating but is now running`)
 
 	gomock.InOrder(
 		app.EXPECT().Exists().Return(caas.DeploymentState{
@@ -384,304 +294,210 @@ func (s *OpsSuite) TestWaitForTerminated(c *gc.C) {
 		app.EXPECT().Exists().Return(caas.DeploymentState{}, nil),
 	)
 	err = caasapplicationprovisioner.AppOps.WaitForTerminated("test", app, clk)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-// TestReconcileDeadUnitScaleNotScaling tests that nothing happens when not scaling
-func (s *OpsSuite) TestReconcileDeadUnitScaleNotScaling(c *gc.C) {
+func (s *OpsSuite) TestReconcileDeadUnitScale(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appUUID := tc.Must(c, application.NewUUID)
+	storageUniqueID := appUUID.String()[:6]
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	units := []params.CAASUnit{{Tag: names.NewUnitTag("test/0")}}
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     false, // Not scaling
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Dead,
+	}
+	ps := applicationservice.ScalingState{
+		Scaling:     true,
 		ScaleTarget: 1,
 	}
-
+	appState := caas.ApplicationState{
+		Replicas: []string{
+			"a",
+		},
+	}
 	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		// Should return early - no further calls
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appUUID).Return(units, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(ps, nil),
+		facade.EXPECT().FilesystemProvisioningInfo(gomock.Any(), "test").Return(api.FilesystemProvisioningInfo{}, nil),
+		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any(), storageUniqueID),
+		app.EXPECT().Scale(1).Return(nil),
+		app.EXPECT().State().Return(appState, nil),
+		facade.EXPECT().RemoveUnit(gomock.Any(), "test/1").Return(nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 0, false).Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-// TestReconcileDeadUnitScaleNilProvisioningState tests that nothing happens with nil provisioning state
-func (s *OpsSuite) TestReconcileDeadUnitScaleNilProvisioningState(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	units := []params.CAASUnit{{Tag: names.NewUnitTag("test/0")}}
-
-	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		// Should return early - no further calls
-	)
-
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale(c.Context(), "test", appUUID, app, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 // TestReconcileDeadUnitScaleScaleUp tests scale up scenario - app.Scale should NOT be called
-func (s *OpsSuite) TestReconcileDeadUnitScaleScaleUp(c *gc.C) {
+func (s *OpsSuite) TestReconcileDeadUnitScaleScaleUp(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	// Scale UP: 2 current units -> 5 target units
-	units := []params.CAASUnit{
-		{Tag: names.NewUnitTag("test/0")},
-		{Tag: names.NewUnitTag("test/1")},
+	// Scale DOWN: 4 current units -> 2 target units, all excess units are dead
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Dead,
 	}
-	ps := params.CAASApplicationProvisioningState{
+	ps := applicationservice.ScalingState{
 		Scaling:     true,
 		ScaleTarget: 5, // Scale up to 5 units
 	}
 
 	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		facade.EXPECT().Life("test/0").Return(life.Alive, nil), // Below target
-		facade.EXPECT().Life("test/1").Return(life.Dead, nil),  // Below target, but dead
-		// No app.Scale should be called - all units are below target
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appId).Return(units, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(ps, nil),
 	)
-
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale(c.Context(), "test", appId, app, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 // TestReconcileDeadUnitScaleScaleDownNotAllDead tests scale down when not all excess units are dead - app.Scale should NOT be called
-func (s *OpsSuite) TestReconcileDeadUnitScaleScaleDownNotAllDead(c *gc.C) {
+func (s *OpsSuite) TestReconcileDeadUnitScaleScaleDownNotAllDead(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-
-	// Scale DOWN: 4 current units -> 2 target units, but not all excess units are dead
-	units := []params.CAASUnit{
-		{Tag: names.NewUnitTag("test/0")},
-		{Tag: names.NewUnitTag("test/1")},
-		{Tag: names.NewUnitTag("test/2")}, // >= target
-		{Tag: names.NewUnitTag("test/3")}, // >= target
-	}
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 2, // Scale down to 2 units
-	}
-
-	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		facade.EXPECT().Life("test/0").Return(life.Alive, nil), // Below target
-		facade.EXPECT().Life("test/1").Return(life.Dead, nil),  // Below target, but dead
-		facade.EXPECT().Life("test/2").Return(life.Dead, nil),  // >= target and dead
-		facade.EXPECT().Life("test/3").Return(life.Alive, nil), // >= target but alive - prevents scaling
-		// No app.Scale should be called - not all excess units (2,3) are dead
-	)
-
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-// TestReconcileDeadUnitScaleScaleDownAllExcessDead tests scale down when all excess units are dead - app.Scale SHOULD be called
-func (s *OpsSuite) TestReconcileDeadUnitScaleScaleDownAllExcessDead(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
 	// Scale DOWN: 4 current units -> 2 target units, all excess units are dead
-	units := []params.CAASUnit{
-		{Tag: names.NewUnitTag("test/0")},
-		{Tag: names.NewUnitTag("test/1")},
-		{Tag: names.NewUnitTag("test/2")}, // >= target
-		{Tag: names.NewUnitTag("test/3")}, // >= target
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Dead,
+		"test/2": life.Dead,  // >= target
+		"test/3": life.Alive, // >= target
 	}
-	ps := params.CAASApplicationProvisioningState{
+	ps := applicationservice.ScalingState{
 		Scaling:     true,
 		ScaleTarget: 2, // Scale down to 2 units
 	}
-	appState := caas.ApplicationState{
-		Replicas: []string{"a", "b"}, // Already at target scale
-	}
-	newPs := params.CAASApplicationProvisioningState{
-		Scaling:     false,
-		ScaleTarget: 0,
-	}
 
 	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		facade.EXPECT().Life("test/0").Return(life.Alive, nil), // Below target
-		facade.EXPECT().Life("test/1").Return(life.Dead, nil),  // Below target, but dead
-		facade.EXPECT().Life("test/2").Return(life.Dead, nil),  // >= target and dead
-		facade.EXPECT().Life("test/3").Return(life.Dead, nil),  // >= target and dead
-		// All excess units (2,3) are dead - scaling should proceed
-		facade.EXPECT().FilesystemProvisioningInfo("test").Return(api.FilesystemProvisioningInfo{}, nil),
-		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any()).Return(nil),
-		app.EXPECT().Scale(2).Return(nil),
-		app.EXPECT().State().Return(appState, nil),
-		facade.EXPECT().RemoveUnit("test/2").Return(nil),
-		facade.EXPECT().RemoveUnit("test/3").Return(nil),
-		facade.EXPECT().SetProvisioningState("test", newPs).Return(nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appId).Return(units, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(ps, nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale(c.Context(), "test", appId, app, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-// TestReconcileDeadUnitScaleScaleDownNoExcessUnits tests when no units need to be removed
-func (s *OpsSuite) TestReconcileDeadUnitScaleScaleDownNoExcessUnits(c *gc.C) {
+func (s *OpsSuite) TestEnsureScaleAlive(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	// Already at target scale
-	units := []params.CAASUnit{
-		{Tag: names.NewUnitTag("test/0")},
-		{Tag: names.NewUnitTag("test/1")},
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Alive,
+		"test/2": life.Dying,
+		"test/3": life.Dead,
 	}
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 2, // Already at target
-	}
-
+	unitsToDestroy := []string{"test/1"}
 	gomock.InOrder(
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		facade.EXPECT().Life("test/0").Return(life.Alive, nil), // Below target
-		facade.EXPECT().Life("test/1").Return(life.Dead, nil),  // Below target, but dead
-		// No units >= target, so no scaling needed
+		applicationService.EXPECT().GetApplicationScale(gomock.Any(), "test").Return(1, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{}, nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 1, true).Return(nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appId).Return(units, nil),
+		facade.EXPECT().DestroyUnits(gomock.Any(), unitsToDestroy).Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.ReconcileDeadUnitScale("test", app, facade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.EnsureScale(c.Context(), "test", appId, app, life.Alive, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestEnsureScaleAlive(c *gc.C) {
+func (s *OpsSuite) TestEnsureScaleAliveRetry(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	ps := params.CAASApplicationProvisioningState{
+	ps := applicationservice.ScalingState{
 		Scaling:     true,
 		ScaleTarget: 1,
 	}
-	units := []params.CAASUnit{{
-		Tag: names.NewUnitTag("test/0"),
-	}, {
-		Tag: names.NewUnitTag("test/1"),
-	}}
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Alive,
+		"test/2": life.Dying,
+		"test/3": life.Dead,
+	}
 	unitsToDestroy := []string{"test/1"}
 	gomock.InOrder(
-		unitFacade.EXPECT().ApplicationScale("test").Return(1, nil),
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		facade.EXPECT().SetProvisioningState("test", ps).Return(nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		app.EXPECT().UnitsToRemove(gomock.Any(), 1).Return(unitsToDestroy, nil),
-		facade.EXPECT().DestroyUnits(unitsToDestroy).Return(nil),
+		applicationService.EXPECT().GetApplicationScale(gomock.Any(), "test").Return(10, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(ps, nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appId).Return(units, nil),
+		facade.EXPECT().DestroyUnits(gomock.Any(), unitsToDestroy).Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.EnsureScale("test", app, life.Alive, facade, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.EnsureScale(c.Context(), "test", appId, app, life.Alive, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorMatches, `try again`)
 }
 
-func (s *OpsSuite) TestEnsureScaleAliveRetry(c *gc.C) {
+func (s *OpsSuite) TestEnsureScaleDyingDead(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 1,
+	units := map[unit.Name]life.Value{
+		"test/0": life.Dying,
+		"test/1": life.Dead,
 	}
-	units := []params.CAASUnit{{
-		Tag: names.NewUnitTag("test/0"),
-	}, {
-		Tag: names.NewUnitTag("test/1"),
-	}}
-	unitsToDestroy := []string{"test/1"}
 	gomock.InOrder(
-		unitFacade.EXPECT().ApplicationScale("test").Return(10, nil),
-		facade.EXPECT().ProvisioningState("test").Return(&ps, nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		app.EXPECT().UnitsToRemove(gomock.Any(), 1).Return(unitsToDestroy, nil),
-		facade.EXPECT().DestroyUnits(unitsToDestroy).Return(nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{}, nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 0, true).Return(nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appId).Return(units, nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.EnsureScale("test", app, life.Alive, facade, unitFacade, s.logger)
-	c.Assert(err, gc.ErrorMatches, `try again`)
+	err := caasapplicationprovisioner.AppOps.EnsureScale(c.Context(), "test", appId, app, life.Dead, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestEnsureScaleDyingDead(c *gc.C) {
+func (s *OpsSuite) TestEnsureScaleWithAttachStorage(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appUUID := tc.Must(c, application.NewUUID)
+	storageUniqueID := appUUID.String()[:6]
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
-
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 0,
-	}
-	units := []params.CAASUnit{{
-		Tag: names.NewUnitTag("test/0"),
-	}, {
-		Tag: names.NewUnitTag("test/1"),
-	}}
-	unitsToDestroy := []string{"test/0", "test/1"}
-	gomock.InOrder(
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		facade.EXPECT().SetProvisioningState("test", ps).Return(nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		app.EXPECT().UnitsToRemove(gomock.Any(), 0).Return(unitsToDestroy, nil),
-		facade.EXPECT().DestroyUnits(unitsToDestroy).Return(nil),
-	)
-
-	err := caasapplicationprovisioner.AppOps.EnsureScale("test", app, life.Dead, facade, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *OpsSuite) TestEnsureScaleWithAttachStorage(c *gc.C) {
-	ctrl := gomock.NewController(c)
-	defer ctrl.Finish()
-
-	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
-
-	// Test scenario where we need to scale up and have attached storage
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 2,
-	}
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
 	// Current units (less than scale target)
-	units := []params.CAASUnit{{
-		Tag: names.NewUnitTag("test/0"),
-	}}
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Alive,
+	}
 
 	// FilesystemProvisioningInfo with filesystem attachments
 	provisioningInfo := api.FilesystemProvisioningInfo{
@@ -693,37 +509,45 @@ func (s *OpsSuite) TestEnsureScaleWithAttachStorage(c *gc.C) {
 	}
 
 	gomock.InOrder(
-		unitFacade.EXPECT().ApplicationScale("test").Return(2, nil),
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		facade.EXPECT().SetProvisioningState("test", ps).Return(nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().FilesystemProvisioningInfo("test").Return(provisioningInfo, nil),
-		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any()).Return(nil),
+		applicationService.EXPECT().GetApplicationScale(gomock.Any(), "test").Return(2, nil),
+		// Test scenario where we need to scale up and have attached storage
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{
+			Scaling:     true,
+			ScaleTarget: 2,
+		}, nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appUUID).Return(units, nil),
+		facade.EXPECT().FilesystemProvisioningInfo(gomock.Any(), "test").Return(provisioningInfo, nil),
+		app.EXPECT().EnsurePVCs([]storage.KubernetesFilesystemParams{{
+			StorageName: "data",
+			Size:        100,
+			Provider:    "kubernetes",
+		}}, gomock.Any(), storageUniqueID).Return(nil),
 		app.EXPECT().Scale(2).Return(nil),
-		facade.EXPECT().SetProvisioningState("test", params.CAASApplicationProvisioningState{}).Return(nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 0, false).Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.EnsureScale("test", app, life.Alive, facade, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.EnsureScale(c.Context(), "test", appUUID, app, life.Alive, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestEnsureScaleWithAttachStorageEnsurePVCsFails(c *gc.C) {
+func (s *OpsSuite) TestEnsureScaleWithAttachStorageEnsurePVCsFails(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appUUID := tc.Must(c, application.NewUUID)
+	storageUniqueID := appUUID.String()[:6]
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
-	ps := params.CAASApplicationProvisioningState{
-		Scaling:     true,
-		ScaleTarget: 2,
+	// Current units (less than scale target)
+	units := map[unit.Name]life.Value{
+		"test/0": life.Alive,
+		"test/1": life.Alive,
 	}
 
-	units := []params.CAASUnit{{
-		Tag: names.NewUnitTag("test/0"),
-	}}
-
+	// FilesystemProvisioningInfo with filesystem attachments
 	provisioningInfo := api.FilesystemProvisioningInfo{
 		Filesystems: []storage.KubernetesFilesystemParams{{
 			StorageName: "data",
@@ -733,34 +557,39 @@ func (s *OpsSuite) TestEnsureScaleWithAttachStorageEnsurePVCsFails(c *gc.C) {
 	}
 
 	gomock.InOrder(
-		unitFacade.EXPECT().ApplicationScale("test").Return(2, nil),
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		facade.EXPECT().SetProvisioningState("test", ps).Return(nil),
-		facade.EXPECT().Units("test").Return(units, nil),
-		facade.EXPECT().FilesystemProvisioningInfo("test").Return(provisioningInfo, nil),
-		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any()).Return(errors.New("PVC creation failed")),
+		applicationService.EXPECT().GetApplicationScale(gomock.Any(), "test").Return(2, nil),
+		// Test scenario where we need to scale up and have attached storage
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{
+			Scaling:     true,
+			ScaleTarget: 2,
+		}, nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appUUID).Return(units, nil),
+		facade.EXPECT().FilesystemProvisioningInfo(gomock.Any(), "test").Return(provisioningInfo, nil),
+		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any(), storageUniqueID).
+			Return(errors.New("PVC creation failed")),
 	)
 
-	err := caasapplicationprovisioner.AppOps.EnsureScale("test", app, life.Alive, facade, unitFacade, s.logger)
-	c.Assert(err, gc.ErrorMatches, "PVC creation failed")
+	err := caasapplicationprovisioner.AppOps.EnsureScale(c.Context(), "test", appUUID, app, life.Alive, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorMatches, "PVC creation failed")
 }
 
-func (s *OpsSuite) TestAppAlive(c *gc.C) {
+func (s *OpsSuite) TestAppAlive(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
 	clk := testclock.NewDilatedWallClock(coretesting.ShortWait)
 	password := "123456789"
 	lastApplied := caas.ApplicationConfig{}
+	appUUID := tc.Must(c, application.NewUUID)
+	storageUniqueID := appUUID.String()[:6]
 
-	pi := api.ProvisioningInfo{
-		CharmURL: charm.MustParseURL("ch:my-app"),
-		ImageDetails: resources.DockerImageDetails{
+	pi := caasapplicationprovisioner.ProvisioningInfo{
+		ImageDetails: coreresource.DockerImageDetails{
 			RegistryPath: "test-repo/jujud-operator:2.9.99",
-			ImageRepoDetails: docker.ImageRepoDetails{
+			ImageRepoDetails: coreresource.ImageRepoDetails{
 				Repository:    "test-repo",
 				ServerAddress: "registry.com",
 			},
@@ -772,7 +601,7 @@ func (s *OpsSuite) TestAppAlive(c *gc.C) {
 				Risk:  corebase.Stable,
 			},
 		},
-		Version:              version.MustParse("2.9.99"),
+		Version:              semversion.MustParse("2.9.99"),
 		CharmModifiedVersion: 123,
 		APIAddresses:         []string{"1.2.3.1", "1.2.3.2", "1.2.3.3"},
 		CACert:               "CACERT",
@@ -782,65 +611,78 @@ func (s *OpsSuite) TestAppAlive(c *gc.C) {
 		Trust:       true,
 		Scale:       10,
 		Constraints: constraints.MustParse("mem=1G"),
-		Filesystems: []storage.KubernetesFilesystemParams{{
-			StorageName: "data",
-			Size:        100,
-		}},
-		Devices: []devices.KubernetesDeviceParams{},
-	}
-	charmInfo := charmscommon.CharmInfo{
-		Meta: &charm.Meta{
+		Devices:     []devices.KubernetesDeviceParams{},
+		CharmMeta: &charm.Meta{
 			Containers: map[string]charm.Container{
 				"mysql": {
 					Resource: "mysql-image",
 					Mounts: []charm.Mount{{
 						Storage:  "data",
-						Location: "/data",
+						Location: "/container-defined-location",
 					}},
 				},
 				"rootless": {
 					Resource: "rootless-image",
-					Uid:      intPtr(5000),
-					Gid:      intPtr(5001),
+					Uid:      ptr(5000),
+					Gid:      ptr(5001),
 				},
 			},
+		},
+		Images: map[string]coreresource.DockerImageDetails{
+			"mysql-image": {
+				RegistryPath: "mysql/ubuntu:latest-22.04",
+			},
+			"rootless-image": {
+				RegistryPath: "rootless:foo-bar",
+			},
+		},
+		FilesystemTemplates: []storageprovisioning.FilesystemTemplate{{
+			Attachments: []storageprovisioning.FilesystemAttachmentTemplate{
+				{
+					MountPoint: "/charm-defined-location/data/0",
+					ReadOnly:   false,
+				},
+			},
+			StorageName:  "data",
+			Count:        1,
+			SizeMiB:      100,
+			ProviderType: "kubernetes",
+			Attributes: map[string]string{
+				"attr-foo": "attr-bar",
+			},
+		}},
+		StorageResourceTags: map[string]string{
+			"rsc-foo": "rsc-bar",
 		},
 	}
 	ds := caas.DeploymentState{
 		Exists:      true,
 		Terminating: true,
 	}
-	oci := map[string]resources.DockerImageDetails{
-		"mysql-image": {
-			RegistryPath: "mysql/ubuntu:latest-22.04",
-		},
-		"rootless-image": {
-			RegistryPath: "rootless:foo-bar",
-		},
-	}
+
 	ensureParams := caas.ApplicationConfig{
-		AgentVersion:         version.Number{Major: 2, Minor: 9, Patch: 99},
+		AgentVersion:         semversion.Number{Major: 2, Minor: 9, Patch: 99},
 		AgentImagePath:       "test-repo/jujud-operator:2.9.99",
 		CharmBaseImagePath:   "test-repo/charm-base:ubuntu-22.04",
 		CharmModifiedVersion: 123,
 		Containers: map[string]caas.ContainerConfig{
 			"mysql": {
 				Name: "mysql",
-				Image: resources.DockerImageDetails{
+				Image: coreresource.DockerImageDetails{
 					RegistryPath: "mysql/ubuntu:latest-22.04",
 				},
 				Mounts: []caas.MountConfig{{
 					StorageName: "data",
-					Path:        "/data",
+					Path:        "/container-defined-location",
 				}},
 			},
 			"rootless": {
 				Name: "rootless",
-				Image: resources.DockerImageDetails{
+				Image: coreresource.DockerImageDetails{
 					RegistryPath: "rootless:foo-bar",
 				},
-				Uid: intPtr(5000),
-				Gid: intPtr(5001),
+				Uid: ptr(5000),
+				Gid: ptr(5001),
 			},
 		},
 		IntroductionSecret:   "123456789",
@@ -853,80 +695,230 @@ func (s *OpsSuite) TestAppAlive(c *gc.C) {
 		Filesystems: []storage.KubernetesFilesystemParams{{
 			StorageName: "data",
 			Size:        100,
+			Provider:    "kubernetes",
+			Attributes: map[string]any{
+				"attr-foo": "attr-bar",
+			},
+			ResourceTags: map[string]string{
+				"rsc-foo": "rsc-bar",
+			},
+			Attachments: []storage.KubernetesFilesystemAttachmentParams{
+				{
+					ReadOnly: false,
+					Path:     "/charm-defined-location/data/0",
+				},
+			},
 		}},
-		Devices:      []devices.KubernetesDeviceParams{},
-		Trust:        true,
-		InitialScale: 0,
-		CharmUser:    caas.RunAsDefault,
+		Devices:         []devices.KubernetesDeviceParams{},
+		Trust:           true,
+		InitialScale:    0,
+		CharmUser:       caas.RunAsDefault,
+		StorageUniqueID: storageUniqueID,
 	}
 	gomock.InOrder(
-		facade.EXPECT().ProvisioningInfo("test").Return(pi, nil),
-		facade.EXPECT().CharmInfo("ch:my-app").Return(&charmInfo, nil),
 		app.EXPECT().Exists().Return(ds, nil),
 		app.EXPECT().Exists().Return(caas.DeploymentState{}, nil),
-		facade.EXPECT().ApplicationOCIResources("test").Return(oci, nil),
 		app.EXPECT().Ensure(gomock.Any()).DoAndReturn(func(config caas.ApplicationConfig) error {
-			c.Check(config, gc.DeepEquals, ensureParams)
+			c.Check(config, tc.DeepEquals, ensureParams)
 			return nil
 		}),
 	)
 
-	err := caasapplicationprovisioner.AppOps.AppAlive("test", app, password, &lastApplied, facade, clk, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.AppAlive(c.Context(), "test",
+		appUUID, app, password, &lastApplied, &pi, statusService, clk, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestAppDying(c *gc.C) {
+func (s *OpsSuite) TestAppDying(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appUUID := tc.Must(c, application.NewUUID)
+	storageUniqueID := appUUID.String()[:6]
 	app := caasmocks.NewMockApplication(ctrl)
 	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
 	gomock.InOrder(
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
-		facade.EXPECT().SetProvisioningState("test", params.CAASApplicationProvisioningState{Scaling: true, ScaleTarget: 0}).Return(nil),
-		facade.EXPECT().Units("test").Return(nil, nil),
-		facade.EXPECT().FilesystemProvisioningInfo("test").Return(api.FilesystemProvisioningInfo{}, nil),
-		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any()).Return(nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{}, nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 0, true).Return(nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appUUID).Return(nil, nil),
+		facade.EXPECT().FilesystemProvisioningInfo(gomock.Any(), "test").Return(api.FilesystemProvisioningInfo{}, nil),
+		app.EXPECT().EnsurePVCs(gomock.Any(), gomock.Any(), storageUniqueID).Return(nil),
 		app.EXPECT().Scale(0).Return(nil),
-		facade.EXPECT().SetProvisioningState("test", params.CAASApplicationProvisioningState{Scaling: false, ScaleTarget: 0}).Return(nil),
-		facade.EXPECT().Units("test").Return(nil, nil),
-		facade.EXPECT().ProvisioningState("test").Return(nil, nil),
+		applicationService.EXPECT().SetApplicationScalingState(gomock.Any(), "test", 0, false).Return(nil),
+		applicationService.EXPECT().GetAllUnitLifeForApplication(gomock.Any(), appUUID).Return(nil, nil),
+		applicationService.EXPECT().GetApplicationScalingState(gomock.Any(), "test").Return(applicationservice.ScalingState{}, nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.AppDying("test", app, life.Dying, facade, unitFacade, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.AppDying(c.Context(), "test", appUUID, app, life.Dying, facade, applicationService, statusService, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *OpsSuite) TestAppDead(c *gc.C) {
+func (s *OpsSuite) TestAppDead(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
+	appId, _ := application.NewUUID()
 	app := caasmocks.NewMockApplication(ctrl)
-	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
-	unitFacade := mocks.NewMockCAASUnitProvisionerFacade(ctrl)
 	broker := mocks.NewMockCAASBroker(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	statusService := mocks.NewMockStatusService(ctrl)
 
 	clk := testclock.NewDilatedWallClock(coretesting.ShortWait)
 
-	appTag := names.NewApplicationTag("test").String()
-	updateUnitsArgs := params.UpdateApplicationUnits{
-		ApplicationTag: appTag,
-	}
 	gomock.InOrder(
 		app.EXPECT().Delete().Return(nil),
 		app.EXPECT().Exists().Return(caas.DeploymentState{}, nil),
 		app.EXPECT().Service().Return(nil, errors.NotFound),
+		applicationService.EXPECT().GetAllUnitCloudContainerIDsForApplication(gomock.Any(), appId).Return(nil, nil),
 		app.EXPECT().Units().Return(nil, nil),
-		facade.EXPECT().UpdateUnits(updateUnitsArgs).Return(nil, nil),
-		facade.EXPECT().ClearApplicationResources("test").Return(nil),
 	)
 
-	err := caasapplicationprovisioner.AppOps.AppDead("test", app, broker, facade, unitFacade, clk, s.logger)
-	c.Assert(err, jc.ErrorIsNil)
+	err := caasapplicationprovisioner.AppOps.AppDead(c.Context(), "test", appId, app, broker, applicationService, statusService, clk, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func intPtr(i int) *int {
+func (s *OpsSuite) TestProvisioningInfo(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	appId, _ := application.NewUUID()
+	facade := mocks.NewMockCAASProvisionerFacade(ctrl)
+	storageProvisioningService := mocks.NewMockStorageProvisioningService(ctrl)
+	applicationService := mocks.NewMockApplicationService(ctrl)
+	resourceOpenerGetter := mocks.NewMockResourceOpenerGetter(ctrl)
+	ro := mocks.NewMockOpener(ctrl)
+	resourceOpenerGetter.EXPECT().ResourceOpenerForApplication(gomock.Any(), appId, "test").Return(ro, nil)
+
+	facadePi := api.ProvisioningInfo{
+		ImageDetails: coreresource.DockerImageDetails{
+			RegistryPath: "test-repo/jujud-operator:2.9.99",
+			ImageRepoDetails: coreresource.ImageRepoDetails{
+				Repository:    "test-repo",
+				ServerAddress: "registry.com",
+			},
+		},
+		Base: corebase.Base{
+			OS: "ubuntu",
+			Channel: corebase.Channel{
+				Track: "22.04",
+				Risk:  corebase.Stable,
+			},
+		},
+		Version:              semversion.MustParse("2.9.99"),
+		CharmModifiedVersion: 123,
+		APIAddresses:         []string{"1.2.3.1", "1.2.3.2", "1.2.3.3"},
+		CACert:               "CACERT",
+		Tags: map[string]string{
+			"tag": "tag-value",
+		},
+		Trust:       true,
+		Scale:       10,
+		Constraints: constraints.MustParse("mem=1G"),
+		Devices:     []devices.KubernetesDeviceParams{},
+	}
+	facade.EXPECT().ProvisioningInfo(gomock.Any(), "test").Return(facadePi, nil)
+
+	fsTemplates := []storageprovisioning.FilesystemTemplate{{
+		StorageName:  "data",
+		Count:        1,
+		SizeMiB:      100,
+		ProviderType: "kubernetes",
+		Attributes: map[string]string{
+			"attr-foo": "attr-bar",
+		},
+	}}
+	storageProvisioningService.EXPECT().GetFilesystemTemplatesForApplication(gomock.Any(), appId).Return(fsTemplates, nil)
+
+	storageResourceTags := map[string]string{
+		"rsc-foo": "rsc-bar",
+	}
+	storageProvisioningService.EXPECT().GetStorageResourceTagsForApplication(gomock.Any(), appId).Return(storageResourceTags, nil)
+
+	chMeta := &charm.Meta{
+		Containers: map[string]charm.Container{
+			"mysql": {
+				Resource: "mysql-image",
+				Mounts: []charm.Mount{{
+					Storage:  "data",
+					Location: "/container-defined-location",
+				}},
+			},
+			"rootless": {
+				Resource: "rootless-image",
+				Uid:      ptr(5000),
+				Gid:      ptr(5001),
+			},
+		},
+		Resources: map[string]charmresource.Meta{
+			"mysql-image": {
+				Name: "mysql-image",
+				Type: charmresource.TypeContainerImage,
+			},
+			"rootless-image": {
+				Name: "rootless-image",
+				Type: charmresource.TypeContainerImage,
+			},
+		},
+	}
+	ch := charm.NewCharmBase(chMeta, nil, nil, nil, nil)
+	applicationService.EXPECT().GetCharmByApplicationUUID(gomock.Any(), appId).Return(ch, applicationcharm.CharmLocator{}, nil)
+
+	mysqlImageResource := coreresource.Opened{
+		ReadCloser: io.NopCloser(bytes.NewBufferString("registrypath: mysql/ubuntu:latest-22.04")),
+	}
+	ro.EXPECT().OpenResource(gomock.Any(), "mysql-image").Return(mysqlImageResource, nil)
+	ro.EXPECT().SetResourceUsed(gomock.Any(), gomock.Any()).Return(nil)
+	rootlessImageResource := coreresource.Opened{
+		ReadCloser: io.NopCloser(bytes.NewBufferString("registrypath: rootless:foo-bar")),
+	}
+	ro.EXPECT().OpenResource(gomock.Any(), "rootless-image").Return(rootlessImageResource, nil)
+	ro.EXPECT().SetResourceUsed(gomock.Any(), gomock.Any()).Return(nil)
+
+	pi, err := caasapplicationprovisioner.AppOps.ProvisioningInfo(c.Context(), "test", appId, facade, storageProvisioningService, applicationService, resourceOpenerGetter, nil, s.logger)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(pi, tc.DeepEquals, &caasapplicationprovisioner.ProvisioningInfo{
+		ImageDetails: coreresource.DockerImageDetails{
+			RegistryPath: "test-repo/jujud-operator:2.9.99",
+			ImageRepoDetails: coreresource.ImageRepoDetails{
+				Repository:    "test-repo",
+				ServerAddress: "registry.com",
+			},
+		},
+		Base: corebase.Base{
+			OS: "ubuntu",
+			Channel: corebase.Channel{
+				Track: "22.04",
+				Risk:  corebase.Stable,
+			},
+		},
+		Version:              semversion.MustParse("2.9.99"),
+		CharmModifiedVersion: 123,
+		APIAddresses:         []string{"1.2.3.1", "1.2.3.2", "1.2.3.3"},
+		CACert:               "CACERT",
+		Tags: map[string]string{
+			"tag": "tag-value",
+		},
+		Trust:       true,
+		Scale:       10,
+		Constraints: constraints.MustParse("mem=1G"),
+		Devices:     []devices.KubernetesDeviceParams{},
+		CharmMeta:   chMeta,
+		Images: map[string]coreresource.DockerImageDetails{
+			"mysql-image": {
+				RegistryPath: "mysql/ubuntu:latest-22.04",
+			},
+			"rootless-image": {
+				RegistryPath: "rootless:foo-bar",
+			},
+		},
+		FilesystemTemplates: fsTemplates,
+		StorageResourceTags: storageResourceTags,
+	})
+}
+
+func ptr[T any](i T) *T {
 	return &i
 }

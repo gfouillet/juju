@@ -4,8 +4,10 @@
 package instancemutater
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/common"
@@ -14,6 +16,13 @@ import (
 	"github.com/juju/juju/rpc/params"
 )
 
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
 const instanceMutaterFacade = "InstanceMutater"
 
 type Client struct {
@@ -21,8 +30,8 @@ type Client struct {
 }
 
 // NewClient creates a new instance mutater facade using the input caller.
-func NewClient(caller base.APICaller) *Client {
-	facadeCaller := base.NewFacadeCaller(caller, instanceMutaterFacade)
+func NewClient(caller base.APICaller, options ...Option) *Client {
+	facadeCaller := base.NewFacadeCaller(caller, instanceMutaterFacade, options...)
 	return NewClientFromFacade(facadeCaller)
 }
 
@@ -36,9 +45,9 @@ func NewClientFromFacade(facadeCaller base.FacadeCaller) *Client {
 
 // WatchModelMachines returns a StringsWatcher reporting changes to machines
 // and not containers.
-func (c *Client) WatchModelMachines() (watcher.StringsWatcher, error) {
+func (c *Client) WatchModelMachines(ctx context.Context) (watcher.StringsWatcher, error) {
 	var result params.StringsWatchResult
-	err := c.facade.FacadeCall("WatchModelMachines", nil, &result)
+	err := c.facade.FacadeCall(ctx, "WatchModelMachines", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -50,8 +59,8 @@ func (c *Client) WatchModelMachines() (watcher.StringsWatcher, error) {
 
 // Machine provides access to methods of a state.Machine through the
 // facade.
-func (c *Client) Machine(tag names.MachineTag) (MutaterMachine, error) {
-	life, err := common.OneLife(c.facade, tag)
+func (c *Client) Machine(ctx context.Context, tag names.MachineTag) (MutaterMachine, error) {
+	life, err := common.OneLife(ctx, c.facade, tag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

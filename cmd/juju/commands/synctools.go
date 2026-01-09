@@ -5,23 +5,24 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/version/v2"
+	"github.com/juju/loggo/v2"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/constants"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/filestorage"
 	"github.com/juju/juju/environs/sync"
 	envtools "github.com/juju/juju/environs/tools"
-	coretools "github.com/juju/juju/tools"
+	"github.com/juju/juju/internal/cmd"
+	coretools "github.com/juju/juju/internal/tools"
 )
 
 var syncTools = sync.SyncTools
@@ -36,7 +37,7 @@ type syncAgentBinaryCommand struct {
 	modelcmd.ModelCommandBase
 	modelcmd.IAASOnlyCommand
 	versionStr    string
-	targetVersion version.Number
+	targetVersion semversion.Number
 	dryRun        bool
 	public        bool
 	source        string
@@ -89,7 +90,7 @@ func (c *syncAgentBinaryCommand) Init(args []string) error {
 		return errors.NewNotValid(nil, "--agent-version is required")
 	}
 	var err error
-	if c.targetVersion, err = version.Parse(c.versionStr); err != nil {
+	if c.targetVersion, err = semversion.Parse(c.versionStr); err != nil {
 		return err
 	}
 	return cmd.CheckEmpty(args)
@@ -98,15 +99,15 @@ func (c *syncAgentBinaryCommand) Init(args []string) error {
 // SyncToolAPI provides an interface with a subset of the
 // modelupgrader.Client API. This exists to enable mocking.
 type SyncToolAPI interface {
-	UploadTools(r io.ReadSeeker, v version.Binary) (coretools.List, error)
+	UploadTools(ctx context.Context, r io.Reader, v semversion.Binary) (coretools.List, error)
 	Close() error
 }
 
-func (c *syncAgentBinaryCommand) getSyncToolAPI() (SyncToolAPI, error) {
+func (c *syncAgentBinaryCommand) getSyncToolAPI(ctx context.Context) (SyncToolAPI, error) {
 	if c.syncToolAPI != nil {
 		return c.syncToolAPI, nil
 	}
-	return c.NewModelUpgraderAPIClient()
+	return c.NewModelUpgraderAPIClient(ctx)
 }
 
 func (c *syncAgentBinaryCommand) Run(ctx *cmd.Context) (resultErr error) {
@@ -146,27 +147,27 @@ func (c *syncAgentBinaryCommand) Run(ctx *cmd.Context) (resultErr error) {
 		}
 	} else {
 		if c.public {
-			logger.Infof("--public is ignored unless --local-dir is specified")
+			logger.Infof(context.TODO(), "--public is ignored unless --local-dir is specified")
 		}
-		api, err := c.getSyncToolAPI()
+		api, err := c.getSyncToolAPI(ctx)
 		if err != nil {
 			return err
 		}
 		defer api.Close()
-		adapter := syncToolAPIAdapter{api}
-		sctx.TargetToolsUploader = adapter
+		adaptor := syncToolAPIAdaptor{api}
+		sctx.TargetToolsUploader = adaptor
 	}
-	return block.ProcessBlockedError(syncTools(sctx), block.BlockChange)
+	return block.ProcessBlockedError(syncTools(ctx, sctx), block.BlockChange)
 }
 
-// syncToolAPIAdapter implements sync.ToolsFinder and
+// syncToolAPIAdaptor implements sync.ToolsFinder and
 // sync.ToolsUploader, adapting a syncToolAPI. This
 // enables the use of sync.SyncTools.
-type syncToolAPIAdapter struct {
+type syncToolAPIAdaptor struct {
 	SyncToolAPI
 }
 
-func (s syncToolAPIAdapter) UploadTools(toolsDir, stream string, tools *coretools.Tools, data []byte) error {
-	_, err := s.SyncToolAPI.UploadTools(bytes.NewReader(data), tools.Version)
+func (s syncToolAPIAdaptor) UploadTools(ctx context.Context, toolsDir, stream string, tools *coretools.Tools, data []byte) error {
+	_, err := s.SyncToolAPI.UploadTools(ctx, bytes.NewReader(data), tools.Version)
 	return err
 }

@@ -4,9 +4,9 @@
 package lxd
 
 import (
-	"github.com/juju/loggo"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
 var (
-	logger = loggo.GetLogger("juju.provider.lxd")
+	logger = internallogger.GetLogger("juju.provider.lxd")
 )

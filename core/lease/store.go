@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Store manipulates leases directly, and is most likely to be seen set on a
@@ -62,6 +62,12 @@ type Store interface {
 	Pinned(ctx context.Context) (map[Key][]string, error)
 }
 
+// ExpiryStore defines a store for expiring leases.
+type ExpiryStore interface {
+	// ExpireLeases deletes all leases that have expired.
+	ExpireLeases(ctx context.Context) error
+}
+
 // Key fully identifies a lease, including the namespace and
 // model it belongs to.
 type Key struct {
@@ -93,7 +99,7 @@ type Request struct {
 // Validate returns an error if any fields are invalid or inconsistent.
 func (request Request) Validate() error {
 	if err := ValidateString(request.Holder); err != nil {
-		return errors.Annotatef(err, "invalid holder")
+		return errors.Errorf("invalid holder: %w", err)
 	}
 	if request.Duration <= 0 {
 		return errors.Errorf("invalid duration")

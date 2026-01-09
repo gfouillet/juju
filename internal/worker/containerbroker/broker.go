@@ -4,27 +4,29 @@
 package containerbroker
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/agent/provisioner"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/container"
-	"github.com/juju/juju/container/broker"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/container"
+	"github.com/juju/juju/internal/container/broker"
 	"github.com/juju/juju/rpc/params"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/state_mock.go github.com/juju/juju/internal/worker/containerbroker State
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/machine_mock.go github.com/juju/juju/api/agent/provisioner MachineProvisioner
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/state_mock.go github.com/juju/juju/internal/worker/containerbroker State
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/machine_mock.go github.com/juju/juju/api/agent/provisioner MachineProvisioner
 
 // Config describes the dependencies of a Tracker.
 //
@@ -41,8 +43,8 @@ type Config struct {
 // State represents the interaction for the apiserver
 type State interface {
 	broker.APICalls
-	Machines(...names.MachineTag) ([]provisioner.MachineResult, error)
-	ContainerManagerConfig(params.ContainerManagerConfigParams) (params.ContainerManagerConfig, error)
+	Machines(context.Context, ...names.MachineTag) ([]provisioner.MachineResult, error)
+	ContainerManagerConfig(context.Context, params.ContainerManagerConfigParams) (params.ContainerManagerConfig, error)
 }
 
 // Validate returns an error if the config cannot be used to start a Tracker.
@@ -67,8 +69,8 @@ func (config Config) Validate() error {
 
 // NewWorkerTracker defines a function that is covariant in the return type
 // so that the manifold can use the covariance of the function as an alias.
-func NewWorkerTracker(config Config) (worker.Worker, error) {
-	return NewTracker(config)
+func NewWorkerTracker(ctx context.Context, config Config) (worker.Worker, error) {
+	return NewTracker(ctx, config)
 }
 
 // Tracker loads a broker, makes it available to clients, and updates
@@ -84,21 +86,21 @@ type Tracker struct {
 //
 // The caller is responsible for Kill()ing the returned Tracker and Wait()ing
 // for any errors it might return.
-func NewTracker(config Config) (*Tracker, error) {
+func NewTracker(ctx context.Context, config Config) (*Tracker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	machineTag := config.AgentConfig.Tag().(names.MachineTag)
 	provisioner := config.NewStateFunc(config.APICaller)
-	result, err := provisioner.Machines(machineTag)
+	result, err := provisioner.Machines(ctx, machineTag)
 	if err != nil {
 		return nil, errors.Annotatef(err, "cannot load machine %s from state", machineTag)
 	}
 	if len(result) != 1 {
 		return nil, errors.Errorf("expected 1 result, got %d", len(result))
 	}
-	if errors.IsNotFound(result[0].Err) || (result[0].Err == nil && result[0].Machine.Life() == life.Dead) {
+	if errors.Is(result[0].Err, errors.NotFound) || (result[0].Err == nil && result[0].Machine.Life() == life.Dead) {
 		return nil, dependency.ErrUninstall
 	}
 
@@ -106,13 +108,14 @@ func NewTracker(config Config) (*Tracker, error) {
 	// types to prevent confusion.
 	containerType := instance.LXD
 	managerConfigResult, err := provisioner.ContainerManagerConfig(
+		ctx,
 		params.ContainerManagerConfigParams{Type: containerType},
 	)
 	if err != nil {
 		return nil, errors.Annotate(err, "generating container manager config")
 	}
 	managerConfig := container.ManagerConfig(managerConfigResult.ManagerConfig)
-	managerConfigWithZones, err := broker.ConfigureAvailabilityZone(managerConfig, result[0].Machine)
+	managerConfigWithZones, err := broker.ConfigureAvailabilityZone(ctx, managerConfig, result[0].Machine)
 	if err != nil {
 		return nil, errors.Annotate(err, "configuring availability zones")
 	}
@@ -135,6 +138,7 @@ func NewTracker(config Config) (*Tracker, error) {
 		broker: broker,
 	}
 	err = catacomb.Invoke(catacomb.Plan{
+		Name: "container-broker-tracker",
 		Site: &t.catacomb,
 		Work: t.loop,
 	})

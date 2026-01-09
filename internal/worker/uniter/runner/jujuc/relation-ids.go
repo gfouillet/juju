@@ -4,15 +4,16 @@
 package jujuc
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // RelationIdsCommand implements the relation-ids command.
@@ -27,7 +28,7 @@ func NewRelationIdsCommand(ctx Context) (cmd.Command, error) {
 	name := ""
 	if r, err := ctx.HookRelation(); err == nil {
 		name = r.Name()
-	} else if cause := errors.Cause(err); !errors.IsNotFound(cause) {
+	} else if !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
 
@@ -41,8 +42,8 @@ func (c *RelationIdsCommand) Info() *cmd.Info {
 		// There's not much we can do about this error here.
 		args = "[<name>]"
 		doc = fmt.Sprintf("Current default endpoint name is %q.", r.Name())
-	} else if !errors.IsNotFound(err) {
-		logger.Errorf("Could not retrieve hook relation: %v", err)
+	} else if !errors.Is(err, errors.NotFound) {
+		logger.Errorf(context.Background(), "Could not retrieve hook relation: %v", err)
 	}
 	doc += `
 relation-ids outputs a list of the related applications with a relation name.
@@ -81,14 +82,14 @@ func (c *RelationIdsCommand) Init(args []string) error {
 func (c *RelationIdsCommand) Run(ctx *cmd.Context) error {
 	result := []string{}
 	ids, err := c.ctx.RelationIds()
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	for _, id := range ids {
 		r, err := c.ctx.Relation(id)
 		if err == nil && r.Name() == c.Name && r.Life() != life.Dead {
 			result = append(result, r.FakeId())
-		} else if err != nil && !errors.IsNotFound(err) {
+		} else if err != nil && !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 	}

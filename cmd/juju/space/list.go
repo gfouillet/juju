@@ -11,14 +11,14 @@ import (
 	"strings"
 
 	"github.com/gosuri/uitable"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListCommand returns a command used to list spaces.
@@ -92,9 +92,9 @@ func (c *ListCommand) Init(args []string) error {
 // Run implements Command.Run.
 func (c *ListCommand) Run(ctx *cmd.Context) error {
 	return c.RunWithSpaceAPI(ctx, func(api SpaceAPI, ctx *cmd.Context) error {
-		spaces, err := api.ListSpaces()
+		spaces, err := api.ListSpaces(ctx)
 		if err != nil {
-			if errors.IsNotSupported(err) {
+			if errors.Is(err, errors.NotSupported) {
 				ctx.Infof("cannot list spaces: %v", err)
 			}
 			return errors.Annotate(err, "cannot list spaces")

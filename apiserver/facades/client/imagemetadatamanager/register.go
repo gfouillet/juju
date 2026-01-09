@@ -4,31 +4,52 @@
 package imagemetadatamanager
 
 import (
+	"context"
+	"fmt"
 	"reflect"
 
 	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/state/stateenvirons"
+	"github.com/juju/juju/core/permission"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("ImageMetadataManager", 1, func(ctx facade.Context) (facade.Facade, error) {
-		return newAPI(ctx)
+	registry.MustRegister("ImageMetadataManager", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		api, err := makeAPI(stdCtx, ctx)
+		if err != nil {
+			return nil, fmt.Errorf("making ImageMetadataManager facade: %w", err)
+		}
+
+		return api, nil
 	}, reflect.TypeOf((*API)(nil)))
 }
 
-// newAPI returns a new cloud image metadata API facade.
-func newAPI(ctx facade.Context) (*API, error) {
-	st := ctx.State()
-	model, err := st.Model()
+// makeAPI is responsible for constructing a new [API] from the provided model
+// context.
+func makeAPI(ctx context.Context, modelctx facade.ModelContext) (*API, error) {
+	authorizer := modelctx.Auth()
+	if !authorizer.AuthClient() {
+		return nil, apiservererrors.ErrPerm
+	}
+
+	controllerTag := names.NewControllerTag(modelctx.ControllerUUID())
+	err := authorizer.HasPermission(ctx, permission.SuperuserAccess, controllerTag)
+	if err != nil {
+		return nil, err
+	}
+
+	domainServices := modelctx.DomainServices()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	newEnviron := func() (environs.Environ, error) {
-		return stateenvirons.GetNewEnvironFunc(environs.New)(model)
-	}
-	return createAPI(getState(st), newEnviron, ctx.Resources(), ctx.Auth())
+
+	return newAPI(
+		domainServices.CloudImageMetadata(),
+		domainServices.Config(),
+		domainServices.ModelInfo(),
+	), nil
 }

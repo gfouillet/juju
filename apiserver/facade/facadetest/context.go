@@ -4,154 +4,223 @@
 package facadetest
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/juju/clock"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/core/cache"
-	coredatabase "github.com/juju/juju/core/database"
+	corehttp "github.com/juju/juju/core/http"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
-	"github.com/juju/juju/core/multiwatcher"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 )
 
-// Context implements facade.Context in the simplest possible way.
-type Context struct {
-	Auth_                facade.Authorizer
-	Dispose_             func()
-	Hub_                 facade.Hub
-	Resources_           facade.Resources
-	State_               *state.State
-	StatePool_           *state.StatePool
-	Controller_          *cache.Controller
-	MultiwatcherFactory_ multiwatcher.Factory
-	ID_                  string
-	RequestRecorder_     facade.RequestRecorder
-	Cancel_              <-chan struct{}
+// ModelContext implements facade.ModelContext in the simplest possible way.
+type ModelContext struct {
+	Auth_                  facade.Authorizer
+	CrossModelAuthContext_ facade.CrossModelAuthContext
+	Dispose_               func()
+	WatcherRegistry_       watcherregistry.WatcherRegistry
+	ID_                    string
+	ControllerUUID_        string
+	ControllerModelUUID_   model.UUID
+	ModelUUID_             model.UUID
+	RequestRecorder_       facade.RequestRecorder
 
-	LeadershipClaimer_  leadership.Claimer
-	LeadershipRevoker_  leadership.Revoker
-	LeadershipChecker_  leadership.Checker
-	LeadershipPinner_   leadership.Pinner
-	LeadershipReader_   leadership.Reader
-	SingularClaimer_    lease.Claimer
-	CharmhubHTTPClient_ facade.HTTPClient
-	ControllerDB_       coredatabase.TrackedDB
-	// Identity is not part of the facade.Context interface, but is instead
+	LeadershipClaimer_     leadership.Claimer
+	LeadershipRevoker_     leadership.Revoker
+	LeadershipChecker_     leadership.Checker
+	LeadershipPinner_      leadership.Pinner
+	LeadershipReader_      leadership.Reader
+	SingularClaimer_       lease.Claimer
+	CharmhubHTTPClient_    facade.HTTPClient
+	DomainServices_        services.DomainServices
+	DomainServicesGetter_  services.DomainServicesGetter
+	ModelExporter_         facade.ModelExporter
+	ModelImporter_         facade.ModelImporter
+	ObjectStore_           objectstore.ObjectStore
+	ControllerObjectStore_ objectstore.ObjectStore
+	Logger_                logger.Logger
+
+	MachineTag_ names.Tag
+	DataDir_    string
+	LogDir_     string
+
+	// Identity is not part of the facade.ModelContext interface, but is instead
 	// used to make sure that the context objects are the same.
 	Identity string
 }
 
-// Cancel is part of the facade.Context interface.
-func (context Context) Cancel() <-chan struct{} {
-	return context.Cancel_
+// Auth is part of the facade.ModelContext interface.
+func (c ModelContext) Auth() facade.Authorizer {
+	return c.Auth_
 }
 
-// Auth is part of the facade.Context interface.
-func (context Context) Auth() facade.Authorizer {
-	return context.Auth_
+// CrossModelAuthContext provides methods to create and authorize macaroons
+// for cross model operations.
+func (c ModelContext) CrossModelAuthContext() facade.CrossModelAuthContext {
+	return c.CrossModelAuthContext_
 }
 
-// Dispose is part of the facade.Context interface.
-func (context Context) Dispose() {
-	context.Dispose_()
+// Dispose is part of the facade.ModelContext interface.
+func (c ModelContext) Dispose() {
+	c.Dispose_()
 }
 
-// Hub is part of the facade.Context interface.
-func (context Context) Hub() facade.Hub {
-	return context.Hub_
+// WatcherRegistry returns the watcher registry for this c. The
+// watchers are per-connection, and are cleaned up when the connection
+// is closed.
+func (c ModelContext) WatcherRegistry() watcherregistry.WatcherRegistry {
+	return c.WatcherRegistry_
 }
 
-// Controller is part of the facade.Context interface.
-func (context Context) Controller() *cache.Controller {
-	return context.Controller_
+// ObjectStore is part of the facade.ModelContext interface.
+// It returns the object store for this c.
+func (c ModelContext) ObjectStore() objectstore.ObjectStore {
+	return c.ObjectStore_
 }
 
-// MultiwatcherFactory is part of the facade.Context interface.
-func (context Context) MultiwatcherFactory() multiwatcher.Factory {
-	return context.MultiwatcherFactory_
+// ControllerObjectStore is part of the facade.ModelContext interface.
+// It returns the object store for this c.
+func (c ModelContext) ControllerObjectStore() objectstore.ObjectStore {
+	return c.ControllerObjectStore_
 }
 
-// CachedModel is part of the facade.Context interface.
-func (context Context) CachedModel(uuid string) (*cache.Model, error) {
-	return context.Controller_.WaitForModel(uuid, clock.WallClock)
+// ControllerUUID returns the controller unique identifier.
+func (c ModelContext) ControllerUUID() string {
+	return c.ControllerUUID_
 }
 
-// Resources is part of the facade.Context interface.
-func (context Context) Resources() facade.Resources {
-	return context.Resources_
+// ControllerUUID returns the controller unique identifier.
+func (c ModelContext) ControllerModelUUID() model.UUID {
+	return c.ControllerModelUUID_
 }
 
-// State is part of the facade.Context interface.
-func (context Context) State() *state.State {
-	return context.State_
+// IsControllerModelScoped returns true if the model context is scoped to a
+// controller model. This is used to determine if the model context is
+// scoped to a controller model or a subordinate model.
+func (c ModelContext) IsControllerModelScoped() bool {
+	return c.ControllerModelUUID() == c.ModelUUID()
 }
 
-// StatePool is part of of the facade.Context interface.
-func (context Context) StatePool() *state.StatePool {
-	return context.StatePool_
+// ModelUUID returns the model unique identifier.
+func (c ModelContext) ModelUUID() model.UUID {
+	return c.ModelUUID_
 }
 
-// ID is part of the facade.Context interface.
-func (context Context) ID() string {
-	return context.ID_
+// ID is part of the facade.ModelContext interface.
+func (c ModelContext) ID() string {
+	return c.ID_
 }
 
 // RequestRecorder defines a metrics collector for outbound requests.
-func (context Context) RequestRecorder() facade.RequestRecorder {
-	return context.RequestRecorder_
+func (c ModelContext) RequestRecorder() facade.RequestRecorder {
+	return c.RequestRecorder_
 }
 
-// Presence implements facade.Context.
-func (context Context) Presence() facade.Presence {
-	return context
+// LeadershipClaimer implements facade.ModelContext.
+func (c ModelContext) LeadershipClaimer() (leadership.Claimer, error) {
+	return c.LeadershipClaimer_, nil
 }
 
-// ModelPresence implements facade.Presence.
-func (context Context) ModelPresence(modelUUID string) facade.ModelPresence {
-	// Potentially may need to add stuff here at some stage.
-	return nil
+// LeadershipRevoker implements facade.ModelContext.
+func (c ModelContext) LeadershipRevoker() (leadership.Revoker, error) {
+	return c.LeadershipRevoker_, nil
 }
 
-// LeadershipClaimer implements facade.Context.
-func (context Context) LeadershipClaimer(modelUUID string) (leadership.Claimer, error) {
-	return context.LeadershipClaimer_, nil
+// LeadershipPinner implements facade.ModelContext.
+func (c ModelContext) LeadershipPinner() (leadership.Pinner, error) {
+	return c.LeadershipPinner_, nil
 }
 
-// LeadershipRevoker implements facade.Context.
-func (context Context) LeadershipRevoker(modelUUID string) (leadership.Revoker, error) {
-	return context.LeadershipRevoker_, nil
+// LeadershipReader implements facade.ModelContext.
+func (c ModelContext) LeadershipReader() (leadership.Reader, error) {
+	return c.LeadershipReader_, nil
 }
 
-// LeadershipChecker implements facade.Context.
-func (context Context) LeadershipChecker() (leadership.Checker, error) {
-	return context.LeadershipChecker_, nil
+// LeadershipChecker implements facade.ModelContext.
+func (c ModelContext) LeadershipChecker() (leadership.Checker, error) {
+	return c.LeadershipChecker_, nil
 }
 
-// LeadershipPinner implements facade.Context.
-func (context Context) LeadershipPinner(modelUUID string) (leadership.Pinner, error) {
-	return context.LeadershipPinner_, nil
+// SingularClaimer implements facade.ModelContext.
+func (c ModelContext) SingularClaimer() (lease.Claimer, error) {
+	return c.SingularClaimer_, nil
 }
 
-// LeadershipReader implements facade.Context.
-func (context Context) LeadershipReader(modelUUID string) (leadership.Reader, error) {
-	return context.LeadershipReader_, nil
-}
+// HTTPClient returns an HTTP client to use for the given purpose. The following
+// errors can be expected:
+// - [ErrorHTTPClientPurposeInvalid] when the requested purpose is not
+// understood by the context.
+// - [ErrorHTTPClientForPurposeNotFound] when no http client can be found for
+// the requested [HTTPClientPurpose].
+func (c ModelContext) HTTPClient(purpose corehttp.Purpose) (facade.HTTPClient, error) {
+	var client facade.HTTPClient
 
-// SingularClaimer implements facade.Context.
-func (context Context) SingularClaimer() (lease.Claimer, error) {
-	return context.SingularClaimer_, nil
-}
-
-func (context Context) HTTPClient(purpose facade.HTTPClientPurpose) facade.HTTPClient {
 	switch purpose {
-	case facade.CharmhubHTTPClient:
-		return context.CharmhubHTTPClient_
+	case corehttp.CharmhubPurpose:
+		client = c.CharmhubHTTPClient_
 	default:
-		return nil
+		return nil, fmt.Errorf(
+			"cannot get http client for purpose %q, purpose is not understood by the facade context%w",
+			purpose, errors.Hide(facade.ErrorHTTPClientPurposeInvalid),
+		)
 	}
+
+	if client == nil {
+		return nil, fmt.Errorf(
+			"cannot get http client for purpose %q: http client not found%w",
+			purpose, errors.Hide(facade.ErrorHTTPClientForPurposeNotFound),
+		)
+	}
+
+	return client, nil
 }
 
-func (context Context) ControllerDB() (coredatabase.TrackedDB, error) {
-	return context.ControllerDB_, nil
+// DomainServices implements facade.ModelContext.
+func (c ModelContext) DomainServices() services.DomainServices {
+	if c.DomainServices_ == nil {
+		panic("missing domain services")
+	}
+	return c.DomainServices_
+}
+
+// ModelExporter returns a model exporter for the current model.
+func (c ModelContext) ModelExporter(context.Context, model.UUID) (facade.ModelExporter, error) {
+	return c.ModelExporter_, nil
+}
+
+// ModelImporter returns a model importer.
+func (c ModelContext) ModelImporter() facade.ModelImporter {
+	return c.ModelImporter_
+}
+
+// MachineTag returns the current machine tag.
+func (c ModelContext) MachineTag() names.Tag {
+	return c.MachineTag_
+}
+
+// DataDir returns the data directory.
+func (c ModelContext) DataDir() string {
+	return c.DataDir_
+}
+
+// LogDir returns the log directory.
+func (c ModelContext) LogDir() string {
+	return c.LogDir_
+}
+
+func (c ModelContext) Clock() clock.Clock {
+	return clock.WallClock
+}
+
+func (c ModelContext) Logger() logger.Logger {
+	return c.Logger_
 }

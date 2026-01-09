@@ -4,22 +4,19 @@
 package caasunitterminationworker
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/agent/caasapplication"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/uniter"
 )
-
-// Logger for logging messages.
-type Logger interface {
-	Infof(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // ManifoldConfig defines the names of the manifolds on which a
 // Manifold will depend.
@@ -28,7 +25,7 @@ type ManifoldConfig struct {
 	APICallerName string
 	UniterName    string
 	Clock         clock.Clock
-	Logger        Logger
+	Logger        logger.Logger
 }
 
 // Validate ensures all the required values for the config are set.
@@ -51,20 +48,20 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.APICallerName,
 			config.UniterName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
 			}
 			var agent agent.Agent
-			if err := context.Get(config.AgentName, &agent); err != nil {
+			if err := getter.Get(config.AgentName, &agent); err != nil {
 				return nil, err
 			}
 			var apiConn api.Connection
-			if err := context.Get(config.APICallerName, &apiConn); err != nil {
+			if err := getter.Get(config.APICallerName, &apiConn); err != nil {
 				return nil, err
 			}
 			var uniter *uniter.Uniter
-			if err := context.Get(config.UniterName, &uniter); err != nil {
+			if err := getter.Get(config.UniterName, &uniter); err != nil {
 				return nil, err
 			}
 			state := caasapplication.NewClient(apiConn)

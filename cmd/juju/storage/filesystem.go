@@ -6,11 +6,11 @@ package storage
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/cmd/juju/common"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -62,7 +62,7 @@ type FilesystemAttachment struct {
 // generateListFilesystemOutput returns a map filesystem IDs to filesystem info
 func generateListFilesystemsOutput(ctx *cmd.Context, api StorageListAPI, ids []string) (map[string]FilesystemInfo, error) {
 
-	results, err := api.ListFilesystems(ids)
+	results, err := api.ListFilesystems(ctx, ids)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -103,9 +103,9 @@ func createFilesystemInfo(details params.FilesystemDetails) (names.FilesystemTag
 	}
 
 	var info FilesystemInfo
-	info.ProviderFilesystemId = details.Info.FilesystemId
+	info.ProviderFilesystemId = details.Info.ProviderId
 	info.Pool = details.Info.Pool
-	info.Size = details.Info.Size
+	info.Size = details.Info.SizeMiB
 	info.Life = string(details.Life)
 	info.Status = EntityStatus{
 		details.Status.Status,

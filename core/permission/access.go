@@ -3,7 +3,28 @@
 
 package permission
 
-import "github.com/juju/errors"
+import (
+	"github.com/juju/names/v6"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
+)
+
+// AccessChange represents a change in access level.
+type AccessChange string
+
+// String returns the access change as a string.
+func (a AccessChange) String() string {
+	return string(a)
+}
+
+const (
+	// Grant represents a change in access level to grant.
+	Grant AccessChange = "grant"
+
+	// Revoke represents a change in access level to revoke.
+	Revoke AccessChange = "revoke"
+)
 
 // Access represents a level of access.
 type Access string
@@ -11,8 +32,6 @@ type Access string
 const (
 	// NoAccess allows a user no permissions at all.
 	NoAccess Access = ""
-
-	// Model Permissions
 
 	// ReadAccess allows a user to read information about a permission subject,
 	// without being able to make any changes.
@@ -27,8 +46,6 @@ const (
 	// AdminAccess allows a user full control over the subject.
 	AdminAccess Access = "admin"
 
-	// Controller permissions
-
 	// LoginAccess allows a user to log-ing into the subject.
 	LoginAccess Access = "login"
 
@@ -39,7 +56,17 @@ const (
 	SuperuserAccess Access = "superuser"
 )
 
-var AllAccessLevels = []Access{NoAccess, ReadAccess, WriteAccess, ConsumeAccess, AdminAccess, LoginAccess, AddModelAccess, SuperuserAccess}
+// AllAccessLevels is a list of all access levels.
+var AllAccessLevels = []Access{
+	NoAccess,
+	ReadAccess,
+	WriteAccess,
+	ConsumeAccess,
+	AdminAccess,
+	LoginAccess,
+	AddModelAccess,
+	SuperuserAccess,
+}
 
 // Validate returns error if the current is not a valid access level.
 func (a Access) Validate() error {
@@ -48,7 +75,95 @@ func (a Access) Validate() error {
 		LoginAccess, AddModelAccess, SuperuserAccess, ConsumeAccess:
 		return nil
 	}
-	return errors.NotValidf("access level %s", a)
+	return errors.Errorf("access level %s %w", a, coreerrors.NotValid)
+}
+
+// String returns the access level as a string.
+func (a Access) String() string {
+	return string(a)
+}
+
+// ObjectType is the type of the permission object/
+type ObjectType string
+
+// These values must match the values in the permission_object_type table.
+const (
+	Cloud      ObjectType = "cloud"
+	Controller ObjectType = "controller"
+	Model      ObjectType = "model"
+	Offer      ObjectType = "offer"
+)
+
+// Validate returns an error if the object type is not in the
+// list of valid object types above.
+func (o ObjectType) Validate() error {
+	switch o {
+	case Cloud, Controller, Model, Offer:
+	default:
+		return errors.Errorf("object type %q %w", o, coreerrors.NotValid)
+	}
+	return nil
+}
+
+// String returns the object type as a string.
+func (o ObjectType) String() string {
+	return string(o)
+}
+
+// ID identifies the object of a permission, its key and type. Keys
+// are names or uuid depending on the type.
+type ID struct {
+	ObjectType ObjectType
+	Key        string
+}
+
+// Validate returns an error if the key is empty and/or the ObjectType
+// is not in the list.
+func (i ID) Validate() error {
+	if i.Key == "" {
+		return errors.Errorf("empty key %w", coreerrors.NotValid)
+	}
+	return i.ObjectType.Validate()
+}
+
+// ValidateAccess validates the access value is valid for this ID.
+func (i ID) ValidateAccess(access Access) error {
+	var err error
+	switch i.ObjectType {
+	case Cloud:
+		err = ValidateCloudAccess(access)
+	case Controller:
+		err = ValidateControllerAccess(access)
+	case Model:
+		err = ValidateModelAccess(access)
+	case Offer:
+		err = ValidateOfferAccess(access)
+	default:
+		err = errors.Errorf("access type %q %w", i.ObjectType, coreerrors.NotValid)
+	}
+	return err
+}
+
+// ParseTagForID returns an ID of a permission object and must
+// conform to the known object types.
+func ParseTagForID(tag names.Tag) (ID, error) {
+	if tag == nil {
+		return ID{}, errors.Errorf("nil tag %w", coreerrors.NotValid)
+	}
+	id := ID{Key: tag.Id()}
+	switch tag.Kind() {
+	case names.CloudTagKind:
+		id.ObjectType = Cloud
+	case names.ControllerTagKind:
+		id.ObjectType = Controller
+	case names.ModelTagKind:
+		id.ObjectType = Model
+	case names.ApplicationOfferTagKind:
+		id.ObjectType = Offer
+	default:
+		return id, errors.Errorf("target tag type %s %w", tag.Kind(), coreerrors.NotSupported)
+	}
+	return id, nil
 }
 
 // ValidateModelAccess returns error if the passed access is not a valid
@@ -58,7 +173,7 @@ func ValidateModelAccess(access Access) error {
 	case ReadAccess, WriteAccess, AdminAccess:
 		return nil
 	}
-	return errors.NotValidf("%q model access", access)
+	return errors.Errorf("%q model access %w", access, coreerrors.NotValid)
 }
 
 // ValidateOfferAccess returns error if the passed access is not a valid
@@ -68,7 +183,7 @@ func ValidateOfferAccess(access Access) error {
 	case ReadAccess, ConsumeAccess, AdminAccess:
 		return nil
 	}
-	return errors.NotValidf("%q offer access", access)
+	return errors.Errorf("%q offer access %w", access, coreerrors.NotValid)
 }
 
 // ValidateCloudAccess returns error if the passed access is not a valid
@@ -78,7 +193,7 @@ func ValidateCloudAccess(access Access) error {
 	case AddModelAccess, AdminAccess:
 		return nil
 	}
-	return errors.NotValidf("%q cloud access", access)
+	return errors.Errorf("%q cloud access %w", access, coreerrors.NotValid)
 }
 
 // ValidateControllerAccess returns error if the passed access is not a valid
@@ -88,7 +203,7 @@ func ValidateControllerAccess(access Access) error {
 	case LoginAccess, SuperuserAccess:
 		return nil
 	}
-	return errors.NotValidf("%q controller access", access)
+	return errors.Errorf("%q controller access %w", access, coreerrors.NotValid)
 }
 
 func (a Access) controllerValue() int {
@@ -106,10 +221,12 @@ func (a Access) controllerValue() int {
 
 func (a Access) cloudValue() int {
 	switch a {
-	case AddModelAccess:
+	case NoAccess:
 		return 0
-	case AdminAccess:
+	case AddModelAccess:
 		return 1
+	case AdminAccess:
+		return 2
 	default:
 		return -1
 	}
@@ -213,4 +330,79 @@ func (a Access) GreaterOfferAccessThan(access Access) bool {
 		return false
 	}
 	return v1 > v2
+}
+
+// modelRevoke provides the logic of revoking
+// model access. Revoking:
+// * AddModel gets you Write
+// * Write gets you Read
+// * Read gets you NoAccess
+func modelRevoke(a Access) Access {
+	switch a {
+	case AdminAccess:
+		return WriteAccess
+	case WriteAccess:
+		return ReadAccess
+	default:
+		return NoAccess
+	}
+}
+
+// offerRevoke provides the logic of revoking
+// offer access. Revoking:
+// * Admin gets you Consume
+// * Consume gets you Read
+// * Read gets you NoAccess
+func offerRevoke(a Access) Access {
+	switch a {
+	case AdminAccess:
+		return ConsumeAccess
+	case ConsumeAccess:
+		return ReadAccess
+	default:
+		return NoAccess
+	}
+}
+
+// controllerRevoke provides the logic of revoking
+// controller access. Revoking:
+// * Superuser gets you Login
+// * Login gets you NoAccess
+func controllerRevoke(a Access) Access {
+	switch a {
+	case SuperuserAccess:
+		return LoginAccess
+	default:
+		return NoAccess
+	}
+}
+
+// cloudRevoke provides the logic of revoking
+// cloud access. Revoking:
+// * Admin gets you AddModel
+// * AddModel gets you NoAccess
+func cloudRevoke(a Access) Access {
+	switch a {
+	case AdminAccess:
+		return AddModelAccess
+	default:
+		return NoAccess
+	}
+}
+
+// EqualOrGreaterThan returns true if the current access is
+// equal or greater than the passed in access level.
+func (a AccessSpec) EqualOrGreaterThan(access Access) bool {
+	switch a.Target.ObjectType {
+	case Cloud:
+		return a.Access.EqualOrGreaterCloudAccessThan(access)
+	case Controller:
+		return a.Access.EqualOrGreaterControllerAccessThan(access)
+	case Model:
+		return a.Access.EqualOrGreaterModelAccessThan(access)
+	case Offer:
+		return a.Access.EqualOrGreaterOfferAccessThan(access)
+	default:
+		return false
+	}
 }

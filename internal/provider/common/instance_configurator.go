@@ -4,20 +4,20 @@
 package common
 
 import (
+	"context"
 	"os"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3/ssh"
+	"github.com/juju/utils/v4/ssh"
 
 	"github.com/juju/juju/core/network/firewall"
-	"github.com/juju/juju/network/iptables"
+	"github.com/juju/juju/internal/network/iptables"
 )
 
 // InstanceConfigurator describes methods for manipulating firewall
 // rules directly on a single instance.
-//
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/instance_configurator.go github.com/juju/juju/internal/provider/common InstanceConfigurator
+
 type InstanceConfigurator interface {
 
 	// DropAllPorts denies access to all ports.
@@ -85,7 +85,7 @@ func (c *sshInstanceConfigurator) DropAllPorts(exceptPorts []int, addr string) e
 	if err != nil {
 		return errors.Errorf("failed to drop all ports: %s", output)
 	}
-	logger.Tracef("drop all ports output: %s", output)
+	logger.Tracef(context.TODO(), "drop all ports output: %s", output)
 	return nil
 }
 
@@ -104,7 +104,7 @@ func (c *sshInstanceConfigurator) ChangeIngressRules(ipAddress string, insert bo
 	if err != nil {
 		return errors.Annotatef(err, "configuring ports for address %q: %s", ipAddress, output)
 	}
-	logger.Tracef("change ports output: %s", output)
+	logger.Tracef(context.TODO(), "change ports output: %s", output)
 	return nil
 }
 
@@ -114,6 +114,6 @@ func (c *sshInstanceConfigurator) FindIngressRules() (firewall.IngressRules, err
 	if err != nil {
 		return nil, errors.Errorf("failed to list open ports: %s", output)
 	}
-	logger.Tracef("find open ports output: %s", output)
+	logger.Tracef(context.TODO(), "find open ports output: %s", output)
 	return iptables.ParseIngressRules(strings.NewReader(output))
 }

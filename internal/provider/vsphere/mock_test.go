@@ -9,16 +9,16 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/juju/testing"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/juju/juju/internal/provider/vsphere"
-	vsphereclient2 "github.com/juju/juju/internal/provider/vsphere/internal/vsphereclient"
+	"github.com/juju/juju/internal/provider/vsphere/internal/vsphereclient"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-func newMockDialFunc(dialStub *testing.Stub, client vsphere.Client) vsphere.DialFunc {
+func newMockDialFunc(dialStub *testhelpers.Stub, client vsphere.Client) vsphere.DialFunc {
 	return func(ctx context.Context, u *url.URL, datacenter string) (vsphere.Client, error) {
 		dialStub.AddCall("Dial", ctx, u, datacenter)
 		if err := dialStub.NextErr(); err != nil {
@@ -32,9 +32,9 @@ type mockClient struct {
 	// mu guards testing.Stub access, to ensure that the recorded
 	// method calls correspond to the errors returned.
 	mu sync.Mutex
-	testing.Stub
+	testhelpers.Stub
 
-	computeResources        []vsphereclient2.ComputeResource
+	computeResources        []vsphereclient.ComputeResource
 	resourcePools           map[string][]*object.ResourcePool
 	createdVirtualMachine   *mo.VirtualMachine
 	virtualMachines         []*mo.VirtualMachine
@@ -43,11 +43,13 @@ type mockClient struct {
 	datastores              []mo.Datastore
 	vmFolder                *object.Folder
 	hasPrivilege            bool
+	invalid                 bool
+	invalidReason           string
 }
 
 type mockTemplateVM struct {
 	vm   *object.VirtualMachine
-	args vsphereclient2.ImportOVAParameters
+	args vsphereclient.ImportOVAParameters
 }
 
 func (c *mockClient) Close(ctx context.Context) error {
@@ -57,7 +59,7 @@ func (c *mockClient) Close(ctx context.Context) error {
 	return c.NextErr()
 }
 
-func (c *mockClient) CreateTemplateVM(ctx context.Context, ovaArgs vsphereclient2.ImportOVAParameters) (vm *object.VirtualMachine, err error) {
+func (c *mockClient) CreateTemplateVM(ctx context.Context, ovaArgs vsphereclient.ImportOVAParameters) (vm *object.VirtualMachine, err error) {
 	tpl := mockTemplateVM{
 		vm: object.NewVirtualMachine(nil, types.ManagedObjectReference{
 			Type:  "VirtualMachine",
@@ -124,12 +126,12 @@ func (c *mockClient) VirtualMachineObjectToManagedObject(ctx context.Context, vm
 		panic("test data not properly set")
 	}
 
-	vmTplObj := buildVM(vmTpl.args.TemplateName).extraConfig(vsphereclient2.ArchTag, vmTpl.args.Arch).vm()
+	vmTplObj := buildVM(vmTpl.args.TemplateName).extraConfig(vsphereclient.ArchTag, vmTpl.args.Arch).vm()
 	c.MethodCall(c, "VirtualMachineObjectToManagedObject", ctx, vmObject)
 	return *vmTplObj, c.NextErr()
 }
 
-func (c *mockClient) ComputeResources(ctx context.Context) ([]vsphereclient2.ComputeResource, error) {
+func (c *mockClient) ComputeResources(ctx context.Context) ([]vsphereclient.ComputeResource, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.MethodCall(c, "ComputeResources", ctx)
@@ -143,7 +145,7 @@ func (c *mockClient) ResourcePools(ctx context.Context, path string) ([]*object.
 	return c.resourcePools[path], c.NextErr()
 }
 
-func (c *mockClient) CreateVirtualMachine(ctx context.Context, args vsphereclient2.CreateVirtualMachineParams) (*mo.VirtualMachine, error) {
+func (c *mockClient) CreateVirtualMachine(ctx context.Context, args vsphereclient.CreateVirtualMachineParams) (*mo.VirtualMachine, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.MethodCall(c, "CreateVirtualMachine", ctx, args)

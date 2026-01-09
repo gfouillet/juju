@@ -4,13 +4,14 @@
 package jujuc_test
 
 import (
+	"context"
 	"fmt"
+	"testing"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 )
 
@@ -23,7 +24,7 @@ type actionLogContext struct {
 	logMessage string
 }
 
-func (ctx *actionLogContext) LogActionMessage(message string) error {
+func (ctx *actionLogContext) LogActionMessage(_ context.Context, message string) error {
 	ctx.logMessage = message
 	return nil
 }
@@ -32,13 +33,14 @@ type nonActionLogContext struct {
 	jujuc.Context
 }
 
-func (ctx *nonActionLogContext) LogActionMessage(message string) error {
+func (ctx *nonActionLogContext) LogActionMessage(_ context.Context, message string) error {
 	return fmt.Errorf("not running an action")
 }
+func TestActionLogSuite(t *testing.T) {
+	tc.Run(t, &ActionLogSuite{})
+}
 
-var _ = gc.Suite(&ActionLogSuite{})
-
-func (s *ActionLogSuite) TestActionLog(c *gc.C) {
+func (s *ActionLogSuite) TestActionLog(c *tc.C) {
 	var actionLogTests = []struct {
 		summary string
 		command []string
@@ -64,22 +66,22 @@ func (s *ActionLogSuite) TestActionLog(c *gc.C) {
 		c.Logf("test %d: %s", i, t.summary)
 		hctx := &actionLogContext{}
 		com, err := jujuc.NewCommand(hctx, "action-log")
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		ctx := cmdtesting.Context(c)
 		code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, t.command)
-		c.Check(code, gc.Equals, t.code)
-		c.Check(bufferString(ctx.Stderr), gc.Equals, t.errMsg)
-		c.Check(hctx.logMessage, gc.Equals, t.message)
+		c.Check(code, tc.Equals, t.code)
+		c.Check(bufferString(ctx.Stderr), tc.Equals, t.errMsg)
+		c.Check(hctx.logMessage, tc.Equals, t.message)
 	}
 }
 
-func (s *ActionLogSuite) TestNonActionLogActionFails(c *gc.C) {
+func (s *ActionLogSuite) TestNonActionLogActionFails(c *tc.C) {
 	hctx := &nonActionLogContext{}
 	com, err := jujuc.NewCommand(hctx, "action-log")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	ctx := cmdtesting.Context(c)
 	code := cmd.Main(jujuc.NewJujucCommandWrappedForTest(com), ctx, []string{"oops"})
-	c.Check(code, gc.Equals, 1)
-	c.Check(bufferString(ctx.Stderr), gc.Equals, "ERROR not running an action\n")
-	c.Check(bufferString(ctx.Stdout), gc.Equals, "")
+	c.Check(code, tc.Equals, 1)
+	c.Check(bufferString(ctx.Stderr), tc.Equals, "ERROR not running an action\n")
+	c.Check(bufferString(ctx.Stdout), tc.Equals, "")
 }

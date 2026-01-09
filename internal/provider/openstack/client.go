@@ -4,6 +4,7 @@
 package openstack
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-goose/goose/v5/client"
@@ -13,11 +14,11 @@ import (
 	"github.com/go-goose/goose/v5/neutron"
 	"github.com/go-goose/goose/v5/nova"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/loggo"
 
 	corelogger "github.com/juju/juju/core/logger"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
+	jujuhttp "github.com/juju/juju/internal/http"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
 // ClientOption to be passed into the transport construction to customize the
@@ -67,8 +68,8 @@ func WithHTTPClient(value *http.Client) ClientOption {
 func newOptions() *clientOptions {
 	// In this case, use a default http.Client.
 	// Ideally we should always use the NewHTTPTLSTransport,
-	// however test suites such as JujuConnSuite and some facade
-	// tests rely on settings to the http.DefaultTransport for
+	// however some test suites and some facade tests
+	// rely on settings to the http.DefaultTransport for
 	// tests to run with different protocol scheme such as "test"
 	// and some replace the RoundTripper to answer test scenarios.
 	//
@@ -171,7 +172,7 @@ func (c *ClientFactory) getClientState(options ...ClientOption) (client.Authenti
 	if authMode == identity.AuthUserPass && (identityClientVersion == -1 || identityClientVersion == 3) {
 		authOptions, err := newClient.IdentityAuthOptions()
 		if err != nil {
-			logger.Errorf("cannot determine available auth versions %v", err)
+			logger.Errorf(context.TODO(), "cannot determine available auth versions %v", err)
 		}
 
 		// Walk over the options to verify if the AuthUserPassV3 exists, if it
@@ -246,18 +247,39 @@ func newClient(
 		option(opts)
 	}
 
-	logger := loggo.GetLogger("goose")
+	logger := internallogger.GetLogger("goose")
 	gooseLogger := gooselogging.DebugLoggerAdapater{
-		Logger: logger,
+		Logger: wrapLogger(logger),
 	}
 
 	httpClient := jujuhttp.NewClient(
 		jujuhttp.WithSkipHostnameVerification(opts.skipHostnameVerification),
 		jujuhttp.WithCACertificates(opts.caCertificates...),
-		jujuhttp.WithLogger(logger.ChildWithLabels("http", corelogger.HTTP)),
+		jujuhttp.WithLogger(logger.Child("http", corelogger.HTTP)),
 	)
 	return client.NewClient(&cred, authMode, gooseLogger,
 		client.WithHTTPClient(httpClient.Client()),
 		client.WithHTTPHeadersFunc(opts.httpHeadersFunc),
 	), nil
+}
+
+// wrappedLogger is a logger.Logger that logs to dependency.Logger interface.
+type wrappedLogger struct {
+	logger corelogger.Logger
+}
+
+// wrapLogger returns a new instance of wrappedLogger.
+func wrapLogger(logger corelogger.Logger) *wrappedLogger {
+	return &wrappedLogger{
+		logger: logger,
+	}
+}
+
+// Debug logs a message at the debug level.
+func (c *wrappedLogger) Debugf(msg string, args ...any) {
+	c.logger.Helper()
+	// We should either fix the goose logger to use a context, or we should
+	// instantiate a new client for each request rather than caching it for
+	// the lifetime of the provider.
+	c.logger.Debugf(context.Background(), msg, args...)
 }

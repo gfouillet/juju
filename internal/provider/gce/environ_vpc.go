@@ -12,7 +12,6 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
@@ -70,7 +69,7 @@ but will be used anyway because vpc-id-force=true is also specified.
 )
 
 func validateBootstrapVPC(ctx environs.BootstrapContext, conn ComputeService, region, vpcID string, force bool) error {
-	err := validateVPC(ctx.Context(), conn, region, vpcID, true)
+	err := validateVPC(ctx, conn, region, vpcID, true)
 	switch {
 	case errors.Is(err, errorVPCNotUsable):
 		// VPC missing or has no subnets at all.
@@ -140,17 +139,17 @@ func validateVPC(ctx stdcontext.Context, conn ComputeService, region, vpcID stri
 		if err != nil {
 			return errors.Trace(err)
 		}
-		availableSubnet, err := findFirstAvailableSubnet(subnets)
+		availableSubnet, err := findFirstAvailableSubnet(ctx, subnets)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		logger.Infof(
-			"found subnet %q (%s) suitable for a Juju controller instance",
+			ctx, "found subnet %q (%s) suitable for a Juju controller instance",
 			availableSubnet.GetName(), availableSubnet.GetIpCidrRange(),
 		)
 	}
 
-	logger.Infof("VPC %q is suitable for Juju controllers and expose-able workloads", vpcID)
+	logger.Infof(ctx, "VPC %q is suitable for Juju controllers and expose-able workloads", vpcID)
 	return nil
 }
 
@@ -192,9 +191,9 @@ func getVPCByID(ctx stdcontext.Context, conn ComputeService, vpcID string) (*com
 	return network, nil
 }
 
-func findFirstAvailableSubnet(subnets []*computepb.Subnetwork) (*computepb.Subnetwork, error) {
+func findFirstAvailableSubnet(ctx stdcontext.Context, subnets []*computepb.Subnetwork) (*computepb.Subnetwork, error) {
 	for _, subnet := range subnets {
-		logger.Debugf("found subnet %q with state %q", subnet.GetName(), subnet.GetState())
+		logger.Debugf(ctx, "found subnet %q with state %q", subnet.GetName(), subnet.GetState())
 		if err := isSubnetReady(subnet); err != nil {
 			continue
 		}
@@ -210,7 +209,7 @@ func isSubnetReady(subnet *computepb.Subnetwork) error {
 	return nil
 }
 
-func validateModelVPC(ctx context.ProviderCallContext, conn ComputeService, region, modelName, vpcID string) error {
+func validateModelVPC(ctx stdcontext.Context, conn ComputeService, region, modelName, vpcID string) error {
 	err := validateVPC(ctx, conn, region, vpcID, false)
 	switch {
 	case errors.Is(err, errorVPCNotUsable):
@@ -220,14 +219,14 @@ func validateModelVPC(ctx context.ProviderCallContext, conn ComputeService, regi
 		// VPC does not meet minimum validation criteria, but that's less
 		// important for hosted models, as the controller is already accessible.
 		logger.Infof(
-			"Juju will use, but does not recommend using VPC %q: %v",
+			ctx, "Juju will use, but does not recommend using VPC %q: %v",
 			vpcID, err.Error(),
 		)
 	case err != nil:
 		// Anything else unexpected while validating the VPC.
-		return errors.Annotate(google.HandleCredentialError(errors.Trace(err), ctx), cannotValidateVPCErrorPrefix)
+		return errors.Annotate(err, cannotValidateVPCErrorPrefix)
 	}
-	logger.Infof("Using VPC %q for model %q", vpcID, modelName)
+	logger.Infof(ctx, "Using VPC %q for model %q", vpcID, modelName)
 
 	return nil
 }

@@ -4,118 +4,101 @@
 package gce_test
 
 import (
-	stdcontext "context"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/utils/v4"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/internal/provider/gce"
-	"github.com/juju/juju/testing"
+	internaltesting "github.com/juju/juju/internal/testing"
 )
 
 type providerSuite struct {
-	testing.BaseSuite
+	gce.BaseSuite
 
 	provider environs.EnvironProvider
 	spec     environscloudspec.CloudSpec
 	config   *config.Config
 }
 
-var _ = gc.Suite(&providerSuite{})
+func TestProviderSuite(t *testing.T) {
+	tc.Run(t, &providerSuite{})
+}
 
-func (s *providerSuite) SetUpTest(c *gc.C) {
+func (s *providerSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 
 	var err error
 	s.provider, err = environs.Provider("gce")
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(err, tc.ErrorIsNil)
 
 	s.spec = gce.MakeTestCloudSpec()
 
 	uuid := utils.MustNewUUID().String()
-	s.config = testing.CustomModelConfig(c, testing.Attrs{
+	s.config = internaltesting.CustomModelConfig(c, internaltesting.Attrs{
 		"uuid": uuid,
 		"type": "gce",
 	})
 }
 
-func (s *providerSuite) TestRegistered(c *gc.C) {
-	c.Assert(s.provider, gc.Equals, gce.Provider)
+func (s *providerSuite) TestRegistered(c *tc.C) {
+	c.Assert(s.provider, tc.Equals, gce.Provider)
 }
 
-func (s *providerSuite) TestOpen(c *gc.C) {
-	env, err := environs.Open(stdcontext.TODO(), s.provider, environs.OpenParams{
+func (s *providerSuite) TestOpen(c *tc.C) {
+	env, err := environs.Open(c.Context(), s.provider, environs.OpenParams{
 		Cloud:  s.spec,
 		Config: s.config,
-	})
-	c.Check(err, jc.ErrorIsNil)
+	}, environs.NoopCredentialInvalidator())
+	c.Check(err, tc.ErrorIsNil)
 
 	envConfig := env.Config()
-	c.Assert(envConfig.Name(), gc.Equals, "testmodel")
+	c.Assert(envConfig.Name(), tc.Equals, "testmodel")
 }
 
-func (s *providerSuite) TestOpenInvalidCloudSpec(c *gc.C) {
+func (s *providerSuite) TestOpenInvalidCloudSpec(c *tc.C) {
 	s.spec.Name = ""
 	s.testOpenError(c, s.spec, `validating cloud spec: cloud name "" not valid`)
 }
 
-func (s *providerSuite) TestOpenMissingCredential(c *gc.C) {
+func (s *providerSuite) TestOpenMissingCredential(c *tc.C) {
 	s.spec.Credential = nil
 	s.testOpenError(c, s.spec, `validating cloud spec: missing credential not valid`)
 }
 
-func (s *providerSuite) TestOpenUnsupportedCredential(c *gc.C) {
+func (s *providerSuite) TestOpenUnsupportedCredential(c *tc.C) {
 	credential := cloud.NewCredential(cloud.UserPassAuthType, map[string]string{})
 	s.spec.Credential = &credential
 	s.testOpenError(c, s.spec, `validating cloud spec: "userpass" auth-type not supported`)
 }
 
-func (s *providerSuite) TestMissingServiceAccount(c *gc.C) {
+func (s *providerSuite) TestMissingServiceAccount(c *tc.C) {
 	credential := cloud.NewCredential(cloud.ServiceAccountAuthType, map[string]string{})
 	s.spec.Credential = &credential
 	s.testOpenError(c, s.spec, `validating cloud spec: missing service account name not valid`)
 }
 
-func (s *providerSuite) testOpenError(c *gc.C, spec environscloudspec.CloudSpec, expect string) {
-	_, err := environs.Open(stdcontext.TODO(), s.provider, environs.OpenParams{
+func (s *providerSuite) testOpenError(c *tc.C, spec environscloudspec.CloudSpec, expect string) {
+	_, err := environs.Open(c.Context(), s.provider, environs.OpenParams{
 		Cloud:  spec,
 		Config: s.config,
-	})
-	c.Assert(err, gc.ErrorMatches, expect)
+	}, environs.NoopCredentialInvalidator())
+	c.Assert(err, tc.ErrorMatches, expect)
 }
 
-func (s *providerSuite) TestPrepareConfig(c *gc.C) {
-	cfg, err := s.provider.PrepareConfig(environs.PrepareConfigParams{
-		Config: s.config,
-		Cloud:  gce.MakeTestCloudSpec(),
-	})
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(cfg, gc.NotNil)
+func (s *providerSuite) TestValidateCloud(c *tc.C) {
+	err := s.provider.ValidateCloud(c.Context(), gce.MakeTestCloudSpec())
+	c.Check(err, tc.ErrorIsNil)
 }
 
-func (s *providerSuite) TestValidate(c *gc.C) {
-	validCfg, err := s.provider.Validate(s.config, nil)
-	c.Check(err, jc.ErrorIsNil)
+func (s *providerSuite) TestValidate(c *tc.C) {
+	validCfg, err := s.provider.Validate(c.Context(), s.config, nil)
+	c.Check(err, tc.ErrorIsNil)
 
 	validAttrs := validCfg.AllAttrs()
-	c.Assert(s.config.AllAttrs(), gc.DeepEquals, validAttrs)
-}
-
-func (s *providerSuite) TestUpgradeConfig(c *gc.C) {
-	c.Assert(s.provider, gc.Implements, new(environs.ModelConfigUpgrader))
-	upgrader := s.provider.(environs.ModelConfigUpgrader)
-
-	_, ok := s.config.StorageDefaultBlockSource()
-	c.Assert(ok, jc.IsFalse)
-
-	outConfig, err := upgrader.UpgradeConfig(s.config)
-	c.Assert(err, jc.ErrorIsNil)
-	source, ok := outConfig.StorageDefaultBlockSource()
-	c.Assert(ok, jc.IsTrue)
-	c.Assert(source, gc.Equals, "gce")
+	c.Assert(s.config.AllAttrs(), tc.DeepEquals, validAttrs)
 }

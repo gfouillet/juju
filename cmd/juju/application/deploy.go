@@ -4,16 +4,14 @@
 package application
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
@@ -26,7 +24,6 @@ import (
 	"github.com/juju/juju/api/client/modelconfig"
 	"github.com/juju/juju/api/client/spaces"
 	commoncharm "github.com/juju/juju/api/common/charm"
-	"github.com/juju/juju/charmhub"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/application/deployer"
 	"github.com/juju/juju/cmd/juju/application/store"
@@ -36,16 +33,21 @@ import (
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/storage"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 	apiparams "github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
 // SpacesAPI defines the necessary API methods needed for listing spaces.
 type SpacesAPI interface {
-	ListSpaces() ([]apiparams.Space, error)
+	ListSpaces(ctx context.Context) ([]apiparams.Space, error)
 }
 
 type CharmsAPI interface {
@@ -63,7 +65,7 @@ type (
 	machineManagerClient = machinemanager.Client
 )
 
-type deployAPIAdapter struct {
+type deployAPIAdaptor struct {
 	api.Connection
 	*charmsClient
 	*localCharmsClient
@@ -76,16 +78,12 @@ type deployAPIAdapter struct {
 	legacyClient *apiclient.Client
 }
 
-func (a *deployAPIAdapter) ModelUUID() (string, bool) {
+func (a *deployAPIAdaptor) ModelUUID() (string, bool) {
 	tag, ok := a.ModelTag()
 	return tag.Id(), ok
 }
 
-func (a *deployAPIAdapter) WatchAll() (api.AllWatch, error) {
-	return a.legacyClient.WatchAll()
-}
-
-func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
+func (a *deployAPIAdaptor) Deploy(ctx context.Context, args application.DeployArgs) error {
 	for i, p := range args.Placement {
 		if p.Scope == "model-uuid" {
 			p.Scope = a.applicationClient.ModelUUID()
@@ -93,55 +91,55 @@ func (a *deployAPIAdapter) Deploy(args application.DeployArgs) error {
 		args.Placement[i] = p
 	}
 
-	return errors.Trace(a.applicationClient.Deploy(args))
+	return errors.Trace(a.applicationClient.Deploy(ctx, args))
 }
 
-func (a *deployAPIAdapter) SetAnnotation(annotations map[string]map[string]string) ([]apiparams.ErrorResult, error) {
-	return a.annotationsClient.Set(annotations)
+func (a *deployAPIAdaptor) SetAnnotation(ctx context.Context, annotations map[string]map[string]string) ([]apiparams.ErrorResult, error) {
+	return a.annotationsClient.Set(ctx, annotations)
 }
 
-func (a *deployAPIAdapter) GetAnnotations(tags []string) ([]apiparams.AnnotationsGetResult, error) {
-	return a.annotationsClient.Get(tags)
+func (a *deployAPIAdaptor) GetAnnotations(ctx context.Context, tags []string) ([]apiparams.AnnotationsGetResult, error) {
+	return a.annotationsClient.Get(ctx, tags)
 }
 
-func (a *deployAPIAdapter) GetModelConstraints() (constraints.Value, error) {
-	return a.modelConfigClient.GetModelConstraints()
+func (a *deployAPIAdaptor) GetModelConstraints(ctx context.Context) (constraints.Value, error) {
+	return a.modelConfigClient.GetModelConstraints(ctx)
 }
 
-func (a *deployAPIAdapter) AddCharm(curl *charm.URL, origin commoncharm.Origin, force bool) (commoncharm.Origin, error) {
-	return a.charmsClient.AddCharm(curl, origin, force)
+func (a *deployAPIAdaptor) AddCharm(ctx context.Context, curl *charm.URL, origin commoncharm.Origin, force bool) (commoncharm.Origin, error) {
+	return a.charmsClient.AddCharm(ctx, curl, origin, force)
 }
 
 type modelGetter interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 }
 
-func agentVersion(c modelGetter) (version.Number, error) {
-	attrs, err := c.ModelGet()
+func agentVersion(ctx context.Context, c modelGetter) (semversion.Number, error) {
+	attrs, err := c.ModelGet(ctx)
 	if err != nil {
-		return version.Zero, errors.Trace(err)
+		return semversion.Zero, errors.Trace(err)
 	}
 	cfg, err := config.New(config.NoDefaults, attrs)
 	if err != nil {
-		return version.Zero, errors.Trace(err)
+		return semversion.Zero, errors.Trace(err)
 	}
 	agentVersion, ok := cfg.AgentVersion()
 	if !ok {
-		return version.Zero, errors.New("model config missing agent version")
+		return semversion.Zero, errors.New("model config missing agent version")
 	}
 	return agentVersion, nil
 }
 
-func (a *deployAPIAdapter) AddLocalCharm(url *charm.URL, c charm.Charm, b bool) (*charm.URL, error) {
-	agentVersion, err := agentVersion(a.modelConfigClient)
+func (a *deployAPIAdaptor) AddLocalCharm(ctx context.Context, url *charm.URL, c charm.Charm, b bool) (*charm.URL, error) {
+	agentVersion, err := agentVersion(ctx, a.modelConfigClient)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return a.localCharmsClient.AddLocalCharm(url, c, b, agentVersion)
 }
 
-func (a *deployAPIAdapter) Status(opts *apiclient.StatusArgs) (*apiparams.FullStatus, error) {
-	return a.legacyClient.Status(opts)
+func (a *deployAPIAdaptor) Status(ctx context.Context, opts *apiclient.StatusArgs) (*apiparams.FullStatus, error) {
+	return a.legacyClient.Status(ctx, opts)
 }
 
 // NewDeployCommand returns a command to deploy applications.
@@ -157,13 +155,13 @@ func newDeployCommand() *DeployCommand {
 	deployCmd.NewCharmsAPI = func(api base.APICallCloser) CharmsAPI {
 		return apicharms.NewClient(api)
 	}
-	deployCmd.NewDownloadClient = func() (store.DownloadBundleClient, error) {
-		apiRoot, err := deployCmd.newAPIRoot()
+	deployCmd.NewDownloadClient = func(ctx context.Context) (store.DownloadBundleClient, error) {
+		apiRoot, err := deployCmd.newAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		modelConfigClient := deployCmd.NewModelConfigAPI(apiRoot)
-		charmHubURL, err := deployCmd.getCharmHubURL(modelConfigClient)
+		charmHubURL, err := deployCmd.getCharmHubURL(ctx, modelConfigClient)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -173,12 +171,12 @@ func newDeployCommand() *DeployCommand {
 			Logger: logger,
 		})
 	}
-	deployCmd.NewDeployAPI = func() (deployer.DeployerAPI, error) {
-		apiRoot, err := deployCmd.newAPIRoot()
+	deployCmd.NewDeployAPI = func(ctx context.Context) (deployer.DeployerAPI, error) {
+		apiRoot, err := deployCmd.newAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		controllerAPIRoot, err := deployCmd.newControllerAPIRoot()
+		controllerAPIRoot, err := deployCmd.newControllerAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -186,7 +184,7 @@ func newDeployCommand() *DeployCommand {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		return &deployAPIAdapter{
+		return &deployAPIAdaptor{
 			Connection:           apiRoot,
 			legacyClient:         apiclient.NewClient(apiRoot, logger),
 			charmsClient:         apicharms.NewClient(apiRoot),
@@ -199,8 +197,8 @@ func newDeployCommand() *DeployCommand {
 			spacesClient:         spaces.NewAPI(apiRoot),
 		}, nil
 	}
-	deployCmd.NewConsumeDetailsAPI = func(url *charm.OfferURL) (deployer.ConsumeDetails, error) {
-		root, err := deployCmd.CommandBase.NewAPIRoot(deployCmd.ClientStore(), url.Source, "")
+	deployCmd.NewConsumeDetailsAPI = func(ctx context.Context, url crossmodel.OfferURL) (deployer.ConsumeDetails, error) {
+		root, err := deployCmd.CommandBase.NewAPIRoot(ctx, deployCmd.ClientStore(), url.Source, "")
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -212,10 +210,11 @@ func newDeployCommand() *DeployCommand {
 	}
 	return deployCmd
 }
-func (c *DeployCommand) newAPIRoot() (api.Connection, error) {
+
+func (c *DeployCommand) newAPIRoot(ctx context.Context) (api.Connection, error) {
 	if c.apiRoot == nil {
 		var err error
-		c.apiRoot, err = c.NewAPIRoot()
+		c.apiRoot, err = c.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -223,10 +222,10 @@ func (c *DeployCommand) newAPIRoot() (api.Connection, error) {
 	return c.apiRoot, nil
 }
 
-func (c *DeployCommand) newControllerAPIRoot() (api.Connection, error) {
+func (c *DeployCommand) newControllerAPIRoot(ctx context.Context) (api.Connection, error) {
 	if c.controllerAPIRoot == nil {
 		var err error
-		c.controllerAPIRoot, err = c.NewControllerAPIRoot()
+		c.controllerAPIRoot, err = c.NewControllerAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -255,10 +254,6 @@ type DeployCommand struct {
 	// Revision is the revision of the charm to deploy.
 	Revision int
 
-	// Series is the series of the charm to deploy.
-	// DEPRECATED: Use --base instead.
-	Series string
-
 	// Base is the base of the charm to deploy.
 	Base string
 
@@ -280,13 +275,13 @@ type DeployCommand struct {
 	// TODO(axw) move this to UnitCommandBase once we support --storage
 	// on add-unit too.
 	//
-	// Storage is a map of storage constraints, keyed on the storage name
+	// Storage is a map of storage directives, keyed on the storage name
 	// defined in charm storage metadata.
-	Storage map[string]storage.Constraints
+	Storage map[string]storage.Directive
 
-	// BundleStorage maps application names to maps of storage constraints keyed on
+	// BundleStorage maps application names to maps of storage directives keyed on
 	// the storage name defined in that application's charm storage metadata.
-	BundleStorage map[string]map[string]storage.Constraints
+	BundleStorage map[string]map[string]storage.Directive
 
 	// Devices is a mapping of device constraints, keyed on the device name
 	// defined in charm devices metadata.
@@ -309,10 +304,10 @@ type DeployCommand struct {
 	BundleMachines map[string]string
 
 	// NewDeployAPI stores a function which returns a new deploy client.
-	NewDeployAPI func() (deployer.DeployerAPI, error)
+	NewDeployAPI func(ctx context.Context) (deployer.DeployerAPI, error)
 
 	// NewDownloadClient stores a function for getting a charm/bundle.
-	NewDownloadClient func() (store.DownloadBundleClient, error)
+	NewDownloadClient func(ctx context.Context) (store.DownloadBundleClient, error)
 
 	// NewModelConfigAPI stores a function which returns a new model config
 	// client. This is used to get the model config.
@@ -329,7 +324,7 @@ type DeployCommand struct {
 
 	// NewConsumeDetailsAPI stores a function which will return a new API
 	// for consume details API using the url as the source.
-	NewConsumeDetailsAPI func(url *charm.OfferURL) (deployer.ConsumeDetails, error)
+	NewConsumeDetailsAPI func(ctx context.Context, url crossmodel.OfferURL) (deployer.ConsumeDetails, error)
 
 	// DeployResources stores a function which deploys charm resources.
 	DeployResources deployer.DeployResourcesFunc
@@ -380,8 +375,14 @@ A local charm may be deployed by giving the path to its directory:
 You will need to be explicit if there is an ambiguity between a local and a
 remote charm:
 
-    juju deploy ./pig
-    juju deploy ch:pig
+  juju deploy ./postgresql.charm
+  juju deploy ch:postgresql
+
+A local charm may be deploy by giving the path to the charm package:
+
+   juju deploy /path/to/example.charm
+
+A charm package is created with charmcraft pack command.
 
 A bundle can be expressed similarly to a charm:
 
@@ -397,8 +398,8 @@ The final charm/machine base is determined using an order of precedence (most
 preferred to least):
 
 - the ` + "`--base`" + ` command option
-- for a bundle, the series stated in each charm URL (in the bundle file)
-- for a bundle, the series given at the top level (in the bundle file)
+- for a bundle, the base stated in each charm URL (in the bundle file)
+- for a bundle, the base given at the top level (in the bundle file)
 - the ` + "`default-base`" + ` model configuration key
 - the first base specified in the charm's manifest file
 
@@ -640,12 +641,11 @@ func (c *DeployCommand) SetFlags(f *gnuflag.FlagSet) {
 
 	f.Var(cmd.NewAppendStringsValue(&c.BundleOverlayFile), "overlay", "Bundles to overlay on the primary bundle, applied in order")
 	f.Var(&c.ConstraintsStr, "constraints", "Set application constraints")
-	f.StringVar(&c.Series, "series", "", "The series on which to deploy. DEPRECATED: use `--base`")
 	f.StringVar(&c.Base, "base", "", "The base on which to deploy")
 	f.IntVar(&c.Revision, "revision", -1, "The revision to deploy")
 	f.BoolVar(&c.DryRun, "dry-run", false, "Just show what the deploy would do")
 	f.BoolVar(&c.Force, "force", false, "Allow a charm/bundle to be deployed which bypasses checks such as supported base or LXD profile allow list")
-	f.Var(storageFlag{&c.Storage, &c.BundleStorage}, "storage", "Charm storage constraints")
+	f.Var(storageFlag{&c.Storage, &c.BundleStorage}, "storage", "Charm storage directives")
 	f.Var(devicesFlag{&c.Devices, &c.BundleDevices}, "device", "Charm device constraints")
 	f.Var(stringMap{&c.Resources}, "resource", "Resource to be uploaded to the controller")
 	f.StringVar(&c.BindToSpaces, "bind", "", "Configure application endpoint bindings to spaces")
@@ -656,27 +656,12 @@ func (c *DeployCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Init validates the flags.
 func (c *DeployCommand) Init(args []string) error {
-	if c.Base != "" && c.Series != "" {
-		return errors.New("--series and --base cannot be specified together")
-	}
 	// NOTE: For deploying a charm with the revision flag, a channel is
 	// also required. It's required to ensure that juju knows which channel
 	// should be used for refreshing/upgrading the charm in the future.However
 	// a bundle does not require a channel, today you cannot refresh/upgrade
 	// a bundle, only the components. These flags will be verified in the
 	// GetDeployer instead.
-	if err := c.validateStorageByModelType(); err != nil {
-		if !errors.Is(err, errors.NotFound) {
-			return errors.Trace(err)
-		}
-		// It is possible that we will not be able to get model type to validate with.
-		// For example, if current client does not know about a model, we
-		// would have queried the controller about the model. However,
-		// at Init() we do not yet have an API connection.
-		// So we do not want to fail here if we encountered NotFoundErr, we want to
-		// do a late validation at Run().
-		c.unknownModel = true
-	}
 	switch len(args) {
 	case 2:
 		if err := names.ValidateApplicationName(args[1]); err != nil {
@@ -702,8 +687,8 @@ func (c *DeployCommand) Init(args []string) error {
 	if err := c.UnitCommandBase.Init(args); err != nil {
 		return err
 	}
-	if err := c.validatePlacementByModelType(); err != nil {
-		if !errors.IsNotFound(err) {
+	if err := c.validatePlacementByModelType(context.Background()); err != nil {
+		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 		// It is possible that we will not be able to get model type to validate with.
@@ -723,19 +708,8 @@ func (c *DeployCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *DeployCommand) validateStorageByModelType() error {
-	modelType, err := c.ModelType()
-	if err != nil {
-		return err
-	}
-	if modelType == model.IAAS {
-		return nil
-	}
-	return nil
-}
-
-func (c *DeployCommand) validatePlacementByModelType() error {
-	modelType, err := c.ModelType()
+func (c *DeployCommand) validatePlacementByModelType(ctx context.Context) error {
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
@@ -784,21 +758,6 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.Series != "" {
-		if c.Series == "kubernetes" {
-			ctx.Warningf("using kubernetes as a series flag is deprecated, use --base instead")
-			base = corebase.LegacyKubernetesBase()
-		} else {
-			ctx.Warningf("series flag is deprecated, use --base instead")
-			if base, err = corebase.GetBaseFromSeries(c.Series); err != nil {
-				return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
-			}
-		}
-		c.Base = base.String()
-		c.Series = ""
-	}
 	if c.Base != "" {
 		if base, err = corebase.ParseBaseFromString(c.Base); err != nil {
 			return errors.Trace(err)
@@ -806,10 +765,7 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if c.unknownModel {
-		if err := c.validateStorageByModelType(); err != nil {
-			return errors.Trace(err)
-		}
-		if err := c.validatePlacementByModelType(); err != nil {
+		if err := c.validatePlacementByModelType(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -817,7 +773,7 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	deployAPI, err := c.NewDeployAPI()
+	deployAPI, err := c.NewDeployAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -830,37 +786,37 @@ func (c *DeployCommand) Run(ctx *cmd.Context) error {
 		}
 	}()
 
-	if c.ModelConstraints, err = deployAPI.GetModelConstraints(); err != nil {
+	if c.ModelConstraints, err = deployAPI.GetModelConstraints(ctx); err != nil {
 		return errors.Trace(err)
 	}
 
-	if err := c.parseBindFlag(deployAPI); err != nil {
+	if err := c.parseBindFlag(ctx, deployAPI); err != nil {
 		return errors.Trace(err)
 	}
 
-	downloadClientFn := func() (store.DownloadBundleClient, error) {
-		return c.NewDownloadClient()
+	downloadClientFn := func(ctx context.Context) (store.DownloadBundleClient, error) {
+		return c.NewDownloadClient(ctx)
 	}
 
 	charmAPIClient := c.NewCharmsAPI(c.apiRoot)
-	charmAdapter := c.NewResolver(charmAPIClient, downloadClientFn)
+	charmAdaptor := c.NewResolver(charmAPIClient, downloadClientFn)
 
 	factory, cfg := c.getDeployerFactory(base, charm.CharmHub)
-	deploy, err := factory.GetDeployer(cfg, deployAPI, charmAdapter)
+	deploy, err := factory.GetDeployer(ctx, cfg, deployAPI, charmAdaptor)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(deploy.PrepareAndDeploy(ctx, deployAPI, charmAdapter), block.BlockChange)
+	return block.ProcessBlockedError(deploy.PrepareAndDeploy(ctx, deployAPI, charmAdaptor), block.BlockChange)
 }
 
-func (c *DeployCommand) parseBindFlag(api SpacesAPI) error {
+func (c *DeployCommand) parseBindFlag(ctx context.Context, api SpacesAPI) error {
 	if c.BindToSpaces == "" {
 		return nil
 	}
 
 	// Fetch known spaces from server
-	knownSpaces, err := api.ListSpaces()
+	knownSpaces, err := api.ListSpaces(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -918,8 +874,8 @@ func (c *DeployCommand) getDeployerFactory(base corebase.Base, defaultCharmSchem
 	return c.NewDeployerFactory(dep), cfg
 }
 
-func (c *DeployCommand) getCharmHubURL(modelConfigClient ModelConfigGetter) (string, error) {
-	attrs, err := modelConfigClient.ModelGet()
+func (c *DeployCommand) getCharmHubURL(ctx context.Context, modelConfigClient ModelConfigGetter) (string, error) {
+	attrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

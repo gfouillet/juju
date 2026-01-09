@@ -4,6 +4,8 @@
 package secretsdrain
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/api/base"
@@ -24,45 +26,23 @@ func NewClient(facade base.FacadeCaller) *Client {
 	return &Client{facade: facade}
 }
 
-func processListSecretResult(info params.ListSecretResult) (out coresecrets.SecretMetadata, _ error) {
-	uri, err := coresecrets.ParseURI(info.URI)
-	if err != nil {
-		return out, errors.NotValidf("secret URI %q", info.URI)
-	}
-	return coresecrets.SecretMetadata{
-		URI:                    uri,
-		OwnerTag:               info.OwnerTag,
-		Description:            info.Description,
-		Label:                  info.Label,
-		RotatePolicy:           coresecrets.RotatePolicy(info.RotatePolicy),
-		LatestRevision:         info.LatestRevision,
-		LatestRevisionChecksum: info.LatestRevisionChecksum,
-		LatestExpireTime:       info.LatestExpireTime,
-		NextRotateTime:         info.NextRotateTime,
-	}, nil
-}
-
 // GetSecretsToDrain returns metadata for the secrets that need to be drained.
-func (c *Client) GetSecretsToDrain() ([]coresecrets.SecretMetadataForDrain, error) {
-	var results params.ListSecretResults
-	err := c.facade.FacadeCall("GetSecretsToDrain", nil, &results)
+func (c *Client) GetSecretsToDrain(ctx context.Context) ([]coresecrets.SecretMetadataForDrain, error) {
+	var results params.SecretRevisionsToDrainResults
+	err := c.facade.FacadeCall(ctx, "GetSecretsToDrain", nil, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	out := make([]coresecrets.SecretMetadataForDrain, len(results.Results))
 	for i, info := range results.Results {
-		md, err := processListSecretResult(info)
+		uri, err := coresecrets.ParseURI(info.URI)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		revisions := make([]coresecrets.SecretRevisionMetadata, len(info.Revisions))
+		revisions := make([]coresecrets.SecretExternalRevision, len(info.Revisions))
 		for i, r := range info.Revisions {
-			rev := coresecrets.SecretRevisionMetadata{
-				Revision:    r.Revision,
-				BackendName: r.BackendName,
-				CreateTime:  r.CreateTime,
-				UpdateTime:  r.UpdateTime,
-				ExpireTime:  r.ExpireTime,
+			rev := coresecrets.SecretExternalRevision{
+				Revision: r.Revision,
 			}
 			if r.ValueRef != nil {
 				rev.ValueRef = &coresecrets.ValueRef{
@@ -72,7 +52,7 @@ func (c *Client) GetSecretsToDrain() ([]coresecrets.SecretMetadataForDrain, erro
 			}
 			revisions[i] = rev
 		}
-		out[i] = coresecrets.SecretMetadataForDrain{URI: md.URI, Revisions: revisions}
+		out[i] = coresecrets.SecretMetadataForDrain{URI: uri, Revisions: revisions}
 	}
 	return out, nil
 }
@@ -101,7 +81,7 @@ func (r ChangeSecretBackendResult) ErrorCount() (out int) {
 }
 
 // ChangeSecretBackend updates the backend for the specified secret after migration done.
-func (c *Client) ChangeSecretBackend(metaRevisions []ChangeSecretBackendArg) (ChangeSecretBackendResult, error) {
+func (c *Client) ChangeSecretBackend(ctx context.Context, metaRevisions []ChangeSecretBackendArg) (ChangeSecretBackendResult, error) {
 	var results params.ErrorResults
 	out := ChangeSecretBackendResult{Results: make([]error, len(metaRevisions))}
 	args := params.ChangeSecretBackendArgs{Args: make([]params.ChangeSecretBackendArg, len(metaRevisions))}
@@ -119,7 +99,7 @@ func (c *Client) ChangeSecretBackend(metaRevisions []ChangeSecretBackendArg) (Ch
 		}
 		args.Args[i] = arg
 	}
-	err := c.facade.FacadeCall("ChangeSecretBackend", args, &results)
+	err := c.facade.FacadeCall(ctx, "ChangeSecretBackend", args, &results)
 	if err != nil {
 		return out, errors.Trace(err)
 	}
@@ -133,9 +113,9 @@ func (c *Client) ChangeSecretBackend(metaRevisions []ChangeSecretBackendArg) (Ch
 }
 
 // WatchSecretBackendChanged sets up a watcher to notify of changes to the secret backend.
-func (c *Client) WatchSecretBackendChanged() (watcher.NotifyWatcher, error) {
+func (c *Client) WatchSecretBackendChanged(ctx context.Context) (watcher.NotifyWatcher, error) {
 	var result params.NotifyWatchResult
-	if err := c.facade.FacadeCall("WatchSecretBackendChanged", nil, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "WatchSecretBackendChanged", nil, &result); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if result.Error != nil {

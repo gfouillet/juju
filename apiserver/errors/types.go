@@ -6,15 +6,12 @@ package errors
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
 )
@@ -81,28 +78,7 @@ func (e *DischargeRequiredError) Unwrap() error {
 
 func (e *DischargeRequiredError) SendError(w http.ResponseWriter) error {
 	w.Header().Set("WWW-Authenticate", `Basic realm="juju"`)
-	return SendError(w, e)
-}
-
-// UpgradeSeriesValidationError is the error returns when an upgrade-machine
-// can not be run because of a validation error.
-type UpgradeSeriesValidationError struct {
-	Cause  error
-	Status string
-}
-
-// Error implements the error interface.
-func (e *UpgradeSeriesValidationError) Error() string {
-	return e.Cause.Error()
-}
-
-func NewErrIncompatibleBase(baseList []base.Base, b base.Base, charmName string) error {
-	return fmt.Errorf("base %q not supported by charm %q, supported bases are: %s%w",
-		b.DisplayString(),
-		charmName,
-		strings.Join(transform.Slice(baseList, func(b base.Base) string { return b.DisplayString() }), ", "),
-		errors.Hide(IncompatibleBaseError),
-	)
+	return sendError(w, e)
 }
 
 // RedirectError is the error returned when a model (previously accessible by

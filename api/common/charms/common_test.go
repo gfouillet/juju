@@ -4,25 +4,29 @@
 package charms_test
 
 import (
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/resource"
-	"github.com/juju/version/v2"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	apicommoncharms "github.com/juju/juju/api/common/charms"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/resource"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type suite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&suite{})
+func TestSuite(t *testing.T) {
+	tc.Run(t, &suite{})
+}
 
-func (s *suite) TestCharmInfo(c *gc.C) {
+func (s *suite) TestCharmInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -90,16 +94,16 @@ func (s *suite) TestCharmInfo(c *gc.C) {
 		},
 	}
 
-	mockFacadeCaller.EXPECT().FacadeCall("CharmInfo", args, info).SetArg(2, params).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "CharmInfo", args, info).SetArg(3, params).Return(nil)
 
 	client := apicommoncharms.NewCharmInfoClient(mockFacadeCaller)
-	got, err := client.CharmInfo(url)
-	c.Assert(err, gc.IsNil)
+	got, err := client.CharmInfo(c.Context(), url)
+	c.Assert(err, tc.IsNil)
 
 	want := &apicommoncharms.CharmInfo{
 		Revision: 1,
 		URL:      url,
-		Config: &charm.Config{
+		Config: &charm.ConfigSpec{
 			Options: map[string]charm.Option{
 				"config": {
 					Type:        "type",
@@ -120,7 +124,7 @@ func (s *suite) TestCharmInfo(c *gc.C) {
 		Meta: &charm.Meta{
 			Name:           "dummy",
 			Description:    "cockroachdb",
-			MinJujuVersion: version.MustParse("2.9.0"),
+			MinJujuVersion: semversion.MustParse("2.9.0"),
 			Resources: map[string]resource.Meta{
 				"cockroachdb-image": {
 					Type:        resource.TypeContainerImage,
@@ -160,10 +164,10 @@ func (s *suite) TestCharmInfo(c *gc.C) {
 			},
 		},
 	}
-	c.Assert(got, gc.DeepEquals, want)
+	c.Assert(got, tc.DeepEquals, want)
 }
 
-func (s *suite) TestApplicationCharmInfo(c *gc.C) {
+func (s *suite) TestApplicationCharmInfo(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -182,21 +186,21 @@ func (s *suite) TestApplicationCharmInfo(c *gc.C) {
 		// The rest of the field conversions are tested by TestCharmInfo
 	}
 
-	mockFacadeCaller.EXPECT().FacadeCall("ApplicationCharmInfo", args, info).SetArg(2, params).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "ApplicationCharmInfo", args, info).SetArg(3, params).Return(nil)
 
 	client := apicommoncharms.NewApplicationCharmInfoClient(mockFacadeCaller)
-	got, err := client.ApplicationCharmInfo("foobar")
-	c.Assert(err, gc.IsNil)
+	got, err := client.ApplicationCharmInfo(c.Context(), "foobar")
+	c.Assert(err, tc.IsNil)
 
 	want := &apicommoncharms.CharmInfo{
 		Revision: 1,
 		URL:      "ch:foobar",
 		Meta: &charm.Meta{
 			Name:           "foobar",
-			MinJujuVersion: version.MustParse("2.9.0"),
+			MinJujuVersion: semversion.MustParse("2.9.0"),
 		},
 	}
-	c.Assert(got, gc.DeepEquals, want)
+	c.Assert(got, tc.DeepEquals, want)
 }
 
 func intPtr(i int) *int {

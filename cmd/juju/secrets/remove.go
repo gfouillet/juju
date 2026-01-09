@@ -4,7 +4,8 @@
 package secrets
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -12,12 +13,13 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type removeSecretCommand struct {
 	modelcmd.ModelCommandBase
 
-	secretsAPIFunc func() (RemoveSecretsAPI, error)
+	secretsAPIFunc func(ctx context.Context) (RemoveSecretsAPI, error)
 
 	secretURI *secrets.URI
 	name      string
@@ -26,7 +28,7 @@ type removeSecretCommand struct {
 
 // RemoveSecretsAPI is the secrets client API.
 type RemoveSecretsAPI interface {
-	RemoveSecret(uri *secrets.URI, name string, revision *int) error
+	RemoveSecret(ctx context.Context, uri *secrets.URI, name string, revision *int) error
 	Close() error
 }
 
@@ -37,8 +39,8 @@ func NewRemoveSecretCommand() cmd.Command {
 	return modelcmd.Wrap(c)
 }
 
-func (c *removeSecretCommand) secretsAPI() (RemoveSecretsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *removeSecretCommand) secretsAPI(ctx context.Context) (RemoveSecretsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -90,10 +92,10 @@ func (c *removeSecretCommand) Run(ctx *cmd.Context) error {
 	if c.revision > 0 {
 		rev = &c.revision
 	}
-	secretsAPI, err := c.secretsAPIFunc()
+	secretsAPI, err := c.secretsAPIFunc(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer secretsAPI.Close()
-	return secretsAPI.RemoveSecret(c.secretURI, c.name, rev)
+	return secretsAPI.RemoveSecret(ctx, c.secretURI, c.name, rev)
 }

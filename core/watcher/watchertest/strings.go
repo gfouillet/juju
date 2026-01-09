@@ -7,12 +7,11 @@ import (
 	"time"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	tomb "gopkg.in/tomb.v2"
 
+	"github.com/juju/juju/core/testing"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/testing"
 )
 
 type MockStringsWatcher struct {
@@ -29,7 +28,7 @@ func NewMockStringsWatcher(ch <-chan []string) *MockStringsWatcher {
 	return w
 }
 
-func (w *MockStringsWatcher) Changes() watcher.StringsChannel {
+func (w *MockStringsWatcher) Changes() <-chan []string {
 	return w.ch
 }
 
@@ -56,7 +55,7 @@ func (w *MockStringsWatcher) Wait() error {
 	return w.tomb.Wait()
 }
 
-func NewStringsWatcherC(c *gc.C, watcher watcher.StringsWatcher) StringsWatcherC {
+func NewStringsWatcherC(c *tc.C, watcher watcher.StringsWatcher) StringsWatcherC {
 	return StringsWatcherC{
 		C:       c,
 		Watcher: watcher,
@@ -64,8 +63,21 @@ func NewStringsWatcherC(c *gc.C, watcher watcher.StringsWatcher) StringsWatcherC
 }
 
 type StringsWatcherC struct {
-	*gc.C
+	*tc.C
 	Watcher watcher.StringsWatcher
+}
+
+// AssertOneChange fails if no change is sent before a long time has passed; or
+// if, subsequent to that, any further change is sent before a short time has
+// passed.
+func (c StringsWatcherC) AssertOneChange() {
+	select {
+	case _, ok := <-c.Watcher.Changes():
+		c.Assert(ok, tc.IsTrue)
+	case <-c.Context().Done():
+		c.Fatalf("watcher did not send change")
+	}
+	c.AssertNoChange()
 }
 
 // AssertChanges fails if it cannot read a value from Changes despite waiting a
@@ -75,11 +87,22 @@ func (c StringsWatcherC) AssertChanges() {
 	select {
 	case change, ok := <-c.Watcher.Changes():
 		c.Logf("received change: %#v", change)
-		c.Assert(ok, jc.IsTrue)
-	case <-time.After(testing.LongWait):
+		c.Assert(ok, tc.IsTrue)
+	case <-c.Context().Done():
 		c.Fatalf("watcher did not send change")
 	}
 	c.AssertNoChange()
+}
+
+// AssertAtLeastOneChange fails if no change is sent before a long time has
+// passed.
+func (c StringsWatcherC) AssertAtLeastOneChange() {
+	select {
+	case _, ok := <-c.Watcher.Changes():
+		c.Assert(ok, tc.IsTrue)
+	case <-c.Context().Done():
+		c.Fatalf("watcher did not send change")
+	}
 }
 
 // AssertNoChange fails if it manages to read a value from Changes before a
@@ -100,21 +123,33 @@ func (c StringsWatcherC) AssertNoChange() {
 // error before a long time has passed; and (2) that Changes remains open but
 // no values are being sent.
 func (c StringsWatcherC) AssertStops() {
+	c.assertStops(false)
+}
+
+// AssertKilled Kills the watcher and asserts that Wait completes without
+// error before a long time has passed.
+func (c StringsWatcherC) AssertKilled() {
+	c.assertStops(true)
+}
+
+func (c StringsWatcherC) assertStops(changesClosed bool) {
 	c.Watcher.Kill()
 	wait := make(chan error)
 	go func() {
 		wait <- c.Watcher.Wait()
 	}()
 	select {
-	case <-time.After(testing.LongWait):
+	case <-c.Context().Done():
 		c.Fatalf("watcher never stopped")
 	case err := <-wait:
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
 	select {
 	case change, ok := <-c.Watcher.Changes():
-		c.Fatalf("watcher sent unexpected change: (%#v, %v)", change, ok)
+		if ok || !changesClosed {
+			c.Fatalf("watcher sent unexpected change: (%#v, %v)", change, ok)
+		}
 	default:
 	}
 }
@@ -134,12 +169,12 @@ func (c StringsWatcherC) AssertChangeMaybeIncluding(expect ...string) {
 	actual := c.collectChanges(true, maxCount)
 
 	if maxCount == 0 {
-		c.Assert(actual, gc.HasLen, 0)
+		c.Assert(actual, tc.HasLen, 0)
 	} else {
 		actualCount := len(actual)
-		c.Assert(actualCount <= maxCount, jc.IsTrue, gc.Commentf("expected at most %d, got %d", maxCount, actualCount))
+		c.Assert(actualCount <= maxCount, tc.IsTrue, tc.Commentf("expected at most %d, got %d", maxCount, actualCount))
 		unexpected := set.NewStrings(actual...).Difference(set.NewStrings(expect...))
-		c.Assert(unexpected.Values(), gc.HasLen, 0)
+		c.Assert(unexpected.Values(), tc.HasLen, 0)
 	}
 }
 
@@ -148,32 +183,33 @@ func (c StringsWatcherC) AssertChangeMaybeIncluding(expect ...string) {
 func (c StringsWatcherC) assertChange(single bool, expect ...string) {
 	actual := c.collectChanges(single, len(expect))
 	if len(expect) == 0 {
-		c.Assert(actual, gc.HasLen, 0)
+		c.Assert(actual, tc.HasLen, 0)
 	} else {
-		c.Assert(actual, jc.SameContents, expect)
+		c.Assert(actual, tc.SameContents, expect)
 	}
 }
 
 // collectChanges gets up to the max number of changes within the
 // testing.LongWait period.
 func (c StringsWatcherC) collectChanges(single bool, max int) []string {
-	timeout := time.After(testing.LongWait)
+	var timeout <-chan time.Time
 	var actual []string
-	gotOneChange := false
 loop:
 	for {
 		select {
 		case changes, ok := <-c.Watcher.Changes():
-			c.Assert(ok, jc.IsTrue)
-			gotOneChange = true
+			c.Assert(ok, tc.IsTrue)
+			if timeout == nil {
+				// start timeout after first expected change.
+				timeout = time.After(testing.LongWait)
+			}
 			actual = append(actual, changes...)
 			if single || len(actual) >= max {
 				break loop
 			}
+		case <-c.Context().Done():
+			c.Fatalf("watcher did not send change")
 		case <-timeout:
-			if !gotOneChange {
-				c.Fatalf("watcher did not send change")
-			}
 			break loop
 		}
 	}

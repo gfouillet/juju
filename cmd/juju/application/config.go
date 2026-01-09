@@ -5,15 +5,14 @@ package application
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/application"
@@ -22,9 +21,8 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/config"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/feature"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -146,15 +144,14 @@ type configCommand struct {
 
 	// Extra `juju config` specific fields
 	applicationName string
-	branchName      string
 }
 
 // ApplicationAPI is an interface to allow passing in a fake implementation under test.
 type ApplicationAPI interface {
 	Close() error
-	Get(branchName string, application string) (*params.ApplicationGetResults, error)
-	SetConfig(branchName string, application, configYAML string, config map[string]string) error
-	UnsetApplicationConfig(branchName string, application string, options []string) error
+	Get(ctx context.Context, application string) (*params.ApplicationGetResults, error)
+	SetConfig(ctx context.Context, application, configYAML string, config map[string]string) error
+	UnsetApplicationConfig(ctx context.Context, application string, options []string) error
 }
 
 // Info is part of the cmd.Command interface.
@@ -186,19 +183,15 @@ func (c *configCommand) SetFlags(f *gnuflag.FlagSet) {
 		"yaml": c.FormatYaml,
 		"json": c.FormatJson,
 	})
-
-	if featureflag.Enabled(feature.Branches) || featureflag.Enabled(feature.Generations) {
-		f.StringVar(&c.branchName, "branch", "", "Specifically target config for the supplied branch")
-	}
 }
 
 // getAPI either uses the fake API set at test time or that is nil, gets a real
 // API and sets that as the API.
-func (c *configCommand) getAPI() (ApplicationAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (ApplicationAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -212,38 +205,13 @@ func (c *configCommand) Init(args []string) error {
 		return errors.New("no application name specified")
 	}
 
-	if err := c.validateGeneration(); err != nil {
-		return errors.Trace(err)
-	}
-
 	c.applicationName = args[0]
 	return c.configBase.Init(args[1:])
 }
 
-func (c *configCommand) validateGeneration() error {
-	if c.branchName == "" {
-		branchName, err := c.ActiveBranch()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		c.branchName = branchName
-	}
-
-	// TODO (manadart 2019-02-04): If the generation feature is inactive,
-	// we set a default in lieu of empty values. This is an expediency
-	// during development. When we remove the flag, there will be tests
-	// (particularly feature tests) that will need to accommodate a value
-	// for branch in the local store.
-	if !featureflag.Enabled(feature.Branches) && !featureflag.Enabled(feature.Generations) && c.branchName == "" {
-		c.branchName = model.GenerationMaster
-	}
-
-	return nil
-}
-
 // Run implements the cmd.Command interface.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -259,7 +227,7 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		case config.SetFile:
 			err = c.setConfigFile(client, ctx)
 		case config.Reset:
-			err = c.resetConfig(client)
+			err = c.resetConfig(ctx, client)
 		default:
 			err = c.getAllConfig(client, ctx)
 		}
@@ -271,8 +239,8 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 }
 
 // resetConfig is the run action when we are resetting attributes.
-func (c *configCommand) resetConfig(client ApplicationAPI) error {
-	err := client.UnsetApplicationConfig(c.branchName, c.applicationName, c.configBase.KeysToReset)
+func (c *configCommand) resetConfig(ctx context.Context, client ApplicationAPI) error {
+	err := client.UnsetApplicationConfig(ctx, c.applicationName, c.configBase.KeysToReset)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }
 
@@ -284,7 +252,7 @@ func (c *configCommand) setConfig(client ApplicationAPI, ctx *cmd.Context) error
 		return errors.Trace(err)
 	}
 
-	err = client.SetConfig(c.branchName, c.applicationName, "", settings)
+	err = client.SetConfig(ctx, c.applicationName, "", settings)
 	return errors.Trace(block.ProcessBlockedError(err, block.BlockChange))
 }
 
@@ -308,18 +276,18 @@ func (c *configCommand) setConfigFile(client ApplicationAPI, ctx *cmd.Context) e
 		}
 	}
 
-	err = client.SetConfig(c.branchName, c.applicationName, string(b), map[string]string{})
+	err = client.SetConfig(ctx, c.applicationName, string(b), map[string]string{})
 	return errors.Trace(block.ProcessBlockedError(err, block.BlockChange))
 }
 
 // getConfig is the run action to return a single configuration value.
 func (c *configCommand) getConfig(client ApplicationAPI, ctx *cmd.Context) error {
-	results, err := client.Get(c.branchName, c.applicationName)
+	results, err := client.Get(ctx, c.applicationName)
 	if err != nil {
 		return err
 	}
 
-	logger.Infof("format %v is ignored", c.out.Name())
+	logger.Infof(context.TODO(), "format %v is ignored", c.out.Name())
 	if len(c.configBase.KeysToGet) == 0 {
 		return errors.New("c.configBase.KeysToGet is empty")
 	}
@@ -341,7 +309,7 @@ func (c *configCommand) getConfig(client ApplicationAPI, ctx *cmd.Context) error
 
 // getAllConfig is the run action to return all configuration values.
 func (c *configCommand) getAllConfig(client ApplicationAPI, ctx *cmd.Context) error {
-	results, err := client.Get(c.branchName, c.applicationName)
+	results, err := client.Get(ctx, c.applicationName)
 	if err != nil {
 		return err
 	}
@@ -356,14 +324,6 @@ func (c *configCommand) getAllConfig(client ApplicationAPI, ctx *cmd.Context) er
 	}
 
 	err = c.out.Write(ctx, resultsMap)
-
-	if (featureflag.Enabled(feature.Branches) || featureflag.Enabled(feature.Generations)) && err == nil {
-		var gen string
-		gen, err = c.ActiveBranch()
-		if err == nil {
-			_, err = ctx.Stdout.Write([]byte(fmt.Sprintf("\nchanges will be targeted to generation: %s\n", gen)))
-		}
-	}
 	return errors.Trace(err)
 }
 

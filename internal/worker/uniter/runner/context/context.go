@@ -4,58 +4,50 @@
 package context
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 	"k8s.io/client-go/rest"
 
 	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/caas"
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/application"
-	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/quota"
 	coresecrets "github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
-	k8sspecs "github.com/juju/juju/internal/provider/kubernetes/specs"
+	coretrace "github.com/juju/juju/core/trace"
+	"github.com/juju/juju/core/version"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/storage"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
-	"github.com/juju/juju/internal/worker/uniter/runner/context/payloads"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner/context/resources"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/juju/sockets"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/secrets"
-	"github.com/juju/juju/storage"
-	"github.com/juju/juju/version"
 )
-
-// Logger is here to stop the desire of creating a package level Logger.
-// Don't do this, instead use xxx.
-type logger interface{}
-
-var _ logger = struct{}{}
 
 // Context exposes hooks.Context, and additional methods needed by Runner.
 type Context interface {
 	jujuc.Context
 	Id() string
 	HookVars(
+		ctx context.Context,
 		paths Paths,
-		remote bool,
 		env Environmenter) ([]string, error)
 	ActionData() (*ActionData, error)
 	SetProcess(process HookProcess)
@@ -63,10 +55,10 @@ type Context interface {
 	ResetExecutionSetUnitStatus()
 	ModelType() model.ModelType
 
-	Prepare() error
-	Flush(badge string, failure error) error
+	Prepare(ctx context.Context) error
+	Flush(ctx context.Context, badge string, failure error) error
 
-	GetLogger(module string) loggo.Logger
+	GetLoggerByName(module string) logger.Logger
 }
 
 // Paths exposes the paths needed by Context.
@@ -86,12 +78,12 @@ type Paths interface {
 	// GetJujucServerSocket returns the path to the socket used by the hook tools
 	// to communicate back to the executing uniter process. It might be a
 	// filesystem path, or it might be abstract.
-	GetJujucServerSocket(remote bool) sockets.Socket
+	GetJujucServerSocket() sockets.Socket
 
 	// GetJujucClientSocket returns the path to the socket used by the hook tools
 	// to communicate back to the executing uniter process. It might be a
 	// filesystem path, or it might be abstract.
-	GetJujucClientSocket(remote bool) sockets.Socket
+	GetJujucClientSocket() sockets.Socket
 
 	// GetMetricsSpoolDir returns the path to a metrics spool dir, used
 	// to store metrics recorded during a single hook run.
@@ -117,64 +109,44 @@ type HookProcess interface {
 	Kill() error
 }
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/hookunit_mock.go github.com/juju/juju/internal/worker/uniter/runner/context HookUnit
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/state_mock.go github.com/juju/juju/internal/worker/uniter/runner/context State
-
 // HookUnit represents the functions needed by a unit in a hook context to
 // call into state.
 type HookUnit interface {
-	Application() (*uniter.Application, error)
+	Application(context.Context) (api.Application, error)
 	ApplicationName() string
-	ConfigSettings() (charm.Settings, error)
-	LogActionMessage(names.ActionTag, string) error
+	ConfigSettings(context.Context) (charm.Config, error)
+	LogActionMessage(context.Context, names.ActionTag, string) error
 	Name() string
-	NetworkInfo(bindings []string, relationId *int) (map[string]params.NetworkInfoResult, error)
-	RequestReboot() error
-	SetUnitStatus(unitStatus status.Status, info string, data map[string]interface{}) error
-	SetAgentStatus(agentStatus status.Status, info string, data map[string]interface{}) error
-	State() (params.UnitStateResult, error)
+	NetworkInfo(ctx context.Context, bindings []string, relationId *int) (map[string]params.NetworkInfoResult, error)
+	RequestReboot(context.Context) error
+	SetUnitStatus(ctx context.Context, unitStatus status.Status, info string, data map[string]interface{}) error
+	SetAgentStatus(ctx context.Context, agentStatus status.Status, info string, data map[string]interface{}) error
+	State(context.Context) (params.UnitStateResult, error)
 	Tag() names.UnitTag
-	UnitStatus() (params.StatusResult, error)
-	CommitHookChanges(params.CommitHookChangesArgs) error
-	PublicAddress() (string, error)
-}
-
-// State exposes required state functions needed by the HookContext.
-type State interface {
-	UnitStorageAttachments(unitTag names.UnitTag) ([]params.StorageAttachmentId, error)
-	StorageAttachment(storageTag names.StorageTag, unitTag names.UnitTag) (params.StorageAttachment, error)
-	GoalState() (application.GoalState, error)
-	GetPodSpec(appName string) (string, error)
-	GetRawK8sSpec(appName string) (string, error)
-	CloudSpec() (*params.CloudSpec, error)
-	ActionBegin(tag names.ActionTag) error
-	ActionFinish(tag names.ActionTag, status string, results map[string]interface{}, message string) error
-	UnitWorkloadVersion(tag names.UnitTag) (string, error)
-	SetUnitWorkloadVersion(tag names.UnitTag, version string) error
-	OpenedMachinePortRangesByEndpoint(machineTag names.MachineTag) (map[names.UnitTag]network.GroupedPortRanges, error)
-	OpenedPortRangesByEndpoint() (map[names.UnitTag]network.GroupedPortRanges, error)
+	UnitStatus(context.Context) (params.StatusResult, error)
+	CommitHookChanges(context.Context, params.CommitHookChangesArgs) error
+	PublicAddress(context.Context) (string, error)
 }
 
 // HookContext is the implementation of runner.Context.
 type HookContext struct {
 	*resources.ResourcesHookContext
-	*payloads.PayloadsHookContext
 	unit HookUnit
 
-	// state is the handle to the uniter State so that HookContext can make
-	// API calls on the state.
+	// uniter is the handle to the uniter client so that HookContext can make
+	// API calls on the uniter facade.
 	// NOTE: We would like to be rid of the fake-remote-Unit and switch
-	// over fully to API calls on State.  This adds that ability, but we're
+	// over fully to API calls on the uniter.  This adds that ability, but we're
 	// not fully there yet.
-	state State
+	uniter api.UniterClient
 
 	// secretsClient allows the context to access the secrets backend.
-	secretsClient SecretsAccessor
+	secretsClient api.SecretsAccessor
 
 	// secretsBackendGetter is used to get a client to access the secrets backend.
 	secretsBackendGetter SecretsBackendGetter
 	// secretsBackend is the secrets backend client, created only when needed.
-	secretsBackend secrets.BackendsClient
+	secretsBackend api.SecretsBackend
 
 	// LeadershipContext supplies several hooks.Context methods.
 	LeadershipContext
@@ -199,7 +171,7 @@ type HookContext struct {
 	availabilityZone string
 
 	// configSettings holds the application configuration.
-	configSettings charm.Settings
+	configSettings charm.Config
 
 	// goalState holds the goal state struct
 	goalState application.GoalState
@@ -296,31 +268,23 @@ type HookContext struct {
 	// a charm's workload status, or if the charm has already taken care of it.
 	hasRunStatusSet bool
 
-	// storageAddConstraints is a collection of storage constraints
+	// storageAddDirectives is a collection of storage directives
 	// keyed on storage name as specified in the charm.
 	// This collection will be added to the unit on successful
 	// hook run, so the actual add will happen in a flush.
-	storageAddConstraints map[string][]params.StorageConstraints
+	storageAddDirectives map[string][]params.StorageDirectives
 
 	// clock is used for any time operations.
 	clock Clock
 
-	logger loggo.Logger
-
-	// slaLevel contains the current SLA level.
-	slaLevel string
+	// logger is used for context logging.
+	logger logger.Logger
 
 	// The cloud specification
 	cloudSpec *params.CloudSpec
 
 	// The cloud API version, if available.
 	cloudAPIVersion string
-
-	// podSpecYaml is the pending pod spec to be committed.
-	podSpecYaml *string
-
-	// k8sRawSpecYaml is the pending raw k8s spec to be committed.
-	k8sRawSpecYaml *string
 
 	// A cached view of the unit's charm state that gets persisted by juju
 	// once the context is flushed.
@@ -344,10 +308,6 @@ type HookContext struct {
 	// checkName is the Pebble check name associated with the hook.
 	checkName string
 
-	// baseUpgradeTarget is the base that the unit's machine is to be
-	// updated to when Juju is issued the `upgrade-machine` command.
-	baseUpgradeTarget string
-
 	// secretURI is the reference to the secret relevant to the hook.
 	secretURI string
 
@@ -366,26 +326,26 @@ type HookContext struct {
 	mu sync.Mutex
 }
 
-// GetLogger returns a Logger for the specified module.
-func (ctx *HookContext) GetLogger(module string) loggo.Logger {
-	return ctx.logger.Root().Child(module)
+// GetLoggerByName returns a Logger for the specified module name.
+func (c *HookContext) GetLoggerByName(module string) logger.Logger {
+	return c.logger.GetChildByName(module)
 }
 
 // GetCharmState returns a copy of the cached charm state.
 // Implements jujuc.HookContext.unitCharmStateContext, part of runner.Context.
-func (ctx *HookContext) GetCharmState() (map[string]string, error) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if err := ctx.ensureCharmStateLoaded(); err != nil {
+func (c *HookContext) GetCharmState(ctx context.Context) (map[string]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureCharmStateLoaded(ctx); err != nil {
 		return nil, err
 	}
 
-	if len(ctx.cachedCharmState) == 0 {
+	if len(c.cachedCharmState) == 0 {
 		return nil, nil
 	}
 
-	retVal := make(map[string]string, len(ctx.cachedCharmState))
-	for k, v := range ctx.cachedCharmState {
+	retVal := make(map[string]string, len(c.cachedCharmState))
+	for k, v := range c.cachedCharmState {
 		retVal[k] = v
 	}
 	return retVal, nil
@@ -393,14 +353,14 @@ func (ctx *HookContext) GetCharmState() (map[string]string, error) {
 
 // GetCharmStateValue returns the value of the given key.
 // Implements jujuc.HookContext.unitCharmStateContext, part of runner.Context.
-func (ctx *HookContext) GetCharmStateValue(key string) (string, error) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if err := ctx.ensureCharmStateLoaded(); err != nil {
+func (c *HookContext) GetCharmStateValue(ctx context.Context, key string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureCharmStateLoaded(ctx); err != nil {
 		return "", err
 	}
 
-	value, ok := ctx.cachedCharmState[key]
+	value, ok := c.cachedCharmState[key]
 	if !ok {
 		return "", errors.NotFoundf("%q", key)
 	}
@@ -409,10 +369,10 @@ func (ctx *HookContext) GetCharmStateValue(key string) (string, error) {
 
 // SetCharmStateValue sets the key/value pair provided in the cache.
 // Implements jujuc.HookContext.unitCharmStateContext, part of runner.Context.
-func (ctx *HookContext) SetCharmStateValue(key, value string) error {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if err := ctx.ensureCharmStateLoaded(); err != nil {
+func (c *HookContext) SetCharmStateValue(ctx context.Context, key, value string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureCharmStateLoaded(ctx); err != nil {
 		return err
 	}
 
@@ -423,46 +383,46 @@ func (ctx *HookContext) SetCharmStateValue(key, value string) error {
 		return errors.Trace(err)
 	}
 
-	curValue, exists := ctx.cachedCharmState[key]
+	curValue, exists := c.cachedCharmState[key]
 	if exists && curValue == value {
 		return nil // no-op
 	}
 
-	ctx.cachedCharmState[key] = value
-	ctx.charmStateCacheDirty = true
+	c.cachedCharmState[key] = value
+	c.charmStateCacheDirty = true
 	return nil
 }
 
 // DeleteCharmStateValue deletes the key/value pair for the given key from
 // the cache.
 // Implements jujuc.HookContext.unitCharmStateContext, part of runner.Context.
-func (ctx *HookContext) DeleteCharmStateValue(key string) error {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if err := ctx.ensureCharmStateLoaded(); err != nil {
+func (c *HookContext) DeleteCharmStateValue(ctx context.Context, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureCharmStateLoaded(ctx); err != nil {
 		return err
 	}
 
-	if _, exists := ctx.cachedCharmState[key]; !exists {
+	if _, exists := c.cachedCharmState[key]; !exists {
 		return nil // no-op
 	}
 
-	delete(ctx.cachedCharmState, key)
-	ctx.charmStateCacheDirty = true
+	delete(c.cachedCharmState, key)
+	c.charmStateCacheDirty = true
 	return nil
 }
 
 // ensureCharmStateLoaded retrieves and caches the unit's charm state from the
 // controller. The caller of this method must be holding the ctx mutex.
-func (ctx *HookContext) ensureCharmStateLoaded() error {
+func (c *HookContext) ensureCharmStateLoaded(ctx context.Context) error {
 	// NOTE: Assuming lock to be held!
-	if ctx.cachedCharmState != nil {
+	if c.cachedCharmState != nil {
 		return nil
 	}
 
 	// Load from controller
 	var charmState map[string]string
-	unitState, err := ctx.unit.State()
+	unitState, err := c.unit.State(ctx)
 	if err != nil {
 		return errors.Annotate(err, "loading unit state from database")
 	}
@@ -472,113 +432,113 @@ func (ctx *HookContext) ensureCharmStateLoaded() error {
 		charmState = unitState.CharmState
 	}
 
-	ctx.cachedCharmState = charmState
-	ctx.charmStateCacheDirty = false
+	c.cachedCharmState = charmState
+	c.charmStateCacheDirty = false
 	return nil
 }
 
 // RequestReboot will set the reboot flag to true on the machine agent
 // Implements jujuc.HookContext.ContextInstance, part of runner.Context.
-func (ctx *HookContext) RequestReboot(priority jujuc.RebootPriority) error {
+func (c *HookContext) RequestReboot(priority jujuc.RebootPriority) error {
 	// Must set reboot priority first, because killing the hook
 	// process will trigger the completion of the hook. If killing
 	// the hook fails, then we can reset the priority.
-	ctx.setRebootPriority(priority)
+	c.setRebootPriority(priority)
 
 	var err error
 	if priority == jujuc.RebootNow {
 		// At this point, the hook should be running
-		err = ctx.killCharmHook()
+		err = c.killCharmHook(context.TODO())
 	}
 
 	switch err {
 	case nil, charmrunner.ErrNoProcess:
 		// ErrNoProcess almost certainly means we are running in debug hooks
 	default:
-		ctx.setRebootPriority(jujuc.RebootSkip)
+		c.setRebootPriority(jujuc.RebootSkip)
 	}
 	return err
 }
 
-func (ctx *HookContext) GetRebootPriority() jujuc.RebootPriority {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	return ctx.rebootPriority
+func (c *HookContext) GetRebootPriority() jujuc.RebootPriority {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rebootPriority
 }
 
-func (ctx *HookContext) setRebootPriority(priority jujuc.RebootPriority) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	ctx.rebootPriority = priority
+func (c *HookContext) setRebootPriority(priority jujuc.RebootPriority) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rebootPriority = priority
 }
 
-func (ctx *HookContext) GetProcess() HookProcess {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	return ctx.process
+func (c *HookContext) GetProcess() HookProcess {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.process
 }
 
 // SetProcess implements runner.Context.
-func (ctx *HookContext) SetProcess(process HookProcess) {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	ctx.process = process
+func (c *HookContext) SetProcess(process HookProcess) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.process = process
 }
 
 // Id returns an integer which uniquely identifies the relation.
 // Implements jujuc.HookContext.ContextRelation, part of runner.Context.
-func (ctx *HookContext) Id() string {
-	return ctx.id
+func (c *HookContext) Id() string {
+	return c.id
 }
 
 // UnitName returns the executing unit's name.
 // UnitName implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) UnitName() string {
-	return ctx.unitName
+func (c *HookContext) UnitName() string {
+	return c.unitName
 }
 
 // ModelType of the context we are running in.
 // SetProcess implements runner.Context.
-func (ctx *HookContext) ModelType() model.ModelType {
-	return ctx.modelType
+func (c *HookContext) ModelType() model.ModelType {
+	return c.modelType
 }
 
 // UnitStatus will return the status for the current Unit.
 // Implements jujuc.HookContext.ContextStatus, part of runner.Context.
-func (ctx *HookContext) UnitStatus() (*jujuc.StatusInfo, error) {
-	if ctx.status == nil {
+func (c *HookContext) UnitStatus(ctx context.Context) (*jujuc.StatusInfo, error) {
+	if c.status == nil {
 		var err error
-		unitStatus, err := ctx.unit.UnitStatus()
+		unitStatus, err := c.unit.UnitStatus(ctx)
 		if err != nil {
 			return nil, err
 		}
-		ctx.status = &jujuc.StatusInfo{
+		c.status = &jujuc.StatusInfo{
 			Status: unitStatus.Status,
 			Info:   unitStatus.Info,
 			Data:   unitStatus.Data,
 		}
 	}
-	return ctx.status, nil
+	return c.status, nil
 }
 
 // ApplicationStatus returns the status for the application and all the units on
 // the application to which this context unit belongs, only if this unit is
 // the leader.
 // Implements jujuc.HookContext.ContextStatus, part of runner.Context.
-func (ctx *HookContext) ApplicationStatus() (jujuc.ApplicationStatusInfo, error) {
+func (c *HookContext) ApplicationStatus(ctx context.Context) (jujuc.ApplicationStatusInfo, error) {
 	var err error
-	isLeader, err := ctx.IsLeader()
+	isLeader, err := c.IsLeader()
 	if err != nil {
 		return jujuc.ApplicationStatusInfo{}, errors.Annotatef(err, "cannot determine leadership")
 	}
 	if !isLeader {
 		return jujuc.ApplicationStatusInfo{}, ErrIsNotLeader
 	}
-	app, err := ctx.unit.Application()
+	app, err := c.unit.Application(ctx)
 	if err != nil {
 		return jujuc.ApplicationStatusInfo{}, errors.Trace(err)
 	}
-	appStatus, err := app.Status(ctx.unit.Name())
+	appStatus, err := app.Status(ctx, c.unit.Name())
 	if err != nil {
 		return jujuc.ApplicationStatusInfo{}, errors.Trace(err)
 	}
@@ -606,10 +566,10 @@ func (ctx *HookContext) ApplicationStatus() (jujuc.ApplicationStatusInfo, error)
 
 // SetUnitStatus will set the given status for this unit.
 // Implements jujuc.HookContext.ContextStatus, part of runner.Context.
-func (ctx *HookContext) SetUnitStatus(unitStatus jujuc.StatusInfo) error {
-	ctx.hasRunStatusSet = true
-	ctx.logger.Tracef("[WORKLOAD-STATUS] %s: %s", unitStatus.Status, unitStatus.Info)
-	return ctx.unit.SetUnitStatus(
+func (c *HookContext) SetUnitStatus(ctx context.Context, unitStatus jujuc.StatusInfo) error {
+	c.hasRunStatusSet = true
+	c.logger.Tracef(ctx, "[WORKLOAD-STATUS] %s: %s", unitStatus.Status, unitStatus.Info)
+	return c.unit.SetUnitStatus(ctx,
 		status.Status(unitStatus.Status),
 		unitStatus.Info,
 		unitStatus.Data,
@@ -618,9 +578,10 @@ func (ctx *HookContext) SetUnitStatus(unitStatus jujuc.StatusInfo) error {
 
 // SetAgentStatus will set the given status for this unit's agent.
 // Implements jujuc.HookContext.ContextStatus, part of runner.Context.
-func (ctx *HookContext) SetAgentStatus(agentStatus jujuc.StatusInfo) error {
-	ctx.logger.Tracef("[AGENT-STATUS] %s: %s", agentStatus.Status, agentStatus.Info)
-	return ctx.unit.SetAgentStatus(
+func (c *HookContext) SetAgentStatus(ctx context.Context, agentStatus jujuc.StatusInfo) error {
+	c.logger.Tracef(ctx, "[AGENT-STATUS] %s: %s", agentStatus.Status, agentStatus.Info)
+	return c.unit.SetAgentStatus(
+		ctx,
 		status.Status(agentStatus.Status),
 		agentStatus.Info,
 		agentStatus.Data,
@@ -630,9 +591,9 @@ func (ctx *HookContext) SetAgentStatus(agentStatus jujuc.StatusInfo) error {
 // SetApplicationStatus will set the given status to the application to which this
 // unit's belong, only if this unit is the leader.
 // Implements jujuc.HookContext.ContextStatus, part of runner.Context.
-func (ctx *HookContext) SetApplicationStatus(applicationStatus jujuc.StatusInfo) error {
-	ctx.logger.Tracef("[APPLICATION-STATUS] %s: %s", applicationStatus.Status, applicationStatus.Info)
-	isLeader, err := ctx.IsLeader()
+func (c *HookContext) SetApplicationStatus(ctx context.Context, applicationStatus jujuc.StatusInfo) error {
+	c.logger.Tracef(ctx, "[APPLICATION-STATUS] %s: %s", applicationStatus.Status, applicationStatus.Info)
+	isLeader, err := c.IsLeader()
 	if err != nil {
 		return errors.Annotatef(err, "cannot determine leadership")
 	}
@@ -640,12 +601,13 @@ func (ctx *HookContext) SetApplicationStatus(applicationStatus jujuc.StatusInfo)
 		return ErrIsNotLeader
 	}
 
-	app, err := ctx.unit.Application()
+	app, err := c.unit.Application(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	return app.SetStatus(
-		ctx.unit.Name(),
+		ctx,
+		c.unit.Name(),
 		status.Status(applicationStatus.Status),
 		applicationStatus.Info,
 		applicationStatus.Data,
@@ -653,97 +615,97 @@ func (ctx *HookContext) SetApplicationStatus(applicationStatus jujuc.StatusInfo)
 }
 
 // HasExecutionSetUnitStatus implements runner.Context.
-func (ctx *HookContext) HasExecutionSetUnitStatus() bool {
-	return ctx.hasRunStatusSet
+func (c *HookContext) HasExecutionSetUnitStatus() bool {
+	return c.hasRunStatusSet
 }
 
 // ResetExecutionSetUnitStatus implements runner.Context.
-func (ctx *HookContext) ResetExecutionSetUnitStatus() {
-	ctx.hasRunStatusSet = false
+func (c *HookContext) ResetExecutionSetUnitStatus() {
+	c.hasRunStatusSet = false
 }
 
 // PublicAddress fetches the executing unit's public address if it has
 // not yet been retrieved.
 // The cached value is returned, or an error if it is not available.
-func (ctx *HookContext) PublicAddress() (string, error) {
-	if ctx.publicAddress == "" {
+func (c *HookContext) PublicAddress(ctx context.Context) (string, error) {
+	if c.publicAddress == "" {
 		var err error
-		if ctx.publicAddress, err = ctx.unit.PublicAddress(); err != nil && !params.IsCodeNoAddressSet(err) {
+		if c.publicAddress, err = c.unit.PublicAddress(ctx); err != nil && !params.IsCodeNoAddressSet(err) {
 			return "", errors.Trace(err)
 		}
 	}
 
-	if ctx.publicAddress == "" {
+	if c.publicAddress == "" {
 		return "", errors.NotFoundf("public address")
 	}
-	return ctx.publicAddress, nil
+	return c.publicAddress, nil
 }
 
 // PrivateAddress returns the executing unit's private address or an
 // error if it is not available.
 // Implements jujuc.HookContext.ContextNetworking, part of runner.Context.
-func (ctx *HookContext) PrivateAddress() (string, error) {
-	if ctx.privateAddress == "" {
+func (c *HookContext) PrivateAddress() (string, error) {
+	if c.privateAddress == "" {
 		return "", errors.NotFoundf("private address")
 	}
-	return ctx.privateAddress, nil
+	return c.privateAddress, nil
 }
 
 // AvailabilityZone returns the executing unit's availability zone or an error
 // if it was not found (or is not available).
 // Implements jujuc.HookContext.ContextInstance, part of runner.Context.
-func (ctx *HookContext) AvailabilityZone() (string, error) {
-	if ctx.availabilityZone == "" {
+func (c *HookContext) AvailabilityZone() (string, error) {
+	if c.availabilityZone == "" {
 		return "", errors.NotFoundf("availability zone")
 	}
-	return ctx.availabilityZone, nil
+	return c.availabilityZone, nil
 }
 
 // StorageTags returns a list of tags for storage instances
 // attached to the unit or an error if they are not available.
 // Implements jujuc.HookContext.ContextStorage, part of runner.Context.
-func (ctx *HookContext) StorageTags() ([]names.StorageTag, error) {
+func (c *HookContext) StorageTags(ctx context.Context) ([]names.StorageTag, error) {
 	// Comparing to nil on purpose here to cache an empty slice.
-	if ctx.storageTags != nil {
-		return ctx.storageTags, nil
+	if c.storageTags != nil {
+		return c.storageTags, nil
 	}
-	attachmentIds, err := ctx.state.UnitStorageAttachments(ctx.unit.Tag())
+	attachmentIds, err := c.uniter.UnitStorageAttachments(ctx, c.unit.Tag())
 	if err != nil {
 		return nil, err
 	}
 	// N.B. zero-length non-nil slice on purpose.
-	ctx.storageTags = make([]names.StorageTag, 0)
+	c.storageTags = make([]names.StorageTag, 0)
 	for _, attachmentId := range attachmentIds {
 		storageTag, err := names.ParseStorageTag(attachmentId.StorageTag)
 		if err != nil {
 			return nil, err
 		}
-		ctx.storageTags = append(ctx.storageTags, storageTag)
+		c.storageTags = append(c.storageTags, storageTag)
 	}
-	return ctx.storageTags, nil
+	return c.storageTags, nil
 }
 
 // HookStorage returns the storage attachment associated
 // the executing hook if it was found, and an error if it
 // was not found or is not available.
 // Implements jujuc.HookContext.ContextStorage, part of runner.Context.
-func (ctx *HookContext) HookStorage() (jujuc.ContextStorageAttachment, error) {
+func (c *HookContext) HookStorage(ctx context.Context) (jujuc.ContextStorageAttachment, error) {
 	emptyTag := names.StorageTag{}
-	if ctx.storageTag == emptyTag {
+	if c.storageTag == emptyTag {
 		return nil, errors.NotFound
 	}
-	return ctx.Storage(ctx.storageTag)
+	return c.Storage(ctx, c.storageTag)
 }
 
 // Storage returns the ContextStorageAttachment with the supplied
 // tag if it was found, and an error if it was not found or is not
 // available to the context.
 // Implements jujuc.HookContext.ContextStorage, part of runner.Context.
-func (ctx *HookContext) Storage(tag names.StorageTag) (jujuc.ContextStorageAttachment, error) {
-	if ctxStorageAttachment, ok := ctx.storageAttachmentCache[tag]; ok {
+func (c *HookContext) Storage(ctx context.Context, tag names.StorageTag) (jujuc.ContextStorageAttachment, error) {
+	if ctxStorageAttachment, ok := c.storageAttachmentCache[tag]; ok {
 		return ctxStorageAttachment, nil
 	}
-	attachment, err := ctx.state.StorageAttachment(tag, ctx.unit.Tag())
+	attachment, err := c.uniter.StorageAttachment(ctx, tag, c.unit.Tag())
 	if err != nil {
 		return nil, err
 	}
@@ -752,23 +714,23 @@ func (ctx *HookContext) Storage(tag names.StorageTag) (jujuc.ContextStorageAttac
 		kind:     storage.StorageKind(attachment.Kind),
 		location: attachment.Location,
 	}
-	ctx.storageAttachmentCache[tag] = ctxStorageAttachment
+	c.storageAttachmentCache[tag] = ctxStorageAttachment
 	return ctxStorageAttachment, nil
 }
 
-// AddUnitStorage saves storage constraints in the context.
+// AddUnitStorage saves storage directives in the context.
 // Implements jujuc.HookContext.ContextStorage, part of runner.Context.
-func (ctx *HookContext) AddUnitStorage(cons map[string]params.StorageConstraints) error {
-	// All storage constraints are accumulated before context is flushed.
-	if ctx.storageAddConstraints == nil {
-		ctx.storageAddConstraints = make(
-			map[string][]params.StorageConstraints,
+func (c *HookContext) AddUnitStorage(cons map[string]params.StorageDirectives) error {
+	// All storage directives are accumulated before context is flushed.
+	if c.storageAddDirectives == nil {
+		c.storageAddDirectives = make(
+			map[string][]params.StorageDirectives,
 			len(cons))
 	}
 	for storage, newConstraints := range cons {
 		// Multiple calls for the same storage are accumulated as well.
-		ctx.storageAddConstraints[storage] = append(
-			ctx.storageAddConstraints[storage],
+		c.storageAddDirectives[storage] = append(
+			c.storageAddDirectives[storage],
 			newConstraints)
 	}
 	return nil
@@ -776,60 +738,60 @@ func (ctx *HookContext) AddUnitStorage(cons map[string]params.StorageConstraints
 
 // OpenPortRange marks the supplied port range for opening.
 // Implements jujuc.HookContext.ContextNetworking, part of runner.Context.
-func (ctx *HookContext) OpenPortRange(endpointName string, portRange network.PortRange) error {
-	return ctx.portRangeChanges.OpenPortRange(endpointName, portRange)
+func (c *HookContext) OpenPortRange(endpointName string, portRange network.PortRange) error {
+	return c.portRangeChanges.OpenPortRange(endpointName, portRange)
 }
 
 // ClosePortRange ensures the supplied port range is closed even when
 // the executing unit's application is exposed (unless it is opened
 // separately by a co- located unit).
 // Implements jujuc.HookContext.ContextNetworking, part of runner.Context.
-func (ctx *HookContext) ClosePortRange(endpointName string, portRange network.PortRange) error {
-	return ctx.portRangeChanges.ClosePortRange(endpointName, portRange)
+func (c *HookContext) ClosePortRange(endpointName string, portRange network.PortRange) error {
+	return c.portRangeChanges.ClosePortRange(endpointName, portRange)
 }
 
 // OpenedPortRanges returns all port ranges currently opened by this
 // unit on its assigned machine grouped by endpoint.
 // Implements jujuc.HookContext.ContextNetworking, part of runner.Context.
-func (ctx *HookContext) OpenedPortRanges() network.GroupedPortRanges {
-	return ctx.portRangeChanges.OpenedUnitPortRanges()
+func (c *HookContext) OpenedPortRanges() network.GroupedPortRanges {
+	return c.portRangeChanges.OpenedUnitPortRanges()
 }
 
 // ConfigSettings returns the current application configuration of the executing unit.
 // Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) ConfigSettings() (charm.Settings, error) {
-	if ctx.configSettings == nil {
+func (c *HookContext) ConfigSettings(ctx context.Context) (charm.Config, error) {
+	if c.configSettings == nil {
 		var err error
-		ctx.configSettings, err = ctx.unit.ConfigSettings()
+		c.configSettings, err = c.unit.ConfigSettings(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	result := charm.Settings{}
-	for name, value := range ctx.configSettings {
+	result := charm.Config{}
+	for name, value := range c.configSettings {
 		result[name] = value
 	}
 	return result, nil
 }
 
-func (ctx *HookContext) getSecretsBackend() (secrets.BackendsClient, error) {
-	if ctx.secretsBackend != nil {
-		return ctx.secretsBackend, nil
+func (c *HookContext) getSecretsBackend() (api.SecretsBackend, error) {
+	if c.secretsBackend != nil {
+		return c.secretsBackend, nil
 	}
 	var err error
-	ctx.secretsBackend, err = ctx.secretsBackendGetter()
+	c.secretsBackend, err = c.secretsBackendGetter()
 	if err != nil {
 		return nil, err
 	}
-	return ctx.secretsBackend, nil
+	return c.secretsBackend, nil
 }
 
-func (ctx *HookContext) lookupOwnedSecretURIByLabel(label string) (*coresecrets.URI, error) {
-	mds, err := ctx.SecretMetadata()
+func (c *HookContext) lookupOwnedSecretURIByLabel(ctx context.Context, label string) (*coresecrets.URI, error) {
+	mds, err := c.SecretMetadata(ctx)
 	if err != nil {
 		return nil, err
 	}
-	isLeader, err := ctx.IsLeader()
+	isLeader, err := c.IsLeader()
 	if err != nil {
 		return nil, errors.Annotatef(err, "cannot determine leadership")
 	}
@@ -838,16 +800,16 @@ func (ctx *HookContext) lookupOwnedSecretURIByLabel(label string) (*coresecrets.
 		if md.Label != label {
 			continue
 		}
-		if md.Owner.Id() == ctx.unitName {
+		if md.Owner.ID == c.unitName {
 			return &coresecrets.URI{ID: ID}, nil
 		}
 
 		// Leaders own application secrets.
-		if isLeader && md.Owner.Id() == ctx.unit.ApplicationName() {
+		if isLeader && md.Owner.ID == c.unit.ApplicationName() {
 			return &coresecrets.URI{ID: ID}, nil
 		}
 	}
-	for _, md := range ctx.secretChanges.pendingCreates {
+	for _, md := range c.secretChanges.pendingCreates {
 		// Check if we have any pending create changes.
 		if md.Label == nil || md.URI == nil {
 			continue
@@ -856,7 +818,7 @@ func (ctx *HookContext) lookupOwnedSecretURIByLabel(label string) (*coresecrets.
 			return md.URI, nil
 		}
 	}
-	for _, md := range ctx.secretChanges.pendingUpdates {
+	for _, md := range c.secretChanges.pendingUpdates {
 		// Check if we have any pending label update changes.
 		if md.Label == nil || md.URI == nil {
 			continue
@@ -865,28 +827,28 @@ func (ctx *HookContext) lookupOwnedSecretURIByLabel(label string) (*coresecrets.
 			return md.URI, nil
 		}
 	}
-	return nil, errors.NotFoundf("secret owned by %q with label %q", ctx.unitName, label)
+	return nil, errors.NotFoundf("secret owned by %q with label %q", c.unitName, label)
 }
 
 // GetSecret returns the value of the specified secret.
-func (ctx *HookContext) GetSecret(uri *coresecrets.URI, label string, refresh, peek bool) (coresecrets.SecretValue, error) {
+func (c *HookContext) GetSecret(ctx context.Context, uri *coresecrets.URI, label string, refresh, peek bool) (coresecrets.SecretValue, error) {
 	if uri == nil && label == "" {
 		return nil, errors.NotValidf("empty URI and label")
 	}
 	if uri != nil {
-		if v, got := ctx.getPendingSecretValue(uri, label, refresh, peek); got {
+		if v, got := c.getPendingSecretValue(uri, label, refresh, peek); got {
 			return v, nil
 		}
 	} else {
 		// Try to resolve label to URI by looking up owned secrets.
-		ownedSecretURI, err := ctx.lookupOwnedSecretURIByLabel(label)
+		ownedSecretURI, err := c.lookupOwnedSecretURIByLabel(ctx, label)
 		if err != nil && !errors.Is(err, errors.NotFound) {
 			return nil, err
 		}
 		if ownedSecretURI != nil {
 			// We now know the URI, see if there's any pending creates/updates
 			// that should be used for the content.
-			if v, got := ctx.getPendingSecretValue(ownedSecretURI, "", refresh, peek); got {
+			if v, got := c.getPendingSecretValue(ownedSecretURI, "", refresh, peek); got {
 				return v, nil
 			}
 			// Found owned secret, no need for label anymore.
@@ -895,32 +857,32 @@ func (ctx *HookContext) GetSecret(uri *coresecrets.URI, label string, refresh, p
 		} else {
 			// No previously created secret with this label, check if there's
 			// any pending creates/updates that should be used for the content.
-			if v, got := ctx.getPendingSecretValue(nil, label, refresh, peek); got {
+			if v, got := c.getPendingSecretValue(nil, label, refresh, peek); got {
 				return v, nil
 			}
 		}
 	}
-	backend, err := ctx.getSecretsBackend()
+	backend, err := c.getSecretsBackend()
 	if err != nil {
 		return nil, err
 	}
-	v, err := backend.GetContent(uri, label, refresh, peek)
+	v, err := backend.GetContent(ctx, uri, label, refresh, peek)
 	if err != nil {
 		return nil, err
 	}
 	return v, nil
 }
 
-func (ctx *HookContext) getPendingSecretValue(uri *coresecrets.URI, label string, refresh, peek bool) (coresecrets.SecretValue, bool) {
+func (c *HookContext) getPendingSecretValue(uri *coresecrets.URI, label string, refresh, peek bool) (coresecrets.SecretValue, bool) {
 	if uri == nil && label == "" {
 		return nil, false
 	}
-	for i, v := range ctx.secretChanges.pendingCreates {
+	for i, v := range c.secretChanges.pendingCreates {
 		if uri != nil && v.URI != nil && v.URI.ID == uri.ID {
 			if label != "" {
-				pending := ctx.secretChanges.pendingCreates[i]
+				pending := c.secretChanges.pendingCreates[i]
 				pending.Label = &label
-				ctx.secretChanges.pendingCreates[i] = pending
+				c.secretChanges.pendingCreates[i] = pending
 			}
 			// The initial value of the secret is not stored in the database yet.
 			return v.Value, true
@@ -934,22 +896,22 @@ func (ctx *HookContext) getPendingSecretValue(uri *coresecrets.URI, label string
 		return nil, false
 	}
 
-	for i, v := range ctx.secretChanges.pendingUpdates {
+	for i, v := range c.secretChanges.pendingUpdates {
 		if uri != nil && v.URI != nil && v.URI.ID == uri.ID {
 			if label != "" {
-				pending := ctx.secretChanges.pendingUpdates[i]
+				pending := c.secretChanges.pendingUpdates[i]
 				pending.Label = &label
-				ctx.secretChanges.pendingUpdates[i] = pending
+				c.secretChanges.pendingUpdates[i] = pending
 			}
 			if refresh {
-				ctx.secretChanges.pendingTrackLatest[v.URI.ID] = true
+				c.secretChanges.pendingTrackLatest[v.URI.ID] = true
 			}
 			// The new value of the secret is going to be updated to the database.
 			return v.Value, v.Value != nil && !v.Value.IsEmpty()
 		}
 		if label != "" && v.Label != nil && label == *v.Label {
 			if refresh {
-				ctx.secretChanges.pendingTrackLatest[v.URI.ID] = true
+				c.secretChanges.pendingTrackLatest[v.URI.ID] = true
 			}
 			// The new value of the secret is going to be updated to the database.
 			return v.Value, v.Value != nil && !v.Value.IsEmpty()
@@ -959,9 +921,9 @@ func (ctx *HookContext) getPendingSecretValue(uri *coresecrets.URI, label string
 }
 
 // CreateSecret creates a secret with the specified data.
-func (ctx *HookContext) CreateSecret(args *jujuc.SecretCreateArgs) (*coresecrets.URI, error) {
-	if args.OwnerTag.Kind() == names.ApplicationTagKind {
-		isLeader, err := ctx.IsLeader()
+func (c *HookContext) CreateSecret(ctx context.Context, args *jujuc.SecretCreateArgs) (*coresecrets.URI, error) {
+	if args.Owner.Kind == coresecrets.ApplicationOwner {
+		isLeader, err := c.IsLeader()
 		if err != nil {
 			return nil, errors.Annotatef(err, "cannot determine leadership")
 		}
@@ -970,17 +932,17 @@ func (ctx *HookContext) CreateSecret(args *jujuc.SecretCreateArgs) (*coresecrets
 		}
 	}
 	if args.Value == nil || args.Value.IsEmpty() {
-		return nil, errors.NotValidf("empty secrte content")
+		return nil, errors.NotValidf("empty secret content")
 	}
 	checksum, err := args.Value.Checksum()
 	if err != nil {
 		return nil, errors.Annotate(err, "calculating secret checksum")
 	}
-	uris, err := ctx.secretsClient.CreateSecretURIs(1)
+	uris, err := c.secretsClient.CreateSecretURIs(ctx, 1)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	err = ctx.secretChanges.create(uniter.SecretCreateArg{
+	err = c.secretChanges.create(uniter.SecretCreateArg{
 		SecretUpsertArg: uniter.SecretUpsertArg{
 			URI:          uris[0],
 			RotatePolicy: args.RotatePolicy,
@@ -990,7 +952,7 @@ func (ctx *HookContext) CreateSecret(args *jujuc.SecretCreateArgs) (*coresecrets
 			Value:        args.Value,
 			Checksum:     checksum,
 		},
-		OwnerTag: args.OwnerTag,
+		Owner: args.Owner,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -998,24 +960,20 @@ func (ctx *HookContext) CreateSecret(args *jujuc.SecretCreateArgs) (*coresecrets
 	return uris[0], nil
 }
 
-func (ctx *HookContext) lazyLoadSecretMetadata() error {
-	if ctx.secretMetadata != nil {
+func (c *HookContext) lazyLoadSecretMetadata(ctx context.Context) error {
+	if c.secretMetadata != nil {
 		return nil
 	}
-	info, err := ctx.secretsClient.SecretMetadata()
+	info, err := c.secretsClient.SecretMetadata(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
-	ctx.secretMetadata = make(map[string]jujuc.SecretMetadata)
+	c.secretMetadata = make(map[string]jujuc.SecretMetadata)
 	for _, md := range info {
-		ownerTag, err := names.ParseTag(md.OwnerTag)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		ctx.secretMetadata[md.URI.ID] = jujuc.SecretMetadata{
+		c.secretMetadata[md.URI.ID] = jujuc.SecretMetadata{
 			Description:      md.Description,
 			Label:            md.Label,
-			Owner:            ownerTag,
+			Owner:            md.Owner,
 			RotatePolicy:     md.RotatePolicy,
 			LatestRevision:   md.LatestRevision,
 			LatestChecksum:   md.LatestRevisionChecksum,
@@ -1028,14 +986,14 @@ func (ctx *HookContext) lazyLoadSecretMetadata() error {
 }
 
 // UpdateSecret creates a secret with the specified data.
-func (ctx *HookContext) UpdateSecret(uri *coresecrets.URI, args *jujuc.SecretUpdateArgs) error {
-	err := ctx.lazyLoadSecretMetadata()
+func (c *HookContext) UpdateSecret(ctx context.Context, uri *coresecrets.URI, args *jujuc.SecretUpdateArgs) error {
+	err := c.lazyLoadSecretMetadata(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	md, knowSecret := ctx.secretMetadata[uri.ID]
-	if knowSecret && md.Owner.Kind() == names.ApplicationTagKind {
-		isLeader, err := ctx.IsLeader()
+	md, knowSecret := c.secretMetadata[uri.ID]
+	if knowSecret && md.Owner.Kind == coresecrets.ApplicationOwner {
+		isLeader, err := c.IsLeader()
 		if err != nil {
 			return errors.Annotatef(err, "cannot determine leadership")
 		}
@@ -1068,19 +1026,19 @@ func (ctx *HookContext) UpdateSecret(uri *coresecrets.URI, args *jujuc.SecretUpd
 		return nil
 	}
 
-	ctx.secretChanges.update(updateArg)
+	c.secretChanges.update(updateArg)
 	return nil
 }
 
 // RemoveSecret removes a secret with the specified uri.
-func (ctx *HookContext) RemoveSecret(uri *coresecrets.URI, revision *int) error {
-	err := ctx.lazyLoadSecretMetadata()
+func (c *HookContext) RemoveSecret(ctx context.Context, uri *coresecrets.URI, revision *int) error {
+	err := c.lazyLoadSecretMetadata(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	md, ok := ctx.secretMetadata[uri.ID]
-	if ok && md.Owner.Kind() == names.ApplicationTagKind {
-		isLeader, err := ctx.IsLeader()
+	md, ok := c.secretMetadata[uri.ID]
+	if ok && md.Owner.Kind == coresecrets.ApplicationOwner {
+		isLeader, err := c.IsLeader()
 		if err != nil {
 			return errors.Annotatef(err, "cannot determine leadership")
 		}
@@ -1088,21 +1046,21 @@ func (ctx *HookContext) RemoveSecret(uri *coresecrets.URI, revision *int) error 
 			return ErrIsNotLeader
 		}
 	}
-	ctx.secretChanges.remove(uri, revision)
+	c.secretChanges.remove(uri, revision)
 	return nil
 }
 
 // SecretMetadata gets the secret ids and their labels and latest revisions created by the charm.
 // The result includes any pending updates.
-func (ctx *HookContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error) {
-	err := ctx.lazyLoadSecretMetadata()
+func (c *HookContext) SecretMetadata(ctx context.Context) (map[string]jujuc.SecretMetadata, error) {
+	err := c.lazyLoadSecretMetadata(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	result := make(map[string]jujuc.SecretMetadata)
-	for _, c := range ctx.secretChanges.pendingCreates {
+	for _, c := range c.secretChanges.pendingCreates {
 		md := jujuc.SecretMetadata{
-			Owner:          c.OwnerTag,
+			Owner:          c.Owner,
 			LatestRevision: 1,
 			LatestChecksum: c.Checksum,
 		}
@@ -1120,11 +1078,11 @@ func (ctx *HookContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error
 		}
 		result[c.URI.ID] = md
 	}
-	for id, v := range ctx.secretMetadata {
-		if _, ok := ctx.secretChanges.pendingDeletes[id]; ok {
+	for id, v := range c.secretMetadata {
+		if _, ok := c.secretChanges.pendingDeletes[id]; ok {
 			continue
 		}
-		if u, ok := ctx.secretChanges.pendingUpdates[id]; ok {
+		if u, ok := c.secretChanges.pendingUpdates[id]; ok {
 			if u.Label != nil {
 				v.Label = *u.Label
 			}
@@ -1144,7 +1102,7 @@ func (ctx *HookContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error
 	for k, v := range result {
 		uri := &coresecrets.URI{ID: k}
 		var err error
-		if v.Access, err = ctx.secretChanges.secretGrantInfo(uri, v.Access...); err != nil {
+		if v.Access, err = c.secretChanges.secretGrantInfo(context.TODO(), uri, v.Access...); err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
@@ -1152,8 +1110,8 @@ func (ctx *HookContext) SecretMetadata() (map[string]jujuc.SecretMetadata, error
 }
 
 // GrantSecret grants access to a specified secret.
-func (ctx *HookContext) GrantSecret(uri *coresecrets.URI, arg *jujuc.SecretGrantRevokeArgs) error {
-	secretMetadata, err := ctx.SecretMetadata()
+func (c *HookContext) GrantSecret(ctx context.Context, uri *coresecrets.URI, arg *jujuc.SecretGrantRevokeArgs) error {
+	secretMetadata, err := c.SecretMetadata(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1161,8 +1119,8 @@ func (ctx *HookContext) GrantSecret(uri *coresecrets.URI, arg *jujuc.SecretGrant
 	if !ok {
 		return errors.NotFoundf("secret %q", uri.ID)
 	}
-	if md.Owner.Kind() == names.ApplicationTagKind {
-		isLeader, err := ctx.IsLeader()
+	if md.Owner.Kind == coresecrets.ApplicationOwner {
+		isLeader, err := c.IsLeader()
 		if err != nil {
 			return errors.Annotatef(err, "cannot determine leadership")
 		}
@@ -1205,19 +1163,19 @@ func (ctx *HookContext) GrantSecret(uri *coresecrets.URI, arg *jujuc.SecretGrant
 			return errors.NewNotValid(nil, "any unit level grants need to be revoked before granting access to the corresponding application")
 		}
 	}
-	ctx.secretChanges.grant(uniterArg)
+	c.secretChanges.grant(uniterArg)
 	return nil
 }
 
 // RevokeSecret revokes access to a specified secret.
-func (ctx *HookContext) RevokeSecret(uri *coresecrets.URI, args *jujuc.SecretGrantRevokeArgs) error {
-	err := ctx.lazyLoadSecretMetadata()
+func (c *HookContext) RevokeSecret(ctx context.Context, uri *coresecrets.URI, args *jujuc.SecretGrantRevokeArgs) error {
+	err := c.lazyLoadSecretMetadata(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	md, ok := ctx.secretMetadata[uri.ID]
-	if ok && md.Owner.Kind() == names.ApplicationTagKind {
-		isLeader, err := ctx.IsLeader()
+	md, ok := c.secretMetadata[uri.ID]
+	if ok && md.Owner.Kind == coresecrets.ApplicationOwner {
+		isLeader, err := c.IsLeader()
 		if err != nil {
 			return errors.Annotatef(err, "cannot determine leadership")
 		}
@@ -1225,7 +1183,7 @@ func (ctx *HookContext) RevokeSecret(uri *coresecrets.URI, args *jujuc.SecretGra
 			return ErrIsNotLeader
 		}
 	}
-	ctx.secretChanges.revoke(uniter.SecretGrantRevokeArgs{
+	c.secretChanges.revoke(uniter.SecretGrantRevokeArgs{
 		URI:             uri,
 		ApplicationName: args.ApplicationName,
 		UnitName:        args.UnitName,
@@ -1236,93 +1194,41 @@ func (ctx *HookContext) RevokeSecret(uri *coresecrets.URI, args *jujuc.SecretGra
 
 // GoalState returns the goal state for the current unit.
 // Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) GoalState() (*application.GoalState, error) {
+func (c *HookContext) GoalState(ctx context.Context) (*application.GoalState, error) {
 	var err error
-	ctx.goalState, err = ctx.state.GoalState()
+	c.goalState, err = c.uniter.GoalState(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ctx.goalState, nil
-}
-
-// SetPodSpec sets the podspec for the unit's application.
-// Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) SetPodSpec(specYaml string) error {
-	isLeader, err := ctx.IsLeader()
-	if err != nil {
-		return errors.Annotatef(err, "cannot determine leadership")
-	}
-	if !isLeader {
-		ctx.logger.Errorf("%q is not the leader but is setting application k8s spec", ctx.unitName)
-		return ErrIsNotLeader
-	}
-	_, err = k8sspecs.ParsePodSpec(specYaml)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ctx.podSpecYaml = &specYaml
-	return nil
-}
-
-// SetRawK8sSpec sets the raw k8s spec for the unit's application.
-// Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) SetRawK8sSpec(specYaml string) error {
-	isLeader, err := ctx.IsLeader()
-	if err != nil {
-		return errors.Annotatef(err, "cannot determine leadership")
-	}
-	if !isLeader {
-		ctx.logger.Errorf("%q is not the leader but is setting application raw k8s spec", ctx.unitName)
-		return ErrIsNotLeader
-	}
-	_, err = k8sspecs.ParseRawK8sSpec(specYaml)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ctx.k8sRawSpecYaml = &specYaml
-	return nil
-}
-
-// GetPodSpec returns the k8s spec for the unit's application.
-// Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) GetPodSpec() (string, error) {
-	appName := ctx.unit.ApplicationName()
-	return ctx.state.GetPodSpec(appName)
-}
-
-// GetRawK8sSpec returns the raw k8s spec for the unit's application.
-// Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) GetRawK8sSpec() (string, error) {
-	appName := ctx.unit.ApplicationName()
-	return ctx.state.GetRawK8sSpec(appName)
+	return &c.goalState, nil
 }
 
 // CloudSpec return the cloud specification for the running unit's model.
 // Implements jujuc.HookContext.ContextUnit, part of runner.Context.
-func (ctx *HookContext) CloudSpec() (*params.CloudSpec, error) {
-	if ctx.cloudSpec != nil {
-		return ctx.cloudSpec, nil
+func (c *HookContext) CloudSpec(ctx context.Context) (*params.CloudSpec, error) {
+	if c.cloudSpec != nil {
+		return c.cloudSpec, nil
 	}
 	var err error
-	if ctx.modelType == model.CAAS {
-		ctx.cloudSpec, err = ctx.cloudSpecK8s()
+	if c.modelType == model.CAAS {
+		c.cloudSpec, err = c.cloudSpecK8s(ctx)
 	} else {
-		ctx.cloudSpec, err = ctx.state.CloudSpec()
+		c.cloudSpec, err = c.uniter.CloudSpec(ctx)
 	}
-	return ctx.cloudSpec, err
+	return c.cloudSpec, err
 }
 
 // cloudSpecK8s loads the in-cluster configuration to connect to the Kubernetes API.
-func (ctx *HookContext) cloudSpecK8s() (*params.CloudSpec, error) {
+func (c *HookContext) cloudSpecK8s(ctx context.Context) (*params.CloudSpec, error) {
 	// Hit controller's CloudSpec API to determine whether we have permission,
 	// and we need it for some of the fields (but not the credentials).
-	modelSpec, err := ctx.state.CloudSpec()
+	modelSpec, err := c.uniter.CloudSpec(ctx)
 	if err != nil {
 		return nil, errors.Annotatef(err, "getting model credentials")
 	}
 
-	inClusterConfig := ctx.inClusterConfig
+	inClusterConfig := c.inClusterConfig
 	if inClusterConfig == nil {
 		inClusterConfig = rest.InClusterConfig
 	}
@@ -1360,47 +1266,47 @@ func (ctx *HookContext) cloudSpecK8s() (*params.CloudSpec, error) {
 
 // ActionParams simply returns the arguments to the Action.
 // Implements jujuc.ActionHookContext.actionHookContext, part of runner.Context.
-func (ctx *HookContext) ActionParams() (map[string]interface{}, error) {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) ActionParams() (map[string]interface{}, error) {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return nil, errors.New("not running an action")
 	}
-	return ctx.actionData.Params, nil
+	return c.actionData.Params, nil
 }
 
 // LogActionMessage logs a progress message for the Action.
 // Implements jujuc.ActionHookContext.actionHookContext, part of runner.Context.
-func (ctx *HookContext) LogActionMessage(message string) error {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) LogActionMessage(ctx context.Context, message string) error {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return errors.New("not running an action")
 	}
-	return ctx.unit.LogActionMessage(ctx.actionData.Tag, message)
+	return c.unit.LogActionMessage(ctx, c.actionData.Tag, message)
 }
 
 // SetActionMessage sets a message for the Action, usually an error message.
 // Implements jujuc.ActionHookContext.actionHookContext, part of runner.Context.
-func (ctx *HookContext) SetActionMessage(message string) error {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) SetActionMessage(message string) error {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return errors.New("not running an action")
 	}
-	ctx.actionData.ResultsMessage = message
+	c.actionData.ResultsMessage = message
 	return nil
 }
 
 // SetActionFailed sets the fail state of the action.
 // Implements jujuc.ActionHookContext.actionHookContext, part of runner.Context.
-func (ctx *HookContext) SetActionFailed() error {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) SetActionFailed() error {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return errors.New("not running an action")
 	}
-	ctx.actionData.Failed = true
+	c.actionData.Failed = true
 	return nil
 }
 
@@ -1409,50 +1315,50 @@ func (ctx *HookContext) SetActionFailed() error {
 // upon completion of the Action.  It returns an error if not called on an
 // Action-containing HookContext.
 // Implements jujuc.ActionHookContext.actionHookContext, part of runner.Context.
-func (ctx *HookContext) UpdateActionResults(keys []string, value interface{}) error {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) UpdateActionResults(keys []string, value interface{}) error {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return errors.New("not running an action")
 	}
-	addValueToMap(keys, value, ctx.actionData.ResultsMap)
+	addValueToMap(keys, value, c.actionData.ResultsMap)
 	return nil
 }
 
 // HookRelation returns the ContextRelation associated with the executing
 // hook if it was found, or an error if it was not found (or is not available).
 // Implements jujuc.RelationHookContext.relationHookContext, part of runner.Context.
-func (ctx *HookContext) HookRelation() (jujuc.ContextRelation, error) {
-	return ctx.Relation(ctx.relationId)
+func (c *HookContext) HookRelation() (jujuc.ContextRelation, error) {
+	return c.Relation(c.relationId)
 }
 
 // RemoteUnitName returns the name of the remote unit the hook execution
 // is associated with if it was found, and an error if it was not found or is not
 // available.
 // Implements jujuc.RelationHookContext.relationHookContext, part of runner.Context.
-func (ctx *HookContext) RemoteUnitName() (string, error) {
-	if ctx.remoteUnitName == "" {
+func (c *HookContext) RemoteUnitName() (string, error) {
+	if c.remoteUnitName == "" {
 		return "", errors.NotFoundf("remote unit")
 	}
-	return ctx.remoteUnitName, nil
+	return c.remoteUnitName, nil
 }
 
 // RemoteApplicationName returns the name of the remote application the hook execution
 // is associated with if it was found, and an error if it was not found or is not
 // available.
 // Implements jujuc.RelationHookContext.relationHookContext, part of runner.Context.
-func (ctx *HookContext) RemoteApplicationName() (string, error) {
-	if ctx.remoteApplicationName == "" {
+func (c *HookContext) RemoteApplicationName() (string, error) {
+	if c.remoteApplicationName == "" {
 		return "", errors.NotFoundf("saas application")
 	}
-	return ctx.remoteApplicationName, nil
+	return c.remoteApplicationName, nil
 }
 
 // Relation returns the relation with the supplied id if it was found, and
 // an error if it was not found or is not available.
 // Implements jujuc.HookContext.ContextRelations, part of runner.Context.
-func (ctx *HookContext) Relation(id int) (jujuc.ContextRelation, error) {
-	r, found := ctx.relations[id]
+func (c *HookContext) Relation(id int) (jujuc.ContextRelation, error) {
+	r, found := c.relations[id]
 	if !found {
 		return nil, errors.NotFoundf("relation")
 	}
@@ -1462,11 +1368,11 @@ func (ctx *HookContext) Relation(id int) (jujuc.ContextRelation, error) {
 // RelationIds returns the ids of all relations the executing unit is
 // currently participating in or an error if they are not available.
 // Implements jujuc.HookContext.ContextRelations, part of runner.Context.
-func (ctx *HookContext) RelationIds() ([]int, error) {
+func (c *HookContext) RelationIds() ([]int, error) {
 	ids := []int{}
-	for id, r := range ctx.relations {
+	for id, r := range c.relations {
 		if r.broken {
-			ctx.logger.Debugf("relation %d is broken, excluding from relations-ids", id)
+			c.logger.Debugf(context.Background(), "relation %d is broken, excluding from relations-ids", id)
 			continue
 		}
 		ids = append(ids, id)
@@ -1478,25 +1384,25 @@ func (ctx *HookContext) RelationIds() ([]int, error) {
 // transitory; it exists to allow uniter and runner code to keep working as
 // it did; it should be considered deprecated, and not used by new clients.
 // Implements runner.Context.
-func (ctx *HookContext) ActionData() (*ActionData, error) {
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	if ctx.actionData == nil {
+func (c *HookContext) ActionData() (*ActionData, error) {
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	if c.actionData == nil {
 		return nil, errors.New("not running an action")
 	}
-	return ctx.actionData, nil
+	return c.actionData, nil
 }
 
 // HookVars returns an os.Environ-style list of strings necessary to run a hook
 // such that it can know what environment it's operating in, and can call back
 // into context.
 // Implements runner.Context.
-func (ctx *HookContext) HookVars(
+func (c *HookContext) HookVars(
+	ctx context.Context,
 	paths Paths,
-	remote bool,
 	env Environmenter,
 ) ([]string, error) {
-	vars := ctx.legacyProxySettings.AsEnvironmentValues()
+	vars := c.legacyProxySettings.AsEnvironmentValues()
 	vars = append(vars, ContextDependentEnvVars(env)...)
 
 	// TODO(thumper): as work on proxies progress, there will be additional
@@ -1504,100 +1410,76 @@ func (ctx *HookContext) HookVars(
 	vars = append(vars,
 		"CHARM_DIR="+paths.GetCharmDir(), // legacy, embarrassing
 		"JUJU_CHARM_DIR="+paths.GetCharmDir(),
-		"JUJU_CONTEXT_ID="+ctx.id,
-		"JUJU_HOOK_NAME="+ctx.hookName,
-		"JUJU_AGENT_SOCKET_ADDRESS="+paths.GetJujucClientSocket(remote).Address,
-		"JUJU_AGENT_SOCKET_NETWORK="+paths.GetJujucClientSocket(remote).Network,
-		"JUJU_UNIT_NAME="+ctx.unitName,
-		"JUJU_MODEL_UUID="+ctx.uuid,
-		"JUJU_MODEL_NAME="+ctx.modelName,
-		"JUJU_API_ADDRESSES="+strings.Join(ctx.apiAddrs, " "),
-		"JUJU_SLA="+ctx.slaLevel,
-		"JUJU_MACHINE_ID="+ctx.assignedMachineTag.Id(),
-		"JUJU_PRINCIPAL_UNIT="+ctx.principal,
-		"JUJU_AVAILABILITY_ZONE="+ctx.availabilityZone,
+		"JUJU_CONTEXT_ID="+c.id,
+		"JUJU_HOOK_NAME="+c.hookName,
+		"JUJU_AGENT_SOCKET_ADDRESS="+paths.GetJujucClientSocket().Address,
+		"JUJU_AGENT_SOCKET_NETWORK="+paths.GetJujucClientSocket().Network,
+		"JUJU_UNIT_NAME="+c.unitName,
+		"JUJU_MODEL_UUID="+c.uuid,
+		"JUJU_MODEL_NAME="+c.modelName,
+		"JUJU_API_ADDRESSES="+strings.Join(c.apiAddrs, " "),
+		"JUJU_MACHINE_ID="+c.assignedMachineTag.Id(),
+		"JUJU_PRINCIPAL_UNIT="+c.principal,
+		"JUJU_AVAILABILITY_ZONE="+c.availabilityZone,
 		"JUJU_VERSION="+version.Current.String(),
-		"CLOUD_API_VERSION="+ctx.cloudAPIVersion,
+		"CLOUD_API_VERSION="+c.cloudAPIVersion,
 		// Some of these will be empty, but that is fine, better
 		// to explicitly export them as empty.
-		"JUJU_CHARM_HTTP_PROXY="+ctx.jujuProxySettings.Http,
-		"JUJU_CHARM_HTTPS_PROXY="+ctx.jujuProxySettings.Https,
-		"JUJU_CHARM_FTP_PROXY="+ctx.jujuProxySettings.Ftp,
-		"JUJU_CHARM_NO_PROXY="+ctx.jujuProxySettings.NoProxy,
+		"JUJU_CHARM_HTTP_PROXY="+c.jujuProxySettings.Http,
+		"JUJU_CHARM_HTTPS_PROXY="+c.jujuProxySettings.Https,
+		"JUJU_CHARM_FTP_PROXY="+c.jujuProxySettings.Ftp,
+		"JUJU_CHARM_NO_PROXY="+c.jujuProxySettings.NoProxy,
 	)
-	if remote {
-		vars = append(vars,
-			"JUJU_AGENT_CA_CERT="+path.Join(paths.GetBaseDir(), caas.CACertFile),
-		)
-	}
-	if r, err := ctx.HookRelation(); err == nil {
+	if r, err := c.HookRelation(); err == nil {
 		vars = append(vars,
 			"JUJU_RELATION="+r.Name(),
 			"JUJU_RELATION_ID="+r.FakeId(),
-			"JUJU_REMOTE_UNIT="+ctx.remoteUnitName,
-			"JUJU_REMOTE_APP="+ctx.remoteApplicationName,
+			"JUJU_REMOTE_UNIT="+c.remoteUnitName,
+			"JUJU_REMOTE_APP="+c.remoteApplicationName,
 		)
 
-		if ctx.departingUnitName != "" {
+		if c.departingUnitName != "" {
 			vars = append(vars,
-				"JUJU_DEPARTING_UNIT="+ctx.departingUnitName,
+				"JUJU_DEPARTING_UNIT="+c.departingUnitName,
 			)
 		}
-	} else if !errors.IsNotFound(err) {
+	} else if !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
-	if ctx.actionData != nil {
+	if c.actionData != nil {
 		vars = append(vars,
-			"JUJU_ACTION_NAME="+ctx.actionData.Name,
-			"JUJU_ACTION_UUID="+ctx.actionData.Tag.Id(),
-			"JUJU_ACTION_TAG="+ctx.actionData.Tag.String(),
+			"JUJU_ACTION_NAME="+c.actionData.Name,
+			"JUJU_ACTION_UUID="+c.actionData.Tag.Id(),
+			"JUJU_ACTION_TAG="+c.actionData.Tag.String(),
 		)
 	}
-	if ctx.workloadName != "" {
-		vars = append(vars, "JUJU_WORKLOAD_NAME="+ctx.workloadName)
-		if ctx.noticeID != "" {
+	if c.workloadName != "" {
+		vars = append(vars, "JUJU_WORKLOAD_NAME="+c.workloadName)
+		if c.noticeID != "" {
 			vars = append(vars,
-				"JUJU_NOTICE_ID="+ctx.noticeID,
-				"JUJU_NOTICE_TYPE="+ctx.noticeType,
-				"JUJU_NOTICE_KEY="+ctx.noticeKey,
+				"JUJU_NOTICE_ID="+c.noticeID,
+				"JUJU_NOTICE_TYPE="+c.noticeType,
+				"JUJU_NOTICE_KEY="+c.noticeKey,
 			)
 		}
-		if ctx.checkName != "" {
-			vars = append(vars, "JUJU_PEBBLE_CHECK_NAME="+ctx.checkName)
+		if c.checkName != "" {
+			vars = append(vars, "JUJU_PEBBLE_CHECK_NAME="+c.checkName)
 		}
 	}
 
-	if ctx.baseUpgradeTarget != "" {
-		// We need to set both the base and the series for the hook. This until
-		// we migrate everything to use base.
-		b, err := corebase.ParseBaseFromString(ctx.baseUpgradeTarget)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		s, err := corebase.GetSeriesFromBase(b)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-
+	if c.secretURI != "" {
 		vars = append(vars,
-			"JUJU_TARGET_BASE="+ctx.baseUpgradeTarget,
-			"JUJU_TARGET_SERIES="+s,
+			"JUJU_SECRET_ID="+c.secretURI,
+			"JUJU_SECRET_LABEL="+c.secretLabel,
 		)
-	}
-
-	if ctx.secretURI != "" {
-		vars = append(vars,
-			"JUJU_SECRET_ID="+ctx.secretURI,
-			"JUJU_SECRET_LABEL="+ctx.secretLabel,
-		)
-		if ctx.secretRevision > 0 {
+		if c.secretRevision > 0 {
 			vars = append(vars,
-				"JUJU_SECRET_REVISION="+strconv.Itoa(ctx.secretRevision),
+				"JUJU_SECRET_REVISION="+strconv.Itoa(c.secretRevision),
 			)
 		}
 	}
 
-	if storage, err := ctx.HookStorage(); err == nil {
+	if storage, err := c.HookStorage(ctx); err == nil {
 		vars = append(vars,
 			"JUJU_STORAGE_ID="+storage.Tag().Id(),
 			"JUJU_STORAGE_LOCATION="+storage.Location(),
@@ -1607,12 +1489,20 @@ func (ctx *HookContext) HookVars(
 		return nil, errors.Trace(err)
 	}
 
-	return append(vars, OSDependentEnvVars(paths, env)...), nil
+	if scope := coretrace.SpanFromContext(ctx).Scope(); scope.TraceID() != "" {
+		vars = append(vars,
+			"JUJU_TRACE_ID="+scope.TraceID(),
+			"JUJU_SPAN_ID="+scope.SpanID(),
+			fmt.Sprintf("JUJU_TRACE_FLAGS=%d", scope.TraceFlags()),
+		)
+	}
+
+	return append(vars, UbuntuEnvVars(paths, env)...), nil
 }
 
-func (ctx *HookContext) handleReboot(ctxErr error) error {
-	ctx.logger.Tracef("checking for reboot request")
-	rebootPriority := ctx.GetRebootPriority()
+func (c *HookContext) handleReboot(ctx context.Context, ctxErr error) error {
+	c.logger.Tracef(ctx, "checking for reboot request")
+	rebootPriority := c.GetRebootPriority()
 	switch rebootPriority {
 	case jujuc.RebootSkip:
 		return ctxErr
@@ -1628,11 +1518,11 @@ func (ctx *HookContext) handleReboot(ctxErr error) error {
 
 	// Do a best-effort attempt to set the unit agent status; we don't care
 	// if it fails as we will request a reboot anyway.
-	if err := ctx.unit.SetAgentStatus(status.Rebooting, "", nil); err != nil {
-		ctx.logger.Errorf("updating agent status: %v", err)
+	if err := c.unit.SetAgentStatus(ctx, status.Rebooting, "", nil); err != nil {
+		c.logger.Errorf(ctx, "updating agent status: %v", err)
 	}
 
-	if err := ctx.unit.RequestReboot(); err != nil {
+	if err := c.unit.RequestReboot(ctx); err != nil {
 		return err
 	}
 
@@ -1640,9 +1530,9 @@ func (ctx *HookContext) handleReboot(ctxErr error) error {
 }
 
 // Prepare implements the runner.Context interface.
-func (ctx *HookContext) Prepare() error {
-	if ctx.actionData != nil {
-		err := ctx.state.ActionBegin(ctx.actionData.Tag)
+func (c *HookContext) Prepare(ctx context.Context) error {
+	if c.actionData != nil {
+		err := c.uniter.ActionBegin(ctx, c.actionData.Tag)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1651,31 +1541,31 @@ func (ctx *HookContext) Prepare() error {
 }
 
 // Flush implements the runner.Context interface.
-func (ctx *HookContext) Flush(process string, ctxErr error) error {
+func (c *HookContext) Flush(ctx context.Context, process string, ctxErr error) error {
 	// Apply the changes if no error reported while the hook was executing.
 	var flushErr error
 	if ctxErr == nil {
-		flushErr = ctx.doFlush(process)
+		flushErr = c.doFlush(ctx, process)
 	}
 
-	if ctx.actionData != nil {
+	if c.actionData != nil {
 		// While an Action is executing, errors may happen as part of
 		// its normal flow. We pass both potential action errors
 		// (ctxErr) and any flush errors to finalizeAction helper
 		// which will figure out if an error needs to be returned back
 		// to the uniter.
-		return ctx.finalizeAction(ctxErr, flushErr)
+		return c.finalizeAction(ctx, ctxErr, flushErr)
 	}
 
 	// TODO(gsamfira): Just for now, reboot will not be supported in actions.
 	if ctxErr == nil {
 		ctxErr = flushErr
 	}
-	return ctx.handleReboot(ctxErr)
+	return c.handleReboot(ctx, ctxErr)
 }
 
-func (ctx *HookContext) doFlush(process string) error {
-	b := uniter.NewCommitHookParamsBuilder(ctx.unit.Tag())
+func (c *HookContext) doFlush(ctx context.Context, process string) error {
+	b := uniter.NewCommitHookParamsBuilder(c.unit.Tag())
 
 	// When processing config changed hooks we need to ensure that the
 	// relation settings for the unit endpoints are up to date after
@@ -1684,40 +1574,40 @@ func (ctx *HookContext) doFlush(process string) error {
 		b.UpdateNetworkInfo()
 	}
 
-	if ctx.charmStateCacheDirty {
-		b.UpdateCharmState(ctx.cachedCharmState)
+	if c.charmStateCacheDirty {
+		b.UpdateCharmState(c.cachedCharmState)
 	}
 
-	for _, rctx := range ctx.relations {
-		unitSettings, appSettings := rctx.FinalSettings()
+	for _, rc := range c.relations {
+		unitSettings, appSettings := rc.FinalSettings()
 		if len(unitSettings)+len(appSettings) == 0 {
 			continue // no settings need updating
 		}
-		b.UpdateRelationUnitSettings(rctx.RelationTag().String(), unitSettings, appSettings)
+		b.UpdateRelationUnitSettings(rc.RelationTag().String(), unitSettings, appSettings)
 	}
 
-	for endpointName, portRanges := range ctx.portRangeChanges.pendingOpenRanges {
+	for endpointName, portRanges := range c.portRangeChanges.pendingOpenRanges {
 		for _, pr := range portRanges {
 			b.OpenPortRange(endpointName, pr)
 		}
 	}
-	for endpointName, portRanges := range ctx.portRangeChanges.pendingCloseRanges {
+	for endpointName, portRanges := range c.portRangeChanges.pendingCloseRanges {
 		for _, pr := range portRanges {
 			b.ClosePortRange(endpointName, pr)
 		}
 	}
 
-	if len(ctx.storageAddConstraints) > 0 {
-		b.AddStorage(ctx.storageAddConstraints)
+	if len(c.storageAddDirectives) > 0 {
+		b.AddStorage(c.storageAddDirectives)
 	}
 
 	// Before saving the secret metadata to Juju, save the content to an external
 	// backend (if configured) - we need the backend id to send to Juju.
 	// If the flush to Juju fails, we'll delete the external content.
-	var secretsBackend secrets.BackendsClient
-	if ctx.secretChanges.haveContentUpdates() {
+	var secretsBackend api.SecretsBackend
+	if c.secretChanges.haveContentUpdates() {
 		var err error
-		secretsBackend, err = ctx.getSecretsBackend()
+		secretsBackend, err = c.getSecretsBackend()
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1732,8 +1622,8 @@ func (ctx *HookContext) doFlush(process string) error {
 		pendingRevokes     []uniter.SecretGrantRevokeArgs
 		pendingTrackLatest []string
 	)
-	for _, c := range ctx.secretChanges.pendingCreates {
-		ref, err := secretsBackend.SaveContent(c.URI, 1, c.Value)
+	for _, c := range c.secretChanges.pendingCreates {
+		ref, err := secretsBackend.SaveContent(ctx, c.URI, 1, c.Value)
 		if errors.Is(err, errors.NotSupported) {
 			pendingCreates = append(pendingCreates, c)
 			continue
@@ -1746,14 +1636,14 @@ func (ctx *HookContext) doFlush(process string) error {
 		c.Value = nil
 		pendingCreates = append(pendingCreates, c)
 	}
-	for _, u := range ctx.secretChanges.pendingUpdates {
+	for _, u := range c.secretChanges.pendingUpdates {
 		// Juju checks that the current revision is stable when updating metadata so it's
 		// safe to increment here knowing the same value will be saved in Juju.
 		if u.Value == nil || u.Value.IsEmpty() {
 			pendingUpdates = append(pendingUpdates, u.SecretUpsertArg)
 			continue
 		}
-		ref, err := secretsBackend.SaveContent(u.URI, u.CurrentRevision+1, u.Value)
+		ref, err := secretsBackend.SaveContent(ctx, u.URI, u.CurrentRevision+1, u.Value)
 		if errors.Is(err, errors.NotSupported) {
 			pendingUpdates = append(pendingUpdates, u.SecretUpsertArg)
 			continue
@@ -1767,9 +1657,9 @@ func (ctx *HookContext) doFlush(process string) error {
 		pendingUpdates = append(pendingUpdates, u.SecretUpsertArg)
 	}
 
-	for _, d := range ctx.secretChanges.pendingDeletes {
+	for _, d := range c.secretChanges.pendingDeletes {
 		pendingDeletes = append(pendingDeletes, d)
-		md, ok := ctx.secretMetadata[d.URI.ID]
+		md, ok := c.secretMetadata[d.URI.ID]
 		if !ok {
 			continue
 		}
@@ -1778,8 +1668,9 @@ func (ctx *HookContext) doFlush(process string) error {
 			// Delete all known revisions, this avoids a race condition where a
 			// new revision is being created concurrently with us asking to
 			// delete existing revisions
-			allRevs, err := ctx.secretsClient.OwnedSecretRevisions(
-				ctx.unit.Tag(), d.URI)
+			allRevs, err := c.secretsClient.OwnedSecretRevisions(
+				ctx,
+				c.unit.Tag(), d.URI)
 			if err != nil {
 				return errors.Annotatef(
 					err, "getting revisions for %q", d.URI.ID,
@@ -1795,10 +1686,10 @@ func (ctx *HookContext) doFlush(process string) error {
 		}
 		// TODO: let the controller know that these secret revisions likely
 		// don't exist anymore before attempting to delete their content.
-		ctx.logger.Debugf("deleting secret %q provider ids: %v", d.URI.ID, toDelete)
+		c.logger.Debugf(ctx, "deleting secret %q provider ids: %v", d.URI.ID, toDelete)
 		for _, rev := range toDelete {
-			if err := secretsBackend.DeleteContent(d.URI, rev); err != nil {
-				if errors.Is(err, errors.NotFound) {
+			if err := secretsBackend.DeleteContent(ctx, d.URI, rev); err != nil {
+				if errors.Is(err, secreterrors.SecretRevisionNotFound) {
 					continue
 				}
 				return errors.Annotatef(err, "cannot delete secret %q revision %d from backend: %v", d.URI.ID, rev, err)
@@ -1806,45 +1697,42 @@ func (ctx *HookContext) doFlush(process string) error {
 		}
 	}
 
-	for _, grants := range ctx.secretChanges.pendingGrants {
+	for _, grants := range c.secretChanges.pendingGrants {
 		for _, g := range grants {
 			pendingGrants = append(pendingGrants, g)
 		}
 	}
 
-	for _, revokes := range ctx.secretChanges.pendingRevokes {
+	for _, revokes := range c.secretChanges.pendingRevokes {
 		pendingRevokes = append(pendingRevokes, revokes...)
 	}
 
-	for uri := range ctx.secretChanges.pendingTrackLatest {
+	for uri := range c.secretChanges.pendingTrackLatest {
 		pendingTrackLatest = append(pendingTrackLatest, uri)
 	}
 
-	b.AddSecretCreates(pendingCreates)
+	if err := b.AddSecretCreates(pendingCreates); err != nil {
+		// Should never happen.
+		return errors.Trace(err)
+	}
 	b.AddSecretUpdates(pendingUpdates)
 	b.AddSecretDeletes(pendingDeletes)
 	b.AddSecretGrants(pendingGrants)
 	b.AddSecretRevokes(pendingRevokes)
 	b.AddTrackLatest(pendingTrackLatest)
 
-	if ctx.modelType == model.CAAS {
-		if err := ctx.addCommitHookChangesForCAAS(b, process); err != nil {
-			return err
-		}
-	}
-
 	// Generate change request but skip its execution if no changes are pending.
 	commitReq, numChanges := b.Build()
 	if numChanges > 0 {
-		if err := ctx.unit.CommitHookChanges(commitReq); err != nil {
-			ctx.logger.Errorf("cannot apply changes: %v", err)
+		if err := c.unit.CommitHookChanges(ctx, commitReq); err != nil {
+			c.logger.Errorf(ctx, "cannot apply changes: %v", err)
 		cleanupDone:
 			for _, secretId := range cleanups {
-				if err2 := secretsBackend.DeleteExternalContent(secretId); err2 != nil {
+				if err2 := secretsBackend.DeleteExternalContent(ctx, secretId); err2 != nil {
 					if errors.Is(err, errors.NotSupported) {
 						break cleanupDone
 					}
-					ctx.logger.Errorf("cannot cleanup secret %q: %v", secretId, err2)
+					c.logger.Errorf(ctx, "cannot cleanup secret %q: %v", secretId, err2)
 				}
 			}
 			return errors.Trace(err)
@@ -1852,60 +1740,24 @@ func (ctx *HookContext) doFlush(process string) error {
 	}
 
 	// Call completed successfully; update local state
-	ctx.charmStateCacheDirty = false
-	return nil
-}
-
-// If we're running the upgrade-charm hook and no podspec update was done,
-// we'll still trigger a change to a counter on the podspec so that we can
-// ensure any other charm changes (eg storage) are acted on.
-func (ctx *HookContext) addCommitHookChangesForCAAS(builder *uniter.CommitHookParamsBuilder, process string) error {
-	if ctx.podSpecYaml == nil && ctx.k8sRawSpecYaml == nil && process != string(hooks.UpgradeCharm) {
-		// No ops for any situation unless any k8s spec needs to be set or "upgrade-charm" was run.
-		return nil
-	}
-	if ctx.podSpecYaml != nil && ctx.k8sRawSpecYaml != nil {
-		return errors.NewForbidden(nil, "either k8s-spec-set or k8s-raw-set can be run for each application, but not both")
-	}
-
-	isLeader, err := ctx.IsLeader()
-	if err != nil {
-		return errors.Annotatef(err, "cannot determine leadership")
-	}
-	// Only leader can set k8s spec.
-	if !isLeader {
-		if process == string(hooks.UpgradeCharm) {
-			// We do not want to fail the non leader unit's upgrade-charm hook.
-			return nil
-		}
-		ctx.logger.Errorf("%v is not the leader but is setting application k8s spec", ctx.unitName)
-		return ErrIsNotLeader
-	}
-
-	appTag := names.NewApplicationTag(ctx.unit.ApplicationName())
-	if ctx.k8sRawSpecYaml != nil {
-		builder.SetRawK8sSpec(appTag, ctx.k8sRawSpecYaml)
-	} else {
-		// either set k8s spec or increment upgrade-counter.
-		builder.SetPodSpec(appTag, ctx.podSpecYaml)
-	}
+	c.charmStateCacheDirty = false
 	return nil
 }
 
 // finalizeAction passes back the final status of an Action hook to state.
 // It wraps any errors which occurred in normal behavior of the Action run;
 // only errors passed in unhandledErr will be returned.
-func (ctx *HookContext) finalizeAction(err, flushErr error) error {
+func (c *HookContext) finalizeAction(ctx context.Context, err, flushErr error) error {
 	// TODO (binary132): synchronize with gsamfira's reboot logic
-	ctx.actionDataMu.Lock()
-	defer ctx.actionDataMu.Unlock()
-	message := ctx.actionData.ResultsMessage
-	results := ctx.actionData.ResultsMap
-	tag := ctx.actionData.Tag
+	c.actionDataMu.Lock()
+	defer c.actionDataMu.Unlock()
+	message := c.actionData.ResultsMessage
+	results := c.actionData.ResultsMap
+	tag := c.actionData.Tag
 	actionStatus := params.ActionCompleted
-	if ctx.actionData.Failed {
+	if c.actionData.Failed {
 		select {
-		case <-ctx.actionData.Cancel:
+		case <-c.actionData.Cancel:
 			actionStatus = params.ActionAborted
 		default:
 			actionStatus = params.ActionFailed
@@ -1917,10 +1769,10 @@ func (ctx *HookContext) finalizeAction(err, flushErr error) error {
 	if err != nil {
 		message = err.Error()
 		if charmrunner.IsMissingHookError(err) {
-			message = fmt.Sprintf("action not implemented on unit %q", ctx.unitName)
+			message = fmt.Sprintf("action not implemented on unit %q", c.unitName)
 		}
 		select {
-		case <-ctx.actionData.Cancel:
+		case <-c.actionData.Cancel:
 			actionStatus = params.ActionAborted
 		default:
 			actionStatus = params.ActionFailed
@@ -1944,26 +1796,26 @@ func (ctx *HookContext) finalizeAction(err, flushErr error) error {
 		}
 	}
 
-	callErr := ctx.state.ActionFinish(tag, actionStatus, results, message)
+	callErr := c.uniter.ActionFinish(ctx, tag, actionStatus, results, message)
 	// Prevent the unit agent from looping if it's impossible to finalise the action.
 	if params.IsCodeNotFoundOrCodeUnauthorized(callErr) || params.IsCodeAlreadyExists(callErr) {
-		ctx.logger.Warningf("error finalising action %v: %v", tag.Id(), callErr)
+		c.logger.Warningf(ctx, "error finalising action %v: %v", tag.Id(), callErr)
 		callErr = nil
 	}
 	return errors.Trace(callErr)
 }
 
 // killCharmHook tries to kill the current running charm hook.
-func (ctx *HookContext) killCharmHook() error {
-	proc := ctx.GetProcess()
+func (c *HookContext) killCharmHook(ctx context.Context) error {
+	proc := c.GetProcess()
 	if proc == nil {
 		// nothing to kill
 		return charmrunner.ErrNoProcess
 	}
-	ctx.logger.Infof("trying to kill context process %v", proc.Pid())
+	c.logger.Infof(ctx, "trying to kill context process %v", proc.Pid())
 
-	tick := ctx.clock.After(0)
-	timeout := ctx.clock.After(30 * time.Second)
+	tick := c.clock.After(0)
+	timeout := c.clock.After(30 * time.Second)
 	for {
 		// We repeatedly try to kill the process until we fail; this is
 		// because we don't control the *Process, and our clients expect
@@ -1974,48 +1826,48 @@ func (ctx *HookContext) killCharmHook() error {
 		case <-tick:
 			err := proc.Kill()
 			if err != nil {
-				ctx.logger.Infof("kill returned: %s", err)
-				ctx.logger.Infof("assuming already killed")
+				c.logger.Infof(ctx, "kill returned: %s", err)
+				c.logger.Infof(ctx, "assuming already killed")
 				return nil
 			}
 		case <-timeout:
 			return errors.Errorf("failed to kill context process %v", proc.Pid())
 		}
-		ctx.logger.Infof("waiting for context process %v to die", proc.Pid())
-		tick = ctx.clock.After(100 * time.Millisecond)
+		c.logger.Infof(ctx, "waiting for context process %v to die", proc.Pid())
+		tick = c.clock.After(100 * time.Millisecond)
 	}
 }
 
 // UnitWorkloadVersion returns the version of the workload reported by
 // the current unit.
 // Implements jujuc.HookContext.ContextVersion, part of runner.Context.
-func (ctx *HookContext) UnitWorkloadVersion() (string, error) {
-	return ctx.state.UnitWorkloadVersion(ctx.unit.Tag())
+func (c *HookContext) UnitWorkloadVersion(ctx context.Context) (string, error) {
+	return c.uniter.UnitWorkloadVersion(ctx, c.unit.Tag())
 }
 
 // SetUnitWorkloadVersion sets the current unit's workload version to
 // the specified value.
 // Implements jujuc.HookContext.ContextVersion, part of runner.Context.
-func (ctx *HookContext) SetUnitWorkloadVersion(version string) error {
-	return ctx.state.SetUnitWorkloadVersion(ctx.unit.Tag(), version)
+func (c *HookContext) SetUnitWorkloadVersion(ctx context.Context, version string) error {
+	return c.uniter.SetUnitWorkloadVersion(ctx, c.unit.Tag(), version)
 }
 
 // NetworkInfo returns the network info for the given bindings on the given relation.
 // Implements jujuc.HookContext.ContextNetworking, part of runner.Context.
-func (ctx *HookContext) NetworkInfo(bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error) {
+func (c *HookContext) NetworkInfo(ctx context.Context, bindingNames []string, relationId int) (map[string]params.NetworkInfoResult, error) {
 	var relId *int
 	if relationId != -1 {
 		relId = &relationId
 	}
-	return ctx.unit.NetworkInfo(bindingNames, relId)
+	return c.unit.NetworkInfo(ctx, bindingNames, relId)
 }
 
 // WorkloadName returns the name of the container/workload for workload hooks.
-func (ctx *HookContext) WorkloadName() (string, error) {
-	if ctx.workloadName == "" {
+func (c *HookContext) WorkloadName() (string, error) {
+	if c.workloadName == "" {
 		return "", errors.NotFoundf("workload name")
 	}
-	return ctx.workloadName, nil
+	return c.workloadName, nil
 }
 
 // WorkloadNoticeType returns the type of the notice for workload notice hooks.
@@ -2045,23 +1897,23 @@ func (ctx *HookContext) WorkloadCheckName() (string, error) {
 // SecretURI returns the secret URI for secret hooks.
 // This is not yet used by any hook commands - it is exported
 // for tests to use.
-func (ctx *HookContext) SecretURI() (string, error) {
-	if ctx.secretURI == "" {
+func (c *HookContext) SecretURI() (string, error) {
+	if c.secretURI == "" {
 		return "", errors.NotFoundf("secret URI")
 	}
-	return ctx.secretURI, nil
+	return c.secretURI, nil
 }
 
 // SecretLabel returns the secret label for secret hooks.
 // This is not yet used by any hook commands - it is exported
 // for tests to use.
-func (ctx *HookContext) SecretLabel() string {
-	return ctx.secretLabel
+func (c *HookContext) SecretLabel() string {
+	return c.secretLabel
 }
 
 // SecretRevision returns the secret revision for secret hooks.
 // This is not yet used by any hook commands - it is exported
 // for tests to use.
-func (ctx *HookContext) SecretRevision() int {
-	return ctx.secretRevision
+func (c *HookContext) SecretRevision() int {
+	return c.secretRevision
 }

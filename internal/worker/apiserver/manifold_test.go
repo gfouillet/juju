@@ -4,21 +4,20 @@
 package apiserver_test
 
 import (
+	"context"
 	"net/http"
+	"testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	"github.com/juju/worker/v3/workertest"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dt "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
 	"github.com/prometheus/client_golang/prometheus"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/agent"
 	coreapiserver "github.com/juju/juju/apiserver"
@@ -26,134 +25,155 @@ import (
 	"github.com/juju/juju/apiserver/authentication/macaroon"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/auditlog"
-	"github.com/juju/juju/core/cache"
-	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/flightrecorder"
+	corehttp "github.com/juju/juju/core/http"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/multiwatcher"
-	"github.com/juju/juju/core/presence"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/internal/jwtparser"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/apiserver"
 	"github.com/juju/juju/internal/worker/gate"
 	"github.com/juju/juju/internal/worker/lease"
-	"github.com/juju/juju/internal/worker/syslogger"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/worker/trace"
+	"github.com/juju/juju/internal/worker/watcherregistry"
+	jujutesting "github.com/juju/juju/juju/testing"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	manifold dependency.Manifold
 
-	agent                *mockAgent
-	auditConfig          stubAuditConfig
-	authenticator        *mockAuthenticator
-	clock                *testclock.Clock
-	context              dependency.Context
-	controller           *cache.Controller
-	hub                  pubsub.StructuredHub
-	leaseManager         *lease.Manager
-	metricsCollector     *coreapiserver.Collector
-	multiwatcherFactory  multiwatcher.Factory
-	mux                  *apiserverhttp.Mux
-	prometheusRegisterer stubPrometheusRegisterer
-	state                stubStateTracker
-	upgradeGate          stubGateWaiter
-	sysLogger            syslogger.SysLogger
-	charmhubHTTPClient   *http.Client
-	dbGetter             stubDBGetter
-	jwtParser            *jwtparser.Parser
+	agent                   *mockAgent
+	auditConfig             stubAuditConfig
+	authenticator           *mockAuthenticator
+	clock                   *testclock.Clock
+	getter                  dependency.Getter
+	leaseManager            *lease.Manager
+	metricsCollector        *coreapiserver.Collector
+	mux                     *apiserverhttp.Mux
+	prometheusRegisterer    stubPrometheusRegisterer
+	upgradeGate             stubGateWaiter
+	logSink                 corelogger.ModelLogger
+	httpClientGetter        *stubHTTPClientGetter
+	charmhubHTTPClient      *http.Client
+	macaroonHTTPClient      *http.Client
+	dbGetter                stubWatchableDBGetter
+	domainServicesGetter    *stubDomainServicesGetter
+	controllerConfigService *MockControllerConfigService
+	modelService            *MockModelService
+	tracerGetter            stubTracerGetter
+	objectStoreGetter       stubObjectStoreGetter
+	watcherRegistryGetter   *stubWatcherRegistryGetter
+	jwtParser               *jwtparser.Parser
+	flightRecorder          flightrecorder.FlightRecorder
 
-	stub testing.Stub
+	stub testhelpers.Stub
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	s.agent = &mockAgent{}
 	s.authenticator = &mockAuthenticator{}
 	s.clock = testclock.NewClock(time.Time{})
-	controller, err := cache.NewController(cache.ControllerConfig{
-		Changes: make(chan interface{}),
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	s.controller = controller
 	s.mux = apiserverhttp.NewMux()
-	s.state = stubStateTracker{}
 	s.metricsCollector = coreapiserver.NewMetricsCollector()
 	s.upgradeGate = stubGateWaiter{}
 	s.auditConfig = stubAuditConfig{}
-	s.multiwatcherFactory = &fakeMultiwatcherFactory{}
 	s.leaseManager = &lease.Manager{}
-	s.sysLogger = &mockSysLogger{}
+	s.logSink = &mockModelLogger{}
 	s.charmhubHTTPClient = &http.Client{}
+	s.macaroonHTTPClient = &http.Client{}
+	s.httpClientGetter = &stubHTTPClientGetter{
+		client: s.charmhubHTTPClient,
+	}
 	s.jwtParser = &jwtparser.Parser{}
 	s.stub.ResetCalls()
+	s.domainServicesGetter = &stubDomainServicesGetter{}
+	s.watcherRegistryGetter = &stubWatcherRegistryGetter{}
+	s.flightRecorder = flightrecorder.NoopRecorder{}
 
-	s.context = s.newContext(nil)
+	s.getter = s.newGetter(nil)
 	s.manifold = apiserver.Manifold(apiserver.ManifoldConfig{
 		AgentName:                         "agent",
 		AuthenticatorName:                 "authenticator",
 		ClockName:                         "clock",
 		MuxName:                           "mux",
-		ModelCacheName:                    "modelcache",
-		MultiwatcherName:                  "multiwatcher",
-		StateName:                         "state",
 		UpgradeGateName:                   "upgrade",
 		AuditConfigUpdaterName:            "auditconfig-updater",
 		LeaseManagerName:                  "lease-manager",
-		SyslogName:                        "syslog",
-		CharmhubHTTPClientName:            "charmhub-http-client",
-		DBAccessorName:                    "db-accessor",
+		LogSinkName:                       "log-sink",
+		HTTPClientName:                    "http-client",
+		DomainServicesName:                "domain-services",
+		TraceName:                         "trace",
+		ObjectStoreName:                   "object-store",
+		ChangeStreamName:                  "change-stream",
 		JWTParserName:                     "jwt-parser",
+		WatcherRegistryName:               "watcher-registry",
+		FlightRecorderName:                "flight-recorder",
 		PrometheusRegisterer:              &s.prometheusRegisterer,
 		RegisterIntrospectionHTTPHandlers: func(func(string, http.Handler)) {},
-		Hub:                               &s.hub,
-		Presence:                          presence.New(s.clock),
-		NewWorker:                         s.newWorker,
-		NewMetricsCollector:               s.newMetricsCollector,
+		GetControllerConfigService: func(getter dependency.Getter, name string) (apiserver.ControllerConfigService, error) {
+			return s.controllerConfigService, nil
+		},
+		GetModelService: func(getter dependency.Getter, name string) (apiserver.ModelService, error) {
+			return s.modelService, nil
+		},
+		NewWorker:           s.newWorker,
+		NewMetricsCollector: s.newMetricsCollector,
 	})
 }
 
-func (s *ManifoldSuite) newContext(overlay map[string]interface{}) dependency.Context {
+func (s *ManifoldSuite) newGetter(overlay map[string]interface{}) dependency.Getter {
 	resources := map[string]interface{}{
-		"agent":                s.agent,
-		"authenticator":        s.authenticator,
-		"clock":                s.clock,
-		"mux":                  s.mux,
-		"modelcache":           s.controller,
-		"multiwatcher":         s.multiwatcherFactory,
-		"state":                &s.state,
-		"upgrade":              &s.upgradeGate,
-		"auditconfig-updater":  s.auditConfig.get,
-		"lease-manager":        s.leaseManager,
-		"syslog":               s.sysLogger,
-		"charmhub-http-client": s.charmhubHTTPClient,
-		"db-accessor":          s.dbGetter,
-		"jwt-parser":           s.jwtParser,
+		"agent":               s.agent,
+		"authenticator":       s.authenticator,
+		"clock":               s.clock,
+		"mux":                 s.mux,
+		"upgrade":             &s.upgradeGate,
+		"auditconfig-updater": s.auditConfig.get,
+		"lease-manager":       s.leaseManager,
+		"log-sink":            s.logSink,
+		"http-client":         s.httpClientGetter,
+		"change-stream":       s.dbGetter,
+		"domain-services":     s.domainServicesGetter,
+		"trace":               s.tracerGetter,
+		"object-store":        s.objectStoreGetter,
+		"jwt-parser":          s.jwtParser,
+		"watcher-registry":    s.watcherRegistryGetter,
+		"flight-recorder":     s.flightRecorder,
 	}
 	for k, v := range overlay {
 		resources[k] = v
 	}
-	return dt.StubContext(nil, resources)
+	return dt.StubGetter(resources)
 }
 
-type mockSysLogger struct {
-	syslogger.SysLogger
+type mockModelLogger struct {
+	corelogger.ModelLogger
 }
 
-func (*mockSysLogger) Log([]corelogger.LogRecord) error {
+func (*mockModelLogger) Log([]corelogger.LogRecord) error {
 	return nil
 }
 
-func (s *ManifoldSuite) newWorker(config apiserver.Config) (worker.Worker, error) {
+func (s *ManifoldSuite) newWorker(ctx context.Context, config apiserver.Config) (worker.Worker, error) {
 	s.stub.MethodCall(s, "NewWorker", config)
 	if err := s.stub.NextErr(); err != nil {
 		return nil, err
 	}
-	return worker.NewRunner(worker.RunnerParams{}), nil
+	return worker.NewRunner(worker.RunnerParams{
+		Name: "apiserver",
+	})
 }
 
 func (s *ManifoldSuite) newMetricsCollector() *coreapiserver.Collector {
@@ -161,100 +181,84 @@ func (s *ManifoldSuite) newMetricsCollector() *coreapiserver.Collector {
 }
 
 var expectedInputs = []string{
-	"agent", "authenticator", "clock", "modelcache", "multiwatcher", "mux",
-	"state", "upgrade", "auditconfig-updater", "lease-manager",
-	"syslog", "charmhub-http-client", "db-accessor", "jwt-parser",
+	"agent", "authenticator", "clock", "mux",
+	"upgrade", "auditconfig-updater", "lease-manager",
+	"http-client", "change-stream",
+	"domain-services", "trace", "object-store", "log-sink",
+	"jwt-parser", "watcher-registry",
+	"flight-recorder",
 }
 
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(s.manifold.Inputs, jc.SameContents, expectedInputs)
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(s.manifold.Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *ManifoldSuite) TestMissingInputs(c *gc.C) {
-	for _, input := range expectedInputs {
-		context := s.newContext(map[string]interface{}{
-			input: dependency.ErrMissing,
-		})
-		_, err := s.manifold.Start(context)
-		c.Assert(errors.Cause(err), gc.Equals, dependency.ErrMissing)
-
-		// The state tracker must have either no calls, or a Use and a Done.
-		if len(s.state.Calls()) > 0 {
-			s.state.CheckCallNames(c, "Use", "Done")
-		}
-		s.state.ResetCalls()
-	}
-}
-
-func (s *ManifoldSuite) TestStart(c *gc.C) {
+func (s *ManifoldSuite) TestStart(c *tc.C) {
 	w := s.startWorkerClean(c)
 	workertest.CleanKill(c, w)
 
 	s.stub.CheckCallNames(c, "NewWorker")
 	args := s.stub.Calls()[0].Args
-	c.Assert(args, gc.HasLen, 1)
-	c.Assert(args[0], gc.FitsTypeOf, apiserver.Config{})
+	c.Assert(args, tc.HasLen, 1)
+	c.Assert(args[0], tc.FitsTypeOf, apiserver.Config{})
 	config := args[0].(apiserver.Config)
 
-	c.Assert(config.GetAuditConfig, gc.NotNil)
-	c.Assert(config.GetAuditConfig(), gc.DeepEquals, s.auditConfig.config)
+	c.Assert(config.GetAuditConfig, tc.NotNil)
+	c.Assert(config.GetAuditConfig(), tc.DeepEquals, s.auditConfig.config)
 	config.GetAuditConfig = nil
 
-	c.Assert(config.UpgradeComplete, gc.NotNil)
+	c.Assert(config.UpgradeComplete, tc.NotNil)
 	config.UpgradeComplete()
 	config.UpgradeComplete = nil
 	s.upgradeGate.CheckCallNames(c, "IsUnlocked")
 
-	c.Assert(config.RegisterIntrospectionHTTPHandlers, gc.NotNil)
+	c.Assert(config.RegisterIntrospectionHTTPHandlers, tc.NotNil)
 	config.RegisterIntrospectionHTTPHandlers = nil
 
-	c.Assert(config.Presence, gc.NotNil)
-	config.Presence = nil
-
 	// NewServer is hard-coded by the manifold to an internal shim.
-	c.Assert(config.NewServer, gc.NotNil)
+	c.Assert(config.NewServer, tc.NotNil)
 	config.NewServer = nil
 
 	// EmbeddedCommand is hard-coded by the manifold to an internal shim.
-	c.Assert(config.EmbeddedCommand, gc.NotNil)
+	c.Assert(config.EmbeddedCommand, tc.NotNil)
 	config.EmbeddedCommand = nil
 
-	c.Assert(config, jc.DeepEquals, apiserver.Config{
+	c.Assert(config, tc.DeepEquals, apiserver.Config{
 		AgentConfig:                &s.agent.conf,
 		LocalMacaroonAuthenticator: s.authenticator,
 		Clock:                      s.clock,
-		Controller:                 s.controller,
 		Mux:                        s.mux,
-		MultiwatcherFactory:        s.multiwatcherFactory,
-		StatePool:                  &s.state.pool,
 		LeaseManager:               s.leaseManager,
 		MetricsCollector:           s.metricsCollector,
-		Hub:                        &s.hub,
-		SysLogger:                  s.sysLogger,
+		LogSink:                    s.logSink,
 		CharmhubHTTPClient:         s.charmhubHTTPClient,
 		DBGetter:                   s.dbGetter,
+		DomainServicesGetter:       s.domainServicesGetter,
+		ControllerConfigService:    s.controllerConfigService,
+		TracerGetter:               s.tracerGetter,
+		ObjectStoreGetter:          s.objectStoreGetter,
+		ModelService:               s.modelService,
 		JWTParser:                  s.jwtParser,
+		WatcherRegistryGetter:      s.watcherRegistryGetter,
+		FlightRecorder:             s.flightRecorder,
 	})
 }
 
-func (s *ManifoldSuite) TestStopWorkerClosesState(c *gc.C) {
+func (s *ManifoldSuite) TestStopWorkerClosesState(c *tc.C) {
 	w := s.startWorkerClean(c)
 	defer workertest.CleanKill(c, w)
 
-	s.state.CheckCallNames(c, "Use")
-
 	workertest.CleanKill(c, w)
-	s.state.CheckCallNames(c, "Use", "Done")
 }
 
-func (s *ManifoldSuite) startWorkerClean(c *gc.C) worker.Worker {
-	w, err := s.manifold.Start(s.context)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *ManifoldSuite) startWorkerClean(c *tc.C) worker.Worker {
+	w, err := s.manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CheckAlive(c, w)
 	return w
 }
 
-func (s *ManifoldSuite) TestAddsAndRemovesMuxClients(c *gc.C) {
+func (s *ManifoldSuite) TestAddsAndRemovesMuxClients(c *tc.C) {
 	waitFinished := make(chan struct{})
 	w := s.startWorkerClean(c)
 	go func() {
@@ -290,7 +294,7 @@ type mockAgentConfig struct {
 	agent.Config
 	dataDir string
 	logDir  string
-	info    *controller.StateServingInfo
+	info    *controller.ControllerAgentInfo
 	values  map[string]string
 }
 
@@ -306,39 +310,19 @@ func (c *mockAgentConfig) DataDir() string {
 	return c.dataDir
 }
 
-func (c *mockAgentConfig) StateServingInfo() (controller.StateServingInfo, bool) {
+func (c *mockAgentConfig) StateServingInfo() (controller.ControllerAgentInfo, bool) {
 	if c.info != nil {
 		return *c.info, true
 	}
-	return controller.StateServingInfo{}, false
+	return controller.ControllerAgentInfo{}, false
 }
 
 func (c *mockAgentConfig) Value(key string) string {
 	return c.values[key]
 }
 
-type stubStateTracker struct {
-	testing.Stub
-	pool state.StatePool
-}
-
-func (s *stubStateTracker) Use() (*state.StatePool, error) {
-	s.MethodCall(s, "Use")
-	return &s.pool, s.NextErr()
-}
-
-func (s *stubStateTracker) Done() error {
-	s.MethodCall(s, "Done")
-	return s.NextErr()
-}
-
-func (s *stubStateTracker) Report() map[string]interface{} {
-	s.MethodCall(s, "Report")
-	return nil
-}
-
 type stubPrometheusRegisterer struct {
-	testing.Stub
+	testhelpers.Stub
 }
 
 func (s *stubPrometheusRegisterer) MustRegister(...prometheus.Collector) {
@@ -356,7 +340,7 @@ func (s *stubPrometheusRegisterer) Unregister(c prometheus.Collector) bool {
 }
 
 type stubGateWaiter struct {
-	testing.Stub
+	testhelpers.Stub
 	gate.Waiter
 }
 
@@ -366,7 +350,7 @@ func (w *stubGateWaiter) IsUnlocked() bool {
 }
 
 type stubAuditConfig struct {
-	testing.Stub
+	testhelpers.Stub
 	config auditlog.Config
 }
 
@@ -379,15 +363,41 @@ type mockAuthenticator struct {
 	macaroon.LocalMacaroonAuthenticator
 }
 
-type fakeMultiwatcherFactory struct {
-	multiwatcher.Factory
-}
+type stubWatchableDBGetter struct{}
 
-type stubDBGetter struct{}
-
-func (s stubDBGetter) GetDB(namespace string) (coredatabase.TrackedDB, error) {
+func (s stubWatchableDBGetter) GetWatchableDB(ctx context.Context, namespace string) (changestream.WatchableDB, error) {
 	if namespace != "controller" {
 		return nil, errors.Errorf(`expected a request for "controller" DB; got %q`, namespace)
 	}
 	return nil, nil
+}
+
+type stubDomainServicesGetter struct {
+	services.DomainServicesGetter
+}
+
+func (s *stubDomainServicesGetter) ServicesForModel(context.Context, model.UUID) (services.DomainServices, error) {
+	return nil, nil
+}
+
+type stubTracerGetter struct {
+	trace.TracerGetter
+}
+
+type stubObjectStoreGetter struct {
+	objectstore.ObjectStoreGetter
+}
+
+type stubHTTPClientGetter struct {
+	client *http.Client
+}
+
+func (s *stubHTTPClientGetter) GetHTTPClient(ctx context.Context, namespace corehttp.Purpose) (corehttp.HTTPClient, error) {
+	return s.client, nil
+}
+
+type stubWatcherRegistryGetter struct{}
+
+func (s *stubWatcherRegistryGetter) GetWatcherRegistry(ctx context.Context, cid uint64) (watcherregistry.WatcherRegistry, error) {
+	return jujutesting.NewTestRegistry()
 }

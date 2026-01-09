@@ -4,18 +4,13 @@
 package workerpool
 
 import (
+	"context"
 	"strings"
 	"sync"
 
-	"github.com/juju/errors"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/errors"
 )
-
-// Logger defines the logging methods that the worker pool uses.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Debugf(string, ...interface{})
-	Tracef(string, ...interface{})
-}
 
 // Task represents a unit of work which should be executed by the pool workers.
 type Task struct {
@@ -37,7 +32,7 @@ type Task struct {
 // which can be used by callers to detect when an error occurred and the
 // pool is shutting down.
 type WorkerPool struct {
-	logger Logger
+	logger logger.Logger
 
 	// A channel used to signal workers that they should finish their
 	// work and exit.
@@ -67,7 +62,7 @@ type WorkerPool struct {
 
 // NewWorkerPool returns a pool with the taskuested number of workers. Callers
 // must ensure to call the pool's Close() method to avoid leaking goroutines.
-func NewWorkerPool(logger Logger, size int) *WorkerPool {
+func NewWorkerPool(logger logger.Logger, size int) *WorkerPool {
 	// Size must be at least one
 	if size <= 0 {
 		size = 1
@@ -82,7 +77,7 @@ func NewWorkerPool(logger Logger, size int) *WorkerPool {
 
 	wp.wg.Add(size)
 	for workerID := 0; workerID < size; workerID++ {
-		wp.logger.Tracef("worker %d: starting new worker pool", workerID)
+		wp.logger.Tracef(context.TODO(), "worker %d: starting new worker pool", workerID)
 		go wp.taskWorker(workerID)
 	}
 
@@ -135,9 +130,9 @@ func (wp *WorkerPool) taskWorker(workerID int) {
 	for {
 		select {
 		case task := <-wp.taskQueueCh:
-			wp.logger.Debugf("worker %d: processing task %q", workerID, task.Type)
+			wp.logger.Debugf(context.TODO(), "worker %d: processing task %q", workerID, task.Type)
 			if err := task.Process(); err != nil {
-				wp.logger.Errorf("worker %d: shutting down pool due to error while handling a %q task: %v", workerID, task.Type, err)
+				wp.logger.Errorf(context.TODO(), "worker %d: shutting down pool due to error while handling a %q task: %v", workerID, task.Type, err)
 
 				// This is a buffered channel to allow every pool worker to report
 				// a single error before it exits. Consequently, this call can never
@@ -148,7 +143,7 @@ func (wp *WorkerPool) taskWorker(workerID int) {
 				return // worker cannot process any further tasks.
 			}
 		case <-wp.shutdownTriggerCh:
-			wp.logger.Tracef("worker %d: terminating as worker pool is shutting down", workerID)
+			wp.logger.Tracef(context.TODO(), "worker %d: terminating as worker pool is shutting down", workerID)
 			return
 		}
 	}

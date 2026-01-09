@@ -4,18 +4,20 @@
 package stateconfigwatcher
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/utils/v3/voyeur"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/agent"
-	apiagent "github.com/juju/juju/api/agent/agent"
+	coreagent "github.com/juju/juju/core/agent"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.worker.stateconfigwatcher")
+var logger = internallogger.GetLogger("juju.worker.stateconfigwatcher")
 
 type ManifoldConfig struct {
 	AgentName          string
@@ -37,9 +39,9 @@ type ManifoldConfig struct {
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{config.AgentName},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			var a agent.Agent
-			if err := context.Get(config.AgentName, &a); err != nil {
+			if err := getter.Get(config.AgentName, &a); err != nil {
 				return nil, err
 			}
 
@@ -48,7 +50,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			}
 
 			tagKind := a.CurrentConfig().Tag().Kind()
-			if !apiagent.IsAllowedControllerTag(tagKind) {
+			if !coreagent.IsAllowedControllerTag(tagKind) {
 				return nil, errors.New("manifold can only be used with a machine or controller agent")
 			}
 
@@ -72,7 +74,7 @@ func outputFunc(in worker.Worker, out interface{}) error {
 	}
 	switch outPointer := out.(type) {
 	case *bool:
-		*outPointer = inWorker.isStateServer()
+		*outPointer = inWorker.isControllerAgent()
 	default:
 		return errors.Errorf("out should be *bool; got %T", out)
 	}
@@ -85,17 +87,20 @@ type stateConfigWatcher struct {
 	agentConfigChanged *voyeur.Value
 }
 
-func (w *stateConfigWatcher) isStateServer() bool {
+func (w *stateConfigWatcher) isControllerAgent() bool {
 	config := w.agent.CurrentConfig()
-	_, ok := config.StateServingInfo()
+	_, ok := config.ControllerAgentInfo()
 	return ok
 }
 
 func (w *stateConfigWatcher) loop() error {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	watch := w.agentConfigChanged.Watch()
 	defer watch.Close()
 
-	lastValue := w.isStateServer()
+	lastValue := w.isControllerAgent()
 
 	watchCh := make(chan bool)
 	go func() {
@@ -117,17 +122,17 @@ func (w *stateConfigWatcher) loop() error {
 	for {
 		select {
 		case <-w.tomb.Dying():
-			logger.Infof("tomb dying")
+			logger.Infof(ctx, "tomb dying")
 			return tomb.ErrDying
 		case _, ok := <-watchCh:
 			if !ok {
 				return errors.New("config changed value closed")
 			}
-			if w.isStateServer() != lastValue {
-				// State serving info has been set or unset so restart
-				// so that dependents get notified. ErrBounce ensures
-				// that the manifold is restarted quickly.
-				logger.Debugf("state serving info change in agent config")
+			if w.isControllerAgent() != lastValue {
+				// Controller agent info has been set or unset so restart so
+				// that dependents get notified. ErrBounce ensures that the
+				// manifold is restarted quickly.
+				logger.Debugf(ctx, "controller agent info change in agent config")
 				return dependency.ErrBounce
 			}
 		}
@@ -142,4 +147,8 @@ func (w *stateConfigWatcher) Kill() {
 // Wait implements worker.Worker.
 func (w *stateConfigWatcher) Wait() error {
 	return w.tomb.Wait()
+}
+
+func (w *stateConfigWatcher) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }

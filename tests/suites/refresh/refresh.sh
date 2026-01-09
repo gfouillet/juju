@@ -13,7 +13,7 @@ run_refresh_local() {
 	wait_for "ubuntu" "$(idle_condition "ubuntu")"
 
 	OUT=$(juju refresh ubuntu --path "${charm_name}" 2>&1 || true)
-	if echo "${OUT}" | grep -E -vq "Added local charm"; then
+	if echo "${OUT}" | grep -v "no change" | grep -E -vq "Added local charm"; then
 		# shellcheck disable=SC2046
 		echo $(red "failed refreshing charm: ${OUT}")
 		exit 5
@@ -45,7 +45,7 @@ run_refresh_local_resources() {
 	# a bug in charm, opening the resource file throws:
 	# TypeError: invalid file
 	# The charm is using python 3. No error in ubuntu 20.04.
-	juju deploy "${charm_name}" juju-qa-test --series focal --resource foo-file="./tests/suites/resources/foo-file.txt"
+	juju deploy "${charm_name}" juju-qa-test --base ubuntu@20.04 --resource foo-file="./tests/suites/resources/foo-file.txt"
 	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test")"
 
 	juju refresh juju-qa-test --path "${charm_name}"
@@ -120,7 +120,7 @@ run_refresh_revision() {
 
 	ensure "${model_name}" "${file}"
 
-	juju deploy juju-qa-test --revision 22 --channel stable --series focal
+	juju deploy juju-qa-test --revision 22 --channel stable --base ubuntu@20.04
 	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test")"
 
 	# refresh to a revision not at the tip of the stable channel
@@ -133,6 +133,11 @@ run_refresh_revision() {
 	OUT=$(juju refresh juju-qa-test 2>&1 || true)
 	# shellcheck disable=SC2059
 	printf "${OUT}\n"
+
+	if echo "${OUT}" | head -n 1 | grep -vq "Added"; then
+		printf "refresh failed, cannot extract the revision number"
+		exit 5
+	fi
 
 	# format: Added charm-store charm "ubuntu", revision 21 in channel stable, to the model
 	revision=$(echo "${OUT}" | awk 'BEGIN{FS=","} {print $2}' | awk 'BEGIN{FS=" "} {print $2}')

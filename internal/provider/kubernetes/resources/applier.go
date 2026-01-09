@@ -9,12 +9,13 @@ import (
 
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 	"github.com/juju/retry"
 	"k8s.io/apimachinery/pkg/types"
+
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.kubernetes.provider.resources")
+var logger = internallogger.GetLogger("juju.kubernetes.provider.resources")
 
 var (
 	errConflict = errors.New("resource version conflict")
@@ -50,7 +51,7 @@ func (op *operation) process(ctx context.Context, rollback Applier) error {
 	// Because it's not good for non namespaced resources.
 	err := existingRes.Get(ctx)
 	found := true
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		found = false
 	} else if err != nil {
 		return errors.Annotatef(err, "checking if resource %q exists or not", existingRes.ID())
@@ -156,7 +157,7 @@ func (a *applier) Run(ctx context.Context, noRollback bool) (err error) {
 			return
 		}
 		if rollbackErr := rollback.Run(ctx, true); rollbackErr != nil {
-			logger.Warningf("rollback failed %s", rollbackErr.Error())
+			logger.Warningf(ctx, "rollback failed %s", rollbackErr.Error())
 		}
 	}()
 	for _, op := range a.ops {

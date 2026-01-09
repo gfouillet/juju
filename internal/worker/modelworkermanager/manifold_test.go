@@ -4,82 +4,117 @@
 package modelworkermanager_test
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	"github.com/juju/worker/v3/workertest"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
-	"github.com/juju/juju/agent"
-	"github.com/juju/juju/apiserver/apiserverhttp"
-	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dt "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
+
+	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/http"
+	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
+	modelservice "github.com/juju/juju/domain/model/service"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/pki"
+	pkitest "github.com/juju/juju/internal/pki/test"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/testhelpers"
+	jujutesting "github.com/juju/juju/internal/testing"
 	jworker "github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/worker/apiremoterelationcaller"
 	"github.com/juju/juju/internal/worker/modelworkermanager"
-	"github.com/juju/juju/pki"
-	pkitest "github.com/juju/juju/pki/test"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
 )
 
 type ManifoldSuite struct {
-	statetesting.StateSuite
+	jujutesting.BaseSuite
 
-	authority    pki.Authority
-	manifold     dependency.Manifold
-	context      dependency.Context
-	stateTracker stubStateTracker
-	sysLogger    stubLogger
+	authority                pki.Authority
+	manifold                 dependency.Manifold
+	getter                   dependency.Getter
+	logSinkGetter            dummyLogSinkGetter
+	domainServicesGetter     services.DomainServicesGetter
+	controllerDomainServices services.ControllerDomainServices
+	providerServicesGetter   services.ProviderServicesGetter
+	leaseManager             lease.Manager
+	httpClientGetter         http.HTTPClientGetter
+	apiRemoteCallerGetter    apiremoterelationcaller.APIRemoteCallerGetter
 
-	stub testing.Stub
+	logger logger.Logger
+
+	stub testhelpers.Stub
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
+
 	var err error
 	s.authority, err = pkitest.NewTestAuthority()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	s.StateSuite.SetUpTest(c)
+	s.BaseSuite.SetUpTest(c)
 
-	s.stateTracker = stubStateTracker{pool: s.StatePool}
+	s.leaseManager = stubLeaseManager{}
+	s.domainServicesGetter = stubDomainServicesGetter{}
+	s.controllerDomainServices = stubControllerDomainServices{}
+	s.providerServicesGetter = stubProviderServicesGetter{}
+	s.httpClientGetter = stubHTTPClientGetter{}
+	s.apiRemoteCallerGetter = stubAPIRemoteCallerGetter{}
 	s.stub.ResetCalls()
 
-	s.sysLogger = stubLogger{}
+	s.logSinkGetter = dummyLogSinkGetter{}
+	s.logger = loggertesting.WrapCheckLog(c)
 
-	s.context = s.newContext(nil)
+	s.getter = s.newGetter(nil)
 	s.manifold = modelworkermanager.Manifold(modelworkermanager.ManifoldConfig{
-		AgentName:      "agent",
-		AuthorityName:  "authority",
-		StateName:      "state",
-		MuxName:        "mux",
-		SyslogName:     "syslog",
-		NewWorker:      s.newWorker,
-		NewModelWorker: s.newModelWorker,
-		ModelMetrics:   dummyModelMetrics{},
-		Logger:         loggo.GetLogger("test"),
+		AuthorityName:                "authority",
+		LogSinkName:                  "log-sink",
+		LeaseManagerName:             "lease-manager",
+		DomainServicesName:           "domain-services",
+		ProviderServiceFactoriesName: "provider-services",
+		HTTPClientName:               "http-client",
+		APIRemoteCallerGetterName:    "api-remote-caller-getter",
+		NewWorker:                    s.newWorker,
+		NewModelWorker:               s.newModelWorker,
+		ModelMetrics:                 dummyModelMetrics{},
+		Logger:                       s.logger,
+		GetProviderServicesGetter: func(getter dependency.Getter, name string) (modelworkermanager.ProviderServicesGetter, error) {
+			var a any
+			if err := getter.Get(name, &a); err != nil {
+				return nil, errors.Trace(err)
+			}
+			return providerServicesGetter{}, nil
+		},
+		GetControllerConfig: func(ctx context.Context, domainServices services.DomainServices) (controller.Config, error) {
+			return jujutesting.FakeControllerConfig(), nil
+		},
 	})
 }
 
-var mux = apiserverhttp.NewMux()
-
-func (s *ManifoldSuite) newContext(overlay map[string]interface{}) dependency.Context {
-	resources := map[string]interface{}{
-		"agent":     &fakeAgent{},
-		"authority": s.authority,
-		"mux":       mux,
-		"state":     &s.stateTracker,
-		"syslog":    s.sysLogger,
+func (s *ManifoldSuite) newGetter(overlay map[string]any) dependency.Getter {
+	resources := map[string]any{
+		"authority":                s.authority,
+		"log-sink":                 s.logSinkGetter,
+		"lease-manager":            s.leaseManager,
+		"domain-services":          []any{s.domainServicesGetter, s.controllerDomainServices},
+		"provider-services":        s.providerServicesGetter,
+		"http-client":              s.httpClientGetter,
+		"api-remote-caller-getter": s.apiRemoteCallerGetter,
 	}
 	for k, v := range overlay {
 		resources[k] = v
 	}
-	return dt.StubContext(nil, resources)
+	return dt.StubGetter(resources)
 }
 
 func (s *ManifoldSuite) newWorker(config modelworkermanager.Config) (worker.Worker, error) {
@@ -87,7 +122,7 @@ func (s *ManifoldSuite) newWorker(config modelworkermanager.Config) (worker.Work
 	if err := s.stub.NextErr(); err != nil {
 		return nil, err
 	}
-	return worker.NewRunner(worker.RunnerParams{}), nil
+	return worker.NewRunner(worker.RunnerParams{Name: "model"})
 }
 
 func (s *ManifoldSuite) newModelWorker(config modelworkermanager.NewModelConfig) (worker.Worker, error) {
@@ -95,115 +130,123 @@ func (s *ManifoldSuite) newModelWorker(config modelworkermanager.NewModelConfig)
 	if err := s.stub.NextErr(); err != nil {
 		return nil, err
 	}
-	return worker.NewRunner(worker.RunnerParams{}), nil
+	return worker.NewRunner(worker.RunnerParams{Name: "model-worker"})
 }
 
-var expectedInputs = []string{"agent", "authority", "mux", "state", "syslog"}
-
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(s.manifold.Inputs, jc.SameContents, expectedInputs)
+var expectedInputs = []string{
+	"api-remote-caller-getter",
+	"authority",
+	"domain-services",
+	"http-client",
+	"lease-manager",
+	"log-sink",
+	"provider-services",
 }
 
-func (s *ManifoldSuite) TestMissingInputs(c *gc.C) {
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(s.manifold.Inputs, tc.SameContents, expectedInputs)
+}
+
+func (s *ManifoldSuite) TestMissingInputs(c *tc.C) {
 	for _, input := range expectedInputs {
-		context := s.newContext(map[string]interface{}{
+		getter := s.newGetter(map[string]any{
 			input: dependency.ErrMissing,
 		})
-		_, err := s.manifold.Start(context)
-		c.Assert(errors.Cause(err), gc.Equals, dependency.ErrMissing)
+		_, err := s.manifold.Start(c.Context(), getter)
+		c.Assert(errors.Cause(err), tc.Equals, dependency.ErrMissing, tc.Commentf("failed for input: %v", input))
 	}
 }
 
-func (s *ManifoldSuite) TestStart(c *gc.C) {
+func (s *ManifoldSuite) TestStart(c *tc.C) {
 	w := s.startWorkerClean(c)
 	workertest.CleanKill(c, w)
 
 	s.stub.CheckCallNames(c, "NewWorker")
 	args := s.stub.Calls()[0].Args
-	c.Assert(args, gc.HasLen, 1)
-	c.Assert(args[0], gc.FitsTypeOf, modelworkermanager.Config{})
+	c.Assert(args, tc.HasLen, 1)
+	c.Assert(args[0], tc.FitsTypeOf, modelworkermanager.Config{})
 	config := args[0].(modelworkermanager.Config)
 	config.Authority = s.authority
 
-	c.Assert(config.NewModelWorker, gc.NotNil)
+	c.Assert(config.NewModelWorker, tc.NotNil)
 	modelConfig := modelworkermanager.NewModelConfig{
-		Authority:    s.authority,
-		ModelUUID:    "foo",
-		ModelType:    state.ModelTypeIAAS,
-		ModelMetrics: dummyMetricSink{},
+		Authority:      s.authority,
+		ModelName:      "test",
+		ModelQualifier: "qualifier",
+		ModelUUID:      "foo",
+		ModelType:      coremodel.IAAS,
+		ModelMetrics:   dummyMetricSink{},
 	}
 	mw, err := config.NewModelWorker(modelConfig)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CleanKill(c, mw)
 	s.stub.CheckCallNames(c, "NewWorker", "NewModelWorker")
 	s.stub.CheckCall(c, 1, "NewModelWorker", modelConfig)
-	config.NewModelWorker = nil
 
-	c.Assert(config, jc.DeepEquals, modelworkermanager.Config{
-		Authority:    s.authority,
-		ModelWatcher: s.State,
-		ModelMetrics: dummyModelMetrics{},
-		Mux:          mux,
-		Controller: modelworkermanager.StatePoolController{
-			StatePool: s.StatePool,
-			SysLogger: s.sysLogger,
-		},
-		ErrorDelay: jworker.RestartDelay,
-		Logger:     loggo.GetLogger("test"),
-		MachineID:  "1",
+	config.NewModelWorker = nil
+	config.GetControllerConfig = nil
+
+	c.Assert(config, tc.DeepEquals, modelworkermanager.Config{
+		Authority:                     s.authority,
+		ModelMetrics:                  dummyModelMetrics{},
+		ErrorDelay:                    jworker.RestartDelay,
+		LeaseManager:                  s.leaseManager,
+		Logger:                        s.logger,
+		LogSinkGetter:                 dummyLogSinkGetter{},
+		ProviderServicesGetter:        providerServicesGetter{},
+		ModelService:                  s.controllerDomainServices.Model(),
+		DomainServicesGetter:          s.domainServicesGetter,
+		HTTPClientGetter:              s.httpClientGetter,
+		APIRemoteRelationClientGetter: s.apiRemoteCallerGetter,
 	})
 }
 
-func (s *ManifoldSuite) TestStopWorkerClosesState(c *gc.C) {
+func (s *ManifoldSuite) TestStopWorkerClosesState(c *tc.C) {
 	w := s.startWorkerClean(c)
 	defer workertest.CleanKill(c, w)
 
-	s.stateTracker.CheckCallNames(c, "Use")
-
 	workertest.CleanKill(c, w)
-	s.stateTracker.CheckCallNames(c, "Use", "Done")
 }
 
-func (s *ManifoldSuite) startWorkerClean(c *gc.C) worker.Worker {
-	w, err := s.manifold.Start(s.context)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *ManifoldSuite) startWorkerClean(c *tc.C) worker.Worker {
+	w, err := s.manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CheckAlive(c, w)
 	return w
 }
 
-type stubStateTracker struct {
-	testing.Stub
-	pool *state.StatePool
+type stubLeaseManager struct {
+	lease.Manager
 }
 
-func (s *stubStateTracker) Use() (*state.StatePool, error) {
-	s.MethodCall(s, "Use")
-	return s.pool, s.NextErr()
+type stubDomainServicesGetter struct {
+	services.DomainServicesGetter
 }
 
-func (s *stubStateTracker) Done() error {
-	s.MethodCall(s, "Done")
-	return s.NextErr()
+type stubProviderServicesGetter struct {
+	services.ProviderServicesGetter
 }
 
-func (s *stubStateTracker) Report() map[string]interface{} {
-	s.MethodCall(s, "Report")
+type providerServicesGetter struct {
+	modelworkermanager.ProviderServicesGetter
+}
+
+func (s providerServicesGetter) ServicesForModel(_ string) modelworkermanager.ProviderServices {
 	return nil
 }
 
-type fakeAgent struct {
-	agent.Agent
-	agent.Config
+type stubHTTPClientGetter struct {
+	http.HTTPClientGetter
 }
 
-func (f *fakeAgent) CurrentConfig() agent.Config {
-	return f
+type stubControllerDomainServices struct {
+	services.ControllerDomainServices
 }
 
-func (f *fakeAgent) Tag() names.Tag {
-	return names.NewMachineTag("1")
+func (s stubControllerDomainServices) Model() *modelservice.WatchableService {
+	return &modelservice.WatchableService{}
 }
 
-type stubLogger struct {
-	corelogger.LoggerCloser
+type stubAPIRemoteCallerGetter struct {
+	apiremoterelationcaller.APIRemoteCallerGetter
 }

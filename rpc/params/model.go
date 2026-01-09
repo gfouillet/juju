@@ -6,9 +6,8 @@ package params
 import (
 	"time"
 
-	"github.com/juju/version/v2"
-
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/semversion"
 )
 
 // ConfigValue encapsulates a configuration
@@ -30,7 +29,7 @@ type ModelConfigResults struct {
 // aggressively.
 type HostedModelConfig struct {
 	Name      string                 `json:"name"`
-	OwnerTag  string                 `json:"owner"`
+	Qualifier string                 `json:"qualifier"`
 	Config    map[string]interface{} `json:"config,omitempty"`
 	CloudSpec *CloudSpec             `json:"cloud-spec,omitempty"`
 	Error     *Error                 `json:"error,omitempty"`
@@ -86,13 +85,6 @@ type ModelUnset struct {
 	Keys []string `json:"keys"`
 }
 
-// ModelSLA contains the arguments for the SetSLALevel client API
-// call.
-type ModelSLA struct {
-	ModelSLAInfo
-	Credentials []byte `json:"creds"`
-}
-
 // SetModelDefaults contains the arguments for SetModelDefaults
 // client API call.
 type SetModelDefaults struct {
@@ -124,9 +116,9 @@ type UnsetModelDefaults struct {
 // SetModelAgentVersion contains the arguments for
 // SetModelAgentVersion client API call.
 type SetModelAgentVersion struct {
-	Version             version.Number `json:"version"`
-	AgentStream         string         `json:"agent-stream,omitempty"`
-	IgnoreAgentVersions bool           `json:"force,omitempty"`
+	Version             semversion.Number `json:"version"`
+	AgentStream         string            `json:"agent-stream,omitempty"`
+	IgnoreAgentVersions bool              `json:"force,omitempty"`
 }
 
 // ModelMigrationStatus holds information about the progress of a (possibly
@@ -145,8 +137,6 @@ type ModelInfo struct {
 	ControllerUUID     string `json:"controller-uuid"`
 	IsController       bool   `json:"is-controller"`
 	ProviderType       string `json:"provider-type,omitempty"`
-	DefaultSeries      string `json:"default-series,omitempty"` // default-series is deprecated, use default-base
-	DefaultBase        string `json:"default-base,omitempty"`
 	CloudTag           string `json:"cloud-tag"`
 	CloudRegion        string `json:"cloud-region,omitempty"`
 	CloudCredentialTag string `json:"cloud-credential-tag,omitempty"`
@@ -154,8 +144,8 @@ type ModelInfo struct {
 	// CloudCredentialValidity contains if model credential is valid, if known.
 	CloudCredentialValidity *bool `json:"cloud-credential-validity,omitempty"`
 
-	// OwnerTag is the tag of the user that owns the model.
-	OwnerTag string `json:"owner-tag"`
+	// Qualifier disambiguates the model name.
+	Qualifier string `json:"qualifier"`
 
 	// Life is the current lifecycle state of the model.
 	Life life.Value `json:"life"`
@@ -181,17 +171,18 @@ type ModelInfo struct {
 	// currently-running migration. It'll be nil if there isn't one.
 	Migration *ModelMigrationStatus `json:"migration,omitempty"`
 
-	// SLA contains the information about the SLA for the model, if set.
-	SLA *ModelSLAInfo `json:"sla"`
-
 	// AgentVersion is the agent version for this model.
-	AgentVersion *version.Number `json:"agent-version"`
+	AgentVersion *semversion.Number `json:"agent-version"`
 
 	// SupportedFeatures provides information about the set of features
 	// supported by this model. The feature set contains both Juju-specific
 	// entries (e.g. juju version) and other features that depend on the
 	// substrate the model is deployed to.
 	SupportedFeatures []SupportedFeature `json:"supported-features,omitempty"`
+
+	// TargetController is a JAAS specific field to specify the
+	// name of the controller that hosts the model.
+	TargetController string `json:"target-controller,omitempty"`
 }
 
 // SupportedFeature describes a feature that is supported by a particular model.
@@ -207,18 +198,15 @@ type SupportedFeature struct {
 // ModelSummary holds summary about a Juju model.
 type ModelSummary struct {
 	Name               string `json:"name"`
+	Qualifier          string `json:"qualifier"`
 	UUID               string `json:"uuid"`
 	Type               string `json:"type"`
 	ControllerUUID     string `json:"controller-uuid"`
 	IsController       bool   `json:"is-controller"`
 	ProviderType       string `json:"provider-type,omitempty"`
-	DefaultSeries      string `json:"default-series,omitempty"`
 	CloudTag           string `json:"cloud-tag"`
 	CloudRegion        string `json:"cloud-region,omitempty"`
 	CloudCredentialTag string `json:"cloud-credential-tag,omitempty"`
-
-	// OwnerTag is the tag of the user that owns the model.
-	OwnerTag string `json:"owner-tag"`
 
 	// Life is the current lifecycle state of the model.
 	Life life.Value `json:"life"`
@@ -241,11 +229,8 @@ type ModelSummary struct {
 	// currently-running migration. It'll be nil if there isn't one.
 	Migration *ModelMigrationStatus `json:"migration,omitempty"`
 
-	// SLA contains the information about the SLA for the model, if set.
-	SLA *ModelSLAInfo `json:"sla"`
-
 	// AgentVersion is the agent version for this model.
-	AgentVersion *version.Number `json:"agent-version"`
+	AgentVersion *semversion.Number `json:"agent-version"`
 }
 
 // ModelEntityCount represent a count for a model entity where entities could be
@@ -263,12 +248,6 @@ const (
 	Cores    CountedEntity = "cores"
 	Units    CountedEntity = "units"
 )
-
-// ModelSLAInfo describes the SLA info for a model.
-type ModelSLAInfo struct {
-	Level string `json:"level"`
-	Owner string `json:"owner"`
-}
 
 // ModelSummaryResult holds the result of a ListModelsWithInfo call.
 type ModelSummaryResult struct {
@@ -324,11 +303,6 @@ type ModelMachineInfo struct {
 	DisplayName string           `json:"display-name,omitempty"`
 	Status      string           `json:"status,omitempty"`
 	Message     string           `json:"message,omitempty"`
-	HasVote     bool             `json:"has-vote,omitempty"`
-	WantsVote   bool             `json:"wants-vote,omitempty"`
-	// HAPrimary indicates whether this machine has a primary mongo instance in replicaset and,
-	// thus, can be considered a primary controller machine in HA setup.
-	HAPrimary *bool `json:"ha-primary,omitempty"`
 }
 
 // ModelApplicationInfo holds information about an application in a model.
@@ -501,15 +475,15 @@ type ModelParam struct {
 
 // UpgradeModel contains the arguments for UpgradeModel API call.
 type UpgradeModelParams struct {
-	ModelTag            string         `json:"model-tag"`
-	TargetVersion       version.Number `json:"target-version"`
-	AgentStream         string         `json:"agent-stream,omitempty"`
-	IgnoreAgentVersions bool           `json:"ignore-agent-versions,omitempty"`
-	DryRun              bool           `json:"dry-run,omitempty"`
+	ModelTag            string            `json:"model-tag"`
+	TargetVersion       semversion.Number `json:"target-version"`
+	AgentStream         string            `json:"agent-stream,omitempty"`
+	IgnoreAgentVersions bool              `json:"ignore-agent-versions,omitempty"`
+	DryRun              bool              `json:"dry-run,omitempty"`
 }
 
 // UpgradeModelResult holds the result of a UpgradeModel API call.
 type UpgradeModelResult struct {
-	ChosenVersion version.Number `json:"chosen-version"`
-	Error         *Error         `json:"error,omitempty"`
+	ChosenVersion semversion.Number `json:"chosen-version"`
+	Error         *Error            `json:"error,omitempty"`
 }

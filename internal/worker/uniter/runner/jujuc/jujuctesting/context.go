@@ -6,8 +6,9 @@ package jujuctesting
 import (
 	"fmt"
 
-	"github.com/juju/loggo"
-	"github.com/juju/testing"
+	"github.com/juju/juju/core/logger"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 // ContextInfo holds the values for the hook context.
@@ -27,7 +28,7 @@ type ContextInfo struct {
 }
 
 // Context returns a Context that wraps the info.
-func (info *ContextInfo) Context(stub *testing.Stub) *Context {
+func (info *ContextInfo) Context(stub *testhelpers.Stub) *Context {
 	return NewContext(stub, info)
 }
 
@@ -52,7 +53,7 @@ func (info *ContextInfo) SetAsActionHook() {
 }
 
 type contextBase struct {
-	stub *testing.Stub
+	stub *testhelpers.Stub
 }
 
 // Context is a test double for jujuc.Context.
@@ -65,7 +66,6 @@ type Context struct {
 	ContextLeader
 	ContextStorage
 	ContextResources
-	ContextPayloads
 	ContextRelations
 	ContextRelationHook
 	ContextActionHook
@@ -75,7 +75,7 @@ type Context struct {
 }
 
 // NewContext builds a jujuc.Context test double.
-func NewContext(stub *testing.Stub, info *ContextInfo) *Context {
+func NewContext(stub *testhelpers.Stub, info *ContextInfo) *Context {
 	var ctx Context
 	ctx.ContextUnit.stub = stub
 	ctx.ContextUnit.info = &info.Unit
@@ -90,7 +90,6 @@ func NewContext(stub *testing.Stub, info *ContextInfo) *Context {
 	ctx.ContextStorage.stub = stub
 	ctx.ContextStorage.info = &info.Storage
 	ctx.ContextResources.stub = stub
-	ctx.ContextPayloads.stub = stub
 	ctx.ContextRelations.stub = stub
 	ctx.ContextRelations.info = &info.Relations
 	ctx.ContextRelationHook.stub = stub
@@ -107,6 +106,6 @@ func NewContext(stub *testing.Stub, info *ContextInfo) *Context {
 	return &ctx
 }
 
-func (c *Context) GetLogger(module string) loggo.Logger {
-	return loggo.GetLogger(module)
+func (c *Context) GetLoggerByName(module string) logger.Logger {
+	return internallogger.GetLogger(module)
 }

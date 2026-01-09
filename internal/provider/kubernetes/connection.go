@@ -12,15 +12,15 @@ import (
 
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	k8sproxy "github.com/juju/juju/internal/provider/kubernetes/proxy"
-	"github.com/juju/juju/proxy"
+	"github.com/juju/juju/internal/proxy"
 )
 
 // ProxyToApplication attempts to construct a Juju proxier for use in proxying
 // connections to the specified application. This assume the presence of a
 // corresponding service for the application.
-func (k *kubernetesClient) ProxyToApplication(appName, remotePort string) (proxy.Proxier, error) {
+func (k *kubernetesClient) ProxyToApplication(ctx context.Context, appName, remotePort string) (proxy.Proxier, error) {
 	svc, err := findServiceForApplication(
-		context.TODO(),
+		ctx,
 		k.client().CoreV1().Services(k.namespace),
 		appName,
 		k.LabelVersion())
@@ -60,6 +60,7 @@ func (k *kubernetesClient) ProxyToApplication(appName, remotePort string) (proxy
 	}
 
 	return k8sproxy.GetProxy(
+		ctx,
 		proxyName,
 		config,
 		k.client().CoreV1().ServiceAccounts(k.Namespace()),
@@ -69,8 +70,9 @@ func (k *kubernetesClient) ProxyToApplication(appName, remotePort string) (proxy
 
 // ConnectionProxyInfo provides the means for getting a proxier onto a Juju
 // controller deployed in this provider.
-func (k *kubernetesClient) ConnectionProxyInfo() (proxy.Proxier, error) {
+func (k *kubernetesClient) ConnectionProxyInfo(ctx context.Context) (proxy.Proxier, error) {
 	p, err := k8sproxy.GetControllerProxy(
+		ctx,
 		getBootstrapResourceName(k8sconstants.JujuControllerStackName, proxyResourceName),
 		k.k8sCfgUnlocked.Host,
 		k.client().CoreV1().ConfigMaps(k.Namespace()),

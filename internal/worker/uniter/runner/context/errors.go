@@ -8,5 +8,4 @@ import (
 )
 
 var ErrRequeueAndReboot = errors.New("reboot now")
-
 var ErrReboot = errors.New("reboot after hook")

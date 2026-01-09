@@ -10,20 +10,21 @@ run_secrets_vault() {
 
 	model_name='model-secrets-vault-charm-owned'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	juju --show-log model-secret-backend myvault -m "$model_name"
+
 	check_secrets
 	destroy_model "$model_name"
 
 	model_name='model-secrets-vault-model-owned'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	juju --show-log model-secret-backend myvault -m "$model_name"
 	run_user_secrets "$model_name"
 	destroy_model "$model_name"
 
 	# test remove-secret-backend with force.
 	model_name='model-remove-secret-backend-with-force'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend=myvault -m "$model_name"
+	juju --show-log model-secret-backend myvault -m "$model_name"
 	# add a secret to the vault backend to make sure the backend is in-use.
 	# (make it a large secret which encodes to approx 1MB in size).
 	echo "data: $(cat /dev/zero | tr '\0' A | head -c 749500)" >"${TEST_DIR}/secret.txt"
@@ -50,7 +51,7 @@ run_secret_drain() {
 	vault_backend_name='myvault'
 	juju add-secret-backend "$vault_backend_name" vault endpoint="$VAULT_ADDR" token="$VAULT_TOKEN" ca-cert="$(cat "$VAULT_CAPATH")"
 
-	juju --show-log deploy jameinel-ubuntu-lite
+	juju --show-log deploy ubuntu-lite
 	wait_for "active" '.applications["ubuntu-lite"] | ."application-status".current'
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite" 0)"
 
@@ -60,26 +61,26 @@ run_secret_drain() {
 	juju show-secret --reveal "$secret_owned_by_unit"
 	juju show-secret --reveal "$secret_owned_by_app"
 
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	model_uuid=$(juju show-model $model_name --format json | jq -r ".[\"${model_name}\"][\"model-uuid\"]")
 
 	attempt=0
 	until [[ $(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length) -eq 2 ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: expected all secrets get drained to vault."
+			red "Failed: expected all secrets get drained to vault."
 			exit 1
 		fi
 		sleep 2
 		attempt=$((attempt + 1))
 	done
 
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	attempt=0
 	until [[ $(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length) -eq 0 ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: expected all secrets get drained back to juju controller."
+			red "Failed: expected all secrets get drained back to juju controller."
 			exit 1
 		fi
 		sleep 2
@@ -103,7 +104,7 @@ run_user_secret_drain() {
 
 	model_name='model-user-secrets-drain'
 	add_model "$model_name"
-	juju --show-log model-config secret-backend="$vault_backend_name" -m "$model_name"
+	juju --show-log model-secret-backend "$vault_backend_name" -m "$model_name"
 	model_uuid=$(juju show-model $model_name --format json | jq -r ".[\"${model_name}\"][\"model-uuid\"]")
 
 	juju --show-log deploy ubuntu-lite
@@ -120,7 +121,7 @@ run_user_secret_drain() {
 	check_contains "$(juju exec --unit ubuntu-lite/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
 
 	# change the secret backend to internal.
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	another_secret_uri=$(juju --show-log add-secret anothersecret owned-by="$model_name-2" --info "this is another user secret")
 	juju show-secret --reveal "$another_secret_uri"
@@ -129,7 +130,7 @@ run_user_secret_drain() {
 	attempt=0
 	until [[ $(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length) -eq 0 ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: expected all secrets get drained back to juju controller."
+			red "Failed: expected all secrets get drained back to juju controller."
 			exit 1
 		fi
 		sleep 2
@@ -137,13 +138,13 @@ run_user_secret_drain() {
 	done
 
 	# change the secret backend to vault.
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	# ensure the user secrets are in the vault backend.
 	attempt=0
 	until [[ $(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length) -eq 2 ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: expected all secrets get drained to vault."
+			red "Failed: expected all secrets get drained to vault."
 			exit 1
 		fi
 		sleep 2
@@ -198,7 +199,7 @@ prepare_vault() {
 	attempt=0
 	until [[ $(vault status -format yaml 2>/dev/null | yq .initialized | grep -i 'true') ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: vault server was not initialized."
+			red "Failed: vault server was not initialized."
 			exit 1
 		fi
 		sleep 2
@@ -208,7 +209,7 @@ prepare_vault() {
 	attempt=0
 	until [[ $(vault status -format yaml 2>/dev/null | yq .ha_enabled | grep -i 'true') ]]; do
 		if [[ ${attempt} -ge 30 ]]; then
-			echo "Failed: vault server was not HA enabled."
+			red "Failed: vault server was not HA enabled."
 			exit 1
 		fi
 		sleep 2

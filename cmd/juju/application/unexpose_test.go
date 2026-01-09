@@ -4,82 +4,69 @@
 package application
 
 import (
-	"runtime"
+	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	jujutesting "github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/rpc"
-	"github.com/juju/juju/testcharms"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/cmd/juju/application/mocks"
+	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 )
 
 type UnexposeSuite struct {
-	jujutesting.RepoSuite
-	testing.CmdBlockHelper
+	testing.BaseSuite
 }
 
-func (s *UnexposeSuite) SetUpTest(c *gc.C) {
-	if runtime.GOOS == "darwin" {
-		c.Skip("Mongo failures on macOS")
-	}
-	s.RepoSuite.SetUpTest(c)
-
-	s.CmdBlockHelper = testing.NewCmdBlockHelper(s.APIState)
-	c.Assert(s.CmdBlockHelper, gc.NotNil)
-	s.AddCleanup(func(*gc.C) { s.CmdBlockHelper.Close() })
+func TestUnexposeSuite(t *stdtesting.T) {
+	tc.Run(t, &UnexposeSuite{})
 }
 
-var _ = gc.Suite(&UnexposeSuite{})
+func runUnexpose(c *tc.C, api ApplicationExposeAPI, args ...string) error {
+	unexposeCmd := &unexposeCommand{api: api}
+	unexposeCmd.SetClientStore(jujuclienttesting.MinimalStore())
 
-func runUnexpose(c *gc.C, args ...string) error {
-	_, err := cmdtesting.RunCommand(c, NewUnexposeCommand(), args...)
+	_, err := cmdtesting.RunCommand(c, modelcmd.WrapBase(unexposeCmd), args...)
 	return err
 }
 
-func (s *UnexposeSuite) assertExposed(c *gc.C, application string, expected bool) {
-	svc, err := s.State.Application(application)
-	c.Assert(err, jc.ErrorIsNil)
-	actual := svc.IsExposed()
-	c.Assert(actual, gc.Equals, expected)
+func (s *UnexposeSuite) TestUnexpose(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Unexpose(gomock.Any(), "some-application-name", []string(nil)).Return(nil)
+	api.EXPECT().Close().Return(nil)
+
+	err := runUnexpose(c, api, "some-application-name")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *UnexposeSuite) TestUnexpose(c *gc.C) {
-	ch := testcharms.RepoWithSeries("bionic").CharmArchivePath(c.MkDir(), "multi-series")
-	err := runDeploy(c, ch, "some-application-name", "--series", "jammy")
+func (s *UnexposeSuite) TestUnexposeEndpoints(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	c.Assert(err, jc.ErrorIsNil)
-	curl := "local:multi-series-1"
-	s.AssertApplication(c, "some-application-name", curl, 1, 0)
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Unexpose(gomock.Any(), "some-application-name", []string{"ep1", "ep2"}).Return(nil)
+	api.EXPECT().Close().Return(nil)
 
-	err = runExpose(c, "some-application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertExposed(c, "some-application-name", true)
-
-	err = runUnexpose(c, "some-application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertExposed(c, "some-application-name", false)
-
-	err = runUnexpose(c, "nonexistent-application")
-	c.Assert(errors.Cause(err), gc.DeepEquals, &rpc.RequestError{
-		Message: `application "nonexistent-application" not found`,
-		Code:    "not found",
-	})
+	err := runUnexpose(c, api, "some-application-name", "--endpoints", "ep1,ep2")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *UnexposeSuite) TestBlockUnexpose(c *gc.C) {
-	ch := testcharms.RepoWithSeries("bionic").CharmArchivePath(c.MkDir(), "multi-series")
-	err := runDeploy(c, ch, "some-application-name", "--series", "jammy")
+func (s *UnexposeSuite) TestBlockUnexpose(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	c.Assert(err, jc.ErrorIsNil)
-	curl := "local:multi-series-1"
-	s.AssertApplication(c, "some-application-name", curl, 1, 0)
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Unexpose(gomock.Any(), "some-application-name", []string(nil)).Return(apiservererrors.OperationBlockedError("unexpose"))
+	api.EXPECT().Close().Return(nil)
 
-	// Block operation
-	s.BlockAllChanges(c, "TestBlockUnexpose")
-	err = runExpose(c, "some-application-name")
-	s.AssertBlocked(c, err, ".*TestBlockUnexpose.*")
+	err := runUnexpose(c, api, "some-application-name")
+	c.Assert(err, tc.NotNil)
+	c.Assert(strings.Contains(err.Error(), "All operations that change model have been disabled for the current model"), tc.IsTrue)
 }

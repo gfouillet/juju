@@ -3,12 +3,13 @@
 
 package network
 
-import "github.com/juju/errors"
+import (
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
+)
 
 // AvailabilityZone describes the common methods
 // for general interaction with an AZ.
-//
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination ../../internal/provider/common/mocks/availability_zone.go github.com/juju/juju/core/network AvailabilityZone
 type AvailabilityZone interface {
 	// Name returns the name of the availability zone.
 	Name() string
@@ -32,5 +33,5 @@ func (a AvailabilityZones) Validate(zoneName string) error {
 			return errors.Errorf("zone %q is unavailable", zoneName)
 		}
 	}
-	return errors.NotValidf("availability zone %q", zoneName)
+	return errors.Errorf("availability zone %q %w", zoneName, coreerrors.NotValid)
 }

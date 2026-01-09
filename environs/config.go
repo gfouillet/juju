@@ -4,13 +4,16 @@
 package environs
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
+
+	"github.com/juju/juju/cloud"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.environs")
+var logger = internallogger.GetLogger("juju.environs")
 
 // ProviderRegistry is an interface that provides methods for registering
 // and obtaining environment providers by provider name.
@@ -27,7 +30,9 @@ type ProviderRegistry interface {
 	// providers.
 	RegisteredProviders() []string
 
-	// Provider returns the environment provider with the specified name.
+	// Provider returns the environment provider with the specified name. If no
+	// provider has been registered with the supplied name then an error
+	// satisfying errors.NotFound is returned.
 	Provider(providerType string) (EnvironProvider, error)
 }
 
@@ -81,6 +86,7 @@ func (r *globalProviderRegistry) RegisteredProviders() []string {
 	return p
 }
 
+// Provider implements ProviderRegistry.Provider()
 func (r *globalProviderRegistry) Provider(providerType string) (EnvironProvider, error) {
 	if alias, ok := r.aliases[providerType]; ok {
 		providerType = alias
@@ -117,4 +123,9 @@ func RegisteredProviders() []string {
 // Provider returns the previously registered provider with the given type.
 func Provider(providerType string) (EnvironProvider, error) {
 	return GlobalProviderRegistry().Provider(providerType)
+}
+
+// CloudService provides access to clouds.
+type CloudService interface {
+	Cloud(ctx context.Context, name string) (*cloud.Cloud, error)
 }

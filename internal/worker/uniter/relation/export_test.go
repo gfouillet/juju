@@ -4,27 +4,30 @@
 package relation
 
 import (
-	"github.com/juju/loggo"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/core/logger"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 )
 
 type StateTrackerForTestConfig struct {
-	St                StateTrackerState
-	Unit              Unit
+	Client            StateTrackerClient
+	Unit              api.Unit
 	LeadershipContext context.LeadershipContext
 	Subordinate       bool
 	PrincipalName     string
 	CharmDir          string
 	StateManager      StateManager
-	NewRelationerFunc func(RelationUnit, StateManager, UnitGetter, Logger) Relationer
+	NewRelationerFunc func(api.RelationUnit, StateManager, UnitGetter, logger.Logger) Relationer
 	Relationers       map[int]Relationer
 	RemoteAppName     map[int]string
 }
 
-func NewStateTrackerForTest(cfg StateTrackerForTestConfig) (RelationStateTracker, error) {
+func NewStateTrackerForTest(c *tc.C, cfg StateTrackerForTestConfig) (RelationStateTracker, error) {
 	rst := &relationStateTracker{
-		st:              cfg.St,
+		client:          cfg.Client,
 		unit:            cfg.Unit,
 		leaderCtx:       cfg.LeadershipContext,
 		abort:           make(chan struct{}),
@@ -36,16 +39,16 @@ func NewStateTrackerForTest(cfg StateTrackerForTestConfig) (RelationStateTracker
 		relationCreated: make(map[int]bool),
 		isPeerRelation:  make(map[int]bool),
 		stateMgr:        cfg.StateManager,
-		logger:          loggo.GetLogger("test"),
+		logger:          loggertesting.WrapCheckLogWithLevel(c, logger.DEBUG),
 		newRelationer:   cfg.NewRelationerFunc,
 	}
-
-	return rst, rst.loadInitialState()
+	err := rst.loadInitialState(c.Context())
+	return rst, err
 }
 
-func NewStateTrackerForSyncScopesTest(cfg StateTrackerForTestConfig) (RelationStateTracker, error) {
+func NewStateTrackerForSyncScopesTest(c *tc.C, cfg StateTrackerForTestConfig) (RelationStateTracker, error) {
 	return &relationStateTracker{
-		st:              cfg.St,
+		client:          cfg.Client,
 		unit:            cfg.Unit,
 		leaderCtx:       cfg.LeadershipContext,
 		abort:           make(chan struct{}),
@@ -54,7 +57,7 @@ func NewStateTrackerForSyncScopesTest(cfg StateTrackerForTestConfig) (RelationSt
 		relationCreated: make(map[int]bool),
 		isPeerRelation:  make(map[int]bool),
 		stateMgr:        cfg.StateManager,
-		logger:          loggo.GetLogger("test"),
+		logger:          loggertesting.WrapCheckLogWithLevel(c, logger.DEBUG),
 		newRelationer:   cfg.NewRelationerFunc,
 		charmDir:        cfg.CharmDir,
 	}, nil

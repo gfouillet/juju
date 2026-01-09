@@ -4,12 +4,13 @@
 package caasrbacmapper
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -17,7 +18,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	provider "github.com/juju/juju/internal/provider/kubernetes"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/provider/kubernetes"
 )
 
 // Mapper describes an interface for mapping k8s service account UID's to juju
@@ -41,66 +43,16 @@ type MapperWorker interface {
 type DefaultMapper struct {
 	catacomb     catacomb.Catacomb
 	lock         *sync.RWMutex
-	logger       Logger
+	logger       logger.Logger
 	saInformer   core.ServiceAccountInformer
 	saNameUIDMap map[string]types.UID
 	saUIDAppMap  map[types.UID]string
 	workQueue    workqueue.RateLimitingInterface
 }
 
-// AppNameForServiceAccount implements Mapper interface
-func (d *DefaultMapper) AppNameForServiceAccount(id types.UID) (string, error) {
-	d.lock.RLock()
-	defer d.lock.RUnlock()
-	appName, found := d.saUIDAppMap[id]
-	if !found {
-		return "", errors.NotFoundf("service account for app with id %v", id)
-	}
-	return appName, nil
-}
-
-func (d *DefaultMapper) enqueueServiceAccount(obj interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
-	if err != nil {
-		d.logger.Errorf("failed enqueuing service account: %v", err)
-		return
-	}
-	d.workQueue.Add(key)
-}
-
-// Kill implements Kill() from the Worker interface
-func (d *DefaultMapper) Kill() {
-	d.catacomb.Kill(nil)
-}
-
-func (d *DefaultMapper) loop() error {
-	defer d.workQueue.ShutDown()
-
-	go d.saInformer.Informer().Run(d.catacomb.Dying())
-
-	if ok := cache.WaitForCacheSync(
-		d.catacomb.Dying(), d.saInformer.Informer().HasSynced); !ok {
-		return errors.New("failed to wait for cache to sync")
-	}
-
-	// Wait until runs the below for loop every one second until the catacomb
-	// dies. The for loop processes all items in the queue till it's empty and
-	// the cycle repeats. This is to stop checking thrashing about and is the
-	// prescribed k8s way to process.
-	go wait.Until(func() {
-		for d.processNextQueueItem() {
-		}
-	}, time.Second, d.catacomb.Dying())
-
-	select {
-	case <-d.catacomb.Dying():
-		return d.catacomb.ErrDying()
-	}
-}
-
 // NewMapper constructs a new DefaultMapper for the supplied logger and
 // ServiceAccountInformer
-func NewMapper(logger Logger, informer core.ServiceAccountInformer) (*DefaultMapper, error) {
+func NewMapper(logger logger.Logger, informer core.ServiceAccountInformer) (*DefaultMapper, error) {
 	dm := &DefaultMapper{
 		lock:         new(sync.RWMutex),
 		logger:       logger,
@@ -122,6 +74,7 @@ func NewMapper(logger Logger, informer core.ServiceAccountInformer) (*DefaultMap
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-rbac-mapper",
 		Site: &dm.catacomb,
 		Work: dm.loop,
 	}); err != nil {
@@ -130,7 +83,65 @@ func NewMapper(logger Logger, informer core.ServiceAccountInformer) (*DefaultMap
 	return dm, nil
 }
 
-func (d *DefaultMapper) processNextQueueItem() bool {
+// AppNameForServiceAccount implements Mapper interface
+func (d *DefaultMapper) AppNameForServiceAccount(id types.UID) (string, error) {
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+	appName, found := d.saUIDAppMap[id]
+	if !found {
+		return "", errors.NotFoundf("service account for app with id %v", id)
+	}
+	return appName, nil
+}
+
+func (d *DefaultMapper) enqueueServiceAccount(obj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		d.logger.Errorf(context.Background(), "failed enqueuing service account: %v", err)
+		return
+	}
+	d.workQueue.Add(key)
+}
+
+// Kill implements Kill() from the Worker interface
+func (d *DefaultMapper) Kill() {
+	d.catacomb.Kill(nil)
+}
+
+// Wait implements Wait() from the Worker interface
+func (d *DefaultMapper) Wait() error {
+	return d.catacomb.Wait()
+}
+
+func (d *DefaultMapper) loop() error {
+	defer d.workQueue.ShutDown()
+
+	ctx, cancel := d.scopedContext()
+	defer cancel()
+
+	go d.saInformer.Informer().Run(d.catacomb.Dying())
+
+	if ok := cache.WaitForCacheSync(
+		d.catacomb.Dying(), d.saInformer.Informer().HasSynced); !ok {
+		return errors.New("failed to wait for cache to sync")
+	}
+
+	// Wait until runs the below for loop every one second until the catacomb
+	// dies. The for loop processes all items in the queue till it's empty and
+	// the cycle repeats. This is to stop checking thrashing about and is the
+	// prescribed k8s way to process.
+	go wait.Until(func() {
+		for d.processNextQueueItem(ctx) {
+		}
+	}, time.Second, d.catacomb.Dying())
+
+	select {
+	case <-d.catacomb.Dying():
+		return d.catacomb.ErrDying()
+	}
+}
+
+func (d *DefaultMapper) processNextQueueItem(ctx context.Context) bool {
 	obj, shutdown := d.workQueue.Get()
 	if shutdown {
 		return false
@@ -140,14 +151,14 @@ func (d *DefaultMapper) processNextQueueItem() bool {
 	key, ok := obj.(string)
 	if !ok {
 		d.workQueue.Forget(obj)
-		d.logger.Errorf("failed converting service account queue item to string")
+		d.logger.Errorf(ctx, "failed converting service account queue item to string")
 		return true
 	}
 
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		d.workQueue.Forget(obj)
-		d.logger.Errorf("failed spliting key into namespace and name for service account queue: %v", err)
+		d.logger.Errorf(ctx, "failed spliting key into namespace and name for service account queue: %v", err)
 		return true
 	}
 
@@ -165,15 +176,15 @@ func (d *DefaultMapper) processNextQueueItem() bool {
 	}
 	if err != nil {
 		d.workQueue.Forget(obj)
-		d.logger.Errorf("failed fetching service account for %s/%s", namespace, name)
+		d.logger.Errorf(ctx, "failed fetching service account for %s/%s", namespace, name)
 		return true
 	}
 
-	appName, err := provider.AppNameForServiceAccount(sa)
-	if errors.IsNotFound(err) {
+	appName, err := kubernetes.AppNameForServiceAccount(sa)
+	if errors.Is(err, errors.NotFound) {
 		return true
 	} else if err != nil {
-		d.logger.Errorf("failure getting app name for service account: %v", err)
+		d.logger.Errorf(ctx, "failure getting app name for service account: %v", err)
 		return true
 	}
 
@@ -184,7 +195,6 @@ func (d *DefaultMapper) processNextQueueItem() bool {
 	return true
 }
 
-// Wait implements Wait() from the Worker interface
-func (d *DefaultMapper) Wait() error {
-	return d.catacomb.Wait()
+func (w *DefaultMapper) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }

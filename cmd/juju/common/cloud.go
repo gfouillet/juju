@@ -7,17 +7,17 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"gopkg.in/juju/environschema.v1"
 
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/configschema"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.common")
+var logger = internallogger.GetLogger("juju.cmd.juju.common")
 
 type chooseCloudRegionError struct {
 	error
@@ -33,7 +33,7 @@ func IsChooseCloudRegionError(err error) bool {
 // CloudOrProvider finds and returns cloud or provider.
 func CloudOrProvider(cloudName string, cloudByNameFunc func(string) (*jujucloud.Cloud, error)) (cloud *jujucloud.Cloud, err error) {
 	if cloud, err = cloudByNameFunc(cloudName); err != nil {
-		if !errors.IsNotFound(err) {
+		if !errors.Is(err, errors.NotFound) {
 			return nil, err
 		}
 		builtInClouds, err := BuiltInClouds()
@@ -107,7 +107,7 @@ func BuiltInClouds() (map[string]jujucloud.Cloud, error) {
 func CloudByName(cloudName string) (*jujucloud.Cloud, error) {
 	cloud, err := jujucloud.CloudByName(cloudName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			// Check built in clouds like localhost (lxd).
 			builtinClouds, err := BuiltInClouds()
 			if err != nil {
@@ -127,7 +127,7 @@ func CloudByName(cloudName string) (*jujucloud.Cloud, error) {
 // CloudSchemaByType returns the Schema for a given cloud type.
 // If the ProviderSchema is not implemented for the given cloud
 // type, a NotFound error is returned.
-func CloudSchemaByType(cloudType string) (environschema.Fields, error) {
+func CloudSchemaByType(cloudType string) (configschema.Fields, error) {
 	provider, err := environs.Provider(cloudType)
 	if err != nil {
 		return nil, err

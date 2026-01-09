@@ -4,25 +4,26 @@
 package utils
 
 import (
-	charmresource "github.com/juju/charm/v12/resource"
+	"context"
 
 	apicharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/api/common/charms"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/charmresource_mock.go github.com/juju/juju/cmd/juju/application/utils CharmClient
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/resourcefacade_mock.go github.com/juju/juju/cmd/juju/application/utils ResourceLister
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/charmresource_mock.go github.com/juju/juju/cmd/juju/application/utils CharmClient
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/resourcefacade_mock.go github.com/juju/juju/cmd/juju/application/utils ResourceLister
 
 // CharmClient defines a subset of the charms facade, as required
 // by the upgrade-charm command and to GetMetaResources.
 type CharmClient interface {
-	CharmInfo(string) (*charms.CharmInfo, error)
-	ListCharmResources(curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
+	CharmInfo(context.Context, string) (*charms.CharmInfo, error)
+	ListCharmResources(ctx context.Context, curl string, origin apicharm.Origin) ([]charmresource.Resource, error)
 }
 
 // ResourceLister defines a subset of the resources facade, as required
 // by the upgrade-charm command and to deploy bundles.
 type ResourceLister interface {
-	ListResources([]string) ([]resources.ApplicationResources, error)
+	ListResources(context.Context, []string) ([]resource.ApplicationResources, error)
 }

@@ -4,12 +4,12 @@
 package relation
 
 import (
-	"github.com/juju/names/v5"
+	stdcontext "context"
 
-	"github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/names/v6"
+
 	"github.com/juju/juju/core/life"
-	"github.com/juju/juju/core/relation"
-	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
@@ -24,12 +24,12 @@ type RelationStateTracker interface {
 	// CommitHook persists the state change encoded in the supplied relation
 	// hook, or returns an error if the hook is unknown or invalid given
 	// current relation state.
-	CommitHook(hook.Info) error
+	CommitHook(stdcontext.Context, hook.Info) error
 
 	// SynchronizeScopes ensures that the locally tracked relation scopes
 	// reflect the contents of the remote state snapshot by entering or
 	// exiting scopes as required.
-	SynchronizeScopes(remotestate.Snapshot) error
+	SynchronizeScopes(stdcontext.Context, remotestate.Snapshot) error
 
 	// IsKnown returns true if the relation ID is known by the tracker.
 	IsKnown(int) bool
@@ -73,7 +73,7 @@ type RelationStateTracker interface {
 
 	// LocalUnitAndApplicationLife returns the life values for the local
 	// unit and application.
-	LocalUnitAndApplicationLife() (life.Value, life.Value, error)
+	LocalUnitAndApplicationLife(stdcontext.Context) (life.Value, life.Value, error)
 
 	// Report provides information for the engine report.
 	Report() map[string]interface{}
@@ -81,7 +81,7 @@ type RelationStateTracker interface {
 
 // SubordinateDestroyer destroys all subordinates of a unit.
 type SubordinateDestroyer interface {
-	DestroyAllSubordinates() error
+	DestroyAllSubordinates(stdcontext.Context) error
 }
 
 // StateManager encapsulates methods required to handle relation
@@ -96,7 +96,7 @@ type StateManager interface {
 
 	// SetRelation persists the given state, overwriting the previous
 	// state for a given id or creating state at a new id.
-	SetRelation(*State) error
+	SetRelation(stdcontext.Context, *State) error
 
 	// RelationFound returns true if the state manager has a
 	// state for the given id.
@@ -104,13 +104,13 @@ type StateManager interface {
 
 	// RemoveRelation removes the state for the given id from the
 	// manager.
-	RemoveRelation(id int, unitGetter UnitGetter, knownUnits map[string]bool) error
+	RemoveRelation(ctx stdcontext.Context, id int, unitGetter UnitGetter, knownUnits map[string]bool) error
 }
 
 // UnitGetter encapsulates methods to get unit info.
 type UnitGetter interface {
 	// Unit returns the existing unit with the given tag.
-	Unit(tag names.UnitTag) (Unit, error)
+	Unit(ctx stdcontext.Context, tag names.UnitTag) (api.Unit, error)
 }
 
 // UnitStateReadWriter encapsulates the methods from a state.Unit
@@ -118,62 +118,24 @@ type UnitGetter interface {
 type UnitStateReadWriter interface {
 	// SetState sets the state persisted by the charm running in this unit
 	// and the state internal to the uniter for this unit.
-	SetState(unitState params.SetUnitStateArg) error
+	SetState(ctx stdcontext.Context, unitState params.SetUnitStateArg) error
 
 	// State returns the state persisted by the charm running in this unit
 	// and the state internal to the uniter for this unit.
-	State() (params.UnitStateResult, error)
+	State(ctx stdcontext.Context) (params.UnitStateResult, error)
 }
 
-// StateTrackerState encapsulates the methods from state
+// StateTrackerClient encapsulates the uniter client API methods
 // required by a relationStateTracker.
-type StateTrackerState interface {
+type StateTrackerClient interface {
 	// Unit returns the existing unit with the given tag.
-	Unit(tag names.UnitTag) (Unit, error)
+	Unit(ctx stdcontext.Context, tag names.UnitTag) (api.Unit, error)
 
 	// Relation returns the existing relation with the given tag.
-	Relation(tag names.RelationTag) (Relation, error)
+	Relation(ctx stdcontext.Context, tag names.RelationTag) (api.Relation, error)
 
 	// RelationById returns the existing relation with the given id.
-	RelationById(int) (Relation, error)
-}
-
-// Unit encapsulates the methods from state.Unit
-// required by a relationStateTracker.
-type Unit interface {
-	UnitStateReadWriter
-
-	// Tag returns the tag for this unit.
-	Tag() names.UnitTag
-
-	// ApplicationTag returns the tag for this unit's application.
-	ApplicationTag() names.ApplicationTag
-
-	// RelationsStatus returns the tags of the relations the unit has joined
-	// and entered scope, or the relation is suspended.
-	RelationsStatus() ([]uniter.RelationStatus, error)
-
-	// Watch returns a watcher for observing changes to the unit.
-	Watch() (watcher.NotifyWatcher, error)
-
-	// Destroy when called on a Alive unit, advances its lifecycle as far as
-	// possible; it otherwise has no effect. In most situations, the unit's
-	// life is just set to Dying; but if a principal unit that is not assigned
-	// to a provisioned machine is Destroyed, it will be removed from state
-	// directly.
-	Destroy() error
-
-	// Name returns the name of the unit.
-	Name() string
-
-	// Refresh updates the cached local copy of the unit's data.
-	Refresh() error
-
-	// Application returns the unit's application.
-	Application() (Application, error)
-
-	// Life returns the unit's lifecycle value.
-	Life() life.Value
+	RelationById(stdcontext.Context, int) (api.Relation, error)
 }
 
 // Application encapsulates the methods from
@@ -182,93 +144,10 @@ type Application interface {
 	Life() life.Value
 }
 
-// Relation encapsulates the methods from
-// state.Relation required by a relationStateTracker.
-type Relation interface {
-	// Endpoint returns the endpoint of the relation for the application the
-	// uniter's managed unit belongs to.
-	Endpoint() (*uniter.Endpoint, error)
-
-	// Id returns the integer internal relation key. This is exposed
-	// because the unit agent needs to expose a value derived from this
-	// (as JUJU_RELATION_ID) to allow relation hooks to differentiate
-	// between relations with different applications.
-	Id() int
-
-	// Life returns the relation's current life state.
-	Life() life.Value
-
-	// OtherApplication returns the name of the application on the other
-	// end of the relation (from this unit's perspective).
-	OtherApplication() string
-
-	// OtherModelUUID returns the UUID of the model hosting the
-	// application on the other end of the relation.
-	OtherModelUUID() string
-
-	// Refresh refreshes the contents of the relation from the underlying
-	// state. It returns an error that satisfies errors.IsNotFound if the
-	// relation has been removed.
-	Refresh() error
-
-	// SetStatus updates the status of the relation.
-	SetStatus(relation.Status) error
-
-	// String returns the relation as a string.
-	String() string
-
-	// Suspended returns the relation's current suspended status.
-	Suspended() bool
-
-	// Tag returns the relation tag.
-	Tag() names.RelationTag
-
-	// Unit returns a uniter.RelationUnit for the supplied unit.
-	Unit(names.UnitTag) (RelationUnit, error)
-
-	// UpdateSuspended updates the in memory value of the
-	// relation's suspended attribute.
-	UpdateSuspended(bool)
-}
-
-// RelationUnit encapsulates the methods from
-// state.RelationUnit required by a relationer.
-type RelationUnit interface {
-	// ApplicationSettings returns a Settings which allows access to this
-	// unit's application settings within the relation. This can only be
-	// used from the leader unit.
-	ApplicationSettings() (*uniter.Settings, error)
-
-	// Endpoint returns the endpoint of the relation for the application the
-	// uniter's managed unit belongs to.
-	Endpoint() uniter.Endpoint
-
-	// EnterScope ensures that the unit has entered its scope in the relation.
-	// When the unit has already entered its relation scope, EnterScope will
-	// report success but make no changes to state.
-	EnterScope() error
-
-	// LeaveScope signals that the unit has left its scope in the relation.
-	// After the unit has left its relation scope, it is no longer a member
-	// of the relation.
-	LeaveScope() error
-
-	// Relation returns the relation associated with the unit.
-	Relation() Relation
-
-	// ReadSettings returns a map holding the settings of the unit with the
-	// supplied name within this relation.
-	ReadSettings(name string) (params.Settings, error)
-
-	// Settings returns a Settings which allows access to the unit's settings
-	// within the relation.
-	Settings() (*uniter.Settings, error)
-}
-
 // Relationer encapsulates the methods from relationer required by a stateTracker.
 type Relationer interface {
 	// CommitHook persists the fact of the supplied hook's completion.
-	CommitHook(hi hook.Info) error
+	CommitHook(ctx stdcontext.Context, hi hook.Info) error
 
 	// ContextInfo returns a representation of the relationer's current state.
 	ContextInfo() *context.RelationInfo
@@ -282,7 +161,7 @@ type Relationer interface {
 	// Join initializes local state and causes the unit to enter its relation
 	// scope, allowing its counterpart units to detect its presence and settings
 	// changes.
-	Join() error
+	Join(ctx stdcontext.Context) error
 
 	// PrepareHook checks that the relation is in a state such that it makes
 	// sense to execute the supplied hook, and ensures that the relation context
@@ -290,10 +169,10 @@ type Relationer interface {
 	PrepareHook(hi hook.Info) (string, error)
 
 	// RelationUnit returns the relation unit associated with this relationer instance.
-	RelationUnit() RelationUnit
+	RelationUnit() api.RelationUnit
 
 	// SetDying informs the relationer that the unit is departing the relation,
 	// and that the only hooks it should send henceforth are -departed hooks,
 	// until the relation is empty, followed by a -broken hook.
-	SetDying() error
+	SetDying(ctx stdcontext.Context) error
 }

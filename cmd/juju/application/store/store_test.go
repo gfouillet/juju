@@ -4,11 +4,12 @@
 package store_test
 
 import (
-	"github.com/juju/charm/v12"
+	"context"
+	"testing"
+
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	commoncharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/cmd/juju/application/store"
@@ -16,6 +17,7 @@ import (
 	"github.com/juju/juju/cmd/juju/application/utils"
 	"github.com/juju/juju/core/arch"
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -23,67 +25,72 @@ type storeSuite struct {
 	charmAdder *mocks.MockCharmAdder
 }
 
-var _ = gc.Suite(&storeSuite{})
+func TestStoreSuite(t *testing.T) {
+	tc.Run(t, &storeSuite{})
+}
 
-func (s *storeSuite) TestAddCharmFromURLAddCharmSuccess(c *gc.C) {
+func (s *storeSuite) TestAddCharmFromURLAddCharmSuccess(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectAddCharm(nil)
 
 	curl, err := charm.ParseURL("ch:testme")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	origin, err := utils.MakeOrigin(charm.CharmHub, -1, charm.Channel{Risk: charm.Beta}, corecharm.Platform{Architecture: arch.DefaultArchitecture})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	obtainedCurl, _, err := store.AddCharmFromURL(
+		c.Context(),
 		s.charmAdder,
 		curl,
 		origin,
 		true,
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtainedCurl.String(), gc.Equals, curl.String())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(obtainedCurl.String(), tc.Equals, curl.String())
 }
 
-func (s *storeSuite) TestAddCharmFromURLFailAddCharmFail(c *gc.C) {
+func (s *storeSuite) TestAddCharmFromURLFailAddCharmFail(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectAddCharm(errors.NotFoundf("testing"))
 	curl, err := charm.ParseURL("ch:testme")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	origin, err := utils.MakeOrigin(charm.CharmHub, -1, charm.Channel{Risk: charm.Beta}, corecharm.Platform{Architecture: arch.DefaultArchitecture})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	obtainedCurl, _, err := store.AddCharmFromURL(
+		c.Context(),
 		s.charmAdder,
 		curl,
 		origin,
 		true,
 	)
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-	c.Assert(obtainedCurl, gc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
+	c.Assert(obtainedCurl, tc.IsNil)
 }
 
-func (s *storeSuite) TestAddCharmFromURLFailAddCharmFailUnauthorized(c *gc.C) {
+func (s *storeSuite) TestAddCharmFromURLFailAddCharmFailUnauthorized(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.expectAddCharm(&params.Error{
 		Code:    params.CodeUnauthorized,
 		Message: "permission denied",
 	})
 	curl, err := charm.ParseURL("ch:testme")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	origin, err := utils.MakeOrigin(charm.CharmHub, -1, charm.Channel{Risk: charm.Beta}, corecharm.Platform{Architecture: arch.DefaultArchitecture})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	obtainedCurl, _, err := store.AddCharmFromURL(
+		c.Context(),
 		s.charmAdder,
 		curl,
 		origin,
 		true,
 	)
-	c.Assert(err, jc.Satisfies, errors.IsForbidden)
-	c.Assert(obtainedCurl, gc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.Forbidden)
+	c.Assert(obtainedCurl, tc.IsNil)
 }
 
-func (s *storeSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *storeSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.charmAdder = mocks.NewMockCharmAdder(ctrl)
 	return ctrl
@@ -91,11 +98,12 @@ func (s *storeSuite) setupMocks(c *gc.C) *gomock.Controller {
 
 func (s *storeSuite) expectAddCharm(err error) {
 	s.charmAdder.EXPECT().AddCharm(
+		gomock.Any(),
 		gomock.AssignableToTypeOf(&charm.URL{}),
 		gomock.AssignableToTypeOf(commoncharm.Origin{}),
 		true,
 	).DoAndReturn(
-		func(_ *charm.URL, origin commoncharm.Origin, _ bool) (commoncharm.Origin, error) {
+		func(ctx context.Context, _ *charm.URL, origin commoncharm.Origin, _ bool) (commoncharm.Origin, error) {
 			return origin, err
 		})
 }

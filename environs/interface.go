@@ -4,12 +4,11 @@
 package environs
 
 import (
-	stdcontext "context"
+	"context"
 	"io"
 
 	"github.com/juju/jsonschema"
-	"github.com/juju/version/v2"
-	"gopkg.in/juju/environschema.v1"
+	"github.com/juju/schema"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/assumes"
@@ -17,18 +16,19 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/semversion"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
-	"github.com/juju/juju/proxy"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/configschema"
+	"github.com/juju/juju/internal/proxy"
+	"github.com/juju/juju/internal/storage"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package testing -destination testing/package_mock.go -write_package_comment=false github.com/juju/juju/environs EnvironProvider,CloudEnvironProvider,ProviderSchema,ProviderCredentials,FinalizeCredentialContext,FinalizeCloudContext,CloudFinalizer,CloudDetector,CloudRegionDetector,ModelConfigUpgrader,ConfigGetter,CloudDestroyer,Environ,InstancePrechecker,Firewaller,InstanceTagger,InstanceTypesFetcher,Upgrader,UpgradeStep,DefaultConstraintsChecker,ProviderCredentialsRegister,RequestFinalizeCredential,NetworkingEnviron
+//go:generate go run go.uber.org/mock/mockgen -typed -package testing -destination testing/package_mock.go -write_package_comment=false github.com/juju/juju/environs EnvironProvider,CloudEnvironProvider,ProviderSchema,ProviderCredentials,FinalizeCredentialContext,FinalizeCloudContext,CloudFinalizer,CloudDetector,CloudRegionDetector,ConfigGetter,CloudDestroyer,Environ,InstancePrechecker,Firewaller,InstanceTagger,InstanceTypesFetcher,Upgrader,UpgradeStep,DefaultConstraintsChecker,ProviderCredentialsRegister,RequestFinalizeCredential,NetworkingEnviron
 
 type ConnectorInfo interface {
-	ConnectionProxyInfo() (proxy.Proxier, error)
+	ConnectionProxyInfo(ctx context.Context) (proxy.Proxier, error)
 }
 
 // A EnvironProvider represents a computing and storage provider
@@ -49,14 +49,29 @@ type EnvironProvider interface {
 	CloudSchema() *jsonschema.Schema
 
 	// Ping tests the connection to the cloud, to verify the endpoint is valid.
-	Ping(ctx context.ProviderCallContext, endpoint string) error
+	Ping(ctx context.Context, endpoint string) error
 
-	// PrepareConfig prepares the configuration for a new model, based on
-	// the provided arguments. PrepareConfig is expected to produce a
-	// deterministic output. Any unique values should be based on the
-	// "uuid" attribute of the base configuration. This is called for the
-	// controller model during bootstrap, and also for new hosted models.
-	PrepareConfig(PrepareConfigParams) (*config.Config, error)
+	// ValidateCloud returns an error if the supplied cloud spec is not
+	// valid for use by the provider. This is called for the controller
+	// model during bootstrap, and also for new hosted models.
+	ValidateCloud(context.Context, environscloudspec.CloudSpec) error
+}
+
+// ModelConfigProvider represents an interface that a [EnvironProvider] can
+// implement to provide opinions and defaults into a model's config.
+type ModelConfigProvider interface {
+	// ConfigDefaults returns the default values for the
+	// provider specific config attributes.
+	ConfigDefaults() schema.Defaults
+
+	// ConfigSchema returns extra config attributes specific
+	// to this provider only.
+	ConfigSchema() schema.Fields
+
+	// ModelConfigDefaults provides a set of default model config attributes
+	// that should be set on a models config if they have not been specified by
+	// the user.
+	ModelConfigDefaults(context.Context) (map[string]any, error)
 }
 
 // A CloudEnvironProvider represents a computing and storage provider
@@ -68,7 +83,7 @@ type CloudEnvironProvider interface {
 	//
 	// Open should not perform any expensive operations, such as querying
 	// the cloud API, as it will be called frequently.
-	Open(stdcontext.Context, OpenParams) (Environ, error)
+	Open(context.Context, OpenParams, CredentialInvalidator) (Environ, error)
 }
 
 // OpenParams contains the parameters for EnvironProvider.Open.
@@ -91,24 +106,14 @@ type ProviderSchema interface {
 	// Schema returns the schema for the provider. It should
 	// include all fields defined in environs/config, conventionally
 	// by calling config.Schema.
-	Schema() environschema.Fields
-}
-
-// PrepareConfigParams contains the parameters for EnvironProvider.PrepareConfig.
-type PrepareConfigParams struct {
-	// Cloud is the cloud specification to use to connect to the cloud.
-	Cloud environscloudspec.CloudSpec
-
-	// Config is the base configuration for the provider. This should
-	// be updated with the region, endpoint and credentials.
-	Config *config.Config
+	Schema() configschema.Fields
 }
 
 // ProviderCredentials is an interface that an EnvironProvider implements
 // in order to validate and automatically detect credentials for clouds
 // supported by the provider.
 //
-// TODO(axw) replace CredentialSchemas with an updated environschema.
+// TODO(axw) replace CredentialSchemas with an updated configschema.
 // The Dashboard also needs to be able to handle multiple credential types,
 // and dependencies in config attributes.
 type ProviderCredentials interface {
@@ -214,6 +219,8 @@ type FinalizeCredentialParams struct {
 // to provide a means of interacting with the user when finalizing
 // a cloud definition.
 type FinalizeCloudContext interface {
+	context.Context
+
 	// Verbosef will write the formatted string to Stderr if the
 	// verbose flag is true, and to the logger if not.
 	Verbosef(string, ...interface{})
@@ -264,21 +271,6 @@ type CloudRegionDetector interface {
 	DetectRegions() ([]cloud.Region, error)
 }
 
-// ModelConfigUpgrader is an interface that an EnvironProvider may
-// implement in order to modify environment configuration on agent upgrade.
-type ModelConfigUpgrader interface {
-	// UpgradeConfig upgrades an old environment configuration by adding,
-	// updating or removing attributes. UpgradeConfig must be idempotent,
-	// as it may be called multiple times in the event of a partial upgrade.
-	//
-	// NOTE(axw) this is currently only called when upgrading to 1.25.
-	// We should update the upgrade machinery to call this for every
-	// version upgrade, so the upgrades package is not tightly coupled
-	// to provider upgrades.
-	// TODO (anastasiamac 2018-04-27) Since it is only for 1.25, do we still need it?
-	UpgradeConfig(cfg *config.Config) (*config.Config, error)
-}
-
 // ConfigGetter implements access to an environment's configuration.
 type ConfigGetter interface {
 	// Config returns the configuration data with which the Environ was created.
@@ -293,13 +285,13 @@ type ConfigSetter interface {
 	//
 	// Calls to SetConfig do not affect the configuration of
 	// values previously obtained from Storage.
-	SetConfig(cfg *config.Config) error
+	SetConfig(ctx context.Context, cfg *config.Config) error
 }
 
 // CloudSpecSetter implements access to an environment's cloud spec.
 type CloudSpecSetter interface {
 	// SetCloudSpec updates the Environ's configuration.
-	SetCloudSpec(ctx stdcontext.Context, spec environscloudspec.CloudSpec) error
+	SetCloudSpec(ctx context.Context, spec environscloudspec.CloudSpec) error
 }
 
 // Bootstrapper provides the way for bootstrapping controller.
@@ -322,7 +314,7 @@ type Bootstrapper interface {
 	// using an architecture constraint; this will have the effect of
 	// limiting the available tools to just those matching the specified
 	// architecture.
-	Bootstrap(ctx BootstrapContext, callCtx context.ProviderCallContext, params BootstrapParams) (*BootstrapResult, error)
+	Bootstrap(ctx BootstrapContext, params BootstrapParams) (*BootstrapResult, error)
 }
 
 // Configer implements access to an environment's configuration.
@@ -346,8 +338,17 @@ type BootstrapEnviron interface {
 	// StorageProviders returned from Environ.StorageProvider will
 	// be scoped specifically to that Environ.
 	storage.ProviderRegistry
+}
 
-	// Create creates the environment for a new hosted model.
+// ModelResources provides the API for checking and instantiating models
+// and their resources in a provider.
+type ModelResources interface {
+	// ValidateProviderForNewModel returns an error if a new model
+	// cannot be created owing to issues such as incompatible or
+	// otherwise invalid model configuration.
+	ValidateProviderForNewModel(context.Context) error
+
+	// CreateModelResources creates resources needed for a new hosted model.
 	//
 	// This will be called before any workers begin operating on the
 	// Environ, to give an Environ a chance to perform operations that
@@ -355,7 +356,7 @@ type BootstrapEnviron interface {
 	//
 	// Create is not called for the initial controller model; it is
 	// the Bootstrap method's job to create the controller model.
-	Create(context.ProviderCallContext, CreateParams) error
+	CreateModelResources(context.Context, CreateParams) error
 }
 
 // CloudDestroyer provides the API to cleanup cloud resources.
@@ -367,7 +368,7 @@ type CloudDestroyer interface {
 	//
 	// When Destroy has been called, any Environ referring to the
 	// same remote environment may become invalid.
-	Destroy(ctx context.ProviderCallContext) error
+	Destroy(ctx context.Context) error
 }
 
 // An Environ represents a Juju environment.
@@ -400,7 +401,7 @@ type Environ interface {
 	// If there are no controller instances, ErrNoInstances is returned.
 	// If it can be determined that the environment has not been bootstrapped,
 	// then ErrNotBootstrapped should be returned instead.
-	ControllerInstances(ctx context.ProviderCallContext, controllerUUID string) ([]instance.Id, error)
+	ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error)
 
 	// Provider returns the EnvironProvider that created this Environ.
 	Provider() EnvironProvider
@@ -420,7 +421,7 @@ type Environ interface {
 // This ensures that "kill-controller" can clean up hosted models
 // when the Juju controller process is unavailable.
 type ControllerDestroyer interface {
-	DestroyController(ctx context.ProviderCallContext, controllerUUID string) error
+	DestroyController(ctx context.Context, controllerUUID string) error
 }
 
 type ResourceAdopter interface {
@@ -435,14 +436,14 @@ type ResourceAdopter interface {
 	// provided for backwards compatibility - if the technique used to
 	// tag items changes, the version number can be used to decide how
 	// to remove the old tags correctly.
-	AdoptResources(ctx context.ProviderCallContext, controllerUUID string, fromVersion version.Number) error
+	AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error
 }
 
 // ConstraintsChecker provides a means to check that constraints are valid.
 type ConstraintsChecker interface {
 	// ConstraintsValidator returns a Validator instance which
 	// is used to validate and merge constraints.
-	ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error)
+	ConstraintsValidator(ctx context.Context) (constraints.Validator, error)
 }
 
 // InstancePrechecker provides a means of "prechecking" instance
@@ -456,7 +457,7 @@ type InstancePrechecker interface {
 	// all invalid parameters. If PrecheckInstance returns nil, it is not
 	// guaranteed that the constraints are valid; if a non-nil error is
 	// returned, then the constraints are definitely invalid.
-	PrecheckInstance(context.ProviderCallContext, PrecheckInstanceParams) error
+	PrecheckInstance(context.Context, PrecheckInstanceParams) error
 }
 
 // InstanceLister provider api to list instances for specified instance ids.
@@ -467,13 +468,16 @@ type InstanceLister interface {
 	// some but not all the instances were found, the returned slice
 	// will have some nil slots, and an ErrPartialInstances error
 	// will be returned.
-	Instances(ctx context.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error)
+	Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error)
 }
 
 // PrecheckInstanceParams contains the parameters for
 // InstancePrechecker.PrecheckInstance.
 type PrecheckInstanceParams struct {
 	// Base contains the base of the machine.
+	// TODO(jack-w-shaw): This should be a platform, so we include the
+	// architecture, since we don't always want to include the arch in
+	// the contraints
 	Base corebase.Base
 
 	// Constraints contains the machine constraints.
@@ -501,12 +505,12 @@ type Firewaller interface {
 	// OpenPorts opens the given port ranges for the whole environment.
 	// Must only be used if the environment was setup with the
 	// FwGlobal firewall mode.
-	OpenPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	OpenPorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// ClosePorts closes the given port ranges for the whole environment.
 	// Must only be used if the environment was setup with the
 	// FwGlobal firewall mode.
-	ClosePorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error
+	ClosePorts(ctx context.Context, rules firewall.IngressRules) error
 
 	// IngressRules returns the ingress rules applied to the whole environment.
 	// Must only be used if the environment was setup with the
@@ -514,7 +518,7 @@ type Firewaller interface {
 	// It is expected that there be only one ingress rule result for a given
 	// port range - the rule's SourceCIDRs will contain all applicable source
 	// address rules for that port range.
-	IngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error)
+	IngressRules(ctx context.Context) (firewall.IngressRules, error)
 }
 
 // FirewallFeatureQuerier exposes methods for detecting what features the
@@ -522,7 +526,7 @@ type Firewaller interface {
 type FirewallFeatureQuerier interface {
 	// SupportsRulesWithIPV6CIDRs returns true if the environment supports
 	// ingress rules containing IPV6 CIDRs.
-	SupportsRulesWithIPV6CIDRs(ctx context.ProviderCallContext) (bool, error)
+	SupportsRulesWithIPV6CIDRs(ctx context.Context) (bool, error)
 }
 
 // InstanceTagger is an interface that can be used for tagging instances.
@@ -531,13 +535,13 @@ type InstanceTagger interface {
 	//
 	// The specified tags will replace any existing ones with the
 	// same names, but other existing tags will be left alone.
-	TagInstance(ctx context.ProviderCallContext, id instance.Id, tags map[string]string) error
+	TagInstance(ctx context.Context, id instance.Id, tags map[string]string) error
 }
 
 // InstanceTypesFetcher is an interface that allows for instance information from
 // a provider to be obtained.
 type InstanceTypesFetcher interface {
-	InstanceTypes(context.ProviderCallContext, constraints.Value) (instances.InstanceTypesWithCostMetadata, error)
+	InstanceTypes(context.Context, constraints.Value) (instances.InstanceTypesWithCostMetadata, error)
 }
 
 // Upgrader is an interface that can be used for upgrading Environs. If an
@@ -546,7 +550,7 @@ type InstanceTypesFetcher interface {
 type Upgrader interface {
 	// UpgradeOperations returns a list of UpgradeOperations for upgrading
 	// an Environ.
-	UpgradeOperations(context.ProviderCallContext, UpgradeOperationsParams) []UpgradeOperation
+	UpgradeOperations(context.Context, UpgradeOperationsParams) []UpgradeOperation
 }
 
 // UpgradeOperationsParams contains the parameters for
@@ -580,30 +584,14 @@ type UpgradeStep interface {
 	Description() string
 
 	// Run executes the upgrade business logic.
-	Run(ctx context.ProviderCallContext) error
-}
-
-// JujuUpgradePrechecker is an interface that can be used to precheck
-// the Environs before upgrading juju. If an Environ implements this
-// interface, its PrecheckUpgradeOperations method will be invoked to
-// identify operations that should be run to check if an juju upgrade
-// is possible.
-type JujuUpgradePrechecker interface {
-	// PreparePrechecker is called to to give an Environ a chance to
-	// perform interactive operations that are required for prechecking
-	// an upgrade.
-	PreparePrechecker() error
-
-	// PrecheckUpgradeOperations returns a list of
-	// PrecheckJujuUpgradeOperations for checking if juju can be upgrade.
-	PrecheckUpgradeOperations() []PrecheckJujuUpgradeOperation
+	Run(ctx context.Context) error
 }
 
 // PrecheckJujuUpgradeOperation contains a target agent version and
 // sequence of upgrade precheck steps to apply to get to that version.
 type PrecheckJujuUpgradeOperation struct {
 	// TargetVersion is the target juju version.
-	TargetVersion version.Number
+	TargetVersion semversion.Number
 
 	// Steps contains the sequence of upgrade steps to apply when
 	// upgrading to the accompanying target version number.
@@ -658,7 +646,7 @@ type SupportedFeatureEnumerator interface {
 // CloudEndpointChecker.
 type CheckProvider interface {
 	// AllInstances returns all instances currently known to the broker.
-	AllInstances(ctx context.ProviderCallContext) ([]instances.Instance, error)
+	AllInstances(ctx context.Context) ([]instances.Instance, error)
 }
 
 // CloudEndpointChecker defines a method for cloud endpoint validation.
@@ -669,5 +657,5 @@ type CheckProvider interface {
 type CloudEndpointChecker interface {
 	// ValidateCloudEndpoint validates connectivity with the cloud's
 	// endpoint and returns nil if no problems.
-	ValidateCloudEndpoint(ctx context.ProviderCallContext) error
+	ValidateCloudEndpoint(ctx context.Context) error
 }

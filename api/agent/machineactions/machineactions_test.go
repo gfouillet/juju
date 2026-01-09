@@ -5,67 +5,70 @@
 package machineactions_test
 
 import (
+	"testing"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/agent/machineactions"
 	apitesting "github.com/juju/juju/api/base/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
 )
 
 type ClientSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&ClientSuite{})
+func TestClientSuite(t *testing.T) {
+	tc.Run(t, &ClientSuite{})
+}
 
-func (s *ClientSuite) TestWatchFails(c *gc.C) {
+func (s *ClientSuite) TestWatchFails(c *tc.C) {
 	tag := names.NewMachineTag("2")
 	expectErr := errors.Errorf("kuso")
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.WatchActionNotifications",
-		[]interface{}{"", params.Entities{
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.WatchActionNotifications",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.StringsWatchResults{})
+		c.Check(result, tc.FitsTypeOf, &params.StringsWatchResults{})
 		res := result.(*params.StringsWatchResults)
 		res.Results = make([]params.StringsWatchResult, 1)
 		return expectErr
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	w, err := client.WatchActionNotifications(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectErr)
-	c.Assert(w, gc.IsNil)
+	w, err := client.WatchActionNotifications(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectErr)
+	c.Assert(w, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestWatchResultError(c *gc.C) {
+func (s *ClientSuite) TestWatchResultError(c *tc.C) {
 	tag := names.NewMachineTag("2")
 	expectErr := &params.Error{
 		Message: "rigged",
 		Code:    params.CodeNotAssigned,
 	}
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.WatchActionNotifications",
-		[]interface{}{"", params.Entities{
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.WatchActionNotifications",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.StringsWatchResults{})
+		c.Check(result, tc.FitsTypeOf, &params.StringsWatchResults{})
 		res := result.(*params.StringsWatchResults)
 		res.Results = make([]params.StringsWatchResult, 1)
 		res.Results[0].Error = expectErr
@@ -73,50 +76,50 @@ func (s *ClientSuite) TestWatchResultError(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	w, err := client.WatchActionNotifications(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectErr)
-	c.Assert(w, gc.IsNil)
+	w, err := client.WatchActionNotifications(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectErr)
+	c.Assert(w, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestWatchResultTooMany(c *gc.C) {
+func (s *ClientSuite) TestWatchResultTooMany(c *tc.C) {
 	tag := names.NewMachineTag("2")
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.WatchActionNotifications",
-		[]interface{}{"", params.Entities{
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.WatchActionNotifications",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.StringsWatchResults{})
+		c.Check(result, tc.FitsTypeOf, &params.StringsWatchResults{})
 		res := result.(*params.StringsWatchResults)
 		res.Results = make([]params.StringsWatchResult, 2)
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	w, err := client.WatchActionNotifications(tag)
-	c.Assert(err, gc.ErrorMatches, "expected 1 result, got 2")
-	c.Assert(w, gc.IsNil)
+	w, err := client.WatchActionNotifications(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "expected 1 result, got 2")
+	c.Assert(w, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionBeginSuccess(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.BeginActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestActionBeginSuccess(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.BeginActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
 			Results: []params.ErrorResult{{}},
 		}
@@ -125,39 +128,39 @@ func (s *ClientSuite) TestActionBeginSuccess(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionBegin(tag)
-	c.Assert(err, jc.ErrorIsNil)
+	err := client.ActionBegin(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionBeginError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.BeginActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestActionBeginError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.BeginActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
 	expectedErr := errors.Errorf("blam")
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		return expectedErr
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionBegin(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
+	err := client.ActionBegin(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionBeginResultError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.BeginActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestActionBeginResultError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.BeginActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
@@ -165,11 +168,11 @@ func (s *ClientSuite) TestActionBeginResultError(c *gc.C) {
 		Message: "rigged",
 		Code:    params.CodeNotAssigned,
 	}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
 			Results: []params.ErrorResult{{expectedErr}},
 		}
@@ -178,43 +181,43 @@ func (s *ClientSuite) TestActionBeginResultError(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionBegin(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
+	err := client.ActionBegin(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionBeginTooManyResults(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.BeginActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestActionBeginTooManyResults(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.BeginActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		res := result.(*params.ErrorResults)
 		res.Results = make([]params.ErrorResult, 2)
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionBegin(tag)
-	c.Assert(err, gc.ErrorMatches, "expected 1 result, got 2")
+	err := client.ActionBegin(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "expected 1 result, got 2")
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionFinishSuccess(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
+func (s *ClientSuite) TestActionFinishSuccess(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
 	status := "stubstatus"
 	actionResults := map[string]interface{}{"stub": "stub"}
 	message := "stubmsg"
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.FinishActions",
-		[]interface{}{"", params.ActionExecutionResults{
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.FinishActions",
+		Args: []interface{}{"", params.ActionExecutionResults{
 			Results: []params.ActionExecutionResult{{
 				ActionTag: tag.String(),
 				Status:    status,
@@ -223,11 +226,11 @@ func (s *ClientSuite) TestActionFinishSuccess(c *gc.C) {
 			}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
 			Results: []params.ErrorResult{{}},
 		}
@@ -235,16 +238,16 @@ func (s *ClientSuite) TestActionFinishSuccess(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionFinish(tag, status, actionResults, message)
-	c.Assert(err, jc.ErrorIsNil)
+	err := client.ActionFinish(c.Context(), tag, status, actionResults, message)
+	c.Assert(err, tc.ErrorIsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionFinishError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.FinishActions",
-		[]interface{}{"", params.ActionExecutionResults{
+func (s *ClientSuite) TestActionFinishError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.FinishActions",
+		Args: []interface{}{"", params.ActionExecutionResults{
 			Results: []params.ActionExecutionResult{{
 				ActionTag: tag.String(),
 				Status:    "",
@@ -254,25 +257,25 @@ func (s *ClientSuite) TestActionFinishError(c *gc.C) {
 		}},
 	}}
 	expectedErr := errors.Errorf("blam")
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		return expectedErr
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionFinish(tag, "", nil, "")
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
+	err := client.ActionFinish(c.Context(), tag, "", nil, "")
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionFinishResultError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.FinishActions",
-		[]interface{}{"", params.ActionExecutionResults{
+func (s *ClientSuite) TestActionFinishResultError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.FinishActions",
+		Args: []interface{}{"", params.ActionExecutionResults{
 			Results: []params.ActionExecutionResult{{
 				ActionTag: tag.String(),
 				Status:    "",
@@ -285,29 +288,29 @@ func (s *ClientSuite) TestActionFinishResultError(c *gc.C) {
 		Message: "rigged",
 		Code:    params.CodeNotAssigned,
 	}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		*(result.(*params.ErrorResults)) = params.ErrorResults{
-			Results: []params.ErrorResult{{expectedErr}},
+			Results: []params.ErrorResult{{Error: expectedErr}},
 		}
 
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionFinish(tag, "", nil, "")
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
+	err := client.ActionFinish(c.Context(), tag, "", nil, "")
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestActionFinishTooManyResults(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.FinishActions",
-		[]interface{}{"", params.ActionExecutionResults{
+func (s *ClientSuite) TestActionFinishTooManyResults(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.FinishActions",
+		Args: []interface{}{"", params.ActionExecutionResults{
 			Results: []params.ActionExecutionResult{{
 				ActionTag: tag.String(),
 				Status:    "",
@@ -316,39 +319,39 @@ func (s *ClientSuite) TestActionFinishTooManyResults(c *gc.C) {
 			}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ErrorResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ErrorResults{})
 		res := result.(*params.ErrorResults)
 		res.Results = make([]params.ErrorResult, 2)
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	err := client.ActionFinish(tag, "", nil, "")
-	c.Assert(err, gc.ErrorMatches, "expected 1 result, got 2")
+	err := client.ActionFinish(c.Context(), tag, "", nil, "")
+	c.Assert(err, tc.ErrorMatches, "expected 1 result, got 2")
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestGetActionSuccess(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.Actions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestGetActionSuccess(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.Actions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
 	expectedName := "ack"
 	expectedParams := map[string]interface{}{"floob": "zgloob"}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	parallel := true
 	group := "group"
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionResults{})
 		*(result.(*params.ActionResults)) = params.ActionResults{
 			Results: []params.ActionResult{{
 				Action: &params.Action{
@@ -363,44 +366,44 @@ func (s *ClientSuite) TestGetActionSuccess(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	action, err := client.Action(tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(action.Name(), gc.Equals, expectedName)
-	c.Assert(action.Params(), gc.DeepEquals, expectedParams)
-	c.Assert(action.Parallel(), jc.IsTrue)
-	c.Assert(action.ExecutionGroup(), gc.Equals, "group")
+	action, err := client.Action(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(action.Name(), tc.Equals, expectedName)
+	c.Assert(action.Params(), tc.DeepEquals, expectedParams)
+	c.Assert(action.Parallel(), tc.IsTrue)
+	c.Assert(action.ExecutionGroup(), tc.Equals, "group")
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestGetActionError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.Actions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestGetActionError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.Actions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
 	expectedErr := errors.Errorf("blam")
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionResults{})
 		return expectedErr
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	action, err := client.Action(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
-	c.Assert(action, gc.IsNil)
+	action, err := client.Action(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
+	c.Assert(action, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestGetActionResultError(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.Actions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestGetActionResultError(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.Actions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
@@ -408,11 +411,11 @@ func (s *ClientSuite) TestGetActionResultError(c *gc.C) {
 		Message: "rigged",
 		Code:    params.CodeNotAssigned,
 	}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionResults{})
 		*(result.(*params.ActionResults)) = params.ActionResults{
 			Results: []params.ActionResult{{
 				Error: expectedErr,
@@ -422,42 +425,42 @@ func (s *ClientSuite) TestGetActionResultError(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	action, err := client.Action(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
-	c.Assert(action, gc.IsNil)
+	action, err := client.Action(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
+	c.Assert(action, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestGetActionTooManyResults(c *gc.C) {
-	tag := names.NewActionTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.Actions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestGetActionTooManyResults(c *tc.C) {
+	tag := names.NewActionTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.Actions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionResults{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionResults{})
 		res := result.(*params.ActionResults)
 		res.Results = make([]params.ActionResult, 2)
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	action, err := client.Action(tag)
-	c.Assert(err, gc.ErrorMatches, "expected only 1 action query result, got 2")
-	c.Assert(action, gc.IsNil)
+	action, err := client.Action(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "expected only 1 action query result, got 2")
+	c.Assert(action, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestRunningActionSuccess(c *gc.C) {
-	tag := names.NewMachineTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.RunningActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestRunningActionSuccess(c *tc.C) {
+	tag := names.NewMachineTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.RunningActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
@@ -465,11 +468,11 @@ func (s *ClientSuite) TestRunningActionSuccess(c *gc.C) {
 		{Action: &params.Action{Name: "foo"}},
 		{Action: &params.Action{Name: "baz"}},
 	}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionsByReceivers{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionsByReceivers{})
 		*(result.(*params.ActionsByReceivers)) = params.ActionsByReceivers{
 			Actions: []params.ActionsByReceiver{{
 				Actions: actionsList,
@@ -479,41 +482,41 @@ func (s *ClientSuite) TestRunningActionSuccess(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	actions, err := client.RunningActions(tag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(actions, jc.DeepEquals, actionsList)
+	actions, err := client.RunningActions(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(actions, tc.DeepEquals, actionsList)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestRunningActionsError(c *gc.C) {
-	tag := names.NewMachineTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.RunningActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestRunningActionsError(c *tc.C) {
+	tag := names.NewMachineTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.RunningActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
 	expectedErr := errors.Errorf("blam")
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionsByReceivers{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionsByReceivers{})
 		return expectedErr
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	actions, err := client.RunningActions(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
-	c.Assert(actions, gc.IsNil)
+	actions, err := client.RunningActions(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
+	c.Assert(actions, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestRunningActionsResultError(c *gc.C) {
-	tag := names.NewMachineTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.RunningActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestRunningActionsResultError(c *tc.C) {
+	tag := names.NewMachineTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.RunningActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
@@ -521,11 +524,11 @@ func (s *ClientSuite) TestRunningActionsResultError(c *gc.C) {
 		Message: "rigged",
 		Code:    params.CodeNotAssigned,
 	}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionsByReceivers{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionsByReceivers{})
 		*(result.(*params.ActionsByReceivers)) = params.ActionsByReceivers{
 			Actions: []params.ActionsByReceiver{{
 				Error: expectedErr,
@@ -535,33 +538,33 @@ func (s *ClientSuite) TestRunningActionsResultError(c *gc.C) {
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	action, err := client.RunningActions(tag)
-	c.Assert(errors.Cause(err), gc.Equals, expectedErr)
-	c.Assert(action, gc.IsNil)
+	action, err := client.RunningActions(c.Context(), tag)
+	c.Assert(errors.Cause(err), tc.Equals, expectedErr)
+	c.Assert(action, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }
 
-func (s *ClientSuite) TestRunningActionsTooManyResults(c *gc.C) {
-	tag := names.NewMachineTag(utils.MustNewUUID().String())
-	expectedCalls := []jujutesting.StubCall{{
-		"MachineActions.RunningActions",
-		[]interface{}{"", params.Entities{
+func (s *ClientSuite) TestRunningActionsTooManyResults(c *tc.C) {
+	tag := names.NewMachineTag(uuid.MustNewUUID().String())
+	expectedCalls := []testhelpers.StubCall{{
+		FuncName: "MachineActions.RunningActions",
+		Args: []interface{}{"", params.Entities{
 			Entities: []params.Entity{{Tag: tag.String()}},
 		}},
 	}}
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 
 	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
 		stub.AddCall(objType+"."+request, id, arg)
-		c.Check(result, gc.FitsTypeOf, &params.ActionsByReceivers{})
+		c.Check(result, tc.FitsTypeOf, &params.ActionsByReceivers{})
 		res := result.(*params.ActionsByReceivers)
 		res.Actions = make([]params.ActionsByReceiver, 2)
 		return nil
 	})
 
 	client := machineactions.NewClient(apiCaller)
-	actions, err := client.RunningActions(tag)
-	c.Assert(err, gc.ErrorMatches, "expected 1 result, got 2")
-	c.Assert(actions, gc.IsNil)
+	actions, err := client.RunningActions(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "expected 1 result, got 2")
+	c.Assert(actions, tc.IsNil)
 	stub.CheckCalls(c, expectedCalls)
 }

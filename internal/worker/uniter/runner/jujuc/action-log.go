@@ -6,10 +6,10 @@ package jujuc
 import (
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ActionLogCommand implements the action-log command.
@@ -40,5 +40,5 @@ func (c *ActionLogCommand) Init(args []string) error {
 }
 
 func (c *ActionLogCommand) Run(ctx *cmd.Context) error {
-	return c.ctx.LogActionMessage(c.Message)
+	return c.ctx.LogActionMessage(ctx, c.Message)
 }

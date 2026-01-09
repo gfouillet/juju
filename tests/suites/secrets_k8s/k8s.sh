@@ -8,7 +8,7 @@ run_secrets() {
 	# These checks ensure the secrets are deleted when the units and app are deleted.
 	echo "deploy an app and create an app owned secret and a unit owned secret"
 	juju --show-log deploy alertmanager-k8s
-	wait_for "alertmanager-k8s" "$(active_idle_condition "alertmanager-k8s" 0 0)"
+	wait_for "alertmanager-k8s" "$(active_idle_condition "alertmanager-k8s" 0)"
 	wait_for "active" '.applications["alertmanager-k8s"] | ."application-status".current'
 	full_uri1=$(juju exec --unit alertmanager-k8s/0 -- secret-add foo=bar)
 	short_uri1=${full_uri1##*/}
@@ -19,7 +19,7 @@ run_secrets() {
 
 	echo "add another unit and create a unit owned secret"
 	juju --show-log scale-application alertmanager-k8s 2
-	wait_for "alertmanager-k8s" "$(active_idle_condition "alertmanager-k8s" 0 1)"
+	wait_for "alertmanager-k8s" "$(active_idle_condition "alertmanager-k8s" 1)"
 	full_uri3=$(juju exec --unit alertmanager-k8s/1 -- secret-add --owner unit foo=bar3)
 	short_uri3=${full_uri3##*/}
 	check_contains "$(microk8s kubectl -n "$model_name" get secrets -o json | jq -r '.items[].metadata.name | select(. == "'"${short_uri3}"'-1")')" "${short_uri3}-1"
@@ -75,9 +75,9 @@ run_secrets() {
 	juju --show-log add-secret mysecret owned-by="$model_name" --info "this is a user secret"
 
 	wait_for "active" '.applications["hello"] | ."application-status".current'
-	wait_for "hello" "$(idle_condition "hello" 0)"
+	wait_for "hello" "$(idle_condition "hello")"
 	wait_for "active" '.applications["nginx"] | ."application-status".current' 900
-	wait_for "nginx" "$(idle_condition "nginx" 1 0)"
+	wait_for "nginx" "$(idle_condition "nginx" 0)"
 	wait_for "active" "$(workload_status "nginx" 0).current"
 	wait_for "hello" '.applications["nginx"] | .relations.ingress[0]'
 
@@ -138,11 +138,11 @@ run_secrets() {
 
 	echo "Checking: secret-revoke by relation ID"
 	juju exec --unit hello/0 -- secret-revoke "$app_owned_full_uri" --relation "$relation_id"
-	check_contains "$(juju exec --unit nginx/0 -- secret-get "$app_owned_full_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit nginx/0 -- secret-get "$app_owned_full_uri" 2>&1)" 'is not allowed to read this secret'
 
 	echo "Checking: secret-revoke by app name"
 	juju exec --unit hello/0 -- secret-revoke "$unit_owned_short_uri" --app nginx
-	check_contains "$(juju exec --unit nginx/0 -- secret-get "$unit_owned_short_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit nginx/0 -- secret-get "$unit_owned_short_uri" 2>&1)" 'is not allowed to read this secret'
 
 	echo "Checking: secret-remove"
 	juju exec --unit hello/0 -- secret-remove "$unit_owned_short_uri"
@@ -166,6 +166,8 @@ run_user_secrets() {
 
 	juju --show-log deploy snappass-test
 
+	wait_for "active" '.applications["hello-kubecon"] | ."application-status".current'
+
 	# create user secrets.
 	secret_uri=$(juju --show-log add-secret mysecret owned-by="$model_name-1" --info "this is a user secret")
 	secret_short_uri=${secret_uri##*:}
@@ -177,7 +179,7 @@ run_user_secrets() {
 	check_contains "$(juju --show-log show-secret "$secret_uri" --revisions | yq ".${secret_short_uri}.description")" 'info'
 
 	# grant secret to snappass-test app, and now the application can access the revision 2.
-	check_contains "$(juju exec --unit snappass-test/0 -- secret-get "$secret_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit snappass-test/0 -- secret-get "$secret_uri" 2>&1)" 'is not allowed to read this secret'
 	juju --show-log grant-secret "$secret_uri" snappass-test
 	check_contains "$(juju exec --unit snappass-test/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-2"
 
@@ -213,7 +215,7 @@ run_user_secrets() {
 	check_contains "$(juju --show-log show-secret $secret_uri --reveal --revision 3 | yq .${secret_short_uri}.content)" "owned-by: $model_name-3"
 
 	juju --show-log revoke-secret $secret_uri snappass-test
-	check_contains "$(juju exec --unit snappass-test/0 -- secret-get "$secret_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit snappass-test/0 -- secret-get "$secret_uri" 2>&1)" 'is not allowed to read this secret'
 
 	juju --show-log remove-secret $secret_uri
 	check_contains "$(juju --show-log secrets --format yaml | yq length)" '0'
@@ -237,7 +239,7 @@ run_secret_drain() {
 
 	juju --show-log deploy snappass-test hello
 	wait_for "active" '.applications["hello"] | ."application-status".current'
-	wait_for "hello" "$(idle_condition "hello" 0)"
+	wait_for "hello" "$(idle_condition "hello")"
 
 	unit_owned_full_uri=$(juju exec --unit hello/0 -- secret-add --owner unit owned-by=hello/0)
 	unit_owned_short_uri=${unit_owned_full_uri##*/}
@@ -250,7 +252,7 @@ run_secret_drain() {
 	check_contains "$(microk8s kubectl -n "$model_name" get secrets -l 'app.juju.is/created-by=hello')" "${unit_owned_short_uri}-1"
 	check_contains "$(microk8s kubectl -n "$model_name" get secrets -l 'app.juju.is/created-by=hello')" "${app_owned_short_uri}-1"
 
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	attempt=0
 	until [[ $(microk8s kubectl -n "$model_name" get secrets -l 'app.juju.is/created-by=hello' -o json | jq '.items | length') -eq 0 ]]; do
@@ -265,7 +267,7 @@ run_secret_drain() {
 	model_uuid=$(juju show-model $model_name --format json | jq -r ".[\"${model_name}\"][\"model-uuid\"]")
 	check_contains "$(vault kv list -format json "${model_name}-${model_uuid: -6}" | jq length)" 2
 
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	attempt=0
 	until [[ "$(microk8s kubectl -n $model_name get secrets -l 'app.juju.is/created-by=hello')" =~ ${unit_owned_short_uri}-1 ]]; do
@@ -303,7 +305,7 @@ run_user_secret_drain() {
 
 	juju --show-log deploy snappass-test hello
 	wait_for "active" '.applications["hello"] | ."application-status".current'
-	wait_for "hello" "$(idle_condition "hello" 0)"
+	wait_for "hello" "$(idle_condition "hello")"
 
 	secret_uri=$(juju --show-log add-secret mysecret owned-by="$model_name-1" --info "this is a user secret")
 	secret_short_uri=${secret_uri##*:}
@@ -315,7 +317,7 @@ run_user_secret_drain() {
 
 	check_contains "$(microk8s kubectl -n "$model_name" get secrets -l "app.juju.is/created-by=$model_uuid" -o jsonpath='{.items[*].metadata.name}')" "${secret_short_uri}-1"
 
-	juju model-config secret-backend="$vault_backend_name"
+	juju model-secret-backend "$vault_backend_name"
 
 	# ensure the user secret is removed from k8s backend.
 	attempt=0
@@ -334,7 +336,7 @@ run_user_secret_drain() {
 	# ensure the application can still read the user secret.
 	check_contains "$(juju exec --unit hello/0 -- secret-get $secret_short_uri)" "owned-by: $model_name-1"
 
-	juju model-config secret-backend=auto
+	juju model-secret-backend auto
 
 	# ensure the user secret is drained back to k8s backend.
 	attempt=0

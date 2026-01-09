@@ -4,17 +4,19 @@
 package lxd
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 )
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	"project": {
 		Description: "The LXD project name to use for Juju's resources.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 }
 
@@ -47,9 +49,9 @@ func newConfig(cfg *config.Config) *environConfig {
 // newValidConfig builds a new environConfig from the provided Config
 // and returns it. This includes applying the provided defaults
 // values, if any. The resulting config values are validated.
-func newValidConfig(cfg *config.Config) (*environConfig, error) {
+func newValidConfig(ctx context.Context, cfg *config.Config) (*environConfig, error) {
 	// Ensure that the provided config is valid.
-	if err := config.Validate(cfg, nil); err != nil {
+	if err := config.Validate(ctx, cfg, nil); err != nil {
 		return nil, errors.Trace(err)
 	}
 

@@ -4,14 +4,16 @@
 package authenticationworker
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/agent/keyupdater"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 )
 
 // ManifoldConfig defines the names of the manifolds on which a Manifold will depend.
@@ -25,8 +27,8 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return engine.AgentAPIManifold(typedConfig, newWorker)
 }
 
-func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
-	w, err := NewWorker(keyupdater.NewState(apiCaller), a.CurrentConfig())
+func newWorker(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+	w, err := NewWorker(keyupdater.NewClient(apiCaller), a.CurrentConfig())
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot start ssh auth-keys updater worker")
 	}

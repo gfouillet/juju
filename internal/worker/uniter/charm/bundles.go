@@ -4,21 +4,23 @@
 package charm
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/downloader"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/downloader"
 )
 
-// Download exposes the downloader.Download methods needed here.
+// Downloader exposes the downloader.Download methods needed here.
 type Downloader interface {
 	// Download starts a new charm archive download, waits for it to
 	// complete, and returns the local name of the file.
-	Download(req downloader.Request) (string, error)
+	Download(ctx context.Context, req downloader.Request) (string, error)
 }
 
 // BundlesDir is responsible for storing and retrieving charm bundles
@@ -26,11 +28,11 @@ type Downloader interface {
 type BundlesDir struct {
 	path       string
 	downloader Downloader
-	logger     Logger
+	logger     logger.Logger
 }
 
 // NewBundlesDir returns a new BundlesDir which uses path for storage.
-func NewBundlesDir(path string, dlr Downloader, logger Logger) *BundlesDir {
+func NewBundlesDir(path string, dlr Downloader, logger logger.Logger) *BundlesDir {
 	if dlr == nil {
 		dlr = downloader.New(downloader.NewArgs{
 			HostnameVerification: false,
@@ -45,14 +47,15 @@ func NewBundlesDir(path string, dlr Downloader, logger Logger) *BundlesDir {
 
 // Read returns a charm bundle from the directory. If no bundle exists yet,
 // one will be downloaded and validated and copied into the directory before
-// being returned. Downloads will be aborted if a value is received on abort.
-func (d *BundlesDir) Read(info BundleInfo, abort <-chan struct{}) (Bundle, error) {
+// being returned. Downloads will be aborted if a value is received on context
+// cancelled.
+func (d *BundlesDir) Read(ctx context.Context, info BundleInfo) (Bundle, error) {
 	path := d.bundlePath(info)
 	if _, err := os.Stat(path); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err := d.download(info, path, abort); err != nil {
+		if err := d.download(ctx, info, path); err != nil {
 			return nil, err
 		}
 	}
@@ -62,13 +65,13 @@ func (d *BundlesDir) Read(info BundleInfo, abort <-chan struct{}) (Bundle, error
 // download fetches the supplied charm and checks that it has the correct sha256
 // hash, then copies it into the directory. If a value is received on abort, the
 // download will be stopped.
-func (d *BundlesDir) download(info BundleInfo, target string, abort <-chan struct{}) error {
+func (d *BundlesDir) download(ctx context.Context, info BundleInfo, target string) error {
 	// First download...
 	curl, err := url.Parse(info.URL())
 	if err != nil {
 		return errors.Annotate(err, "could not parse charm URL")
 	}
-	expectedSha256, err := info.ArchiveSha256()
+	expectedSha256, err := info.ArchiveSha256(ctx)
 	if err != nil {
 		return errors.Annotatef(err, "failed to get archive sha256 for charm %q", info.URL())
 	}
@@ -77,10 +80,9 @@ func (d *BundlesDir) download(info BundleInfo, target string, abort <-chan struc
 		URL:           curl,
 		TargetDir:     downloadsPath(d.path),
 		Verify:        downloader.NewSha256Verifier(expectedSha256),
-		Abort:         abort,
 	}
-	d.logger.Infof("downloading %s from API server", info.URL())
-	filename, err := d.downloader.Download(req)
+	d.logger.Infof(ctx, "downloading %s from API server", info.URL())
+	filename, err := d.downloader.Download(ctx, req)
 	if err != nil {
 		return errors.Annotatef(err, "failed to download charm %q from API server", info.URL())
 	}

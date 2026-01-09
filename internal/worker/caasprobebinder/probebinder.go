@@ -5,10 +5,10 @@ package caasprobebinder
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 
+	"github.com/juju/juju/internal/observability/probe"
 	"github.com/juju/juju/internal/worker/caasprober"
-	"github.com/juju/juju/observability/probe"
 )
 
 // ProbeBinder is a worker that binds a set of probe providers
@@ -27,6 +27,7 @@ func NewProbeBinder(probes *caasprober.CAASProbes, providers map[string]probe.Pr
 		providers: providers,
 	}
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-probe-binder",
 		Site: &pb.catacomb,
 		Work: pb.loop,
 	}); err != nil {

@@ -14,7 +14,6 @@ import (
 	reflect "reflect"
 
 	network "github.com/juju/juju/core/network"
-	state "github.com/juju/juju/state"
 	gomock "go.uber.org/mock/gomock"
 	ssh "golang.org/x/crypto/ssh"
 )
@@ -43,7 +42,7 @@ func (m *MockState) EXPECT() *MockStateMockRecorder {
 }
 
 // InsertSSHConnRequest mocks base method.
-func (m *MockState) InsertSSHConnRequest(arg0 state.SSHConnRequestArg) error {
+func (m *MockState) InsertSSHConnRequest(arg0 sshRequestArgs) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "InsertSSHConnRequest", arg0)
 	ret0, _ := ret[0].(error)
@@ -69,13 +68,13 @@ func (c *MockStateInsertSSHConnRequestCall) Return(arg0 error) *MockStateInsertS
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStateInsertSSHConnRequestCall) Do(f func(state.SSHConnRequestArg) error) *MockStateInsertSSHConnRequestCall {
+func (c *MockStateInsertSSHConnRequestCall) Do(f func(sshRequestArgs) error) *MockStateInsertSSHConnRequestCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStateInsertSSHConnRequestCall) DoAndReturn(f func(state.SSHConnRequestArg) error) *MockStateInsertSSHConnRequestCall {
+func (c *MockStateInsertSSHConnRequestCall) DoAndReturn(f func(sshRequestArgs) error) *MockStateInsertSSHConnRequestCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

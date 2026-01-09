@@ -4,16 +4,22 @@
 package params
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
-	"github.com/juju/version/v2"
+	"github.com/juju/errors"
+	"github.com/juju/loggo/v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/tools"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/tools"
 )
 
 // MachineContainersParams holds the arguments for making a SetSupportedContainers
@@ -117,10 +123,8 @@ type ModelCreateArgs struct {
 	// Name is the name for the new model.
 	Name string `json:"name"`
 
-	// OwnerTag represents the user that will own the new model.
-	// The OwnerTag must be a valid user tag.  If the user tag represents
-	// a local user, that user must exist.
-	OwnerTag string `json:"owner-tag"`
+	// Qualifier disambiguates the name of the model.
+	Qualifier string `json:"qualifier"`
 
 	// Config defines the model config, which includes the name of the
 	// model. A model UUID is allocated by the API server during the
@@ -144,15 +148,19 @@ type ModelCreateArgs struct {
 	// and the owner is the controller owner, the same credential
 	// used for the controller model will be used.
 	CloudCredentialTag string `json:"credential,omitempty"`
+
+	// TargetController is a JAAS specific field to specify the
+	// name of the controller that hosts the model.
+	TargetController string `json:"target-controller,omitempty"`
 }
 
 // Model holds the result of an API call returning a name and UUID
 // for a model and the tag of the server in which it is running.
 type Model struct {
-	Name     string `json:"name"`
-	UUID     string `json:"uuid"`
-	Type     string `json:"type"`
-	OwnerTag string `json:"owner-tag"`
+	Name      string `json:"name"`
+	Qualifier string `json:"qualifier"`
+	UUID      string `json:"uuid"`
+	Type      string `json:"type"`
 }
 
 // UserModel holds information about a model and the last
@@ -264,8 +272,6 @@ type UnitStateResult struct {
 	StorageState string `json:"storage-state,omitempty"`
 	// SecretState is internal secret state for this unit.
 	SecretState string `json:"secret-state,omitempty"`
-	// MeterStatusState encodes the meter status state for this unit.
-	MeterStatusState string `json:"meter-status-state,omitempty"`
 }
 
 // UnitStateResults holds multiple unit state maps or errors.
@@ -287,13 +293,12 @@ type SetUnitStateArgs struct {
 // to be evaluated for changes to the persisted data.  A pointer to nil or
 // empty data will cause the persisted data to be deleted.
 type SetUnitStateArg struct {
-	Tag              string             `json:"tag"`
-	CharmState       *map[string]string `json:"charm-state,omitempty"`
-	UniterState      *string            `json:"uniter-state,omitempty"`
-	RelationState    *map[int]string    `json:"relation-state,omitempty"`
-	StorageState     *string            `json:"storage-state,omitempty"`
-	SecretState      *string            `json:"secret-state,omitempty"`
-	MeterStatusState *string            `json:"meter-status-state,omitempty"`
+	Tag           string             `json:"tag"`
+	CharmState    *map[string]string `json:"charm-state,omitempty"`
+	UniterState   *string            `json:"uniter-state,omitempty"`
+	RelationState *map[int]string    `json:"relation-state,omitempty"`
+	StorageState  *string            `json:"storage-state,omitempty"`
+	SecretState   *string            `json:"secret-state,omitempty"`
 }
 
 // CommitHookChangesArgs serves as a container for CommitHookChangesArg objects
@@ -313,8 +318,6 @@ type CommitHookChangesArg struct {
 	ClosePorts           []EntityPortRange      `json:"close-ports,omitempty"`
 	SetUnitState         *SetUnitStateArg       `json:"unit-state,omitempty"`
 	AddStorage           []StorageAddParams     `json:"add-storage,omitempty"`
-	SetPodSpec           *PodSpec               `json:"pod-spec,omitempty"`
-	SetRawK8sSpec        *PodSpec               `json:"set-raw-k8s-spec,omitempty"`
 	SecretCreates        []CreateSecretArg      `json:"secret-creates,omitempty"`
 	TrackLatest          []string               `json:"secret-track-latest,omitempty"`
 	SecretUpdates        []UpdateSecretArg      `json:"secret-updates,omitempty"`
@@ -383,7 +386,6 @@ type RelationUnitPairs struct {
 
 // RelationUnitSettings holds a relation tag, a unit tag and local
 // unit and app-level settings.
-// TODO(juju3) - remove
 type RelationUnitSettings struct {
 	Relation            string   `json:"relation"`
 	Unit                string   `json:"unit"`
@@ -393,7 +395,6 @@ type RelationUnitSettings struct {
 
 // RelationUnitsSettings holds the arguments for making a EnterScope
 // or UpdateRelationSettings API calls.
-// TODO(juju3) - remove
 type RelationUnitsSettings struct {
 	RelationUnits []RelationUnitSettings `json:"relation-units"`
 }
@@ -409,6 +410,27 @@ type RelatedApplicationDetails struct {
 // information about multiple relations.
 type RelationResults struct {
 	Results []RelationResult `json:"results"`
+}
+
+// Endpoint holds an application-relation pair.
+type Endpoint struct {
+	ApplicationName string        `json:"application-name"`
+	Relation        CharmRelation `json:"relation"`
+}
+
+// NewCharmRelation creates a new local CharmRelation structure from  the
+// charm.Relation structure. NOTE: when we update the database to not store a
+// charm.Relation directly in the database, this method should take the state
+// structure type.
+func NewCharmRelation(cr charm.Relation) CharmRelation {
+	return CharmRelation{
+		Name:      cr.Name,
+		Role:      string(cr.Role),
+		Interface: cr.Interface,
+		Optional:  cr.Optional,
+		Limit:     cr.Limit,
+		Scope:     string(cr.Scope),
+	}
 }
 
 // RelationResult returns information about a single relation,
@@ -565,30 +587,13 @@ type AgentGetEntitiesResult struct {
 // VersionResult holds the version and possibly error for a given
 // DesiredVersion() API call.
 type VersionResult struct {
-	Version *version.Number `json:"version,omitempty"`
-	Error   *Error          `json:"error,omitempty"`
+	Version *semversion.Number `json:"version,omitempty"`
+	Error   *Error             `json:"error,omitempty"`
 }
 
 // VersionResults is a list of versions for the requested entities.
 type VersionResults struct {
 	Results []VersionResult `json:"results"`
-}
-
-// SetModelEnvironVersions holds the tags and associated environ versions
-// of a collection of models.
-type SetModelEnvironVersions struct {
-	Models []SetModelEnvironVersion `json:"models,omitempty"`
-}
-
-// SetModelEnvironVersion holds the tag and associated environ version
-// of a model.
-type SetModelEnvironVersion struct {
-	// ModelTag is the string representation of a model tag, which
-	// should be parsable using names.ParseModelTag.
-	ModelTag string `json:"model-tag"`
-
-	// Version is the environ version to set for the model.
-	Version int `json:"version"`
 }
 
 // ToolsResult holds the tools and possibly error for a given
@@ -605,7 +610,7 @@ type ToolsResults struct {
 
 // Version holds a specific binary version.
 type Version struct {
-	Version version.Binary `json:"version"`
+	Version semversion.Binary `json:"version"`
 }
 
 // EntityVersion specifies the tools version to be set for an entity
@@ -774,10 +779,6 @@ type RunParams struct {
 	Units          []string      `json:"units,omitempty"`
 	Parallel       *bool         `json:"parallel,omitempty"`
 	ExecutionGroup *string       `json:"execution-group,omitempty"`
-
-	// WorkloadContext for CAAS is true when the Commands should be run on
-	// the workload not the operator.
-	WorkloadContext bool `json:"workload-context,omitempty"`
 }
 
 // RunResult contains the result from an individual run call on a machine.
@@ -801,7 +802,7 @@ type RunResults struct {
 // AgentVersionResult is used to return the current version number of the
 // agent running the API server.
 type AgentVersionResult struct {
-	Version version.Number `json:"version"`
+	Version semversion.Number `json:"version"`
 }
 
 // RetryProvisioningArgs holds args for retrying machine provisioning.
@@ -857,56 +858,6 @@ type ProvisioningInfoResults struct {
 	Results []ProvisioningInfoResult `json:"results"`
 }
 
-// Metric holds a single metric.
-type Metric struct {
-	Key    string            `json:"key"`
-	Value  string            `json:"value"`
-	Time   time.Time         `json:"time"`
-	Labels map[string]string `json:"labels,omitempty"`
-}
-
-// MetricsParam contains the metrics for a single unit.
-type MetricsParam struct {
-	Tag     string   `json:"tag"`
-	Metrics []Metric `json:"metrics"`
-}
-
-// MetricsParams contains the metrics for multiple units.
-type MetricsParams struct {
-	Metrics []MetricsParam `json:"metrics"`
-}
-
-// MetricBatch is a list of metrics with metadata.
-type MetricBatch struct {
-	UUID     string    `json:"uuid"`
-	CharmURL string    `json:"charm-url"`
-	Created  time.Time `json:"created"`
-	Metrics  []Metric  `json:"metrics"`
-}
-
-// MetricBatchParam contains a single metric batch.
-type MetricBatchParam struct {
-	Tag   string      `json:"tag"`
-	Batch MetricBatch `json:"batch"`
-}
-
-// MetricBatchParams contains multiple metric batches.
-type MetricBatchParams struct {
-	Batches []MetricBatchParam `json:"batches"`
-}
-
-// MeterStatusResult holds unit meter status or error.
-type MeterStatusResult struct {
-	Code  string `json:"code"`
-	Info  string `json:"info"`
-	Error *Error `json:"error,omitempty"`
-}
-
-// MeterStatusResults holds meter status results for multiple units.
-type MeterStatusResults struct {
-	Results []MeterStatusResult `json:"results"`
-}
-
 // SingularClaim represents a request for exclusive administrative access
 // to an entity (model or controller) on the part of the claimant.
 type SingularClaim struct {
@@ -921,7 +872,23 @@ type SingularClaims struct {
 }
 
 // LogMessage is a structured logging entry.
+// It is used to stream log records to the log streamer client
+// from the api server /logs endpoint.
+// The client is used for model migration and debug-log.
 type LogMessage struct {
+	ModelUUID string            `json:"uuid,omitempty"`
+	Entity    string            `json:"tag"`
+	Timestamp time.Time         `json:"ts"`
+	Severity  string            `json:"sev"`
+	Module    string            `json:"mod"`
+	Location  string            `json:"loc"`
+	Message   string            `json:"msg"`
+	Labels    map[string]string `json:"lab,omitempty"`
+}
+
+// LogMessageV1 is a structured logging entry
+// for older clients expecting an array of labels.
+type LogMessageV1 struct {
 	Entity    string    `json:"tag"`
 	Timestamp time.Time `json:"ts"`
 	Severity  string    `json:"sev"`
@@ -929,6 +896,59 @@ type LogMessage struct {
 	Location  string    `json:"loc"`
 	Message   string    `json:"msg"`
 	Labels    []string  `json:"lab"`
+}
+
+type logMessageJSON struct {
+	ModelUUID string    `json:"uuid,omitempty"`
+	Entity    string    `json:"tag"`
+	Timestamp time.Time `json:"ts"`
+	Severity  string    `json:"sev"`
+	Module    string    `json:"mod"`
+	Location  string    `json:"loc"`
+	Message   string    `json:"msg"`
+	Labels    any       `json:"lab,omitempty"`
+}
+
+// UnmarshalJSON unmarshalls an incoming log message
+// in either v1 or later format.
+func (m *LogMessage) UnmarshalJSON(data []byte) error {
+	var jm logMessageJSON
+	if err := json.Unmarshal(data, &jm); err != nil {
+		return errors.Trace(err)
+	}
+	m.ModelUUID = jm.ModelUUID
+	m.Timestamp = jm.Timestamp
+	m.Entity = jm.Entity
+	m.Severity = jm.Severity
+	m.Module = jm.Module
+	m.Location = jm.Location
+	m.Message = jm.Message
+	m.Labels = unmarshallLogLabels(jm.Labels)
+	return nil
+}
+
+func unmarshallLogLabels(in any) map[string]string {
+	var result map[string]string
+	switch lab := in.(type) {
+	case []any:
+		if len(lab) > 0 {
+			out := make([]string, len(lab))
+			for i, v := range lab {
+				out[i] = fmt.Sprint(v)
+			}
+			result = map[string]string{
+				loggo.LoggerTags: strings.Join(out, ","),
+			}
+		}
+	case map[string]any:
+		result = map[string]string{}
+		for k, v := range lab {
+			result[k] = fmt.Sprint(v)
+		}
+	default:
+		// Either missing or not supported.
+	}
+	return result
 }
 
 // ResourceUploadResult is used to return some details about an
@@ -963,19 +983,6 @@ type UnitRefreshResults struct {
 type EntityString struct {
 	Tag   string `json:"tag"`
 	Value string `json:"value"`
-}
-
-// SetPodSpecParams holds the arguments for setting the pod
-// spec for a set of applications.
-// TODO(juju3) - remove
-type SetPodSpecParams struct {
-	Specs []EntityString `json:"specs"`
-}
-
-// PodSpec holds an entity tag and optional podspec value.
-type PodSpec struct {
-	Tag  string  `json:"tag"`
-	Spec *string `json:"spec,omitempty"`
 }
 
 // GoalStateResults holds the results of GoalStates API call

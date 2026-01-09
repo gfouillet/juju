@@ -6,10 +6,10 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ConfigGetCommand implements the config-get command.
@@ -71,7 +71,7 @@ func (c *ConfigGetCommand) Init(args []string) error {
 }
 
 func (c *ConfigGetCommand) Run(ctx *cmd.Context) error {
-	settings, err := c.ctx.ConfigSettings()
+	settings, err := c.ctx.ConfigSettings(ctx)
 	if err != nil {
 		return err
 	}

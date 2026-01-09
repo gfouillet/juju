@@ -4,9 +4,9 @@
 package application
 
 import (
+	"context"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -92,6 +93,9 @@ func NewExposeCommand() modelcmd.ModelCommand {
 // exposeCommand is responsible exposing applications.
 type exposeCommand struct {
 	modelcmd.ModelCommandBase
+
+	api ApplicationExposeAPI
+
 	ApplicationName      string
 	ExposedEndpointsList string
 	ExposeToSpacesList   string
@@ -126,14 +130,18 @@ func (c *exposeCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args[1:])
 }
 
-type applicationExposeAPI interface {
+// ApplicationExposeAPI is used to expose and unexpose applicatios.
+type ApplicationExposeAPI interface {
 	Close() error
-	Expose(applicationName string, exposedEndpoints map[string]params.ExposedEndpoint) error
-	Unexpose(applicationName string, exposedEndpoints []string) error
+	Expose(ctx context.Context, applicationName string, exposedEndpoints map[string]params.ExposedEndpoint) error
+	Unexpose(ctx context.Context, applicationName string, exposedEndpoints []string) error
 }
 
-func (c *exposeCommand) getAPI() (applicationExposeAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *exposeCommand) getAPI(ctx context.Context) (ApplicationExposeAPI, error) {
+	if c.api != nil {
+		return c.api, nil
+	}
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -142,15 +150,15 @@ func (c *exposeCommand) getAPI() (applicationExposeAPI, error) {
 
 // Run changes the juju-managed firewall to expose any
 // ports that were also explicitly marked by units as open.
-func (c *exposeCommand) Run(_ *cmd.Context) error {
-	client, err := c.getAPI()
+func (c *exposeCommand) Run(ctx *cmd.Context) error {
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	exposedEndpoints := c.buildExposedEndpoints()
-	return block.ProcessBlockedError(client.Expose(c.ApplicationName, exposedEndpoints), block.BlockChange)
+	return block.ProcessBlockedError(client.Expose(ctx, c.ApplicationName, exposedEndpoints), block.BlockChange)
 }
 
 func (c *exposeCommand) buildExposedEndpoints() map[string]params.ExposedEndpoint {

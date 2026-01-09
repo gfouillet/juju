@@ -6,13 +6,13 @@ package space
 import (
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewRenameCommand returns a command used to rename an existing space.
@@ -90,7 +90,7 @@ func (c *RenameCommand) Init(args []string) (err error) {
 // Run implements Command.Run.
 func (c *RenameCommand) Run(ctx *cmd.Context) error {
 	return c.RunWithSpaceAPI(ctx, func(api SpaceAPI, ctx *cmd.Context) error {
-		err := api.RenameSpace(c.Name, c.NewName)
+		err := api.RenameSpace(ctx, c.Name, c.NewName)
 		if err != nil {
 			return errors.Annotatef(err, "cannot rename space %q", c.Name)
 		}

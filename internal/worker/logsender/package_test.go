@@ -3,12 +3,4 @@
 
 package logsender_test
 
-import (
-	stdtesting "testing"
-
-	"github.com/juju/juju/testing"
-)
-
-func TestPackage(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/logwriter_mock.go github.com/juju/juju/api/logsender LogWriter

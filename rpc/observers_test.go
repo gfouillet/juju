@@ -4,20 +4,24 @@
 package rpc_test
 
 import (
-	"github.com/juju/testing"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/apiserver/observer/fakeobserver"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc"
 )
 
 type multiplexerSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&multiplexerSuite{})
+func TestMultiplexerSuite(t *testing.T) {
+	tc.Run(t, &multiplexerSuite{})
+}
 
-func (*multiplexerSuite) TestServerReply_CallsAllObservers(c *gc.C) {
+func (*multiplexerSuite) TestServerReply_CallsAllObservers(c *tc.C) {
 	observers := []*fakeobserver.RPCInstance{
 		(&fakeobserver.Instance{}).RPCObserver().(*fakeobserver.RPCInstance),
 		(&fakeobserver.Instance{}).RPCObserver().(*fakeobserver.RPCInstance),
@@ -29,14 +33,14 @@ func (*multiplexerSuite) TestServerReply_CallsAllObservers(c *gc.C) {
 		hdr  rpc.Header
 		body string
 	)
-	o.ServerReply(req, &hdr, body)
+	o.ServerReply(c.Context(), req, &hdr, body)
 
 	for _, f := range observers {
 		f.CheckCall(c, 0, "ServerReply", req, &hdr, body)
 	}
 }
 
-func (*multiplexerSuite) TestServerRequest_CallsAllObservers(c *gc.C) {
+func (*multiplexerSuite) TestServerRequest_CallsAllObservers(c *tc.C) {
 	observers := []*fakeobserver.RPCInstance{
 		(&fakeobserver.Instance{}).RPCObserver().(*fakeobserver.RPCInstance),
 		(&fakeobserver.Instance{}).RPCObserver().(*fakeobserver.RPCInstance),
@@ -47,7 +51,7 @@ func (*multiplexerSuite) TestServerRequest_CallsAllObservers(c *gc.C) {
 		hdr  rpc.Header
 		body string
 	)
-	o.ServerRequest(&hdr, body)
+	o.ServerRequest(c.Context(), &hdr, body)
 
 	for _, f := range observers {
 		f.CheckCall(c, 0, "ServerRequest", &hdr, body)

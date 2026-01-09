@@ -4,16 +4,17 @@
 package caas
 
 import (
+	"context"
 	"encoding/hex"
 	"math/rand"
 
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/caas/kubernetes/clientconfig"
 	k8scloud "github.com/juju/juju/caas/kubernetes/cloud"
 	jujucloud "github.com/juju/juju/cloud"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	provider "github.com/juju/juju/internal/provider/kubernetes"
 )
 
 const rbacLabelKeyName = k8scloud.RBACLabelKeyName
@@ -53,7 +54,7 @@ func getExistingLocalCredential(store credentialGetter, cloudName, credentialNam
 func decideCredentialUID(store credentialGetter, cloudName, credentialName string) (string, error) {
 	var credUID string
 	existingCredential, err := getExistingLocalCredential(store, cloudName, credentialName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return "", errors.Trace(err)
 	}
 	if err == nil && existingCredential.Attributes() != nil {
@@ -70,7 +71,7 @@ func decideCredentialUID(store credentialGetter, cloudName, credentialName strin
 	return credUID, nil
 }
 
-func cleanUpCredentialRBAC(cloud jujucloud.Cloud, credential jujucloud.Credential) error {
+func cleanUpCredentialRBAC(ctx context.Context, cloud jujucloud.Cloud, credential jujucloud.Credential) error {
 	attr := credential.Attributes()
 	if attr == nil {
 		return nil
@@ -84,10 +85,10 @@ func cleanUpCredentialRBAC(cloud jujucloud.Cloud, credential jujucloud.Credentia
 	if err != nil {
 		return errors.Trace(err)
 	}
-	restConfig, err := provider.CloudSpecToK8sRestConfig(cloudSpec)
+	restConfig, err := kubernetes.CloudSpecToK8sRestConfig(cloudSpec)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	err = clientconfig.RemoveCredentialRBACResources(restConfig, credUID)
+	err = clientconfig.RemoveCredentialRBACResources(ctx, restConfig, credUID)
 	return errors.Trace(err)
 }

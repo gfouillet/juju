@@ -4,10 +4,12 @@
 package machiner
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	apiagent "github.com/juju/juju/api/agent/agent"
@@ -18,9 +20,8 @@ import (
 // ManifoldConfig defines the names of the manifolds on which a
 // Manifold will depend.
 type ManifoldConfig struct {
-	AgentName         string
-	APICallerName     string
-	FanConfigurerName string
+	AgentName     string
+	APICallerName string
 }
 
 // Manifold returns a dependency manifold that runs a machiner worker, using
@@ -30,25 +31,17 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 		Inputs: []string{
 			config.AgentName,
 			config.APICallerName,
-			config.FanConfigurerName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			var agent agent.Agent
-			if err := context.Get(config.AgentName, &agent); err != nil {
+			if err := getter.Get(config.AgentName, &agent); err != nil {
 				return nil, err
 			}
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, err
 			}
-			var fanConfigurerReady bool
-			if err := context.Get(config.FanConfigurerName, &fanConfigurerReady); err != nil {
-				return nil, err
-			}
-			if !fanConfigurerReady {
-				return nil, dependency.ErrMissing
-			}
-			return newWorker(agent, apiCaller)
+			return newWorker(ctx, agent, apiCaller)
 		},
 	}
 }
@@ -58,7 +51,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 // TODO(waigani) This function is currently covered by functional tests
 // under the machine agent. Add unit tests once infrastructure to do so is
 // in place.
-func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func newWorker(ctx context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	currentConfig := a.CurrentConfig()
 
 	// TODO(fwereade): this functionality should be on the
@@ -67,11 +60,11 @@ func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	// have completely separate workers.
 	//
 	// (With their own facades.)
-	agentFacade, err := apiagent.NewState(apiCaller)
+	agentFacade, err := apiagent.NewClient(apiCaller)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	modelConfig, err := agentFacade.ModelConfig()
+	modelConfig, err := agentFacade.ModelConfig(ctx)
 	if err != nil {
 		return nil, errors.Errorf("cannot read environment config: %v", err)
 	}
@@ -83,9 +76,9 @@ func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 		ignoreMachineAddresses = false
 	}
 	if ignoreMachineAddresses {
-		logger.Infof("machine addresses not used, only addresses from provider")
+		logger.Infof(context.Background(), "machine addresses not used, only addresses from provider")
 	}
-	accessor := APIMachineAccessor{apimachiner.NewState(apiCaller)}
+	accessor := APIMachineAccessor{apimachiner.NewClient(apiCaller)}
 	w, err := NewMachiner(Config{
 		MachineAccessor:              accessor,
 		Tag:                          tag.(names.MachineTag),

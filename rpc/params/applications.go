@@ -9,7 +9,7 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/storage"
 )
 
 // ApplicationsDeploy holds the parameters for deploying one or more applications.
@@ -59,7 +59,7 @@ type ApplicationDeploy struct {
 	Constraints      constraints.Value              `json:"constraints"`
 	Placement        []*instance.Placement          `json:"placement,omitempty"`
 	Policy           string                         `json:"policy,omitempty"`
-	Storage          map[string]storage.Constraints `json:"storage,omitempty"`
+	Storage          map[string]storage.Directive   `json:"storage,omitempty"`
 	Devices          map[string]devices.Constraints `json:"devices,omitempty"`
 	AttachStorage    []string                       `json:"attach-storage,omitempty"`
 	EndpointBindings map[string]string              `json:"endpoint-bindings,omitempty"`
@@ -67,25 +67,8 @@ type ApplicationDeploy struct {
 	Force            bool
 }
 
-// ApplicationUpdate holds the parameters for making the application Update call.
-type ApplicationUpdate struct {
-	ApplicationName string             `json:"application"`
-	CharmURL        string             `json:"charm-url"`
-	ForceCharmURL   bool               `json:"force-charm-url"`
-	ForceBase       bool               `json:"force-base"`
-	Force           bool               `json:"force"`
-	MinUnits        *int               `json:"min-units,omitempty"`
-	SettingsStrings map[string]string  `json:"settings,omitempty"` // Takes precedence over yaml entries if both are present.
-	SettingsYAML    string             `json:"settings-yaml"`
-	Constraints     *constraints.Value `json:"constraints,omitempty"`
-
-	// Generation is the generation version in which this
-	// request will update the application.
-	Generation string `json:"generation"`
-}
-
-// ApplicationSetCharm sets the charm for a given application.
-type ApplicationSetCharm struct {
+// ApplicationSetCharmV2 sets the charm for a given application.
+type ApplicationSetCharmV2 struct {
 	// ApplicationName is the name of the application to set the charm on.
 	ApplicationName string `json:"application"`
 
@@ -127,15 +110,24 @@ type ApplicationSetCharm struct {
 	// the upgrade.
 	ResourceIDs map[string]string `json:"resource-ids,omitempty"`
 
-	// StorageConstraints is a map of storage names to storage constraints to
-	// update during the upgrade. This field is only understood by Application
-	// facade version 2 and greater.
-	StorageConstraints map[string]StorageConstraints `json:"storage-constraints,omitempty"`
+	// StorageDirectives is a map of storage names to storage directives to
+	// update during the upgrade.
+	StorageDirectives map[string]StorageDirectives `json:"storage-directives,omitempty"`
 
 	// EndpointBindings is a map of operator-defined endpoint names to
 	// space names to be merged with any existing endpoint bindings. This
 	// field is only understood by Application facade version 10 and greater.
 	EndpointBindings map[string]string `json:"endpoint-bindings,omitempty"`
+}
+
+// ApplicationSetCharmV1 sets the charm for a given application.
+type ApplicationSetCharmV1 struct {
+	ApplicationSetCharmV2 `json:",inline"`
+
+	// StorageDirectives is a map of storage names to storage directives to
+	// update during the upgrade. This field is only understood by Application
+	// facade version < 20. After that it is renamed to "storage-directives" on the wire.
+	StorageDirectives map[string]StorageDirectives `json:"storage-constraints,omitempty"`
 }
 
 // ApplicationExpose holds the parameters for making the application Expose call.
@@ -281,9 +273,7 @@ type UpdateApplicationServiceArg struct {
 	ApplicationTag string    `json:"application-tag"`
 	ProviderId     string    `json:"provider-id"`
 	Addresses      []Address `json:"addresses"`
-
-	Scale      *int   `json:"scale,omitempty"`
-	Generation *int64 `json:"generation,omitempty"`
+	Scale          *int      `json:"scale,omitempty"`
 }
 
 // ApplicationDestroy holds the parameters for making the deprecated
@@ -644,9 +634,9 @@ type DeployFromRepositoryArg struct {
 	// resource to use if default revision is not desired.
 	Resources map[string]string `json:"resources,omitempty"`
 
-	// Storage contains Constraints specifying how storage should be
+	// Storage contains Directives specifying how storage should be
 	// handled.
-	Storage map[string]storage.Constraints
+	Storage map[string]storage.Directive `json:"storage"`
 
 	//  Trust allows charm to run hooks that require access credentials
 	Trust bool
@@ -712,7 +702,7 @@ type PendingResourceUpload struct {
 // ApplicationStorageGetResult holds the storage constraints and any
 // error information for a single application.
 type ApplicationStorageGetResult struct {
-	StorageConstraints map[string]StorageConstraints `json:"storage-constraints"`
+	StorageConstraints map[string]StorageDirectives `json:"storage-constraints"`
 	Error              *Error
 }
 
@@ -735,5 +725,5 @@ type ApplicationStorageUpdate struct {
 	ApplicationTag string `json:"application-tag"`
 
 	// Holds the application storage constraints where the key is the storage name.
-	StorageConstraints map[string]StorageConstraints `json:"storage-constraints"`
+	StorageConstraints map[string]StorageDirectives `json:"storage-constraints"`
 }

@@ -4,35 +4,40 @@
 package uniter_test
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"testing"
 
-	jujucharm "github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/agent/tools"
+	"github.com/juju/juju/core/life"
+	corerelation "github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/charm/hooks"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/uniter"
+	uniterapi "github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
-	"github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/testcharms"
-	coretesting "github.com/juju/juju/testing"
+	contextmocks "github.com/juju/juju/internal/worker/uniter/runner/context/mocks"
+	"github.com/juju/juju/rpc/params"
 )
 
 type UniterSuite struct {
-	testing.JujuConnSuite
+	coretesting.FakeJujuXDGDataHomeSuite
 	dataDir string
 	unitDir string
 
@@ -41,89 +46,114 @@ type UniterSuite struct {
 	deployer               *mockDeployer
 }
 
-var _ = gc.Suite(&UniterSuite{})
+func TestUniterSuite(t *testing.T) {
+	tc.Run(t, &UniterSuite{})
+}
 
 // This guarantees that we get proper platform
 // specific error directly from their source
 var errNotDir = syscall.ENOTDIR.Error()
 
-func (s *UniterSuite) SetUpSuite(c *gc.C) {
-	s.JujuConnSuite.SetUpSuite(c)
+func (s *UniterSuite) SetUpSuite(c *tc.C) {
+	s.FakeJujuXDGDataHomeSuite.SetUpSuite(c)
 	s.dataDir = c.MkDir()
 	toolsDir := tools.ToolsDir(s.dataDir, "unit-u-0")
 	err := os.MkdirAll(toolsDir, 0755)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.PatchEnvironment("LC_ALL", "en_US")
 	s.unitDir = filepath.Join(s.dataDir, "agents", "unit-u-0")
 }
 
-func (s *UniterSuite) SetUpTest(c *gc.C) {
+func (s *UniterSuite) SetUpTest(c *tc.C) {
 	s.updateStatusHookTicker = newManualTicker()
 	s.runner = &mockRunner{}
 	s.deployer = &mockDeployer{}
-	s.JujuConnSuite.SetUpTest(c)
+	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 }
 
-func (s *UniterSuite) TearDownTest(c *gc.C) {
+func (s *UniterSuite) TearDownTest(c *tc.C) {
 	s.ResetContext(c)
-	s.JujuConnSuite.TearDownTest(c)
+	s.FakeJujuXDGDataHomeSuite.TearDownTest(c)
 }
 
-func (s *UniterSuite) Reset(c *gc.C) {
-	s.JujuConnSuite.Reset(c)
+func (s *UniterSuite) Reset(c tc.LikeC) {
 	s.ResetContext(c)
 }
 
-func (s *UniterSuite) ResetContext(c *gc.C) {
+func (s *UniterSuite) ResetContext(c tc.LikeC) {
 	s.runner = &mockRunner{}
 	s.deployer = &mockDeployer{}
 	err := os.RemoveAll(s.unitDir)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *UniterSuite) runUniterTests(c *gc.C, uniterTests []uniterTest) {
-	for i, t := range uniterTests {
-		c.Logf("\ntest %d: %s\n", i, t.summary)
-		func() {
-			defer s.Reset(c)
-
-			ctx := &testContext{
-				s:                      s,
-				st:                     s.State,
-				uuid:                   s.State.ModelUUID(),
-				path:                   s.unitDir,
-				dataDir:                s.dataDir,
-				charms:                 make(map[string][]byte),
-				leaseManager:           s.LeaseManager,
-				updateStatusHookTicker: s.updateStatusHookTicker,
-				charmDirGuard:          &mockCharmDirGuard{},
-				runner:                 s.runner,
-				deployer:               s.deployer,
-			}
-			ctx.run(c, t.steps)
-		}()
-	}
-}
-
-func (s *UniterSuite) runUniterTest(c *gc.C, steps ...stepper) {
+func (s *UniterSuite) newContext(c tc.LikeC) (*testContext, *gomock.Controller) {
+	ctrl := gomock.NewController(c)
 	ctx := &testContext{
+		ctrl:                   ctrl,
 		s:                      s,
-		st:                     s.State,
-		uuid:                   s.State.ModelUUID(),
+		uuid:                   coretesting.ModelTag.Id(),
 		path:                   s.unitDir,
 		dataDir:                s.dataDir,
 		charms:                 make(map[string][]byte),
-		leaseManager:           s.LeaseManager,
+		servedCharms:           make(map[string][]byte),
+		relationUnits:          make(map[int]relationUnitSettings),
+		secretRevisions:        make(map[string]int),
 		updateStatusHookTicker: s.updateStatusHookTicker,
 		charmDirGuard:          &mockCharmDirGuard{},
 		runner:                 s.runner,
 		deployer:               s.deployer,
 	}
+	ctx.runner.ctx = ctx
+	ctx.api = uniterapi.NewMockUniterClient(ctx.ctrl)
+	ctx.resources = contextmocks.NewMockOpenedResourceClient(ctx.ctrl)
+	ctx.secretsClient = uniterapi.NewMockSecretsClient(ctx.ctrl)
+	ctx.secretBackends = uniterapi.NewMockSecretsBackend(ctx.ctrl)
+
+	ctx.unitWatchCounter.Store(-1)
+	ctx.relUnitCounter.Store(-1)
+	ctx.relCounter.Store(-1)
+	ctx.actionCounter.Store(-1)
+
+	// Initialise the channels used for the watchers.
+	// Some need a buffer to allow the test steps to run.
+	ctx.unitResolveCh = make(chan struct{}, 1)
+	ctx.configCh = make(chan []string, 5)
+	ctx.relCh = make(chan []string, 5)
+	ctx.storageCh = make(chan []string, 5)
+	ctx.relationUnitCh = make(chan watcher.RelationUnitsChange, 5)
+	ctx.consumedSecretsCh = make(chan []string, 1)
+	ctx.applicationCh = make(chan struct{}, 1)
+	ctx.leadershipSettingsCh = make(chan struct{}, 1)
+	ctx.actionsCh = make(chan []string, 1)
+	return ctx, ctrl
+}
+
+func (s *UniterSuite) runUniterTests(c *tc.C, uniterTests []uniterTest) {
+	for i, test := range uniterTests {
+		c.Logf("\ntest %d: %s\n", i, test.summary)
+		c.Run(fmt.Sprintf("Test%d", i), func(t *testing.T) {
+			c := &tc.TBC{TB: t}
+			defer s.Reset(c)
+			ctx, ctrl := s.newContext(c)
+			defer ctrl.Finish()
+			ctx.run(c, test.steps)
+		})
+	}
+}
+
+func (s *UniterSuite) runUniterTest(c *tc.C, steps ...stepper) {
+	ctx, ctrl := s.newContext(c)
+	defer ctrl.Finish()
 	ctx.run(c, steps)
 }
 
-func (s *UniterSuite) TestUniterStartup(c *gc.C) {
+func (s *UniterSuite) TestRunUniterTestsNoop(c *tc.C) {
+	s.runUniterTests(c, []uniterTest{})
+}
+
+func (s *UniterSuite) TestUniterStartup(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Check conditions that can cause the uniter to fail to start.
 		ut(
@@ -133,7 +163,7 @@ func (s *UniterSuite) TestUniterStartup(c *gc.C) {
 			// (and hence unit) name.
 			createCharm{},
 			createApplicationAndUnit{applicationName: "w"},
-			startUniter{unitTag: "unit-u-0"},
+			startUniter{unit: "u/0"},
 			waitUniterDead{err: `failed to initialize uniter for "unit-u-0": permission denied`},
 		),
 		ut(
@@ -148,13 +178,12 @@ func (s *UniterSuite) TestUniterStartup(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestPreviousDownloadsCleared(c *gc.C) {
+func (s *UniterSuite) TestPreviousDownloadsCleared(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"Ensure stale download files are cleared on uniter startup",
 			createCharm{},
 			serveCharm{},
-			ensureStateWorker{},
 			createApplicationAndUnit{},
 			startUniter{},
 			waitAddresses{},
@@ -164,7 +193,7 @@ func (s *UniterSuite) TestPreviousDownloadsCleared(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterBootstrap(c *gc.C) {
+func (s *UniterSuite) TestUniterBootstrap(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Check error conditions during unit bootstrap phase.
 		ut(
@@ -172,19 +201,19 @@ func (s *UniterSuite) TestUniterBootstrap(c *gc.C) {
 			createCharm{},
 			serveCharm{},
 			writeFile{"charm", 0644},
-			createUniter{},
+			createUniter{startError: true},
 			waitUniterDead{err: `executing operation "install ch:quantal/wordpress-0" for u/0: .*` + errNotDir},
 		), ut(
 			"charm cannot be downloaded",
 			createCharm{},
 			// don't serve charm
-			createUniter{},
+			createUniter{startError: true},
 			waitUniterDead{err: `preparing operation "install ch:quantal/wordpress-0" for u/0: failed to download charm .* not found`},
 		),
 	})
 }
 
-func (s *UniterSuite) TestUniterRestartWithCharmDirInvalidThenRecover(c *gc.C) {
+func (s *UniterSuite) TestUniterRestartWithCharmDirInvalidThenRecover(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"re-downloaded charm if it is missing after restart",
@@ -219,13 +248,12 @@ func (s *UniterSuite) TestUniterRestartWithCharmDirInvalidThenRecover(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterStartupStatus(c *gc.C) {
+func (s *UniterSuite) TestUniterStartupStatus(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"unit status and message at startup",
 			createCharm{},
 			serveCharm{},
-			ensureStateWorker{},
 			createApplicationAndUnit{},
 			startUniter{
 				newExecutorFunc: executorFunc(c),
@@ -244,74 +272,14 @@ func (s *UniterSuite) TestUniterStartupStatus(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterStartupStatusCharmProfile(c *gc.C) {
-	// addCharmProfile customises the wordpress charm's metadata,
-	// adding an lxd profile for the charm. We do it here rather
-	// than in the charm itself to avoid modifying all of the other
-	// scenarios.
-	addCharmProfile := func(c *gc.C, ctx *testContext, path string) {
-		f, err := os.OpenFile(filepath.Join(path, "lxd-profile.yaml"), os.O_RDWR|os.O_CREATE, 0644)
-		c.Assert(err, jc.ErrorIsNil)
-		defer func() {
-			err := f.Close()
-			c.Assert(err, jc.ErrorIsNil)
-		}()
-		_, err = io.WriteString(f, `
-config:
-  security.nesting: "false"
-  security.privileged: "true"`)
-		c.Assert(err, jc.ErrorIsNil)
-	}
-
-	s.runUniterTests(c, []uniterTest{
-		ut(
-			"unit status and message at startup, charm waiting for profile",
-			createCharm{customize: addCharmProfile},
-			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{container: true},
-			startUniter{
-				newExecutorFunc: executorFunc(c),
-			},
-			waitUnitAgent{
-				statusGetter: unitStatusGetter,
-				status:       status.Waiting,
-				info:         "required charm profile not yet applied to machine",
-			},
-			expectError{"required charm profile on machine not found"},
-		),
-		ut(
-			"unit status and message at startup, charm profile found",
-			createCharm{customize: addCharmProfile},
-			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{container: true},
-			addCharmProfileToMachine{profiles: []string{"default", "juju-model-u-0"}},
-			startUniter{
-				newExecutorFunc: executorFunc(c),
-			},
-			waitUnitAgent{
-				statusGetter: unitStatusGetter,
-				status:       status.Waiting,
-				info:         status.MessageInitializingAgent,
-			},
-			waitUnitAgent{
-				status: status.Failed,
-				info:   "resolver loop error",
-			},
-			expectError{".*some error occurred.*"},
-		),
-	})
-}
-
-func (s *UniterSuite) TestUniterInstallHook(c *gc.C) {
+func (s *UniterSuite) TestUniterInstallHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"install hook fail and resolve",
 			startupError{"install"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -325,7 +293,7 @@ func (s *UniterSuite) TestUniterInstallHook(c *gc.C) {
 			startupError{"install"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -338,7 +306,7 @@ func (s *UniterSuite) TestUniterInstallHook(c *gc.C) {
 			fixHook{"install"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -347,7 +315,7 @@ func (s *UniterSuite) TestUniterInstallHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterUpdateStatusHook(c *gc.C) {
+func (s *UniterSuite) TestUniterUpdateStatusHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"update status hook runs on timer",
@@ -362,7 +330,7 @@ func (s *UniterSuite) TestUniterUpdateStatusHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestNoUniterUpdateStatusHookInError(c *gc.C) {
+func (s *UniterSuite) TestNoUniterUpdateStatusHookInError(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"update status hook doesn't run if in error",
@@ -372,7 +340,7 @@ func (s *UniterSuite) TestNoUniterUpdateStatusHookInError(c *gc.C) {
 			waitHooks{},
 
 			// Resolve and hook should run.
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -383,7 +351,7 @@ func (s *UniterSuite) TestNoUniterUpdateStatusHookInError(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterWorkloadReadyHook(c *gc.C) {
+func (s *UniterSuite) TestUniterWorkloadReadyHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"update status hook runs on timer",
@@ -399,21 +367,21 @@ func (s *UniterSuite) TestUniterWorkloadReadyHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterStartHook(c *gc.C) {
+func (s *UniterSuite) TestUniterStartHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"start hook fail and resolve",
 			startupError{"start"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Maintenance,
-				info:         "installing charm software",
+				info:         status.MessageInstallingCharm,
 			},
 			waitHooks{},
 			verifyRunning{},
@@ -422,7 +390,7 @@ func (s *UniterSuite) TestUniterStartHook(c *gc.C) {
 			startupError{"start"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -435,7 +403,7 @@ func (s *UniterSuite) TestUniterStartHook(c *gc.C) {
 			verifyWaiting{},
 
 			fixHook{"start"},
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -456,7 +424,7 @@ func (s *UniterSuite) TestUniterStartHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterRotateSecretHook(c *gc.C) {
+func (s *UniterSuite) TestUniterRotateSecretHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"rotate secret hook runs when there are secrets to be rotated",
@@ -466,13 +434,13 @@ func (s *UniterSuite) TestUniterRotateSecretHook(c *gc.C) {
 			waitHooks(startupHooks(false)),
 			waitUnitAgent{status: status.Idle},
 			createSecret{},
-			rotateSecret{},
+			rotateSecret{rev: 1},
 			waitHooks{"secret-rotate"},
 		),
 	})
 }
 
-func (s *UniterSuite) TestUniterSecretExpiredHook(c *gc.C) {
+func (s *UniterSuite) TestUniterSecretExpiredHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"secret expired hook runs when there are secret revisions to be expired",
@@ -488,7 +456,7 @@ func (s *UniterSuite) TestUniterSecretExpiredHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterSecretChangedHook(c *gc.C) {
+func (s *UniterSuite) TestUniterSecretChangedHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"change secret hook runs when there are secret changes",
@@ -505,7 +473,7 @@ func (s *UniterSuite) TestUniterSecretChangedHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterMultipleErrors(c *gc.C) {
+func (s *UniterSuite) TestUniterMultipleErrors(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"resolved is cleared before moving on to next hook",
@@ -520,7 +488,7 @@ func (s *UniterSuite) TestUniterMultipleErrors(c *gc.C) {
 					"hook": "install",
 				},
 			},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -529,7 +497,7 @@ func (s *UniterSuite) TestUniterMultipleErrors(c *gc.C) {
 					"hook": "leader-elected",
 				},
 			},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -538,7 +506,7 @@ func (s *UniterSuite) TestUniterMultipleErrors(c *gc.C) {
 					"hook": "config-changed",
 				},
 			},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -551,7 +519,7 @@ func (s *UniterSuite) TestUniterMultipleErrors(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
+func (s *UniterSuite) TestUniterConfigChangedHook(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"config-changed hook fail and resolve",
@@ -562,7 +530,7 @@ func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
 			// started state, so the broken hook would actually prevent us
 			// from advancing at all if we didn't fix it.
 			fixHook{"config-changed"},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -570,11 +538,6 @@ func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
 				statusGetter: unitStatusGetter,
 				status:       status.Unknown,
 			},
-			// TODO(axw) confirm with fwereade that this is correct.
-			// Previously we would see "start", "config-changed".
-			// I don't think we should see another config-changed,
-			// since config did not change since we resolved the
-			// failed one above.
 			waitHooks{"start"},
 			// If we'd accidentally retried that hook, somehow, we would get
 			// an extra config-changed as we entered started; see that we don't.
@@ -585,7 +548,7 @@ func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
 			startupError{"config-changed"},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -598,7 +561,7 @@ func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
 			verifyWaiting{},
 
 			fixHook{"config-changed"},
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				status: status.Idle,
 			},
@@ -608,7 +571,7 @@ func (s *UniterSuite) TestUniterConfigChangedHook(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterHookSynchronisation(c *gc.C) {
+func (s *UniterSuite) TestUniterHookSynchronisation(c *tc.C) {
 	var lock hookLock
 	s.runUniterTests(c, []uniterTest{
 		ut(
@@ -625,7 +588,6 @@ func (s *UniterSuite) TestUniterHookSynchronisation(c *gc.C) {
 			// Can't use quickstart as it has a built in waitHooks.
 			createCharm{},
 			serveCharm{},
-			ensureStateWorker{},
 			createApplicationAndUnit{},
 			startUniter{},
 			waitAddresses{},
@@ -637,7 +599,7 @@ func (s *UniterSuite) TestUniterHookSynchronisation(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterDyingReaction(c *gc.C) {
+func (s *UniterSuite) TestUniterDyingReaction(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Reaction to entity deaths.
 		ut(
@@ -658,7 +620,7 @@ func (s *UniterSuite) TestUniterDyingReaction(c *gc.C) {
 			unitDying,
 			verifyWaiting{},
 			fixHook{"start"},
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitHooks{"start", "stop"},
 			waitUniterDead{},
 		), ut(
@@ -671,7 +633,7 @@ func (s *UniterSuite) TestUniterDyingReaction(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterSteadyStateUpgrade(c *gc.C) {
+func (s *UniterSuite) TestUniterSteadyStateUpgrade(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Upgrade scenarios from steady state.
 		ut(
@@ -695,7 +657,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgrade(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterSteadyStateUpgradeForce(c *gc.C) {
+func (s *UniterSuite) TestUniterSteadyStateUpgradeForce(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"steady state forced upgrade (identical behaviour)",
@@ -718,7 +680,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeForce(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterSteadyStateUpgradeResolve(c *gc.C) {
+func (s *UniterSuite) TestUniterSteadyStateUpgradeResolve(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"steady state upgrade hook fail and resolve",
@@ -738,7 +700,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeResolve(c *gc.C) {
 			verifyCharm{revision: 1},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 				charm:  1,
@@ -754,7 +716,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeResolve(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterSteadyStateUpgradeRetry(c *gc.C) {
+func (s *UniterSuite) TestUniterSteadyStateUpgradeRetry(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"steady state upgrade hook fail and retry",
@@ -774,7 +736,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeRetry(c *gc.C) {
 			verifyCharm{revision: 1},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Error,
@@ -788,7 +750,7 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeRetry(c *gc.C) {
 			verifyWaiting{},
 
 			fixHook{"upgrade-charm"},
-			resolveError{state.ResolvedRetryHooks},
+			resolveError{params.ResolvedRetryHooks},
 			waitUnitAgent{
 				status: status.Idle,
 				charm:  1,
@@ -799,17 +761,17 @@ func (s *UniterSuite) TestUniterSteadyStateUpgradeRetry(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUpdateResourceCausesUpgrade(c *gc.C) {
+func (s *UniterSuite) TestUpdateResourceCausesUpgrade(c *tc.C) {
 	// appendStorageMetadata customises the wordpress charm's metadata,
 	// adding a "wp-content" filesystem store. We do it here rather
 	// than in the charm itself to avoid modifying all of the other
 	// scenarios.
-	appendResource := func(c *gc.C, ctx *testContext, path string) {
+	appendResource := func(c tc.LikeC, ctx *testContext, path string) {
 		f, err := os.OpenFile(filepath.Join(path, "metadata.yaml"), os.O_RDWR|os.O_APPEND, 0644)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		defer func() {
 			err := f.Close()
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		}()
 		_, err = io.WriteString(f, `
 resources:
@@ -817,7 +779,7 @@ resources:
     Type: file
     filename: filename.tgz
     comment: One line that is useful when operators need to push it.`)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 	s.runUniterTests(c, []uniterTest{
 		ut(
@@ -838,7 +800,7 @@ resources:
 	})
 }
 
-func (s *UniterSuite) TestUniterErrorStateUnforcedUpgrade(c *gc.C) {
+func (s *UniterSuite) TestUniterErrorStateUnforcedUpgrade(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Upgrade scenarios from error state.
 		ut(
@@ -858,7 +820,7 @@ func (s *UniterSuite) TestUniterErrorStateUnforcedUpgrade(c *gc.C) {
 			verifyCharm{},
 			verifyWaiting{},
 
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 				charm:  1,
@@ -866,7 +828,7 @@ func (s *UniterSuite) TestUniterErrorStateUnforcedUpgrade(c *gc.C) {
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Maintenance,
-				info:         "installing charm software",
+				info:         status.MessageInstallingCharm,
 				charm:        1,
 			},
 			waitHooks{"upgrade-charm", "config-changed"},
@@ -875,7 +837,7 @@ func (s *UniterSuite) TestUniterErrorStateUnforcedUpgrade(c *gc.C) {
 		)})
 }
 
-func (s *UniterSuite) TestUniterErrorStateForcedUpgrade(c *gc.C) {
+func (s *UniterSuite) TestUniterErrorStateForcedUpgrade(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"error state forced upgrade",
@@ -903,7 +865,7 @@ func (s *UniterSuite) TestUniterErrorStateForcedUpgrade(c *gc.C) {
 			verifyWaiting{},
 			verifyCharm{revision: 1},
 
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{
 				status: status.Idle,
 				charm:  1,
@@ -914,17 +876,16 @@ func (s *UniterSuite) TestUniterErrorStateForcedUpgrade(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterUpgradeConflicts(c *gc.C) {
-	coretesting.SkipIfPPC64EL(c, "lp:1448308")
+func (s *UniterSuite) TestUniterUpgradeConflicts(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Upgrade scenarios - handling conflicts.
 		ut(
 			"upgrade: resolving doesn't help until underlying problem is fixed",
 			startUpgradeError{},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			verifyWaitingUpgradeError{revision: 1},
 			fixUpgradeError{},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitHooks{"upgrade-charm", "config-changed"},
 			waitUnitAgent{
 				status: status.Idle,
@@ -939,7 +900,7 @@ func (s *UniterSuite) TestUniterUpgradeConflicts(c *gc.C) {
 		), ut(
 			`upgrade: forced upgrade does work without explicit resolution if underlying problem was fixed`,
 			startUpgradeError{},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			verifyWaitingUpgradeError{revision: 1},
 			fixUpgradeError{},
 			createCharm{revision: 2},
@@ -962,7 +923,7 @@ func (s *UniterSuite) TestUniterUpgradeConflicts(c *gc.C) {
 			unitDying,
 			verifyWaitingUpgradeError{revision: 1},
 			fixUpgradeError{},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitHooks{"upgrade-charm", "config-changed", "stop"},
 			waitUniterDead{},
 		), ut(
@@ -976,7 +937,7 @@ func (s *UniterSuite) TestUniterUpgradeConflicts(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterRelationsSimpleJoinedChangedDeparted(c *gc.C) {
+func (s *UniterSuite) TestUniterRelationsSimpleJoinedChangedDeparted(c *tc.C) {
 	s.runUniterTest(c,
 		quickStartRelation{},
 		addRelationUnit{},
@@ -992,30 +953,27 @@ func (s *UniterSuite) TestUniterRelationsSimpleJoinedChangedDeparted(c *gc.C) {
 	)
 }
 
-func (s *UniterSuite) TestUniterRelations(c *gc.C) {
+func (s *UniterSuite) TestUniterRelations(c *tc.C) {
 	loggo.GetLogger("juju.apiserver").SetLogLevel(loggo.TRACE)
-	waitDyingHooks := custom{func(c *gc.C, ctx *testContext) {
+	waitDyingHooks := custom{func(c tc.LikeC, ctx *testContext) {
 		// There is no ordering relationship between relation hooks and
 		// leader-settings-changed hooks; and while we're dying we may
 		// never get to leader-settings-changed before it's time to run
 		// the stop (as we might not react to a config change in time).
 		// It's actually clearer to just list the possible orders:
 		possibles := [][]string{{
-			"leader-settings-changed",
 			"db-relation-departed mysql/0 db:0",
 			"db-relation-broken db:0",
 			"stop",
 			"remove",
 		}, {
 			"db-relation-departed mysql/0 db:0",
-			"leader-settings-changed",
 			"db-relation-broken db:0",
 			"stop",
 			"remove",
 		}, {
 			"db-relation-departed mysql/0 db:0",
 			"db-relation-broken db:0",
-			"leader-settings-changed",
 			"stop",
 			"remove",
 		}, {
@@ -1026,7 +984,7 @@ func (s *UniterSuite) TestUniterRelations(c *gc.C) {
 		}}
 		unchecked := ctx.hooksCompleted[len(ctx.hooks):]
 		for _, possible := range possibles {
-			if ok, _ := jc.DeepEqual(unchecked, possible); ok {
+			if ok, _ := tc.DeepEqual(unchecked, possible); ok {
 				return
 			}
 		}
@@ -1043,7 +1001,7 @@ func (s *UniterSuite) TestUniterRelations(c *gc.C) {
 				"db-relation-broken db:0",
 			},
 			verifyRunning{},
-			relationState{life: state.Dying},
+			relationState{life: life.Dying},
 			removeRelationUnit{"mysql/0"},
 			verifyRunning{},
 			relationState{removed: true},
@@ -1064,9 +1022,9 @@ func (s *UniterSuite) TestUniterRelations(c *gc.C) {
 			unitDying,
 			waitUniterDead{},
 			waitDyingHooks,
-			relationState{life: state.Alive},
+			relationState{life: life.Alive},
 			removeRelationUnit{"mysql/0"},
-			relationState{life: state.Alive},
+			relationState{life: life.Alive},
 		), ut(
 			"unit becomes dead while in a relation",
 			quickStartRelation{},
@@ -1093,7 +1051,7 @@ func (s *UniterSuite) TestUniterRelations(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterRelationErrors(c *gc.C) {
+func (s *UniterSuite) TestUniterRelationErrors(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"hook error during join of a relation",
@@ -1155,19 +1113,14 @@ func (s *UniterSuite) TestUniterRelationErrors(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestUniterRelationErrorsLostRelation(c *gc.C) {
+func (s *UniterSuite) TestUniterRelationErrorsLostRelation(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"ignore pending relation hook when relation deleted while stopped",
 			quickStart{},
 			stopUniter{},
-			custom{func(c *gc.C, ctx *testContext) {
-				us, err := ctx.unit.State()
-				c.Assert(err, jc.ErrorIsNil)
-				data, _ := us.UniterState()
+			custom{func(c tc.LikeC, ctx *testContext) {
 				opState := operation.State{}
-				err = yaml.Unmarshal([]byte(data), &opState)
-				c.Assert(err, jc.ErrorIsNil)
 				opState.Kind = operation.RunHook
 				opState.Step = operation.Pending
 				opState.Hook = &hook.Info{
@@ -1177,10 +1130,8 @@ func (s *UniterSuite) TestUniterRelationErrorsLostRelation(c *gc.C) {
 					RemoteApplication: "other",
 				}
 				newData, err := yaml.Marshal(&opState)
-				c.Assert(err, jc.ErrorIsNil)
-				us.SetUniterState(string(newData))
-				err = ctx.unit.SetState(us, state.UnitStateSizeLimits{})
-				c.Assert(err, jc.ErrorIsNil)
+				c.Assert(err, tc.ErrorIsNil)
+				ctx.uniterState = string(newData)
 			}},
 			startUniter{rebootQuerier: fakeRebootQuerier{rebootNotDetected}},
 			waitUnitAgent{
@@ -1197,7 +1148,7 @@ func (s *UniterSuite) TestUniterRelationErrorsLostRelation(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestRunCommand(c *gc.C) {
+func (s *UniterSuite) TestRunCommand(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"run commands",
@@ -1207,13 +1158,12 @@ func (s *UniterSuite) TestRunCommand(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestRunAction(c *gc.C) {
+func (s *UniterSuite) TestRunAction(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"simple action",
 			createCharm{},
 			serveCharm{},
-			ensureStateWorker{},
 			createApplicationAndUnit{},
 			startUniter{},
 			waitAddresses{},
@@ -1238,7 +1188,6 @@ func (s *UniterSuite) TestRunAction(c *gc.C) {
 			"pending expectedActions get consumed",
 			createCharm{},
 			serveCharm{},
-			ensureStateWorker{},
 			createApplicationAndUnit{},
 			addAction{"fakeaction", map[string]interface{}{"foo": "bar"}},
 			addAction{"fakeaction", nil},
@@ -1287,37 +1236,37 @@ func (s *UniterSuite) TestRunAction(c *gc.C) {
 				data:         map[string]interface{}{"hook": "start"},
 			},
 			verifyWaiting{},
-			resolveError{state.ResolvedNoHooks},
+			resolveError{params.ResolvedNoHooks},
 			waitUnitAgent{status: status.Idle},
 			waitUnitAgent{
 				statusGetter: unitStatusGetter,
 				status:       status.Maintenance,
-				info:         "installing charm software",
+				info:         status.MessageInstallingCharm,
 			},
 		),
 	})
 }
 
-func (s *UniterSuite) TestUniterSubordinates(c *gc.C) {
+func (s *UniterSuite) TestUniterSubordinates(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		// Subordinates.
 		ut(
 			"unit becomes dying while subordinates exist",
 			quickStart{},
-			addSubordinateRelation{"juju-info"},
+			addSubordinateRelation{corerelation.JujuInfo},
 			waitSubordinateExists{"logging/0"},
 			unitDying,
 			waitSubordinateDying{},
-			waitHooks{"stop"},
+			waitHooks{"stop", "remove"},
 			verifyWaiting{},
 			removeSubordinate{},
 			waitUniterDead{},
 		), ut(
 			"new subordinate becomes necessary while old one is dying",
 			quickStart{},
-			addSubordinateRelation{"juju-info"},
+			addSubordinateRelation{corerelation.JujuInfo},
 			waitSubordinateExists{"logging/0"},
-			removeSubordinateRelation{"juju-info"},
+			removeSubordinateRelation{corerelation.JujuInfo},
 			// The subordinate Uniter would usually set Dying in this situation.
 			subordinateDying,
 			addSubordinateRelation{"logging-dir"},
@@ -1328,90 +1277,18 @@ func (s *UniterSuite) TestUniterSubordinates(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestSubordinateDying(c *gc.C) {
-	// Create a test context for later use.
-	ctx := &testContext{
-		s:                      s,
-		st:                     s.State,
-		path:                   filepath.Join(s.dataDir, "agents", "unit-u-0"),
-		dataDir:                s.dataDir,
-		charms:                 make(map[string][]byte),
-		leaseManager:           s.LeaseManager,
-		updateStatusHookTicker: s.updateStatusHookTicker,
-		charmDirGuard:          &mockCharmDirGuard{},
-		runner:                 s.runner,
-		deployer:               s.deployer,
-	}
-
-	addControllerMachine(c, ctx.st)
-
-	// Create the subordinate application.
-	dir := testcharms.Repo.ClonedDir(c.MkDir(), "logging")
-	curl, err := jujucharm.ParseURL("ch:quantal/logging")
-	c.Assert(err, jc.ErrorIsNil)
-	curl = curl.WithRevision(dir.Revision())
-	step(c, ctx, addCharm{dir, curl.String()})
-	ctx.application = s.AddTestingApplication(c, "u", ctx.sch)
-
-	// Create the principal application and add a relation.
-	wps := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wpu, err := wps.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	eps, err := s.State.InferEndpoints("wordpress", "u")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	assertAssignUnit(c, s.State, wpu)
-
-	// Create the subordinate unit by entering scope as the principal.
-	wpru, err := rel.Unit(wpu)
-	c.Assert(err, jc.ErrorIsNil)
-	err = wpru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	ctx.unit, err = s.State.Unit("u/0")
-	c.Assert(err, jc.ErrorIsNil)
-	ctx.apiLogin(c)
-
-	// Run the actual test.
-	ctx.run(c, []stepper{
-		serveCharm{},
-		startUniter{},
-		waitAddresses{},
-		custom{func(c *gc.C, ctx *testContext) {
-			c.Check(rel.Refresh(), gc.IsNil)
-			c.Assert(rel.Destroy(), gc.IsNil)
-		}},
-		waitUniterDead{},
-	})
-}
-
-func (s *UniterSuite) TestLeadership(c *gc.C) {
+func (s *UniterSuite) TestLeadership(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"leader-elected triggers when elected",
 			quickStart{minion: true},
 			forceLeader{},
 			waitHooks{"leader-elected"},
-		), ut(
-			"leader-settings-changed triggers when leader settings change",
-			quickStart{minion: true},
-			setLeaderSettings{"ping": "pong"},
-			waitHooks{"leader-settings-changed"},
-		), ut(
-			"leader-settings-changed triggers when bounced",
-			quickStart{minion: true},
-			verifyRunning{minion: true},
-		), ut(
-			"leader-settings-changed triggers when deposed (while stopped)",
-			quickStart{},
-			stopUniter{},
-			forceMinion{},
-			verifyRunning{minion: true},
 		),
 	})
 }
 
-func (s *UniterSuite) TestLeadershipUnexpectedDepose(c *gc.C) {
+func (s *UniterSuite) TestLeadershipUnexpectedDepose(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			// NOTE: this is a strange and ugly test, intended to detect what
@@ -1421,22 +1298,21 @@ func (s *UniterSuite) TestLeadershipUnexpectedDepose(c *gc.C) {
 			"leader-settings-changed triggers when deposed (while running)",
 			quickStart{},
 			forceMinion{},
-			waitHooks{"leader-settings-changed"},
 		),
 	})
 }
 
-func (s *UniterSuite) TestStorage(c *gc.C) {
+func (s *UniterSuite) TestStorage(c *tc.C) {
 	// appendStorageMetadata customises the wordpress charm's metadata,
 	// adding a "wp-content" filesystem store. We do it here rather
 	// than in the charm itself to avoid modifying all of the other
 	// scenarios.
-	appendStorageMetadata := func(c *gc.C, ctx *testContext, path string) {
+	appendStorageMetadata := func(c tc.LikeC, ctx *testContext, path string) {
 		f, err := os.OpenFile(filepath.Join(path, "metadata.yaml"), os.O_RDWR|os.O_APPEND, 0644)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 		defer func() {
 			err := f.Close()
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 		}()
 		_, err = io.WriteString(f, `
 storage:
@@ -1445,18 +1321,17 @@ storage:
     multiple:
       range: 0-
 `[1:])
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
-	storageConstraints := map[string]state.StorageConstraints{
-		"wp-content": {Count: 1},
+	storageDirectives := map[string]int{
+		"wp-content": 1,
 	}
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"test that storage-attached is called",
 			createCharm{customize: appendStorageMetadata},
 			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{storage: storageConstraints},
+			createApplicationAndUnit{storage: storageDirectives},
 			provisionStorage{},
 			startUniter{},
 			waitAddresses{},
@@ -1466,8 +1341,7 @@ storage:
 			"test that storage-detaching is called before stop",
 			createCharm{customize: appendStorageMetadata},
 			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{storage: storageConstraints},
+			createApplicationAndUnit{storage: storageDirectives},
 			provisionStorage{},
 			startUniter{},
 			waitAddresses{},
@@ -1482,8 +1356,7 @@ storage:
 			"test that storage-detaching is called only if previously attached",
 			createCharm{customize: appendStorageMetadata},
 			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{storage: storageConstraints},
+			createApplicationAndUnit{storage: storageDirectives},
 			// provision and destroy the storage before the uniter starts,
 			// to ensure it never sees the storage as attached
 			provisionStorage{},
@@ -1499,8 +1372,7 @@ storage:
 			"test that delay-provisioned storage does not block forever",
 			createCharm{customize: appendStorageMetadata},
 			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{storage: storageConstraints},
+			createApplicationAndUnit{storage: storageDirectives},
 			startUniter{},
 			// no hooks should be run, as storage isn't provisioned
 			waitHooks{},
@@ -1511,8 +1383,7 @@ storage:
 			"test that unprovisioned storage does not block unit termination",
 			createCharm{customize: appendStorageMetadata},
 			serveCharm{},
-			ensureStateWorker{},
-			createApplicationAndUnit{storage: storageConstraints},
+			createApplicationAndUnit{storage: storageDirectives},
 			unitDying,
 			startUniter{},
 			// no hooks should be run, and unit agent should terminate
@@ -1532,16 +1403,16 @@ type mockExecutor struct {
 	operation.Executor
 }
 
-func (m *mockExecutor) Run(op operation.Operation, rs <-chan remotestate.Snapshot) error {
+func (m *mockExecutor) Run(ctx context.Context, op operation.Operation, rs <-chan remotestate.Snapshot) error {
 	// want to allow charm unpacking to occur
 	if strings.HasPrefix(op.String(), "install") {
-		return m.Executor.Run(op, rs)
+		return m.Executor.Run(ctx, op, rs)
 	}
 	// but hooks should error
 	return mockExecutorErr
 }
 
-func (s *UniterSuite) TestOperationErrorReported(c *gc.C) {
+func (s *UniterSuite) TestOperationErrorReported(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"error running operations are reported",
@@ -1557,9 +1428,9 @@ func (s *UniterSuite) TestOperationErrorReported(c *gc.C) {
 	})
 }
 
-func (s *UniterSuite) TestTranslateResolverError(c *gc.C) {
+func (s *UniterSuite) TestTranslateResolverError(c *tc.C) {
 	translateResolverErr := func(in error) error {
-		c.Check(errors.Cause(in), gc.Equals, mockExecutorErr)
+		c.Check(errors.Cause(in), tc.Equals, mockExecutorErr)
 		return errors.New("some other error")
 	}
 	s.runUniterTests(c, []uniterTest{
@@ -1580,15 +1451,15 @@ func (s *UniterSuite) TestTranslateResolverError(c *gc.C) {
 	})
 }
 
-func executorFunc(c *gc.C) uniter.NewOperationExecutorFunc {
-	return func(unitName string, cfg operation.ExecutorConfig) (operation.Executor, error) {
-		e, err := operation.NewExecutor(unitName, cfg)
-		c.Assert(err, jc.ErrorIsNil)
+func executorFunc(c *tc.C) uniter.NewOperationExecutorFunc {
+	return func(ctx context.Context, unitName string, cfg operation.ExecutorConfig) (operation.Executor, error) {
+		e, err := operation.NewExecutor(ctx, unitName, cfg)
+		c.Assert(err, tc.ErrorIsNil)
 		return &mockExecutor{e}, nil
 	}
 }
 
-func (s *UniterSuite) TestShutdown(c *gc.C) {
+func (s *UniterSuite) TestShutdown(c *tc.C) {
 	s.runUniterTests(c, []uniterTest{
 		ut(
 			"shutdown",

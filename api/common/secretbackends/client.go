@@ -4,6 +4,7 @@
 package secretbackends
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
@@ -11,9 +12,10 @@ import (
 	"github.com/juju/juju/api/base"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	coresecrets "github.com/juju/juju/core/secrets"
+	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	"github.com/juju/juju/internal/secrets"
+	"github.com/juju/juju/internal/secrets/provider"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/secrets"
-	"github.com/juju/juju/secrets/provider"
 )
 
 // Client is the api client for accessing secret backend related facades.
@@ -28,15 +30,15 @@ func NewClient(facade base.FacadeCaller) *Client {
 
 // GetSecretBackendConfig fetches the config needed to make a secret backend client.
 // If backendID is nil, fetch the current active backend config.
-func (c *Client) GetSecretBackendConfig(backendID *string) (*provider.ModelBackendConfigInfo, error) {
+func (c *Client) GetSecretBackendConfig(ctx context.Context, backendID *string) (*provider.ModelBackendConfigInfo, error) {
 	var results params.SecretBackendConfigResults
 
 	args := params.SecretBackendArgs{}
 	if backendID != nil {
 		args.BackendIDs = []string{*backendID}
 	}
-	err := c.facade.FacadeCall("GetSecretBackendConfigs", args, &results)
-	if err != nil && !errors.Is(err, errors.NotFound) {
+	err := c.facade.FacadeCall(ctx, "GetSecretBackendConfigs", args, &results)
+	if err != nil && !errors.Is(params.TranslateWellKnownError(err), secretbackenderrors.NotFound) {
 		return nil, errors.Trace(err)
 	}
 	if err != nil || len(results.Results) == 0 {
@@ -44,7 +46,7 @@ func (c *Client) GetSecretBackendConfig(backendID *string) (*provider.ModelBacke
 		if backendID != nil {
 			msg = fmt.Sprintf("external secret backend id %q", *backendID)
 		}
-		return nil, errors.NotFoundf(msg)
+		return nil, fmt.Errorf("%s%w", msg, errors.Hide(secretbackenderrors.NotFound))
 	}
 	if len(results.Results) != 1 {
 		return nil, errors.Errorf("expected 1 result, got %d", len(results.Results))
@@ -68,14 +70,14 @@ func (c *Client) GetSecretBackendConfig(backendID *string) (*provider.ModelBacke
 }
 
 // GetBackendConfigForDrain fetches the config needed to make a secret backend client for the drain worker.
-func (c *Client) GetBackendConfigForDrain(backendID *string) (*provider.ModelBackendConfig, string, error) {
+func (c *Client) GetBackendConfigForDrain(ctx context.Context, backendID *string) (*provider.ModelBackendConfig, string, error) {
 	var result params.SecretBackendConfigResults
 	arg := params.SecretBackendArgs{ForDrain: true}
 	if backendID != nil {
 		arg.BackendIDs = []string{*backendID}
 	}
-	err := c.facade.FacadeCall("GetSecretBackendConfigs", arg, &result)
-	if err != nil && !errors.Is(err, errors.NotFound) {
+	err := c.facade.FacadeCall(ctx, "GetSecretBackendConfigs", arg, &result)
+	if err != nil && !errors.Is(params.TranslateWellKnownError(err), secretbackenderrors.NotFound) {
 		return nil, "", errors.Trace(err)
 	}
 	if len(result.Results) == 0 {
@@ -100,7 +102,7 @@ func (c *Client) GetBackendConfigForDrain(backendID *string) (*provider.ModelBac
 }
 
 // GetContentInfo returns info about the content of a secret.
-func (c *Client) GetContentInfo(uri *coresecrets.URI, label string, refresh, peek bool) (*secrets.ContentParams, *provider.ModelBackendConfig, bool, error) {
+func (c *Client) GetContentInfo(ctx context.Context, uri *coresecrets.URI, label string, refresh, peek bool) (*secrets.ContentParams, *provider.ModelBackendConfig, bool, error) {
 	arg := params.GetSecretContentArg{
 		Label:   label,
 		Refresh: refresh,
@@ -113,6 +115,7 @@ func (c *Client) GetContentInfo(uri *coresecrets.URI, label string, refresh, pee
 	var results params.SecretContentResults
 
 	if err := c.facade.FacadeCall(
+		ctx,
 		"GetSecretContentInfo", params.GetSecretContentArgs{Args: []params.GetSecretContentArg{arg}}, &results,
 	); err != nil {
 		return nil, nil, false, errors.Trace(err)
@@ -162,7 +165,7 @@ func (c *Client) processSecretContentResults(results params.SecretContentResults
 
 // GetRevisionContentInfo returns info about the content of a secret revision.
 // If pendingDelete is true, the revision is marked for deletion.
-func (c *Client) GetRevisionContentInfo(uri *coresecrets.URI, revision int, pendingDelete bool) (*secrets.ContentParams, *provider.ModelBackendConfig, bool, error) {
+func (c *Client) GetRevisionContentInfo(ctx context.Context, uri *coresecrets.URI, revision int, pendingDelete bool) (*secrets.ContentParams, *provider.ModelBackendConfig, bool, error) {
 	arg := params.SecretRevisionArg{
 		URI:           uri.String(),
 		Revisions:     []int{revision},
@@ -172,6 +175,7 @@ func (c *Client) GetRevisionContentInfo(uri *coresecrets.URI, revision int, pend
 	var results params.SecretContentResults
 
 	if err := c.facade.FacadeCall(
+		ctx,
 		"GetSecretRevisionContentInfo", arg, &results,
 	); err != nil {
 		return nil, nil, false, errors.Trace(err)

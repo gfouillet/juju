@@ -4,31 +4,34 @@
 package uniter_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api/agent/uniter"
 	basetesting "github.com/juju/juju/api/base/testing"
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/api/types"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type modelSuite struct {
 	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&modelSuite{})
+func TestModelSuite(t *testing.T) {
+	tc.Run(t, &modelSuite{})
+}
 
-func (s *modelSuite) TestModel(c *gc.C) {
+func (s *modelSuite) TestModel(c *tc.C) {
 	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Assert(objType, gc.Equals, "Uniter")
-		c.Assert(id, gc.Equals, "")
+		c.Assert(objType, tc.Equals, "Uniter")
+		c.Assert(id, tc.Equals, "")
 		switch request {
 		case "CurrentModel":
-			c.Assert(arg, gc.IsNil)
-			c.Assert(result, gc.FitsTypeOf, &params.ModelResult{})
+			c.Assert(arg, tc.IsNil)
+			c.Assert(result, tc.FitsTypeOf, &params.ModelResult{})
 			*(result.(*params.ModelResult)) = params.ModelResult{
 				Name: "mary",
 				UUID: "deadbeaf",
@@ -39,12 +42,12 @@ func (s *modelSuite) TestModel(c *gc.C) {
 		}
 		return nil
 	})
-	client := uniter.NewState(apiCaller, names.NewUnitTag("mysql/0"))
-	m, err := client.Model()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(m, jc.DeepEquals, &model.Model{
+	client := uniter.NewClient(apiCaller, names.NewUnitTag("mysql/0"))
+	m, err := client.Model(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m, tc.DeepEquals, &types.Model{
 		Name:      "mary",
 		UUID:      "deadbeaf",
-		ModelType: model.CAAS,
+		ModelType: types.CAAS,
 	})
 }

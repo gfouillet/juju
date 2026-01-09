@@ -13,6 +13,7 @@ import (
 	"github.com/go-goose/goose/v5/nova"
 	"github.com/go-goose/goose/v5/swift"
 	"github.com/juju/errors"
+	"github.com/juju/tc"
 
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
@@ -50,8 +51,8 @@ func MetadataStorage(e environs.Environ) envstorage.Storage {
 	return metadataStorage
 }
 
-func InstanceAddress(publicIP string, addresses map[string][]nova.IPAddress) string {
-	addr, _ := convertNovaAddresses(publicIP, addresses).OneMatchingScope(network.ScopeMatchPublic)
+func InstanceAddress(c *tc.C, publicIP string, addresses map[string][]nova.IPAddress) string {
+	addr, _ := convertNovaAddresses(c.Context(), publicIP, addresses).OneMatchingScope(network.ScopeMatchPublic)
 	return addr.Value
 }
 
@@ -687,7 +688,7 @@ func DiscardSecurityGroup(e environs.Environ, name string) error {
 	neutronClient := env.neutron()
 	groups, err := neutronClient.SecurityGroupByNameV2(name)
 	if err != nil || len(groups) == 0 {
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			// Group already deleted, done
 			return nil
 		}

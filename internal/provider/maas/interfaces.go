@@ -4,6 +4,7 @@
 package maas
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -14,7 +15,6 @@ import (
 	"github.com/juju/juju/core/instance"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 )
 
 // TODO(dimitern): The types below should be part of gomaasapi.
@@ -85,7 +85,7 @@ type maasSubnet struct {
 }
 
 // NetworkInterfaces implements Environ.NetworkInterfaces.
-func (env *maasEnviron) NetworkInterfaces(ctx context.ProviderCallContext, ids []instance.Id) ([]corenetwork.InterfaceInfos, error) {
+func (env *maasEnviron) NetworkInterfaces(ctx context.Context, ids []instance.Id) ([]corenetwork.InterfaceInfos, error) {
 	switch len(ids) {
 	case 0:
 		return nil, environs.ErrNoInstances
@@ -136,7 +136,7 @@ func (env *maasEnviron) NetworkInterfaces(ctx context.ProviderCallContext, ids [
 	return infos, err
 }
 
-func (env *maasEnviron) networkInterfacesForInstance(ctx context.ProviderCallContext, instId instance.Id) (corenetwork.InterfaceInfos, error) {
+func (env *maasEnviron) networkInterfacesForInstance(ctx context.Context, instId instance.Id) (corenetwork.InterfaceInfos, error) {
 	inst, err := env.getInstance(ctx, instId)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -153,7 +153,7 @@ func (env *maasEnviron) networkInterfacesForInstance(ctx context.ProviderCallCon
 }
 
 func maasNetworkInterfaces(
-	_ context.ProviderCallContext,
+	ctx context.Context,
 	instance *maasInstance,
 	subnetsMap map[string]corenetwork.Id,
 	dnsSearchDomains ...string,
@@ -205,7 +205,7 @@ func maasNetworkInterfaces(
 		}
 
 		if len(iface.Links()) == 0 {
-			logger.Debugf("interface %q has no links", iface.Name())
+			logger.Debugf(ctx, "interface %q has no links", iface.Name())
 			infos = append(infos, nicInfo)
 			continue
 		}
@@ -214,7 +214,7 @@ func maasNetworkInterfaces(
 			configType := maasLinkToInterfaceConfigType(link.Mode())
 
 			if link.IPAddress() == "" && link.Subnet() == nil {
-				logger.Debugf("interface %q link %d has neither subnet nor address", iface.Name(), link.ID())
+				logger.Debugf(ctx, "interface %q link %d has neither subnet nor address", iface.Name(), link.ID())
 				infos = append(infos, nicInfo)
 			} else {
 				// We set it here initially without a space, just so we don't
@@ -223,19 +223,21 @@ func maasNetworkInterfaces(
 				// NOTE(achilleasa): the original code used a last-write-wins
 				// policy. Do we need to append link addresses to the list?
 				nicInfo.Addresses = corenetwork.ProviderAddresses{
-					corenetwork.NewMachineAddress(link.IPAddress(), corenetwork.WithConfigType(configType)).AsProviderAddress(),
+					corenetwork.NewMachineAddress(link.IPAddress(),
+						corenetwork.WithConfigType(configType),
+					).AsProviderAddress(
+						corenetwork.WithProviderID(corenetwork.Id(fmt.Sprintf("%v", link.ID()))),
+					),
 				}
-				nicInfo.ProviderAddressId = corenetwork.Id(fmt.Sprintf("%v", link.ID()))
 			}
 
 			sub := link.Subnet()
 			if sub == nil {
-				logger.Debugf("interface %q link %d missing subnet", iface.Name(), link.ID())
+				logger.Debugf(ctx, "interface %q link %d missing subnet", iface.Name(), link.ID())
 				infos = append(infos, nicInfo)
 				continue
 			}
 
-			nicInfo.ProviderSubnetId = corenetwork.Id(fmt.Sprintf("%v", sub.ID()))
 			nicInfo.ProviderVLANId = corenetwork.Id(fmt.Sprintf("%v", sub.VLAN().ID()))
 
 			// Provider addresses are created with a space name massaged
@@ -244,28 +246,27 @@ func maasNetworkInterfaces(
 
 			// Now we know the subnet and space, we can update the address to
 			// store the space with it.
-			nicInfo.Addresses[0] = corenetwork.NewMachineAddress(
-				link.IPAddress(), corenetwork.WithCIDR(sub.CIDR()), corenetwork.WithConfigType(configType),
-			).AsProviderAddress(corenetwork.WithSpaceName(space))
+			nicInfo.Addresses[0] = corenetwork.NewMachineAddress(link.IPAddress(),
+				corenetwork.WithCIDR(sub.CIDR()),
+				corenetwork.WithConfigType(configType),
+			).AsProviderAddress(
+				corenetwork.WithProviderSubnetID(corenetwork.Id(fmt.Sprintf("%v", sub.ID()))),
+				corenetwork.WithSpaceName(space),
+				corenetwork.WithProviderID(corenetwork.Id(fmt.Sprintf("%v", link.ID()))),
+			)
 
 			spaceId, ok := subnetsMap[sub.CIDR()]
 			if !ok {
 				// The space we found is not recognised.
 				// No provider space info is available.
-				logger.Warningf("interface %q link %d has unrecognised space %q", iface.Name(), link.ID(), sub.Space())
+				logger.Warningf(ctx, "interface %q link %d has unrecognised space %q", iface.Name(), link.ID(), sub.Space())
 			} else {
 				nicInfo.Addresses[0].ProviderSpaceID = spaceId
 				nicInfo.ProviderSpaceId = spaceId
 			}
 
-			gwAddr := corenetwork.NewMachineAddress(sub.Gateway()).AsProviderAddress(corenetwork.WithSpaceName(space))
-			nicInfo.DNSServers = corenetwork.NewMachineAddresses(sub.DNSServers()).AsProviderAddresses(corenetwork.WithSpaceName(space))
-			if ok {
-				gwAddr.ProviderSpaceID = spaceId
-				for i := range nicInfo.DNSServers {
-					nicInfo.DNSServers[i].ProviderSpaceID = spaceId
-				}
-			}
+			gwAddr := corenetwork.NewMachineAddress(sub.Gateway()).AsProviderAddress()
+			nicInfo.DNSServers = sub.DNSServers()
 			nicInfo.DNSSearchDomains = dnsSearchDomains
 			nicInfo.GatewayAddress = gwAddr
 			nicInfo.MTU = sub.VLAN().MTU()

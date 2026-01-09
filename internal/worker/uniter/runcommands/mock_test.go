@@ -4,9 +4,11 @@
 package runcommands_test
 
 import (
-	"github.com/juju/testing"
-	"github.com/juju/utils/v3/exec"
+	"context"
 
+	"github.com/juju/utils/v4/exec"
+
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	runnercontext "github.com/juju/juju/internal/worker/uniter/runner/context"
@@ -17,37 +19,37 @@ type mockRunnerFactory struct {
 	newCommandRunner func(runnercontext.CommandInfo) (runner.Runner, error)
 }
 
-func (f *mockRunnerFactory) NewCommandRunner(info runnercontext.CommandInfo) (runner.Runner, error) {
+func (f *mockRunnerFactory) NewCommandRunner(_ context.Context, info runnercontext.CommandInfo) (runner.Runner, error) {
 	return f.newCommandRunner(info)
 }
 
 type mockRunner struct {
 	runner.Runner
-	runCommands func(string, runner.RunLocation) (*exec.ExecResponse, error)
+	runCommands func(string) (*exec.ExecResponse, error)
 }
 
 func (r *mockRunner) Context() runnercontext.Context {
 	return &mockRunnerContext{}
 }
 
-func (r *mockRunner) RunCommands(commands string, runLocation runner.RunLocation) (*exec.ExecResponse, error) {
-	return r.runCommands(commands, runLocation)
+func (r *mockRunner) RunCommands(ctx context.Context, commands string) (*exec.ExecResponse, error) {
+	return r.runCommands(commands)
 }
 
 type mockRunnerContext struct {
 	runnercontext.Context
 }
 
-func (*mockRunnerContext) Prepare() error {
+func (*mockRunnerContext) Prepare(context.Context) error {
 	return nil
 }
 
 type mockCallbacks struct {
-	testing.Stub
+	testhelpers.Stub
 	operation.Callbacks
 }
 
-func (c *mockCallbacks) SetExecutingStatus(status string) error {
+func (c *mockCallbacks) SetExecutingStatus(_ context.Context, status string) error {
 	c.MethodCall(c, "SetExecutingStatus", status)
 	return c.NextErr()
 }

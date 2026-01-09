@@ -4,9 +4,10 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apiwatcher "github.com/juju/juju/api/watcher"
@@ -14,25 +15,32 @@ import (
 	"github.com/juju/juju/rpc/params"
 )
 
-// State provides access to an logger worker's view of the state.
-type State struct {
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
+// Client provides access to a logger facade client.
+type Client struct {
 	facade base.FacadeCaller
 }
 
-// NewState returns a version of the state that provides functionality
+// NewClient returns a version of the logger client that provides functionality
 // required by the logger worker.
-func NewState(caller base.APICaller) *State {
-	return &State{base.NewFacadeCaller(caller, "Logger")}
+func NewClient(caller base.APICaller, options ...Option) *Client {
+	return &Client{base.NewFacadeCaller(caller, "Logger", options...)}
 }
 
 // LoggingConfig returns the loggo configuration string for the agent
 // specified by agentTag.
-func (st *State) LoggingConfig(agentTag names.Tag) (string, error) {
+func (c *Client) LoggingConfig(ctx context.Context, agentTag names.Tag) (string, error) {
 	var results params.StringResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: agentTag.String()}},
 	}
-	err := st.facade.FacadeCall("LoggingConfig", args, &results)
+	err := c.facade.FacadeCall(ctx, "LoggingConfig", args, &results)
 	if err != nil {
 		// TODO: Not directly tested
 		return "", err
@@ -50,12 +58,12 @@ func (st *State) LoggingConfig(agentTag names.Tag) (string, error) {
 
 // WatchLoggingConfig returns a notify watcher that looks for changes in the
 // logging-config for the agent specified by agentTag.
-func (st *State) WatchLoggingConfig(agentTag names.Tag) (watcher.NotifyWatcher, error) {
+func (c *Client) WatchLoggingConfig(ctx context.Context, agentTag names.Tag) (watcher.NotifyWatcher, error) {
 	var results params.NotifyWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: agentTag.String()}},
 	}
-	err := st.facade.FacadeCall("WatchLoggingConfig", args, &results)
+	err := c.facade.FacadeCall(ctx, "WatchLoggingConfig", args, &results)
 	if err != nil {
 		// TODO: Not directly tested
 		return nil, err
@@ -69,6 +77,6 @@ func (st *State) WatchLoggingConfig(agentTag names.Tag) (watcher.NotifyWatcher, 
 		//  TODO: Not directly tested
 		return nil, result.Error
 	}
-	w := apiwatcher.NewNotifyWatcher(st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewNotifyWatcher(c.facade.RawAPICaller(), result)
 	return w, nil
 }

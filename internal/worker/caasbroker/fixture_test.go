@@ -7,11 +7,10 @@ import (
 	"context"
 	"sync"
 
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/workertest"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/workertest"
 
 	"github.com/juju/juju/caas"
 	"github.com/juju/juju/controller"
@@ -19,7 +18,8 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	jujutesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	jujutesting "github.com/juju/juju/internal/testing"
 )
 
 type fixture struct {
@@ -29,11 +29,11 @@ type fixture struct {
 	initialSpec   environscloudspec.CloudSpec
 }
 
-func (fix *fixture) Run(c *gc.C, test func(*runContext)) {
+func (fix *fixture) Run(c *tc.C, test func(*runContext)) {
 	watcher := newNotifyWatcher(fix.watcherErr)
-	defer workertest.DirtyKill(c, watcher)
+	defer workertest.CleanKill(c, watcher)
 	cloudWatcher := newNotifyWatcher(fix.watcherErr)
-	defer workertest.DirtyKill(c, cloudWatcher)
+	defer workertest.CleanKill(c, cloudWatcher)
 	context := &runContext{
 		cloud:        fix.initialSpec,
 		config:       newModelConfig(c, fix.initialConfig),
@@ -46,7 +46,7 @@ func (fix *fixture) Run(c *gc.C, test func(*runContext)) {
 
 type runContext struct {
 	mu           sync.Mutex
-	stub         testing.Stub
+	stub         testhelpers.Stub
 	cloud        environscloudspec.CloudSpec
 	config       map[string]interface{}
 	watcher      *notifyWatcher
@@ -55,21 +55,21 @@ type runContext struct {
 }
 
 // SetConfig updates the configuration returned by ModelConfig.
-func (context *runContext) SetConfig(c *gc.C, extraAttrs jujutesting.Attrs) {
+func (context *runContext) SetConfig(c *tc.C, extraAttrs jujutesting.Attrs) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.config = newModelConfig(c, extraAttrs)
 }
 
 // SetCloudSpec updates the spec returned by CloudSpec.
-func (context *runContext) SetCloudSpec(c *gc.C, spec environscloudspec.CloudSpec) {
+func (context *runContext) SetCloudSpec(c *tc.C, spec environscloudspec.CloudSpec) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.cloud = spec
 }
 
 // CloudSpec is part of the environ.ConfigObserver interface.
-func (context *runContext) CloudSpec() (environscloudspec.CloudSpec, error) {
+func (context *runContext) CloudSpec(_ context.Context) (environscloudspec.CloudSpec, error) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.AddCall("CloudSpec")
@@ -80,7 +80,7 @@ func (context *runContext) CloudSpec() (environscloudspec.CloudSpec, error) {
 }
 
 // ModelConfig is part of the environ.ConfigObserver interface.
-func (context *runContext) ModelConfig() (*config.Config, error) {
+func (context *runContext) ModelConfig(_ context.Context) (*config.Config, error) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.AddCall("ModelConfig")
@@ -90,7 +90,7 @@ func (context *runContext) ModelConfig() (*config.Config, error) {
 	return config.New(config.UseDefaults, context.config)
 }
 
-func (context *runContext) ControllerConfig() (controller.Config, error) {
+func (context *runContext) ControllerConfig(_ context.Context) (controller.Config, error) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.AddCall("ControllerConfig")
@@ -135,7 +135,7 @@ func (context *runContext) CloseCloudSpecNotify() {
 }
 
 // WatchForModelConfigChanges is part of the environ.ConfigObserver interface.
-func (context *runContext) WatchForModelConfigChanges() (watcher.NotifyWatcher, error) {
+func (context *runContext) WatchForModelConfigChanges(_ context.Context) (watcher.NotifyWatcher, error) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.AddCall("WatchForModelConfigChanges")
@@ -145,7 +145,7 @@ func (context *runContext) WatchForModelConfigChanges() (watcher.NotifyWatcher, 
 	return context.watcher, nil
 }
 
-func (context *runContext) WatchCloudSpecChanges() (watcher.NotifyWatcher, error) {
+func (context *runContext) WatchCloudSpecChanges(_ context.Context) (watcher.NotifyWatcher, error) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.AddCall("WatchCloudSpecChanges")
@@ -183,7 +183,7 @@ func (context *runContext) WatchCredential(cred names.CloudCredentialTag) (watch
 	return context.watcher, nil
 }
 
-func (context *runContext) CheckCallNames(c *gc.C, names ...string) {
+func (context *runContext) CheckCallNames(c *tc.C, names ...string) {
 	context.mu.Lock()
 	defer context.mu.Unlock()
 	context.stub.CheckCallNames(c, names...)
@@ -210,20 +210,20 @@ func (w *notifyWatcher) Changes() watcher.NotifyChannel {
 
 // newModelConfig returns an environment config map with the supplied attrs
 // (on top of some default set), or fails the test.
-func newModelConfig(c *gc.C, extraAttrs jujutesting.Attrs) map[string]interface{} {
+func newModelConfig(c *tc.C, extraAttrs jujutesting.Attrs) map[string]interface{} {
 	return jujutesting.CustomModelConfig(c, extraAttrs).AllAttrs()
 }
 
 type mockBroker struct {
 	caas.Broker
-	testing.Stub
+	testhelpers.Stub
 	spec      environscloudspec.CloudSpec
 	cfg       *config.Config
 	namespace string
 	mu        sync.Mutex
 }
 
-func newMockBroker(_ context.Context, args environs.OpenParams) (caas.Broker, error) {
+func newMockBroker(_ context.Context, args environs.OpenParams, _ environs.CredentialInvalidator) (caas.Broker, error) {
 	return &mockBroker{spec: args.Cloud, namespace: args.Config.Name(), cfg: args.Config}, nil
 }
 
@@ -252,7 +252,7 @@ func (e *mockBroker) Config() *config.Config {
 	return e.cfg
 }
 
-func (e *mockBroker) SetConfig(cfg *config.Config) error {
+func (e *mockBroker) SetConfig(_ context.Context, cfg *config.Config) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.MethodCall(e, "SetConfig", cfg)

@@ -4,33 +4,23 @@
 package apiconfigwatcher
 
 import (
+	"context"
 	"sort"
 
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3/voyeur"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/core/logger"
 )
-
-// Logger represents the methods used by the worker to log information.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Errorf(string, ...interface{})
-}
-
-// logger is here to stop the desire of creating a package level logger.
-// Don't do this, instead use the one passed as manifold config.
-type logger interface{}
-
-var _ logger = struct{}{}
 
 type ManifoldConfig struct {
 	AgentName          string
 	AgentConfigChanged *voyeur.Value
-	Logger             Logger
+	Logger             logger.Logger
 }
 
 // Manifold returns a dependency.Manifold which wraps an agent's
@@ -43,13 +33,13 @@ type ManifoldConfig struct {
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{config.AgentName},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if config.AgentConfigChanged == nil {
 				return nil, errors.NotValidf("nil AgentConfigChanged")
 			}
 
 			var a agent.Agent
-			if err := context.Get(config.AgentName, &a); err != nil {
+			if err := getter.Get(config.AgentName, &a); err != nil {
 				return nil, err
 			}
 
@@ -69,11 +59,14 @@ type apiconfigwatcher struct {
 	agent              agent.Agent
 	agentConfigChanged *voyeur.Value
 	addrs              []string
-	logger             Logger
+	logger             logger.Logger
 }
 
 func (w *apiconfigwatcher) loop() error {
-	w.addrs = w.getAPIAddresses()
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	w.addrs = w.getAPIAddresses(ctx)
 	watch := w.agentConfigChanged.Watch()
 	defer watch.Close()
 
@@ -101,8 +94,8 @@ func (w *apiconfigwatcher) loop() error {
 		// Always unconditionally check for a change in API addresses
 		// first, in case there was a change between the start func
 		// and the call to Watch.
-		if !stringSliceEq(w.addrs, w.getAPIAddresses()) {
-			w.logger.Debugf("API addresses changed in agent config")
+		if !stringSliceEq(w.addrs, w.getAPIAddresses(ctx)) {
+			w.logger.Debugf(ctx, "API addresses changed in agent config")
 			return dependency.ErrBounce
 		}
 
@@ -127,15 +120,19 @@ func (w *apiconfigwatcher) Wait() error {
 	return w.tomb.Wait()
 }
 
-func (w *apiconfigwatcher) getAPIAddresses() []string {
+func (w *apiconfigwatcher) getAPIAddresses(ctx context.Context) []string {
 	config := w.agent.CurrentConfig()
 	addrs, err := config.APIAddresses()
 	if err != nil {
-		w.logger.Errorf("retrieving API addresses: %s", err)
+		w.logger.Errorf(ctx, "retrieving API addresses: %s", err)
 		addrs = nil
 	}
 	sort.Strings(addrs)
 	return addrs
+}
+
+func (w *apiconfigwatcher) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }
 
 func stringSliceEq(a, b []string) bool {

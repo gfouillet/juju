@@ -4,9 +4,10 @@
 package space_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"testing"
+
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/cmd/juju/space"
 	"github.com/juju/juju/cmd/juju/space/mocks"
@@ -16,7 +17,7 @@ type SpaceCommandSuite struct {
 	BaseSpaceSuite
 }
 
-func setUpMocks(c *gc.C) (*gomock.Controller, *mocks.MockAPI) {
+func setUpMocks(c *tc.C) (*gomock.Controller, *mocks.MockAPI) {
 	ctrl := gomock.NewController(c)
 
 	api := mocks.NewMockAPI(ctrl)
@@ -24,10 +25,11 @@ func setUpMocks(c *gc.C) (*gomock.Controller, *mocks.MockAPI) {
 
 	return ctrl, api
 }
+func TestSpaceCommandSuite(t *testing.T) {
+	tc.Run(t, &SpaceCommandSuite{})
+}
 
-var _ = gc.Suite(&SpaceCommandSuite{})
-
-func (s *SpaceCommandSuite) TestInit(c *gc.C) {
+func (s *SpaceCommandSuite) TestInit(c *tc.C) {
 	for i, test := range []struct {
 		about         string
 		args          []string
@@ -97,14 +99,14 @@ func (s *SpaceCommandSuite) TestInit(c *gc.C) {
 		// Create a new instance of the subcommand for each test, but
 		// since we're not running the command no need to use
 		// modelcmd.Wrap().
-		name, CIDRs, err := space.ParseNameAndCIDRs(test.args, test.cidrsOptional)
+		name, cidrs, err := space.ParseNameAndCIDRs(test.args, test.cidrsOptional)
 		if test.expectErr != "" {
 			prefixedErr := "invalid arguments specified: " + test.expectErr
-			c.Check(err, gc.ErrorMatches, prefixedErr)
+			c.Check(err, tc.ErrorMatches, prefixedErr)
 		} else {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		}
-		c.Check(name, gc.Equals, test.expectName)
-		c.Check(CIDRs.SortedValues(), jc.DeepEquals, test.expectCIDRs)
+		c.Check(name, tc.Equals, test.expectName)
+		c.Check(cidrs.SortedValues(), tc.DeepEquals, test.expectCIDRs)
 	}
 }

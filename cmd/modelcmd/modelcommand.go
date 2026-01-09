@@ -11,22 +11,21 @@ import (
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
 
 	"github.com/juju/juju/api"
 	apiclient "github.com/juju/juju/api/client/client"
 	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/client/modelupgrader"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient"
 )
 
-var logger = loggo.GetLogger("juju.cmd.modelcmd")
+var logger = internallogger.GetLogger("juju.cmd.modelcmd")
 
 // ErrNoModelSpecified is returned by commands that operate on
 // an environment if there is no current model, no model
@@ -69,15 +68,12 @@ type ModelCommand interface {
 	// It may be a model name, or a full or partial model UUID.
 	ModelIdentifier() (string, error)
 
+	// ModelNameWithQualifier returns the target model name
+	// and qualifier.
+	ModelNameWithQualifier() (string, string, error)
+
 	// ModelType returns the type of the model.
-	ModelType() (model.ModelType, error)
-
-	// SetActiveBranch sets the branch to use for this command,
-	// then updates the model's active branch in the local store.
-	SetActiveBranch(string) error
-
-	// ActiveBranch returns the current active branch for this model.
-	ActiveBranch() (string, error)
+	ModelType(context.Context) (model.ModelType, error)
 
 	// ControllerName returns the name of the controller that contains
 	// the model returned by ModelIdentifier().
@@ -109,7 +105,6 @@ type ModelCommandBase struct {
 	// ControllerName respectively.
 	_modelIdentifier string
 	_modelType       model.ModelType
-	_activeBranch    string
 	_controllerName  string
 
 	allowDefaultModel bool
@@ -221,8 +216,29 @@ func (c *ModelCommandBase) ModelIdentifier() (string, error) {
 	return c._modelIdentifier, nil
 }
 
+// ModelNameWithQualifier returns the current model name
+// with its qualifier if it has one.
+func (c *ModelCommandBase) ModelNameWithQualifier() (string, string, error) {
+	modelIdent, err := c.ModelIdentifier()
+	if err != nil {
+		return "", "", errors.Trace(err)
+	}
+	currentModel, _, err := c.modelFromStore(c._controllerName, modelIdent)
+	if err != nil {
+		return "", "", errors.Trace(err)
+	}
+	if !jujuclient.IsQualifiedModelName(currentModel) {
+		return currentModel, "", nil
+	}
+	modelName, qualifier, err := jujuclient.SplitFullyQualifiedModelName(currentModel)
+	if err != nil {
+		return "", "", errors.Trace(err)
+	}
+	return modelName, qualifier, nil
+}
+
 // ModelType implements the ModelCommand interface.
-func (c *ModelCommandBase) ModelType() (model.ModelType, error) {
+func (c *ModelCommandBase) ModelType(ctx context.Context) (model.ModelType, error) {
 	if c._modelType != "" {
 		return c._modelType, nil
 	}
@@ -238,53 +254,13 @@ func (c *ModelCommandBase) ModelType() (model.ModelType, error) {
 		if !c.runStarted {
 			return "", errors.Trace(err)
 		}
-		_, details, err = c.modelDetails(c._controllerName, c._modelIdentifier)
+		_, details, err = c.modelDetails(ctx, c._controllerName, c._modelIdentifier)
 		if err != nil {
 			return "", errors.Trace(err)
 		}
 	}
 	c._modelType = details.ModelType
 	return c._modelType, nil
-}
-
-// SetActiveBranch implements the ModelCommand interface.
-func (c *ModelCommandBase) SetActiveBranch(branchName string) error {
-	name, modelDetails, err := c.ModelDetails()
-	if err != nil {
-		return errors.Annotate(err, "getting model details")
-	}
-	modelDetails.ActiveBranch = branchName
-	if err = c.store.UpdateModel(c._controllerName, name, *modelDetails); err != nil {
-		return err
-	}
-	c._activeBranch = branchName
-	return nil
-}
-
-// ActiveBranch implements the ModelCommand interface.
-func (c *ModelCommandBase) ActiveBranch() (string, error) {
-	if c._activeBranch != "" {
-		return c._activeBranch, nil
-	}
-
-	// If we need to look up the model generation, we need to ensure we
-	// have access to the model details.
-	if err := c.maybeInitModel(); err != nil {
-		return "", errors.Trace(err)
-	}
-
-	_, details, err := c.modelFromStore(c._controllerName, c._modelIdentifier)
-	if err != nil {
-		if !c.runStarted {
-			return "", errors.Trace(err)
-		}
-		_, details, err = c.modelDetails(c._controllerName, c._modelIdentifier)
-		if err != nil {
-			return "", errors.Trace(err)
-		}
-	}
-	c._activeBranch = details.ActiveBranch
-	return c._activeBranch, nil
 }
 
 // ControllerName implements the ModelCommand interface.
@@ -325,8 +301,8 @@ func (c *ModelCommandBase) CookieJar() (http.CookieJar, error) {
 	return c.CommandBase.CookieJar(c.ClientStore(), controllerName)
 }
 
-func (c *ModelCommandBase) NewAPIClient() (*apiclient.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *ModelCommandBase) NewAPIClient(ctx context.Context) (*apiclient.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -335,7 +311,7 @@ func (c *ModelCommandBase) NewAPIClient() (*apiclient.Client, error) {
 
 // ModelDetails returns details from the file store for the model indicated by
 // the currently set controller name and model identifier.
-func (c *ModelCommandBase) ModelDetails() (string, *jujuclient.ModelDetails, error) {
+func (c *ModelCommandBase) ModelDetails(ctx context.Context) (string, *jujuclient.ModelDetails, error) {
 	modelIdentifier, err := c.ModelIdentifier()
 	if err != nil {
 		return "", nil, errors.Trace(err)
@@ -345,11 +321,11 @@ func (c *ModelCommandBase) ModelDetails() (string, *jujuclient.ModelDetails, err
 		return "", nil, errors.Trace(err)
 	}
 
-	name, details, err := c.modelDetails(controllerName, modelIdentifier)
+	name, details, err := c.modelDetails(ctx, controllerName, modelIdentifier)
 	return name, details, errors.Trace(err)
 }
 
-func (c *ModelCommandBase) modelDetails(controllerName, modelIdentifier string) (
+func (c *ModelCommandBase) modelDetails(ctx context.Context, controllerName, modelIdentifier string) (
 	string, *jujuclient.ModelDetails, error,
 ) {
 	if modelIdentifier == "" {
@@ -358,13 +334,13 @@ func (c *ModelCommandBase) modelDetails(controllerName, modelIdentifier string) 
 
 	name, details, err := c.modelFromStore(controllerName, modelIdentifier)
 	if err != nil {
-		if !errors.IsNotFound(err) {
+		if !errors.Is(err, errors.NotFound) {
 			return "", nil, errors.Trace(err)
 		}
-		logger.Debugf("model %q not found, refreshing", modelIdentifier)
+		logger.Debugf(context.TODO(), "model %q not found, refreshing", modelIdentifier)
 		// The model is not known locally, so query the models
 		// available in the controller, and cache them locally.
-		if err := c.RefreshModels(c.store, controllerName); err != nil {
+		if err := c.RefreshModels(ctx, c.store, controllerName); err != nil {
 			return "", nil, errors.Annotate(err, "refreshing models")
 		}
 		name, details, err = c.modelFromStore(controllerName, modelIdentifier)
@@ -385,7 +361,7 @@ func (c *ModelCommandBase) modelFromStore(controllerName, modelIdentifier string
 	if err == nil {
 		return modelIdentifier, details, nil
 	}
-	if !errors.IsNotFound(err) {
+	if !errors.Is(err, errors.NotFound) {
 		return "", nil, errors.Trace(err)
 	}
 
@@ -402,69 +378,62 @@ func (c *ModelCommandBase) modelFromStore(controllerName, modelIdentifier string
 				return name, &details, nil
 			}
 		}
+		return "", nil, errors.NotFoundf("model %s:%s", controllerName, modelIdentifier)
 	}
 
 	// Keep the not-found error from the store if we have one.
 	// This will preserve the user-qualified model identifier.
-	if err == nil {
-		err = errors.NotFoundf("model %s:%s", controllerName, modelIdentifier)
-	}
 	return "", nil, errors.Trace(err)
 }
 
 // NewAPIRoot returns a new connection to the API server for the environment
 // directed to the model specified on the command line.
-func (c *ModelCommandBase) NewAPIRoot() (api.Connection, error) {
-	// We need to call ModelDetails() here and not just ModelName() to force
-	// a refresh of the internal model details if those are not yet stored locally.
-	modelName, _, err := c.ModelDetails()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	conn, err := c.newAPIRoot(modelName, nil)
-	return conn, errors.Trace(err)
+func (c *ModelCommandBase) NewAPIRoot(ctx context.Context) (api.Connection, error) {
+	return c.NewAPIRootWithDialOpts(ctx, nil)
 }
 
 // NewAPIRootWithDialOpts returns a new connection to the API server for the
 // environment directed to the model specified on the command line (and with
 // the given dial options if non-nil).
-func (c *ModelCommandBase) NewAPIRootWithDialOpts(dialOpts *api.DialOpts) (api.Connection, error) {
-	// We need to call ModelDetails() here and not just ModelName() to force
-	// a refresh of the internal model details if those are not yet stored locally.
-	modelName, _, err := c.ModelDetails()
+func (c *ModelCommandBase) NewAPIRootWithDialOpts(ctx context.Context, dialOpts *api.DialOpts, overrideAddresses ...string) (api.Connection, error) {
+	// We need to call ModelDetails() here and not just ModelName() to force a
+	// refresh of the internal model details if those are not yet stored
+	// locally.
+	modelName, _, err := c.ModelDetails(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	conn, err := c.newAPIRoot(modelName, dialOpts)
+	conn, err := c.newAPIRoot(ctx, modelName, dialOpts, overrideAddresses)
 	return conn, errors.Trace(err)
 }
 
-// NewControllerAPIRoot returns a new connection to the API server for the environment
-// directed to the controller specified on the command line.
-// This is for the use of model-centered commands that still want
-// to talk to controller-only APIs.
-func (c *ModelCommandBase) NewControllerAPIRoot() (api.Connection, error) {
-	return c.newAPIRoot("", nil)
+// NewControllerAPIRoot returns a new connection to the API server for the
+// environment directed to the controller specified on the command line. This is
+// for the use of model-centered commands that still want to talk to
+// controller-only APIs.
+func (c *ModelCommandBase) NewControllerAPIRoot(ctx context.Context) (api.Connection, error) {
+	return c.newAPIRoot(ctx, "", nil, nil)
 }
 
-// newAPIRoot is the internal implementation of NewAPIRoot and NewControllerAPIRoot;
-// if modelName is empty, it makes a controller-only connection.
-func (c *ModelCommandBase) newAPIRoot(modelName string, dialOpts *api.DialOpts) (api.Connection, error) {
+// newAPIRoot is the internal implementation of NewAPIRoot and
+// NewControllerAPIRoot; if modelName is empty, it makes a controller-only
+// connection.
+func (c *ModelCommandBase) newAPIRoot(ctx context.Context, modelName string, dialOpts *api.DialOpts, addressOverride []string) (api.Connection, error) {
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	conn, err := c.CommandBase.NewAPIRootWithDialOpts(c.store, controllerName, modelName, dialOpts)
+	conn, err := c.CommandBase.NewAPIRootWithDialOpts(ctx, c.store, controllerName, modelName, addressOverride, dialOpts)
 	return conn, errors.Trace(err)
 }
 
 // ModelUUIDs returns the model UUIDs for the given model names.
-func (c *ModelCommandBase) ModelUUIDs(modelNames []string) ([]string, error) {
+func (c *ModelCommandBase) ModelUUIDs(ctx context.Context, modelNames []string) ([]string, error) {
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return c.CommandBase.ModelUUIDs(c.ClientStore(), controllerName, modelNames)
+	return c.CommandBase.ModelUUIDs(ctx, c.ClientStore(), controllerName, modelNames)
 }
 
 // CurrentAccountDetails returns details of the account associated with
@@ -479,8 +448,8 @@ func (c *ModelCommandBase) CurrentAccountDetails() (*jujuclient.AccountDetails, 
 
 // NewModelManagerAPIClient returns an API client for the
 // ModelManager on the current controller using the current credentials.
-func (c *ModelCommandBase) NewModelManagerAPIClient() (*modelmanager.Client, error) {
-	root, err := c.NewControllerAPIRoot()
+func (c *ModelCommandBase) NewModelManagerAPIClient(ctx context.Context) (*modelmanager.Client, error) {
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -489,8 +458,8 @@ func (c *ModelCommandBase) NewModelManagerAPIClient() (*modelmanager.Client, err
 
 // NewModelUpgraderAPIClient returns an API client for the
 // ModelUpgrader on the current controller using the current credentials.
-func (c *ModelCommandBase) NewModelUpgraderAPIClient() (*modelupgrader.Client, error) {
-	root, err := c.NewControllerAPIRoot()
+func (c *ModelCommandBase) NewModelUpgraderAPIClient(ctx context.Context) (*modelupgrader.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -594,20 +563,20 @@ type CAASOnlyCommand interface {
 
 // validateCommandForModelType returns an error if an IAAS-only command
 // is run on a CAAS model.
-func (w *modelCommandWrapper) validateCommandForModelType(runStarted bool) error {
+func (w *modelCommandWrapper) validateCommandForModelType(ctx context.Context, runStarted bool) error {
 	_, iaasOnly := w.inner().(IAASOnlyCommand)
 	_, caasOnly := w.inner().(CAASOnlyCommand)
 	if !caasOnly && !iaasOnly {
 		return nil
 	}
 
-	modelType, err := w.ModelCommand.ModelType()
+	modelType, err := w.ModelCommand.ModelType(ctx)
 	if err != nil {
 		err = errors.Cause(err)
 		// We need to error if Run() has been invoked the model is known and there was
 		// some other error. If the model is not yet known, we'll grab the details
 		// during the Run() API call later.
-		if runStarted || (err != ErrNoModelSpecified && !errors.IsNotFound(err)) {
+		if runStarted || (err != ErrNoModelSpecified && !errors.Is(err, errors.NotFound)) {
 			return errors.Trace(err)
 		}
 		return nil
@@ -651,7 +620,7 @@ func (w *modelCommandWrapper) Init(args []string) error {
 		// command's Init(), we can bail early if the command is not supported for the
 		// specific model type. Otherwise, if the command is one which doesn't allow a
 		// default model, we need to wait till Run() is invoked.
-		if err := w.validateCommandForModelType(false); err != nil {
+		if err := w.validateCommandForModelType(context.TODO(), false); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -673,7 +642,7 @@ func (w *modelCommandWrapper) Run(ctx *cmd.Context) error {
 
 	// Some commands are only supported on IAAS models.
 	if !w.skipModelInit {
-		if err := w.validateCommandForModelType(true); err != nil {
+		if err := w.validateCommandForModelType(ctx, true); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -692,44 +661,6 @@ func (w *modelCommandWrapper) SetFlags(f *gnuflag.FlagSet) {
 		f.StringVar(&w.modelIdentifier, "model", "", "")
 	}
 	w.ModelCommand.SetFlags(f)
-}
-
-// Define a type alias so we can embed *cmd.Context and have a Context() method.
-type cmdContext = cmd.Context
-
-type bootstrapContext struct {
-	*cmdContext
-	verifyCredentials bool
-	ctx               context.Context
-}
-
-// ShouldVerifyCredentials implements BootstrapContext.ShouldVerifyCredentials
-func (c *bootstrapContext) ShouldVerifyCredentials() bool {
-	return c.verifyCredentials
-}
-
-// Context returns this bootstrap's context.Context value.
-func (c *bootstrapContext) Context() context.Context {
-	return c.ctx
-}
-
-// BootstrapContext returns a new BootstrapContext constructed from a command Context.
-func BootstrapContext(ctx context.Context, cmdContext *cmd.Context) environs.BootstrapContext {
-	return &bootstrapContext{
-		cmdContext:        cmdContext,
-		verifyCredentials: true,
-		ctx:               ctx,
-	}
-}
-
-// BootstrapContextNoVerify returns a new BootstrapContext constructed from a command Context
-// where the validation of credentials is false.
-func BootstrapContextNoVerify(ctx context.Context, cmdContext *cmd.Context) environs.BootstrapContext {
-	return &bootstrapContext{
-		cmdContext:        cmdContext,
-		verifyCredentials: false,
-		ctx:               ctx,
-	}
 }
 
 // SplitModelName splits a model name into its controller

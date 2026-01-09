@@ -4,59 +4,91 @@
 package modelworkermanager
 
 import (
-	"github.com/juju/clock"
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
 
-	"github.com/juju/juju/agent"
-	"github.com/juju/juju/apiserver/apiserverhttp"
+	"github.com/juju/errors"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	"github.com/juju/juju/controller"
+	coredependency "github.com/juju/juju/core/dependency"
+	"github.com/juju/juju/core/http"
+	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/pki"
+	"github.com/juju/juju/internal/services"
 	jworker "github.com/juju/juju/internal/worker"
-	"github.com/juju/juju/internal/worker/common"
-	workerstate "github.com/juju/juju/internal/worker/state"
-	"github.com/juju/juju/internal/worker/syslogger"
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/internal/worker/apiremoterelationcaller"
 )
 
-// Logger defines the logging methods used by the worker.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Errorf(string, ...interface{})
-	Infof(string, ...interface{})
-}
+// GetProviderServicesGetterFunc returns a ProviderServicesGetter
+// from the given dependency.Getter.
+type GetProviderServicesGetterFunc func(getter dependency.Getter, name string) (ProviderServicesGetter, error)
 
 // ManifoldConfig holds the information necessary to run a model worker manager
 // in a dependency.Engine.
 type ManifoldConfig struct {
-	AgentName      string
-	AuthorityName  string
-	StateName      string
-	MuxName        string
-	SyslogName     string
-	Clock          clock.Clock
-	NewWorker      func(Config) (worker.Worker, error)
+	// AuthorityName is the name of the pki.Authority dependency.
+	AuthorityName string
+	// DomainServicesName is used to get the controller domain services
+	// dependency.
+	DomainServicesName string
+	// LeaseManagerName is the name of the lease.Manager dependency.
+	LeaseManagerName string
+	// ProviderServiceFactoriesName is used to get the provider domain services
+	// getter dependency. This exposes a provider domain services for each
+	// model upon request.
+	ProviderServiceFactoriesName string
+	// LogSinkName is the name of the logger.ModelLogger dependency.
+	LogSinkName string
+	// HTTPClientName is the name of the http.Client dependency.
+	HTTPClientName string
+	// APIRemoteCallerGetterName is the name of the
+	// apiremotereleationcaller.APIRemoteRelationClientGetter dependency.
+	APIRemoteCallerGetterName string
+
+	// GetProviderServicesGetter is used to get the provider service
+	// factory getter from the dependency engine. This makes testing a lot
+	// simpler, as we can expose the interface directly, without the
+	// intermediary type.
+	GetProviderServicesGetter GetProviderServicesGetterFunc
+
+	// GetControllerConfig is used to get the controller config from the
+	// controller service.
+	GetControllerConfig GetControllerConfigFunc
+
+	// NewWorker is the function that creates the worker.
+	NewWorker func(Config) (worker.Worker, error)
+	// NewModelWorker is the function that creates the model worker.
 	NewModelWorker NewModelWorkerFunc
-	ModelMetrics   ModelMetrics
-	Logger         Logger
+	// ModelMetrics is the metrics for the model worker.
+	ModelMetrics ModelMetrics
+	// Logger is the logger for the worker.
+	Logger logger.Logger
 }
 
 // Validate validates the manifold configuration.
 func (config ManifoldConfig) Validate() error {
-	if config.AgentName == "" {
-		return errors.NotValidf("empty AgentName")
-	}
 	if config.AuthorityName == "" {
 		return errors.NotValidf("empty AuthorityName")
 	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
-	if config.MuxName == "" {
-		return errors.NotValidf("empty MuxName")
+	if config.LeaseManagerName == "" {
+		return errors.NotValidf("empty LeaseManagerName")
 	}
-	if config.SyslogName == "" {
-		return errors.NotValidf("empty SyslogName")
+	if config.ProviderServiceFactoriesName == "" {
+		return errors.NotValidf("empty ProviderServiceFactoriesName")
+	}
+	if config.LogSinkName == "" {
+		return errors.NotValidf("empty LogSinkName")
+	}
+	if config.HTTPClientName == "" {
+		return errors.NotValidf("empty HTTPClientName")
+	}
+	if config.APIRemoteCallerGetterName == "" {
+		return errors.NotValidf("empty APIRemoteCallerGetterName")
 	}
 	if config.NewWorker == nil {
 		return errors.NotValidf("nil NewWorker")
@@ -70,6 +102,12 @@ func (config ManifoldConfig) Validate() error {
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")
 	}
+	if config.GetProviderServicesGetter == nil {
+		return errors.NotValidf("nil GetProviderServicesGetter")
+	}
+	if config.GetControllerConfig == nil {
+		return errors.NotValidf("nil GetControllerConfig")
+	}
 	return nil
 }
 
@@ -77,75 +115,127 @@ func (config ManifoldConfig) Validate() error {
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
-			config.AgentName,
 			config.AuthorityName,
-			config.MuxName,
-			config.StateName,
-			config.SyslogName,
+			config.LogSinkName,
+			config.LeaseManagerName,
+			config.DomainServicesName,
+			config.ProviderServiceFactoriesName,
+			config.HTTPClientName,
+			config.APIRemoteCallerGetterName,
 		},
 		Start: config.start,
 	}
 }
 
 // start is a method on ManifoldConfig because it's more readable than a closure.
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
-	}
-	var agent agent.Agent
-	if err := context.Get(config.AgentName, &agent); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var authority pki.Authority
-	if err := context.Get(config.AuthorityName, &authority); err != nil {
+	if err := getter.Get(config.AuthorityName, &authority); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var mux *apiserverhttp.Mux
-	if err := context.Get(config.MuxName, &mux); err != nil {
+	var logSinkGetter logger.ModelLogSinkGetter
+	if err := getter.Get(config.LogSinkName, &logSinkGetter); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var sysLogger syslogger.SysLogger
-	if err := context.Get(config.SyslogName, &sysLogger); err != nil {
+	var domainServicesGetter services.DomainServicesGetter
+	if err := getter.Get(config.DomainServicesName, &domainServicesGetter); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := context.Get(config.StateName, &stTracker); err != nil {
+	var controllerDomainServices services.ControllerDomainServices
+	if err := getter.Get(config.DomainServicesName, &controllerDomainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
-	statePool, err := stTracker.Use()
+
+	var httpClientGetter http.HTTPClientGetter
+	if err := getter.Get(config.HTTPClientName, &httpClientGetter); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var apiRemoteCallerGetter apiremoterelationcaller.APIRemoteCallerGetter
+	if err := getter.Get(config.APIRemoteCallerGetterName, &apiRemoteCallerGetter); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var leaseManager lease.Manager
+	if err := getter.Get(config.LeaseManagerName, &leaseManager); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	providerServicesGetter, err := config.GetProviderServicesGetter(getter, config.ProviderServiceFactoriesName)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	machineID := agent.CurrentConfig().Tag().Id()
-
-	systemState, err := statePool.SystemState()
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
 	w, err := config.NewWorker(Config{
-		Authority:    authority,
-		Clock:        config.Clock,
-		Logger:       config.Logger,
-		MachineID:    machineID,
-		ModelWatcher: systemState,
-		ModelMetrics: config.ModelMetrics,
-		Mux:          mux,
-		Controller: StatePoolController{
-			StatePool: statePool,
-			SysLogger: sysLogger,
-		},
-		NewModelWorker: config.NewModelWorker,
-		ErrorDelay:     jworker.RestartDelay,
+		Authority:                     authority,
+		Logger:                        config.Logger,
+		ModelMetrics:                  config.ModelMetrics,
+		LogSinkGetter:                 logSinkGetter,
+		NewModelWorker:                config.NewModelWorker,
+		ErrorDelay:                    jworker.RestartDelay,
+		DomainServicesGetter:          domainServicesGetter,
+		LeaseManager:                  leaseManager,
+		ModelService:                  controllerDomainServices.Model(),
+		ProviderServicesGetter:        providerServicesGetter,
+		HTTPClientGetter:              httpClientGetter,
+		APIRemoteRelationClientGetter: apiRemoteCallerGetter,
+		GetControllerConfig:           config.GetControllerConfig,
 	})
 	if err != nil {
-		_ = stTracker.Done()
 		return nil, errors.Trace(err)
 	}
-	return common.NewCleanupWorker(w, func() { _ = stTracker.Done() }), nil
+	return w, nil
+}
+
+// GetProviderServicesGetter returns a ProviderServicesGetter from
+// the given dependency.Getter.
+func GetProviderServicesGetter(getter dependency.Getter, name string) (ProviderServicesGetter, error) {
+	return coredependency.GetDependencyByName(getter, name, func(servicesGetter services.ProviderServicesGetter) ProviderServicesGetter {
+		return providerServicesGetter{servicesGetter: servicesGetter}
+	})
+}
+
+// GetControllerConfig returns the controller config from the given service.
+func GetControllerConfig(ctx context.Context, services services.DomainServices) (controller.Config, error) {
+	controllerConfigService := services.ControllerConfig()
+	return controllerConfigService.ControllerConfig(ctx)
+}
+
+type providerServicesGetter struct {
+	servicesGetter services.ProviderServicesGetter
+}
+
+// ServicesForModel returns a ProviderServices for the given model.
+func (g providerServicesGetter) ServicesForModel(modelUUID string) ProviderServices {
+	return providerServices{factory: g.servicesGetter.ServicesForModel(modelUUID)}
+}
+
+type providerServices struct {
+	factory services.ProviderServices
+}
+
+func (f providerServices) Model() ProviderModelService {
+	return f.factory.Model()
+}
+
+// Cloud returns the cloud service.
+func (f providerServices) Cloud() ProviderCloudService {
+	return f.factory.Cloud()
+}
+
+// Config returns the cloud service.
+func (f providerServices) Config() ProviderConfigService {
+	return f.factory.Config()
+}
+
+// Credential returns the credential service.
+func (f providerServices) Credential() ProviderCredentialService {
+	return f.factory.Credential()
 }

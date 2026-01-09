@@ -13,22 +13,78 @@ run_api_imports() {
 	done
 }
 
+run_domain_imports() {
+	dirs=$(find ./domain -mindepth 1 -maxdepth 4 -type d | grep -E "/service$|/state$" | awk '{split($0,a,"/"); print "./"a[2]"/"a[3]}' | sort -u)
+	for dir in $dirs; do
+		echo "Checking $dir"
+
+		if [[ -d "$dir/service" ]]; then
+			# Service domain packages should not import state domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/service" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/state"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain service imports it's state pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state imports it's service pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state/controller" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state/controller" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state/controller imports it's service pkg $dir" && exit 1)
+		fi
+
+		if [[ -d "$dir/state/model" ]]; then
+			# State domain packages should not import service domain packages.
+			got=$(go run ./scripts/import-inspector "$dir/state/model" 2>/dev/null | jq -r ".[]")
+			disallowed="github.com/juju/juju/${dir#*/}/service"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${got}" || (echo "Error: domain state/model imports it's service pkg $dir" && exit 1)
+		fi
+	done
+}
+
+run_juju_errors_imports() {
+	pkgs=("domain")
+
+	for pkg in "${pkgs[@]}"; do
+		dirs=$(find ${pkg} -mindepth 1 -maxdepth 10 -type d | sort -u)
+		for dir in $dirs; do
+			echo "Checking $dir"
+			imports=$(go list -json -e -test "./${dir}" 2>/dev/null | jq -r ".Imports // [] | .[]")
+			disallowed="github.com/juju/errors"
+			python3 tests/suites/static_analysis/lint_go.py -d "${disallowed}" -g "${imports}" || (echo "Error: pkg $dir contains juju/errors imports" && exit 1)
+		done
+	done
+}
+
+run_context_background() {
+	pkgs=("domain")
+
+	for pkg in "${pkgs[@]}"; do
+		dirs=$(find ${pkg} -mindepth 1 -maxdepth 10 -type d | sort -u)
+		files=$(find ${dirs} -type f -name "*_test.go")
+		for file in $files; do
+			grep "context.Background()" "$file" && (echo "Error: pkg $file contains context.Background()" && exit 1)
+		done
+	done
+
+	echo "done"
+}
+
 run_go() {
 	VER=$(golangci-lint --version | tr -s ' ' | cut -d ' ' -f 4 | cut -d '.' -f 1,2)
 	if [[ ${VER} != "2.6" ]] && [[ ${VER} != "v2.6" ]]; then
 		(echo >&2 -e "\nError: golangci-lint version ${VER} does not match 2.6. Please upgrade/downgrade to the right version.")
 		exit 1
 	fi
-	OUT=$(golangci-lint run -c .github/golangci-lint.config.yaml 2>&1)
-	chk=$(echo "${OUT}" | grep -E "^0 issues" || true)
-	if [[ -z ${chk} ]]; then
+	OUT=$(golangci-lint run -c .golangci.yml 2>&1 | sed '/0 issues./d')
+	if [[ -n ${OUT} ]]; then
 		(echo >&2 "\\nError: linter has issues:\\n\\n${OUT}")
-		exit 1
-	fi
-	OUT=$(golangci-lint run -c .github/golangci-lint.config.experimental.yaml 2>&1)
-	chk=$(echo "${OUT}" | grep -E "^0 issues" || true)
-	if [[ -z ${chk} ]]; then
-		(echo >&2 "\\nError: experimental linter has issues:\\n\\n${OUT}")
 		exit 1
 	fi
 }
@@ -44,6 +100,31 @@ run_go_tidy() {
 	fi
 }
 
+run_go_fanout() {
+	# Ensure that the following binaries don't import each other, or are not
+	# imported by any other package outside of their own package.
+	for cmd in "containeragent" "jujuc" "jujud"; do
+		LIST=$(find . -type f -name "*.go" | sort -u | xargs grep -EH "github\.com\/juju\/juju\/cmd\/$cmd(\/|\")" | grep -v "^./cmd/$cmd")
+		if [[ -n ${LIST} ]]; then
+			(echo >&2 -e "\\nError: $cmd binary is being used outside of it's package. Refactor the following list:\\n\\n${LIST}")
+			exit 1
+		fi
+	done
+
+	# Ensure the following packages aren't used outside of the cmd directory.
+	for pkg in "modelcmd"; do
+		LIST=$(find . -type f -name "*.go" | sort -u | xargs grep -EH "github\.com\/juju\/juju\/cmd\/$pkg(\/|\")" | grep -v "^./cmd")
+		if [[ -n ${LIST} ]]; then
+			(echo >&2 -e "\\nError: $pkg package can not be used outside of the cmd package. Refactor the following list:\\n\\n${LIST}")
+			exit 1
+		fi
+	done
+}
+
+run_go_txncheck() {
+	go run ./scripts/txncheck/main.go "$PWD" 2>&1
+}
+
 join() {
 	local IFS="$1"
 	shift
@@ -52,23 +133,22 @@ join() {
 
 run_govulncheck() {
 	ignore=(
-		# false positive vulnerability in github.com/canonical/lxd. This is resolved upstream.
-		# Anyway, it does not affect as we only use client-side lxc code, but the vulnerability is
-		# server-side.
-		# https://pkg.go.dev/vuln/GO-2024-3312
-		# https://pkg.go.dev/vuln/GO-2024-3313
-		# https://pkg.go.dev/vuln/GO-2025-4121
-		"GO-2024-3312"
-		"GO-2024-3313"
-		"GO-2025-4121"
-		# false positive vulnerabilities in github.com/canonical/lxd. These are resolved in lxd-5.21.4.
+		# The vulnerability below is for a method not used since Juju 1.x.
+		#
+		# https://pkg.go.dev/vuln/GO-2025-3798
+		"GO-2025-3798"
+		# false positive vulnerabilities in github.com/canonical/lxd. These are
+		# resolved in lxd-5.21.4.
+		#
 		# https://pkg.go.dev/vuln/GO-2025-3999
 		# https://pkg.go.dev/vuln/GO-2025-4003
 		"GO-2025-3999"
 		"GO-2025-4003"
-		# The vulnerability below is for a method not used since Juju 1.x.
-		# https://pkg.go.dev/vuln/GO-2025-3798
-		"GO-2025-3798"
+		# The vulnerability is in github.com/canonical/lxd. This is resolved in
+		# the yet to be released lxd-5.21.5.
+		#
+		# https://pkg.go.dev/vuln/GO-2025-4121
+		"GO-2025-4121"
 		# The vulnerabilities below are fixed in the version of
 		# golang.org/x/crypto we now use but the govuln db
 		# seems out of date at the time of writing.
@@ -101,9 +181,15 @@ test_static_analysis_go() {
 
 		cd .. || exit
 
+		run "run_juju_errors_imports"
 		run "run_api_imports"
+		run "run_domain_imports"
+		run "run_context_background"
+
 		run_linter "run_go"
 		run_linter "run_go_tidy"
+		run_linter "run_go_fanout"
+		run_linter "run_go_txncheck"
 
 		# govulncheck static analysis
 		if which govulncheck >/dev/null 2>&1; then

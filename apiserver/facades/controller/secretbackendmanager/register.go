@@ -4,39 +4,30 @@
 package secretbackendmanager
 
 import (
+	"context"
 	"reflect"
-
-	"github.com/juju/clock"
-	"github.com/juju/errors"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/state"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("SecretBackendsManager", 1, func(ctx facade.Context) (facade.Facade, error) {
+	registry.MustRegister("SecretBackendsManager", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
 		return NewSecretBackendsManagerAPI(ctx)
 	}, reflect.TypeOf((*SecretBackendsManagerAPI)(nil)))
 }
 
 // NewSecretBackendsManagerAPI creates a SecretBackendsManagerAPI.
-func NewSecretBackendsManagerAPI(context facade.Context) (*SecretBackendsManagerAPI, error) {
-	if !context.Auth().AuthController() {
+func NewSecretBackendsManagerAPI(ctx facade.ModelContext) (*SecretBackendsManagerAPI, error) {
+	if !ctx.Auth().AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
-	model, err := context.State().Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+	domainServices := ctx.DomainServices()
+	backendService := domainServices.SecretBackend()
 	return &SecretBackendsManagerAPI{
-		resources:      context.Resources(),
-		controllerUUID: model.ControllerUUID(),
-		modelUUID:      model.UUID(),
-		modelName:      model.Name(),
-		backendRotate:  context.State(),
-		backendState:   state.NewSecretBackends(context.State()),
-		clock:          clock.WallClock,
+		watcherRegistry: ctx.WatcherRegistry(),
+		backendService:  backendService,
+		clock:           ctx.Clock(),
 	}, nil
 }

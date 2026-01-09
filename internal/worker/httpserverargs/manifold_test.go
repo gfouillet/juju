@@ -4,188 +4,188 @@
 package httpserverargs_test
 
 import (
+	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	"github.com/juju/worker/v3/workertest"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dt "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
+	accessservice "github.com/juju/juju/domain/access/service"
+	controllerconfigservice "github.com/juju/juju/domain/controllerconfig/service"
+	macaroonservice "github.com/juju/juju/domain/macaroon/service"
+	modelservice "github.com/juju/juju/domain/model/service"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/httpserverargs"
-	"github.com/juju/juju/state"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	config         httpserverargs.ManifoldConfig
+	manifold       dependency.Manifold
+	getter         dependency.Getter
+	clock          *testclock.Clock
+	authenticator  mockLocalMacaroonAuthenticator
+	domainServices stubDomainServices
 
-	config        httpserverargs.ManifoldConfig
-	manifold      dependency.Manifold
-	context       dependency.Context
-	clock         *testclock.Clock
-	state         stubStateTracker
-	authenticator mockLocalMacaroonAuthenticator
-
-	stub testing.Stub
+	stub testhelpers.Stub
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
-	s.IsolationSuite.SetUpTest(c)
-
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.clock = testclock.NewClock(time.Time{})
-	s.state = stubStateTracker{}
+	s.domainServices = stubDomainServices{}
 	s.stub.ResetCalls()
 
-	s.context = s.newContext(nil)
+	s.getter = s.newGetter(nil)
 	s.config = httpserverargs.ManifoldConfig{
 		ClockName:             "clock",
-		StateName:             "state",
-		ControllerPortName:    "controller-port",
+		DomainServicesName:    "domain-services",
 		NewStateAuthenticator: s.newStateAuthenticator,
 	}
 	s.manifold = httpserverargs.Manifold(s.config)
 }
 
-func (s *ManifoldSuite) newContext(overlay map[string]interface{}) dependency.Context {
-	resources := map[string]interface{}{
+func (s *ManifoldSuite) newGetter(overlay map[string]any) dependency.Getter {
+	resources := map[string]any{
 		"clock":           s.clock,
-		"state":           &s.state,
-		"controller-port": nil,
+		"domain-services": &s.domainServices,
 	}
 	for k, v := range overlay {
 		resources[k] = v
 	}
-	return dt.StubContext(nil, resources)
+	return dt.StubGetter(resources)
 }
 
 func (s *ManifoldSuite) newStateAuthenticator(
-	statePool *state.StatePool,
+	ctx context.Context,
+	controllerConfig httpserverargs.ControllerConfigService,
+	agentPasswordServiceGetter httpserverargs.AgentPasswordServiceGetter,
+	accessService httpserverargs.AccessService,
+	modelService httpserverargs.ModelService,
+	macaroonService httpserverargs.MacaroonService,
 	mux *apiserverhttp.Mux,
 	clock clock.Clock,
-	abort <-chan struct{},
 ) (macaroon.LocalMacaroonAuthenticator, error) {
-	s.stub.MethodCall(s, "NewStateAuthenticator", statePool, mux, clock, abort)
+	s.stub.MethodCall(s, "NewStateAuthenticator", ctx, "")
 	if err := s.stub.NextErr(); err != nil {
 		return nil, err
 	}
 	return &s.authenticator, nil
 }
 
-var expectedInputs = []string{"state", "clock", "controller-port"}
+var expectedInputs = []string{"clock", "domain-services"}
 
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	c.Assert(s.manifold.Inputs, jc.SameContents, expectedInputs)
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(s.manifold.Inputs, tc.SameContents, expectedInputs)
 }
 
-func (s *ManifoldSuite) TestMissingInputs(c *gc.C) {
+func (s *ManifoldSuite) TestMissingInputs(c *tc.C) {
 	for _, input := range expectedInputs {
-		context := s.newContext(map[string]interface{}{
+		getter := s.newGetter(map[string]any{
 			input: dependency.ErrMissing,
 		})
-		_, err := s.manifold.Start(context)
-		c.Assert(errors.Cause(err), gc.Equals, dependency.ErrMissing)
+		_, err := s.manifold.Start(c.Context(), getter)
+		c.Assert(errors.Cause(err), tc.Equals, dependency.ErrMissing)
 	}
 }
 
-func (s *ManifoldSuite) TestMuxOutput(c *gc.C) {
+func (s *ManifoldSuite) TestMuxOutput(c *tc.C) {
 	w := s.startWorkerClean(c)
 	defer workertest.CleanKill(c, w)
 
 	var mux *apiserverhttp.Mux
 	err := s.manifold.Output(w, &mux)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(mux, gc.NotNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(mux, tc.NotNil)
 }
 
-func (s *ManifoldSuite) TestAuthenticatorOutput(c *gc.C) {
+func (s *ManifoldSuite) TestAuthenticatorOutput(c *tc.C) {
 	w := s.startWorkerClean(c)
 	defer workertest.CleanKill(c, w)
 
 	var auth1 authentication.RequestAuthenticator
 	var auth2 macaroon.LocalMacaroonAuthenticator
-	for _, out := range []interface{}{&auth1, &auth2} {
+	for _, out := range []any{&auth1, &auth2} {
 		err := s.manifold.Output(w, out)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
-	c.Assert(auth1, gc.NotNil)
-	c.Assert(auth1, gc.Equals, auth2)
+	c.Assert(auth1, tc.NotNil)
+	c.Assert(auth1, tc.Equals, auth2)
 }
 
-func (s *ManifoldSuite) startWorkerClean(c *gc.C) worker.Worker {
-	w, err := s.manifold.Start(s.context)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *ManifoldSuite) startWorkerClean(c *tc.C) worker.Worker {
+	w, err := s.manifold.Start(c.Context(), s.getter)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CheckAlive(c, w)
 	return w
 }
 
-func (s *ManifoldSuite) TestStopWorkerClosesState(c *gc.C) {
+func (s *ManifoldSuite) TestStopWorkerClosesState(c *tc.C) {
 	w := s.startWorkerClean(c)
 	defer workertest.CleanKill(c, w)
-
-	s.state.CheckCallNames(c, "Use")
-
-	workertest.CleanKill(c, w)
-	s.state.CheckCallNames(c, "Use", "Done")
 }
 
-func (s *ManifoldSuite) TestStoppingWorkerClosesAuthenticator(c *gc.C) {
+func (s *ManifoldSuite) TestStoppingWorkerClosesAuthenticator(c *tc.C) {
 	w := s.startWorkerClean(c)
 	s.stub.CheckCallNames(c, "NewStateAuthenticator")
 	authArgs := s.stub.Calls()[0].Args
-	c.Assert(authArgs, gc.HasLen, 4)
-	abort := authArgs[3].(<-chan struct{})
+	c.Assert(authArgs, tc.HasLen, 2)
+	ctx := authArgs[0].(context.Context)
 
 	// abort should still be open at this point.
 	select {
-	case <-abort:
+	case <-ctx.Done():
 		c.Fatalf("abort closed while worker still running")
 	default:
 	}
 
 	workertest.CleanKill(c, w)
 	select {
-	case <-abort:
+	case <-ctx.Done():
 	default:
 		c.Fatalf("authenticator abort channel not closed")
 	}
 }
 
-func (s *ManifoldSuite) TestValidate(c *gc.C) {
+func (s *ManifoldSuite) TestValidate(c *tc.C) {
 	type test struct {
 		f      func(*httpserverargs.ManifoldConfig)
 		expect string
 	}
 	tests := []test{{
-		func(cfg *httpserverargs.ManifoldConfig) { cfg.StateName = "" },
-		"empty StateName not valid",
+		f:      func(cfg *httpserverargs.ManifoldConfig) { cfg.ClockName = "" },
+		expect: "empty ClockName not valid",
 	}, {
-		func(cfg *httpserverargs.ManifoldConfig) { cfg.ClockName = "" },
-		"empty ClockName not valid",
+		f:      func(cfg *httpserverargs.ManifoldConfig) { cfg.DomainServicesName = "" },
+		expect: "empty DomainServicesName not valid",
 	}, {
-		func(cfg *httpserverargs.ManifoldConfig) { cfg.ControllerPortName = "" },
-		"empty ControllerPortName not valid",
-	}, {
-		func(cfg *httpserverargs.ManifoldConfig) { cfg.NewStateAuthenticator = nil },
-		"nil NewStateAuthenticator not valid",
+		f:      func(cfg *httpserverargs.ManifoldConfig) { cfg.NewStateAuthenticator = nil },
+		expect: "nil NewStateAuthenticator not valid",
 	}}
+
 	for i, test := range tests {
 		c.Logf("test #%d (%s)", i, test.expect)
+
 		config := s.config
 		test.f(&config)
+
 		manifold := httpserverargs.Manifold(config)
-		w, err := manifold.Start(s.context)
+		w, err := manifold.Start(c.Context(), s.getter)
 		workertest.CheckNilOrKill(c, w)
-		c.Check(err, gc.ErrorMatches, test.expect)
+		c.Check(err, tc.ErrorMatches, test.expect)
 	}
 }
 
@@ -193,22 +193,28 @@ type mockLocalMacaroonAuthenticator struct {
 	macaroon.LocalMacaroonAuthenticator
 }
 
-type stubStateTracker struct {
-	testing.Stub
-	pool state.StatePool
+type stubDomainServices struct {
+	testhelpers.Stub
+	services.ControllerDomainServices
+	services.DomainServicesGetter
 }
 
-func (s *stubStateTracker) Use() (*state.StatePool, error) {
-	s.MethodCall(s, "Use")
-	return &s.pool, s.NextErr()
+func (s *stubDomainServices) ControllerConfig() *controllerconfigservice.WatchableService {
+	s.MethodCall(s, "ControllerConfig")
+	return nil
 }
 
-func (s *stubStateTracker) Done() error {
-	s.MethodCall(s, "Done")
-	return s.NextErr()
+func (s *stubDomainServices) Access() *accessservice.Service {
+	s.MethodCall(s, "Access")
+	return nil
 }
 
-func (s *stubStateTracker) Report() map[string]interface{} {
-	s.MethodCall(s, "Report")
+func (s *stubDomainServices) Macaroon() *macaroonservice.Service {
+	s.MethodCall(s, "Macaroon")
+	return nil
+}
+
+func (s *stubDomainServices) Model() *modelservice.WatchableService {
+	s.MethodCall(s, "Model")
 	return nil
 }

@@ -4,12 +4,13 @@
 package osenv
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
 
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 )
 
 // jujuXDGDataHome stores the path to the juju configuration
@@ -20,6 +21,12 @@ import (
 var (
 	jujuXDGDataHomeMu sync.Mutex
 	jujuXDGDataHome   string
+)
+
+const (
+	// DirectorySubPathSSH is the sub directory under Juju home that holds ssh
+	// related information for the Juju client.
+	DirectorySubPathSSH = "ssh"
 )
 
 // SetJujuXDGDataHome sets the value of juju home and
@@ -40,6 +47,18 @@ func JujuXDGDataHome() string {
 	return jujuXDGDataHome
 }
 
+// JujuXDGDDataHomeFS returns a file system rooted at home directory for the
+// Juju data directory.
+func JujuXDGDataHomeFS() fs.FS {
+	return os.DirFS(JujuXDGDataHomeDir())
+}
+
+// JujuXDGDataSSHFS return a file system rooted at the ssh directory in the Juju
+// data directory.
+func JujuXDGDataSSHFS() fs.FS {
+	return os.DirFS(filepath.Join(JujuXDGDataHomeDir(), DirectorySubPathSSH))
+}
+
 // JujuXDGDataHomePath returns the path to a file in the
 // current juju home.
 func JujuXDGDataHomePath(names ...string) string {
@@ -49,19 +68,19 @@ func JujuXDGDataHomePath(names ...string) string {
 
 // JujuXDGDataHomeDir returns the directory where juju should store application-specific files
 func JujuXDGDataHomeDir() string {
-	JujuXDGDataHomeDir := JujuXDGDataHome()
-	if JujuXDGDataHomeDir != "" {
-		return JujuXDGDataHomeDir
+	homeDir := JujuXDGDataHome()
+	if homeDir != "" {
+		return homeDir
 	}
-	JujuXDGDataHomeDir = os.Getenv(JujuXDGDataHomeEnvKey)
-	if JujuXDGDataHomeDir == "" {
+	homeDir = os.Getenv(JujuXDGDataHomeEnvKey)
+	if homeDir == "" {
 		if runtime.GOOS == "windows" {
-			JujuXDGDataHomeDir = jujuXDGDataHomeWin()
+			homeDir = jujuXDGDataHomeWin()
 		} else {
-			JujuXDGDataHomeDir = jujuXDGDataHomeLinux()
+			homeDir = jujuXDGDataHomeLinux()
 		}
 	}
-	return JujuXDGDataHomeDir
+	return homeDir
 }
 
 // jujuXDGDataHomeLinux returns the directory where juju should store application-specific files on Linux.

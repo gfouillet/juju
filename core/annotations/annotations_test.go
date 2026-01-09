@@ -1,90 +1,93 @@
 // Copyright 2019 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package annotations_test
+package annotations
 
 import (
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
 
-	jujuannotations "github.com/juju/juju/core/annotations"
-	"github.com/juju/juju/testing"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/testing"
 )
 
 type annotationsSuite struct {
 	testing.BaseSuite
 
-	annotations jujuannotations.Annotation
+	annotations Annotation
 }
 
-var _ = gc.Suite(&annotationsSuite{})
+func TestAnnotationsSuite(t *stdtesting.T) {
+	tc.Run(t, &annotationsSuite{})
+}
 
-func (s *annotationsSuite) SetUpTest(c *gc.C) {
+func (s *annotationsSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 
-	s.annotations = jujuannotations.New(nil)
+	s.annotations = New(nil)
 }
 
-func (s *annotationsSuite) TestExistAndAdd(c *gc.C) {
+func (s *annotationsSuite) TestExistAndAdd(c *tc.C) {
 	key := "annotation-1-key"
 	value := "annotation-1-val"
-	c.Assert(s.annotations.Has(key, value), jc.IsFalse)
+	c.Assert(s.annotations.Has(key, value), tc.IsFalse)
 
 	s.annotations.Add(key, value)
-	c.Assert(s.annotations.Has(key, value), jc.IsTrue)
+	c.Assert(s.annotations.Has(key, value), tc.IsTrue)
 
 	s.annotations.Add(key, "a new value")
-	c.Assert(s.annotations.Has(key, value), jc.IsFalse)
-	c.Assert(s.annotations.Has(key, "a new value"), jc.IsTrue)
+	c.Assert(s.annotations.Has(key, value), tc.IsFalse)
+	c.Assert(s.annotations.Has(key, "a new value"), tc.IsTrue)
 }
 
-func (s *annotationsSuite) TestRemove(c *gc.C) {
+func (s *annotationsSuite) TestRemove(c *tc.C) {
 	key := "annotation-1-key"
 	value := "annotation-1-val"
-	c.Assert(s.annotations.Has(key, value), jc.IsFalse)
+	c.Assert(s.annotations.Has(key, value), tc.IsFalse)
 
 	s.annotations.Add(key, value)
-	c.Assert(s.annotations.Has(key, value), jc.IsTrue)
+	c.Assert(s.annotations.Has(key, value), tc.IsTrue)
 
 	s.annotations.Remove(key)
-	c.Assert(s.annotations.Has(key, value), jc.IsFalse)
+	c.Assert(s.annotations.Has(key, value), tc.IsFalse)
 }
 
-func (s *annotationsSuite) TestCopy(c *gc.C) {
+func (s *annotationsSuite) TestCopy(c *tc.C) {
 	annotation1 := map[string]string{
 		"annotation-1-key": "annotation-1-val",
 	}
-	s.annotations.Merge(jujuannotations.New(annotation1))
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, annotation1)
+	s.annotations.Merge(New(annotation1))
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, annotation1)
 
 	newAnnotation1 := s.annotations.Copy()
 	newAnnotation2 := s.annotations
 
 	newAnnotation1.Add("a-new-key", "a-new-value")
 	c.Assert(
-		newAnnotation1.ToMap(), jc.DeepEquals,
+		newAnnotation1.ToMap(), tc.DeepEquals,
 		map[string]string{
 			"annotation-1-key": "annotation-1-val",
 			"a-new-key":        "a-new-value",
 		},
 	)
 	// no change in original one because it was Copy.
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, annotation1)
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, annotation1)
 
 	newAnnotation2.Add("aaaa", "bbbbb")
-	c.Assert(newAnnotation2.ToMap(), jc.DeepEquals, map[string]string{
+	c.Assert(newAnnotation2.ToMap(), tc.DeepEquals, map[string]string{
 		"annotation-1-key": "annotation-1-val",
 		"aaaa":             "bbbbb",
 	})
 	// changed in original one because it was NOT Copy.
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, map[string]string{
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, map[string]string{
 		"annotation-1-key": "annotation-1-val",
 		"aaaa":             "bbbbb",
 	})
 }
 
-func (s *annotationsSuite) TestExistAllExistAnyMergeToMap(c *gc.C) {
+func (s *annotationsSuite) TestExistAllExistAnyMergeToMap(c *tc.C) {
 	annotation1 := map[string]string{
 		"annotation-1-key": "annotation-1-val",
 	}
@@ -105,44 +108,55 @@ func (s *annotationsSuite) TestExistAllExistAnyMergeToMap(c *gc.C) {
 	}
 
 	// empty
-	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation1), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation2), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation3), jc.IsFalse)
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, make(map[string]string))
+	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation1), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation2), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation3), tc.IsFalse)
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, make(map[string]string))
 
 	// merge 1, has 1.
-	s.annotations.Merge(jujuannotations.New(annotation1))
-	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation1), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation2), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation3), jc.IsFalse)
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, mergeMap(annotation1))
+	s.annotations.Merge(New(annotation1))
+	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation1), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation2), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation3), tc.IsFalse)
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, mergeMap(annotation1))
 
 	// merge 2, has 1, 2.
-	s.annotations.Merge(jujuannotations.New(annotation2))
-	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), jc.IsFalse)
-	c.Assert(s.annotations.HasAny(annotation1), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation2), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation3), jc.IsFalse)
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, mergeMap(annotation1, annotation2))
+	s.annotations.Merge(New(annotation2))
+	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), tc.IsFalse)
+	c.Assert(s.annotations.HasAny(annotation1), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation2), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation3), tc.IsFalse)
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, mergeMap(annotation1, annotation2))
 
 	// merge 3, has 1, 2, 3.
-	s.annotations.Merge(jujuannotations.New(annotation3))
-	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation1), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation2), jc.IsTrue)
-	c.Assert(s.annotations.HasAny(annotation3), jc.IsTrue)
-	c.Assert(s.annotations.ToMap(), jc.DeepEquals, mergeMap(annotation1, annotation2, annotation3))
+	s.annotations.Merge(New(annotation3))
+	c.Assert(s.annotations.HasAll(mergeMap(annotation1, annotation2, annotation3)), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation1), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation2), tc.IsTrue)
+	c.Assert(s.annotations.HasAny(annotation3), tc.IsTrue)
+	c.Assert(s.annotations.ToMap(), tc.DeepEquals, mergeMap(annotation1, annotation2, annotation3))
 }
 
-func (s *annotationsSuite) TestCheckKeysNonEmpty(c *gc.C) {
-	c.Assert(s.annotations.CheckKeysNonEmpty("key1"), jc.Satisfies, errors.IsNotFound)
+func (s *annotationsSuite) TestCheckKeysNonEmpty(c *tc.C) {
+	c.Assert(s.annotations.CheckKeysNonEmpty("key1"), tc.ErrorIs, coreerrors.NotFound)
 
 	s.annotations.Add("key1", "")
-	c.Assert(s.annotations.CheckKeysNonEmpty("key1"), jc.Satisfies, errors.IsNotValid)
+	c.Assert(s.annotations.CheckKeysNonEmpty("key1"), tc.ErrorIs, coreerrors.NotValid)
 
 	s.annotations.Add("key2", "val2")
-	c.Assert(s.annotations.CheckKeysNonEmpty("key2"), jc.ErrorIsNil)
-	c.Assert(s.annotations.CheckKeysNonEmpty("key1", "key2"), jc.Satisfies, errors.IsNotValid)
+	c.Assert(s.annotations.CheckKeysNonEmpty("key2"), tc.ErrorIsNil)
+	c.Assert(s.annotations.CheckKeysNonEmpty("key1", "key2"), tc.ErrorIs, coreerrors.NotValid)
+}
+
+func (s *annotationsSuite) TestConvertTagToID(c *tc.C) {
+	// ConvertTagToID happy path
+	id, err := ConvertTagToID(names.NewUnitTag("unit/0"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(id, tc.DeepEquals, ID{Kind: KindUnit, Name: "unit/0"})
+
+	// ConvertTagToID unknown kind
+	_, err = ConvertTagToID(names.NewEnvironTag("env/0"))
+	c.Assert(err.Error(), tc.Equals, "unknown kind \"environment\"")
 }

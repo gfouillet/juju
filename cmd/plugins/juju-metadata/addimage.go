@@ -4,14 +4,17 @@
 package main
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/environs/simplestreams"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -28,6 +31,9 @@ are optional for this command but they may still be needed by your provider.
 Adding an image for a specific base can be done via --base. --base can be 
 specified using the OS name and the version of the OS, separated by @. For 
 example, --base ubuntu@22.04.
+
+Valid values for --stream are released, testing, proposed and devel. The image
+stream used by Juju can be configured with 'juju model-config'.
 `
 
 // addImageMetadataCommand stores image metadata in Juju environment.
@@ -36,7 +42,6 @@ type addImageMetadataCommand struct {
 
 	ImageId         string
 	Region          string
-	Series          string
 	Base            string
 	Version         string
 	Arch            string
@@ -48,9 +53,6 @@ type addImageMetadataCommand struct {
 
 // Init implements Command.Init.
 func (c *addImageMetadataCommand) Init(args []string) (err error) {
-	if c.Base != "" && c.Series != "" {
-		return errors.New("--series and --base cannot be specified together")
-	}
 	if len(args) == 0 {
 		return errors.New("image id must be supplied when adding image metadata")
 	}
@@ -67,6 +69,11 @@ func (c *addImageMetadataCommand) Info() *cmd.Info {
 		Name:    "add-image",
 		Purpose: "adds image metadata to model",
 		Doc:     addImageCommandDoc,
+		SeeAlso: []string{
+			"delete-image",
+			"list-images",
+			"model-config",
+		},
 	})
 }
 
@@ -75,9 +82,8 @@ func (c *addImageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.cloudImageMetadataCommandBase.SetFlags(f)
 
 	f.StringVar(&c.Region, "region", "", "image cloud region")
-	f.StringVar(&c.Series, "series", "", "image series. DEPRECATED, use --base")
 	f.StringVar(&c.Base, "base", "", "image base")
-	f.StringVar(&c.Arch, "arch", "amd64", "image architecture")
+	f.StringVar(&c.Arch, "arch", arch.AMD64, "image architecture")
 	f.StringVar(&c.VirtType, "virt-type", "", "image metadata virtualisation type")
 	f.StringVar(&c.RootStorageType, "storage-type", "", "image metadata root storage type")
 	f.Uint64Var(&c.RootStorageSize, "storage-size", 0, "image metadata root storage size")
@@ -90,30 +96,20 @@ func (c *addImageMetadataCommand) Run(ctx *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.Series != "" {
-		ctx.Warningf("series flag is deprecated, use --base instead")
-		if base, err = corebase.GetBaseFromSeries(c.Series); err != nil {
-			return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
-		}
-		c.Base = base.String()
-		c.Series = ""
-	}
 	if c.Base != "" {
 		if base, err = corebase.ParseBaseFromString(c.Base); err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	api, err := getImageMetadataAddAPI(c)
+	api, err := getImageMetadataAddAPI(c, ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	m := c.constructMetadataParam(base)
-	if err := api.Save([]params.CloudImageMetadata{m}); err != nil {
+	if err := api.Save(ctx, []params.CloudImageMetadata{m}); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -122,13 +118,13 @@ func (c *addImageMetadataCommand) Run(ctx *cmd.Context) error {
 // MetadataAddAPI defines the API methods that add image metadata command uses.
 type MetadataAddAPI interface {
 	Close() error
-	Save(metadata []params.CloudImageMetadata) error
+	Save(ctx context.Context, metadata []params.CloudImageMetadata) error
 }
 
 var getImageMetadataAddAPI = (*addImageMetadataCommand).getImageMetadataAddAPI
 
-func (c *addImageMetadataCommand) getImageMetadataAddAPI() (MetadataAddAPI, error) {
-	return c.NewImageMetadataAPI()
+func (c *addImageMetadataCommand) getImageMetadataAddAPI(ctx context.Context) (MetadataAddAPI, error) {
+	return c.NewImageMetadataAPI(ctx)
 }
 
 // constructMetadataParam returns cloud image metadata as a param.

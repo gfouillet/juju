@@ -1,16 +1,25 @@
-// Copyright 2015 Canonical Ltd.
+// Copyright 2025 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package applicationoffers_test
+package applicationoffers
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/juju/tc"
+	"gopkg.in/macaroon.v2"
 )
 
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
+//go:generate go run go.uber.org/mock/mockgen -typed -package applicationoffers -destination facade_mock_test.go github.com/juju/juju/apiserver/facade Authorizer
+//go:generate go run go.uber.org/mock/mockgen -typed -package applicationoffers -destination package_mock_test.go github.com/juju/juju/apiserver/facades/client/applicationoffers AccessService,ModelService,CrossModelRelationService,RemovalService,CrossModelAuthContext,ControllerService
+
+func newMacaroon(c *tc.C, id string) *macaroon.Macaroon {
+	mac, err := macaroon.New(nil, []byte(id), "", macaroon.LatestVersion)
+	c.Assert(err, tc.ErrorIsNil)
+	return mac
 }
 
-//go:generate go run go.uber.org/mock/mockgen -package applicationoffers_test -destination authorizer_mock_test.go github.com/juju/juju/apiserver/facade Authorizer
+func newBakeryMacaroon(c *tc.C, id string) *bakery.Macaroon {
+	mac, err := bakery.NewLegacyMacaroon(newMacaroon(c, id))
+	c.Assert(err, tc.ErrorIsNil)
+	return mac
+}

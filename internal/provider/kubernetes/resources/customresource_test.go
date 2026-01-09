@@ -5,11 +5,10 @@ package resources_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +21,7 @@ import (
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	providerutils "github.com/juju/juju/internal/provider/kubernetes/utils"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type customresourceSuite struct {
@@ -29,7 +29,9 @@ type customresourceSuite struct {
 	dynamicClient dynamic.Interface
 }
 
-var _ = gc.Suite(&customresourceSuite{})
+func TestCustomResourceSuite(t *testing.T) {
+	tc.Run(t, &customresourceSuite{})
+}
 
 func makeCR(name, namespace string, labels map[string]string) unstructured.Unstructured {
 	obj := unstructured.Unstructured{
@@ -59,7 +61,7 @@ func (s *customresourceSuite) getNamespacedDynamicClient(gvr schema.GroupVersion
 	return s.dynamicClient.Resource(gvr).Namespace(namespace)
 }
 
-func (s *customresourceSuite) SetUpTest(c *gc.C) {
+func (s *customresourceSuite) SetUpTest(c *tc.C) {
 	s.resourceSuite.SetUpTest(c)
 	scheme := runtime.NewScheme()
 
@@ -72,7 +74,7 @@ func (s *customresourceSuite) SetUpTest(c *gc.C) {
 	s.dynamicClient = dynamicfake.NewSimpleDynamicClient(scheme)
 }
 
-func (s *customresourceSuite) TestApply(c *gc.C) {
+func (s *customresourceSuite) TestApply(c *tc.C) {
 	client := s.getClusterDynamicClient(schema.GroupVersionResource{
 		Group:    "example.com",
 		Version:  "v1",
@@ -83,23 +85,23 @@ func (s *customresourceSuite) TestApply(c *gc.C) {
 
 	// Create.
 	crResource := resources.NewCustomResource(client, "cr1", &cr)
-	c.Assert(crResource.Apply(context.TODO()), jc.ErrorIsNil)
-	result, err := client.Get(context.TODO(), "cr1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result.GetAnnotations()), gc.Equals, 0)
+	c.Assert(crResource.Apply(c.Context()), tc.ErrorIsNil)
+	result, err := client.Get(c.Context(), "cr1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(result.GetAnnotations()), tc.Equals, 0)
 
 	// Update.
 	cr.SetAnnotations(map[string]string{"a": "b"})
 	crResource = resources.NewCustomResource(client, "cr1", &cr)
-	c.Assert(crResource.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(crResource.Apply(c.Context()), tc.ErrorIsNil)
 
-	result, err = client.Get(context.TODO(), "cr1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `cr1`)
-	c.Assert(result.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	result, err = client.Get(c.Context(), "cr1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `cr1`)
+	c.Assert(result.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *customresourceSuite) TestGet(c *gc.C) {
+func (s *customresourceSuite) TestGet(c *tc.C) {
 	client := s.getClusterDynamicClient(schema.GroupVersionResource{
 		Group:    "example.com",
 		Version:  "v1",
@@ -110,52 +112,52 @@ func (s *customresourceSuite) TestGet(c *gc.C) {
 
 	cr1 := template.DeepCopy()
 	cr1.SetAnnotations(map[string]string{"a": "b"})
-	_, err := client.Create(context.TODO(), cr1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := client.Create(c.Context(), cr1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	crResource := resources.NewCustomResource(client, "cr1", &template)
-	c.Assert(len(crResource.GetAnnotations()), gc.Equals, 0)
+	c.Assert(len(crResource.GetAnnotations()), tc.Equals, 0)
 
-	err = crResource.Get(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(crResource.GetName(), gc.Equals, `cr1`)
-	c.Assert(crResource.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	err = crResource.Get(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(crResource.GetName(), tc.Equals, `cr1`)
+	c.Assert(crResource.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *customresourceSuite) TestDelete(c *gc.C) {
+func (s *customresourceSuite) TestDelete(c *tc.C) {
 	client := s.getClusterDynamicClient(schema.GroupVersionResource{
 		Group:    "example.com",
 		Version:  "v1",
 		Resource: "widgets",
 	})
 	cr := makeCR("cr1", "", nil)
-	_, err := client.Create(context.TODO(), &cr, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := client.Create(c.Context(), &cr, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	result, err := client.Get(context.TODO(), "cr1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `cr1`)
+	result, err := client.Get(c.Context(), "cr1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `cr1`)
 
 	crResource := resources.NewCustomResource(client, "cr1", &cr)
-	err = crResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
+	err = crResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = crResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err = crResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	err = crResource.Get(context.TODO())
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	err = crResource.Get(c.Context())
+	c.Assert(err, tc.Satisfies, errors.IsNotFound)
 
-	_, err = client.Get(context.TODO(), "cr1", metav1.GetOptions{})
-	c.Assert(err, jc.Satisfies, k8serrors.IsNotFound)
+	_, err = client.Get(c.Context(), "cr1", metav1.GetOptions{})
+	c.Assert(err, tc.Satisfies, k8serrors.IsNotFound)
 }
 
-func (s *customresourceSuite) TestListCRsForCRD(c *gc.C) {
-	controllerUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+func (s *customresourceSuite) TestListCRsForCRD(c *tc.C) {
+	controllerUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
-	modelUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	modelUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	modelName := "testmodel"
 
@@ -198,9 +200,9 @@ func (s *customresourceSuite) TestListCRsForCRD(c *gc.C) {
 		},
 	}
 	crdResource := resources.NewCustomResourceDefinition(s.extendedClient.ApiextensionsV1().CustomResourceDefinitions(), "crd1", crd)
-	c.Assert(crdResource.Apply(context.TODO()), jc.ErrorIsNil)
-	crd1, err := s.extendedClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), "crd1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(crdResource.Apply(c.Context()), tc.ErrorIsNil)
+	crd1, err := s.extendedClient.ApiextensionsV1().CustomResourceDefinitions().Get(c.Context(), "crd1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create namespaced cr with crd.
 	ns := "ns1"
@@ -215,33 +217,33 @@ func (s *customresourceSuite) TestListCRsForCRD(c *gc.C) {
 	crNamespacedClient := s.getNamespacedDynamicClient(gvr, ns)
 
 	// Create namespaced cr1 with crd.
-	_, err = crNamespacedClient.Create(context.TODO(), &cr1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = crNamespacedClient.Create(c.Context(), &cr1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create namespaced cr2 with crd.
 	cr2Name := "cr2"
 	cr2 := makeCR(cr2Name, ns, labelSet)
-	_, err = crNamespacedClient.Create(context.TODO(), &cr2, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = crNamespacedClient.Create(c.Context(), &cr2, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// List resources with correct labels.
 	crs, err := resources.ListCRsForCRD(context.Background(), s.dynamicClient, ns, crd1, metav1.ListOptions{
 		LabelSelector: labelSet.String(),
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(crs), gc.Equals, 2)
-	c.Assert(crs[0].GetName(), gc.Equals, cr1Name)
-	c.Assert(crs[1].GetName(), gc.Equals, cr2Name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(crs), tc.Equals, 2)
+	c.Assert(crs[0].GetName(), tc.Equals, cr1Name)
+	c.Assert(crs[1].GetName(), tc.Equals, cr2Name)
 
 	// List resources with empty labels.
 	crs, err = resources.ListCRsForCRD(context.Background(), s.dynamicClient, ns, crd1, metav1.ListOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(crs), gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(crs), tc.Equals, 2)
 
 	// List resources with incorrect labels.
 	crs, err = resources.ListCRsForCRD(context.Background(), s.dynamicClient, ns, crd1, metav1.ListOptions{
 		LabelSelector: "foo=bar",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(crs), gc.Equals, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(crs), tc.Equals, 0)
 }

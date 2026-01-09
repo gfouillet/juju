@@ -63,7 +63,7 @@ cd juju
 ```
 
 5. Add a new remote with the name `upstream` and set it to point to the upstream
-`juju` repo.
+   `juju` repo.
 
 ```
 git remote add upstream git@github.com:juju/juju.git
@@ -80,11 +80,11 @@ git branch --set-upstream-to=upstream/main
 ```
 
 7. Sync your local branches with the upstream, then check out the branch you
-want to contribute to and create a feature branch based on it. **If your
-contribution is not specific to a particular branch, please target the lowest that
-applies.** (All patches in earlier versions are eventually merged through to later
-versions.) E.g., for a change that should go into both Juju 3.6 and Juju 4
-(`main`):
+   want to contribute to and create a feature branch based on it. **If your
+   contribution is not specific to a particular branch, please target the lowest that
+   applies.** (All patches in earlier versions are eventually merged through to later
+   versions.) E.g., for a change that should go into both Juju 3.6 and Juju 4
+   (`main`):
 
 ```
 git fetch upstream
@@ -111,11 +111,12 @@ page). If you delete a page, make sure to set up a redirect in the
 ### Standards
 
 All changes should follow the existing patterns, including
-  [Diátaxis](https://diataxis.fr), the [Canonical Documentation Style
-  Guide](https://docs.ubuntu.com/styleguide/en), the modular structure, the
-  cross-referencing pattern, [MyST
-  Markdown](https://canonical-starter-pack.readthedocs-hosted.com/latest/reference/myst-syntax-reference/),
-  etc.
+[Diátaxis](https://diataxis.fr), the [Canonical Documentation Style
+Guide](https://docs.ubuntu.com/styleguide/en), the modular structure, the
+cross-referencing pattern, [MyST
+Markdown](https://canonical-documentation-with-sphinx-and-readthedocscom.readthedocs-hosted.com/style-guide-myst/),
+etc.
+[Coding style guide](STYLE.md), the coding style guidelines used in the Juju codebase.
 
 ### Testing
 
@@ -164,32 +165,9 @@ go get -u github.com/the/dependency@v1.2.3
 go mod tidy
 ```
 
-### Code formatting
+### Standards
 
-To format your code, run `go fmt`.
-
-> Note: Your editor may do this automatically.
-
-
-### Imports
-
-Import statements are grouped into 3 sections: standard library, 3rd party
-libraries, juju imports. The tool "go fmt" can be used to ensure each
-group is alphabetically sorted. eg:
-
-```go
-    import (
-        "fmt"
-        "time"
-
-        "labix.org/v2/mgo"
-        "github.com/juju/loggo"
-        gc "gopkg.in/check.v1"
-
-        "github.com/juju/juju/state"
-        "github.com/juju/worker/v3"
-    )
-```
+See the project's [coding style guide](STYLE.md), the coding style guidelines used in the Juju codebase.
 
 ### Testing
 
@@ -203,7 +181,7 @@ each package so the standard `go test` command is used to run `gocheck` tests.
 For example:
 
 ```
-go test -v github.com/juju/juju/core/config -check.v
+go test -v github.com/juju/juju/core/config
 ```
 
 By default `gocheck` will run all tests
@@ -239,13 +217,12 @@ For more information see [CODING.md](CODING.md)
 
 ```
 git pull upstream 3.6 --rebase
-git push --force
 ```
 
 10. Stage, commit and push regularly to your fork. Make sure your commit messages
-comply with conventional commits ([see upstream
-standard](https://www.conventionalcommits.org/en/v1.0.0/), [see adaptation in
-Juju](./docs/contributor/reference/conventional-commits.md)). E.g.,
+    comply with conventional commits ([see upstream
+    standard](https://www.conventionalcommits.org/en/v1.0.0/), [see adaptation in
+    Juju](./docs/contributor/reference/conventional-commits.md)). E.g.,
 
 ```
 git add .
@@ -264,22 +241,22 @@ may be enough for `git` to prompt you with the correct arguments.
 `git commit --amend --no-edit`, then `git push --force`.
 
 11. Create the PR. In the PR window make sure to select the correct target base
-branch. In your PR description make sure to comply with the template rules (e.g.,
-explain _why_ you're making the change). If your change should target multiple
-branches, add a note at the top of your PR to say so (e.g., "This PR should be
-merged into both `3.6` and `main`").
+    branch. In your PR description make sure to comply with the template rules (e.g.,
+    explain _why_ you're making the change). If your change should target multiple
+    branches, add a note at the top of your PR to say so (e.g., "This PR should be
+    merged into both `3.6` and `main`").
 
 12. Ensure GitHub tests pass.
 
 13. In [the Matrix Juju Development
-channel](https://matrix.to/#/#charmhub-jujudev:ubuntu.com), drop a link to your
-PR with the mention that it needs reviews. Someone will review your PR. Make all
-the requested changes.
+    channel](https://matrix.to/#/#charmhub-jujudev:ubuntu.com), drop a link to your
+    PR with the mention that it needs reviews. Someone will review your PR. Make all
+    the requested changes.
 
 14. When you've received two approvals, your PR can be merged. If you are part
-of the `juju` organization, at this point in the Conversation view of your PR
-you can type `/merge` to merge. If not, ping one of your reviewers and ask them
-to help merge.
+    of the `juju` organization, at this point in the Conversation view of your PR
+    you can type `/merge` to merge. If not, ping one of your reviewers and ask them
+    to help merge.
 
 > Tip: After your first contribution, you will only have to repeat steps 7-14.
 

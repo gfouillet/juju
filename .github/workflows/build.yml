@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: [self-hosted, linux, "${{ matrix.platform.host_arch }}", aws, large]
+    runs-on: [self-hosted, linux, "${{ matrix.platform.host_arch }}", aws, xxlarge]
     strategy:
       fail-fast: false
       matrix:
@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: "Set up Go"
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
           cache: false

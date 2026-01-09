@@ -4,78 +4,67 @@
 package keyupdater_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
 
-	"github.com/juju/juju/api"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+
 	"github.com/juju/juju/api/agent/keyupdater"
-	"github.com/juju/juju/core/watcher/watchertest"
-	jujutesting "github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/api/base/testing"
+	coretesting "github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/rpc/params"
 )
 
 type keyupdaterSuite struct {
-	jujutesting.JujuConnSuite
-
-	// These are raw State objects. Use them for setup and assertions, but
-	// should never be touched by the API calls themselves
-	rawMachine *state.Machine
-
-	keyupdater *keyupdater.State
+	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&keyupdaterSuite{})
-
-func (s *keyupdaterSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
-	var stateAPI api.Connection
-	stateAPI, s.rawMachine = s.OpenAPIAsNewMachine(c)
-	c.Assert(stateAPI, gc.NotNil)
-	s.keyupdater = keyupdater.NewState(stateAPI)
-	c.Assert(s.keyupdater, gc.NotNil)
+func TestKeyupdaterSuite(t *stdtesting.T) {
+	tc.Run(t, &keyupdaterSuite{})
 }
 
-func (s *keyupdaterSuite) TestAuthorisedKeysNoSuchMachine(c *gc.C) {
-	_, err := s.keyupdater.AuthorisedKeys(names.NewMachineTag("42"))
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+func (s *keyupdaterSuite) TestAuthorisedKeys(c *tc.C) {
+	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "KeyUpdater")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "AuthorisedKeys")
+		c.Check(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.StringsResults{})
+		*(result.(*params.StringsResults)) = params.StringsResults{
+			Results: []params.StringsResult{{
+				Result: []string{"key1", "key2"},
+			}},
+		}
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := keyupdater.NewClient(apiCaller)
+	keys, err := client.AuthorisedKeys(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(keys, tc.DeepEquals, []string{"key1", "key2"})
 }
 
-func (s *keyupdaterSuite) TestAuthorisedKeysForbiddenMachine(c *gc.C) {
-	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.keyupdater.AuthorisedKeys(m.Tag().(names.MachineTag))
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-}
-
-func (s *keyupdaterSuite) TestAuthorisedKeys(c *gc.C) {
-	s.setAuthorisedKeys(c, "key1\nkey2")
-	keys, err := s.keyupdater.AuthorisedKeys(s.rawMachine.Tag().(names.MachineTag))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(keys, gc.DeepEquals, []string{"key1", "key2"})
-}
-
-func (s *keyupdaterSuite) setAuthorisedKeys(c *gc.C, keys string) {
-	err := s.Model.UpdateModelConfig(map[string]interface{}{"authorized-keys": keys}, nil)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *keyupdaterSuite) TestWatchAuthorisedKeys(c *gc.C) {
-	watcher, err := s.keyupdater.WatchAuthorisedKeys(s.rawMachine.Tag().(names.MachineTag))
-	c.Assert(err, jc.ErrorIsNil)
-	wc := watchertest.NewNotifyWatcherC(c, watcher)
-	defer wc.AssertStops()
-
-	// Initial event
-	wc.AssertOneChange()
-
-	s.setAuthorisedKeys(c, "key1\nkey2")
-	// One change noticing the new version
-	wc.AssertOneChange()
-	// Setting the version to the same value doesn't trigger a change
-	s.setAuthorisedKeys(c, "key1\nkey2")
-	wc.AssertNoChange()
-
-	s.setAuthorisedKeys(c, "key1\nkey2\nkey3")
-	wc.AssertOneChange()
+func (s *keyupdaterSuite) TestWatchAuthorisedKeys(c *tc.C) {
+	apiCaller := testing.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "KeyUpdater")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "WatchAuthorisedKeys")
+		c.Check(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.NotifyWatchResults{})
+		*(result.(*params.NotifyWatchResults)) = params.NotifyWatchResults{
+			Results: []params.NotifyWatchResult{{
+				Error: &params.Error{Message: "FAIL"},
+			}}}
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := keyupdater.NewClient(apiCaller)
+	_, err := client.WatchAuthorisedKeys(c.Context(), tag)
+	c.Assert(err, tc.ErrorMatches, "FAIL")
 }

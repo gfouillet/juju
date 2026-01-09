@@ -18,7 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/juju/juju/internal/provider/kubernetes/constants"
+	"github.com/juju/juju/core/logger"
+	providerconst "github.com/juju/juju/internal/provider/kubernetes/constants"
 	providerutils "github.com/juju/juju/internal/provider/kubernetes/utils"
 )
 
@@ -51,13 +52,13 @@ var (
 	}
 )
 
-func admissionHandler(logger Logger, rbacMapper RBACMapper, labelVersion constants.LabelVersion, controllerUUID string, modelUUID string, modelName string) http.Handler {
+func admissionHandler(logger logger.Logger, rbacMapper RBACMapper, labelVersion providerconst.LabelVersion, controllerUUID string, modelUUID string, modelName string) http.Handler {
 	codecFactory := serializer.NewCodecFactory(runtime.NewScheme())
 
 	return http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		data, err := io.ReadAll(req.Body)
 		if err != nil {
-			logger.Errorf("digesting admission request body: %v", err)
+			logger.Errorf(req.Context(), "digesting admission request body: %v", err)
 			http.Error(res, fmt.Sprintf("%s: reading request body",
 				http.StatusText(http.StatusInternalServerError)), http.StatusInternalServerError)
 			return
@@ -87,12 +88,12 @@ func admissionHandler(logger Logger, rbacMapper RBACMapper, labelVersion constan
 				Response: response,
 			})
 			if err != nil {
-				logger.Errorf("marshaling admission request response body: %v", err)
+				logger.Errorf(req.Context(), "marshaling admission request response body: %v", err)
 				http.Error(res, fmt.Sprintf("%s: building response body",
 					http.StatusText(http.StatusInternalServerError)), http.StatusInternalServerError)
 			}
 			if _, err := res.Write(body); err != nil {
-				logger.Errorf("writing admission request response body: %v", err)
+				logger.Errorf(req.Context(), "writing admission request response body: %v", err)
 			}
 		}
 
@@ -110,7 +111,7 @@ func admissionHandler(logger Logger, rbacMapper RBACMapper, labelVersion constan
 			return
 		}
 
-		logger.Debugf("received admission request for %s of %s in namespace %s",
+		logger.Debugf(req.Context(), "received admission request for %s of %s in namespace %s",
 			admissionReview.Request.Name,
 			admissionReview.Request.Kind,
 			admissionReview.Request.Namespace,
@@ -122,7 +123,7 @@ func admissionHandler(logger Logger, rbacMapper RBACMapper, labelVersion constan
 
 		for _, ignoreObjKind := range admissionObjectIgnores {
 			if compareAPIGroupVersionKind(ignoreObjKind, admissionReview.Request.Kind) {
-				logger.Debugf("ignoring admission request for gvk %s", ignoreObjKind)
+				logger.Debugf(req.Context(), "ignoring admission request for gvk %s", ignoreObjKind)
 				finalise(admissionReview, reviewResponse)
 				return
 			}
@@ -130,13 +131,13 @@ func admissionHandler(logger Logger, rbacMapper RBACMapper, labelVersion constan
 
 		appName, err := rbacMapper.AppNameForServiceAccount(
 			types.UID(admissionReview.Request.UserInfo.UID))
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			http.Error(res, fmt.Sprintf(
 				"could not determine if admission request belongs to juju: %v", err,
 			),
 				http.StatusInternalServerError)
 			return
-		} else if errors.IsNotFound(err) {
+		} else if errors.Is(err, errors.NotFound) {
 			finalise(admissionReview, reviewResponse)
 			return
 		}
@@ -194,7 +195,7 @@ func patchEscape(s string) string {
 func patchForLabels(
 	labels map[string]string,
 	appName string,
-	labelVersion constants.LabelVersion,
+	labelVersion providerconst.LabelVersion,
 	controllerUUID, modelUUID, modelName string) []patchOperation {
 	patches := []patchOperation{}
 

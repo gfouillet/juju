@@ -4,23 +4,18 @@
 package querylogger
 
 import (
+	"context"
 	"runtime/debug"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/common"
 )
-
-// Logger is the interface that is used to log issues with the slow query
-// logger.
-type Logger interface {
-	Warningf(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // ManifoldConfig contains:
 // - The names of other manifolds on which the DB accessor depends.
@@ -28,7 +23,7 @@ type Logger interface {
 type ManifoldConfig struct {
 	LogDir string
 	Clock  clock.Clock
-	Logger Logger
+	Logger logger.Logger
 }
 
 func (cfg ManifoldConfig) Validate() error {
@@ -50,7 +45,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{},
 		Output: output,
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
 			}

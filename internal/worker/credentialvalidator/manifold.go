@@ -4,19 +4,16 @@
 package credentialvalidator
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	"github.com/juju/juju/core/logger"
 )
-
-// Logger represents the methods used by the worker to log details.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-}
 
 // ManifoldConfig holds the dependencies and configuration for a
 // Worker manifold.
@@ -24,8 +21,8 @@ type ManifoldConfig struct {
 	APICallerName string
 
 	NewFacade func(base.APICaller) (Facade, error)
-	NewWorker func(Config) (worker.Worker, error)
-	Logger    Logger
+	NewWorker func(context.Context, Config) (worker.Worker, error)
+	Logger    logger.Logger
 }
 
 // Validate is called by start to check for bad configuration.
@@ -46,19 +43,19 @@ func (config ManifoldConfig) Validate() error {
 }
 
 // start is a StartFunc for a Worker manifold.
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var apiCaller base.APICaller
-	if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+	if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 		return nil, errors.Trace(err)
 	}
 	facade, err := config.NewFacade(apiCaller)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	w, err := config.NewWorker(Config{
+	w, err := config.NewWorker(ctx, Config{
 		Facade: facade,
 		Logger: config.Logger,
 	})

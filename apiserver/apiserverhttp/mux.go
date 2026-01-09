@@ -10,7 +10,7 @@ import (
 
 	"github.com/bmizerany/pat"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
+	"github.com/juju/loggo/v2"
 
 	corelogger "github.com/juju/juju/core/logger"
 )
@@ -40,7 +40,7 @@ type Mux struct {
 	// httpserver from stopping until they're done.
 	clients sync.WaitGroup
 
-	logger logger
+	logger loggo.Logger
 }
 
 type patternHandler struct {
@@ -48,16 +48,12 @@ type patternHandler struct {
 	h   http.Handler
 }
 
-type logger interface {
-	Debugf(format string, args ...interface{})
-}
-
 // NewMux returns a new, empty mux.
 func NewMux(opts ...muxOption) *Mux {
 	m := &Mux{
 		p:      pat.New(),
 		added:  make(map[string][]patternHandler),
-		logger: loggo.GetLoggerWithLabels("juju.apiserver.http", corelogger.API),
+		logger: loggo.GetLoggerWithTags("juju.apiserver.http", corelogger.API),
 	}
 	for _, opt := range opts {
 		opt(m)

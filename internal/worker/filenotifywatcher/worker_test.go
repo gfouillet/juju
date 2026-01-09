@@ -4,26 +4,28 @@
 package filenotifywatcher
 
 import (
+	stdtesting "testing"
 	time "time"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/workertest"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/workertest"
 
-	"github.com/juju/juju/testing"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type workerSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&workerSuite{})
+func TestWorkerSuite(t *stdtesting.T) {
+	tc.Run(t, &workerSuite{})
+}
 
-func (s *workerSuite) TestChanges(c *gc.C) {
+func (s *workerSuite) TestChanges(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	s.expectAnyLogs()
 	s.expectAnyClock()
 
 	done := make(chan struct{})
@@ -42,27 +44,27 @@ func (s *workerSuite) TestChanges(c *gc.C) {
 	s.watcher.EXPECT().Kill().AnyTimes()
 
 	w := s.newWorker(c)
-	defer workertest.DirtyKill(c, w)
+	defer workertest.CleanKill(c, w)
 
 	watcher, ok := w.(FileNotifyWatcher)
-	c.Assert(ok, jc.IsTrue, gc.Commentf("worker does not implement FileNotifyWatcher"))
+	c.Assert(ok, tc.IsTrue, tc.Commentf("worker does not implement FileNotifyWatcher"))
 
 	ch1, err := watcher.Changes("controller")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case v := <-ch1:
-		c.Assert(v, jc.IsTrue)
+		c.Assert(v, tc.IsTrue)
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for changes")
 	}
 
 	ch2, err := watcher.Changes("controller")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	select {
 	case v := <-ch2:
-		c.Assert(v, jc.IsTrue)
+		c.Assert(v, tc.IsTrue)
 	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out waiting for changes")
 	}
@@ -76,16 +78,16 @@ func (s *workerSuite) TestChanges(c *gc.C) {
 	}
 }
 
-func (s *workerSuite) newWorker(c *gc.C) worker.Worker {
+func (s *workerSuite) newWorker(c *tc.C) worker.Worker {
 	cfg := WorkerConfig{
 		Clock:  s.clock,
-		Logger: s.logger,
+		Logger: loggertesting.WrapCheckLog(c),
 		NewWatcher: func(string, ...Option) (FileWatcher, error) {
 			return s.watcher, nil
 		},
 	}
 
 	w, err := newWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return w
 }

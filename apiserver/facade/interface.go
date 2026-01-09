@@ -4,20 +4,29 @@
 package facade
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/juju/names/v5"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
+	"github.com/juju/clock"
+	"github.com/juju/description/v11"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/core/cache"
-	coredatabase "github.com/juju/juju/core/database"
+	crossmodelbakery "github.com/juju/juju/apiserver/internal/crossmodel/bakery"
+	corehttp "github.com/juju/juju/core/http"
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
-	"github.com/juju/juju/core/multiwatcher"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 )
 
 // Facade could be anything; it will be interpreted by the apiserver
@@ -26,50 +35,63 @@ import (
 type Facade interface{}
 
 // Factory is a callback used to create a Facade.
-type Factory func(Context) (Facade, error)
+type Factory func(stdCtx context.Context, modelCtx ModelContext) (Facade, error)
 
-// LeadershipContext describes factory methods for objects that deliver
-// specific lease-related capabilities
-type LeadershipContext interface {
+// MultiModelFactory is a callback used to create a Facade.
+type MultiModelFactory func(stdCtx context.Context, modelCtx MultiModelContext) (Facade, error)
 
-	// LeadershipClaimer returns a leadership.Claimer tied to a
-	// specific model.
-	LeadershipClaimer(modelUUID string) (leadership.Claimer, error)
+// LeadershipModelContext defines a context that provides leadership
+// capabilities for a specific model.
+type LeadershipModelContext interface {
+	// LeadershipClaimer returns a leadership.Claimer for this
+	// context's model.
+	LeadershipClaimer() (leadership.Claimer, error)
 
-	// LeadershipRevoker returns a leadership.Revoker tied to a
-	// specific model.
-	LeadershipRevoker(modelUUID string) (leadership.Revoker, error)
+	// LeadershipRevoker returns a leadership.Revoker for this
+	// context's model.
+	LeadershipRevoker() (leadership.Revoker, error)
+
+	// LeadershipPinner returns a leadership.Pinner for this
+	// context's model.
+	LeadershipPinner() (leadership.Pinner, error)
+
+	// LeadershipReader returns a leadership.Reader for this
+	// context's model.
+	LeadershipReader() (leadership.Reader, error)
 
 	// LeadershipChecker returns a leadership.Checker for this
 	// context's model.
 	LeadershipChecker() (leadership.Checker, error)
-
-	// LeadershipPinner returns a leadership.Pinner for this
-	// context's model.
-	LeadershipPinner(modelUUID string) (leadership.Pinner, error)
-
-	// LeadershipReader returns a leadership.Reader for this
-	// context's model.
-	LeadershipReader(modelUUID string) (leadership.Reader, error)
 
 	// SingularClaimer returns a lease.Claimer for singular leases for
 	// this context's model.
 	SingularClaimer() (lease.Claimer, error)
 }
 
-// Context exposes useful capabilities to a Facade.
-type Context interface {
+// MultiModelContext is a context that can operate on multiple models at once.
+type MultiModelContext interface {
+	ModelContext
+
+	// DomainServicesForModel returns the services factory for a given model
+	// uuid.
+	DomainServicesForModel(context.Context, model.UUID) (services.DomainServices, error)
+
+	// ObjectStoreForModel returns the object store for a given model uuid.
+	ObjectStoreForModel(ctx context.Context, modelUUID string) (objectstore.ObjectStore, error)
+}
+
+// ModelContext exposes useful capabilities to a Facade for a given model.
+type ModelContext interface {
 	// TODO (stickupkid): This shouldn't be embedded, instead this should be
 	// in the form of `context.Leadership() Leadership`, which returns the
 	// contents of the LeadershipContext.
 	// Context should have a single responsibility, and that's access to other
 	// types/objects.
-	LeadershipContext
-
-	// Cancel channel represents an indication from the API server that
-	// all interruptable calls should stop. The channel is only ever
-	// closed, and never sents values.
-	Cancel() <-chan struct{}
+	LeadershipModelContext
+	ModelMigrationFactory
+	DomainServices
+	ObjectStoreFactory
+	Logger
 
 	// Auth represents information about the connected client. You
 	// should always be checking individual requests against Auth:
@@ -77,6 +99,10 @@ type Context interface {
 	// with apiservererrors.ErrPerm for any targets for which the client is
 	// not *known* to have a responsibility or requirement.
 	Auth() Authorizer
+
+	// CrossModelAuthContext provides methods to create and authorize macaroons
+	// for cross model operations.
+	CrossModelAuthContext() CrossModelAuthContext
 
 	// Dispose disposes the context and any resources related to
 	// the API server facade object. Normally the context will not
@@ -87,53 +113,10 @@ type Context interface {
 	// be disposed by calling this method.
 	Dispose()
 
-	// Resources exposes per-connection capabilities. By adding a
-	// resource, you make it accessible by (returned) id to all
-	// other facades used by this connection. It's mostly used to
-	// pass watcher ids over to watcher-specific facades, but that
-	// seems to be an antipattern: it breaks the separate-facades-
-	// by-role advice, and makes it inconvenient to track a given
-	// worker's watcher activity alongside its other communications.
-	//
-	// It's also used to hold some config strings used by various
-	// consumers, because it's convenient; and the Pinger that
-	// reports client presence in state, because every Resource gets
-	// Stop()ped on conn close. Not all of these uses are
-	// necessarily a great idea.
-	Resources() Resources
-
-	// State returns, /sigh, a *State. As yet, there is no way
-	// around this; in the not-too-distant future, we hope, its
-	// capabilities will migrate towards access via Resources.
-	State() *state.State
-
-	// StatePool returns the state pool used by the apiserver to minimise the
-	// creation of the expensive *State instances.
-	StatePool() *state.StatePool
-
-	// MultiwatcherFactory returns the factory to create multiwatchers.
-	MultiwatcherFactory() multiwatcher.Factory
-
-	// Controller returns the in-memory representation of the models
-	// in the database.
-	Controller() *cache.Controller
-
-	// CachedModel returns the in-memory representation of the specified
-	// model. This call will wait for the model to appear in the cache.
-	// The method optimistically expects the model to exist in the cache
-	// or appear very soon. If the model doesn't appear, the database is
-	// checked. A NotFound error is returned if the model no longer exists
-	// in the database, or a Timeout error is returned if the model didn't
-	// appear, but should have.
-	CachedModel(uuid string) (*cache.Model, error)
-
-	// Presence returns an instance that is able to be asked for
-	// the current model presence.
-	Presence() Presence
-
-	// Hub returns the central hub that the API server holds.
-	// At least at this stage, facades only need to publish events.
-	Hub() Hub
+	// WatcherRegistry returns the watcher registry for this context. The
+	// watchers are per-connection, and are cleaned up when the connection
+	// is closed.
+	WatcherRegistry() watcherregistry.WatcherRegistry
 
 	// ID returns a string that should almost always be "", unless
 	// this is a watcher facade, in which case it exists in lieu of
@@ -142,14 +125,99 @@ type Context interface {
 	// a good idea; see Resources.
 	ID() string
 
+	// ControllerUUID returns the controller's unique identifier.
+	ControllerUUID() string
+
+	// ControllerModelUUID returns the controller's model unique identifier.
+	// This is the model that the controller is running in, which may be
+	// different from the model that the facade is running in.
+	ControllerModelUUID() model.UUID
+
+	// ModelUUID returns the model's unique identifier. All facade requests
+	// are in the scope of a model. There are some exceptions to the rule, but
+	// they are exceptions that prove the rule.
+	ModelUUID() model.UUID
+
+	// IsControllerModelScoped returns true if the context is scoped to the
+	// controller model. Is the controller model uuid and then model uuid
+	// are the same.
+	IsControllerModelScoped() bool
+
 	// RequestRecorder defines a metrics collector for outbound requests.
 	RequestRecorder() RequestRecorder
 
-	// HTTPClient returns an HTTP client to use for the given purpose.
-	HTTPClient(purpose HTTPClientPurpose) HTTPClient
+	// HTTPClient returns an HTTP client to use for the given purpose. The
+	// following errors can be expected:
+	// - [ErrorHTTPClientPurposeInvalid] when the requested purpose is not
+	// understood by the context.
+	// - [ErrorHTTPClientForPurposeNotFound] when no http client can be found
+	// for the requested [HTTPClientPurpose].
+	HTTPClient(corehttp.Purpose) (HTTPClient, error)
 
-	// ControllerDB returns a TrackedDB reference for the controller database.
-	ControllerDB() (coredatabase.TrackedDB, error)
+	// MachineTag returns the current machine tag.
+	MachineTag() names.Tag
+
+	// DataDir returns the data directory.
+	DataDir() string
+
+	// LogDir returns the log directory.
+	LogDir() string
+
+	// Clock returns a instance of the clock.
+	Clock() clock.Clock
+}
+
+// ModelExporter defines a interface for exporting models.
+type ModelExporter interface {
+	// ExportModel exports the current model into a description model. This
+	// can be serialized into yaml and then imported.
+	ExportModel(context.Context, objectstore.ObjectStore) (description.Model, error)
+}
+
+// LegacyStateExporter describes interface on state required to export a
+// model.
+//
+// Deprecated: This is being replaced with the ModelExporter.
+type LegacyStateExporter interface {
+	// Export generates an abstract representation of a model.
+	Export(objectstore.ObjectStore) (description.Model, error)
+}
+
+// ModelImporter defines an interface for importing models.
+type ModelImporter interface {
+	// ImportModel takes a serialized description model (yaml bytes) and returns
+	// a state model and state state.
+	ImportModel(ctx context.Context, bytes []byte) error
+}
+
+// ModelMigrationFactory defines an interface for getting a model migrator.
+type ModelMigrationFactory interface {
+	// ModelExporter returns a model exporter for the current model.
+	ModelExporter(context.Context, model.UUID) (ModelExporter, error)
+
+	// ModelImporter returns a model importer.
+	ModelImporter() ModelImporter
+}
+
+// DomainServices defines an interface for accessing all the services.
+type DomainServices interface {
+	// DomainServices returns the services factory for the current model.
+	DomainServices() services.DomainServices
+}
+
+// ObjectStoreFactory defines an interface for accessing the object store.
+type ObjectStoreFactory interface {
+	// ObjectStore returns the object store for the current model.
+	ObjectStore() objectstore.ObjectStore
+
+	// ControllerObjectStore returns the object store for the controller.
+	ControllerObjectStore() objectstore.ObjectStore
+}
+
+// Logger defines an interface for getting the apiserver logger instance.
+type Logger interface {
+	// Logger returns the apiserver logger instance.
+	Logger() corelogger.Logger
 }
 
 // RequestRecorder is implemented by types that can record information about
@@ -175,8 +243,8 @@ type Authorizer interface {
 	// GetAuthTag, as the other methods all are.
 	AuthController() bool
 
-	// TODO(wallyworld - bug 1733759) - the following auth methods should not be on this interface
-	// eg introduce a utility func or something.
+	// TODO(wallyworld - bug 1733759) - the following auth methods should not be
+	// on this interface eg introduce a utility func or something.
 
 	// AuthMachineAgent returns true if the entity is a machine agent.
 	AuthMachineAgent() bool
@@ -198,52 +266,75 @@ type Authorizer interface {
 
 	// HasPermission reports whether the given access is allowed for the given
 	// target by the authenticated entity.
-	HasPermission(operation permission.Access, target names.Tag) error
+	HasPermission(ctx context.Context, operation permission.Access, target names.Tag) error
 
-	// EntityHasPermission reports whether the given access is allowed for the given
-	// target by the given entity.
-	EntityHasPermission(entity names.Tag, operation permission.Access, target names.Tag) error
-
-	// ConnectedModel returns the UUID of the model to which the API
-	// connection was made.
-	ConnectedModel() string
+	// EntityHasPermission reports whether the given access is allowed for the
+	// given target by the given entity.
+	EntityHasPermission(ctx context.Context, entity names.Tag, operation permission.Access, target names.Tag) error
 }
 
-// Resources allows you to store and retrieve Resource implementations.
-//
-// The lack of error returns are in deference to the existing
-// implementation, not because they're a good idea.
-type Resources interface {
-	Register(Resource) string
-	Get(string) Resource
-	Stop(string) error
+// MacaroonAuthenticator provides methods to authenticate macaroons for cross
+// model operations.
+type MacaroonAuthenticator interface {
+	// CheckOfferMacaroons verifies that the specified macaroons allow access to the
+	// offer.
+	CheckOfferMacaroons(
+		ctx context.Context,
+		offeringModelUUID, offerUUID string,
+		mac macaroon.Slice,
+		version bakery.Version,
+	) (map[string]string, error)
+
+	// CheckRelationMacaroons verifies that the specified macaroons allow access to the relation.
+	CheckRelationMacaroons(
+		ctx context.Context,
+		sourceModelUUID, offerUUID string,
+		relationTag names.RelationTag,
+		mac macaroon.Slice,
+		version bakery.Version,
+	) error
 }
 
-// Resource should almost certainly be worker.Worker: the current
-// implementation renders the apiserver vulnerable to deadlock when
-// shutting down. (See common.Resources.StopAll -- *that* should be a
-// Kill() and a Wait(), so that connection cleanup can kill the
-// resources early, along with everything else, and then just wait for
-// all those things to finish.)
-type Resource interface {
-	Stop() error
-}
+// CrossModelAuthContext provides methods to create macaroons for cross model
+// operations.
+type CrossModelAuthContext interface {
+	// Authenticator returns an instance used to authenticate macaroons used to
+	// access offers.
+	Authenticator() MacaroonAuthenticator
 
-// Presence represents the current known state of API connections from agents
-// to any of the API servers.
-type Presence interface {
-	ModelPresence(modelUUID string) ModelPresence
-}
+	// CreateConsumeOfferMacaroon creates a macaroon that authorizes access to
+	// the specified offer.
+	CreateConsumeOfferMacaroon(
+		ctx context.Context,
+		modelUUID model.UUID,
+		offerUUID, username string,
+		version bakery.Version,
+	) (*bakery.Macaroon, error)
 
-// ModelPresence represents the API server connections for a model.
-type ModelPresence interface {
-	// For a given non controller agent, return the Status for that agent.
-	AgentStatus(agent string) (presence.Status, error)
-}
+	// CreateRemoteRelationMacaroon creates a macaroon that authorizes access to
+	// the specified relation.
+	CreateRemoteRelationMacaroon(
+		ctx context.Context,
+		modelUUID model.UUID,
+		offerUUID, username string,
+		rel names.RelationTag,
+		version bakery.Version,
+	) (*bakery.Macaroon, error)
 
-// Hub represents the central hub that the API server has.
-type Hub interface {
-	Publish(topic string, data interface{}) (func(), error)
+	// CheckLocalAccessRequest checks that the user in the specified permission
+	// check details has consume access to the offer in the details. It returns
+	// an error with a *bakery.VerificationError cause if the macaroon
+	// verification failed. If the macaroon is valid, CheckLocalAccessRequest
+	// returns a list of caveats to add to the discharge macaroon.
+	CheckLocalAccessRequest(ctx context.Context, details crossmodelbakery.OfferAccessDetails) ([]checkers.Caveat, error)
+
+	// CheckOfferAccessCaveat checks that the specified caveat required to be
+	// satisfied to gain access to an offer is valid, and returns the attributes
+	// return to check that the caveat is satisfied.
+	CheckOfferAccessCaveat(ctx context.Context, caveat string) (crossmodelbakery.OfferAccessDetails, error)
+
+	// OfferThirdPartyKey returns the key used to discharge offer macaroons.
+	OfferThirdPartyKey() *bakery.KeyPair
 }
 
 // HTTPClient represents an HTTP client, for example, an *http.Client.
@@ -251,9 +342,26 @@ type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// HTTPClientPurpose describes a specific purpose for an HTTP client.
-type HTTPClientPurpose string
+// WatcherRegistry defines an interface for managing watchers
+// for a connection.
+type WatcherRegistry interface {
+	// Get returns the watcher for the given id, or nil if there is no such
+	// watcher.
+	Get(string) (worker.Worker, error)
+	// Register registers the given watcher. It returns a unique identifier for
+	// the watcher which can then be used in subsequent API requests to refer to
+	// the watcher.
+	Register(context.Context, worker.Worker) (string, error)
 
-const (
-	CharmhubHTTPClient HTTPClientPurpose = "charmhub"
-)
+	// RegisterNamed registers the given watcher. Callers must supply a unique
+	// name for the given watcher. It is an error to try to register another
+	// watcher with the same name as an already registered name. It is also an
+	// error to supply a name that is an integer string, since that collides
+	// with the auto-naming from Register.
+	RegisterNamed(context.Context, string, worker.Worker) error
+
+	// Stop stops the resource with the given id and unregisters it. It returns
+	// any error from the underlying Stop call. It does not return an error if
+	// the resource has already been unregistered.
+	Stop(id string) error
+}

@@ -17,7 +17,7 @@ jobs:
         id: check
         run: |
           set -euxo pipefail
-          version=$(grep -r "const version =" version/version.go | sed -r 's/^const version = \"(.*)\"$/\1/')
+          version=$(grep -r "const version =" core/version/version.go | sed -r 's/^const version = \"(.*)\"$/\1/')
           majmin=$(echo $version | awk -F'[.-]' '{print $1 "." $2}')
           snap info juju > snap-info.txt
           channel=$(awk -F':' -v ver=$majmin 'NR == 1, /channels/ {next} {gsub(/ /, "", $1); gsub(/ /, "", $2); if (!match($1,ver)) next; if ($2 == "--") next; print $1; exit}' snap-info.txt)
@@ -39,7 +39,7 @@ jobs:
       CHARM_microk8s: snappass-test
       OCI_REGISTRY: 10.152.183.69
       UPGRADE_FLAGS_localhost: --build-agent
-      UPGRADE_FLAGS_microk8s: --agent-stream=develop
+      UPGRADE_FLAGS_microk8s: --agent-stream=devel
       MODEL_TYPE_localhost: iaas
       MODEL_TYPE_microk8s: caas
 
@@ -74,7 +74,7 @@ jobs:
         id: vars
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: "go.mod"
           cache: false
@@ -210,9 +210,20 @@ jobs:
             DEPLOY_FLAGS='--trust'
           fi
 
-          juju deploy ${CHARM_${{ matrix.cloud }}} $DEPLOY_FLAGS
+          CURRENT_CHARM=${CHARM_${{ matrix.cloud }}}
+          
+          # Make sure that the deployed application is named with the name of the charm, because wait loop will rely on it
+          juju deploy ${CURRENT_CHARM} ${CURRENT_CHARM} $DEPLOY_FLAGS
 
-          juju wait-for application ${CHARM_${{ matrix.cloud }}}
+          attempt=0          
+          until juju status --format=json | jq -S ".applications | select((.[\"${CURRENT_CHARM}\"] | .[\"application-status\"] | .current == \"active\" ))" | grep "${CURRENT_CHARM}"; do
+            sleep 10
+            attempt=$((attempt+1))
+            if [ "$attempt" -eq 48 ]; then
+              echo "Deploy application \"${CURRENT_CHARM}\" timed out"
+              exit 1
+            fi
+          done
 
           $GITHUB_WORKSPACE/.github/verify-${CHARM_${{ matrix.cloud }}}.sh 30
 

@@ -5,25 +5,26 @@ package caas
 
 import (
 	"bytes"
+	"context"
 	"io"
 
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/caas/kubernetes/clientconfig"
 	"github.com/juju/juju/cloud"
 	jujucmdcloud "github.com/juju/juju/cmd/juju/cloud"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewAddCAASCommandForTest(
 	cloudMetadataStore CloudMetadataStore,
 	credentialStoreAPI CredentialStoreAPI,
 	store jujuclient.ClientStore,
-	addCloudAPIFunc func() (AddCloudAPI, error),
-	adminServiceAccountResolver func(jujuclock.Clock) clientconfig.K8sCredentialResolver,
+	addCloudAPIFunc func(ctx context.Context) (AddCloudAPI, error),
+	adminServiceAccountResolver func(context.Context, jujuclock.Clock) clientconfig.K8sCredentialResolver,
 	brokerGetter BrokerGetter,
 	k8sCluster k8sCluster,
 	newClientConfigReaderFunc func(string) (clientconfig.ClientConfigFunc, error),
@@ -49,7 +50,7 @@ func NewAddCAASCommandForTest(
 func NewUpdateCAASCommandForTest(
 	cloudMetadataStore CloudMetadataStore,
 	store jujuclient.ClientStore,
-	updateCloudAPIFunc func() (UpdateCloudAPI, error),
+	updateCloudAPIFunc func(ctx context.Context) (UpdateCloudAPI, error),
 	brokerGetter BrokerGetter,
 ) cmd.Command {
 	command := &UpdateCAASCommand{
@@ -81,7 +82,7 @@ func NewRemoveCAASCommandForTest(
 	cloudMetadataStore CloudMetadataStore,
 	credentialStoreAPI credentialGetter,
 	store jujuclient.ClientStore,
-	removeCloudAPIFunc func() (RemoveCloudAPI, error),
+	removeCloudAPIFunc func(ctx context.Context) (RemoveCloudAPI, error),
 ) cmd.Command {
 	command := &RemoveCAASCommand{
 		credentialStoreAPI:        credentialStoreAPI,

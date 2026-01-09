@@ -5,11 +5,10 @@ package resources_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	appsv1 "k8s.io/api/apps/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +17,7 @@ import (
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	providerutils "github.com/juju/juju/internal/provider/kubernetes/utils"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type statefulSetSuite struct {
@@ -26,15 +26,17 @@ type statefulSetSuite struct {
 	statefulSetClient v1.StatefulSetInterface
 }
 
-var _ = gc.Suite(&statefulSetSuite{})
+func TestStatefulSetSuite(t *testing.T) {
+	tc.Run(t, &statefulSetSuite{})
+}
 
-func (s *statefulSetSuite) SetUpTest(c *gc.C) {
+func (s *statefulSetSuite) SetUpTest(c *tc.C) {
 	s.resourceSuite.SetUpTest(c)
 	s.namespace = "ns1"
 	s.statefulSetClient = s.client.AppsV1().StatefulSets(s.namespace)
 }
 
-func (s *statefulSetSuite) TestApply(c *gc.C) {
+func (s *statefulSetSuite) TestApply(c *tc.C) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sts1",
@@ -43,24 +45,24 @@ func (s *statefulSetSuite) TestApply(c *gc.C) {
 	}
 	// Create.
 	stsResource := resources.NewStatefulSet(s.client.AppsV1().StatefulSets(sts.Namespace), "test", "sts1", sts)
-	c.Assert(stsResource.Apply(context.TODO()), jc.ErrorIsNil)
-	result, err := s.client.AppsV1().StatefulSets("test").Get(context.TODO(), "sts1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result.GetAnnotations()), gc.Equals, 0)
+	c.Assert(stsResource.Apply(c.Context()), tc.ErrorIsNil)
+	result, err := s.client.AppsV1().StatefulSets("test").Get(c.Context(), "sts1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(result.GetAnnotations()), tc.Equals, 0)
 
 	// Update.
 	sts.SetAnnotations(map[string]string{"a": "b"})
 	stsResource = resources.NewStatefulSet(s.client.AppsV1().StatefulSets(sts.Namespace), "test", "sts1", sts)
-	c.Assert(stsResource.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(stsResource.Apply(c.Context()), tc.ErrorIsNil)
 
-	result, err = s.client.AppsV1().StatefulSets("test").Get(context.TODO(), "sts1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `sts1`)
-	c.Assert(result.GetNamespace(), gc.Equals, `test`)
-	c.Assert(result.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	result, err = s.client.AppsV1().StatefulSets("test").Get(c.Context(), "sts1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `sts1`)
+	c.Assert(result.GetNamespace(), tc.Equals, `test`)
+	c.Assert(result.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *statefulSetSuite) TestGet(c *gc.C) {
+func (s *statefulSetSuite) TestGet(c *tc.C) {
 	template := appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sts1",
@@ -69,53 +71,53 @@ func (s *statefulSetSuite) TestGet(c *gc.C) {
 	}
 	sts1 := template
 	sts1.SetAnnotations(map[string]string{"a": "b"})
-	_, err := s.client.AppsV1().StatefulSets("test").Create(context.TODO(), &sts1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.AppsV1().StatefulSets("test").Create(c.Context(), &sts1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	stsResource := resources.NewStatefulSet(s.client.AppsV1().StatefulSets(sts1.Namespace), "test", "sts1", &template)
-	c.Assert(len(stsResource.GetAnnotations()), gc.Equals, 0)
-	err = stsResource.Get(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(stsResource.GetName(), gc.Equals, `sts1`)
-	c.Assert(stsResource.GetNamespace(), gc.Equals, `test`)
-	c.Assert(stsResource.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	c.Assert(len(stsResource.GetAnnotations()), tc.Equals, 0)
+	err = stsResource.Get(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(stsResource.GetName(), tc.Equals, `sts1`)
+	c.Assert(stsResource.GetNamespace(), tc.Equals, `test`)
+	c.Assert(stsResource.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *statefulSetSuite) TestDelete(c *gc.C) {
+func (s *statefulSetSuite) TestDelete(c *tc.C) {
 	sts := appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sts1",
 			Namespace: "test",
 		},
 	}
-	_, err := s.client.AppsV1().StatefulSets("test").Create(context.TODO(), &sts, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.AppsV1().StatefulSets("test").Create(c.Context(), &sts, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	result, err := s.client.AppsV1().StatefulSets("test").Get(context.TODO(), "sts1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `sts1`)
+	result, err := s.client.AppsV1().StatefulSets("test").Get(c.Context(), "sts1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `sts1`)
 
 	stsResource := resources.NewStatefulSet(s.client.AppsV1().StatefulSets(sts.Namespace), "test", "sts1", &sts)
-	err = stsResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
+	err = stsResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = stsResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err = stsResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	err = stsResource.Get(context.TODO())
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	err = stsResource.Get(c.Context())
+	c.Assert(err, tc.Satisfies, errors.IsNotFound)
 
-	_, err = s.client.AppsV1().StatefulSets("test").Get(context.TODO(), "sts1", metav1.GetOptions{})
-	c.Assert(err, jc.Satisfies, k8serrors.IsNotFound)
+	_, err = s.client.AppsV1().StatefulSets("test").Get(c.Context(), "sts1", metav1.GetOptions{})
+	c.Assert(err, tc.Satisfies, k8serrors.IsNotFound)
 }
 
-func (s *statefulSetSuite) TestListStatefulSets(c *gc.C) {
+func (s *statefulSetSuite) TestListStatefulSets(c *tc.C) {
 	// Set up labels for model and app to list resource
-	controllerUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	controllerUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
-	modelUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	modelUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	modelName := "testmodel"
 
@@ -133,8 +135,8 @@ func (s *statefulSetSuite) TestListStatefulSets(c *gc.C) {
 			Labels: labelSet,
 		},
 	}
-	_, err = s.statefulSetClient.Create(context.TODO(), sts1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.statefulSetClient.Create(c.Context(), sts1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create sts2
 	sts2Name := "sts2"
@@ -144,27 +146,27 @@ func (s *statefulSetSuite) TestListStatefulSets(c *gc.C) {
 			Labels: labelSet,
 		},
 	}
-	_, err = s.statefulSetClient.Create(context.TODO(), sts2, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.statefulSetClient.Create(c.Context(), sts2, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// List resources with correct labels.
 	stses, err := resources.ListStatefulSets(context.Background(), s.statefulSetClient, s.namespace, metav1.ListOptions{
 		LabelSelector: labelSet.String(),
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(stses), gc.Equals, 2)
-	c.Assert(stses[0].GetName(), gc.Equals, sts1Name)
-	c.Assert(stses[1].GetName(), gc.Equals, sts2Name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(stses), tc.Equals, 2)
+	c.Assert(stses[0].GetName(), tc.Equals, sts1Name)
+	c.Assert(stses[1].GetName(), tc.Equals, sts2Name)
 
 	// List resources with no labels.
 	stses, err = resources.ListStatefulSets(context.Background(), s.statefulSetClient, s.namespace, metav1.ListOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(stses), gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(stses), tc.Equals, 2)
 
 	// List resources with wrong labels.
 	stses, err = resources.ListStatefulSets(context.Background(), s.statefulSetClient, s.namespace, metav1.ListOptions{
 		LabelSelector: "foo=bar",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(stses), gc.Equals, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(stses), tc.Equals, 0)
 }

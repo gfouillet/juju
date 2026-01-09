@@ -11,10 +11,11 @@ run_relation_departing_unit() {
 	juju model-config -m "${model_name}" logging-config="<root>=DEBUG"
 
 	echo "Deploy 2 departer instances"
-	juju deploy ./testcharms/charms/departer -n 2
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/departer) -n 2
 
-	wait_for "departer" "$(idle_condition "departer" 0 0)"
-	wait_for "departer" "$(idle_condition "departer" 0 1)"
+	wait_for "departer" "$(idle_condition "departer" 0)"
+	wait_for "departer" "$(idle_condition "departer" 1)"
 
 	check_contains "$(juju show-unit departer/0 | yq '.departer/0.relation-info[0].related-units')" 'departer/1'
 	check_contains "$(juju show-unit departer/1 | yq '.departer/1.relation-info[0].related-units')" 'departer/0'

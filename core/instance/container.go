@@ -3,9 +3,7 @@
 
 package instance
 
-import (
-	"fmt"
-)
+import "github.com/juju/juju/internal/errors"
 
 // ContainerType defines different container technologies known to juju.
 type ContainerType string
@@ -14,13 +12,11 @@ type ContainerType string
 const (
 	NONE ContainerType = "none"
 	LXD  ContainerType = "lxd"
-	KVM  ContainerType = "kvm"
 )
 
 // ContainerTypes is used to validate add-machine arguments.
 var ContainerTypes = []ContainerType{
 	LXD,
-	KVM,
 }
 
 // ParseContainerTypeOrNone converts the specified string into a supported
@@ -41,5 +37,5 @@ func ParseContainerType(ctype string) (ContainerType, error) {
 			return supportedType, nil
 		}
 	}
-	return "", fmt.Errorf("invalid container type %q", ctype)
+	return "", errors.Errorf("invalid container type %q", ctype)
 }

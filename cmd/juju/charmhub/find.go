@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
-	"github.com/juju/juju/charmhub"
-	"github.com/juju/juju/charmhub/transport"
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/charmhub/transport"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
@@ -149,7 +149,7 @@ func (c *findCommand) Run(cmdContext *cmd.Context) error {
 	options := populateFindOptions(c)
 
 	results, err := client.Find(ctx, c.query, options...)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		return errors.Wrap(err, errors.Errorf("Nothing found for query %q.", c.query))
 	} else if err != nil {
 		return errors.Trace(err)

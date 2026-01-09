@@ -4,19 +4,19 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
 // StorageAddCommand implements the status-set command.
 type StorageAddCommand struct {
 	cmd.CommandBase
 	ctx Context
-	all map[string]params.StorageConstraints
+	all map[string]params.StorageDirectives
 }
 
 // NewStorageAddCommand makes a jujuc storage-add command.
@@ -58,18 +58,18 @@ func (s *StorageAddCommand) Init(args []string) error {
 		return errors.New("storage add requires a storage directive")
 	}
 
-	constraintsMap, err := storage.ParseConstraintsMap(args, false)
+	constraintsMap, err := storage.ParseDirectivesMap(args, false)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	s.all = make(map[string]params.StorageConstraints, len(constraintsMap))
+	s.all = make(map[string]params.StorageDirectives, len(constraintsMap))
 	for k, v := range constraintsMap {
 		cons := v
-		if cons != (storage.Constraints{Count: cons.Count}) {
+		if cons != (storage.Directive{Count: cons.Count}) {
 			return errors.Errorf("only count can be specified for %q", k)
 		}
-		s.all[k] = params.StorageConstraints{Count: &cons.Count}
+		s.all[k] = params.StorageDirectives{Count: &cons.Count}
 	}
 	return nil
 }

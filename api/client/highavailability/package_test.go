@@ -4,19 +4,12 @@
 package highavailability
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-
 	"github.com/juju/juju/api/base"
 )
 
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}
-
-func NewClientFromCaller(caller base.FacadeCaller) *Client {
+func NewClientFromCaller(caller base.FacadeCaller, facade base.ClientFacade) *Client {
 	return &Client{
-		facade: caller,
+		ClientFacade: facade,
+		facade:       caller,
 	}
 }

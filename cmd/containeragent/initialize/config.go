@@ -9,16 +9,16 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3/shell"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4/shell"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/semversion"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
-	"github.com/juju/juju/mongo"
 )
 
 type configFromEnv struct {
@@ -68,7 +68,7 @@ func (c *configFromEnv) WriteCommands(renderer shell.Renderer) ([]string, error)
 	panic("not implemented")
 }
 
-func (c *configFromEnv) StateServingInfo() (controller.StateServingInfo, bool) {
+func (c *configFromEnv) ControllerAgentInfo() (controller.ControllerAgentInfo, bool) {
 	panic("not implemented")
 }
 
@@ -83,15 +83,11 @@ func (c *configFromEnv) APIInfo() (*api.Info, bool) {
 	}, true
 }
 
-func (c *configFromEnv) MongoInfo() (*mongo.MongoInfo, bool) {
-	panic("not implemented")
-}
-
 func (c *configFromEnv) OldPassword() string {
 	return os.Getenv("JUJU_K8S_APPLICATION_PASSWORD")
 }
 
-func (c *configFromEnv) UpgradedToVersion() version.Number {
+func (c *configFromEnv) UpgradedToVersion() semversion.Number {
 	panic("not implemented")
 }
 
@@ -115,10 +111,6 @@ func (c *configFromEnv) MetricsSpoolDir() string {
 	panic("not implemented")
 }
 
-func (c *configFromEnv) MongoMemoryProfile() mongo.MemoryProfile {
-	panic("not implemented")
-}
-
 func (c *configFromEnv) JujuDBSnapChannel() string {
 	panic("not implemented")
 }
@@ -136,6 +128,38 @@ func (c *configFromEnv) QueryTracingEnabled() bool {
 }
 
 func (c *configFromEnv) QueryTracingThreshold() time.Duration {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryEnabled() bool {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) DqliteBusyTimeout() time.Duration {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryEndpoint() string {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryInsecure() bool {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryStackTraces() bool {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetrySampleRatio() float64 {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) OpenTelemetryTailSamplingThreshold() time.Duration {
+	panic("not implemented")
+}
+
+func (c *configFromEnv) ObjectStoreType() objectstore.BackendType {
 	panic("not implemented")
 }
 

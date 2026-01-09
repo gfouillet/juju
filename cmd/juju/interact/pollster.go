@@ -155,7 +155,7 @@ func (p *Pollster) EnterPassword(valueName string) (string, error) {
 	return p.EnterPasswordWithSuffix(valueName, "")
 }
 
-// EnterPassword works like Enter except that if the pollster's input wraps a
+// EnterPasswordWithSuffix works like Enter except that if the pollster's input wraps a
 // terminal, the user's input will be read without local echo.
 func (p *Pollster) EnterPasswordWithSuffix(valueName string, suffix string) (string, error) {
 	var display string
@@ -166,7 +166,7 @@ func (p *Pollster) EnterPasswordWithSuffix(valueName string, suffix string) (str
 	}
 	if f, ok := p.in.(*os.File); ok && terminal.IsTerminal(int(f.Fd())) {
 		defer fmt.Fprint(p.out, "\n\n")
-		if _, err := fmt.Fprint(p.out, display); err != nil {
+		if _, err := fmt.Fprintf(p.out, "Enter %s: ", display); err != nil {
 			return "", errors.Trace(err)
 		}
 		value, err := terminal.ReadPassword(int(f.Fd()))
@@ -200,7 +200,7 @@ func (p *Pollster) EnterVerify(valueName string, verify VerifyFunc) (string, err
 	return QueryVerify("Enter "+valueName+": ", p.scanner, p.out, p.errOut, verify)
 }
 
-// EnterOptional requests that the user enter a value.  It accepts any value,
+// EnterWithSuffix requests that the user enter a value.  It accepts any value,
 // even an empty string.
 func (p *Pollster) EnterWithSuffix(valueName string, suffix string) (string, error) {
 	return QueryVerify("Enter "+valueName+" "+suffix+": ", p.scanner, p.out, p.errOut, nil)

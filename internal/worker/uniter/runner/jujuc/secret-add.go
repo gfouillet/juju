@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/secrets"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretUpsertCommand struct {
@@ -170,11 +170,12 @@ func (c *secretAddCommand) Init(args []string) error {
 // Run implements cmd.Command.
 func (c *secretAddCommand) Run(ctx *cmd.Context) error {
 	unitName := c.ctx.UnitName()
-	var ownerTag names.Tag
 	appName, _ := names.UnitApplication(unitName)
-	ownerTag = names.NewApplicationTag(appName)
+	var owner secrets.Owner
 	if c.owner == "unit" {
-		ownerTag = names.NewUnitTag(unitName)
+		owner = secrets.Owner{Kind: secrets.UnitOwner, ID: unitName}
+	} else {
+		owner = secrets.Owner{Kind: secrets.ApplicationOwner, ID: appName}
 	}
 	updateArgs := c.marshallArg()
 	if updateArgs.Value.IsEmpty() {
@@ -182,9 +183,9 @@ func (c *secretAddCommand) Run(ctx *cmd.Context) error {
 	}
 	arg := &SecretCreateArgs{
 		SecretUpdateArgs: *updateArgs,
-		OwnerTag:         ownerTag,
+		Owner:            owner,
 	}
-	uri, err := c.ctx.CreateSecret(arg)
+	uri, err := c.ctx.CreateSecret(ctx, arg)
 	if err != nil {
 		return err
 	}

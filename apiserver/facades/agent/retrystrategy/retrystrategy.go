@@ -5,17 +5,18 @@
 package retrystrategy
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/internal"
+	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
 // Right now, these are defined as constants, but the plan is to maybe make
@@ -29,31 +30,48 @@ const (
 
 // RetryStrategy defines the methods exported by the RetryStrategy API facade.
 type RetryStrategy interface {
-	RetryStrategy(params.Entities) (params.RetryStrategyResults, error)
-	WatchRetryStrategy(params.Entities) (params.NotifyWatchResults, error)
+	RetryStrategy(context.Context, params.Entities) (params.RetryStrategyResults, error)
+	WatchRetryStrategy(context.Context, params.Entities) (params.NotifyWatchResults, error)
 }
 
 // RetryStrategyAPI implements RetryStrategy
 type RetryStrategyAPI struct {
-	st        *state.State
-	model     *state.Model
-	canAccess common.GetAuthFunc
-	resources facade.Resources
+	canAccess          common.GetAuthFunc
+	modelConfigService ModelConfigService
+	watcherRegistry    facade.WatcherRegistry
 }
 
 var _ RetryStrategy = (*RetryStrategyAPI)(nil)
 
+func NewRetryStrategyAPI(
+	authorizer facade.Authorizer,
+	modelConfigService ModelConfigService,
+	watcherRegistry facade.WatcherRegistry,
+) (*RetryStrategyAPI, error) {
+	if !authorizer.AuthUnitAgent() && !authorizer.AuthApplicationAgent() {
+		return nil, apiservererrors.ErrPerm
+	}
+
+	return &RetryStrategyAPI{
+		canAccess: func(context.Context) (common.AuthFunc, error) {
+			return authorizer.AuthOwner, nil
+		},
+		modelConfigService: modelConfigService,
+		watcherRegistry:    watcherRegistry,
+	}, nil
+}
+
 // RetryStrategy returns RetryStrategyResults that can be used by any code that uses
 // to configure the retry timer that's currently in juju utils.
-func (h *RetryStrategyAPI) RetryStrategy(args params.Entities) (params.RetryStrategyResults, error) {
+func (h *RetryStrategyAPI) RetryStrategy(ctx context.Context, args params.Entities) (params.RetryStrategyResults, error) {
 	results := params.RetryStrategyResults{
 		Results: make([]params.RetryStrategyResult, len(args.Entities)),
 	}
-	canAccess, err := h.canAccess()
+	canAccess, err := h.canAccess(ctx)
 	if err != nil {
 		return params.RetryStrategyResults{}, errors.Trace(err)
 	}
-	config, err := h.model.ModelConfig()
+	config, err := h.modelConfigService.ModelConfig(ctx)
 	if err != nil {
 		return params.RetryStrategyResults{}, errors.Trace(err)
 	}
@@ -84,11 +102,11 @@ func (h *RetryStrategyAPI) RetryStrategy(args params.Entities) (params.RetryStra
 
 // WatchRetryStrategy watches for changes to the model. Currently we only allow
 // changes to the boolean that determines whether retries should be attempted or not.
-func (h *RetryStrategyAPI) WatchRetryStrategy(args params.Entities) (params.NotifyWatchResults, error) {
+func (h *RetryStrategyAPI) WatchRetryStrategy(ctx context.Context, args params.Entities) (params.NotifyWatchResults, error) {
 	results := params.NotifyWatchResults{
 		Results: make([]params.NotifyWatchResult, len(args.Entities)),
 	}
-	canAccess, err := h.canAccess()
+	canAccess, err := h.canAccess(ctx)
 	if err != nil {
 		return params.NotifyWatchResults{}, errors.Trace(err)
 	}
@@ -98,20 +116,29 @@ func (h *RetryStrategyAPI) WatchRetryStrategy(args params.Entities) (params.Noti
 			results.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		err = apiservererrors.ErrPerm
-		if canAccess(tag) {
-			watch := h.model.WatchForModelConfigChanges()
-			// Consume the initial event. Technically, API calls to Watch
-			// 'transmit' the initial event in the Watch response. But
-			// NotifyWatchers have no state to transmit.
-			if _, ok := <-watch.Changes(); ok {
-				results.Results[i].NotifyWatcherId = h.resources.Register(watch)
-				err = nil
-			} else {
-				err = watcher.EnsureErr(watch)
-			}
+
+		if !canAccess(tag) {
+			results.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
+			continue
 		}
-		results.Results[i].Error = apiservererrors.ServerError(err)
+
+		watch, err := h.modelConfigService.Watch(ctx)
+		if err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		notifyWatcher, err := watcher.Normalise[[]string](watch)
+		if err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		results.Results[i].NotifyWatcherId, _, err = internal.EnsureRegisterWatcher[struct{}](ctx, h.watcherRegistry, notifyWatcher)
+		if err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
 	}
 	return results, nil
 }

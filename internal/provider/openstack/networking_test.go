@@ -4,21 +4,22 @@
 package openstack
 
 import (
+	"testing"
+
 	"github.com/go-goose/goose/v5/neutron"
 	"github.com/go-goose/goose/v5/nova"
 	"github.com/juju/errors"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type networkingSuite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 
 	base    *MockNetworkingBase
 	neutron *MockNetworkingNeutron
@@ -33,9 +34,11 @@ type networkingSuite struct {
 	ip3             string
 }
 
-var _ = gc.Suite(&networkingSuite{})
+func TestNetworkingSuite(t *testing.T) {
+	tc.Run(t, &networkingSuite{})
+}
 
-func (s *networkingSuite) SetUpTest(c *gc.C) {
+func (s *networkingSuite) SetUpTest(c *tc.C) {
 	s.serverAZ = "test-me"
 	s.externalNetwork = "ext-net"
 	s.ip = "10.4.5.6"
@@ -43,7 +46,7 @@ func (s *networkingSuite) SetUpTest(c *gc.C) {
 	s.ip3 = "10.4.5.75"
 }
 
-func (s *networkingSuite) TestAllocatePublicIPConfiguredExternalNetwork(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPConfiguredExternalNetwork(c *tc.C) {
 	// Get a FIP for an instance with a configured external-network,
 	// which has available FIPs. Other external networks do exist -
 	// at last 1 in the same AZ as the instance. Should get the FIP
@@ -56,12 +59,12 @@ func (s *networkingSuite) TestAllocatePublicIPConfiguredExternalNetwork(c *gc.C)
 	s.expectListExternalNetworksV2() // getExternalNeutronNetworksByAZ()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fip, gc.NotNil)
-	c.Assert(*fip, gc.Equals, s.ip)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fip, tc.NotNil)
+	c.Assert(*fip, tc.Equals, s.ip)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetwork(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetwork(c *tc.C) {
 	// Get a FIP for an instance with an external network in the same AZ
 	// having an available FIP.  The first external network in the list
 	// does not have an available FIP.  No configured external-networks.
@@ -73,12 +76,12 @@ func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetwork(c *gc.
 	s.expectListExternalNetworksV2() // getExternalNeutronNetworksByAZ()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fip, gc.NotNil)
-	c.Assert(*fip, gc.Equals, s.ip2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fip, tc.NotNil)
+	c.Assert(*fip, tc.Equals, s.ip2)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetworkMultiAZ(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetworkMultiAZ(c *tc.C) {
 	// Get a FIP for an instance with an external network in the same AZ
 	// having an available FIP. This external network exists in multiple
 	// AZ, the one we want is not first in the list. The first external
@@ -92,12 +95,12 @@ func (s *networkingSuite) TestAllocatePublicIPUnconfiguredExternalNetworkMultiAZ
 	s.expectListExternalNetworksV2MultiAZ() // getExternalNeutronNetworksByAZ()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fip, gc.NotNil)
-	c.Assert(*fip, gc.Equals, s.ip2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fip, tc.NotNil)
+	c.Assert(*fip, tc.Equals, s.ip2)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPFail(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPFail(c *tc.C) {
 	// Find external-networks, but none have an available FIP, nor
 	// are they able to create one.
 	defer s.setupMocks(c).Finish()
@@ -109,11 +112,11 @@ func (s *networkingSuite) TestAllocatePublicIPFail(c *gc.C) {
 	s.expectAllocateFloatingIPV2FailAll()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-	c.Assert(fip, gc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
+	c.Assert(fip, tc.IsNil)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPEmtpyAZEqualEmptyString(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPEmtpyAZEqualEmptyString(c *tc.C) {
 	// Test for lp: 1891227 fix.  An empty slice for AZ should be
 	// treated as an empty string AZ.
 	s.serverAZ = ""
@@ -130,12 +133,12 @@ func (s *networkingSuite) TestAllocatePublicIPEmtpyAZEqualEmptyString(c *gc.C) {
 	s.expectListFloatingIPsV2NotFromConfig()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fip, gc.NotNil)
-	c.Assert(*fip, gc.Equals, s.ip2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fip, tc.NotNil)
+	c.Assert(*fip, tc.Equals, s.ip2)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPNoneAvailable(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPNoneAvailable(c *tc.C) {
 	// Get a FIP for an instance with an external network in the same AZ
 	// having an available FIP.  No FIPs are available in the configured
 	// external network, so allocate one.  The first network fails to
@@ -149,12 +152,12 @@ func (s *networkingSuite) TestAllocatePublicIPNoneAvailable(c *gc.C) {
 	s.expectAllocateFloatingIPV2()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(fip, gc.NotNil)
-	c.Assert(*fip, gc.Equals, s.ip3)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(fip, tc.NotNil)
+	c.Assert(*fip, tc.Equals, s.ip3)
 }
 
-func (s *networkingSuite) TestAllocatePublicIPFailNoNetworkInAZ(c *gc.C) {
+func (s *networkingSuite) TestAllocatePublicIPFailNoNetworkInAZ(c *tc.C) {
 	// No external network in same AZ as the instance is found, no
 	// external network is configured.
 	defer s.setupMocks(c).Finish()
@@ -164,15 +167,16 @@ func (s *networkingSuite) TestAllocatePublicIPFailNoNetworkInAZ(c *gc.C) {
 	s.expectListExternalNetworksV2NotInAZ() // getExternalNeutronNetworksByAZ()
 
 	fip, err := s.runAllocatePublicIP()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-	c.Assert(fip, gc.IsNil)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
+	c.Assert(fip, tc.IsNil)
 }
 
-func (s *networkingSuite) TestNetworkInterfaces(c *gc.C) {
+func (s *networkingSuite) TestNetworkInterfaces(c *tc.C) {
 	defer s.expectNeutronCalls(c).Finish()
 	s.externalNetwork = ""
 	s.expectListSubnets()
 
+	s.nova.EXPECT().ListAvailabilityZones().Return([]nova.AvailabilityZone{}, nil).AnyTimes() // not used
 	s.neutron.EXPECT().ListFloatingIPsV2(gomock.Any()).Return([]neutron.FloatingIPV2{
 		{
 			FixedIP: "10.0.0.2",
@@ -222,63 +226,66 @@ func (s *networkingSuite) TestNetworkInterfaces(c *gc.C) {
 	nn := &NeutronNetworking{NetworkingBase: s.base}
 
 	res, err := nn.NetworkInterfaces([]instance.Id{"inst-0"})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(res, gc.HasLen, 1)
-	c.Assert(res[0], gc.HasLen, 2, gc.Commentf("expected to get 2 NICs for machine-0"))
+	c.Assert(res, tc.HasLen, 1)
+	c.Assert(res[0], tc.HasLen, 2, tc.Commentf("expected to get 2 NICs for machine-0"))
 
 	nic0 := res[0][0]
-	c.Assert(nic0.InterfaceType, gc.Equals, network.EthernetDevice)
-	c.Assert(nic0.Origin, gc.Equals, network.OriginProvider)
-	c.Assert(nic0.Disabled, jc.IsFalse)
-	c.Assert(nic0.MACAddress, gc.Equals, "aa:bb:cc:dd:ee:ff")
-	c.Assert(nic0.Addresses, gc.DeepEquals, network.ProviderAddresses{
+	c.Assert(nic0.InterfaceType, tc.Equals, network.EthernetDevice)
+	c.Assert(nic0.Origin, tc.Equals, network.OriginProvider)
+	c.Assert(nic0.Disabled, tc.IsFalse)
+	c.Assert(nic0.MACAddress, tc.Equals, "aa:bb:cc:dd:ee:ff")
+	c.Assert(nic0.Addresses, tc.DeepEquals, network.ProviderAddresses{
 		network.NewMachineAddress(
 			"192.168.0.2",
 			network.WithCIDR("192.168.0.0/24"),
 			network.WithScope(network.ScopeCloudLocal),
 			network.WithConfigType(network.ConfigStatic),
-		).AsProviderAddress(),
+		).AsProviderAddress(
+			network.WithProviderSubnetID("sub-42"),
+		),
 		network.NewMachineAddress(
 			"10.0.0.2",
 			network.WithCIDR("10.0.0.0/24"),
 			network.WithScope(network.ScopeCloudLocal),
 			network.WithConfigType(network.ConfigStatic),
-		).AsProviderAddress(),
+		).AsProviderAddress(
+			network.WithProviderSubnetID("sub-665"),
+		),
 	})
-	c.Assert(nic0.ShadowAddresses, gc.DeepEquals, network.ProviderAddresses{
+	c.Assert(nic0.ShadowAddresses, tc.DeepEquals, network.ProviderAddresses{
 		network.NewMachineAddress(
 			"10.245.164.31",
 			network.WithScope(network.ScopePublic),
 		).AsProviderAddress(),
 	})
-	c.Assert(nic0.ProviderId, gc.Equals, network.Id("nic-0"))
-	c.Assert(nic0.ProviderNetworkId, gc.Equals, network.Id("deadbeef-0bad-400d-8000-4b1ddbeefbeef"))
-	c.Assert(nic0.ProviderSubnetId, gc.Equals, network.Id("sub-42"), gc.Commentf("expected NIC to use the provider subnet ID for the primary NIC address"))
+	c.Assert(nic0.ProviderId, tc.Equals, network.Id("nic-0"))
 
 	nic1 := res[0][1]
-	c.Assert(nic1.InterfaceType, gc.Equals, network.EthernetDevice)
-	c.Assert(nic1.Origin, gc.Equals, network.OriginProvider)
-	c.Assert(nic1.Disabled, jc.IsTrue, gc.Commentf("expected device to be listed as disabled"))
-	c.Assert(nic1.MACAddress, gc.Equals, "10:20:30:40:50:60")
-	c.Assert(nic1.Addresses, gc.DeepEquals, network.ProviderAddresses{
+	c.Assert(nic1.InterfaceType, tc.Equals, network.EthernetDevice)
+	c.Assert(nic1.Origin, tc.Equals, network.OriginProvider)
+	c.Assert(nic1.Disabled, tc.IsTrue, tc.Commentf("expected device to be listed as disabled"))
+	c.Assert(nic1.MACAddress, tc.Equals, "10:20:30:40:50:60")
+	c.Assert(nic1.Addresses, tc.DeepEquals, network.ProviderAddresses{
 		network.NewMachineAddress(
 			"192.168.0.42",
 			network.WithCIDR("192.168.0.0/24"),
 			network.WithScope(network.ScopeCloudLocal),
 			network.WithConfigType(network.ConfigStatic),
-		).AsProviderAddress(),
+		).AsProviderAddress(
+			network.WithProviderSubnetID("sub-42"),
+		),
 	})
-	c.Assert(nic1.ProviderId, gc.Equals, network.Id("nic-1"))
-	c.Assert(nic1.ProviderNetworkId, gc.Equals, network.Id("deadbeef-0bad-400d-8000-4b1ddbeefbeef"))
-	c.Assert(nic1.ProviderSubnetId, gc.Equals, network.Id("sub-42"), gc.Commentf("expected NIC to use the provider subnet ID for the primary NIC address"))
+	c.Assert(nic1.ProviderId, tc.Equals, network.Id("nic-1"))
 }
 
-func (s *networkingSuite) TestNetworkInterfacesPartialMatch(c *gc.C) {
+func (s *networkingSuite) TestNetworkInterfacesPartialMatch(c *tc.C) {
 	defer s.expectNeutronCalls(c).Finish()
 	s.externalNetwork = ""
 	s.expectListSubnets()
 
+	s.nova.EXPECT().ListAvailabilityZones().Return([]nova.AvailabilityZone{}, nil).AnyTimes() // not used
 	s.neutron.EXPECT().ListFloatingIPsV2(gomock.Any()).Return(nil, nil)
 
 	s.neutron.EXPECT().ListPortsV2(gomock.Any()).Return([]neutron.PortV2{
@@ -295,20 +302,115 @@ func (s *networkingSuite) TestNetworkInterfacesPartialMatch(c *gc.C) {
 	nn := &NeutronNetworking{NetworkingBase: s.base}
 
 	res, err := nn.NetworkInterfaces([]instance.Id{"inst-0", "bogus-0"})
-	c.Assert(err, gc.Equals, environs.ErrPartialInstances)
+	c.Assert(err, tc.Equals, environs.ErrPartialInstances)
 
-	c.Assert(res, gc.HasLen, 2)
-	c.Assert(res[0], gc.HasLen, 1, gc.Commentf("expected to get 1 NIC for inst-0"))
-	c.Assert(res[1], gc.IsNil, gc.Commentf("expected a nil slice for non-matched machines"))
+	c.Assert(res, tc.HasLen, 2)
+	c.Assert(res[0], tc.HasLen, 1, tc.Commentf("expected to get 1 NIC for inst-0"))
+	c.Assert(res[1], tc.IsNil, tc.Commentf("expected a nil slice for non-matched machines"))
 }
 
-func (s *networkingSuite) expectNeutronCalls(c *gc.C) *gomock.Controller {
+func (s *networkingSuite) TestSubnets_PopulatesAZsFromNetwork(c *tc.C) {
+	// When the network returned by neutron has availability zones, those should be used.
+	defer s.expectNeutronCalls(c).Finish()
+	s.externalNetwork = ""
+
+	// Internal networks configured
+	s.ecfg.EXPECT().networks().Return([]string{"int-net"})
+	// No external network configured
+	s.expectExternalNetwork()
+	// Resolve internal network
+	s.neutron.EXPECT().ListNetworksV2(gomock.Any()).Return([]neutron.NetworkV2{{
+		Id:                "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Name:              "int-net",
+		AvailabilityZones: []string{"ignored"},
+	}}, nil)
+	// All subnets in that network
+	s.neutron.EXPECT().ListSubnetsV2().Return([]neutron.SubnetV2{{
+		Id:        "sub-42",
+		NetworkId: "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Cidr:      "192.168.0.0/24",
+	}, {
+		Id:        "sub-665",
+		NetworkId: "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Cidr:      "10.0.0.0/24",
+	}}, nil)
+	// Nova AZs exist but should be ignored because network provides AZs
+	s.nova.EXPECT().ListAvailabilityZones().Return([]nova.AvailabilityZone{{
+		Name:  "az-a",
+		State: nova.AvailabilityZoneState{Available: true},
+	}}, nil)
+	// Network reports specific AZs
+	s.neutron.EXPECT().GetNetworkV2("deadbeef-0bad-400d-8000-4b1ddbeefbeef").Return(&neutron.NetworkV2{
+		AvailabilityZones: []string{"mars", "phobos"},
+	}, nil).AnyTimes()
+
+	nn := &NeutronNetworking{NetworkingBase: s.base}
+	subnets, err := nn.Subnets(nil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subnets, tc.HasLen, 2)
+	for _, sn := range subnets {
+		c.Assert(sn.AvailabilityZones, tc.DeepEquals, []string{"mars", "phobos"})
+	}
+}
+
+func (s *networkingSuite) TestSubnets_PopulatesAZsFromNovaFallback(c *tc.C) {
+	// When the network has no availability zones, fallback to nova's available AZs.
+	defer s.expectNeutronCalls(c).Finish()
+	s.externalNetwork = ""
+
+	// Internal networks configured
+	s.ecfg.EXPECT().networks().Return([]string{"int-net"})
+	// No external network configured
+	s.expectExternalNetwork()
+	// Resolve internal network
+	s.neutron.EXPECT().ListNetworksV2(gomock.Any()).Return([]neutron.NetworkV2{{
+		Id:                "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Name:              "int-net",
+		AvailabilityZones: []string{"ignored"},
+	}}, nil)
+	// All subnets in that network
+	s.neutron.EXPECT().ListSubnetsV2().Return([]neutron.SubnetV2{{
+		Id:        "sub-42",
+		NetworkId: "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Cidr:      "192.168.0.0/24",
+	}, {
+		Id:        "sub-665",
+		NetworkId: "deadbeef-0bad-400d-8000-4b1ddbeefbeef",
+		Cidr:      "10.0.0.0/24",
+	}}, nil)
+	// Nova AZs should be used; only available ones are included
+	s.nova.EXPECT().ListAvailabilityZones().Return([]nova.AvailabilityZone{{
+		Name:  "az-1",
+		State: nova.AvailabilityZoneState{Available: true},
+	}, {
+		Name:  "az-2",
+		State: nova.AvailabilityZoneState{Available: false},
+	}, {
+		Name:  "az-3",
+		State: nova.AvailabilityZoneState{Available: true},
+	}}, nil)
+	// Network reports no AZs
+	s.neutron.EXPECT().GetNetworkV2("deadbeef-0bad-400d-8000-4b1ddbeefbeef").Return(&neutron.NetworkV2{
+		AvailabilityZones: []string{},
+	}, nil).AnyTimes()
+
+	nn := &NeutronNetworking{NetworkingBase: s.base}
+	subnets, err := nn.Subnets(nil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(subnets, tc.HasLen, 2)
+	for _, sn := range subnets {
+		c.Assert(sn.AvailabilityZones, tc.DeepEquals, []string{"az-1", "az-3"})
+	}
+}
+
+func (s *networkingSuite) expectNeutronCalls(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.client = NewMockNetworkingAuthenticatingClient(ctrl)
 	s.client.EXPECT().TenantId().Return("TenantId").AnyTimes()
 
 	s.neutron = NewMockNetworkingNeutron(ctrl)
+	s.nova = NewMockNetworkingNova(ctrl)
 
 	s.ecfg = NewMockNetworkingEnvironConfig(ctrl)
 
@@ -317,6 +419,7 @@ func (s *networkingSuite) expectNeutronCalls(c *gc.C) *gomock.Controller {
 	bExp.neutron().Return(s.neutron).AnyTimes()
 	bExp.client().Return(s.client).AnyTimes()
 	bExp.ecfg().Return(s.ecfg).AnyTimes()
+	bExp.nova().Return(s.nova)
 
 	return ctrl
 }
@@ -349,7 +452,7 @@ func (s *networkingSuite) expectListSubnets() {
 	}, nil).AnyTimes()
 }
 
-func (s *networkingSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *networkingSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.neutron = NewMockNetworkingNeutron(ctrl)

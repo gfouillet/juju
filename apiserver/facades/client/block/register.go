@@ -4,9 +4,10 @@
 package block
 
 import (
+	"context"
 	"reflect"
 
-	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -14,26 +15,21 @@ import (
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Block", 2, func(ctx facade.Context) (facade.Facade, error) {
-		return newAPI(ctx)
+	registry.MustRegister("Block", 2, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return NewAPI(ctx)
 	}, reflect.TypeOf((*API)(nil)))
 }
 
-// newAPI returns a new block API facade.
-func newAPI(ctx facade.Context) (*API, error) {
+// NewAPI returns a new block API facade.
+func NewAPI(ctx facade.ModelContext) (*API, error) {
 	authorizer := ctx.Auth()
 	if !authorizer.AuthClient() {
 		return nil, apiservererrors.ErrPerm
 	}
 
-	st := ctx.State()
-	m, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	return &API{
-		access:     getState(st, m),
+		modelTag:   names.NewModelTag(ctx.ModelUUID().String()),
+		service:    ctx.DomainServices().BlockCommand(),
 		authorizer: authorizer,
 	}, nil
 }

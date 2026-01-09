@@ -7,7 +7,8 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/provider/common"
+	"github.com/juju/juju/internal/storage"
 )
 
 type poolType string
@@ -76,11 +77,19 @@ func (s *storageProvider) Releasable() bool {
 	return false
 }
 
+// DefaultPools returns the default pools available through the oci provider.
+// By default a pool by the same name as the provider is offered in addition to
+// a iscsi backed storage pool.
+//
+// Implements [storage.Provider] interface.
 func (s *storageProvider) DefaultPools() []*storage.Config {
-	pool, _ := storage.NewConfig("iscsi", ociStorageProviderType, map[string]interface{}{
+	ociPool, _ := storage.NewConfig(
+		ociStorageProviderType.String(), ociStorageProviderType, storage.Attrs{},
+	)
+	iscsiPool, _ := storage.NewConfig("iscsi", ociStorageProviderType, storage.Attrs{
 		ociVolumeType: iscsiPool,
 	})
-	return []*storage.Config{pool}
+	return []*storage.Config{ociPool, iscsiPool}
 }
 
 func (s *storageProvider) ValidateForK8s(map[string]any) error {
@@ -108,19 +117,43 @@ func (s *storageProvider) ValidateConfig(cfg *storage.Config) error {
 	return nil
 }
 
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned. The
+// OCI provider currently recommends the iscsi pool be used for both block and
+// filesystem storage.
+//
+// Implements [storage.ProviderRegistry] interface.
+func (*Environ) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	switch kind {
+	case storage.StorageKindBlock, storage.StorageKindFilesystem:
+		iscsiPool, _ := storage.NewConfig("iscsi", ociStorageProviderType, storage.Attrs{
+			ociVolumeType: iscsiPool,
+		})
+		return iscsiPool
+	default:
+		return common.GetCommonRecommendedIAASPoolForKind(kind)
+	}
+}
+
 // StorageProviderTypes implements storage.ProviderRegistry.
-func (e *Environ) StorageProviderTypes() ([]storage.ProviderType, error) {
-	return []storage.ProviderType{ociStorageProviderType}, nil
+func (*Environ) StorageProviderTypes() ([]storage.ProviderType, error) {
+	return append(
+		common.CommonIAASStorageProviderTypes(),
+		ociStorageProviderType,
+	), nil
 }
 
 // StorageProvider implements storage.ProviderRegistry.
 func (e *Environ) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	if t == ociStorageProviderType {
+	switch t {
+	case ociStorageProviderType:
 		return &storageProvider{
 			env: e,
 			api: e.Storage,
 		}, nil
+	default:
+		return common.GetCommonIAASStorageProvider(t)
 	}
-
-	return nil, errors.NotFoundf("storage provider %q", t)
 }

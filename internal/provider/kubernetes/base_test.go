@@ -10,10 +10,8 @@ import (
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	core "k8s.io/api/core/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextensionsclientsetfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
@@ -40,23 +38,22 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
+	k8s "github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/cloud"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	provider "github.com/juju/juju/internal/provider/kubernetes"
-	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
+	k8sprovider "github.com/juju/juju/internal/provider/kubernetes"
 	"github.com/juju/juju/internal/provider/kubernetes/mocks"
-	k8sspecs "github.com/juju/juju/internal/provider/kubernetes/specs"
-	"github.com/juju/juju/internal/provider/kubernetes/utils"
 	k8swatcher "github.com/juju/juju/internal/provider/kubernetes/watcher"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type BaseSuite struct {
 	coretesting.BaseSuite
 
 	clock               *testclock.Clock
-	broker              *provider.KubernetesClient
+	broker              *k8sprovider.KubernetesClient
 	cfg                 *config.Config
 	k8sRestConfig       *rest.Config
 	k8sWatcherFn        k8swatcher.NewK8sWatcherFunc
@@ -149,19 +146,7 @@ func listOptionsFieldSelectorMatcher(fieldSelector string) gomock.Matcher {
 		})
 }
 
-func listOptionsLabelSelectorMatcher(labelSelector string) gomock.Matcher {
-	return genericMatcherFn(
-		func(i interface{}) (bool, string) {
-			lo, ok := i.(v1.ListOptions)
-			if !ok {
-				return false, "is list options, not a valid corev1.ListOptions"
-			}
-			return lo.LabelSelector == labelSelector,
-				fmt.Sprintf("is list options label %v == %v", lo.LabelSelector, labelSelector)
-		})
-}
-
-func (s *BaseSuite) SetUpTest(c *gc.C) {
+func (s *BaseSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
 
 	cred := cloud.NewCredential(cloud.UserPassAuthType, map[string]string{
@@ -176,22 +161,20 @@ func (s *BaseSuite) SetUpTest(c *gc.C) {
 		CACertificates: []string{coretesting.CACert},
 	}
 	var err error
-	s.k8sRestConfig, err = provider.CloudSpecToK8sRestConfig(cloudSpec)
-	c.Assert(err, jc.ErrorIsNil)
+	s.k8sRestConfig, err = k8s.CloudSpecToK8sRestConfig(cloudSpec)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// init config for each test for easier changing config inside test.
 	cfg, err := config.New(config.UseDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
-		config.NameKey:                  "test",
-		k8sconstants.OperatorStorageKey: "",
-		k8sconstants.WorkloadStorageKey: "",
+		config.NameKey: "test",
 	}))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.cfg = cfg
 
 	s.namespace = s.cfg.Name()
 }
 
-func (s *BaseSuite) TearDownTest(c *gc.C) {
+func (s *BaseSuite) TearDownTest(c *tc.C) {
 	// ensure previous broker setup all are all cleaned up because it should be re-initialized in setupController or errors.
 	s.broker = nil
 	s.clock = nil
@@ -209,33 +192,21 @@ func (s *BaseSuite) getNamespace() string {
 	return s.namespace
 }
 
-func (s *BaseSuite) getModelUUID() string {
-	return s.broker.ModelUUID()
-}
-
-func (s *BaseSuite) getControllerUUID() string {
-	return s.broker.ControllerUUID()
-}
-
-func (s *BaseSuite) setupController(c *gc.C) *gomock.Controller {
+func (s *BaseSuite) setupController(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	newK8sClientFunc, newK8sRestFunc := s.setupK8sRestClient(c, ctrl, s.getNamespace())
-	randomPrefixFunc := func() (string, error) {
-		return "appuuid", nil
-	}
 
 	s.mockNamespaces.EXPECT().Get(gomock.Any(), s.getNamespace(), v1.GetOptions{}).Times(2).
 		Return(nil, s.k8sNotFoundError())
 
-	return s.setupBroker(c, ctrl, coretesting.ControllerTag.Id(), newK8sClientFunc, newK8sRestFunc, randomPrefixFunc, "")
+	return s.setupBroker(c, ctrl, coretesting.ControllerTag.Id(), newK8sClientFunc, newK8sRestFunc, "")
 }
 
 func (s *BaseSuite) setupBroker(
-	c *gc.C, ctrl *gomock.Controller, controllerUUID string,
-	newK8sClientFunc provider.NewK8sClientFunc,
-	newK8sRestFunc k8sspecs.NewK8sRestClientFunc,
-	randomPrefixFunc utils.RandomPrefixFunc,
+	c *tc.C, ctrl *gomock.Controller, controllerUUID string,
+	newK8sClientFunc k8sprovider.NewK8sClientFunc,
+	newK8sRestFunc k8sprovider.NewK8sRestClientFunc,
 	expectErr string,
 ) *gomock.Controller {
 	s.clock = testclock.NewClock(time.Time{})
@@ -261,19 +232,22 @@ func (s *BaseSuite) setupBroker(
 	})
 
 	var err error
-	s.broker, err = provider.NewK8sBroker(controllerUUID, s.k8sRestConfig, s.cfg, s.getNamespace(), newK8sClientFunc, newK8sRestFunc,
-		watcherFn, stringsWatcherFn, randomPrefixFunc, s.clock)
+	s.broker, err = k8sprovider.NewK8sBroker(
+		c.Context(), controllerUUID, s.k8sRestConfig, s.cfg,
+		s.getNamespace(), newK8sClientFunc, newK8sRestFunc,
+		watcherFn, stringsWatcherFn, s.clock,
+	)
 	if expectErr == "" {
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	} else {
-		c.Assert(err, gc.ErrorMatches, expectErr)
+		c.Assert(err, tc.ErrorMatches, expectErr)
 	}
 	return ctrl
 }
 
 func (s *BaseSuite) setupK8sRestClient(
-	c *gc.C, ctrl *gomock.Controller, namespace string,
-) (provider.NewK8sClientFunc, k8sspecs.NewK8sRestClientFunc) {
+	c *tc.C, ctrl *gomock.Controller, namespace string,
+) (k8sprovider.NewK8sClientFunc, k8sprovider.NewK8sRestClientFunc) {
 	s.k8sClient = mocks.NewMockInterface(ctrl)
 
 	// Plug in the various k8s client modules we need.
@@ -387,10 +361,10 @@ func (s *BaseSuite) setupK8sRestClient(
 	s.k8sClient.EXPECT().Discovery().AnyTimes().Return(s.mockDiscovery)
 
 	return func(cfg *rest.Config) (kubernetes.Interface, apiextensionsclientset.Interface, dynamic.Interface, error) {
-			c.Assert(cfg.Username, gc.Equals, "fred")
-			c.Assert(cfg.Password, gc.Equals, "secret")
-			c.Assert(cfg.Host, gc.Equals, "some-host")
-			c.Assert(cfg.TLSClientConfig, jc.DeepEquals, rest.TLSClientConfig{
+			c.Assert(cfg.Username, tc.Equals, "fred")
+			c.Assert(cfg.Password, tc.Equals, "secret")
+			c.Assert(cfg.Host, tc.Equals, "some-host")
+			c.Assert(cfg.TLSClientConfig, tc.DeepEquals, rest.TLSClientConfig{
 				CertData: []byte("cert-data"),
 				KeyData:  []byte("cert-key"),
 				CAData:   []byte(coretesting.CACert),
@@ -403,10 +377,6 @@ func (s *BaseSuite) setupK8sRestClient(
 
 func (s *BaseSuite) k8sNotFoundError() *k8serrors.StatusError {
 	return k8serrors.NewNotFound(schema.GroupResource{}, "test")
-}
-
-func (s *BaseSuite) k8sAlreadyExistsError() *k8serrors.StatusError {
-	return k8serrors.NewAlreadyExists(schema.GroupResource{}, "test")
 }
 
 func (s *BaseSuite) deleteOptions(policy v1.DeletionPropagation, uid types.UID) v1.DeleteOptions {
@@ -436,10 +406,10 @@ func ensureJujuNamespaceAnnotations(modelUUID string, isController bool, ns *cor
 }
 
 type fakeClientSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
 	clock               *testclock.Clock
-	broker              *provider.KubernetesClient
+	broker              *k8sprovider.KubernetesClient
 	cfg                 *config.Config
 	k8sRestConfig       *rest.Config
 	k8sWatcherFn        k8swatcher.NewK8sWatcherFunc
@@ -499,7 +469,7 @@ func (s *fakeClientSuite) ensureJujuNamespaceAnnotations(isController bool, ns *
 	return ensureJujuNamespaceAnnotations(s.cfg.UUID(), isController, ns)
 }
 
-func (s *fakeClientSuite) SetUpTest(c *gc.C) {
+func (s *fakeClientSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	cred := cloud.NewCredential(cloud.UserPassAuthType, map[string]string{
@@ -514,24 +484,19 @@ func (s *fakeClientSuite) SetUpTest(c *gc.C) {
 		CACertificates: []string{coretesting.CACert},
 	}
 	var err error
-	s.k8sRestConfig, err = provider.CloudSpecToK8sRestConfig(cloudSpec)
-	c.Assert(err, jc.ErrorIsNil)
+	s.k8sRestConfig, err = k8s.CloudSpecToK8sRestConfig(cloudSpec)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.cfg, err = config.New(config.UseDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
-		config.NameKey:                  "test",
-		k8sconstants.OperatorStorageKey: "",
-		k8sconstants.WorkloadStorageKey: "",
+		config.NameKey: "test",
 	}))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.namespace = s.cfg.Name()
 	s.clock = testclock.NewClock(time.Time{})
 
 	newK8sClientFunc, newK8sRestFunc := s.setupK8sRestClient(c, s.getNamespace())
-	randomPrefixFunc := func() (string, error) {
-		return "appuuid", nil
-	}
-	s.setupBroker(c, newK8sClientFunc, newK8sRestFunc, randomPrefixFunc, nil)
+	s.setupBroker(c, newK8sClientFunc, newK8sRestFunc, nil)
 }
 
 func (s *fakeClientSuite) getNamespace() string {
@@ -542,10 +507,9 @@ func (s *fakeClientSuite) getNamespace() string {
 }
 
 func (s *fakeClientSuite) setupBroker(
-	c *gc.C,
-	newK8sClientFunc provider.NewK8sClientFunc,
-	newK8sRestFunc k8sspecs.NewK8sRestClientFunc,
-	randomPrefixFunc utils.RandomPrefixFunc,
+	c *tc.C,
+	newK8sClientFunc k8sprovider.NewK8sClientFunc,
+	newK8sRestFunc k8sprovider.NewK8sRestClientFunc,
 	watchers *[]k8swatcher.KubernetesNotifyWatcher,
 ) {
 	watcherFn := k8swatcher.NewK8sWatcherFunc(func(i cache.SharedIndexInformer, n string, c jujuclock.Clock) (k8swatcher.KubernetesNotifyWatcher, error) {
@@ -569,12 +533,15 @@ func (s *fakeClientSuite) setupBroker(
 	})
 
 	var err error
-	s.broker, err = provider.NewK8sBroker(coretesting.ControllerTag.Id(), s.k8sRestConfig, s.cfg, s.getNamespace(), newK8sClientFunc, newK8sRestFunc,
-		watcherFn, stringsWatcherFn, randomPrefixFunc, s.clock)
-	c.Assert(err, jc.ErrorIsNil)
+	s.broker, err = k8sprovider.NewK8sBroker(
+		c.Context(), coretesting.ControllerTag.Id(), s.k8sRestConfig,
+		s.cfg, s.getNamespace(), newK8sClientFunc, newK8sRestFunc,
+		watcherFn, stringsWatcherFn, s.clock,
+	)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *fakeClientSuite) setupK8sRestClient(c *gc.C, namespace string) (provider.NewK8sClientFunc, k8sspecs.NewK8sRestClientFunc) {
+func (s *fakeClientSuite) setupK8sRestClient(c *tc.C, namespace string) (k8sprovider.NewK8sClientFunc, k8sprovider.NewK8sRestClientFunc) {
 	s.clientset = fake.NewSimpleClientset()
 	s.k8sClient = s.clientset
 	s.mockCoreV1 = s.k8sClient.CoreV1()
@@ -621,11 +588,59 @@ func (s *fakeClientSuite) setupK8sRestClient(c *gc.C, namespace string) (provide
 
 	s.mockDiscovery = s.clientset.Discovery()
 
+	c.Cleanup(func() {
+		s.clientset = nil
+		s.k8sClient = nil
+		s.mockCoreV1 = nil
+		s.mockRestClient = nil
+		s.mockNamespaces = nil
+		s.mockApps = nil
+		s.mockNetworkingV1beta1 = nil
+		s.mockNetworkingV1 = nil
+		s.mockSecrets = nil
+		s.mockDeployments = nil
+		s.mockStatefulSets = nil
+		s.mockDaemonSets = nil
+		s.mockPods = nil
+		s.mockServices = nil
+		s.mockConfigMaps = nil
+		s.mockPersistentVolumes = nil
+		s.mockPersistentVolumeClaims = nil
+		s.mockStorage = nil
+		s.mockStorageClass = nil
+		s.mockIngressClasses = nil
+		s.mockIngressV1Beta1 = nil
+		s.mockIngressV1 = nil
+		s.mockNodes = nil
+		s.mockEvents = nil
+
+		s.mockApiextensionsClient = nil
+		s.mockApiextensionsV1Beta1 = nil
+		s.mockApiextensionsV1 = nil
+		s.mockCustomResourceDefinitionV1Beta1 = nil
+		s.mockCustomResourceDefinitionV1 = nil
+
+		s.mockMutatingWebhookConfigurationV1 = nil
+		s.mockValidatingWebhookConfigurationV1 = nil
+		s.mockMutatingWebhookConfigurationV1Beta1 = nil
+		s.mockValidatingWebhookConfigurationV1Beta1 = nil
+
+		s.mockDynamicClient = nil
+
+		s.mockServiceAccounts = nil
+		s.mockRoles = nil
+		s.mockClusterRoles = nil
+		s.mockRoleBindings = nil
+		s.mockClusterRoleBindings = nil
+
+		s.mockDiscovery = nil
+	})
+
 	return func(cfg *rest.Config) (kubernetes.Interface, apiextensionsclientset.Interface, dynamic.Interface, error) {
-			c.Assert(cfg.Username, gc.Equals, "fred")
-			c.Assert(cfg.Password, gc.Equals, "secret")
-			c.Assert(cfg.Host, gc.Equals, "some-host")
-			c.Assert(cfg.TLSClientConfig, jc.DeepEquals, rest.TLSClientConfig{
+			c.Assert(cfg.Username, tc.Equals, "fred")
+			c.Assert(cfg.Password, tc.Equals, "secret")
+			c.Assert(cfg.Host, tc.Equals, "some-host")
+			c.Assert(cfg.TLSClientConfig, tc.DeepEquals, rest.TLSClientConfig{
 				CertData: []byte("cert-data"),
 				KeyData:  []byte("cert-key"),
 				CAData:   []byte(coretesting.CACert),

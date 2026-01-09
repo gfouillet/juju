@@ -4,17 +4,18 @@
 package juju_test
 
 import (
+	"context"
 	"net/url"
 
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/testing"
 )
 
-type mockAPIState struct {
+type mockAPIConnection struct {
 	api.Connection
 
 	// If non-nil, close is called when the Close method is called.
@@ -41,7 +42,7 @@ const (
 // of api.Connection. The logical OR of the flags specifies
 // whether to include a fake host port and model tag
 // in the result.
-func mockedAPIState(flags mockedStateFlags) *mockAPIState {
+func mockedAPIState(flags mockedStateFlags) *mockAPIConnection {
 	hasHostPort := flags&mockedHostPort == mockedHostPort
 	hasModelTag := flags&mockedModelTag == mockedModelTag
 
@@ -56,7 +57,7 @@ func mockedAPIState(flags mockedStateFlags) *mockAPIState {
 	if hasModelTag {
 		modelTag = "model-df136476-12e9-11e4-8a70-b2227cce2b54"
 	}
-	return &mockAPIState{
+	return &mockAPIConnection{
 		apiHostPorts:  apiHostPorts,
 		modelTag:      modelTag,
 		controllerTag: testing.ControllerTag.Id(),
@@ -65,22 +66,22 @@ func mockedAPIState(flags mockedStateFlags) *mockAPIState {
 	}
 }
 
-func (s *mockAPIState) Close() error {
+func (s *mockAPIConnection) Close() error {
 	if s.close != nil {
 		return s.close(s)
 	}
 	return nil
 }
 
-func (s *mockAPIState) ServerVersion() (version.Number, bool) {
-	return version.MustParse("1.2.3"), true
+func (s *mockAPIConnection) ServerVersion() (semversion.Number, bool) {
+	return semversion.MustParse("1.2.3"), true
 }
 
-func (s *mockAPIState) IPAddr() string {
+func (s *mockAPIConnection) IPAddr() string {
 	return s.ipAddr
 }
 
-func (s *mockAPIState) Addr() *url.URL {
+func (s *mockAPIConnection) Addr() *url.URL {
 	if s.addr == nil {
 		return nil
 	}
@@ -88,19 +89,19 @@ func (s *mockAPIState) Addr() *url.URL {
 	return &copy
 }
 
-func (s *mockAPIState) IsProxied() bool {
+func (s *mockAPIConnection) IsProxied() bool {
 	return false
 }
 
-func (s *mockAPIState) PublicDNSName() string {
+func (s *mockAPIConnection) PublicDNSName() string {
 	return s.publicDNSName
 }
 
-func (s *mockAPIState) APIHostPorts() []network.MachineHostPorts {
+func (s *mockAPIConnection) APIHostPorts() []network.MachineHostPorts {
 	return s.apiHostPorts
 }
 
-func (s *mockAPIState) ModelTag() (names.ModelTag, bool) {
+func (s *mockAPIConnection) ModelTag() (names.ModelTag, bool) {
 	if s.modelTag == "" {
 		return names.ModelTag{}, false
 	}
@@ -111,7 +112,7 @@ func (s *mockAPIState) ModelTag() (names.ModelTag, bool) {
 	return t, true
 }
 
-func (s *mockAPIState) ControllerTag() names.ControllerTag {
+func (s *mockAPIConnection) ControllerTag() names.ControllerTag {
 	t, err := names.ParseControllerTag(s.controllerTag)
 	if err != nil {
 		panic("bad controller tag")
@@ -119,14 +120,14 @@ func (s *mockAPIState) ControllerTag() names.ControllerTag {
 	return t
 }
 
-func (s *mockAPIState) AuthTag() names.Tag {
+func (s *mockAPIConnection) AuthTag() names.Tag {
 	return s.authTag
 }
 
-func (s *mockAPIState) ControllerAccess() string {
+func (s *mockAPIConnection) ControllerAccess() string {
 	return "superuser"
 }
 
-func panicAPIOpen(apiInfo *api.Info, opts api.DialOpts) (api.Connection, error) {
+func panicAPIOpen(ctx context.Context, apiInfo *api.Info, opts api.DialOpts) (api.Connection, error) {
 	panic("api.Open called unexpectedly")
 }

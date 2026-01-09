@@ -4,14 +4,14 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/common"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
-	"github.com/juju/juju/jujuclient"
 )
 
 // ControllerSet contains the set of controllers known to the client,
@@ -59,7 +59,7 @@ func (c *listControllersCommand) convertControllerDetails(storeControllers map[s
 
 	errs := []string{}
 	addError := func(msg, controllerName string, err error) {
-		logger.Errorf(fmt.Sprintf("getting current %s for controller %s: %v", msg, controllerName, err))
+		logger.Errorf(context.TODO(), fmt.Sprintf("getting current %s for controller %s: %v", msg, controllerName, err))
 		errs = append(errs, msg)
 	}
 
@@ -75,7 +75,7 @@ func (c *listControllersCommand) convertControllerDetails(storeControllers map[s
 		var userName, access string
 		accountDetails, err := c.store.AccountDetails(controllerName)
 		if err != nil {
-			if !errors.IsNotFound(err) {
+			if !errors.Is(err, errors.NotFound) {
 				addError("account details", controllerName, err)
 				continue
 			}
@@ -87,7 +87,7 @@ func (c *listControllersCommand) convertControllerDetails(storeControllers map[s
 		var modelName string
 		currentModel, err := c.store.CurrentModel(controllerName)
 		if err != nil {
-			if !errors.IsNotFound(err) {
+			if !errors.Is(err, errors.NotFound) {
 				addError("model", controllerName, err)
 				continue
 			}
@@ -96,14 +96,11 @@ func (c *listControllersCommand) convertControllerDetails(storeControllers map[s
 			if userName != "" {
 				// There's a user logged in, so display the
 				// model name relative to that user.
-				if unqualifiedModelName, owner, err := jujuclient.SplitModelName(modelName); err == nil {
-					user := names.NewUserTag(userName)
-					modelName = common.OwnerQualifiedModelName(unqualifiedModelName, owner, user)
-				}
+				modelName = common.UserModelName(modelName, userName)
 			}
 		}
 		models, err := c.store.AllModels(controllerName)
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			addError("models", controllerName, err)
 		}
 		modelCount := len(models)

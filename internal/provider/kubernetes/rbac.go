@@ -5,7 +5,6 @@ package kubernetes
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"sort"
 	"time"
@@ -21,8 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
-	"github.com/juju/juju/internal/provider/kubernetes/resources"
-	k8sspecs "github.com/juju/juju/internal/provider/kubernetes/specs"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
 )
 
@@ -47,193 +44,41 @@ func RBACLabels(appName, modelName, modelUUID, controllerUUID string, global boo
 	return labels
 }
 
-func (k *kubernetesClient) ensureServiceAccountForApp(
-	appName string, annotations map[string]string, rbacDefinition k8sspecs.K8sRBACSpecConverter,
-) (cleanups []func(), err error) {
-	ctx := context.TODO()
-
-	prefixNameSpace := func(name string) string {
-		return fmt.Sprintf("%s-%s", k.namespace, name)
-	}
-	getBindingName := func(sa, cR k8sspecs.NameGetter) string {
-		if sa.GetName() == cR.GetName() {
-			return sa.GetName()
-		}
-		return fmt.Sprintf("%s-%s", sa.GetName(), cR.GetName())
-	}
-	getSAMeta := func(name string) v1.ObjectMeta {
-		return v1.ObjectMeta{
-			Name:        name,
-			Namespace:   k.namespace,
-			Labels:      RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), false, k.LabelVersion()),
-			Annotations: annotations,
-		}
-	}
-	getRoleClusterRoleName := func(roleName, serviceAccountName string, index int, global bool) (out string) {
-		defer func() {
-			if global {
-				out = prefixNameSpace(out)
-			}
-		}()
-		if roleName != "" {
-			return roleName
-		}
-		out = serviceAccountName
-		if index == 0 {
-			return out
-		}
-		return fmt.Sprintf("%s%d", out, index)
-	}
-	getRoleMeta := func(roleName, serviceAccountName string, index int) v1.ObjectMeta {
-		return v1.ObjectMeta{
-			Name:        getRoleClusterRoleName(roleName, serviceAccountName, index, false),
-			Namespace:   k.namespace,
-			Labels:      RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), false, k.LabelVersion()),
-			Annotations: annotations,
-		}
-	}
-	getClusterRoleMeta := func(roleName, serviceAccountName string, index int) v1.ObjectMeta {
-		return v1.ObjectMeta{
-			Name:        getRoleClusterRoleName(roleName, serviceAccountName, index, true),
-			Namespace:   k.namespace,
-			Labels:      RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), true, k.LabelVersion()),
-			Annotations: annotations,
-		}
-	}
-	getBindingMeta := func(sa, role k8sspecs.NameGetter) v1.ObjectMeta {
-		return v1.ObjectMeta{
-			Name:        getBindingName(sa, role),
-			Namespace:   k.namespace,
-			Labels:      RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), false, k.LabelVersion()),
-			Annotations: annotations,
-		}
-	}
-	getClusterBindingMeta := func(sa, clusterRole k8sspecs.NameGetter) v1.ObjectMeta {
-		return v1.ObjectMeta{
-			Name:        getBindingName(sa, clusterRole),
-			Namespace:   k.namespace,
-			Labels:      RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), true, k.LabelVersion()),
-			Annotations: annotations,
-		}
-	}
-
-	serviceAccounts, roles, clusterroles, roleBindings, clusterRoleBindings := rbacDefinition.ToK8s(
-		getSAMeta,
-		getRoleMeta,
-		getClusterRoleMeta,
-		getBindingMeta,
-		getClusterBindingMeta,
-	)
-
-	for _, spec := range serviceAccounts {
-		_, sacleanups, err := k.ensureServiceAccount(&spec)
-		cleanups = append(cleanups, sacleanups...)
-		if err != nil {
-			return cleanups, errors.Trace(err)
-		}
-	}
-
-	for _, spec := range roles {
-		_, rCleanups, err := k.ensureRole(&spec)
-		cleanups = append(cleanups, rCleanups...)
-		if err != nil {
-			return cleanups, errors.Trace(err)
-		}
-	}
-	for _, spec := range roleBindings {
-		_, rbCleanups, err := k.ensureRoleBinding(&spec)
-		cleanups = append(cleanups, rbCleanups...)
-		if err != nil {
-			return cleanups, errors.Trace(err)
-		}
-	}
-
-	for _, spec := range clusterroles {
-		cr := resources.NewClusterRole(
-			k.client().RbacV1().ClusterRoles(), spec.Name, &spec,
-		)
-		cRCleanups, err := cr.Ensure(
-			ctx,
-			resources.ClaimJujuOwnership,
-		)
-		cleanups = append(cleanups, cRCleanups...)
-		if err != nil {
-			return cleanups, errors.Trace(err)
-		}
-	}
-	for _, spec := range clusterRoleBindings {
-		clusterRoleBinding := resources.NewClusterRoleBinding(k.client().RbacV1().ClusterRoleBindings(), spec.Name, &spec)
-		crbCleanups, err := clusterRoleBinding.Ensure(
-			ctx,
-			resources.ClaimJujuOwnership,
-		)
-		cleanups = append(cleanups, crbCleanups...)
-		if err != nil {
-			return cleanups, errors.Trace(err)
-		}
-	}
-
-	return cleanups, nil
-}
-
-func (k *kubernetesClient) deleteAllServiceAccountResources(appName string) error {
-	selectorNamespaced := utils.LabelsToSelector(
-		RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), false, k.LabelVersion()))
-	selectorGlobal := utils.LabelsToSelector(
-		RBACLabels(appName, k.ModelName(), k.ModelUUID(), k.ControllerUUID(), true, k.LabelVersion()))
-	if err := k.deleteRoleBindings(selectorNamespaced); err != nil {
-		return errors.Trace(err)
-	}
-	if err := k.deleteClusterRoleBindings(selectorGlobal); err != nil {
-		return errors.Trace(err)
-	}
-	if err := k.deleteRoles(selectorNamespaced); err != nil {
-		return errors.Trace(err)
-	}
-	if err := k.deleteClusterRoles(selectorGlobal); err != nil {
-		return errors.Trace(err)
-	}
-	if err := k.deleteServiceAccounts(selectorNamespaced); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
-}
-
-func (k *kubernetesClient) createServiceAccount(sa *core.ServiceAccount) (*core.ServiceAccount, error) {
+func (k *kubernetesClient) createServiceAccount(ctx context.Context, sa *core.ServiceAccount) (*core.ServiceAccount, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
 	utils.PurifyResource(sa)
-	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Create(context.TODO(), sa, v1.CreateOptions{})
+	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Create(ctx, sa, v1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		return nil, errors.AlreadyExistsf("service account %q", sa.GetName())
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) updateServiceAccount(sa *core.ServiceAccount) (*core.ServiceAccount, error) {
+func (k *kubernetesClient) updateServiceAccount(ctx context.Context, sa *core.ServiceAccount) (*core.ServiceAccount, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
-	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Update(context.TODO(), sa, v1.UpdateOptions{})
+	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Update(ctx, sa, v1.UpdateOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NotFoundf("service account %q", sa.GetName())
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) ensureServiceAccount(sa *core.ServiceAccount) (out *core.ServiceAccount, cleanups []func(), err error) {
-	out, err = k.createServiceAccount(sa)
+func (k *kubernetesClient) ensureServiceAccount(ctx context.Context, sa *core.ServiceAccount) (out *core.ServiceAccount, cleanups []func(), err error) {
+	out, err = k.createServiceAccount(ctx, sa)
 	if err == nil {
-		logger.Debugf("service account %q created", out.GetName())
-		cleanups = append(cleanups, func() { _ = k.deleteServiceAccount(out.GetName(), out.GetUID()) })
+		logger.Debugf(ctx, "service account %q created", out.GetName())
+		cleanups = append(cleanups, func() { _ = k.deleteServiceAccount(ctx, out.GetName(), out.GetUID()) })
 		return out, cleanups, nil
 	}
 	if !errors.IsAlreadyExists(err) {
 		return nil, cleanups, errors.Trace(err)
 	}
 
-	existing, err := k.getServiceAccount(sa.GetName())
+	existing, err := k.getServiceAccount(ctx, sa.GetName())
 	if err != nil {
 		return nil, cleanups, errors.Trace(err)
 	}
@@ -243,97 +88,77 @@ func (k *kubernetesClient) ensureServiceAccount(sa *core.ServiceAccount) (out *c
 	case ExecRBACResourceName, modelOperatorName:
 		existingLabelVersion, err = utils.MatchOperatorMetaLabelVersion(existing.ObjectMeta, modelOperatorName, OperatorModelTarget)
 	default:
-		if isOperatorName(name) {
-			existingLabelVersion, err = utils.MatchOperatorMetaLabelVersion(existing.ObjectMeta, appNameFromOperator(name), OperatorAppTarget)
-		} else {
-			existingLabelVersion, err = utils.MatchApplicationMetaLabelVersion(existing.ObjectMeta, name)
-		}
+		existingLabelVersion, err = utils.MatchApplicationMetaLabelVersion(existing.ObjectMeta, name)
 	}
 	if err != nil {
 		return nil, cleanups, errors.Annotatef(err, "ensuring ServiceAccount %q with labels %v ", sa.GetName(), existing.Labels)
 	}
 	if existingLabelVersion < k.labelVersion {
-		logger.Warningf("updating label version for existing ServiceAccount %q from %d to %d ", sa.GetName(), existingLabelVersion, k.labelVersion)
+		logger.Warningf(ctx, "updating label version for existing ServiceAccount %q from %d to %d ", sa.GetName(), existingLabelVersion, k.labelVersion)
 	}
 
-	out, err = k.updateServiceAccount(sa)
-	logger.Debugf("updating service account %q", sa.GetName())
+	out, err = k.updateServiceAccount(ctx, sa)
+	logger.Debugf(ctx, "updating service account %q", sa.GetName())
 	return out, cleanups, errors.Trace(err)
 }
 
-func (k *kubernetesClient) getServiceAccount(name string) (*core.ServiceAccount, error) {
+func (k *kubernetesClient) getServiceAccount(ctx context.Context, name string) (*core.ServiceAccount, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
-	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Get(context.TODO(), name, v1.GetOptions{})
+	out, err := k.client().CoreV1().ServiceAccounts(k.namespace).Get(ctx, name, v1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NotFoundf("service account %q", name)
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteServiceAccount(name string, uid types.UID) error {
+func (k *kubernetesClient) deleteServiceAccount(ctx context.Context, name string, uid types.UID) error {
 	if k.namespace == "" {
 		return errNoNamespace
 	}
-	err := k.client().CoreV1().ServiceAccounts(k.namespace).Delete(context.TODO(), name, utils.NewPreconditionDeleteOptions(uid))
+	err := k.client().CoreV1().ServiceAccounts(k.namespace).Delete(ctx, name, utils.NewPreconditionDeleteOptions(uid))
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
 	return errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteServiceAccounts(selectors ...k8slabels.Selector) error {
-	for _, selector := range selectors {
-		err := k.client().CoreV1().ServiceAccounts(k.namespace).DeleteCollection(
-			context.TODO(),
-			v1.DeleteOptions{
-				PropagationPolicy: constants.DefaultPropagationPolicy(),
-			}, v1.ListOptions{
-				LabelSelector: selector.String(),
-			})
-		if !k8serrors.IsNotFound(err) {
-			return errors.Trace(err)
-		}
-	}
-	return nil
-}
-
-func (k *kubernetesClient) createRole(role *rbacv1.Role) (*rbacv1.Role, error) {
+func (k *kubernetesClient) createRole(ctx context.Context, role *rbacv1.Role) (*rbacv1.Role, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
 	utils.PurifyResource(role)
-	out, err := k.client().RbacV1().Roles(k.namespace).Create(context.TODO(), role, v1.CreateOptions{})
+	out, err := k.client().RbacV1().Roles(k.namespace).Create(ctx, role, v1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		return nil, errors.AlreadyExistsf("role %q", role.GetName())
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) updateRole(role *rbacv1.Role) (*rbacv1.Role, error) {
+func (k *kubernetesClient) updateRole(ctx context.Context, role *rbacv1.Role) (*rbacv1.Role, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
-	out, err := k.client().RbacV1().Roles(k.namespace).Update(context.TODO(), role, v1.UpdateOptions{})
+	out, err := k.client().RbacV1().Roles(k.namespace).Update(ctx, role, v1.UpdateOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NotFoundf("role %q", role.GetName())
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) ensureRole(role *rbacv1.Role) (out *rbacv1.Role, cleanups []func(), err error) {
-	out, err = k.createRole(role)
+func (k *kubernetesClient) ensureRole(ctx context.Context, role *rbacv1.Role) (out *rbacv1.Role, cleanups []func(), err error) {
+	out, err = k.createRole(ctx, role)
 	if err == nil {
-		logger.Debugf("role %q created", out.GetName())
-		cleanups = append(cleanups, func() { _ = k.deleteRole(out.GetName(), out.GetUID()) })
+		logger.Debugf(ctx, "role %q created", out.GetName())
+		cleanups = append(cleanups, func() { _ = k.deleteRole(ctx, out.GetName(), out.GetUID()) })
 		return out, cleanups, nil
 	}
-	if !errors.IsAlreadyExists(err) {
+	if !errors.Is(err, errors.AlreadyExists) {
 		return nil, cleanups, errors.Trace(err)
 	}
 
-	existing, err := k.getRole(role.GetName())
+	existing, err := k.getRole(ctx, role.GetName())
 	if err != nil {
 		return nil, cleanups, errors.Trace(err)
 	}
@@ -343,67 +168,44 @@ func (k *kubernetesClient) ensureRole(role *rbacv1.Role) (out *rbacv1.Role, clea
 	case ExecRBACResourceName, modelOperatorName:
 		existingLabelVersion, err = utils.MatchOperatorMetaLabelVersion(existing.ObjectMeta, modelOperatorName, OperatorModelTarget)
 	default:
-		if isOperatorName(name) {
-			existingLabelVersion, err = utils.MatchOperatorMetaLabelVersion(existing.ObjectMeta, appNameFromOperator(name), OperatorAppTarget)
-		} else {
-			existingLabelVersion, err = utils.MatchApplicationMetaLabelVersion(existing.ObjectMeta, name)
-		}
+		existingLabelVersion, err = utils.MatchApplicationMetaLabelVersion(existing.ObjectMeta, name)
 	}
 	if err != nil {
 		return nil, cleanups, errors.Annotatef(err, "ensuring Role %q with labels %v ", role.GetName(), existing.Labels)
 	}
 	if existingLabelVersion < k.labelVersion {
-		logger.Warningf("updating label version for existing Role %q from %d to %d ", role.GetName(), existingLabelVersion, k.labelVersion)
+		logger.Warningf(ctx, "updating label version for existing Role %q from %d to %d ", role.GetName(), existingLabelVersion, k.labelVersion)
 	}
 
-	out, err = k.updateRole(role)
-	logger.Debugf("updating role %q", role.GetName())
+	out, err = k.updateRole(ctx, role)
+	logger.Debugf(ctx, "updating role %q", role.GetName())
 	return out, cleanups, errors.Trace(err)
 }
 
-func (k *kubernetesClient) getRole(name string) (*rbacv1.Role, error) {
+func (k *kubernetesClient) getRole(ctx context.Context, name string) (*rbacv1.Role, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
-	out, err := k.client().RbacV1().Roles(k.namespace).Get(context.TODO(), name, v1.GetOptions{})
+	out, err := k.client().RbacV1().Roles(k.namespace).Get(ctx, name, v1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NotFoundf("role %q", name)
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteRole(name string, uid types.UID) error {
+func (k *kubernetesClient) deleteRole(ctx context.Context, name string, uid types.UID) error {
 	if k.namespace == "" {
 		return errNoNamespace
 	}
-	err := k.client().RbacV1().Roles(k.namespace).Delete(context.TODO(), name, utils.NewPreconditionDeleteOptions(uid))
+	err := k.client().RbacV1().Roles(k.namespace).Delete(ctx, name, utils.NewPreconditionDeleteOptions(uid))
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
 	return errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteRoles(selectors ...k8slabels.Selector) error {
-	if k.namespace == "" {
-		return errNoNamespace
-	}
-	for _, selector := range selectors {
-		err := k.client().RbacV1().Roles(k.namespace).DeleteCollection(
-			context.TODO(),
-			v1.DeleteOptions{
-				PropagationPolicy: constants.DefaultPropagationPolicy(),
-			}, v1.ListOptions{
-				LabelSelector: selector.String(),
-			})
-		if !k8serrors.IsNotFound(err) {
-			return errors.Trace(err)
-		}
-	}
-	return nil
-}
-
-func (k *kubernetesClient) deleteClusterRoles(selector k8slabels.Selector) error {
-	err := k.client().RbacV1().ClusterRoles().DeleteCollection(context.TODO(), v1.DeleteOptions{
+func (k *kubernetesClient) deleteClusterRoles(ctx context.Context, selector k8slabels.Selector) error {
+	err := k.client().RbacV1().ClusterRoles().DeleteCollection(ctx, v1.DeleteOptions{
 		PropagationPolicy: constants.DefaultPropagationPolicy(),
 	}, v1.ListOptions{
 		LabelSelector: selector.String(),
@@ -414,11 +216,11 @@ func (k *kubernetesClient) deleteClusterRoles(selector k8slabels.Selector) error
 	return errors.Trace(err)
 }
 
-func (k *kubernetesClient) listClusterRoles(selector k8slabels.Selector) ([]rbacv1.ClusterRole, error) {
+func (k *kubernetesClient) listClusterRoles(ctx context.Context, selector k8slabels.Selector) ([]rbacv1.ClusterRole, error) {
 	listOps := v1.ListOptions{
 		LabelSelector: selector.String(),
 	}
-	cRList, err := k.client().RbacV1().ClusterRoles().List(context.TODO(), listOps)
+	cRList, err := k.client().RbacV1().ClusterRoles().List(ctx, listOps)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -428,12 +230,12 @@ func (k *kubernetesClient) listClusterRoles(selector k8slabels.Selector) ([]rbac
 	return cRList.Items, nil
 }
 
-func (k *kubernetesClient) createRoleBinding(rb *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
+func (k *kubernetesClient) createRoleBinding(ctx context.Context, rb *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
 	utils.PurifyResource(rb)
-	out, err := k.client().RbacV1().RoleBindings(k.namespace).Create(context.TODO(), rb, v1.CreateOptions{})
+	out, err := k.client().RbacV1().RoleBindings(k.namespace).Create(ctx, rb, v1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		return nil, errors.AlreadyExistsf("role binding %q", rb.GetName())
 	}
@@ -444,7 +246,7 @@ func ensureResourceDeleted(clock jujuclock.Clock, getResource func() error) erro
 	notReadyYetErr := errors.New("resource is still being deleted")
 	deletionChecker := func() error {
 		err := getResource()
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			return nil
 		}
 		if err == nil {
@@ -462,7 +264,7 @@ func ensureResourceDeleted(clock jujuclock.Clock, getResource func() error) erro
 			return err != nil && err != notReadyYetErr
 		},
 		NotifyFunc: func(error, int) {
-			logger.Debugf("waiting for resource to be deleted")
+			logger.Debugf(context.TODO(), "waiting for resource to be deleted")
 		},
 	})
 	return errors.Trace(err)
@@ -483,10 +285,10 @@ func isRoleBindingEqual(a, b rbacv1.RoleBinding) bool {
 		reflect.DeepEqual(a.ObjectMeta.Annotations, b.ObjectMeta.Annotations)
 }
 
-func (k *kubernetesClient) ensureRoleBinding(rb *rbacv1.RoleBinding) (out *rbacv1.RoleBinding, cleanups []func(), err error) {
+func (k *kubernetesClient) ensureRoleBinding(ctx context.Context, rb *rbacv1.RoleBinding) (out *rbacv1.RoleBinding, cleanups []func(), err error) {
 	isFirstDeploy := false
 	// RoleRef is immutable, so delete first then re-create.
-	existing, err := k.getRoleBinding(rb.GetName())
+	existing, err := k.getRoleBinding(ctx, rb.GetName())
 	if errors.Is(err, errors.NotFound) {
 		isFirstDeploy = true
 	} else if err != nil {
@@ -497,76 +299,57 @@ func (k *kubernetesClient) ensureRoleBinding(rb *rbacv1.RoleBinding) (out *rbacv
 			return existing, cleanups, nil
 		}
 		name := existing.GetName()
-		UID := existing.GetUID()
-		if err := k.deleteRoleBinding(name, UID); err != nil {
+		uid := existing.GetUID()
+		if err := k.deleteRoleBinding(ctx, name, uid); err != nil {
 			return nil, cleanups, errors.Trace(err)
 		}
 
 		if err := ensureResourceDeleted(
 			k.clock,
 			func() error {
-				_, err := k.getRoleBinding(name)
+				_, err := k.getRoleBinding(ctx, name)
 				return errors.Trace(err)
 			},
 		); err != nil {
 			return nil, cleanups, errors.Trace(err)
 		}
 	}
-	out, err = k.createRoleBinding(rb)
+	out, err = k.createRoleBinding(ctx, rb)
 	if err != nil {
 		return nil, cleanups, errors.Trace(err)
 	}
 	if isFirstDeploy {
 		// only do cleanup for the first time, don't do this for existing deployments.
-		cleanups = append(cleanups, func() { _ = k.deleteRoleBinding(out.GetName(), out.GetUID()) })
+		cleanups = append(cleanups, func() { _ = k.deleteRoleBinding(ctx, out.GetName(), out.GetUID()) })
 	}
-	logger.Debugf("role binding %q created", rb.GetName())
+	logger.Debugf(ctx, "role binding %q created", rb.GetName())
 	return out, cleanups, nil
 }
 
-func (k *kubernetesClient) getRoleBinding(name string) (*rbacv1.RoleBinding, error) {
+func (k *kubernetesClient) getRoleBinding(ctx context.Context, name string) (*rbacv1.RoleBinding, error) {
 	if k.namespace == "" {
 		return nil, errNoNamespace
 	}
-	out, err := k.client().RbacV1().RoleBindings(k.namespace).Get(context.TODO(), name, v1.GetOptions{})
+	out, err := k.client().RbacV1().RoleBindings(k.namespace).Get(ctx, name, v1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, errors.NotFoundf("role binding %q", name)
 	}
 	return out, errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteRoleBinding(name string, uid types.UID) error {
+func (k *kubernetesClient) deleteRoleBinding(ctx context.Context, name string, uid types.UID) error {
 	if k.namespace == "" {
 		return errNoNamespace
 	}
-	err := k.client().RbacV1().RoleBindings(k.namespace).Delete(context.TODO(), name, utils.NewPreconditionDeleteOptions(uid))
+	err := k.client().RbacV1().RoleBindings(k.namespace).Delete(ctx, name, utils.NewPreconditionDeleteOptions(uid))
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
 	return errors.Trace(err)
 }
 
-func (k *kubernetesClient) deleteRoleBindings(selectors ...k8slabels.Selector) error {
-	if k.namespace == "" {
-		return errNoNamespace
-	}
-	for _, selector := range selectors {
-		err := k.client().RbacV1().RoleBindings(k.namespace).DeleteCollection(
-			context.TODO(),
-			v1.DeleteOptions{
-				PropagationPolicy: constants.DefaultPropagationPolicy(),
-			}, v1.ListOptions{
-				LabelSelector: selector.String(),
-			})
-		if !k8serrors.IsNotFound(err) {
-			return errors.Trace(err)
-		}
-	}
-	return nil
-}
-
-func (k *kubernetesClient) deleteClusterRoleBindings(selector k8slabels.Selector) error {
-	err := k.client().RbacV1().ClusterRoleBindings().DeleteCollection(context.TODO(), v1.DeleteOptions{
+func (k *kubernetesClient) deleteClusterRoleBindings(ctx context.Context, selector k8slabels.Selector) error {
+	err := k.client().RbacV1().ClusterRoleBindings().DeleteCollection(ctx, v1.DeleteOptions{
 		PropagationPolicy: constants.DefaultPropagationPolicy(),
 	}, v1.ListOptions{
 		LabelSelector: selector.String(),
@@ -577,11 +360,11 @@ func (k *kubernetesClient) deleteClusterRoleBindings(selector k8slabels.Selector
 	return errors.Trace(err)
 }
 
-func (k *kubernetesClient) listClusterRoleBindings(selector k8slabels.Selector) ([]rbacv1.ClusterRoleBinding, error) {
+func (k *kubernetesClient) listClusterRoleBindings(ctx context.Context, selector k8slabels.Selector) ([]rbacv1.ClusterRoleBinding, error) {
 	listOps := v1.ListOptions{
 		LabelSelector: selector.String(),
 	}
-	cRBList, err := k.client().RbacV1().ClusterRoleBindings().List(context.TODO(), listOps)
+	cRBList, err := k.client().RbacV1().ClusterRoleBindings().List(ctx, listOps)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

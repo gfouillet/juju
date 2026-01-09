@@ -4,32 +4,26 @@
 package apiaddressupdater
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
-	"github.com/juju/juju/api/agent/caasoperator"
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/agent/machiner"
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	"github.com/juju/juju/core/logger"
 )
-
-// Logger represents the methods used for logging messages.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-}
 
 // ManifoldConfig defines the names of the manifolds on which a Manifold will depend.
 type ManifoldConfig struct {
 	AgentName     string
 	APICallerName string
-	Logger        Logger
+	Logger        logger.Logger
 }
 
 // Manifold returns a dependency manifold that runs an API address updater worker,
@@ -45,18 +39,16 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 // newWorker trivially wraps NewAPIAddressUpdater for use in a engine.AgentAPIManifold.
 // It's not tested at the moment, because the scaffolding necessary is too
 // unwieldy/distracting to introduce at this point.
-func (config ManifoldConfig) newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func (config ManifoldConfig) newWorker(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	tag := a.CurrentConfig().Tag()
 
 	// TODO(fwereade): use appropriate facade!
 	var facade APIAddresser
 	switch apiTag := tag.(type) {
 	case names.UnitTag:
-		facade = uniter.NewState(apiCaller, apiTag)
-	case names.ApplicationTag:
-		facade = caasoperator.NewClient(apiCaller)
+		facade = uniter.NewClient(apiCaller, apiTag)
 	case names.MachineTag:
-		facade = machiner.NewState(apiCaller)
+		facade = machiner.NewClient(apiCaller)
 	default:
 		return nil, errors.Errorf("expected a unit or machine tag; got %q", tag)
 	}

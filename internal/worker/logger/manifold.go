@@ -4,31 +4,24 @@
 package logger
 
 import (
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
+
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/agent/logger"
 	"github.com/juju/juju/api/base"
+	corelogger "github.com/juju/juju/core/logger"
 )
-
-// Logger represents a loggo logger for the purpose of recording what is going
-// on.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-	Warningf(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // ManifoldConfig defines the names of the manifolds on which a
 // Manifold will depend.
 type ManifoldConfig struct {
 	AgentName       string
 	APICallerName   string
-	LoggingContext  *loggo.Context
-	Logger          Logger
+	LoggerContext   corelogger.LoggerContext
+	Logger          corelogger.Logger
 	UpdateAgentFunc func(string) error
 }
 
@@ -40,22 +33,22 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.AgentName,
 			config.APICallerName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			var a agent.Agent
-			if err := context.Get(config.AgentName, &a); err != nil {
+			if err := getter.Get(config.AgentName, &a); err != nil {
 				return nil, err
 			}
 			currentConfig := a.CurrentConfig()
 			loggingOverride := currentConfig.Value(agent.LoggingOverride)
 
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, err
 			}
 
-			loggerFacade := logger.NewState(apiCaller)
+			loggerFacade := logger.NewClient(apiCaller)
 			workerConfig := WorkerConfig{
-				Context:  config.LoggingContext,
+				Context:  config.LoggerContext,
 				API:      loggerFacade,
 				Tag:      currentConfig.Tag(),
 				Logger:   config.Logger,

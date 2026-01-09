@@ -4,51 +4,61 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/bundle"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewExportBundleCommand returns a fully constructed export bundle command.
 func NewExportBundleCommand() cmd.Command {
 	command := &exportBundleCommand{}
-	command.newAPIFunc = func() (ExportBundleAPI, error) {
-		return command.getAPIs()
+	command.newAPIFunc = func(ctx context.Context) (ExportBundleAPI, error) {
+		return command.getAPIs(ctx)
 	}
 	return modelcmd.Wrap(command)
 }
 
 type exportBundleCommand struct {
 	modelcmd.ModelCommandBase
-	newAPIFunc           func() (ExportBundleAPI, error)
+	newAPIFunc           func(ctx context.Context) (ExportBundleAPI, error)
 	Filename             string
 	includeCharmDefaults bool
-	includeSeries        bool
 }
 
 const exportBundleHelpDoc = `
-Exports the current model configuration as a reusable bundle.
+Exports the current model's applications and relations as a reusable bundle.
+
+The bundle does not mirror the model configuration. It is a self-contained
+definition derived from the applications currently deployed in the model, so
+that the same set of applications and relations can be reproduced in another
+model.
+
+Juju may optimise how information is represented in the exported bundle.
+For example, if all applications share the same base, Juju may set a
+bundle-level default-base. 
+
+Exposure rules and application offers may
+also be captured in an overlay as a second YAML document within the same
+file (for example, using exposed-endpoints and offers entries). These
+optimisations change only how the bundle is expressed and do not affect
+the resulting deployment.
 
 If ` + "`--filename`" + ` is not used, the configuration is printed to ` + "`stdout`" + `.
 ` + "` --filename`" + ` specifies an output file.
-
-If ` + "`--include-series`" + ` is used, the exported bundle will include the OS series
- alongside bases. This should be used as a compatibility option for older
- versions of Juju before bases were added.
 `
 
 const exportBundleHelpExamples = `
     juju export-bundle
     juju export-bundle --filename mymodel.yaml
     juju export-bundle --include-charm-defaults
-    juju export-bundle --include-series
 `
 
 // Info implements Command.
@@ -66,7 +76,6 @@ func (c *exportBundleCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	f.StringVar(&c.Filename, "filename", "", "Bundle file")
 	f.BoolVar(&c.includeCharmDefaults, "include-charm-defaults", false, "Whether to include charm config default values in the exported bundle")
-	f.BoolVar(&c.includeSeries, "include-series", false, "Compatibility option. Set to include series in the bundle alongside bases")
 }
 
 // Init implements Command.
@@ -77,11 +86,11 @@ func (c *exportBundleCommand) Init(args []string) error {
 // ExportBundleAPI specifies the used function calls of the BundleFacade.
 type ExportBundleAPI interface {
 	Close() error
-	ExportBundle(includeCharmDefaults bool, includeSeries bool) (string, error)
+	ExportBundle(ctx context.Context, includeCharmDefaults bool) (string, error)
 }
 
-func (c *exportBundleCommand) getAPIs() (ExportBundleAPI, error) {
-	api, err := c.NewAPIRoot()
+func (c *exportBundleCommand) getAPIs(ctx context.Context) (ExportBundleAPI, error) {
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +100,13 @@ func (c *exportBundleCommand) getAPIs() (ExportBundleAPI, error) {
 
 // Run implements Command.
 func (c *exportBundleCommand) Run(ctx *cmd.Context) error {
-	bundleClient, err := c.newAPIFunc()
+	bundleClient, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer bundleClient.Close()
 
-	result, err := bundleClient.ExportBundle(c.includeCharmDefaults, c.includeSeries)
+	result, err := bundleClient.ExportBundle(ctx, c.includeCharmDefaults)
 	if err != nil {
 		return err
 	}

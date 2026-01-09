@@ -4,14 +4,16 @@
 package firewaller
 
 import (
+	"context"
+
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 )
 
 type modelFirewallRulesWatcher struct {
-	catacomb catacomb.Catacomb
-	backend  State
+	catacomb           catacomb.Catacomb
+	modelConfigService ModelConfigService
 
 	out chan struct{}
 
@@ -22,13 +24,14 @@ type modelFirewallRulesWatcher struct {
 // determining the model firewall rules takes place
 //
 // NOTE: At this time, ssh-allow model config item is the only thing that needs to be watched
-func NewModelFirewallRulesWatcher(st State) (*modelFirewallRulesWatcher, error) {
+func NewModelFirewallRulesWatcher(modelConfigService ModelConfigService) (*modelFirewallRulesWatcher, error) {
 	w := &modelFirewallRulesWatcher{
-		backend: st,
-		out:     make(chan struct{}),
+		modelConfigService: modelConfigService,
+		out:                make(chan struct{}),
 	}
 
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "model-firewall-rules-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -38,7 +41,13 @@ func NewModelFirewallRulesWatcher(st State) (*modelFirewallRulesWatcher, error) 
 func (w *modelFirewallRulesWatcher) loop() error {
 	defer close(w.out)
 
-	configWatcher := w.backend.WatchForModelConfigChanges()
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
+	configWatcher, err := w.modelConfigService.Watch(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	if err := w.catacomb.Add(configWatcher); err != nil {
 		return errors.Trace(err)
 	}
@@ -55,17 +64,33 @@ func (w *modelFirewallRulesWatcher) loop() error {
 			if !ok {
 				return w.catacomb.ErrDying()
 			}
-			cfg, err := w.backend.ModelConfig()
+			sshAllow, err := w.getSSHAllow(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			sshAllow := set.NewStrings(cfg.SSHAllow()...)
 			if !setEquals(sshAllow, w.sshAllowCache) {
 				out = w.out
 				w.sshAllowCache = sshAllow
 			}
 		}
 	}
+}
+
+// scopedContext returns a context that is in the scope of the watcher lifetime.
+// It returns a cancellable context that is cancelled when the action has
+// completed.
+func (w *modelFirewallRulesWatcher) scopedContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return w.catacomb.Context(ctx), cancel
+}
+
+func (w *modelFirewallRulesWatcher) getSSHAllow(ctx context.Context) (set.Strings, error) {
+	cfg, err := w.modelConfigService.ModelConfig(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	sshAllow := set.NewStrings(cfg.SSHAllow()...)
+	return sshAllow, nil
 }
 
 func (w *modelFirewallRulesWatcher) Changes() <-chan struct{} {

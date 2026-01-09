@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var keyRule = charm.GetActionNameRule()

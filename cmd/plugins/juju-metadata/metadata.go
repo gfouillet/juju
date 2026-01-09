@@ -6,16 +6,15 @@ package main
 import (
 	"os"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	_ "github.com/juju/juju/internal/provider/all"
 	"github.com/juju/juju/juju"
 	"github.com/juju/juju/juju/osenv"
 )
 
-var logger = loggo.GetLogger("juju.plugins.metadata")
+var logger = internallogger.GetLogger("juju.plugins.metadata")
 
 var metadataDoc = `
 Juju metadata is used to find the correct image and agent binaries when bootstrapping a

@@ -36,17 +36,16 @@ using the default count (`1`) and storage pool
     juju deploy postgresql --storage pgdata=100G
 
 
-
 ## Details
 
 Add storage to a pre-existing unit within a model.
 
 Storage is allocated from
 a storage pool, using parameters provided within a "storage directive". (Use
-`juju deploy --storage=<storage-directive>` to provision storage during the
-deployment process.)
+`juju deploy --storage=<storage-name>=<storage-directive>` to provision storage during the
+deployment process).
 
-	juju add-storage &lt;unit&gt; &lt;storage-directive&gt;
+	juju add-storage <unit> <storage-name>=<storage-directive>
 
 `<unit>` is the ID of a unit that is already in the model.
 
@@ -65,7 +64,7 @@ following:
     <pool>,<count>,<size>
 
 Each parameter is optional, so long as at least one is present. So the following
-storage constraints are also valid:
+storage directives are also valid:
 
     <pool>,<size>
     <count>,<size>

@@ -11,43 +11,47 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"testing"
 	"time"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	cookiejar "github.com/juju/persistent-cookiejar"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	"gopkg.in/macaroon-bakery.v2/httpbakery"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	apitesting "github.com/juju/juju/api/testing"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
+	"github.com/juju/juju/cmd/internal/loginprovider"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/cmd/modelcmd/mocks"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/pki"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
+	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type BaseCommandSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	store *jujuclient.MemStore
 }
 
-var _ = gc.Suite(&BaseCommandSuite{})
+func TestBaseCommandSuite(t *testing.T) {
+	tc.Run(t, &BaseCommandSuite{})
+}
 
-func (s *BaseCommandSuite) SetUpTest(c *gc.C) {
+func (s *BaseCommandSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	s.store = jujuclient.NewMemStore()
@@ -67,9 +71,9 @@ func (s *BaseCommandSuite) SetUpTest(c *gc.C) {
 	}
 }
 
-func (s *BaseCommandSuite) assertUnknownModel(c *gc.C, baseCmd *modelcmd.ModelCommandBase, current, expectedCurrent string) {
+func (s *BaseCommandSuite) assertUnknownModel(c *tc.C, baseCmd *modelcmd.ModelCommandBase, current, expectedCurrent string) {
 	s.store.Models["foo"].CurrentModel = current
-	apiOpen := func(*api.Info, api.DialOpts) (api.Connection, error) {
+	apiOpen := func(context.Context, *api.Info, api.DialOpts) (api.Connection, error) {
 		return nil, errors.Trace(&params.Error{Code: params.CodeModelNotFound, Message: "model deaddeaf not found"})
 	}
 	baseCmd.SetClientStore(s.store)
@@ -77,47 +81,45 @@ func (s *BaseCommandSuite) assertUnknownModel(c *gc.C, baseCmd *modelcmd.ModelCo
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 	baseCmd.SetModelIdentifier("foo:admin/badmodel", false)
-	conn, err := baseCmd.NewAPIRoot()
-	c.Assert(conn, gc.IsNil)
+	conn, err := baseCmd.NewAPIRoot(c.Context())
+	c.Assert(conn, tc.IsNil)
 	msg := strings.Replace(err.Error(), "\n", "", -1)
-	c.Assert(msg, gc.Equals, `model "admin/badmodel" has been removed from the controller, run 'juju models' and switch to one of them.`)
-	c.Assert(s.store.Models["foo"].Models, gc.HasLen, 1)
-	c.Assert(s.store.Models["foo"].Models["admin/goodmodel"], gc.DeepEquals,
+	c.Assert(msg, tc.Equals, `model "admin/badmodel" has been removed from the controller, run 'juju models' and switch to one of them.`)
+	c.Assert(s.store.Models["foo"].Models, tc.HasLen, 1)
+	c.Assert(s.store.Models["foo"].Models["admin/goodmodel"], tc.DeepEquals,
 		jujuclient.ModelDetails{ModelUUID: "deadbeef2", ModelType: model.IAAS})
-	c.Assert(s.store.Models["foo"].CurrentModel, gc.Equals, expectedCurrent)
+	c.Assert(s.store.Models["foo"].CurrentModel, tc.Equals, expectedCurrent)
 }
 
-func (s *BaseCommandSuite) TestUnknownModel(c *gc.C) {
+func (s *BaseCommandSuite) TestUnknownModel(c *tc.C) {
 	s.assertUnknownModel(c, new(modelcmd.ModelCommandBase), "admin/badmodel", "admin/badmodel")
 }
 
-func (s *BaseCommandSuite) TestUnknownUncachedModel(c *gc.C) {
+func (s *BaseCommandSuite) TestUnknownUncachedModel(c *tc.C) {
 	baseCmd := new(modelcmd.ModelCommandBase)
 	baseCmd.CanClearCurrentModel = false
 	baseCmd.RemoveModelFromClientStore(s.store, "foo", "admin/nonexistent")
-	// expecting silence in the logs since this model has never been cached.
-	c.Assert(c.GetTestLog(), gc.DeepEquals, "")
 }
 
-func (s *BaseCommandSuite) TestUnknownModelCanRemoveCachedCurrent(c *gc.C) {
+func (s *BaseCommandSuite) TestUnknownModelCanRemoveCachedCurrent(c *tc.C) {
 	baseCmd := new(modelcmd.ModelCommandBase)
 	baseCmd.CanClearCurrentModel = true
 	s.assertUnknownModel(c, baseCmd, "admin/badmodel", "")
 }
 
-func (s *BaseCommandSuite) TestUnknownModelNotCurrent(c *gc.C) {
+func (s *BaseCommandSuite) TestUnknownModelNotCurrent(c *tc.C) {
 	s.assertUnknownModel(c, new(modelcmd.ModelCommandBase), "admin/goodmodel", "admin/goodmodel")
 }
 
-func (s *BaseCommandSuite) TestUnknownModelNotCurrentCanRemoveCachedCurrent(c *gc.C) {
+func (s *BaseCommandSuite) TestUnknownModelNotCurrentCanRemoveCachedCurrent(c *tc.C) {
 	baseCmd := new(modelcmd.ModelCommandBase)
 	baseCmd.CanClearCurrentModel = true
 	s.assertUnknownModel(c, baseCmd, "admin/goodmodel", "admin/goodmodel")
 }
 
-func (s *BaseCommandSuite) TestMigratedModelErrorHandling(c *gc.C) {
+func (s *BaseCommandSuite) TestMigratedModelErrorHandling(c *tc.C) {
 	var callCount int
-	apiOpen := func(*api.Info, api.DialOpts) (api.Connection, error) {
+	apiOpen := func(context.Context, *api.Info, api.DialOpts) (api.Connection, error) {
 		var alias string
 		if callCount > 0 {
 			alias = "brand-new-controller"
@@ -139,10 +141,10 @@ func (s *BaseCommandSuite) TestMigratedModelErrorHandling(c *gc.C) {
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 
-	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), jc.ErrorIsNil)
+	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), tc.ErrorIsNil)
 
 	fingerprint, _, err := pki.Fingerprint([]byte(coretesting.CACert))
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	specs := []struct {
 		descr   string
@@ -190,22 +192,22 @@ To access it run 'juju switch bar:admin/badmodel'.`,
 			spec.setupFn()
 		}
 
-		_, err := baseCmd.NewAPIRoot()
-		c.Assert(err, gc.Not(gc.IsNil))
-		c.Assert(err.Error(), gc.Equals, spec.expErr)
+		_, err := baseCmd.NewAPIRoot(c.Context())
+		c.Assert(err, tc.Not(tc.IsNil))
+		c.Assert(err.Error(), tc.Equals, spec.expErr)
 	}
 }
 
-func (s *BaseCommandSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *BaseCommandSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	return ctrl
 }
 
-func (s *BaseCommandSuite) TestNewAPIRootExternalUser(c *gc.C) {
+func (s *BaseCommandSuite) TestNewAPIRootExternalUser(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 	conn := mocks.NewMockConnection(ctrl)
-	apiOpen := func(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+	apiOpen := func(ctx context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 		return conn, nil
 	}
 	externalName := "alastair@external"
@@ -228,32 +230,16 @@ func (s *BaseCommandSuite) TestNewAPIRootExternalUser(c *gc.C) {
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 
-	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), jc.ErrorIsNil)
+	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), tc.ErrorIsNil)
 
-	_, err := baseCmd.NewAPIRoot()
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-// TestNewAPIConnectionParams checks that the connection
-// parameters used to establish a connection are valid,
-// currently only the login provider is verified.
-func (s *BaseCommandSuite) TestNewAPIConnectionParams(c *gc.C) {
-	baseCmd := new(modelcmd.ModelCommandBase)
-	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
-	modelcmd.SetRunStarted(baseCmd)
-	s.store.Accounts["foo"] = jujuclient.AccountDetails{
-		User: "bar", Password: "hunter2",
-	}
-	account := s.store.Accounts["foo"]
-	params, err := baseCmd.NewAPIConnectionParams(s.store, s.store.CurrentControllerName, "", &account)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(params.DialOpts.LoginProvider, gc.IsNil)
+	_, err := baseCmd.NewAPIRoot(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 // TestNewAPIRoot_OIDCLogin_ClientCredentials verifies that when we have a controller supporting
 // OAuth/OIDC login (i.e. JAAS) that the client credential login provider is tried, and if successful
 // logs the user in.
-func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *gc.C) {
+func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -268,16 +254,16 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *gc.C) {
 
 	baseCmd := new(modelcmd.ModelCommandBase)
 	baseCmd.SetClientStore(s.store)
-	baseCmd.SetAPIOpen(func(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+	baseCmd.SetAPIOpen(func(_ context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 		// We don't care about the result, just the APICalls made to the login facades.
 		_, err := opts.LoginProvider.Login(ctx, conn)
-		c.Check(err, gc.IsNil)
+		c.Check(err, tc.IsNil)
 		return conn, nil
 	})
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 
-	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), jc.ErrorIsNil)
+	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), tc.ErrorIsNil)
 
 	request := struct {
 		ClientID     string `json:"client-id"`
@@ -296,6 +282,7 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *gc.C) {
 	// Expect env login to succeed.
 	conn.EXPECT().
 		APICall(
+			gomock.Any(),
 			"Admin",
 			gomock.Any(),
 			gomock.Any(),
@@ -303,7 +290,7 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *gc.C) {
 			request,
 			gomock.Any(),
 		).
-		DoAndReturn(func(_ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
+		DoAndReturn(func(_ context.Context, _ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
 			if r, ok := response.(*params.LoginResult); ok {
 				// Set server version so the login calls NewLoginResultParams can succeed.
 				r.ServerVersion = "3.6.9"
@@ -322,27 +309,26 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_ClientCredentials(c *gc.C) {
 	conn.EXPECT().IsProxied()
 	conn.EXPECT().ControllerAccess()
 
-	_, err := baseCmd.NewAPIRoot()
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := baseCmd.NewAPIRoot(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 // TestNewAPIRoot_OIDCLogin_SessionToken verifies that when we have a controller supporting
 // OAuth/OIDC login (i.e. JAAS) that the login provider can return a new
 // session token which is then saved in the client's account store.
-func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_SessionToken(c *gc.C) {
+// This specifically tests all commands *besides* `juju login`
+// since `juju login` uses a different code path.
+func (s *BaseCommandSuite) TestLoginWithOIDC_SessionToken(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	ctx := context.Background()
-
 	conn := mocks.NewMockConnection(ctrl)
-
 	sessionLoginFactory := mocks.NewMockSessionLoginFactory(ctrl)
 	sessionLoginProvider := mocks.NewMockLoginProvider(ctrl)
 
-	apiOpen := func(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+	apiOpen := func(ctx context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 		_, err := opts.LoginProvider.Login(ctx, conn)
-		c.Check(err, jc.ErrorIsNil)
+		c.Check(err, tc.ErrorIsNil)
 		return conn, nil
 	}
 	externalName := "alice@external"
@@ -357,15 +343,17 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_SessionToken(c *gc.C) {
 	conn.EXPECT().ControllerAccess().MinTimes(1)
 
 	var tokenCallbackFunc func(string)
-	sessionLoginFactory.EXPECT().NewLoginProvider("test-token", gomock.Any(), gomock.Any()).Do(
-		func(_ string, _ io.Writer, f func(string)) {
+	sessionLoginFactory.EXPECT().NewLoginProvider("test-token", gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, _ io.Writer, f func(string)) api.LoginProvider {
 			tokenCallbackFunc = f
-		}).Return(sessionLoginProvider)
+			return sessionLoginProvider
+		})
 
-	sessionLoginProvider.EXPECT().Login(gomock.Any(), gomock.Any()).Do(
-		func(_ context.Context, _ base.APICaller) {
+	sessionLoginProvider.EXPECT().Login(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ base.APICaller) (*api.LoginResultParams, error) {
 			tokenCallbackFunc("new-token")
-		}).Return(nil, nil)
+			return nil, nil
+		})
 
 	s.store.Controllers["foo"] = jujuclient.ControllerDetails{
 		APIEndpoints: []string{"testing.invalid:1234"},
@@ -384,17 +372,56 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_SessionToken(c *gc.C) {
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 
-	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), jc.ErrorIsNil)
+	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), tc.ErrorIsNil)
 
-	_, err := baseCmd.NewAPIRoot()
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := baseCmd.NewAPIRoot(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(s.store.Accounts["foo"].SessionToken, gc.Equals, "new-token")
+	c.Assert(s.store.Accounts["foo"].SessionToken, tc.Equals, "new-token")
+}
+
+// TestNewAPIConnectionParams checks that the connection
+// parameters used to establish a connection are valid,
+// currently only the login provider is verified.
+func (s *BaseCommandSuite) TestNewAPIConnectionParams(c *tc.C) {
+	baseCmd := new(modelcmd.ModelCommandBase)
+	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
+	modelcmd.SetRunStarted(baseCmd)
+	s.store.Accounts["foo"] = jujuclient.AccountDetails{
+		User: "bar", Password: "hunter2",
+	}
+	account := s.store.Accounts["foo"]
+	params, err := baseCmd.NewAPIConnectionParams(s.store, s.store.CurrentControllerName, "", &account)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(params.DialOpts.LoginProvider, tc.IsNil)
+}
+
+// TestNewAPIConnectionParamsWithOAuthController is similar
+// to TestNewAPIConnectionParams but verifies that when
+// connecting to a controller supporting OIDC, we default
+// to a specific kind of login provider.
+func (s *BaseCommandSuite) TestNewAPIConnectionParamsWithOAuthController(c *tc.C) {
+	newController, err := s.store.ControllerByName(s.store.CurrentControllerName)
+	c.Assert(err, tc.ErrorIsNil)
+	newController.OIDCLogin = true
+	s.store.Controllers["oauth-controller"] = *newController
+
+	baseCmd := new(modelcmd.ModelCommandBase)
+	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
+	modelcmd.SetRunStarted(baseCmd)
+	s.store.Accounts["foo"] = jujuclient.AccountDetails{
+		User: "bar", Password: "hunter2",
+	}
+	account := s.store.Accounts["foo"]
+	params, err := baseCmd.NewAPIConnectionParams(s.store, "oauth-controller", "", &account)
+	c.Assert(err, tc.ErrorIsNil)
+	loginProvider := loginprovider.NewTryInOrderLoginProvider(loggertesting.WrapCheckLog(c))
+	c.Assert(params.DialOpts.LoginProvider, tc.FitsTypeOf, loginProvider)
 }
 
 // TestNewAPIRoot_OIDCLogin_TriesInOrder verifies that the client credential flow is attempted first and subsequently the
 // session token flow. The error returned to the user is the session token flow.
-func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *gc.C) {
+func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
@@ -409,14 +436,14 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *gc.C) {
 
 	baseCmd := new(modelcmd.ModelCommandBase)
 	baseCmd.SetClientStore(s.store)
-	baseCmd.SetAPIOpen(func(info *api.Info, opts api.DialOpts) (api.Connection, error) {
+	baseCmd.SetAPIOpen(func(_ context.Context, info *api.Info, opts api.DialOpts) (api.Connection, error) {
 		_, err := opts.LoginProvider.Login(ctx, conn)
 		return conn, err
 	})
 	modelcmd.InitContexts(&cmd.Context{Stderr: io.Discard}, baseCmd)
 	modelcmd.SetRunStarted(baseCmd)
 
-	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), jc.ErrorIsNil)
+	c.Assert(baseCmd.SetModelIdentifier("foo:admin/badmodel", false), tc.ErrorIsNil)
 
 	request := struct {
 		ClientID     string `json:"client-id"`
@@ -435,6 +462,7 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *gc.C) {
 	// Expect env login to failed.
 	conn.EXPECT().
 		APICall(
+			gomock.Any(),
 			"Admin",
 			gomock.Any(),
 			gomock.Any(),
@@ -442,13 +470,14 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *gc.C) {
 			request,
 			gomock.Any(),
 		).
-		DoAndReturn(func(_ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
+		DoAndReturn(func(_ context.Context, _ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
 			return errors.New("unauthorised") // Simulate a failed client credential login.
 		})
 
-		// Expect session login to be tried next and also fail
+	// Expect session login to be tried next and also fail
 	conn.EXPECT().
 		APICall(
+			gomock.Any(),
 			"Admin",
 			gomock.Any(),
 			gomock.Any(),
@@ -456,22 +485,23 @@ func (s *BaseCommandSuite) TestNewAPIRoot_OIDCLogin_TriesInOrder(c *gc.C) {
 			gomock.Any(),
 			gomock.Any(),
 		).
-		DoAndReturn(func(_ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
+		DoAndReturn(func(_ context.Context, _ string, _ int, _ string, _ string, _ interface{}, response interface{}) error {
 			return errors.New("session token unauthorised")
 		})
 
-	_, err := baseCmd.NewAPIRoot()
+	_, err := baseCmd.NewAPIRoot(c.Context())
 	// Expect an unauthorised error from the session token attempt.
-	c.Assert(err, gc.ErrorMatches, "session token unauthorised")
+	c.Assert(err, tc.ErrorMatches, "session token unauthorised")
 }
 
 type NewGetBootstrapConfigParamsFuncSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&NewGetBootstrapConfigParamsFuncSuite{})
-
-func (NewGetBootstrapConfigParamsFuncSuite) TestDetectCredentials(c *gc.C) {
+func TestNewGetBootstrapConfigParamsFuncSuite(t *testing.T) {
+	tc.Run(t, &NewGetBootstrapConfigParamsFuncSuite{})
+}
+func (s *NewGetBootstrapConfigParamsFuncSuite) TestDetectCredentials(c *tc.C) {
 	clientStore := jujuclient.NewMemStore()
 	clientStore.Controllers["foo"] = jujuclient.ControllerDetails{}
 	clientStore.BootstrapConfig["foo"] = jujuclient.BootstrapConfig{
@@ -491,12 +521,12 @@ func (NewGetBootstrapConfigParamsFuncSuite) TestDetectCredentials(c *gc.C) {
 		clientStore,
 		&registry,
 	)
-	_, params, err := f("foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(params.Cloud.Credential.Label, gc.Equals, "finalized")
+	_, spec, _, err := f("foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(spec.Credential.Label, tc.Equals, "finalized")
 }
 
-func (NewGetBootstrapConfigParamsFuncSuite) TestCloudCACert(c *gc.C) {
+func (s *NewGetBootstrapConfigParamsFuncSuite) TestCloudCACert(c *tc.C) {
 	fakeCert := coretesting.CACert
 	clientStore := jujuclient.NewMemStore()
 	clientStore.Controllers["foo"] = jujuclient.ControllerDetails{}
@@ -519,10 +549,10 @@ func (NewGetBootstrapConfigParamsFuncSuite) TestCloudCACert(c *gc.C) {
 		clientStore,
 		&registry,
 	)
-	_, params, err := f("foo")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(params.Cloud.CACertificates, jc.SameContents, []string{fakeCert})
-	c.Assert(params.Cloud.SkipTLSVerify, jc.IsTrue)
+	_, spec, _, err := f("foo")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(spec.CACertificates, tc.SameContents, []string{fakeCert})
+	c.Assert(spec.SkipTLSVerify, tc.IsTrue)
 }
 
 type mockProviderRegistry struct {
@@ -555,19 +585,21 @@ func (p *mockEnvironProvider) CredentialSchemas() map[cloud.AuthType]cloud.Crede
 }
 
 type OpenAPIFuncSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	store *jujuclient.MemStore
 }
 
-var _ = gc.Suite(&OpenAPIFuncSuite{})
+func TestOpenAPIFuncSuite(t *testing.T) {
+	tc.Run(t, &OpenAPIFuncSuite{})
+}
 
-func (s *OpenAPIFuncSuite) SetUpTest(c *gc.C) {
+func (s *OpenAPIFuncSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
 	s.store = jujuclient.NewMemStore()
 }
 
-func (s *OpenAPIFuncSuite) TestOpenAPIFunc(c *gc.C) {
+func (s *OpenAPIFuncSuite) TestOpenAPIFunc(c *tc.C) {
 	var (
 		expected = &api.Info{
 			Password:  "meshuggah",
@@ -575,55 +607,55 @@ func (s *OpenAPIFuncSuite) TestOpenAPIFunc(c *gc.C) {
 		}
 		received *api.Info
 	)
-	origin := func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	origin := func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		received = info
 		return nil, nil
 	}
 	openFunc := modelcmd.OpenAPIFuncWithMacaroons(origin, s.store, "foo")
-	_, err := openFunc(expected, api.DialOpts{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(received, jc.DeepEquals, expected)
+	_, err := openFunc(c.Context(), expected, api.DialOpts{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(received, tc.DeepEquals, expected)
 }
 
-func (s *OpenAPIFuncSuite) TestOpenAPIFuncWithNoPassword(c *gc.C) {
+func (s *OpenAPIFuncSuite) TestOpenAPIFuncWithNoPassword(c *tc.C) {
 	var (
 		expected = &api.Info{
 			Macaroons: []macaroon.Slice{{}},
 		}
 		received *api.Info
 	)
-	origin := func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	origin := func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		received = info
 		return nil, nil
 	}
 	openFunc := modelcmd.OpenAPIFuncWithMacaroons(origin, s.store, "foo")
-	_, err := openFunc(expected, api.DialOpts{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(received, jc.DeepEquals, expected)
+	_, err := openFunc(c.Context(), expected, api.DialOpts{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(received, tc.DeepEquals, expected)
 }
 
-func (s *OpenAPIFuncSuite) TestOpenAPIFuncWithNoMacaroons(c *gc.C) {
+func (s *OpenAPIFuncSuite) TestOpenAPIFuncWithNoMacaroons(c *tc.C) {
 	var (
 		expected = &api.Info{
 			Password: "meshuggah",
 		}
 		received *api.Info
 	)
-	origin := func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	origin := func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		received = info
 		return nil, nil
 	}
 	openFunc := modelcmd.OpenAPIFuncWithMacaroons(origin, s.store, "foo")
-	_, err := openFunc(expected, api.DialOpts{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(received, jc.DeepEquals, expected)
+	_, err := openFunc(c.Context(), expected, api.DialOpts{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(received, tc.DeepEquals, expected)
 }
 
-func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStore(c *gc.C) {
-	mac, err := apitesting.NewMacaroon("id")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStore(c *tc.C) {
+	mac, err := jujutesting.NewMacaroon("id")
+	c.Assert(err, tc.ErrorIsNil)
 	jar, err := cookiejar.New(nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	addCookie(c, jar, mac, api.CookieURLFromHost("foo"))
 	s.store.CookieJars["foo"] = jar
@@ -635,23 +667,23 @@ func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStore(c *gc.C) {
 		}
 		received *api.Info
 	)
-	origin := func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	origin := func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		received = info
 		return nil, nil
 	}
 	openFunc := modelcmd.OpenAPIFuncWithMacaroons(origin, s.store, "foo")
-	_, err = openFunc(&api.Info{
+	_, err = openFunc(c.Context(), &api.Info{
 		ControllerUUID: "foo",
 	}, api.DialOpts{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(received, jc.DeepEquals, expected)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(received, tc.DeepEquals, expected)
 }
 
-func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStoreWithSNIHost(c *gc.C) {
-	mac, err := apitesting.NewMacaroon("id")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStoreWithSNIHost(c *tc.C) {
+	mac, err := jujutesting.NewMacaroon("id")
+	c.Assert(err, tc.ErrorIsNil)
 	jar, err := cookiejar.New(nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	addCookie(c, jar, mac, api.CookieURLFromHost("foo"))
 	s.store.CookieJars["foo"] = jar
@@ -664,22 +696,22 @@ func (s *OpenAPIFuncSuite) TestOpenAPIFuncUsesStoreWithSNIHost(c *gc.C) {
 		}
 		received *api.Info
 	)
-	origin := func(info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
+	origin := func(ctx context.Context, info *api.Info, dialOpts api.DialOpts) (api.Connection, error) {
 		received = info
 		return nil, nil
 	}
 	openFunc := modelcmd.OpenAPIFuncWithMacaroons(origin, s.store, "foo")
-	_, err = openFunc(&api.Info{
+	_, err = openFunc(c.Context(), &api.Info{
 		SNIHostName:    "foo",
 		ControllerUUID: "bar",
 	}, api.DialOpts{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(received, jc.DeepEquals, expected)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(received, tc.DeepEquals, expected)
 }
 
-func addCookie(c *gc.C, jar http.CookieJar, mac *macaroon.Macaroon, url *url.URL) {
+func addCookie(c *tc.C, jar http.CookieJar, mac *macaroon.Macaroon, url *url.URL) {
 	cookie, err := httpbakery.NewCookie(nil, macaroon.Slice{mac})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	cookie.Expires = time.Now().Add(time.Hour) // only persistent cookies are stored
 	jar.SetCookies(url, []*http.Cookie{cookie})
 }

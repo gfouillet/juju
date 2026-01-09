@@ -4,6 +4,7 @@
 package apiserver
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"io"
@@ -11,21 +12,16 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"golang.org/x/crypto/nacl/secretbox"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/apiserver/common"
-	coremacaroon "github.com/juju/juju/core/macaroon"
-	"github.com/juju/juju/environs"
+	internalhttp "github.com/juju/juju/apiserver/internal/http"
+	coreuser "github.com/juju/juju/core/user"
+	usererrors "github.com/juju/juju/domain/access/errors"
+	proxyerrors "github.com/juju/juju/domain/proxy/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internalmacaroon "github.com/juju/juju/internal/macaroon"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
-)
-
-const (
-	secretboxNonceLength = 24
-	secretboxKeyLength   = 32
 )
 
 // registerUserHandler is an http.Handler for the "/register" endpoint. This is
@@ -40,22 +36,30 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	if req.Method != "POST" {
 		err := sendError(w, errors.MethodNotAllowedf("unsupported method: %q", req.Method))
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
-	st, err := h.ctxt.stateForRequestUnauthenticated(req)
+
+	// TODO (stickupkid): Remove this nonsense, we should be able to get the
+	// domain services from the handler.
+	domainServices, err := h.ctxt.srv.shared.domainServicesGetter.ServicesForModel(req.Context(), h.ctxt.srv.shared.controllerModelUUID)
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
-	defer st.Release()
-	userTag, response, err := h.processPost(req, st.State)
+	userTag, response, err := h.processPost(
+		req,
+		domainServices.ModelInfo(),
+		domainServices.Proxy(),
+		domainServices.ControllerConfig(),
+		domainServices.Access(),
+	)
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
@@ -65,21 +69,21 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	m, err := h.ctxt.srv.localMacaroonAuthenticator.CreateLocalLoginMacaroon(req.Context(), userTag, httpbakery.RequestVersion(req))
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
-	cookie, err := httpbakery.NewCookie(coremacaroon.MacaroonNamespace, macaroon.Slice{m})
+	cookie, err := httpbakery.NewCookie(internalmacaroon.MacaroonNamespace, macaroon.Slice{m})
 	if err != nil {
 		if err := sendError(w, err); err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(req.Context(), "%v", err)
 		}
 		return
 	}
 	http.SetCookie(w, cookie)
 
-	if err := sendStatusAndJSON(w, http.StatusOK, response); err != nil {
-		logger.Errorf("%v", err)
+	if err := internalhttp.SendStatusAndJSON(w, http.StatusOK, response); err != nil {
+		logger.Errorf(req.Context(), "%v", err)
 	}
 }
 
@@ -101,133 +105,101 @@ func (h *registerUserHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 // NOTE(axw) it is important that the client and server choose their
 // own nonces, because reusing a nonce means that the key-stream can
 // be revealed.
-func (h *registerUserHandler) processPost(req *http.Request, st *state.State) (
+func (h *registerUserHandler) processPost(
+	req *http.Request,
+	modelInfoService ModelInfoService,
+	proxyService ProxyService,
+	controllerConfigService ControllerConfigService,
+	userService UserService,
+) (
 	names.UserTag, *params.SecretKeyLoginResponse, error,
 ) {
-
-	failure := func(err error) (names.UserTag, *params.SecretKeyLoginResponse, error) {
-		return names.UserTag{}, nil, err
-	}
-
 	data, err := io.ReadAll(req.Body)
 	if err != nil {
-		return failure(err)
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
 	var loginRequest params.SecretKeyLoginRequest
 	if err := json.Unmarshal(data, &loginRequest); err != nil {
-		return failure(err)
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
 
 	// Basic validation: ensure that the request contains a valid user tag,
 	// nonce, and ciphertext of the expected length.
 	userTag, err := names.ParseUserTag(loginRequest.User)
 	if err != nil {
-		return failure(err)
-	}
-	if len(loginRequest.Nonce) != secretboxNonceLength {
-		return failure(errors.NotValidf("nonce"))
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
 
-	// Decrypt the ciphertext with the user's secret key (if it has one).
-	user, err := st.User(userTag)
+	// Decrypt the ciphertext with the user's activation key (if it has one).
+	sealer, err := userService.SetPasswordWithActivationKey(req.Context(), coreuser.NameFromTag(userTag), loginRequest.Nonce, loginRequest.PayloadCiphertext)
 	if err != nil {
-		return failure(err)
-	}
-	if len(user.SecretKey()) != secretboxKeyLength {
-		return failure(errors.NotFoundf("secret key for user %q", user.Name()))
-	}
-	var key [secretboxKeyLength]byte
-	var nonce [secretboxNonceLength]byte
-	copy(key[:], user.SecretKey())
-	copy(nonce[:], loginRequest.Nonce)
-	payloadBytes, ok := secretbox.Open(nil, loginRequest.PayloadCiphertext, &nonce, &key)
-	if !ok {
-		// Cannot decrypt the ciphertext, which implies that the secret
-		// key specified by the client is invalid.
-		return failure(errors.NotValidf("secret key"))
-	}
-
-	// Unmarshal the request payload, which contains the new password to
-	// set for the user.
-	var requestPayload params.SecretKeyLoginRequestPayload
-	if err := json.Unmarshal(payloadBytes, &requestPayload); err != nil {
-		return failure(errors.Annotate(err, "cannot unmarshal payload"))
-	}
-	if err := user.SetPassword(requestPayload.Password); err != nil {
-		return failure(errors.Annotate(err, "setting new password"))
+		if errors.Is(err, usererrors.ActivationKeyNotValid) {
+			return names.UserTag{}, nil, errors.NotValidf("activation key")
+		} else if errors.Is(err, usererrors.ActivationKeyNotFound) {
+			return names.UserTag{}, nil, errors.NotFoundf("activation key")
+		}
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
 
 	// Respond with the CA-cert and password, encrypted again with the
-	// secret key.
-	responsePayload, err := h.getSecretKeyLoginResponsePayload(st, userTag)
+	// activation key.
+	responsePayload, err := h.getSecretKeyLoginResponsePayload(req.Context(), modelInfoService, proxyService, controllerConfigService)
 	if err != nil {
-		return failure(errors.Trace(err))
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
-	payloadBytes, err = json.Marshal(responsePayload)
+	payloadBytes, err := json.Marshal(responsePayload)
 	if err != nil {
-		return failure(errors.Trace(err))
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return failure(errors.Trace(err))
+	if _, err := rand.Read(loginRequest.Nonce); err != nil {
+		return names.UserTag{}, nil, errors.Trace(err)
+	}
+
+	// Seal the response payload with the user's activation key.
+	sealed, err := sealer.Seal(loginRequest.Nonce, payloadBytes)
+	if err != nil {
+		return names.UserTag{}, nil, errors.Trace(err)
 	}
 	response := &params.SecretKeyLoginResponse{
-		Nonce:             nonce[:],
-		PayloadCiphertext: secretbox.Seal(nil, payloadBytes, &nonce, &key),
+		Nonce:             loginRequest.Nonce,
+		PayloadCiphertext: sealed,
 	}
 	return userTag, response, nil
 }
 
-func getConnectorInfoer(model stateenvirons.Model) (environs.ConnectorInfo, error) {
-	configGetter := stateenvirons.EnvironConfigGetter{Model: model}
-	environ, err := common.EnvironFuncForModel(model, configGetter)()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if connInfo, ok := environ.(environs.ConnectorInfo); ok {
-		return connInfo, nil
-	}
-	return nil, errors.NotSupportedf("environ %q", environ.Config().Type())
-}
-
-// For testing.
-var GetConnectorInfoer = getConnectorInfoer
-
 // getSecretKeyLoginResponsePayload returns the information required by the
 // client to login to the controller securely.
 func (h *registerUserHandler) getSecretKeyLoginResponsePayload(
-	st *state.State, userTag names.UserTag,
+	ctx context.Context,
+	modelInfoService ModelInfoService,
+	proxyService ProxyService,
+	controllerConfigService ControllerConfigService,
 ) (*params.SecretKeyLoginResponsePayload, error) {
-	if !st.IsController() {
-		return nil, errors.New("state is not for a controller")
+	modelInfo, err := modelInfoService.GetModelInfo(ctx)
+	if err != nil {
+		return nil, internalerrors.Capture(err)
 	}
-	controllerConfig, err := st.ControllerConfig()
+	if !modelInfo.IsControllerModel {
+		return nil, internalerrors.Capture(errors.New("model is not a controller"))
+	}
+	controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	caCert, _ := controllerConfig.CACert()
 	payload := params.SecretKeyLoginResponsePayload{
 		CACert:         caCert,
-		ControllerUUID: st.ControllerUUID(),
+		ControllerUUID: controllerConfig.ControllerUUID(),
 	}
 
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	connInfo, err := GetConnectorInfoer(model)
-	if errors.Is(err, errors.NotSupported) { // Not all providers support this.
+	proxier, err := proxyService.GetConnectionProxyInfo(ctx)
+	if errors.Is(err, proxyerrors.ProxyInfoNotSupported) ||
+		errors.Is(err, proxyerrors.ProxyInfoNotFound) {
 		return &payload, nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return nil, errors.Trace(err)
 	}
-	proxier, err := connInfo.ConnectionProxyInfo()
-	if errors.Is(err, errors.NotFound) {
-		return &payload, nil
-	}
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+
 	if payload.ProxyConfig, err = params.NewProxy(proxier); err != nil {
 		return nil, errors.Trace(err)
 	}

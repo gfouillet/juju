@@ -4,49 +4,48 @@
 package kubernetes_test
 
 import (
+	stdtesting "testing"
 	"time"
 
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
-	provider "github.com/juju/juju/internal/provider/kubernetes"
+	"github.com/juju/juju/internal/provider/kubernetes"
 	"github.com/juju/juju/internal/provider/kubernetes/mocks"
 	k8swatcher "github.com/juju/juju/internal/provider/kubernetes/watcher"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
+
+func TestModelOperatorExternalSuite(t *stdtesting.T) {
+	tc.Run(t, &ModelOperatorExternalSuite{})
+}
 
 type ModelOperatorExternalSuite struct {
 	BaseSuite
 }
 
-var _ = gc.Suite(&ModelOperatorExternalSuite{})
-
-func (m *ModelOperatorExternalSuite) SetUpTest(c *gc.C) {
+func (m *ModelOperatorExternalSuite) SetUpTest(c *tc.C) {
 	m.BaseSuite.SetUpTest(c)
 }
 
-func (m *ModelOperatorExternalSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (m *ModelOperatorExternalSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	m.BaseSuite.mockDeployments = mocks.NewMockDeploymentInterface(ctrl)
 	return ctrl
 }
 
-func (m *ModelOperatorExternalSuite) setupBroker(c *gc.C) *gomock.Controller {
+func (m *ModelOperatorExternalSuite) setupBroker(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	m.clock = testclock.NewClock(time.Time{})
 
 	newK8sClientFunc, newK8sRestFunc := m.setupK8sRestClient(c, ctrl, "")
-	randomPrefixFunc := func() (string, error) {
-		return "", nil
-	}
 
 	watcherFn := k8swatcher.NewK8sWatcherFunc(func(i cache.SharedIndexInformer, n string, c jujuclock.Clock) (k8swatcher.KubernetesNotifyWatcher, error) {
 		return nil, errors.NewNotFound(nil, "undefined k8sWatcherFn")
@@ -57,14 +56,17 @@ func (m *ModelOperatorExternalSuite) setupBroker(c *gc.C) *gomock.Controller {
 	})
 
 	var err error
-	m.broker, err = provider.NewK8sBroker(testing.ControllerTag.Id(), m.k8sRestConfig, m.cfg, "", newK8sClientFunc, newK8sRestFunc,
-		watcherFn, stringsWatcherFn, randomPrefixFunc, m.clock)
+	m.broker, err = kubernetes.NewK8sBroker(
+		c.Context(), testing.ControllerTag.Id(), m.k8sRestConfig, m.cfg,
+		"", newK8sClientFunc, newK8sRestFunc, watcherFn,
+		stringsWatcherFn, m.clock,
+	)
 
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return ctrl
 }
 
-func (m *ModelOperatorExternalSuite) TestGetModelOperatorDeploymentImage(c *gc.C) {
+func (m *ModelOperatorExternalSuite) TestGetModelOperatorDeploymentImage(c *tc.C) {
 	defer m.setupMocks(c).Finish()
 	defer m.setupBroker(c).Finish()
 
@@ -87,7 +89,7 @@ func (m *ModelOperatorExternalSuite) TestGetModelOperatorDeploymentImage(c *gc.C
 	}
 
 	m.BaseSuite.mockDeployments.EXPECT().Get(gomock.Any(), modelOperatorName, metav1.GetOptions{}).Return(deployment, nil)
-	deploymentImage, err := m.BaseSuite.broker.GetModelOperatorDeploymentImage()
-	c.Assert(err, gc.IsNil)
-	c.Assert(deploymentImage, gc.Equals, imageName)
+	deploymentImage, err := m.BaseSuite.broker.GetModelOperatorDeploymentImage(c.Context())
+	c.Assert(err, tc.IsNil)
+	c.Assert(deploymentImage, tc.Equals, imageName)
 }

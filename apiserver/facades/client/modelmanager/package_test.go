@@ -3,14 +3,7 @@
 
 package modelmanager
 
-import (
-	stdtesting "testing"
-
-	"github.com/juju/juju/testing"
-)
-
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/common_mock.go github.com/juju/juju/apiserver/common BlockCheckerInterface
-
-func TestAll(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package modelmanager_test -destination common_mock_test.go github.com/juju/juju/apiserver/common BlockCheckerInterface
+//go:generate go run go.uber.org/mock/mockgen -typed -package modelmanager_test -destination domain_mock_test.go github.com/juju/juju/apiserver/common ControllerConfigService,BlockCommandService
+//go:generate go run go.uber.org/mock/mockgen -typed -package modelmanager_test -destination service_mock_test.go github.com/juju/juju/apiserver/facades/client/modelmanager ApplicationService,AccessService,SecretBackendService,ModelService,DomainServicesGetter,ModelDefaultsService,ModelInfoService,ModelConfigService,NetworkService,ModelDomainServices,MachineService,ModelAgentService,StatusService
+//go:generate go run go.uber.org/mock/mockgen -typed -package modelmanager_test -destination status_mock_test.go github.com/juju/juju/apiserver/facades/client/modelmanager ModelStatusAPI

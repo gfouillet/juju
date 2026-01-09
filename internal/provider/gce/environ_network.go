@@ -4,6 +4,7 @@
 package gce
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"path"
@@ -18,7 +19,6 @@ import (
 	"github.com/juju/juju/core/instance"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
@@ -31,11 +31,19 @@ const (
 	ErrAutoSubnetsInvalid = errors.ConstError("cannot use auto subnets")
 )
 
+const (
+	// firstNetInterface describes the first network interface index for Google
+	// Cloud.
+	// TODO(network): This might not always hold true, so an alternative must be
+	// reached.
+	firstNetInterface = 4
+)
+
 type subnetMap map[string]corenetwork.SubnetInfo
 
 // Subnets implements environs.NetworkingEnviron.
 func (e *environ) Subnets(
-	ctx context.ProviderCallContext, inst instance.Id, subnetIds []corenetwork.Id,
+	ctx context.Context, subnetIds []corenetwork.Id,
 ) ([]corenetwork.SubnetInfo, error) {
 	// In GCE all the subnets are in all AZs.
 	zones, err := e.zoneNames(ctx)
@@ -47,12 +55,7 @@ func (e *environ) Subnets(
 	for _, id := range subnetIds {
 		wantIDs.Add(id.String())
 	}
-	var results []corenetwork.SubnetInfo
-	if inst == instance.UnknownId {
-		results, err = e.getSubnets(ctx, wantIDs, zones)
-	} else {
-		results, err = e.getInstanceSubnets(ctx, inst, wantIDs, zones)
-	}
+	results, err := e.getSubnets(ctx, wantIDs, zones)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -107,12 +110,12 @@ func (env *environ) maybeUseAutoSubnets(requireAutoSubnets bool, cons constraint
 	return false, nil
 }
 
-func (env *environ) getPossibleInstanceSubnets(args environs.StartInstanceParams, allSubnets []*computepb.Subnetwork) ([][]corenetwork.Id, error) {
+func (env *environ) getPossibleInstanceSubnets(ctx context.Context, args environs.StartInstanceParams, allSubnets []*computepb.Subnetwork) ([][]corenetwork.Id, error) {
 	// Right now, we only return a single set of subnets to choose from,
 	// but we allow for it to change in the future if we support multi-nic vms.
 	// So the return result is [][]corenetwork.Id.
 	if args.Constraints.HasSpaces() {
-		validSubnets, err := common.GetValidSubnetZoneMap(args)
+		validSubnets, err := common.GetValidSubnetZoneMap(ctx, args)
 		if err != nil {
 			return nil, environs.ZoneIndependentError(err)
 		}
@@ -181,7 +184,7 @@ func (env *environ) getSubnetIDsFromPossible(allSubnets []*computepb.Subnetwork,
 	return subnetIds, nil
 }
 
-func (env *environ) subnetsForInstance(ctx context.ProviderCallContext, args environs.StartInstanceParams) (*string, []*computepb.Subnetwork, error) {
+func (env *environ) subnetsForInstance(ctx context.Context, args environs.StartInstanceParams) (*string, []*computepb.Subnetwork, error) {
 	vpcLink, autosubnets, err := env.getVpcInfo(ctx)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
@@ -193,7 +196,7 @@ func (env *environ) subnetsForInstance(ctx context.ProviderCallContext, args env
 
 	allSubnets, err := env.gce.NetworkSubnetworks(ctx, env.cloud.Region, *vpcLink)
 	if err != nil {
-		return nil, nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, nil, env.HandleCredentialError(ctx, err)
 	}
 
 	instPlacement, err := env.parsePlacement(args.Placement)
@@ -216,7 +219,7 @@ func (env *environ) subnetsForInstance(ctx context.ProviderCallContext, args env
 		return nil, nil, environs.ZoneIndependentError(ErrNoSubnets)
 	}
 
-	logger.Debugf("got %d subnets for vpc %q in region %q: %s", len(allSubnets), *vpcLink, env.cloud.Region)
+	logger.Debugf(ctx, "got %d subnets for vpc %q in region %q: %s", len(allSubnets), *vpcLink, env.cloud.Region)
 
 	// If no space constraints, just use placement subnet if specified.
 	if !args.Constraints.HasSpaces() && instPlacement.subnetSpec != "" {
@@ -229,7 +232,7 @@ func (env *environ) subnetsForInstance(ctx context.ProviderCallContext, args env
 	}
 
 	// Gather the viable subnets from the superset for the VPC being used.
-	possibleSubnets, err := env.getPossibleInstanceSubnets(args, allSubnets)
+	possibleSubnets, err := env.getPossibleInstanceSubnets(ctx, args, allSubnets)
 	if err != nil {
 		return nil, nil, environs.ZoneIndependentError(err)
 	}
@@ -261,7 +264,7 @@ func (env *environ) subnetsForInstance(ctx context.ProviderCallContext, args env
 	return vpcLink, result, nil
 }
 
-func (e *environ) zoneNames(ctx context.ProviderCallContext) ([]string, error) {
+func (e *environ) zoneNames(ctx context.Context) ([]string, error) {
 	zones, err := e.AvailabilityZones(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -275,10 +278,10 @@ func (e *environ) zoneNames(ctx context.ProviderCallContext) ([]string, error) {
 
 type networkMap map[string]*computepb.Network
 
-func (e *environ) networksByURL(ctx context.ProviderCallContext) (networkMap, error) {
+func (e *environ) networksByURL(ctx context.Context) (networkMap, error) {
 	networks, err := e.gce.Networks(ctx)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	results := make(networkMap)
 	for _, network := range networks {
@@ -288,7 +291,7 @@ func (e *environ) networksByURL(ctx context.ProviderCallContext) (networkMap, er
 }
 
 func (e *environ) getSubnets(
-	ctx context.ProviderCallContext, subnetIds set.Strings, zones []string,
+	ctx context.Context, subnetIds set.Strings, zones []string,
 ) ([]corenetwork.SubnetInfo, error) {
 	// If subnets ids are specified, we'll load those, else fetch all subnets.
 	// In the latter case, if a VPC is defined, use that to filter subnets,
@@ -303,7 +306,7 @@ func (e *environ) getSubnets(
 	if haveVPC {
 		network, err := e.gce.Network(ctx, vpcID)
 		if err != nil {
-			return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 		networks = networkMap{
 			network.GetSelfLink(): network,
@@ -311,7 +314,7 @@ func (e *environ) getSubnets(
 	} else {
 		networks, err = e.networksByURL(ctx)
 		if err != nil {
-			return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 	}
 
@@ -341,7 +344,7 @@ func (e *environ) getSubnets(
 	var allSubnets []*computepb.Subnetwork
 	if len(urls) > 0 {
 		if allSubnets, err = e.gce.Subnetworks(ctx, e.cloud.Region, urls...); err != nil {
-			return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 	}
 
@@ -369,31 +372,8 @@ func (e *environ) getSubnets(
 	return results, nil
 }
 
-func (e *environ) getInstanceSubnets(
-	ctx context.ProviderCallContext, inst instance.Id, subnetIds set.Strings, zones []string,
-) ([]corenetwork.SubnetInfo, error) {
-	ifLists, err := e.NetworkInterfaces(ctx, []instance.Id{inst})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	ifaces := ifLists[0]
-
-	var results []corenetwork.SubnetInfo
-	for _, iface := range ifaces {
-		if len(subnetIds) == 0 || subnetIds.Contains(string(iface.ProviderSubnetId)) {
-			results = append(results, makeSubnetInfo(
-				iface.ProviderSubnetId,
-				iface.ProviderNetworkId,
-				iface.PrimaryAddress().CIDR,
-				zones,
-			))
-		}
-	}
-	return results, nil
-}
-
 // NetworkInterfaces implements environs.NetworkingEnviron.
-func (e *environ) NetworkInterfaces(ctx context.ProviderCallContext, ids []instance.Id) ([]corenetwork.InterfaceInfos, error) {
+func (e *environ) NetworkInterfaces(ctx context.Context, ids []instance.Id) ([]corenetwork.InterfaceInfos, error) {
 	if len(ids) == 0 {
 		return nil, environs.ErrNoInstances
 	}
@@ -458,26 +438,30 @@ func (e *environ) NetworkInterfaces(ctx context.ProviderCallContext, ids []insta
 					continue
 				}
 
-				shadowAddrs = append(shadowAddrs,
-					corenetwork.NewMachineAddress(accessConf.GetNatIP(), corenetwork.WithScope(corenetwork.ScopePublic)).AsProviderAddress(),
-				)
+				shadowAddrs = append(shadowAddrs, corenetwork.NewMachineAddress(
+					ensureCIDRNotation(accessConf.GetNatIP()),
+					corenetwork.WithScope(corenetwork.ScopePublic),
+				).AsProviderAddress())
 			}
 
+			// interfaceName holds the expected interface name for this network
+			// interface. This value is determined through testing Ubuntu 24.04
+			// on Google Cloud with both VirtIO and gVNIC interfaces.
+			interfaceName := fmt.Sprintf("ens%d", firstNetInterface+i)
 			infos[idx] = append(infos[idx], corenetwork.InterfaceInfo{
 				DeviceIndex: i,
 				// The network interface has no id in GCE so it's
 				// identified by the machine's id + its name.
-				ProviderId:        corenetwork.Id(fmt.Sprintf("%s/%s", ids[idx], iface.GetName())),
-				ProviderSubnetId:  details.subnet,
-				ProviderNetworkId: details.network,
-				AvailabilityZones: copyStrings(zones),
-				InterfaceName:     iface.GetName(),
+				ProviderId:    corenetwork.Id(fmt.Sprintf("%s/%s", ids[idx], iface.GetName())),
+				InterfaceName: interfaceName,
 				Addresses: corenetwork.ProviderAddresses{corenetwork.NewMachineAddress(
-					iface.GetNetworkIP(),
+					ensureCIDRNotation(iface.GetNetworkIP()),
 					corenetwork.WithScope(corenetwork.ScopeCloudLocal),
 					corenetwork.WithCIDR(details.cidr),
 					corenetwork.WithConfigType(corenetwork.ConfigDHCP),
-				).AsProviderAddress()},
+				).AsProviderAddress(
+					corenetwork.WithProviderSubnetID(details.subnet),
+				)},
 				ShadowAddresses: shadowAddrs,
 				InterfaceType:   corenetwork.EthernetDevice,
 				Disabled:        false,
@@ -491,6 +475,20 @@ func (e *environ) NetworkInterfaces(ctx context.ProviderCallContext, ids []insta
 		err = environs.ErrPartialInstances
 	}
 	return infos, err
+}
+
+func ensureCIDRNotation(addr string) string {
+	subnet := strings.Split(addr, "/")
+	if len(subnet) == 2 {
+		return fmt.Sprintf("%s/%s", addr, subnet[1])
+	}
+	switch corenetwork.DeriveAddressType(addr) {
+	case corenetwork.IPv4Address:
+		return fmt.Sprintf("%s/32", addr)
+	case corenetwork.IPv6Address:
+		return fmt.Sprintf("%s/128", addr)
+	}
+	return addr
 }
 
 func getUniqueSubnetURLs(ids []instance.Id, insts []instances.Instance) (set.Strings, error) {
@@ -544,14 +542,14 @@ func findNetworkDetails(iface *computepb.NetworkInterface, subnets subnetMap, ne
 	return result, nil
 }
 
-func (e *environ) subnetsByURL(ctx context.ProviderCallContext, network *computepb.Network, urls []string, zones []string) (subnetMap, error) {
+func (e *environ) subnetsByURL(ctx context.Context, network *computepb.Network, urls []string, zones []string) (subnetMap, error) {
 	if len(urls) == 0 {
 		return make(map[string]corenetwork.SubnetInfo), nil
 	}
 	urlSet := set.NewStrings(urls...)
 	allSubnets, err := e.gce.Subnetworks(ctx, e.cloud.Region, urls...)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	results := make(map[string]corenetwork.SubnetInfo)
 	for _, subnet := range allSubnets {
@@ -570,32 +568,8 @@ func (e *environ) subnetsByURL(ctx context.ProviderCallContext, network *compute
 }
 
 // SupportsSpaces implements environs.NetworkingEnviron.
-func (e *environ) SupportsSpaces(ctx context.ProviderCallContext) (bool, error) {
+func (e *environ) SupportsSpaces() (bool, error) {
 	return true, nil
-}
-
-// AreSpacesRoutable implements environs.NetworkingEnviron.
-func (*environ) AreSpacesRoutable(ctx context.ProviderCallContext, space1, space2 *environs.ProviderSpaceInfo) (bool, error) {
-	return false, nil
-}
-
-// SuperSubnets implements environs.SuperSubnets
-func (e *environ) SuperSubnets(ctx context.ProviderCallContext) ([]string, error) {
-	vpcLink, _, err := e.getVpcInfo(ctx)
-	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
-	}
-	subnets, err := e.gce.Subnetworks(ctx, e.cloud.Region)
-	if err != nil {
-		return nil, err
-	}
-	var cidrs []string
-	for _, subnet := range subnets {
-		if vpcLink == nil || subnet.GetNetwork() == *vpcLink {
-			cidrs = append(cidrs, subnet.GetIpCidrRange())
-		}
-	}
-	return cidrs, nil
 }
 
 func copyStrings(items []string) []string {

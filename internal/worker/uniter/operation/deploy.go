@@ -4,11 +4,12 @@
 package operation
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
@@ -25,7 +26,6 @@ type deploy struct {
 
 	callbacks Callbacks
 	deployer  charm.Deployer
-	abort     <-chan struct{}
 }
 
 // String is part of the Operation interface.
@@ -47,7 +47,7 @@ func (d *deploy) String() string {
 // that the unit will be using it. If the supplied state indicates that a
 // hook was pending, that hook is recorded in the returned state.
 // Prepare is part of the Operation interface.
-func (d *deploy) Prepare(state State) (*State, error) {
+func (d *deploy) Prepare(ctx context.Context, state State) (*State, error) {
 	if err := d.checkAlreadyDone(state); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -55,7 +55,7 @@ func (d *deploy) Prepare(state State) (*State, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if err := d.deployer.Stage(info, d.abort); err != nil {
+	if err := d.deployer.Stage(ctx, info); err != nil {
 		return nil, errors.Trace(err)
 	}
 	// note: yes, this *should* be in Prepare, not Execute. Before we can safely
@@ -65,7 +65,7 @@ func (d *deploy) Prepare(state State) (*State, error) {
 	// race with a new application-charm-url change on the controller, and lead to
 	// failures on resume in which we try to obtain archive info for a charm that
 	// has already been removed from the controller.
-	if err := d.callbacks.SetCurrentCharm(d.charmURL); err != nil {
+	if err := d.callbacks.SetCurrentCharm(ctx, d.charmURL); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return d.getState(state, Pending), nil
@@ -74,7 +74,7 @@ func (d *deploy) Prepare(state State) (*State, error) {
 // Execute installs or upgrades the prepared charm, and preserves any hook
 // recorded in the supplied state.
 // Execute is part of the Operation interface.
-func (d *deploy) Execute(state State) (*State, error) {
+func (d *deploy) Execute(ctx context.Context, state State) (*State, error) {
 	if err := d.deployer.Deploy(); err == charm.ErrConflict {
 		return nil, NewDeployConflictError(d.charmURL)
 	} else if err != nil {
@@ -85,7 +85,7 @@ func (d *deploy) Execute(state State) (*State, error) {
 
 // Commit restores state for any interrupted hook, or queues an install or
 // upgrade-charm hook if no hook was interrupted.
-func (d *deploy) Commit(state State) (*State, error) {
+func (d *deploy) Commit(ctx context.Context, state State) (*State, error) {
 	change := &stateChange{
 		Kind: RunHook,
 	}

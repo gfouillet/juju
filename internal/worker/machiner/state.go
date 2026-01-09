@@ -4,8 +4,10 @@
 package machiner
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/machiner"
 	"github.com/juju/juju/core/life"
@@ -16,25 +18,25 @@ import (
 )
 
 type MachineAccessor interface {
-	Machine(names.MachineTag) (Machine, error)
+	Machine(context.Context, names.MachineTag) (Machine, error)
 }
 
 type Machine interface {
-	Refresh() error
+	Refresh(context.Context) error
 	Life() life.Value
-	EnsureDead() error
-	SetMachineAddresses(addresses []network.MachineAddress) error
-	SetStatus(machineStatus status.Status, info string, data map[string]interface{}) error
-	Watch() (watcher.NotifyWatcher, error)
-	SetObservedNetworkConfig(netConfig []params.NetworkConfig) error
+	EnsureDead(context.Context) error
+	SetMachineAddresses(ctx context.Context, addresses []network.MachineAddress) error
+	SetStatus(ctx context.Context, machineStatus status.Status, info string, data map[string]interface{}) error
+	Watch(context.Context) (watcher.NotifyWatcher, error)
+	SetObservedNetworkConfig(ctx context.Context, netConfig []params.NetworkConfig) error
 }
 
 type APIMachineAccessor struct {
-	State *machiner.State
+	State *machiner.Client
 }
 
-func (a APIMachineAccessor) Machine(tag names.MachineTag) (Machine, error) {
-	m, err := a.State.Machine(tag)
+func (a APIMachineAccessor) Machine(ctx context.Context, tag names.MachineTag) (Machine, error) {
+	m, err := a.State.Machine(ctx, tag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

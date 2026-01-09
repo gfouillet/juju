@@ -8,15 +8,15 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -122,7 +122,7 @@ func (c *showTaskCommand) Init(args []string) error {
 
 // Run issues the API call to get Actions by ID.
 func (c *showTaskCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 
 	shouldWatch := c.wait.Nanoseconds() >= 0
 	if shouldWatch {
-		result, err := fetchResult(api, c.requestedId)
+		result, err := fetchResult(ctx, api, c.requestedId)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -149,7 +149,7 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if shouldWatch {
-		logsWatcher, err = api.WatchActionProgress(c.requestedId)
+		logsWatcher, err = api.WatchActionProgress(ctx, c.requestedId)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -161,9 +161,9 @@ func (c *showTaskCommand) Run(ctx *cmd.Context) error {
 
 	var result actionapi.ActionResult
 	if shouldWatch {
-		result, err = GetActionResult(api, c.requestedId, c.clock, wait)
+		result, err = GetActionResult(ctx, api, c.requestedId, c.clock, wait)
 	} else {
-		result, err = fetchResult(api, c.requestedId)
+		result, err = fetchResult(ctx, api, c.requestedId)
 	}
 	close(actionDone)
 	if logsWatcher != nil {

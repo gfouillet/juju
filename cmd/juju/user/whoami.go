@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var whoAmIDetails = `
@@ -92,7 +91,7 @@ func formatWhoAmITabular(writer io.Writer, value interface{}) error {
 // Run implements Command.Run
 func (c *whoAmICommand) Run(ctx *cmd.Context) error {
 	controllerName, err := modelcmd.DetermineCurrentController(c.store)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return err
 	}
 	if err != nil {
@@ -100,11 +99,11 @@ func (c *whoAmICommand) Run(ctx *cmd.Context) error {
 		return nil
 	}
 	modelName, err := c.store.CurrentModel(controllerName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return err
 	}
 	userDetails, err := c.store.AccountDetails(controllerName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return err
 	}
 	if err != nil {
@@ -113,10 +112,7 @@ func (c *whoAmICommand) Run(ctx *cmd.Context) error {
 	}
 	// Only qualify model name if there is a current model.
 	if modelName != "" {
-		if unqualifiedModelName, owner, err := jujuclient.SplitModelName(modelName); err == nil {
-			user := names.NewUserTag(userDetails.User)
-			modelName = common.OwnerQualifiedModelName(unqualifiedModelName, owner, user)
-		}
+		modelName = common.UserModelName(modelName, userDetails.User)
 	}
 
 	result := whoAmI{

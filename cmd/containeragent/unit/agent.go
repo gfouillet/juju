@@ -4,6 +4,7 @@
 package unit
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,43 +15,45 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/utils/v3/voyeur"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/agent/addons"
+	"github.com/juju/juju/agent/engine"
+	agenterrors "github.com/juju/juju/agent/errors"
 	"github.com/juju/juju/api/agent/uniter"
 	"github.com/juju/juju/api/base"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/constants"
 	"github.com/juju/juju/cmd/containeragent/utils"
-	"github.com/juju/juju/cmd/jujud/agent/agentconf"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
-	agenterrors "github.com/juju/juju/cmd/jujud/agent/errors"
+	"github.com/juju/juju/cmd/internal/agent/agentconf"
+	"github.com/juju/juju/core/flightrecorder"
+	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/paths"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
+	internaldependency "github.com/juju/juju/internal/dependency"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
-	jworker "github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/upgrade"
+	"github.com/juju/juju/internal/upgrades"
+	internalworker "github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/introspection"
 	"github.com/juju/juju/internal/worker/logsender"
 	uniterworker "github.com/juju/juju/internal/worker/uniter"
-	"github.com/juju/juju/internal/worker/upgradesteps"
 	jnames "github.com/juju/juju/juju/names"
-	"github.com/juju/juju/upgrades"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var (
-	logger = loggo.GetLogger("juju.cmd.containeragent.unit")
+	logger = internallogger.GetLogger("juju.cmd.containeragent.unit")
 
 	jujuRun        = paths.JujuExec(paths.CurrentOS())
 	jujuIntrospect = paths.JujuIntrospect(paths.CurrentOS())
@@ -151,12 +154,16 @@ func (c *containerUnitAgent) Init(args []string) error {
 		}
 	}
 
-	c.runner = worker.NewRunner(worker.RunnerParams{
+	var err error
+	if c.runner, err = worker.NewRunner(worker.RunnerParams{
+		Name:          "containeragent",
 		IsFatal:       agenterrors.IsFatal,
 		MoreImportant: agenterrors.MoreImportant,
-		RestartDelay:  jworker.RestartDelay,
-		Logger:        logger,
-	})
+		RestartDelay:  internalworker.RestartDelay,
+		Logger:        internalworker.WrapLogger(logger),
+	}); err != nil {
+		return errors.Trace(err)
+	}
 
 	if err := ensureAgentConf(c.AgentConf); err != nil {
 		return errors.Annotate(err, "ensuring agent conf file")
@@ -178,7 +185,7 @@ func (c *containerUnitAgent) Init(args []string) error {
 
 	if err := introspection.WriteProfileFunctions(introspection.ProfileDir); err != nil {
 		// This isn't fatal, just annoying.
-		logger.Errorf("failed to write profile funcs: %v", err)
+		logger.Errorf(context.TODO(), "failed to write profile funcs: %v", err)
 	}
 	return nil
 }
@@ -254,16 +261,14 @@ func (c *containerUnitAgent) workers(sigTermCh chan os.Signal) (worker.Worker, e
 			return nil
 		})
 	}
-	localHub := pubsub.NewSimpleHub(&pubsub.SimpleHubConfig{
-		Logger: loggo.GetLogger("juju.localhub"),
-	})
 	agentConfig := c.AgentConf.CurrentConfig()
 	cfg := manifoldsConfig{
 		Agent:                   agent.APIHostPortsSetter{Agent: c},
 		LogSource:               c.bufferedLogger.Logs(),
 		LeadershipGuarantee:     30 * time.Second,
-		UpgradeStepsLock:        upgradesteps.NewLock(agentConfig),
+		UpgradeStepsLock:        upgrade.NewLock(agentConfig, jujuversion.Current),
 		PreUpgradeSteps:         upgrades.PreUpgradeSteps,
+		UpgradeSteps:            upgrades.PerformUpgradeSteps,
 		AgentConfigChanged:      c.configChangedVal,
 		ValidateMigration:       c.validateMigration,
 		PrometheusRegisterer:    c.prometheusRegistry,
@@ -275,7 +280,6 @@ func (c *containerUnitAgent) workers(sigTermCh chan os.Signal) (worker.Worker, e
 		Clock:                   c.clk,
 		CharmModifiedVersion:    c.CharmModifiedVersion(),
 		ContainerNames:          c.containerNames,
-		LocalHub:                localHub,
 		ColocatedWithController: c.colocatedWithController,
 		SignalCh:                sigTermCh,
 	}
@@ -283,13 +287,16 @@ func (c *containerUnitAgent) workers(sigTermCh chan os.Signal) (worker.Worker, e
 
 	metrics := engine.NewMetrics()
 	workerMetricsSink := metrics.ForModel(agentConfig.Model())
-	eng, err := dependency.NewEngine(engine.DependencyEngineConfig(workerMetricsSink))
+	eng, err := dependency.NewEngine(engine.DependencyEngineConfig(
+		workerMetricsSink,
+		internaldependency.WrapLogger(internallogger.GetLogger("juju.worker.dependency")),
+	))
 	if err != nil {
 		return nil, err
 	}
 	if err := dependency.Install(eng, manifolds); err != nil {
 		if err := worker.Stop(eng); err != nil {
-			logger.Errorf("while stopping engine with bad manifolds: %v", err)
+			logger.Errorf(context.TODO(), "while stopping engine with bad manifolds: %v", err)
 		}
 		return nil, err
 	}
@@ -298,21 +305,22 @@ func (c *containerUnitAgent) workers(sigTermCh chan os.Signal) (worker.Worker, e
 		Engine:             eng,
 		MachineLock:        c.machineLock,
 		PrometheusGatherer: c.prometheusRegistry,
+		FlightRecorder:     flightrecorder.NoopRecorder{},
 		WorkerFunc:         introspection.NewWorker,
 		Clock:              c.clk,
-		LocalHub:           localHub,
+		Logger:             logger.Child("introspection"),
 	}); err != nil {
 		// If the introspection worker failed to start, we just log error
 		// but continue. It is very unlikely to happen in the real world
 		// as the only issue is connecting to the abstract domain socket
 		// and the agent is controlled by the OS to only have one.
-		logger.Errorf("failed to start introspection worker: %v", err)
+		logger.Errorf(context.TODO(), "failed to start introspection worker: %v", err)
 	}
 	if err := addons.RegisterEngineMetrics(c.prometheusRegistry, metrics, eng, workerMetricsSink); err != nil {
 		// If the dependency engine metrics fail, continue on. This is unlikely
 		// to happen in the real world, but should't stop or bring down an
 		// agent.
-		logger.Errorf("failed to start the dependency engine metrics %v", err)
+		logger.Errorf(context.TODO(), "failed to start the dependency engine metrics %v", err)
 	}
 
 	return eng, nil
@@ -326,7 +334,7 @@ func (c *containerUnitAgent) Run(ctx *cmd.Context) (err error) {
 	machineLock, err := machinelock.New(machinelock.Config{
 		AgentName:   c.Tag().String(),
 		Clock:       c.clk,
-		Logger:      loggo.GetLogger("juju.machinelock"),
+		Logger:      internallogger.GetLogger("juju.machinelock"),
 		LogFilename: agent.MachineLockLogFilename(agentConfig),
 	})
 	// There will only be an error if the required configuration
@@ -344,7 +352,7 @@ func (c *containerUnitAgent) Run(ctx *cmd.Context) (err error) {
 	sigTermCh := make(chan os.Signal, 1)
 	signal.Notify(sigTermCh, syscall.SIGTERM)
 
-	err = c.runner.StartWorker("unit", func() (worker.Worker, error) {
+	err = c.runner.StartWorker(ctx, "unit", func(ctx context.Context) (worker.Worker, error) {
 		return c.workers(sigTermCh)
 	})
 	if err != nil {
@@ -356,19 +364,19 @@ func (c *containerUnitAgent) Run(ctx *cmd.Context) (err error) {
 
 // validateMigration is called by the migrationminion to help check
 // that the agent will be ok when connected to a new controller.
-func (c *containerUnitAgent) validateMigration(apiCaller base.APICaller) error {
+func (c *containerUnitAgent) validateMigration(ctx context.Context, apiCaller base.APICaller) error {
 	// TODO(mjs) - more extensive checks to come.
 	tag := c.CurrentConfig().Tag()
 	unitTag, ok := tag.(names.UnitTag)
 	if !ok {
 		return errors.NotValidf("expected a unit tag; got %q", tag)
 	}
-	facade := uniter.NewState(apiCaller, unitTag)
-	_, err := facade.Unit(unitTag)
+	facade := uniter.NewClient(apiCaller, unitTag)
+	_, err := facade.Unit(ctx, unitTag)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	model, err := facade.Model()
+	model, err := facade.Model(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -382,26 +390,26 @@ func (c *containerUnitAgent) validateMigration(apiCaller base.APICaller) error {
 }
 
 // AgentDone processes the error returned by an exiting agent.
-func AgentDone(logger loggo.Logger, err error) error {
+func AgentDone(logger corelogger.Logger, err error) error {
 	err = errors.Cause(err)
 	switch err {
-	case jworker.ErrTerminateAgent:
+	case internalworker.ErrTerminateAgent:
 		// These errors are swallowed here because we want to exit
 		// the agent process without error, to avoid the init system
 		// restarting us.
-		logger.Infof("agent terminating")
+		logger.Infof(context.TODO(), "agent terminating")
 		err = nil
 	}
-	if err == jworker.ErrRestartAgent {
+	if err == internalworker.ErrRestartAgent {
 		// This does not seem to happen for k8s units.
-		logger.Infof("agent restarting")
+		logger.Infof(context.TODO(), "agent restarting")
 	}
 	return err
 }
 
 func ensureAgentConf(ac agentconf.AgentConf) error {
 	templateConfigPath := path.Join(ac.DataDir(), k8sconstants.TemplateFileNameAgentConf)
-	logger.Debugf("template config path %s", templateConfigPath)
+	logger.Debugf(context.TODO(), "template config path %s", templateConfigPath)
 	config, err := agent.ReadConfig(templateConfigPath)
 	if err != nil {
 		return errors.Annotate(err, "reading template agent config file")
@@ -409,7 +417,7 @@ func ensureAgentConf(ac agentconf.AgentConf) error {
 
 	unitTag := config.Tag()
 	configPath := agent.ConfigPath(ac.DataDir(), unitTag)
-	logger.Debugf("config path %s", configPath)
+	logger.Debugf(context.TODO(), "config path %s", configPath)
 	// if the rendered configuration already exists, use that copy
 	// as it likely has updated api addresses or could have a newer password,
 	// otherwise we need to copy the template.

@@ -4,13 +4,13 @@
 package application
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
@@ -20,6 +20,7 @@ import (
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -123,7 +124,7 @@ func (c *UnitCommandBase) Init(args []string) error {
 		}
 	}
 	if len(c.Placement) > c.NumUnits {
-		logger.Warningf("%d unit(s) will be deployed, extra placement directives will be ignored", c.NumUnits)
+		logger.Warningf(context.TODO(), "%d unit(s) will be deployed, extra placement directives will be ignored", c.NumUnits)
 	}
 	return nil
 }
@@ -171,8 +172,8 @@ func (c *addUnitCommand) Init(args []string) error {
 	if err := cmd.CheckEmpty(args[1:]); err != nil {
 		return err
 	}
-	if err := c.validateArgsByModelType(); err != nil {
-		if !errors.IsNotFound(err) {
+	if err := c.validateArgsByModelType(context.TODO()); err != nil {
+		if !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 		c.unknownModel = true
@@ -181,15 +182,13 @@ func (c *addUnitCommand) Init(args []string) error {
 	return c.UnitCommandBase.Init(args)
 }
 
-func (c *addUnitCommand) validateArgsByModelType() error {
-	modelType, err := c.ModelType()
+func (c *addUnitCommand) validateArgsByModelType(ctx context.Context) error {
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
-	if modelType == model.CAAS {
-		if c.PlacementSpec != "" {
-			return errors.New("k8s models only support --num-units")
-		}
+	if modelType == model.CAAS && c.PlacementSpec != "" {
+		return errors.New("k8s models do not support placement directives")
 	}
 	return nil
 }
@@ -199,15 +198,15 @@ func (c *addUnitCommand) validateArgsByModelType() error {
 type applicationAddUnitAPI interface {
 	Close() error
 	ModelUUID() string
-	AddUnits(application.AddUnitsParams) ([]string, error)
-	ScaleApplication(application.ScaleApplicationParams) (params.ScaleApplicationResult, error)
+	AddUnits(context.Context, application.AddUnitsParams) ([]string, error)
+	ScaleApplication(context.Context, application.ScaleApplicationParams) (params.ScaleApplicationResult, error)
 }
 
-func (c *addUnitCommand) getAPI() (applicationAddUnitAPI, error) {
+func (c *addUnitCommand) getAPI(ctx context.Context) (applicationAddUnitAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -217,25 +216,25 @@ func (c *addUnitCommand) getAPI() (applicationAddUnitAPI, error) {
 // Run connects to the environment specified on the command line
 // and calls AddUnits for the given application.
 func (c *addUnitCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.getAPI()
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer apiclient.Close()
 
 	if c.unknownModel {
-		if err := c.validateArgsByModelType(); err != nil {
+		if err := c.validateArgsByModelType(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	modelType, err := c.ModelType()
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return err
 	}
 
 	if modelType == model.CAAS {
-		_, err = apiclient.ScaleApplication(application.ScaleApplicationParams{
+		_, err = apiclient.ScaleApplication(ctx, application.ScaleApplicationParams{
 			ApplicationName: c.ApplicationName,
 			ScaleChange:     c.NumUnits,
 			AttachStorage:   c.AttachStorage,
@@ -258,7 +257,7 @@ func (c *addUnitCommand) Run(ctx *cmd.Context) error {
 		}
 		c.Placement[i] = p
 	}
-	_, err = apiclient.AddUnits(application.AddUnitsParams{
+	_, err = apiclient.AddUnits(ctx, application.AddUnitsParams{
 		ApplicationName: c.ApplicationName,
 		NumUnits:        c.NumUnits,
 		Placement:       c.Placement,

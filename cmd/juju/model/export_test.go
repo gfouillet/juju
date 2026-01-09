@@ -4,14 +4,16 @@
 package model
 
 import (
+	"context"
+
 	jujuclock "github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewConfigCommandForTest returns a configCommand with the api
@@ -29,7 +31,7 @@ func NewConfigCommandForTest(api configCommandAPI) cmd.Command {
 func NewDefaultsCommandForTest(apiRoot api.Connection, dAPI defaultsCommandAPI, cAPI cloudAPI, store jujuclient.ClientStore) cmd.Command {
 	cmd := &defaultsCommand{
 		configBase:     defConfigBase,
-		newAPIRoot:     func() (api.Connection, error) { return apiRoot, nil },
+		newAPIRoot:     func(ctx context.Context) (api.Connection, error) { return apiRoot, nil },
 		newDefaultsAPI: func(caller base.APICallCloser) defaultsCommandAPI { return dAPI },
 		newCloudAPI:    func(caller base.APICallCloser) cloudAPI { return cAPI },
 	}
@@ -47,7 +49,7 @@ func NewRetryProvisioningCommandForTest(api RetryProvisioningAPI) cmd.Command {
 }
 
 // NewShowCommandForTest returns a ShowCommand with the api provided as specified.
-func NewShowCommandForTest(api ShowModelAPI, refreshFunc func(jujuclient.ClientStore, string) error, store jujuclient.ClientStore) cmd.Command {
+func NewShowCommandForTest(api ShowModelAPI, refreshFunc func(context.Context, jujuclient.ClientStore, string) error, store jujuclient.ClientStore) cmd.Command {
 	cmd := &showModelCommand{api: api}
 	cmd.SetClientStore(store)
 	cmd.SetModelRefresh(refreshFunc)
@@ -72,7 +74,7 @@ func NewDumpDBCommandForTest(api DumpDBAPI, store jujuclient.ClientStore) cmd.Co
 
 // NewExportBundleCommandForTest returns a ExportBundleCommand with the api provided as specified.
 func NewExportBundleCommandForTest(bundleAPI ExportBundleAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &exportBundleCommand{newAPIFunc: func() (ExportBundleAPI, error) {
+	cmd := &exportBundleCommand{newAPIFunc: func(ctx context.Context) (ExportBundleAPI, error) {
 		return bundleAPI, nil
 	}}
 	cmd.SetClientStore(store)
@@ -83,7 +85,7 @@ func NewExportBundleCommandForTest(bundleAPI ExportBundleAPI, store jujuclient.C
 func NewDestroyCommandForTest(
 	api DestroyModelAPI,
 	clk jujuclock.Clock,
-	refreshFunc func(jujuclient.ClientStore, string) error, store jujuclient.ClientStore,
+	refreshFunc func(context.Context, jujuclient.ClientStore, string) error, store jujuclient.ClientStore,
 ) cmd.Command {
 	cmd := &destroyCommand{
 		api:   api,
@@ -165,7 +167,7 @@ func NewModelGetConstraintsCommandForTest() cmd.Command {
 }
 
 // NewModelCredentialCommandForTest returns a ModelCredentialCommand with the api provided as specified.
-func NewModelCredentialCommandForTest(modelClient ModelCredentialAPI, cloudClient CloudAPI, rootFunc func() (base.APICallCloser, error), store jujuclient.ClientStore) cmd.Command {
+func NewModelCredentialCommandForTest(modelClient ModelCredentialAPI, cloudClient CloudAPI, rootFunc func(ctx context.Context) (base.APICallCloser, error), store jujuclient.ClientStore) cmd.Command {
 	cmd := &modelCredentialCommand{
 		newModelCredentialAPIFunc: func(root base.APICallCloser) ModelCredentialAPI {
 			return modelClient
@@ -174,70 +176,6 @@ func NewModelCredentialCommandForTest(modelClient ModelCredentialAPI, cloudClien
 			return cloudClient
 		},
 		newAPIRootFunc: rootFunc,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewAddBranchCommandForTest(api AddBranchCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &addBranchCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewAbortCommandForTest(api AbortCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &abortCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewCommitCommandForTest(api CommitCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &commitCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewTrackBranchCommandForTest(api TrackBranchCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &trackBranchCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewBranchCommandForTest(api BranchCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &branchCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewDiffCommandForTest(api DiffCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &diffCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewListCommitsCommandForTest(api CommitsCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &CommitsCommand{
-		api: api,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewShowCommitCommandForTest(api ShowCommitCommandAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &ShowCommitCommand{
-		api: api,
 	}
 	cmd.SetClientStore(store)
 	return modelcmd.Wrap(cmd)

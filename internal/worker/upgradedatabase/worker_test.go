@@ -1,637 +1,927 @@
-// Copyright 2019 Canonical Ltd.
+// Copyright 2023 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package upgradedatabase_test
+package upgradedatabase
 
 import (
-	"fmt"
+	"context"
+	stdtesting "testing"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/retry"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	"github.com/juju/worker/v3/workertest"
+	names "github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/agent"
-	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/internal/worker/upgradedatabase"
-	. "github.com/juju/juju/internal/worker/upgradedatabase/mocks"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/upgrades"
-	jujuversion "github.com/juju/juju/version"
+	coreagentbinary "github.com/juju/juju/core/agentbinary"
+	"github.com/juju/juju/core/arch"
+	coredatabase "github.com/juju/juju/core/database"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/testing"
+	upgrade "github.com/juju/juju/core/upgrade"
+	jujuversion "github.com/juju/juju/core/version"
+	watcher "github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/domain/schema"
+	domainupgrade "github.com/juju/juju/domain/upgrade"
+	upgradeerrors "github.com/juju/juju/domain/upgrade/errors"
+	databasetesting "github.com/juju/juju/internal/database/testing"
+	"github.com/juju/juju/internal/uuid"
 )
-
-var (
-	statusUpgrading = "upgrading database for " + jujuversion.Current.String()
-	statusWaiting   = "waiting on primary database upgrade for " + jujuversion.Current.String()
-	statusCompleted = fmt.Sprintf("database upgrade for %v completed", jujuversion.Current)
-	statusConfirmed = fmt.Sprintf("confirmed primary database upgrade for %s", jujuversion.Current.String())
-
-	logRunning = "running database upgrade for %v on mongodb primary"
-	logWaiting = "waiting for database upgrade on mongodb primary"
-)
-
-// baseSuite is embedded in both the worker and manifold tests.
-// Tests should not go on this suite directly.
-type baseSuite struct {
-	testing.IsolationSuite
-
-	logger *MockLogger
-}
-
-// ignoreLogging turns the suite's mock logger into a sink, with no validation.
-// Logs are still emitted via the test logger.
-func (s *baseSuite) ignoreLogging(c *gc.C) {
-	debugIt := func(message string, args ...interface{}) { logIt(c, loggo.DEBUG, message, args) }
-	infoIt := func(message string, args ...interface{}) { logIt(c, loggo.INFO, message, args) }
-	errorIt := func(message string, args ...interface{}) { logIt(c, loggo.ERROR, message, args) }
-
-	e := s.logger.EXPECT()
-	e.Debugf(gomock.Any(), gomock.Any()).AnyTimes().Do(debugIt)
-	e.Infof(gomock.Any(), gomock.Any()).AnyTimes().Do(infoIt)
-	e.Errorf(gomock.Any(), gomock.Any()).AnyTimes().Do(errorIt)
-}
-
-func logIt(c *gc.C, level loggo.Level, message string, args interface{}) {
-	var nArgs []interface{}
-	var ok bool
-	if nArgs, ok = args.([]interface{}); ok {
-		nArgs = append([]interface{}{level}, nArgs...)
-	} else {
-		nArgs = append([]interface{}{level}, args)
-	}
-
-	c.Logf("%s "+message, nArgs...)
-}
 
 type workerSuite struct {
 	baseSuite
+	databasetesting.DqliteSuite
 
-	lock        *MockLock
-	agent       *MockAgent
-	agentCfg    *MockConfig
-	cfgSetter   *MockConfigSetter
-	pool        *MockPool
-	clock       *MockClock
-	upgradeInfo *MockUpgradeInfo
-	watcher     *MockNotifyWatcher
+	upgradeUUID domainupgrade.UUID
+
+	upgradeService        *MockUpgradeService
+	controllerNodeService *MockControllerNodeService
 }
 
-var _ = gc.Suite(&workerSuite{})
-
-func (s *workerSuite) TestValidateConfig(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
-	cfg.Tag = names.NewControllerAgentTag("0")
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
-
-	cfg.UpgradeComplete = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.Tag = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.Agent = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.Logger = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.OpenState = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.PerformUpgrade = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.RetryStrategy = retry.CallArgs{}
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
-
-	cfg = s.getConfig()
-	cfg.Clock = nil
-	c.Check(cfg.Validate(), jc.Satisfies, errors.IsNotValid)
+func TestWorkerSuite(t *stdtesting.T) {
+	tc.Run(t, &workerSuite{})
 }
 
-func (s *workerSuite) TestNewLockSameVersionUnlocked(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
+func (s *workerSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := s.baseSuite.setupMocks(c)
 
-	s.agentCfg.EXPECT().UpgradedToVersion().Return(jujuversion.Current)
-	c.Assert(upgradedatabase.NewLock(s.agentCfg).IsUnlocked(), jc.IsTrue)
-}
+	s.upgradeUUID = domainupgrade.UUID(uuid.MustNewUUID().String())
+	s.upgradeService = NewMockUpgradeService(ctrl)
+	s.controllerNodeService = NewMockControllerNodeService(ctrl)
 
-func (s *workerSuite) TestNewLockOldVersionLocked(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.agentCfg.EXPECT().UpgradedToVersion().Return(version.Number{})
-	c.Assert(upgradedatabase.NewLock(s.agentCfg).IsUnlocked(), jc.IsFalse)
-}
-
-func (s *workerSuite) TestAlreadyCompleteNoWork(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.lock.EXPECT().IsUnlocked().Return(true)
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestAlreadyUpgradedNoWork(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.lock.EXPECT().IsUnlocked().Return(false)
-	s.agent.EXPECT().CurrentConfig().Return(s.agentCfg)
-	s.agentCfg.EXPECT().UpgradedToVersion().Return(jujuversion.Current)
-	s.lock.EXPECT().Unlock()
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryWatchForCompletionSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.expectUpgradeRequired(false)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	// Expect a watcher that will fire a change for the initial event
-	// and then a change for the watch loop.
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	changes := make(chan struct{}, 2)
-	changes <- struct{}{}
-	changes <- struct{}{}
-	s.watcher.EXPECT().Changes().Return(changes).MinTimes(1)
-
-	// Initial state is UpgradePending
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending)
-	// After the first change is retrieved from the channel above, we then say the upgrade is complete
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradeDBComplete)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusConfirmed)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.lock.EXPECT().Unlock().Do(func() {
-		close(finished)
+	c.Cleanup(func() {
+		s.upgradeService = nil
+		s.controllerNodeService = nil
+		s.upgradeUUID = domainupgrade.UUID("")
 	})
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryWatchForCompletionSuccessRunning(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.expectUpgradeRequired(false)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	// Expect a watcher that will fire a change for the initial event
-	// and then a change for the watch loop.
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	changes := make(chan struct{}, 2)
-	changes <- struct{}{}
-	changes <- struct{}{}
-	s.watcher.EXPECT().Changes().Return(changes).MinTimes(1)
-
-	// Initial state is UpgradePending
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending)
-	// After the first change is retrieved from the channel above,
-	// we then say the upgrade has moved on to running (non-db) steps.
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradeRunning)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusConfirmed)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.lock.EXPECT().Unlock().Do(func() {
-		close(finished)
-	})
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryWatchForCompletionTimeout(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.expectUpgradeRequired(false)
-
-	s.logger.EXPECT().Infof(logWaiting)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	// Expect a watcher that will fire a change for the initial event
-	// and then a change for the watch loop.
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-
-	// Have changes available for the first couple of loops, but later
-	// stop to allow timeout select case to fire for sure
-	changes := make(chan struct{}, 2)
-	changes <- struct{}{}
-	changes <- struct{}{}
-	s.watcher.EXPECT().Changes().Return(changes).AnyTimes()
-
-	timeout := make(chan time.Time, 1)
-	s.clock.EXPECT().After(10 * time.Minute).Return(timeout)
-
-	neverTimeout := make(chan time.Time)
-	s.clock.EXPECT().After(5 * time.Second).Return(neverTimeout).MaxTimes(1)
-
-	// Primary does not complete the upgrade.
-	// After we have gone to the upgrade pending state, trip the timeout.
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).AnyTimes()
-
-	// Don't timeout on first few check of status.
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending).Times(2)
-	s.upgradeInfo.EXPECT().Status().DoAndReturn(func() state.UpgradeStatus {
-		// We only care about queueing one in the buffer.
-		// Carry on if we're jammed up - we'll fail elsewhere.
-		select {
-		case timeout <- time.Now():
-		default:
-		}
-		return state.UpgradePending
-	}).AnyTimes()
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.pool.EXPECT().SetStatus("0", status.Error, statusUpgrading).Do(func(string, status.Status, string) {
-		close(finished)
-	})
-
-	// Note that UpgradeComplete is not unlocked.
-
-	cfg := s.getConfig()
-	cfg.Clock = s.clock
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.DirtyKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryButPrimaryFinished(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.expectUpgradeRequired(false)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	// Expect the watcher to be created, and then the Status is examined.
-	// If the status is already complete, there are no calls to the Changes for the watcher.
-
-	// Expect a watcher that will fire a change for the initial event
-	// and then a change for the watch loop.
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	// Primary already completed the upgrade.
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradeDBComplete)
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusConfirmed)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.lock.EXPECT().Unlock().Do(func() {
-		close(finished)
-	})
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryButBecomePrimary(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	// first IsPrimary is false
-	s.expectUpgradeRequired(false)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.pool.EXPECT().IsPrimary("0").DoAndReturn(func(_ interface{}) (bool, error) {
-		// The second isPrimary returns true and marks completion
-		close(finished)
-		return true, nil
-	})
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending)
-
-	// First clock.After returns the timeout clock
-	// After that, returns a clock to wait to re-check primary
-	timeout := make(chan time.Time, 1)
-	checkPrimary := make(chan time.Time, 1)
-	checkPrimary <- time.Now()
-	s.clock.EXPECT().After(10 * time.Minute).Return(timeout)
-	s.clock.EXPECT().After(5 * time.Second).Return(checkPrimary)
-
-	changes := make(chan struct{}, 1)
-	s.watcher.EXPECT().Changes().Return(changes)
-
-	cfg := s.getConfig()
-	cfg.Clock = s.clock
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.DirtyKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryButBecomePrimaryByError(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	// first IsPrimary is false
-	s.expectUpgradeRequired(false)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.pool.EXPECT().IsPrimary("0").DoAndReturn(func(_ interface{}) (bool, error) {
-		// The second isPrimary returns true and marks completion
-		close(finished)
-		return false, errors.New("Primary has changed")
-	})
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending)
-
-	// First clock.After returns the timeout clock
-	// After that, returns a clock to wait to re-check primary
-	timeout := make(chan time.Time, 1)
-	checkPrimary := make(chan time.Time, 1)
-	checkPrimary <- time.Now()
-	s.clock.EXPECT().After(10 * time.Minute).Return(timeout)
-	s.clock.EXPECT().After(5 * time.Second).Return(checkPrimary)
-
-	changes := make(chan struct{}, 1)
-	s.watcher.EXPECT().Changes().Return(changes)
-
-	cfg := s.getConfig()
-	cfg.Clock = s.clock
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.DirtyKill(c, w)
-}
-
-func (s *workerSuite) TestNotPrimaryButBecomePrimaryAfter2Checks(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	// first IsPrimary is false
-	s.expectUpgradeRequired(false)
-	// so is the second
-	s.pool.EXPECT().IsPrimary("0").Return(false, nil)
-
-	// We don't want to kill the worker while we are in the status observation
-	// loop, so we gate on this final expectation.
-	finished := make(chan struct{})
-	s.pool.EXPECT().IsPrimary("0").DoAndReturn(func(_ interface{}) (bool, error) {
-		// The third isPrimary returns true and marks completion
-		close(finished)
-		return true, nil
-	})
-
-	s.pool.EXPECT().SetStatus("0", status.Started, statusWaiting)
-
-	s.upgradeInfo.EXPECT().Watch().Return(s.watcher)
-	s.upgradeInfo.EXPECT().Refresh().Return(nil).MinTimes(1)
-	s.upgradeInfo.EXPECT().Status().Return(state.UpgradePending)
-
-	// First clock.After returns the timeout clock
-	// After that, returns a clock to wait to re-check primary
-	timeout := make(chan time.Time, 1)
-	checkPrimary := make(chan time.Time, 2)
-	checkPrimary <- time.Now()
-	checkPrimary <- time.Now()
-
-	s.clock.EXPECT().After(10 * time.Minute).Return(timeout)
-	s.clock.EXPECT().After(5 * time.Second).Return(checkPrimary).Times(2)
-
-	changes := make(chan struct{}, 1)
-	s.watcher.EXPECT().Changes().Return(changes)
-
-	cfg := s.getConfig()
-	cfg.Clock = s.clock
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	select {
-	case <-finished:
-	case <-time.After(testing.LongWait):
-	}
-	workertest.DirtyKill(c, w)
-}
-
-func (s *workerSuite) TestUpgradedSuccessFirst(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-	s.ignoreLogging(c)
-
-	s.expectUpgradeRequired(true)
-	s.expectExecution()
-
-	s.upgradeInfo.EXPECT().SetStatus(state.UpgradeDBComplete).Return(nil)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusUpgrading)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusCompleted)
-
-	s.lock.EXPECT().Unlock()
-
-	w, err := upgradedatabase.NewWorker(s.getConfig())
-	c.Assert(err, jc.ErrorIsNil)
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestUpgradedRetryThenSuccess(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.expectUpgradeRequired(true)
-	s.expectExecution()
-
-	s.logger.EXPECT().Infof(logRunning, jujuversion.Current)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusUpgrading)
-
-	cfg := s.getConfig()
-	msg := "database upgrade from %v to %v for %q failed (%s): %v"
-	s.logger.EXPECT().Errorf(msg, version.Number{}, jujuversion.Current, cfg.Tag, "will retry", gomock.Any())
-
-	s.pool.EXPECT().SetStatus("0", status.Error, statusUpgrading)
-
-	s.upgradeInfo.EXPECT().SetStatus(state.UpgradeDBComplete).Return(nil)
-	s.logger.EXPECT().Infof("database upgrade for %v completed successfully.", jujuversion.Current)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusCompleted)
-
-	s.lock.EXPECT().Unlock()
-
-	var failedOnce bool
-	cfg.PerformUpgrade = func(ver version.Number, targets []upgrades.Target, ctx func() upgrades.Context) error {
-		c.Check(ver, gc.Equals, version.Number{})
-		c.Check(targets, gc.DeepEquals, []upgrades.Target{upgrades.DatabaseMaster})
-
-		if !failedOnce {
-			failedOnce = true
-			return errors.New("boom")
-		}
-		return nil
-	}
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	workertest.CleanKill(c, w)
-}
-
-func (s *workerSuite) TestUpgradedRetryAllFailed(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	s.expectUpgradeRequired(true)
-	s.expectExecution()
-
-	s.logger.EXPECT().Infof(logRunning, jujuversion.Current)
-	s.pool.EXPECT().SetStatus("0", status.Started, statusUpgrading)
-
-	cfg := s.getConfig()
-	msg := "database upgrade from %v to %v for %q failed (%s): %v"
-	s.logger.EXPECT().Errorf(msg, version.Number{}, jujuversion.Current, cfg.Tag, "will retry", gomock.Any()).MinTimes(1)
-	s.logger.EXPECT().Errorf(msg, version.Number{}, jujuversion.Current, cfg.Tag, "giving up", gomock.Any())
-
-	s.pool.EXPECT().SetStatus("0", status.Error, statusUpgrading).MinTimes(1)
-
-	// Note that UpgradeComplete is not unlocked.
-
-	cfg.PerformUpgrade = func(ver version.Number, targets []upgrades.Target, ctx func() upgrades.Context) error {
-		c.Check(ver, gc.Equals, version.Number{})
-		c.Check(targets, gc.DeepEquals, []upgrades.Target{upgrades.DatabaseMaster})
-		return errors.New("boom")
-	}
-
-	w, err := upgradedatabase.NewWorker(cfg)
-	c.Assert(err, jc.ErrorIsNil)
-
-	workertest.DirtyKill(c, w)
-}
-
-func (s *workerSuite) getConfig() upgradedatabase.Config {
-	return upgradedatabase.Config{
-		UpgradeComplete: s.lock,
-		Tag:             names.NewMachineTag("0"),
-		Agent:           s.agent,
-		Logger:          s.logger,
-		OpenState:       func() (upgradedatabase.Pool, error) { return s.pool, nil },
-		PerformUpgrade:  func(version.Number, []upgrades.Target, func() upgrades.Context) error { return nil },
-		RetryStrategy:   retry.CallArgs{Clock: clock.WallClock, Delay: time.Millisecond, Attempts: 3},
-		Clock:           clock.WallClock,
-	}
-}
-
-func (s *workerSuite) setupMocks(c *gc.C) *gomock.Controller {
-	ctrl := gomock.NewController(c)
-
-	s.lock = NewMockLock(ctrl)
-	s.agent = NewMockAgent(ctrl)
-	s.agentCfg = NewMockConfig(ctrl)
-	s.cfgSetter = NewMockConfigSetter(ctrl)
-	s.logger = NewMockLogger(ctrl)
-	s.clock = NewMockClock(ctrl)
-	s.upgradeInfo = NewMockUpgradeInfo(ctrl)
-
-	s.pool = NewMockPool(ctrl)
-	s.pool.EXPECT().Close().Return(nil).MaxTimes(1)
-
-	s.watcher = NewMockNotifyWatcher(ctrl)
-	s.watcher.EXPECT().Stop().Return(nil).MaxTimes(1)
-
 	return ctrl
 }
 
-// expectUpgradeRequired sets expectations for a scenario where a database
-// upgrade needs to be run.
-// The input bool simulates whether we are running the primary MongoDB.
-func (s *workerSuite) expectUpgradeRequired(isPrimary bool) {
-	fromVersion := version.Number{}
+func (s *workerSuite) TestLockAlreadyUnlocked(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.lock.EXPECT().IsUnlocked().Return(false)
-	s.pool.EXPECT().IsPrimary("0").Return(isPrimary, nil)
-	s.agent.EXPECT().CurrentConfig().Return(s.agentCfg)
-	s.agentCfg.EXPECT().UpgradedToVersion().Return(fromVersion)
-	s.pool.EXPECT().EnsureUpgradeInfo("0", fromVersion, jujuversion.Current).Return(s.upgradeInfo, nil)
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	s.lock.EXPECT().IsUnlocked().Return(true)
+
+	w, err := NewUpgradeDatabaseWorker(s.getConfig())
+	c.Assert(err, tc.ErrorIsNil)
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
 }
 
-// expectExecution simply executes the mutator passed to ChangeConfig.
-// In this case it is worker.runUpgradeSteps.
-func (s *workerSuite) expectExecution() {
-	s.agent.EXPECT().ChangeConfig(gomock.Any()).DoAndReturn(func(f agent.ConfigMutator) error {
-		return f(s.cfgSetter)
+func (s *workerSuite) TestLockIsUnlockedIfMatchingVersions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	s.lock.EXPECT().IsUnlocked().Return(false)
+	s.lock.EXPECT().Unlock()
+
+	cfg := s.getConfig()
+	cfg.FromVersion = jujuversion.Current
+	cfg.ToVersion = jujuversion.Current
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestWatchUpgradeCompleted(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	chCompleted := make(chan struct{})
+	chFailed := make(chan struct{})
+
+	completedWatcher := watchertest.NewMockNotifyWatcher(chCompleted)
+	defer workertest.DirtyKill(c, completedWatcher)
+
+	failedWatcher := watchertest.NewMockNotifyWatcher(chFailed)
+	defer workertest.DirtyKill(c, failedWatcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and ensure it's not in an error state.
+	//  - Watch for the upgrade to be completed.
+	//  - Watch for the upgrade to be failed, but do not act upon it.
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(upgrade.Info{State: upgrade.Created}, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").Return(nil)
+
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.DBCompleted).Return(completedWatcher, nil)
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
+
+	done := make(chan struct{})
+
+	// We expect the lock to be unlocked when the upgrade completes.
+	s.lock.EXPECT().Unlock().DoAndReturn(func() {
+		defer close(done)
 	})
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, chCompleted)
+	s.dispatchChange(c, chFailed)
+
+	s.dispatchChange(c, chCompleted)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestWatchUpgradeCompletedErrorSetControllerReady(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	chCompleted := make(chan struct{})
+	chFailed := make(chan struct{})
+
+	completedWatcher := watchertest.NewMockNotifyWatcher(chCompleted)
+	defer workertest.DirtyKill(c, completedWatcher)
+
+	failedWatcher := watchertest.NewMockNotifyWatcher(chFailed)
+	defer workertest.DirtyKill(c, failedWatcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and ensure it's not in an error state.
+	//  - Set controller ready, but fails.
+	//  - Set upgrade failed, so it causes everyone else to bounce.
+
+	done := make(chan struct{})
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(upgrade.Info{State: upgrade.Created}, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").Return(errors.Errorf("boom"))
+	srv.SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID) error {
+		defer close(done)
+		return nil
+	})
+
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.DBCompleted).Return(completedWatcher, nil)
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, chCompleted)
+	s.dispatchChange(c, chFailed)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrBounce)
+}
+
+func (s *workerSuite) TestWatchUpgradeCompletedErrorSetControllerReadyError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	chCompleted := make(chan struct{})
+	chFailed := make(chan struct{})
+
+	completedWatcher := watchertest.NewMockNotifyWatcher(chCompleted)
+	defer workertest.DirtyKill(c, completedWatcher)
+
+	failedWatcher := watchertest.NewMockNotifyWatcher(chFailed)
+	defer workertest.DirtyKill(c, failedWatcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and ensure it's not in an error state.
+	//  - Set controller ready, but fails.
+	//  - Set upgrade failed also fails, which kills the worker causing manual intervention.
+
+	done := make(chan struct{})
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(upgrade.Info{State: upgrade.Created}, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").Return(errors.Errorf("boom"))
+	srv.SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID) error {
+		defer close(done)
+		return errors.Errorf("boom")
+	})
+
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.DBCompleted).Return(completedWatcher, nil)
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).Return(failedWatcher, nil)
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, chCompleted)
+	s.dispatchChange(c, chFailed)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, nil)
+}
+
+func (s *workerSuite) TestWatchUpgradeCompletedNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and returns not found.
+	//  - Cause the worker to bounce.
+
+	done := make(chan struct{})
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID) (upgrade.Info, error) {
+		defer close(done)
+		return upgrade.Info{State: upgrade.Created}, upgradeerrors.NotFound
+	})
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrBounce)
+}
+
+func (s *workerSuite) TestWatchUpgradeCompletedInErrorState(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and ensure it's not in an error state.
+	//  - Stop the worker, requires manual intervention.
+
+	done := make(chan struct{})
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID) (upgrade.Info, error) {
+		defer close(done)
+		return upgrade.Info{State: upgrade.Error}, nil
+	})
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, nil)
+}
+
+func (s *workerSuite) TestWatchUpgradeFailed(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	chCompleted := make(chan struct{})
+	chFailed := make(chan struct{})
+
+	completedWatcher := watchertest.NewMockNotifyWatcher(chCompleted)
+	defer workertest.DirtyKill(c, completedWatcher)
+
+	failedWatcher := watchertest.NewMockNotifyWatcher(chFailed)
+	defer workertest.DirtyKill(c, failedWatcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade.
+	//  - Get the upgrade info and ensure it's not in an error state.
+	//  - Watch for the upgrade to be completed.
+	//  - Watch for the upgrade to be failed, but do not act upon it.
+	//  - Ensure that we _don't_ unlock the lock.
+
+	sync := make(chan struct{})
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, nil)
+	srv.UpgradeInfo(gomock.Any(), s.upgradeUUID).Return(upgrade.Info{State: upgrade.Created}, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").Return(nil)
+
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.DBCompleted).Return(completedWatcher, nil)
+	srv.WatchForUpgradeState(gomock.Any(), s.upgradeUUID, upgrade.Error).DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID, state upgrade.State) (watcher.Watcher[struct{}], error) {
+		defer close(sync)
+		return failedWatcher, nil
+	})
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, chCompleted)
+	s.dispatchChange(c, chFailed)
+
+	select {
+	case <-sync:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for watcher to respond")
+	}
+
+	s.dispatchChange(c, chFailed)
+
+	// Wait for the events to be consumed.
+	<-time.After(time.Second)
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrBounce)
+}
+
+func (s *workerSuite) TestWatchUpgradeError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.DirtyKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade, but it's already started.
+	//  - Get the active upgrade, but it doesn't exist.
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(domainupgrade.UUID(""), upgradeerrors.AlreadyExists)
+	srv.ActiveUpgrade(gomock.Any()).Return(s.upgradeUUID, upgradeerrors.NotFound)
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrBounce)
+}
+
+func (s *workerSuite) TestUpgradeController(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.DirtyKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade.
+	//  - Set the controller ready for upgrade.
+	//  - Wait for the upgrade to be ready. This means, all the controller nodes
+	//    are synced and ready to be upgraded.
+	//  - Start the upgrade, we're the leader.
+	//  - Upgrade the controller db.
+	//  - Set the db upgrade complete.
+	//  - Unlock the lock.
+
+	s.expectStartUpgrade(cfg.FromVersion, cfg.ToVersion, watcher)
+
+	// Controller upgrade.
+	s.expectControllerDBUpgrade()
+
+	// Model upgrade (there are no models).
+	s.upgradeService.EXPECT().GetAllModelUUIDs(gomock.Any()).Return(nil, nil)
+
+	s.expectDBCompleted()
+	done := s.expectUnlock()
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, ch)
+	s.dispatchChange(c, ch)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestUpgradeControllerThatIsAlreadyUpgraded(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.DirtyKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade.
+	//  - Set the controller ready for upgrade.
+	//  - Wait for the upgrade to be ready. This means, all the controller nodes
+	//    are synced and ready to be upgraded.
+	//  - Start the upgrade, we're the leader.
+	//  - Upgrade the controller db.
+	//  - Set the db upgrade complete.
+	//  - Unlock the lock.
+
+	s.expectStartUpgrade(cfg.FromVersion, cfg.ToVersion, watcher)
+
+	// Controller upgrade.
+	//  - Upgrade the controller db and re-run the upgrades to ensure that they
+	//    don't break in the worker.
+
+	schema := schema.ControllerDDL()
+	_, err := schema.Ensure(c.Context(), s.TxnRunner())
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.expectControllerDBUpgrade()
+
+	// Model upgrade (there are no models).
+	s.upgradeService.EXPECT().GetAllModelUUIDs(gomock.Any()).Return(nil, nil)
+
+	s.expectDBCompleted()
+	done := s.expectUnlock()
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, ch)
+	s.dispatchChange(c, ch)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestUpgradeModels(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.DirtyKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade.
+	//  - Set the controller ready for upgrade.
+	//  - Wait for the upgrade to be ready. This means, all the controller nodes
+	//    are synced and ready to be upgraded.
+	//  - Start the upgrade, we're the leader.
+	//  - Upgrade the controller db.
+	//  - Upgrade all the model dbs.
+	//  - Set the db upgrade complete.
+	//  - Unlock the lock.
+
+	s.expectStartUpgrade(cfg.FromVersion, cfg.ToVersion, watcher)
+
+	// Controller upgrade.
+	s.expectControllerDBUpgrade()
+
+	// Model upgrade.
+	modelUUID := tc.Must(c, coremodel.NewUUID)
+	s.upgradeService.EXPECT().GetAllModelUUIDs(gomock.Any()).Return(
+		[]coremodel.UUID{modelUUID}, nil,
+	)
+	s.expectModelDBUpgrade(c, modelUUID)
+
+	s.expectDBCompleted()
+	done := s.expectUnlock()
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, ch)
+	s.dispatchChange(c, ch)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestUpgradeModelsThatIsAlreadyUpgraded(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.CheckKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade.
+	//  - Set the controller ready for upgrade.
+	//  - Wait for the upgrade to be ready. This means, all the controller nodes
+	//    are synced and ready to be upgraded.
+	//  - Start the upgrade, we're the leader.
+	//  - Upgrade the controller db.
+	//  - Upgrade all the model dbs.
+	//  - Set the db upgrade complete.
+	//  - Unlock the lock.
+
+	s.expectStartUpgrade(cfg.FromVersion, cfg.ToVersion, watcher)
+
+	// Controller upgrade.
+	s.expectControllerDBUpgrade()
+
+	// Model upgrade.
+	modelUUID := tc.Must(c, coremodel.NewUUID)
+	s.upgradeService.EXPECT().GetAllModelUUIDs(gomock.Any()).Return(
+		[]coremodel.UUID{modelUUID}, nil,
+	)
+	txnRunner := s.expectModelDBUpgrade(c, modelUUID)
+
+	// Run the upgrade steps on the existing model, to ensure it doesn't break
+	// in the worker.
+	schema := schema.ModelDDL()
+	_, err := schema.Ensure(c.Context(), txnRunner)
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.expectDBCompleted()
+	done := s.expectUnlock()
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, ch)
+	s.dispatchChange(c, ch)
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for unlock")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, dependency.ErrUninstall)
+}
+
+func (s *workerSuite) TestUpgradeFailsWhenKilled(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	)
+
+	// Ensure that the update hasn't already happened.
+	s.lock.EXPECT().IsUnlocked().Return(false)
+
+	cfg := s.getConfig()
+
+	ch := make(chan struct{})
+
+	watcher := watchertest.NewMockNotifyWatcher(ch)
+	defer workertest.CheckKill(c, watcher)
+
+	// Walk through the upgrade process:
+	//  - Create Upgrade.
+	//  - Watch for the upgrade ready
+	//  - Dispatch the initial event.
+	//  - Set the controller ready, but kill the worker at the same time.
+	//  - Ensure that kill the worker also sets the upgrade to failed.
+
+	done := make(chan struct{})
+	kill := make(chan worker.Worker)
+
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), cfg.FromVersion, cfg.ToVersion).Return(s.upgradeUUID, nil)
+	srv.WatchForUpgradeReady(gomock.Any(), s.upgradeUUID).Return(watcher, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").DoAndReturn(func(ctx context.Context, uuid domainupgrade.UUID, controllerID string) error {
+		select {
+		case w := <-kill:
+			defer close(done)
+			w.Kill()
+		case <-time.After(testing.LongWait):
+			c.Fatalf("timed out waiting for kill")
+		}
+		return nil
+	})
+	srv.SetDBUpgradeFailed(gomock.Any(), s.upgradeUUID).Return(nil)
+
+	w, err := NewUpgradeDatabaseWorker(cfg)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
+
+	// Dispatch the initial event.
+	s.dispatchChange(c, ch)
+
+	select {
+	case kill <- w:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for kill")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(testing.LongWait):
+		c.Fatalf("timed out waiting for done")
+	}
+
+	err = workertest.CheckKill(c, w)
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+// TestReportControllerNodeAgentVersionFails tests that the correct error type
+// is propagated.
+func (s *workerSuite) TestReportControllerNodeAgentVersionFails(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	settingError := errors.New("setting controller node agent version")
+	s.controllerNodeService.EXPECT().SetControllerNodeReportedAgentVersion(
+		gomock.Any(),
+		"0",
+		coreagentbinary.Version{
+			Number: jujuversion.Current,
+			Arch:   arch.HostArch(),
+		},
+	).Return(settingError)
+
+	w, err := NewUpgradeDatabaseWorker(s.getConfig())
+	c.Assert(err, tc.ErrorIsNil)
+
+	err = workertest.CheckKill(c, w)
+	c.Check(err, tc.ErrorIs, settingError)
+}
+
+func (s *workerSuite) getConfig() Config {
+	return Config{
+		DBUpgradeCompleteLock: s.lock,
+		Agent:                 s.agent,
+		Logger:                s.logger,
+		Clock:                 clock.WallClock,
+		UpgradeService:        s.upgradeService,
+		ControllerNodeService: s.controllerNodeService,
+		DBGetter:              s.dbGetter,
+		FromVersion:           semversion.MustParse("3.0.0"),
+		ToVersion:             semversion.MustParse("6.6.6"),
+		Tag:                   names.NewMachineTag("0"),
+	}
+}
+
+func (s *workerSuite) expectStartUpgrade(from, to semversion.Number, watcher watcher.NotifyWatcher) {
+	srv := s.upgradeService.EXPECT()
+	srv.CreateUpgrade(gomock.Any(), from, to).Return(s.upgradeUUID, nil)
+	srv.SetControllerReady(gomock.Any(), s.upgradeUUID, "0").Return(nil)
+	srv.WatchForUpgradeReady(gomock.Any(), s.upgradeUUID).Return(watcher, nil)
+	srv.StartUpgrade(gomock.Any(), s.upgradeUUID).Return(nil)
+}
+
+func (s *workerSuite) expectDBCompleted() {
+	srv := s.upgradeService.EXPECT()
+	srv.SetDBUpgradeCompleted(gomock.Any(), s.upgradeUUID).Return(nil)
+}
+
+func (s *workerSuite) expectControllerDBUpgrade() {
+	s.dbGetter.EXPECT().GetDB(gomock.Any(), coredatabase.ControllerNS).Return(s.TxnRunner(), nil)
+}
+
+func (s *workerSuite) expectModelDBUpgrade(c *tc.C, modelUUID coremodel.UUID) coredatabase.TxnRunner {
+	txnRunner, _ := s.OpenDB(c)
+	s.dbGetter.EXPECT().GetDB(gomock.Any(), modelUUID.String()).Return(txnRunner, nil)
+	return txnRunner
+}
+
+func (s *workerSuite) expectUnlock() chan struct{} {
+	done := make(chan struct{})
+	s.lock.EXPECT().Unlock().DoAndReturn(func() {
+		close(done)
+	})
+	return done
+}
+
+func (s *workerSuite) dispatchChange(c *tc.C, ch chan struct{}) {
+	// Send initial event.
+	select {
+	case ch <- struct{}{}:
+	case <-time.After(testing.ShortWait):
+		c.Fatalf("timed out waiting to enqueue change")
+	}
 }

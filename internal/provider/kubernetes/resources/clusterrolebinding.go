@@ -118,7 +118,7 @@ func (rb *ClusterRoleBinding) Ensure(
 
 	existing := ClusterRoleBinding{rb.client, rb.ClusterRoleBinding}
 	err := existing.Get(ctx)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return cleanups, errors.Annotatef(err, "getting existing cluster role binding %q", rb.Name)
 	}
 	doUpdate := err == nil

@@ -4,29 +4,28 @@
 package cloud
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/cert"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
+	"github.com/juju/utils/v4/cert"
 	"gopkg.in/yaml.v2"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/interact"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -86,8 +85,8 @@ A cloud definition file has the following YAML format:
 Cloud types for private clouds:
  - ` + "`lxd`" + `
  - ` + "`maas`" + `
- - ` + "`manual`" + `
  - ` + "`openstack`" + `
+ - ` + "`unmanaged`" + `
  - ` + "`vsphere`" + `
 
 Cloud types for public clouds:
@@ -124,8 +123,8 @@ const usageAddCloudExamples = `
 
 // AddCloudAPI - Implemented by cloudapi.Client.
 type AddCloudAPI interface {
-	AddCloud(jujucloud.Cloud, bool) error
-	AddCredential(tag string, credential jujucloud.Credential) error
+	AddCloud(context.Context, jujucloud.Cloud, bool) error
+	AddCredential(ctx context.Context, tag string, credential jujucloud.Credential) error
 	Close() error
 }
 
@@ -145,13 +144,11 @@ type AddCloudCommand struct {
 	// default it just calls the correct provider's Ping method.
 	Ping func(p environs.EnvironProvider, endpoint string) error
 
-	// CloudCallCtx contains context to be used for any cloud calls.
-	CloudCallCtx       *context.CloudCallContext
 	cloudMetadataStore CloudMetadataStore
 
 	// These attributes are used when adding a cloud to a controller.
 	credentialName  string
-	addCloudAPIFunc func() (AddCloudAPI, error)
+	addCloudAPIFunc func(ctx context.Context) (AddCloudAPI, error)
 
 	// Force holds whether user wants to force addition of the cloud.
 	Force bool
@@ -166,26 +163,24 @@ type AddCloudCommand struct {
 
 // NewAddCloudCommand returns a command to add cloud information.
 func NewAddCloudCommand(cloudMetadataStore CloudMetadataStore) cmd.Command {
-	cloudCallCtx := context.NewCloudCallContext(stdcontext.Background())
 	store := jujuclient.NewFileClientStore()
 	c := &AddCloudCommand{
 		OptionalControllerCommand: modelcmd.OptionalControllerCommand{
 			Store: store,
 		},
 		cloudMetadataStore: cloudMetadataStore,
-		CloudCallCtx:       cloudCallCtx,
 		// Ping is provider.Ping except in tests where we don't actually want to
 		// require a valid cloud.
 		Ping: func(p environs.EnvironProvider, endpoint string) error {
-			return p.Ping(cloudCallCtx, endpoint)
+			return p.Ping(context.Background(), endpoint)
 		},
 	}
 	c.addCloudAPIFunc = c.cloudAPI
 	return modelcmd.WrapBase(c)
 }
 
-func (c *AddCloudCommand) cloudAPI() (AddCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *AddCloudCommand) cloudAPI(ctx context.Context) (AddCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -289,7 +284,7 @@ func (c *AddCloudCommand) addCredentialToController(ctx *cmd.Context, cloud juju
 	}
 	cloudCredTag := names.NewCloudCredentialTag(id)
 
-	if err := apiClient.AddCredential(cloudCredTag.String(), *cred); err != nil {
+	if err := apiClient.AddCredential(ctx, cloudCredTag.String(), *cred); err != nil {
 		return errors.Trace(err)
 	}
 	return nil
@@ -349,12 +344,12 @@ func (c *AddCloudCommand) Run(ctxt *cmd.Context) error {
 func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.Cloud) error {
 	// A controller has been specified so upload the cloud details
 	// plus a corresponding credential to the controller.
-	api, err := c.addCloudAPIFunc()
+	api, err := c.addCloudAPIFunc(ctxt)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
-	err = api.AddCloud(*newCloud, c.Force)
+	err = api.AddCloud(ctxt, *newCloud, c.Force)
 	if err != nil {
 		if params.ErrCode(err) == params.CodeAlreadyExists {
 			ctxt.Infof("Cloud %q already exists on the controller %q.", c.Cloud, c.ControllerName)
@@ -364,7 +359,7 @@ func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.
 			return nil
 		}
 		if params.ErrCode(err) == params.CodeIncompatibleClouds {
-			logger.Infof("%v", err)
+			logger.Infof(context.TODO(), "%v", err)
 			ctxt.Infof("Adding a cloud of type %q might not function correctly on this controller.\n"+
 				"If you really want to do this, use --force.", newCloud.Type)
 			return nil
@@ -375,7 +370,7 @@ func (c *AddCloudCommand) addRemoteCloud(ctxt *cmd.Context, newCloud *jujucloud.
 	// Add a credential for the newly added cloud.
 	err = c.addCredentialToController(ctxt, *newCloud, api)
 	if err != nil {
-		logger.Warningf("%v", err)
+		logger.Warningf(context.TODO(), "%v", err)
 		ctxt.Infof("To upload a credential to the controller for cloud %q, use \n"+
 			"* 'add-model' with --credential option or\n"+
 			"* 'add-credential -c %v'.", newCloud.Name, newCloud.Name)
@@ -468,15 +463,6 @@ func (c *AddCloudCommand) runInteractive(ctxt *cmd.Context) (*jujucloud.Cloud, e
 		return nil, errors.Trace(err)
 	}
 
-	// At this stage, since we do not have a reference to any model, nor can we get it,
-	// nor do we need to have a model for anything that this command does,
-	// no cloud credential stored server-side can be invalidated.
-	// So, just log an informative message.
-	c.CloudCallCtx.InvalidateCredentialFunc = func(reason string) error {
-		ctxt.Infof("Cloud credential is not accepted by cloud provider: %v", reason)
-		return nil
-	}
-
 	// VerifyURLs will return true if a schema format type jsonschema.FormatURI is used
 	// and the value will Ping().
 	pollster.VerifyURLs = func(s string) (bool, string, error) {
@@ -511,7 +497,7 @@ func (c *AddCloudCommand) runInteractive(ctxt *cmd.Context) (*jujucloud.Cloud, e
 
 	filename, alt, err := addCertificate(b)
 	switch {
-	case errors.IsNotFound(err):
+	case errors.Is(err, errors.NotFound):
 	case err != nil:
 		return nil, errors.Annotate(err, "CA Certificate")
 	default:
@@ -758,7 +744,7 @@ func (p *CloudFileReader) ReadCloudFromFile(cloudFile string, ctxt *cmd.Context)
 		}
 	}
 	if err := p.verifyName(p.CloudName); err != nil {
-		if !errors.IsAlreadyExists(err) {
+		if !errors.Is(err, errors.AlreadyExists) {
 			return nil, errors.Trace(err)
 		}
 		p.alreadyExists = true

@@ -21,16 +21,16 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/retry"
-	"github.com/juju/utils/v3"
-	"github.com/juju/version/v2"
+	"github.com/juju/utils/v4"
 
-	"github.com/juju/juju/container/lxd"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/utils/proxy"
+	"github.com/juju/juju/internal/container/lxd"
+	proxy "github.com/juju/juju/internal/proxy/config"
 )
 
 // Server defines an interface of all localized methods that the environment
@@ -51,7 +51,6 @@ type Server interface {
 	ContainerAddresses(name string) ([]network.ProviderAddress, error)
 	RemoveContainer(name string) error
 	RemoveContainers(names []string) error
-	FilterContainers(prefix string, statuses ...string) ([]lxd.Container, error)
 	CreateContainerFromSpec(spec lxd.ContainerSpec) (*lxd.Container, error)
 	WriteContainer(*lxd.Container) error
 	CreateProfileWithConfig(string, map[string]string) error
@@ -71,15 +70,15 @@ type Server interface {
 	GetStoragePoolVolume(pool string, volType string, name string) (*lxdapi.StorageVolume, string, error)
 	GetStoragePoolVolumes(pool string) (volumes []lxdapi.StorageVolume, err error)
 	CreateVolume(pool, name string, config map[string]string) error
-	UpdateStoragePoolVolume(pool string, volType string, name string, volume lxdapi.StorageVolumePut, ETag string) error
-	DeleteStoragePoolVolume(pool string, volType string, name string) (err error)
+	UpdateStoragePoolVolume(pool string, volType string, name string, volume lxdapi.StorageVolumePut, ETag string) (lxdclient.Operation, error)
+	DeleteStoragePoolVolume(pool string, volType string, name string) (lxdclient.Operation, error)
 	ServerCertificate() string
 	HostArch() string
 	SupportedArches() []string
 	EnableHTTPSListener() error
 	GetNICsFromProfile(profName string) (map[string]map[string]string, error)
 	IsClustered() bool
-	UseTargetServer(name string) (*lxd.Server, error)
+	UseTargetServer(ctx context.Context, name string) (*lxd.Server, error)
 	GetClusterMembers() (members []lxdapi.ClusterMember, err error)
 	Name() string
 	HasExtension(extension string) (exists bool)
@@ -191,7 +190,7 @@ func (s *serverFactory) LocalServer() (Server, error) {
 	// bootstrap a new local server, this ensures that all connections to and
 	// from the local server are connected and setup correctly.
 	var hostName string
-	svr, hostName, err = s.bootstrapLocalServer(svr)
+	svr, hostName, err = s.bootstrapLocalServer(context.TODO(), svr)
 	if err == nil {
 		s.localServer = svr
 		s.localServerAddress = hostName
@@ -238,7 +237,7 @@ func (s *serverFactory) RemoteServer(spec CloudSpec) (Server, error) {
 		svr.UseProject(spec.Project)
 	}
 
-	return svr, errors.Trace(s.bootstrapRemoteServer(svr))
+	return svr, errors.Trace(s.bootstrapRemoteServer(context.TODO(), svr))
 }
 
 func (s *serverFactory) InsecureRemoteServer(spec CloudSpec) (Server, error) {
@@ -291,7 +290,7 @@ func (s *serverFactory) initLocalServer() (Server, error) {
 	return svr, nil
 }
 
-func (s *serverFactory) bootstrapLocalServer(svr Server) (Server, string, error) {
+func (s *serverFactory) bootstrapLocalServer(ctx context.Context, svr Server) (Server, string, error) {
 	// select the server bridge name, so that we can then try and select
 	// the hostAddress from the current interfaceAddress
 	bridgeName := svr.LocalBridgeName()
@@ -349,19 +348,19 @@ func (s *serverFactory) bootstrapLocalServer(svr Server) (Server, string, error)
 
 	// If the server is not a simple simple stream server, don't check the
 	// API version, but do report for other scenarios
-	if err := s.validateServer(svr); err != nil {
+	if err := s.validateServer(ctx, svr); err != nil {
 		return nil, "", errors.Trace(err)
 	}
 
 	return svr, hostAddress, nil
 }
 
-func (s *serverFactory) bootstrapRemoteServer(svr Server) error {
-	err := s.validateServer(svr)
+func (s *serverFactory) bootstrapRemoteServer(ctx context.Context, svr Server) error {
+	err := s.validateServer(ctx, svr)
 	return errors.Trace(err)
 }
 
-func (s *serverFactory) validateServer(svr Server) error {
+func (s *serverFactory) validateServer(ctx context.Context, svr Server) error {
 	// If the storage API is supported, let's make sure the LXD has a
 	// default pool; we'll just use dir backend for now.
 	if svr.StorageSupported() {
@@ -383,10 +382,10 @@ func (s *serverFactory) validateServer(svr Server) error {
 		return errors.Trace(err)
 	}
 	if err != nil {
-		logger.Warningf(err.Error())
-		logger.Warningf("trying to use unsupported LXD API version %q", apiVersion)
+		logger.Warningf(ctx, err.Error())
+		logger.Warningf(ctx, "trying to use unsupported LXD API version %q", apiVersion)
 	} else {
-		logger.Tracef("using LXD API version %q", apiVersion)
+		logger.Tracef(ctx, "using LXD API version %q", apiVersion)
 	}
 
 	return nil
@@ -400,24 +399,24 @@ func (s *serverFactory) Clock() clock.Clock {
 }
 
 // parseAPIVersion parses the LXD API version string.
-func parseAPIVersion(s string) (version.Number, error) {
+func parseAPIVersion(s string) (semversion.Number, error) {
 	versionParts := strings.Split(s, ".")
 	if len(versionParts) < 2 {
-		return version.Zero, errors.NewNotValid(nil, fmt.Sprintf("LXD API version %q: expected format <major>.<minor>", s))
+		return semversion.Zero, errors.NewNotValid(nil, fmt.Sprintf("LXD API version %q: expected format <major>.<minor>", s))
 	}
 	major, err := strconv.Atoi(versionParts[0])
 	if err != nil {
-		return version.Zero, errors.NotValidf("major version number  %v", versionParts[0])
+		return semversion.Zero, errors.NotValidf("major version number  %v", versionParts[0])
 	}
 	minor, err := strconv.Atoi(versionParts[1])
 	if err != nil {
-		return version.Zero, errors.NotValidf("minor version number  %v", versionParts[1])
+		return semversion.Zero, errors.NotValidf("minor version number  %v", versionParts[1])
 	}
-	return version.Number{Major: major, Minor: minor}, nil
+	return semversion.Number{Major: major, Minor: minor}, nil
 }
 
 // minLXDVersion defines the min version of LXD we support.
-var minLXDVersion = version.Number{Major: 5, Minor: 0}
+var minLXDVersion = semversion.Number{Major: 5, Minor: 0}
 
 // ValidateAPIVersion validates the LXD version.
 func ValidateAPIVersion(version string) error {
@@ -425,7 +424,7 @@ func ValidateAPIVersion(version string) error {
 	if err != nil {
 		return err
 	}
-	logger.Tracef("current LXD version %q, min LXD version %q", ver, minLXDVersion)
+	logger.Tracef(context.TODO(), "current LXD version %q, min LXD version %q", ver, minLXDVersion)
 	if ver.Compare(minLXDVersion) < 0 {
 		return errors.NewNotSupported(nil,
 			fmt.Sprintf("LXD version has to be at least %q, but current version is only %q", minLXDVersion, ver),

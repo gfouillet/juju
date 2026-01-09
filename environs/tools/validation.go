@@ -4,12 +4,12 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/version/v2"
-
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs/simplestreams"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // ToolsMetadataLookupParams is used to query metadata for matching tools.
@@ -22,7 +22,7 @@ type ToolsMetadataLookupParams struct {
 
 // ValidateToolsMetadata attempts to load tools metadata for the specified cloud attributes and returns
 // any tools versions found, or an error if the metadata could not be loaded.
-func ValidateToolsMetadata(ss SimplestreamsFetcher, params *ToolsMetadataLookupParams) ([]string, *simplestreams.ResolveInfo, error) {
+func ValidateToolsMetadata(ctx context.Context, ss SimplestreamsFetcher, params *ToolsMetadataLookupParams) ([]string, *simplestreams.ResolveInfo, error) {
 	if len(params.Sources) == 0 {
 		return nil, nil, fmt.Errorf("required parameter sources not specified")
 	}
@@ -41,7 +41,7 @@ func ValidateToolsMetadata(ss SimplestreamsFetcher, params *ToolsMetadataLookupP
 			Arches:   params.Architectures,
 		})
 	} else {
-		versNum, err := version.Parse(params.Version)
+		versNum, err := semversion.Parse(params.Version)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -55,7 +55,7 @@ func ValidateToolsMetadata(ss SimplestreamsFetcher, params *ToolsMetadataLookupP
 			Arches:   params.Architectures,
 		})
 	}
-	matchingTools, resolveInfo, err := Fetch(ss, params.Sources, toolsConstraint)
+	matchingTools, resolveInfo, err := Fetch(ctx, ss, params.Sources, toolsConstraint)
 	if err != nil {
 		return nil, resolveInfo, err
 	}
@@ -64,8 +64,8 @@ func ValidateToolsMetadata(ss SimplestreamsFetcher, params *ToolsMetadataLookupP
 	}
 	versions := make([]string, len(matchingTools))
 	for i, tm := range matchingTools {
-		vers := version.Binary{
-			Number:  version.MustParse(tm.Version),
+		vers := semversion.Binary{
+			Number:  semversion.MustParse(tm.Version),
 			Release: tm.Release,
 			Arch:    tm.Arch,
 		}

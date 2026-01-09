@@ -4,105 +4,124 @@
 package caasapplicationprovisioner_test
 
 import (
+	"testing"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	dt "github.com/juju/worker/v4/dependency/testing"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/caas"
+	agentpasswordservice "github.com/juju/juju/domain/agentpassword/service"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	modelconfigservice "github.com/juju/juju/domain/modelconfig/service"
+	resourceservice "github.com/juju/juju/domain/resource/service"
+	statusservice "github.com/juju/juju/domain/status/service"
+	storageprovisioningservice "github.com/juju/juju/domain/storageprovisioning/service"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/caasapplicationprovisioner"
+	"github.com/juju/juju/internal/worker/caasapplicationprovisioner/mocks"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	config caasapplicationprovisioner.ManifoldConfig
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
-
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
-	s.IsolationSuite.SetUpTest(c)
-	s.config = s.validConfig()
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
 }
 
-func (s *ManifoldSuite) validConfig() caasapplicationprovisioner.ManifoldConfig {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
+	s.IsolationSuite.SetUpTest(c)
+	s.config = s.validConfig(c)
+}
+
+func (s *ManifoldSuite) validConfig(c *tc.C) caasapplicationprovisioner.ManifoldConfig {
 	return caasapplicationprovisioner.ManifoldConfig{
-		APICallerName: "api-caller",
-		BrokerName:    "broker",
-		ClockName:     "clock",
+		APICallerName:      "api-caller",
+		BrokerName:         "broker",
+		ClockName:          "clock",
+		DomainServicesName: "domain-services",
 		NewWorker: func(config caasapplicationprovisioner.Config) (worker.Worker, error) {
 			return nil, nil
 		},
-		Logger: loggo.GetLogger("test"),
+		Logger: loggertesting.WrapCheckLog(c),
 	}
 }
 
-func (s *ManifoldSuite) TestValid(c *gc.C) {
-	c.Check(s.config.Validate(), jc.ErrorIsNil)
+func (s *ManifoldSuite) TestValid(c *tc.C) {
+	c.Check(s.config.Validate(), tc.ErrorIsNil)
 }
 
-func (s *ManifoldSuite) TestMissingAPICallerName(c *gc.C) {
+func (s *ManifoldSuite) TestMissingAPICallerName(c *tc.C) {
 	s.config.APICallerName = ""
 	s.checkNotValid(c, "empty APICallerName not valid")
 }
 
-func (s *ManifoldSuite) TestMissingBrokerName(c *gc.C) {
+func (s *ManifoldSuite) TestMissingDomainServicesName(c *tc.C) {
+	s.config.DomainServicesName = ""
+	s.checkNotValid(c, "empty DomainServicesName not valid")
+}
+
+func (s *ManifoldSuite) TestMissingBrokerName(c *tc.C) {
 	s.config.BrokerName = ""
 	s.checkNotValid(c, "empty BrokerName not valid")
 }
 
-func (s *ManifoldSuite) TestMissingClockName(c *gc.C) {
+func (s *ManifoldSuite) TestMissingClockName(c *tc.C) {
 	s.config.ClockName = ""
 	s.checkNotValid(c, "empty ClockName not valid")
 }
 
-func (s *ManifoldSuite) TestMissingNewWorker(c *gc.C) {
+func (s *ManifoldSuite) TestMissingNewWorker(c *tc.C) {
 	s.config.NewWorker = nil
 	s.checkNotValid(c, "nil NewWorker not valid")
 }
 
-func (s *ManifoldSuite) TestMissingLogger(c *gc.C) {
+func (s *ManifoldSuite) TestMissingLogger(c *tc.C) {
 	s.config.Logger = nil
 	s.checkNotValid(c, "nil Logger not valid")
 }
 
-func (s *ManifoldSuite) checkNotValid(c *gc.C, expect string) {
+func (s *ManifoldSuite) checkNotValid(c *tc.C, expect string) {
 	err := s.config.Validate()
-	c.Check(err, gc.ErrorMatches, expect)
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
+	c.Check(err, tc.ErrorMatches, expect)
+	c.Check(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *ManifoldSuite) TestStart(c *gc.C) {
+func (s *ManifoldSuite) TestStart(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	mockDomainServices := mocks.NewMockModelDomainServices(ctrl)
+	mockDomainServices.EXPECT().Config().Return(&modelconfigservice.WatchableService{}).AnyTimes()
+	mockDomainServices.EXPECT().Application().Return(&applicationservice.WatchableService{}).AnyTimes()
+	mockDomainServices.EXPECT().Status().Return(&statusservice.LeadershipService{}).AnyTimes()
+	mockDomainServices.EXPECT().AgentPassword().Return(&agentpasswordservice.Service{}).AnyTimes()
+	mockDomainServices.EXPECT().Resource().Return(&resourceservice.Service{}).AnyTimes()
+	mockDomainServices.EXPECT().StorageProvisioning().Return(&storageprovisioningservice.Service{}).AnyTimes()
+
 	called := false
 	s.config.NewWorker = func(config caasapplicationprovisioner.Config) (worker.Worker, error) {
 		called = true
-		mc := jc.NewMultiChecker()
-		mc.AddExpr(`_.Facade`, gc.NotNil)
-		mc.AddExpr(`_.Broker`, gc.NotNil)
-		mc.AddExpr(`_.Clock`, gc.NotNil)
-		mc.AddExpr(`_.Logger`, gc.NotNil)
-		mc.AddExpr(`_.NewAppWorker`, gc.NotNil)
-		mc.AddExpr(`_.UnitFacade`, gc.NotNil)
-		c.Check(config, mc, caasapplicationprovisioner.Config{
-			ModelTag: names.NewModelTag("ffffffff-ffff-ffff-ffff-ffffffffffff"),
-		})
 		return nil, nil
 	}
 	manifold := caasapplicationprovisioner.Manifold(s.config)
-	w, err := manifold.Start(dt.StubContext(nil, map[string]interface{}{
-		"api-caller": struct{ base.APICaller }{&mockAPICaller{}},
-		"broker":     struct{ caas.Broker }{},
-		"clock":      struct{ clock.Clock }{},
+	w, err := manifold.Start(c.Context(), dt.StubGetter(map[string]any{
+		"api-caller":      struct{ base.APICaller }{&mockAPICaller{}},
+		"broker":          struct{ caas.Broker }{},
+		"clock":           struct{ clock.Clock }{},
+		"domain-services": mockDomainServices,
 	}))
-	c.Assert(w, gc.IsNil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(called, jc.IsTrue)
+	c.Assert(w, tc.IsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(called, tc.IsTrue)
 }
 
 type mockAPICaller struct {

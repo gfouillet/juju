@@ -16,50 +16,50 @@ import (
 	"github.com/juju/errors"
 	"gopkg.in/httprequest.v1"
 
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/rpc/params"
-	jujuversion "github.com/juju/juju/version"
 )
 
 // HTTPClient implements Connection.APICaller.HTTPClient and returns an HTTP
 // client pointing to the API server "/model/:uuid/" path.
-func (s *state) HTTPClient() (*httprequest.Client, error) {
-	apiPath, err := apiPath(s.modelTag.Id(), "/")
+func (c *conn) HTTPClient() (*httprequest.Client, error) {
+	apiPath, err := apiPath(c.modelTag.Id(), "/")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	url := s.Addr()
-	url.Scheme = s.serverScheme
+	url := c.Addr()
+	url.Scheme = c.serverScheme
 	url.Path = gopath.Join(url.Path, apiPath)
 
-	return s.httpClient(url)
+	return c.httpClient(url)
 }
 
 // RootHTTPClient implements Connection.APICaller.HTTPClient and returns an HTTP
 // client pointing to the API server root path.
-func (s *state) RootHTTPClient() (*httprequest.Client, error) {
-	url := s.Addr()
-	url.Scheme = s.serverScheme
-	return s.httpClient(url)
+func (c *conn) RootHTTPClient() (*httprequest.Client, error) {
+	url := c.Addr()
+	url.Scheme = c.serverScheme
+	return c.httpClient(url)
 }
 
-func (s *state) httpClient(baseURL *url.URL) (*httprequest.Client, error) {
-	if !s.isLoggedIn() {
+func (c *conn) httpClient(baseURL *url.URL) (*httprequest.Client, error) {
+	if !c.isLoggedIn() {
 		return nil, errors.New("no HTTP client available without logging in")
 	}
 	return &httprequest.Client{
 		BaseURL: baseURL.String(),
 		Doer: httpRequestDoer{
-			st: s,
+			c: c,
 		},
 		UnmarshalError: unmarshalHTTPErrorResponse,
 	}, nil
 }
 
 // httpRequestDoer implements httprequest.Doer and httprequest.DoerWithBody
-// by using httpbakery and the state to make authenticated requests to
+// by using httpbakery and the conn to make authenticated requests to
 // the API server.
 type httpRequestDoer struct {
-	st *state
+	c *conn
 }
 
 var _ httprequest.Doer = httpRequestDoer{}
@@ -68,11 +68,11 @@ var _ httprequest.Doer = httpRequestDoer{}
 func (doer httpRequestDoer) Do(req *http.Request) (*http.Response, error) {
 	if err := authHTTPRequest(
 		req,
-		doer.st.loginProvider,
+		doer.c.loginProvider,
 	); err != nil {
 		return nil, errors.Trace(err)
 	}
-	return doer.st.bakeryClient.DoWithCustomError(req, func(resp *http.Response) error {
+	return doer.c.bakeryClient.DoWithCustomError(req, func(resp *http.Response) error {
 		// At this point we are only interested in errors that
 		// the bakery cares about, and the CodeDischargeRequired
 		// error is the only one, and that always comes with a

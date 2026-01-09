@@ -4,15 +4,17 @@
 package application
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewResolvedCommand() cmd.Command {
@@ -76,15 +78,15 @@ func (c *resolvedCommand) Init(args []string) error {
 
 type applicationResolveAPI interface {
 	Close() error
-	ResolveUnitErrors(units []string, all, retry bool) error
+	ResolveUnitErrors(ctx context.Context, units []string, all, retry bool) error
 }
 
-func (c *resolvedCommand) getapplicationResolveAPI() (applicationResolveAPI, error) {
+func (c *resolvedCommand) getapplicationResolveAPI(ctx context.Context) (applicationResolveAPI, error) {
 	if c.applicationResolveAPI != nil {
 		return c.applicationResolveAPI, nil
 	}
 
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -92,11 +94,11 @@ func (c *resolvedCommand) getapplicationResolveAPI() (applicationResolveAPI, err
 }
 
 func (c *resolvedCommand) Run(ctx *cmd.Context) error {
-	applicationResolveAPI, err := c.getapplicationResolveAPI()
+	applicationResolveAPI, err := c.getapplicationResolveAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer applicationResolveAPI.Close()
 
-	return block.ProcessBlockedError(applicationResolveAPI.ResolveUnitErrors(c.UnitNames, c.All, !c.NoRetry), block.BlockChange)
+	return block.ProcessBlockedError(applicationResolveAPI.ResolveUnitErrors(ctx, c.UnitNames, c.All, !c.NoRetry), block.BlockChange)
 }

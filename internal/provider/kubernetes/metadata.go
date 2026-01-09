@@ -18,7 +18,6 @@ import (
 
 	"github.com/juju/juju/caas/kubernetes"
 	"github.com/juju/juju/environs"
-	environscontext "github.com/juju/juju/environs/context"
 	providerstorage "github.com/juju/juju/internal/provider/kubernetes/storage"
 )
 
@@ -53,7 +52,7 @@ func mergeSelectors(selectors ...k8slabels.Selector) k8slabels.Selector {
 		if selectable {
 			s = s.Add(rs...)
 		} else {
-			logger.Warningf("%v is not selectable", v)
+			logger.Warningf(context.TODO(), "%v is not selectable", v)
 		}
 	}
 	return s
@@ -101,16 +100,16 @@ func toCaaSStorageProvisioner(sc *storagev1.StorageClass) *kubernetes.StoragePro
 // ValidateCloudEndpoint returns nil if the current model can talk to the kubernetes
 // endpoint.  Used as validation during model upgrades.
 // Implements environs.CloudEndpointChecker
-func (k *kubernetesClient) ValidateCloudEndpoint(_ environscontext.ProviderCallContext) error {
-	_, err := k.GetClusterMetadata("")
+func (k *kubernetesClient) ValidateCloudEndpoint(ctx context.Context) error {
+	_, err := k.GetClusterMetadata(ctx, "")
 	return errors.Trace(err)
 }
 
 // GetClusterMetadata implements ClusterMetadataChecker. If a nominated storage
 // class is provided
-func (k *kubernetesClient) GetClusterMetadata(nominatedStorageClass string) (*kubernetes.ClusterMetadata, error) {
+func (k *kubernetesClient) GetClusterMetadata(ctx context.Context, nominatedStorageClass string) (*kubernetes.ClusterMetadata, error) {
 	return GetClusterMetadata(
-		context.TODO(),
+		ctx,
 		nominatedStorageClass,
 		k.client().CoreV1().Nodes(),
 		k.client().StorageV1().StorageClasses(),
@@ -134,17 +133,10 @@ func GetClusterMetadata(
 		return nil, errors.Annotate(err, "cannot determine cluster region")
 	}
 
-	// We may have the workload storage but still need to look for operator storage.
-	storageClasses, err := storageClassI.List(context.TODO(), v1.ListOptions{})
+	storageClasses, err := storageClassI.List(ctx, v1.ListOptions{})
 	if err != nil {
 		return nil, errors.Annotate(err, "listing storage classes")
 	}
-
-	preferredOperatorStorage := providerstorage.PreferredOperatorStorageForCloud(result.Cloud).Prepend(
-		&providerstorage.PreferredStorageNominated{
-			StorageClassName: nominatedStorageClass,
-		},
-	)
 
 	preferredWorkloadStorage := providerstorage.PreferredWorkloadStorageForCloud(result.Cloud).Prepend(
 		&providerstorage.PreferredStorageNominated{
@@ -153,19 +145,11 @@ func GetClusterMetadata(
 	)
 
 	var (
-		selectedOperatorSC *storagev1.StorageClass
 		selectedWorkloadSC *storagev1.StorageClass
-		operatorPriority   int
 		workloadPriority   int
 	)
 	for i, sc := range storageClasses.Items {
-		priority, matches := preferredOperatorStorage.Matches(&sc)
-		if matches && (priority < operatorPriority || selectedOperatorSC == nil) {
-			selectedOperatorSC = &storageClasses.Items[i]
-			operatorPriority = priority
-		}
-
-		priority, matches = preferredWorkloadStorage.Matches(&sc)
+		priority, matches := preferredWorkloadStorage.Matches(&sc)
 		if matches && (priority < workloadPriority || selectedWorkloadSC == nil) {
 			selectedWorkloadSC = &storageClasses.Items[i]
 			workloadPriority = priority
@@ -173,12 +157,6 @@ func GetClusterMetadata(
 	}
 
 	if nominatedStorageClass != "" {
-		if selectedOperatorSC == nil || selectedOperatorSC.Name != nominatedStorageClass {
-			return nil, &environs.NominatedStorageNotFound{
-				StorageName: nominatedStorageClass,
-			}
-		}
-
 		if selectedWorkloadSC == nil || selectedWorkloadSC.Name != nominatedStorageClass {
 			return nil, &environs.NominatedStorageNotFound{
 				StorageName: nominatedStorageClass,
@@ -186,7 +164,6 @@ func GetClusterMetadata(
 		}
 	}
 
-	result.OperatorStorageClass = selectedOperatorSC
 	result.WorkloadStorageClass = selectedWorkloadSC
 	return &result, nil
 }

@@ -5,19 +5,18 @@
 ## Summary
 Displays log messages for a model.
 
-## Usage
-```juju debug-log [options] ```
-
 ### Options
 | Flag | Default | Usage |
 | --- | --- | --- |
 | `-B`, `--no-browser-login` | false | Do not use web browser for authentication |
 | `--color` | false | Force use of ANSI color codes |
 | `--date` | false | Show dates as well as times |
-| `--exclude-label` |  | Do not show log messages for these logging labels |
+| `--exclude-labels` |  | Do not show log messages for these logging label key values |
 | `--exclude-module` |  | Do not show log messages for these logging modules |
+| `--firehose` | false | Show logs from all models |
+| `--format` | text | Specify output format (json&#x7c;text) |
 | `-i`, `--include` |  | Only show log messages for these entities |
-| `--include-label` |  | Only show log messages for these logging labels |
+| `--include-labels` |  | Only show log messages for these logging label key values |
 | `--include-module` |  | Only show log messages for these logging modules |
 | `-l`, `--level` |  | Log level to show, one of [TRACE, DEBUG, INFO, WARNING, ERROR] |
 | `--limit` | 0 | Show this many of the most recent logs and then exit |
@@ -26,6 +25,7 @@ Displays log messages for a model.
 | `--ms` | false | Show times to millisecond precision |
 | `-n`, `--lines` | 0 | Show this many of the most recent lines and continue to append new ones |
 | `--no-tail` | false | Show existing log messages and then exit |
+| `-o`, `--output` |  | Specify an output file |
 | `--replay` | false | Show the entire log and continue to append new ones |
 | `--retry` | false | Retry connection on failure |
 | `--retry-delay` | 1s | Retry delay between connection failure retries |
@@ -72,7 +72,7 @@ new WARNING and ERROR messages as they are logged:
 
 View all logs on the `cmr` topic (label):
 
-    juju debug-log --include-label cmr
+    juju debug-log --include-labels cmr
 
 Progressively exclude more content from the entire log:
 
@@ -118,7 +118,6 @@ Show all messages from the `juju.worker.uniter` module, except those sent from
         --exclude machine-4
 
 
-
 ## Details
 
 
@@ -141,17 +140,17 @@ The `--include-module` and `--exclude-module` options filter by the (dotted)
 logging module name. The module name can be truncated such that all loggers
 with the prefix will match.
 
-The `--include-label` and `--exclude-label` options filter by logging label.
+The `--include-labels` and `--exclude-labels` options filter by logging labels.
 
 The filtering options combine as follows:
 * All `--include` options are logically ORed together.
 * All `--exclude` options are logically ORed together.
 * All `--include-module` options are logically ORed together.
 * All `--exclude-module` options are logically ORed together.
-* All `--include-label` options are logically ORed together.
-* All `--exclude-label` options are logically ORed together.
+* All `--include-labels` options are logically ORed together.
+* All `--exclude-labels` options are logically ORed together.
 * The combined `--include`, `--exclude`, `--include-module`, `--exclude-module`,
-  `--include-label` and `--exclude-label` selections are logically ANDed to form
+  `--include-labels` and `--exclude-labels` selections are logically ANDed to form
   the complete filter.
 
 The `--tail` option waits for and continuously prints new log lines after displaying the most recent log lines.

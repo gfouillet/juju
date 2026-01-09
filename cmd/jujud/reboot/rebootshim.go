@@ -11,11 +11,11 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/agent"
-	"github.com/juju/juju/container"
-	"github.com/juju/juju/container/factory"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/internal/container"
+	"github.com/juju/juju/internal/container/factory"
+	"github.com/juju/juju/internal/service"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/service"
 )
 
 // rebootWaiterShim wraps the functions required by RebootWaiter

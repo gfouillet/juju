@@ -4,34 +4,37 @@
 package crosscontroller
 
 import (
+	"context"
+
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/internal"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
-type localControllerInfoFunc func() ([]string, string, error)
-type publicDNSAddressFunc func() (string, error)
-type watchLocalControllerInfoFunc func() state.NotifyWatcher
+type localControllerInfoFunc func(context.Context) ([]string, string, error)
+type publicDNSAddressFunc func(context.Context) (string, error)
+type watchLocalControllerInfoFunc func(ctx context.Context) (watcher.NotifyWatcher, error)
 
 // CrossControllerAPI provides access to the CrossModelRelations API facade.
 type CrossControllerAPI struct {
-	resources                facade.Resources
 	localControllerInfo      localControllerInfoFunc
 	publicDNSAddress         publicDNSAddressFunc
 	watchLocalControllerInfo watchLocalControllerInfoFunc
+	watcherRegistry          facade.WatcherRegistry
 }
 
 // NewCrossControllerAPI returns a new server-side CrossControllerAPI facade.
 func NewCrossControllerAPI(
-	resources facade.Resources,
+	watcherRegistry facade.WatcherRegistry,
 	localControllerInfo localControllerInfoFunc,
 	publicDNSAddress publicDNSAddressFunc,
 	watchLocalControllerInfo watchLocalControllerInfoFunc,
 ) (*CrossControllerAPI, error) {
 	return &CrossControllerAPI{
-		resources:                resources,
+		watcherRegistry:          watcherRegistry,
 		localControllerInfo:      localControllerInfo,
 		publicDNSAddress:         publicDNSAddress,
 		watchLocalControllerInfo: watchLocalControllerInfo,
@@ -40,30 +43,30 @@ func NewCrossControllerAPI(
 
 // WatchControllerInfo creates a watcher that notifies when the API info
 // for the controller changes.
-func (api *CrossControllerAPI) WatchControllerInfo() (params.NotifyWatchResults, error) {
+func (api *CrossControllerAPI) WatchControllerInfo(ctx context.Context) (params.NotifyWatchResults, error) {
 	results := params.NotifyWatchResults{
 		Results: make([]params.NotifyWatchResult, 1),
 	}
-	w := api.watchLocalControllerInfo()
-	if _, ok := <-w.Changes(); !ok {
-		results.Results[0].Error = apiservererrors.ServerError(watcher.EnsureErr(w))
-		return results, nil
+	w, err := api.watchLocalControllerInfo(ctx)
+	if err != nil {
+		return results, errors.Capture(err)
 	}
-	results.Results[0].NotifyWatcherId = api.resources.Register(w)
+	results.Results[0].NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(ctx, api.watcherRegistry, w)
+	results.Results[0].Error = apiservererrors.ServerError(err)
 	return results, nil
 }
 
 // ControllerInfo returns the API info for the controller.
-func (api *CrossControllerAPI) ControllerInfo() (params.ControllerAPIInfoResults, error) {
+func (api *CrossControllerAPI) ControllerInfo(ctx context.Context) (params.ControllerAPIInfoResults, error) {
 	results := params.ControllerAPIInfoResults{
 		Results: make([]params.ControllerAPIInfoResult, 1),
 	}
-	addrs, caCert, err := api.localControllerInfo()
+	addrs, caCert, err := api.localControllerInfo(ctx)
 	if err != nil {
 		results.Results[0].Error = apiservererrors.ServerError(err)
 		return results, nil
 	}
-	publicDNSAddress, err := api.publicDNSAddress()
+	publicDNSAddress, err := api.publicDNSAddress(ctx)
 	if err != nil {
 		results.Results[0].Error = apiservererrors.ServerError(err)
 		return results, nil

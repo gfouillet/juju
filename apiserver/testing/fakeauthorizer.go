@@ -4,60 +4,21 @@
 package testing
 
 import (
+	"context"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/permission"
 )
 
-// FakeAuthorizerOption defines a function that modifies the fake authorizer
-type FakeAuthorizerOption func(*FakeAuthorizer)
-
-// SetTagWithWriteAccess returns a FakeAuthorizerOption that modifies the fake
-// authorizer so that it will grant read access to the specified user.
-func SetTagWithReadAccess(ut names.UserTag) FakeAuthorizerOption {
-	return func(a *FakeAuthorizer) {
-		a.Tag = ut
-		a.HasReadTag = ut
-	}
-}
-
-// SetTagWithWriteAccess returns a FakeAuthorizerOption that modifies the fake
-// authorizer so that it will grant read and write access to the specified user.
-func SetTagWithWriteAccess(ut names.UserTag) FakeAuthorizerOption {
-	return func(a *FakeAuthorizer) {
-		a.Tag = ut
-		a.HasWriteTag = ut
-	}
-}
-
-// SetTagWithAdminAccess returns a FakeAuthorizerOption that modifies the fake
-// authorizer so that it will grant admin access to the specified user.
-func SetTagWithAdminAccess(ut names.UserTag) FakeAuthorizerOption {
-	return func(a *FakeAuthorizer) {
-		a.Tag = ut
-		a.AdminTag = ut
-	}
-}
-
-// SetTagWithConsumeAccess returns a FakeAuthorizerOption that modifies the fake
-// authorizer so that it will grant consume access to the specified user.
-func SetTagWithConsumeAccess(ut names.UserTag) FakeAuthorizerOption {
-	return func(a *FakeAuthorizer) {
-		a.Tag = ut
-		a.HasConsumeTag = ut
-	}
-}
-
 // FakeAuthorizer implements the facade.Authorizer interface.
 type FakeAuthorizer struct {
 	Tag           names.Tag
 	Controller    bool
-	ModelUUID     string
 	AdminTag      names.UserTag
 	HasConsumeTag names.UserTag
 	HasWriteTag   names.UserTag
@@ -111,7 +72,7 @@ func (fa FakeAuthorizer) GetAuthTag() names.Tag {
 
 // HasPermission returns true if the logged in user is admin or has a name equal to
 // the pre-set admin tag.
-func (fa FakeAuthorizer) HasPermission(operation permission.Access, target names.Tag) error {
+func (fa FakeAuthorizer) HasPermission(ctx context.Context, operation permission.Access, target names.Tag) error {
 	if fa.Tag.Kind() == names.UserTagKind {
 		ut := fa.Tag.(names.UserTag)
 		emptyTag := names.UserTag{}
@@ -179,15 +140,9 @@ func nameBasedHasPermission(name string, operation permission.Access, target nam
 	return operation == perm && targetTag.String() == target.String()
 }
 
-// ConnectedModel returns the UUID of the model the current client is
-// connected to.
-func (fa FakeAuthorizer) ConnectedModel() string {
-	return fa.ModelUUID
-}
-
 // EntityHasPermission returns true if the passed entity is admin or has a name equal to
 // the pre-set admin tag.
-func (fa FakeAuthorizer) EntityHasPermission(entity names.Tag, operation permission.Access, _ names.Tag) error {
+func (fa FakeAuthorizer) EntityHasPermission(ctx context.Context, entity names.Tag, operation permission.Access, _ names.Tag) error {
 	if entity.Kind() == names.UserTagKind && entity.Id() == "admin" {
 		return nil
 	}
@@ -196,9 +151,6 @@ func (fa FakeAuthorizer) EntityHasPermission(entity names.Tag, operation permiss
 		return nil
 	}
 	if operation == permission.ConsumeAccess && fa.HasConsumeTag != emptyTag && entity == fa.HasConsumeTag {
-		return nil
-	}
-	if operation == permission.ReadAccess && fa.HasReadTag != emptyTag && entity == fa.HasReadTag {
 		return nil
 	}
 	return errors.WithType(apiservererrors.ErrPerm, authentication.ErrorEntityMissingPermission)

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/cmd/juju/storage"
 	"github.com/juju/juju/core/instance"
@@ -24,7 +24,6 @@ type formattedStatus struct {
 	Relations          []relationStatus                   `json:"-" yaml:"-"`
 	Storage            *storage.CombinedStorage           `json:"storage,omitempty" yaml:"storage,omitempty"`
 	Controller         *controllerStatus                  `json:"controller,omitempty" yaml:"controller,omitempty"`
-	Branches           map[string]branchStatus            `json:"branches,omitempty" yaml:"branches,omitempty"`
 }
 
 type formattedMachineStatus struct {
@@ -45,8 +44,6 @@ type modelStatus struct {
 	Version          string             `json:"version" yaml:"version"`
 	AvailableVersion string             `json:"upgrade-available,omitempty" yaml:"upgrade-available,omitempty"`
 	Status           statusInfoContents `json:"model-status,omitempty" yaml:"model-status,omitempty"`
-	MeterStatus      *meterStatus       `json:"meter-status,omitempty" yaml:"meter-status,omitempty"`
-	SLA              string             `json:"sla,omitempty" yaml:"sla,omitempty"`
 }
 
 type controllerStatus struct {
@@ -78,9 +75,13 @@ type machineStatus struct {
 	Containers         map[string]machineStatus      `json:"containers,omitempty" yaml:"containers,omitempty"`
 	Constraints        string                        `json:"constraints,omitempty" yaml:"constraints,omitempty"`
 	Hardware           string                        `json:"hardware,omitempty" yaml:"hardware,omitempty"`
-	HAStatus           string                        `json:"controller-member-status,omitempty" yaml:"controller-member-status,omitempty"`
-	HAPrimary          bool                          `json:"ha-primary,omitempty" yaml:"ha-primary,omitempty"`
 	LXDProfiles        map[string]lxdProfileContents `json:"lxd-profiles,omitempty" yaml:"lxd-profiles,omitempty"`
+	HAClusterRole      *string                       `json:"controller-cluster-role,omitempty" yaml:"controller-cluster-role,omitempty"`
+
+	// These fields should be deprecated in favour of HAClusterRole. Remove
+	// them in the next version of the API client version.
+	HAStatus  string `json:"controller-member-status,omitempty" yaml:"controller-member-status,omitempty"`
+	HAPrimary *bool  `json:"ha-primary,omitempty" yaml:"ha-primary,omitempty"`
 }
 
 // A goyaml bug means we can't declare these types
@@ -224,16 +225,10 @@ func (s offerStatus) MarshalYAML() (interface{}, error) {
 	return offerStatusNoMarshal(s), nil
 }
 
-type meterStatus struct {
-	Color   string `json:"color,omitempty" yaml:"color,omitempty"`
-	Message string `json:"message,omitempty" yaml:"message,omitempty"`
-}
-
 type unitStatus struct {
 	// New Juju Health Status fields.
 	WorkloadStatusInfo statusInfoContents `json:"workload-status,omitempty" yaml:"workload-status,omitempty"`
 	JujuStatusInfo     statusInfoContents `json:"juju-status,omitempty" yaml:"juju-status,omitempty"`
-	MeterStatus        *meterStatus       `json:"meter-status,omitempty" yaml:"meter-status,omitempty"`
 
 	Leader        bool                  `json:"leader,omitempty" yaml:"leader,omitempty"`
 	Charm         string                `json:"upgrading-from,omitempty" yaml:"upgrading-from,omitempty"`
@@ -243,7 +238,6 @@ type unitStatus struct {
 	Address       string                `json:"address,omitempty" yaml:"address,omitempty"`
 	ProviderId    string                `json:"provider-id,omitempty" yaml:"provider-id,omitempty"`
 	Subordinates  map[string]unitStatus `json:"subordinates,omitempty" yaml:"subordinates,omitempty"`
-	Branch        string                `json:"branch,omitempty" yaml:"branch,omitempty"`
 }
 
 func (s *formattedStatus) applicationScale(name string) (string, bool) {
@@ -337,11 +331,4 @@ type relationStatus struct {
 	Type      string
 	Status    string
 	Message   string
-}
-
-type branchStatus struct {
-	Ref       string `json:"ref,omitempty" yaml:"ref,omitempty"`
-	Created   string `json:"created,omitempty" yaml:"created,omitempty"`
-	CreatedBy string `json:"created-by,omitempty" yaml:"created-by,omitempty"`
-	Active    bool   `json:"active,omitempty" yaml:"active,omitempty"`
 }

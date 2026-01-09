@@ -4,20 +4,23 @@
 package context
 
 import (
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	envtesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
-var _ = gc.Suite(&PortRangeChangeRecorderSuite{})
+func TestPortRangeChangeRecorderSuite(t *testing.T) {
+	tc.Run(t, &PortRangeChangeRecorderSuite{})
+}
 
 type PortRangeChangeRecorderSuite struct {
-	envtesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
 type portRangeTest struct {
@@ -36,7 +39,7 @@ type portRangeTest struct {
 	isCAAS             bool
 }
 
-func (s *PortRangeChangeRecorderSuite) TestOpenPortRange(c *gc.C) {
+func (s *PortRangeChangeRecorderSuite) TestOpenPortRange(c *tc.C) {
 	targetUnit := names.NewUnitTag("u/0")
 
 	tests := []portRangeTest{
@@ -207,24 +210,24 @@ func (s *PortRangeChangeRecorderSuite) TestOpenPortRange(c *gc.C) {
 		if test.isCAAS {
 			modelType = model.CAAS
 		}
-		rec := newPortRangeChangeRecorder(loggo.GetLogger("test"), targetUnit, modelType, test.machinePortRanges, test.applicationPortRanges)
+		rec := newPortRangeChangeRecorder(loggertesting.WrapCheckLog(c), targetUnit, modelType, test.machinePortRanges, test.applicationPortRanges)
 		rec.pendingOpenRanges = test.pendingOpenRanges
 		rec.pendingCloseRanges = test.pendingCloseRanges
 
 		err := rec.OpenPortRange(test.targetEndpoint, test.targetPortRange)
 		if test.expectErr != "" {
-			c.Check(err, gc.ErrorMatches, test.expectErr)
+			c.Check(err, tc.ErrorMatches, test.expectErr)
 		} else {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 
 			pendingOpenRanges, pendingCloseRanges := rec.PendingChanges()
-			c.Check(pendingOpenRanges, jc.DeepEquals, test.expectPendingOpen)
-			c.Check(pendingCloseRanges, jc.DeepEquals, test.expectPendingClose)
+			c.Check(pendingOpenRanges, tc.DeepEquals, test.expectPendingOpen)
+			c.Check(pendingCloseRanges, tc.DeepEquals, test.expectPendingClose)
 		}
 	}
 }
 
-func (s *PortRangeChangeRecorderSuite) TestClosePortRange(c *gc.C) {
+func (s *PortRangeChangeRecorderSuite) TestClosePortRange(c *tc.C) {
 	targetUnit := names.NewUnitTag("u/0")
 
 	tests := []portRangeTest{
@@ -407,19 +410,19 @@ func (s *PortRangeChangeRecorderSuite) TestClosePortRange(c *gc.C) {
 	for i, test := range tests {
 		c.Logf("test %d: %s", i, test.about)
 
-		rec := newPortRangeChangeRecorder(loggo.GetLogger("test"), targetUnit, model.IAAS, test.machinePortRanges, test.applicationPortRanges)
+		rec := newPortRangeChangeRecorder(loggertesting.WrapCheckLog(c), targetUnit, model.IAAS, test.machinePortRanges, test.applicationPortRanges)
 		rec.pendingOpenRanges = test.pendingOpenRanges
 		rec.pendingCloseRanges = test.pendingCloseRanges
 
 		err := rec.ClosePortRange(test.targetEndpoint, test.targetPortRange)
 		if test.expectErr != "" {
-			c.Check(err, gc.ErrorMatches, test.expectErr)
+			c.Check(err, tc.ErrorMatches, test.expectErr)
 		} else {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 
 			pendingOpenRanges, pendingCloseRanges := rec.PendingChanges()
-			c.Check(pendingOpenRanges, jc.DeepEquals, test.expectPendingOpen)
-			c.Check(pendingCloseRanges, jc.DeepEquals, test.expectPendingClose)
+			c.Check(pendingOpenRanges, tc.DeepEquals, test.expectPendingOpen)
+			c.Check(pendingCloseRanges, tc.DeepEquals, test.expectPendingClose)
 		}
 	}
 }

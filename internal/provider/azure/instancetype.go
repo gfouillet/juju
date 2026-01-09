@@ -4,6 +4,7 @@
 package azure
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,7 +14,6 @@ import (
 
 	corearch "github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/internal/provider/azure/internal/imageutils"
 )
@@ -477,7 +477,7 @@ func newInstanceType(arch corearch.Arch, size armcompute.VirtualMachineSize) ins
 	// Anything not in the list is more expensive that is in the list.
 	if !found {
 		if !isPromo && instType != "Basic" {
-			logger.Debugf("got VM for which we don't have relative cost data: %q", sizeName)
+			logger.Debugf(context.TODO(), "got VM for which we don't have relative cost data: %q", sizeName)
 		}
 		cost = 100 * len(machineSizeCost)
 	}
@@ -520,7 +520,7 @@ func mbToMib(mb uint64) uint64 {
 // NOTE(axw) for now we ignore simplestreams altogether, and go straight to
 // Azure's image registry.
 func (env *azureEnviron) findInstanceSpec(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	instanceTypesMap map[string]instances.InstanceType,
 	constraint *instances.InstanceConstraint,
 	imageStream string,
@@ -534,7 +534,7 @@ func (env *azureEnviron) findInstanceSpec(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	image, err := imageutils.BaseImage(ctx, constraint.Base, imageStream, constraint.Region, constraint.Arch, client, preferGen1Image)
+	image, err := imageutils.BaseImage(ctx, env.CredentialInvalidator, constraint.Base, imageStream, constraint.Region, constraint.Arch, client, preferGen1Image)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

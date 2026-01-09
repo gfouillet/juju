@@ -4,27 +4,27 @@
 package ssh
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 
 	"github.com/juju/juju/api/client/application"
 	"github.com/juju/juju/api/client/charms"
-	apicharm "github.com/juju/juju/api/common/charm"
-	charmscommon "github.com/juju/juju/api/common/charms"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/relation"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/network/ssh"
 	unitdebug "github.com/juju/juju/internal/worker/uniter/runner/debug"
-	"github.com/juju/juju/network/ssh"
 )
 
 func NewDebugHooksCommand(hostChecker ssh.ReachableChecker, retryStrategy retry.CallArgs, publicKeyRetryStrategy retry.CallArgs) cmd.Command {
@@ -39,9 +39,6 @@ func NewDebugHooksCommand(hostChecker ssh.ReachableChecker, retryStrategy retry.
 type debugHooksCommand struct {
 	sshCommand
 	hooks []string
-
-	applicationAPI
-	charmAPI
 }
 
 const debugHooksDoc = `
@@ -123,27 +120,16 @@ func (c *debugHooksCommand) Init(args []string) error {
 	return nil
 }
 
-type applicationAPI interface {
-	GetCharmURLOrigin(branchName, applicationName string) (*charm.URL, apicharm.Origin, error)
-	Leader(string) (string, error)
-	Close() error
-}
-
-type charmAPI interface {
-	CharmInfo(charmURL string) (*charmscommon.CharmInfo, error)
-	Close() error
-}
-
-func (c *debugHooksCommand) initAPIs() (err error) {
+func (c *debugHooksCommand) initAPIs(ctx context.Context) (err error) {
 	defer func() {
-		c.provider.setLeaderAPI(c.applicationAPI)
+		c.provider.setLeaderAPI(ctx, c.applicationAPI)
 	}()
 
 	if c.charmAPI != nil && c.applicationAPI != nil {
 		return nil
 	}
 
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -168,7 +154,7 @@ func (c *debugHooksCommand) closeAPIs() {
 	}
 }
 
-func (c *debugHooksCommand) validateHooksOrActions() error {
+func (c *debugHooksCommand) validateHooksOrActions(ctx context.Context) error {
 	if len(c.hooks) == 0 {
 		return nil
 	}
@@ -191,24 +177,24 @@ func (c *debugHooksCommand) validateHooksOrActions() error {
 		return err
 	}
 
-	curl, _, err := c.applicationAPI.GetCharmURLOrigin("", appName)
+	curl, _, err := c.applicationAPI.GetCharmURLOrigin(ctx, appName)
 	if err != nil {
 		return err
 	}
 
-	charmInfo, err := c.charmAPI.CharmInfo(curl.String())
+	charmInfo, err := c.charmAPI.CharmInfo(ctx, curl.String())
 	if err != nil {
 		return err
 	}
 
 	// Get a set of valid hooks.
-	validHooks, err := c.getValidHooks(charmInfo.Charm())
+	validHooks, err := c.getValidHooks(charmInfo.Meta)
 	if err != nil {
 		return err
 	}
 
 	// Get a set of valid actions.
-	validActions, err := c.getValidActions(charmInfo.Charm())
+	validActions, err := c.getValidActions(charmInfo.Actions)
 	if err != nil {
 		return err
 	}
@@ -229,21 +215,21 @@ func (c *debugHooksCommand) validateHooksOrActions() error {
 	return nil
 }
 
-func (c *debugHooksCommand) getValidActions(ch charm.Charm) (set.Strings, error) {
+func (c *debugHooksCommand) getValidActions(actions *charm.Actions) (set.Strings, error) {
 	validActions := set.NewStrings()
-	for name := range ch.Actions().ActionSpecs {
+	for name := range actions.ActionSpecs {
 		validActions.Add(name)
 	}
 	return validActions, nil
 }
 
-func (c *debugHooksCommand) getValidHooks(ch charm.Charm) (set.Strings, error) {
+func (c *debugHooksCommand) getValidHooks(meta *charm.Meta) (set.Strings, error) {
 	validHooks := set.NewStrings()
 	for _, hook := range hooks.RelationHooks() {
-		hook := fmt.Sprintf("juju-info-%s", hook)
+		hook := fmt.Sprintf("%s-%s", relation.JujuInfo, hook)
 		validHooks.Add(hook)
 	}
-	return validHooks.Union(ch.Meta().Hooks()), nil
+	return validHooks.Union(meta.Hooks()), nil
 }
 
 func (c *debugHooksCommand) decideEntryPoint(ctx *cmd.Context) string {
@@ -260,14 +246,14 @@ func (c *debugHooksCommand) commonRun(
 	hooks []string,
 	debugAt string,
 ) (err error) {
-	err = c.validateHooksOrActions()
+	err = c.validateHooksOrActions(ctx)
 	if err != nil {
 		return err
 	}
 
 	// If the unit/leader syntax is used, we first need to resolve it into
 	// the unit name that corresponds to the current leader.
-	resolvedTargetName, err := c.provider.maybeResolveLeaderUnit(target)
+	resolvedTargetName, err := c.provider.maybeResolveLeaderUnit(ctx, target)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -285,7 +271,7 @@ func (c *debugHooksCommand) commonRun(
 // and connects to it via SSH to execute the debug-hooks
 // script.
 func (c *debugHooksCommand) Run(ctx *cmd.Context) error {
-	if err := c.initAPIs(); err != nil {
+	if err := c.initAPIs(ctx); err != nil {
 		return err
 	}
 	defer c.closeAPIs()

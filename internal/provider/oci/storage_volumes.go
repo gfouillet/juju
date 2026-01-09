@@ -14,21 +14,12 @@ import (
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 
 	"github.com/juju/juju/core/instance"
-	envcontext "github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/tags"
-	allProvidersCommon "github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/internal/provider/oci/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
 
 func mibToGib(m uint64) uint64 {
 	return (m + 1023) / 1024
-}
-
-// isAuthFailure is a helper function that's used to reduce line noise.
-// It's typically called within err != nil blocks.
-var isAuthFailure = func(err error, ctx envcontext.ProviderCallContext) bool {
-	return allProvidersCommon.MaybeHandleCredentialError(common.IsAuthorisationFailure, err, ctx)
 }
 
 type volumeSource struct {
@@ -58,7 +49,7 @@ func (v *volumeSource) getVolumeStatus(resourceID *string) (string, error) {
 	return string(response.Volume.LifecycleState), nil
 }
 
-func (v *volumeSource) createVolume(ctx envcontext.ProviderCallContext, p storage.VolumeParams, instanceMap map[instance.Id]*ociInstance) (_ *storage.Volume, err error) {
+func (v *volumeSource) createVolume(ctx context.Context, p storage.VolumeParams, instanceMap map[instance.Id]*ociInstance) (_ *storage.Volume, err error) {
 	var details ociCore.CreateVolumeResponse
 	defer func() {
 		if err != nil && details.Id != nil {
@@ -67,15 +58,15 @@ func (v *volumeSource) createVolume(ctx envcontext.ProviderCallContext, p storag
 			}
 			response, nestedErr := v.storageAPI.DeleteVolume(context.Background(), req)
 			if nestedErr != nil && !v.env.isNotFound(response.RawResponse) {
-				logger.Warningf("failed to cleanup volume: %s", *details.Id)
+				logger.Warningf(ctx, "failed to cleanup volume: %s", *details.Id)
 				return
 			}
 			nestedErr = v.env.waitForResourceStatus(
 				v.getVolumeStatus, details.Id,
 				string(ociCore.VolumeLifecycleStateTerminated),
 				5*time.Minute)
-			if nestedErr != nil && !errors.IsNotFound(nestedErr) {
-				logger.Warningf("failed to cleanup volume: %s", *details.Id)
+			if nestedErr != nil && !errors.Is(nestedErr, errors.NotFound) {
+				logger.Warningf(ctx, "failed to cleanup volume: %s", *details.Id)
 				return
 			}
 		}
@@ -91,8 +82,7 @@ func (v *volumeSource) createVolume(ctx envcontext.ProviderCallContext, p storag
 	if !ok {
 		ociInstances, err := v.env.getOciInstances(ctx, instanceId)
 		if err != nil {
-			common.HandleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
+			return nil, v.env.HandleCredentialError(ctx, err)
 		}
 		inst = ociInstances[0]
 		instanceMap[instanceId] = inst
@@ -135,8 +125,7 @@ func (v *volumeSource) createVolume(ctx envcontext.ProviderCallContext, p storag
 	volumeDetails, err := v.storageAPI.GetVolume(
 		context.Background(), ociCore.GetVolumeRequest{VolumeId: result.Volume.Id})
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, v.env.HandleCredentialError(ctx, err)
 	}
 
 	return &storage.Volume{Tag: p.Tag, VolumeInfo: makeVolumeInfo(volumeDetails.Volume)}, nil
@@ -157,8 +146,8 @@ func makeVolumeInfo(vol ociCore.Volume) storage.VolumeInfo {
 	}
 }
 
-func (v *volumeSource) CreateVolumes(ctx envcontext.ProviderCallContext, params []storage.VolumeParams) ([]storage.CreateVolumesResult, error) {
-	logger.Debugf("Creating volumes: %v", params)
+func (v *volumeSource) CreateVolumes(ctx context.Context, params []storage.VolumeParams) ([]storage.CreateVolumesResult, error) {
+	logger.Debugf(ctx, "Creating volumes: %v", params)
 	if params == nil {
 		return []storage.CreateVolumesResult{}, nil
 	}
@@ -173,9 +162,8 @@ func (v *volumeSource) CreateVolumes(ctx envcontext.ProviderCallContext, params 
 		}
 		vol, err := v.createVolume(ctx, volume, instanceMap)
 		if err != nil {
-			if isAuthFailure(err, ctx) {
-				credErr = err
-				common.HandleCredentialError(err, ctx)
+			if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+				credErr = maybeCredErr
 			}
 			results[i].Error = errors.Trace(err)
 			continue
@@ -205,12 +193,11 @@ func (v *volumeSource) allVolumes() (map[string]ociCore.Volume, error) {
 	return result, nil
 }
 
-func (v *volumeSource) ListVolumes(ctx envcontext.ProviderCallContext) ([]string, error) {
+func (v *volumeSource) ListVolumes(ctx context.Context) ([]string, error) {
 	var ids []string
 	volumes, err := v.allVolumes()
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, v.env.HandleCredentialError(ctx, err)
 	}
 
 	for k := range volumes {
@@ -219,13 +206,12 @@ func (v *volumeSource) ListVolumes(ctx envcontext.ProviderCallContext) ([]string
 	return ids, nil
 }
 
-func (v *volumeSource) DescribeVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]storage.DescribeVolumesResult, error) {
+func (v *volumeSource) DescribeVolumes(ctx context.Context, volIds []string) ([]storage.DescribeVolumesResult, error) {
 	result := make([]storage.DescribeVolumesResult, len(volIds), len(volIds))
 
 	allVolumes, err := v.allVolumes()
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, v.env.HandleCredentialError(ctx, err)
 	}
 
 	for i, val := range volIds {
@@ -239,11 +225,10 @@ func (v *volumeSource) DescribeVolumes(ctx envcontext.ProviderCallContext, volId
 	return result, nil
 }
 
-func (v *volumeSource) DestroyVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]error, error) {
+func (v *volumeSource) DestroyVolumes(ctx context.Context, volIds []string) ([]error, error) {
 	volumes, err := v.allVolumes()
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, v.env.HandleCredentialError(ctx, err)
 	}
 
 	var credErr error
@@ -265,9 +250,8 @@ func (v *volumeSource) DestroyVolumes(ctx envcontext.ProviderCallContext, volIds
 
 		response, err := v.storageAPI.DeleteVolume(context.Background(), request)
 		if err != nil && !v.env.isNotFound(response.RawResponse) {
-			if isAuthFailure(err, ctx) {
-				common.HandleCredentialError(err, ctx)
-				credErr = err
+			if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+				credErr = maybeCredErr
 			}
 			errs[idx] = errors.Trace(err)
 			continue
@@ -276,10 +260,9 @@ func (v *volumeSource) DestroyVolumes(ctx envcontext.ProviderCallContext, volIds
 			v.getVolumeStatus, volumeDetails.Id,
 			string(ociCore.VolumeLifecycleStateTerminated),
 			5*time.Minute)
-		if err != nil && !errors.IsNotFound(err) {
-			if isAuthFailure(err, ctx) {
-				common.HandleCredentialError(err, ctx)
-				credErr = err
+		if err != nil && !errors.Is(err, errors.NotFound) {
+			if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+				credErr = maybeCredErr
 			}
 			errs[idx] = errors.Trace(err)
 		} else {
@@ -289,7 +272,7 @@ func (v *volumeSource) DestroyVolumes(ctx envcontext.ProviderCallContext, volIds
 	return errs, nil
 }
 
-func (v *volumeSource) ReleaseVolumes(ctx envcontext.ProviderCallContext, volIds []string) ([]error, error) {
+func (v *volumeSource) ReleaseVolumes(ctx context.Context, volIds []string) ([]error, error) {
 	volumes, err := v.allVolumes()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -330,9 +313,8 @@ func (v *volumeSource) ReleaseVolumes(ctx envcontext.ProviderCallContext, volIds
 
 			_, err := v.storageAPI.UpdateVolume(context.Background(), request)
 			if err != nil {
-				if isAuthFailure(err, ctx) {
-					common.HandleCredentialError(err, ctx)
-					credErr = err
+				if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+					credErr = maybeCredErr
 				}
 				errs[idx] = errors.Trace(err)
 			} else {
@@ -353,7 +335,7 @@ func (v *volumeSource) ValidateVolumeParams(params storage.VolumeParams) error {
 }
 
 func (v *volumeSource) volumeAttachments(instanceId instance.Id) ([]ociCore.IScsiVolumeAttachment, error) {
-	instId := string(instanceId)
+	instId := instanceId.String()
 
 	attachments, err := v.computeAPI.ListVolumeAttachments(context.Background(), v.env.ecfg().compartmentID(), &instId)
 	if err != nil {
@@ -413,7 +395,7 @@ func makeVolumeAttachmentResult(attachment ociCore.IScsiVolumeAttachment, param 
 	return result, nil
 }
 
-func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param storage.VolumeAttachmentParams) (_ storage.AttachVolumesResult, err error) {
+func (v *volumeSource) attachVolume(ctx context.Context, param storage.VolumeAttachmentParams) (_ storage.AttachVolumesResult, err error) {
 	var details ociCore.AttachVolumeResponse
 	defer func() {
 		volAttach := details.VolumeAttachment
@@ -423,15 +405,15 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 			}
 			res, nestedErr := v.computeAPI.DetachVolume(context.Background(), req)
 			if nestedErr != nil && !v.env.isNotFound(res.RawResponse) {
-				logger.Warningf("failed to cleanup volume attachment: %v", volAttach.GetId())
+				logger.Warningf(ctx, "failed to cleanup volume attachment: %v", volAttach.GetId())
 				return
 			}
 			nestedErr = v.env.waitForResourceStatus(
 				v.getAttachmentStatus, volAttach.GetId(),
 				string(ociCore.VolumeAttachmentLifecycleStateDetached),
 				5*time.Minute)
-			if nestedErr != nil && !errors.IsNotFound(nestedErr) {
-				logger.Warningf("failed to cleanup volume attachment: %v", volAttach.GetId())
+			if nestedErr != nil && !errors.Is(nestedErr, errors.NotFound) {
+				logger.Warningf(ctx, "failed to cleanup volume attachment: %v", volAttach.GetId())
 				return
 			}
 		}
@@ -439,8 +421,7 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 
 	instances, err := v.env.getOciInstances(ctx, param.InstanceId)
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return storage.AttachVolumesResult{}, errors.Trace(err)
+		return storage.AttachVolumesResult{}, v.env.HandleCredentialError(ctx, err)
 	}
 	if len(instances) != 1 {
 		return storage.AttachVolumesResult{}, errors.Errorf("expected 1 instance, got %d", len(instances))
@@ -458,8 +439,7 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 
 	volumeAttachments, err := v.volumeAttachments(param.InstanceId)
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return storage.AttachVolumesResult{}, errors.Trace(err)
+		return storage.AttachVolumesResult{}, v.env.HandleCredentialError(ctx, err)
 	}
 
 	for _, val := range volumeAttachments {
@@ -487,8 +467,7 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 
 	details, err = v.computeAPI.AttachVolume(context.Background(), request)
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return storage.AttachVolumesResult{}, errors.Trace(err)
+		return storage.AttachVolumesResult{}, v.env.HandleCredentialError(ctx, err)
 	}
 
 	err = v.env.waitForResourceStatus(
@@ -496,8 +475,7 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 		string(ociCore.VolumeAttachmentLifecycleStateAttached),
 		5*time.Minute)
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return storage.AttachVolumesResult{}, errors.Trace(err)
+		return storage.AttachVolumesResult{}, v.env.HandleCredentialError(ctx, err)
 	}
 
 	detailsReq := ociCore.GetVolumeAttachmentRequest{
@@ -506,8 +484,7 @@ func (v *volumeSource) attachVolume(ctx envcontext.ProviderCallContext, param st
 
 	response, err := v.computeAPI.GetVolumeAttachment(context.Background(), detailsReq)
 	if err != nil {
-		common.HandleCredentialError(err, ctx)
-		return storage.AttachVolumesResult{}, errors.Trace(err)
+		return storage.AttachVolumesResult{}, v.env.HandleCredentialError(ctx, err)
 	}
 
 	baseType, ok := response.VolumeAttachment.(ociCore.IScsiVolumeAttachment)
@@ -534,7 +511,7 @@ func (v *volumeSource) getAttachmentStatus(resourceID *string) (string, error) {
 	return string(response.VolumeAttachment.GetLifecycleState()), nil
 }
 
-func (v *volumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, params []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
+func (v *volumeSource) AttachVolumes(ctx context.Context, params []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
 	var instanceIds []instance.Id
 	for _, val := range params {
 		instanceIds = append(instanceIds, val.InstanceId)
@@ -545,12 +522,11 @@ func (v *volumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, params 
 	ret := make([]storage.AttachVolumesResult, len(params))
 	instancesAsMap, err := v.env.getOciInstancesAsMap(ctx, instanceIds...)
 	if err != nil {
-		if isAuthFailure(err, ctx) {
-			common.HandleCredentialError(err, ctx)
+		if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
 			// Exit out early to improve readability on handling credential
 			// errors.
 			for idx := range params {
-				ret[idx].Error = errors.Trace(err)
+				ret[idx].Error = maybeCredErr
 			}
 			return ret, nil
 		}
@@ -568,10 +544,7 @@ func (v *volumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, params 
 
 		result, err := v.attachVolume(ctx, volParam)
 		if err != nil {
-			if isAuthFailure(err, ctx) {
-				common.HandleCredentialError(err, ctx)
-			}
-			ret[idx].Error = errors.Trace(err)
+			ret[idx].Error = v.env.HandleCredentialError(ctx, err)
 		} else {
 			ret[idx] = result
 		}
@@ -579,7 +552,7 @@ func (v *volumeSource) AttachVolumes(ctx envcontext.ProviderCallContext, params 
 	return ret, nil
 }
 
-func (v *volumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, params []storage.VolumeAttachmentParams) ([]error, error) {
+func (v *volumeSource) DetachVolumes(ctx context.Context, params []storage.VolumeAttachmentParams) ([]error, error) {
 	var credErr error
 	ret := make([]error, len(params))
 	instanceAttachmentMap := map[instance.Id][]ociCore.IScsiVolumeAttachment{}
@@ -594,9 +567,8 @@ func (v *volumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, params 
 		if !ok {
 			currentAttachments, err := v.volumeAttachments(param.InstanceId)
 			if err != nil {
-				if isAuthFailure(err, ctx) {
-					credErr = err
-					common.HandleCredentialError(err, ctx)
+				if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+					credErr = maybeCredErr
 				}
 				ret[idx] = errors.Trace(err)
 				continue
@@ -609,7 +581,7 @@ func (v *volumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, params 
 				ret[idx] = errors.Trace(credErr)
 				continue
 			}
-			logger.Tracef("volume ID is: %v", attachment.VolumeId)
+			logger.Tracef(ctx, "volume ID is: %v", attachment.VolumeId)
 			if attachment.VolumeId != nil && param.VolumeId == *attachment.VolumeId && attachment.LifecycleState != ociCore.VolumeAttachmentLifecycleStateDetached {
 				if attachment.LifecycleState != ociCore.VolumeAttachmentLifecycleStateDetaching {
 					request := ociCore.DetachVolumeRequest{
@@ -618,9 +590,8 @@ func (v *volumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, params 
 
 					res, err := v.computeAPI.DetachVolume(context.Background(), request)
 					if err != nil && !v.env.isNotFound(res.RawResponse) {
-						if isAuthFailure(err, ctx) {
-							credErr = err
-							common.HandleCredentialError(err, ctx)
+						if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+							credErr = maybeCredErr
 						}
 						ret[idx] = errors.Trace(err)
 						break
@@ -630,13 +601,12 @@ func (v *volumeSource) DetachVolumes(ctx envcontext.ProviderCallContext, params 
 					v.getAttachmentStatus, attachment.Id,
 					string(ociCore.VolumeAttachmentLifecycleStateDetached),
 					5*time.Minute)
-				if err != nil && !errors.IsNotFound(err) {
-					if isAuthFailure(err, ctx) {
-						credErr = err
-						common.HandleCredentialError(err, ctx)
+				if err != nil && !errors.Is(err, errors.NotFound) {
+					if denied, maybeCredErr := v.env.MaybeInvalidateCredentialError(ctx, err); denied {
+						credErr = maybeCredErr
 					}
 					ret[idx] = errors.Trace(err)
-					logger.Warningf("failed to detach volume: %s", *attachment.Id)
+					logger.Warningf(ctx, "failed to detach volume: %s", *attachment.Id)
 				} else {
 					ret[idx] = nil
 				}

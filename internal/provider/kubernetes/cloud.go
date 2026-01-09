@@ -4,9 +4,10 @@
 package kubernetes
 
 import (
+	"context"
+
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
 	k8slabels "k8s.io/apimachinery/pkg/labels"
 
 	k8s "github.com/juju/juju/caas/kubernetes"
@@ -16,8 +17,8 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	k8sutils "github.com/juju/juju/internal/provider/kubernetes/utils"
+	"github.com/juju/juju/internal/uuid"
 )
 
 // ClientConfigFuncGetter returns a function returning az reader that will read a k8s cluster config for a given cluster type
@@ -82,22 +83,14 @@ func UpdateKubeCloudWithStorage(k8sCloud cloud.Cloud, storageParams KubeCloudSto
 		}
 	}
 
-	// We at least expected operator storage to be available to successfully use
-	// this cloud.
-	if clusterMetadata.OperatorStorageClass == nil {
-		return cloud.Cloud{}, &environs.PreferredStorageNotFound{
-			Message: "no preferred operator storage found in Kubernetes cluster",
-		}
-	}
-
 	if k8sCloud.Config == nil {
 		k8sCloud.Config = make(map[string]interface{})
 	}
 
-	k8sCloud.Config[k8sconstants.OperatorStorageKey] = clusterMetadata.OperatorStorageClass.Name
-	k8sCloud.Config[k8sconstants.WorkloadStorageKey] = ""
+	// TODO(storage): maybe re-implement this to create storage pool templates
+	// on clouds.
 	if clusterMetadata.WorkloadStorageClass != nil {
-		k8sCloud.Config[k8sconstants.WorkloadStorageKey] = clusterMetadata.WorkloadStorageClass.Name
+		_ = clusterMetadata.WorkloadStorageClass.Name
 	}
 	return k8sCloud, nil
 }
@@ -106,11 +99,11 @@ func UpdateKubeCloudWithStorage(k8sCloud cloud.Cloud, storageParams KubeCloudSto
 func BaseKubeCloudOpenParams(cloud cloud.Cloud, credential cloud.Credential) (environs.OpenParams, error) {
 	// To get a k8s client, we need a config with minimal information.
 	// It's not used unless operating on a real model but we need to supply it.
-	modelUUID, err := utils.NewUUID()
+	modelUUID, err := uuid.NewUUID()
 	if err != nil {
 		return environs.OpenParams{}, errors.Trace(err)
 	}
-	controllerUUID, err := utils.NewUUID()
+	controllerUUID, err := uuid.NewUUID()
 	if err != nil {
 		return environs.OpenParams{}, errors.Trace(err)
 	}
@@ -143,10 +136,7 @@ func (p kubernetesEnvironProvider) FinalizeCloud(ctx environs.FinalizeCloudConte
 	// bootstrap. See lp-1918486
 	cld.AuthTypes = k8scloud.SupportedAuthTypes()
 
-	// if storage is already defined there is no need to query the cluster
-	if opStorage, ok := cld.Config[k8sconstants.OperatorStorageKey]; ok && opStorage != "" {
-		return cld, nil
-	}
+	// TODO(storage): re-implement without workload-storage.
 
 	var credentials cloud.Credential
 	if cld.Name != k8s.K8sCloudMicrok8s {
@@ -178,26 +168,26 @@ func (p kubernetesEnvironProvider) FinalizeCloud(ctx environs.FinalizeCloudConte
 	}
 
 	if cld.SkipTLSVerify {
-		logger.Warningf("k8s cloud %v is configured to skip server certificate validity checks", cld.Name)
+		logger.Warningf(context.TODO(), "k8s cloud %v is configured to skip server certificate validity checks", cld.Name)
 	}
 
 	openParams, err := BaseKubeCloudOpenParams(cld, credentials)
 	if err != nil {
 		return cloud.Cloud{}, errors.Trace(err)
 	}
-	broker, err := p.brokerGetter(openParams)
+	broker, err := p.brokerGetter(ctx, openParams, environs.NoopCredentialInvalidator())
 	if err != nil {
 		return cloud.Cloud{}, errors.Trace(err)
 	}
 	if cld.Name == k8s.K8sCloudMicrok8s {
-		if err := ensureMicroK8sSuitable(broker); err != nil {
+		if err := ensureMicroK8sSuitable(ctx, broker); err != nil {
 			return cld, errors.Trace(err)
 		}
 	}
 	storageUpdateParams := KubeCloudStorageParams{
 		MetadataChecker: broker,
 		GetClusterMetadataFunc: func(storageParams KubeCloudStorageParams) (*k8s.ClusterMetadata, error) {
-			clusterMetadata, err := storageParams.MetadataChecker.GetClusterMetadata("")
+			clusterMetadata, err := storageParams.MetadataChecker.GetClusterMetadata(ctx, "")
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -217,9 +207,9 @@ func (p kubernetesEnvironProvider) FinalizeCloud(ctx environs.FinalizeCloudConte
 	return cld, nil
 }
 
-func checkDefaultStorageExist(broker ClusterMetadataStorageChecker) error {
-	storageClasses, err := broker.ListStorageClasses(k8slabels.NewSelector())
-	if err != nil && !errors.IsNotFound(err) {
+func checkDefaultStorageExist(ctx context.Context, broker ClusterMetadataStorageChecker) error {
+	storageClasses, err := broker.ListStorageClasses(ctx, k8slabels.NewSelector())
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Annotate(err, "cannot list storage classes")
 	}
 	for _, sc := range storageClasses {
@@ -230,9 +220,9 @@ func checkDefaultStorageExist(broker ClusterMetadataStorageChecker) error {
 	return errors.NotFoundf("default storage")
 }
 
-func checkDNSAddonEnabled(broker ClusterMetadataStorageChecker) error {
-	pods, err := broker.ListPods("kube-system", k8sutils.LabelsToSelector(map[string]string{"k8s-app": "kube-dns"}))
-	if err != nil && !errors.IsNotFound(err) {
+func checkDNSAddonEnabled(ctx context.Context, broker ClusterMetadataStorageChecker) error {
+	pods, err := broker.ListPods(ctx, "kube-system", k8sutils.LabelsToSelector(map[string]string{"k8s-app": "kube-dns"}))
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Annotate(err, "cannot list kube-dns pods")
 	}
 	if len(pods) > 0 {
@@ -241,17 +231,17 @@ func checkDNSAddonEnabled(broker ClusterMetadataStorageChecker) error {
 	return errors.NotFoundf("dns pod")
 }
 
-func ensureMicroK8sSuitable(broker ClusterMetadataStorageChecker) error {
-	err := checkDefaultStorageExist(broker)
-	if errors.IsNotFound(err) {
+func ensureMicroK8sSuitable(ctx context.Context, broker ClusterMetadataStorageChecker) error {
+	err := checkDefaultStorageExist(ctx, broker)
+	if errors.Is(err, errors.NotFound) {
 		return errors.New("required storage addon is not enabled")
 	}
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	err = checkDNSAddonEnabled(broker)
-	if errors.IsNotFound(err) {
+	err = checkDNSAddonEnabled(ctx, broker)
+	if errors.Is(err, errors.NotFound) {
 		return errors.New("required dns addon is not enabled")
 	}
 	return errors.Trace(err)

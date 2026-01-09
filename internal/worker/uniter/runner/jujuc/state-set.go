@@ -6,13 +6,13 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/utils/v3/keyvalues"
+	"github.com/juju/utils/v4/keyvalues"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/quota"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StateSetCommand implements the state-set command.
@@ -90,7 +90,7 @@ func (c *StateSetCommand) Run(ctx *cmd.Context) error {
 	}
 
 	for k, v := range c.StateValues {
-		if err := c.ctx.SetCharmStateValue(k, v); err != nil {
+		if err := c.ctx.SetCharmStateValue(ctx, k, v); err != nil {
 			return err
 		}
 	}

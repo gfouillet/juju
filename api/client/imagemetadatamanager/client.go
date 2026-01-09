@@ -4,12 +4,21 @@
 package imagemetadatamanager
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/api/base"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client provides access to cloud image metadata.
 // It is used to find, save and update image metadata.
@@ -19,14 +28,15 @@ type Client struct {
 }
 
 // NewClient returns a new metadata client.
-func NewClient(st base.APICallCloser) *Client {
-	frontend, backend := base.NewClientFacade(st, "ImageMetadataManager")
+func NewClient(st base.APICallCloser, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(st, "ImageMetadataManager", options...)
 	return &Client{ClientFacade: frontend, facade: backend}
 }
 
 // List returns image metadata that matches filter.
 // Empty filter will return all image metadata.
 func (c *Client) List(
+	ctx context.Context,
 	stream, region string,
 	bases []corebase.Base, arches []string,
 	virtType, rootStorageType string,
@@ -44,18 +54,18 @@ func (c *Client) List(
 		RootStorageType: rootStorageType,
 	}
 	out := params.ListCloudImageMetadataResult{}
-	err := c.facade.FacadeCall("List", in, &out)
+	err := c.facade.FacadeCall(ctx, "List", in, &out)
 	return out.Result, err
 }
 
 // Save saves specified image metadata.
 // Supports bulk saves for scenarios like cloud image metadata caching at bootstrap.
-func (c *Client) Save(metadata []params.CloudImageMetadata) error {
+func (c *Client) Save(ctx context.Context, metadata []params.CloudImageMetadata) error {
 	in := params.MetadataSaveParams{
 		Metadata: []params.CloudImageMetadataList{{metadata}},
 	}
 	out := params.ErrorResults{}
-	err := c.facade.FacadeCall("Save", in, &out)
+	err := c.facade.FacadeCall(ctx, "Save", in, &out)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -69,10 +79,10 @@ func (c *Client) Save(metadata []params.CloudImageMetadata) error {
 }
 
 // Delete removes image metadata for given image id from stored metadata.
-func (c *Client) Delete(imageId string) error {
+func (c *Client) Delete(ctx context.Context, imageId string) error {
 	in := params.MetadataImageIds{[]string{imageId}}
 	out := params.ErrorResults{}
-	err := c.facade.FacadeCall("Delete", in, &out)
+	err := c.facade.FacadeCall(ctx, "Delete", in, &out)
 	if err != nil {
 		return errors.Trace(err)
 	}

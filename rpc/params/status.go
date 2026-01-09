@@ -22,17 +22,17 @@ type StatusParams struct {
 
 // FullStatus holds information about the status of a juju model.
 type FullStatus struct {
-	Model               ModelStatusInfo                    `json:"model"`
-	Machines            map[string]MachineStatus           `json:"machines"`
-	Applications        map[string]ApplicationStatus       `json:"applications"`
-	RemoteApplications  map[string]RemoteApplicationStatus `json:"remote-applications"`
-	Offers              map[string]ApplicationOfferStatus  `json:"offers"`
-	Relations           []RelationStatus                   `json:"relations"`
-	ControllerTimestamp *time.Time                         `json:"controller-timestamp"`
-	Branches            map[string]BranchStatus            `json:"branches"`
-	Storage             []StorageDetails                   `json:"storage,omitempty"`
-	Filesystems         []FilesystemDetails                `json:"filesystems,omitempty"`
-	Volumes             []VolumeDetails                    `json:"volumes,omitempty"`
+	Model                     ModelStatusInfo                    `json:"model"`
+	Machines                  map[string]MachineStatus           `json:"machines"`
+	Applications              map[string]ApplicationStatus       `json:"applications"`
+	RemoteApplicationOfferers map[string]RemoteApplicationStatus `json:"remote-applications"`
+	Offers                    map[string]ApplicationOfferStatus  `json:"offers"`
+	Relations                 []RelationStatus                   `json:"relations"`
+	ControllerTimestamp       *time.Time                         `json:"controller-timestamp"`
+	Branches                  map[string]BranchStatus            `json:"branches"`
+	Storage                   []StorageDetails                   `json:"storage,omitempty"`
+	Filesystems               []FilesystemDetails                `json:"filesystems,omitempty"`
+	Volumes                   []VolumeDetails                    `json:"volumes,omitempty"`
 }
 
 // IsEmpty checks all collections on FullStatus to determine if the status is empty.
@@ -41,7 +41,7 @@ func (fs *FullStatus) IsEmpty() bool {
 	return len(fs.Applications) == 0 &&
 		len(fs.Machines) == 0 &&
 		len(fs.Offers) == 0 &&
-		len(fs.RemoteApplications) == 0 &&
+		len(fs.RemoteApplicationOfferers) == 0 &&
 		len(fs.Relations) == 0
 }
 
@@ -54,8 +54,6 @@ type ModelStatusInfo struct {
 	Version          string         `json:"version"`
 	AvailableVersion string         `json:"available-version"`
 	ModelStatus      DetailedStatus `json:"model-status"`
-	MeterStatus      MeterStatus    `json:"meter-status"`
-	SLA              string         `json:"sla"`
 }
 
 // NetworkInterface holds a /etc/network/interfaces-type data and the
@@ -120,16 +118,18 @@ type MachineStatus struct {
 	// hardware specification datum.
 	Hardware string `json:"hardware"`
 
-	Jobs      []model.MachineJob `json:"jobs"`
-	HasVote   bool               `json:"has-vote"`
-	WantsVote bool               `json:"wants-vote"`
+	Jobs        []model.MachineJob `json:"jobs"`
+	HasVote     bool               `json:"has-vote"`
+	WantsVote   bool               `json:"wants-vote"`
+	ClusterRole *string            `json:"cluster-role,omitempty"`
 
 	// LXDProfiles holds all the machines current LXD profiles that have
 	// been applied to the machine
 	LXDProfiles map[string]LXDProfile `json:"lxd-profiles,omitempty"`
 
-	// PrimaryControllerMachine indicates whether this machine has a primary mongo instance in replicaset and,
-	//	// thus, can be considered a primary controller machine in HA setup.
+	// PrimaryControllerMachine indicates whether this machine has a primary
+	// instance and, thus, can be considered a primary controller machine in HA
+	// setup.
 	PrimaryControllerMachine *bool `json:"primary-controller-machine,omitempty"`
 }
 
@@ -156,7 +156,6 @@ type ApplicationStatus struct {
 	CanUpgradeTo     string                     `json:"can-upgrade-to"`
 	SubordinateTo    []string                   `json:"subordinate-to"`
 	Units            map[string]UnitStatus      `json:"units"`
-	MeterStatuses    map[string]MeterStatus     `json:"meter-statuses"`
 	Status           DetailedStatus             `json:"status"`
 	WorkloadVersion  string                     `json:"workload-version"`
 	EndpointBindings map[string]string          `json:"endpoint-bindings"`
@@ -187,12 +186,6 @@ type ApplicationOfferStatus struct {
 	Endpoints            map[string]RemoteEndpoint `json:"endpoints"`
 	ActiveConnectedCount int                       `json:"active-connected-count"`
 	TotalConnectedCount  int                       `json:"total-connected-count"`
-}
-
-// MeterStatus represents the meter status of a unit.
-type MeterStatus struct {
-	Color   string `json:"color"`
-	Message string `json:"message"`
 }
 
 // UnitStatus holds status info about a unit.
@@ -288,13 +281,6 @@ type StatusHistoryResult struct {
 // StatusHistoryResults holds a slice of StatusHistoryResult.
 type StatusHistoryResults struct {
 	Results []StatusHistoryResult `json:"results"`
-}
-
-// StatusHistoryPruneArgs holds arguments for status history
-// prunning process.
-type StatusHistoryPruneArgs struct {
-	MaxHistoryTime time.Duration `json:"max-history-time"`
-	MaxHistoryMB   int           `json:"max-history-mb"`
 }
 
 // StatusResult holds an entity status, extra information, or an

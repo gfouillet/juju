@@ -6,7 +6,7 @@ package leadership
 import (
 	"context"
 
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/rpc/params"
 )
@@ -16,7 +16,7 @@ import (
 type LeadershipService interface {
 
 	// ClaimLeadership makes a leadership claim with the given parameters.
-	ClaimLeadership(params params.ClaimLeadershipBulkParams) (params.ClaimLeadershipBulkResults, error)
+	ClaimLeadership(ctx context.Context, params params.ClaimLeadershipBulkParams) (params.ClaimLeadershipBulkResults, error)
 
 	// BlockUntilLeadershipReleased blocks the caller until leadership is
 	// released for the given service.

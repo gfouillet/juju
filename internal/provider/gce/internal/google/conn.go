@@ -13,11 +13,12 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/googleapis/gax-go/v2/callctx"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	transporthttp "google.golang.org/api/transport/http"
+
+	jujuhttp "github.com/juju/juju/internal/http"
 )
 
 // Connection provides methods for interacting with the GCE API. The

@@ -5,16 +5,15 @@ package model
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/api/client/modelconfig"
 	jujucmd "github.com/juju/juju/cmd"
@@ -22,8 +21,10 @@ import (
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/config"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 	envconfig "github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/configschema"
 )
 
 const (
@@ -220,10 +221,11 @@ type configCommand struct {
 // configCommandAPI defines an API interface to be used during testing.
 type configCommandAPI interface {
 	Close() error
-	ModelGet() (map[string]interface{}, error)
-	ModelGetWithMetadata() (envconfig.ConfigValues, error)
-	ModelSet(config map[string]interface{}) error
-	ModelUnset(keys ...string) error
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
+	ModelGetWithMetadata(ctx context.Context) (envconfig.ConfigValues, error)
+	ModelSet(ctx context.Context, config map[string]interface{}) error
+	ModelUnset(ctx context.Context, keys ...string) error
+	BestAPIVersion() int
 }
 
 // Info implements part of the cmd.Command interface.
@@ -276,11 +278,11 @@ func (c *configCommand) Init(args []string) error {
 
 // getAPI returns the API. This allows passing in a test configCommandAPI
 // implementation.
-func (c *configCommand) getAPI() (configCommandAPI, error) {
+func (c *configCommand) getAPI(ctx context.Context) (configCommandAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	api, err := c.NewAPIRoot()
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
@@ -290,7 +292,7 @@ func (c *configCommand) getAPI() (configCommandAPI, error) {
 
 // Run implements the meaty part of the cmd.Command interface.
 func (c *configCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
@@ -300,20 +302,20 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 		var err error
 		switch action {
 		case config.GetOne:
-			err = c.getConfig(client, ctx)
+			err = c.getConfig(ctx, client)
 		case config.SetArgs:
-			err = c.setConfig(client, c.configBase.ValsToSet)
+			err = c.setConfig(ctx, client, c.configBase.ValsToSet)
 		case config.SetFile:
 			var attrs config.Attrs
 			attrs, err = c.configBase.ReadFile(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			err = c.setConfig(client, attrs)
+			err = c.setConfig(ctx, client, attrs)
 		case config.Reset:
-			err = c.resetConfig(client)
+			err = c.resetConfig(ctx, client)
 		default:
-			err = c.getAllConfig(client, ctx)
+			err = c.getAllConfig(ctx, client)
 		}
 		if err != nil {
 			return errors.Trace(err)
@@ -323,17 +325,17 @@ func (c *configCommand) Run(ctx *cmd.Context) error {
 }
 
 // resetConfig unsets the keys provided to the command.
-func (c *configCommand) resetConfig(client configCommandAPI) error {
+func (c *configCommand) resetConfig(ctx context.Context, client configCommandAPI) error {
 	// ctx unused in this method
-	if err := c.verifyKnownKeys(client, c.configBase.KeysToReset); err != nil {
+	if err := c.verifyKnownKeys(ctx, client, c.configBase.KeysToReset); err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(client.ModelUnset(c.configBase.KeysToReset...), block.BlockChange)
+	return block.ProcessBlockedError(client.ModelUnset(ctx, c.configBase.KeysToReset...), block.BlockChange)
 }
 
 // setConfig sets the provided key/value pairs on the model.
-func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) error {
+func (c *configCommand) setConfig(ctx context.Context, client configCommandAPI, attrs config.Attrs) error {
 	var keys []string // collect and validate
 
 	// Sort through to catch read-only keys
@@ -351,6 +353,8 @@ func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) e
 			}
 			return errors.Errorf(`%q must be set via "add-model"`,
 				envconfig.CharmHubURLKey)
+		} else if k == "secret-backend" && client.BestAPIVersion() > 3 {
+			return secretBackendNotSupportedError
 		}
 
 		values[k] = v
@@ -362,16 +366,20 @@ func (c *configCommand) setConfig(client configCommandAPI, attrs config.Attrs) e
 		return errors.Trace(err)
 	}
 
-	if err := c.verifyKnownKeys(client, keys); err != nil {
+	if err := c.verifyKnownKeys(ctx, client, keys); err != nil {
 		return errors.Trace(err)
 	}
 
-	return block.ProcessBlockedError(client.ModelSet(coerced), block.BlockChange)
+	return block.ProcessBlockedError(client.ModelSet(ctx, coerced), block.BlockChange)
 }
 
+const secretBackendNotSupportedError = errors.ConstError(
+	`"secret-backend" has been removed from model config, use the new command "model-secret-backend" instead`,
+)
+
 // getConfig writes the value of a single model config key to the cmd.Context.
-func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) error {
-	attrs, err := c.getFilteredModel(client)
+func (c *configCommand) getConfig(ctx *cmd.Context, client configCommandAPI) error {
+	attrs, err := c.getFilteredModel(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -381,6 +389,9 @@ func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) err
 	}
 
 	key := c.configBase.KeysToGet[0]
+	if key == "secret-backend" && client.BestAPIVersion() > 3 {
+		return secretBackendNotSupportedError
+	}
 	if value, found := attrs[key]; found {
 		if c.out.Name() == "tabular" {
 			// The user has not specified that they want
@@ -401,8 +412,8 @@ func (c *configCommand) getConfig(client configCommandAPI, ctx *cmd.Context) err
 }
 
 // getAllConfig writes the full model config to the cmd.Context.
-func (c *configCommand) getAllConfig(client configCommandAPI, ctx *cmd.Context) error {
-	attrs, err := c.getFilteredModel(client)
+func (c *configCommand) getAllConfig(ctx *cmd.Context, client configCommandAPI) error {
+	attrs, err := c.getFilteredModel(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -422,8 +433,8 @@ func (c *configCommand) getAllConfig(client configCommandAPI, ctx *cmd.Context) 
 }
 
 // getFilteredModel returns the model config with model attributes filtered out.
-func (c *configCommand) getFilteredModel(client configCommandAPI) (envconfig.ConfigValues, error) {
-	attrs, err := client.ModelGetWithMetadata()
+func (c *configCommand) getFilteredModel(ctx context.Context, client configCommandAPI) (envconfig.ConfigValues, error) {
+	attrs, err := client.ModelGetWithMetadata(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -438,8 +449,8 @@ func (c *configCommand) getFilteredModel(client configCommandAPI) (envconfig.Con
 
 // verifyKnownKeys is a helper to validate the keys we are operating with
 // against the set of known attributes from the model.
-func (c *configCommand) verifyKnownKeys(client configCommandAPI, keys []string) error {
-	known, err := client.ModelGet()
+func (c *configCommand) verifyKnownKeys(ctx context.Context, client configCommandAPI, keys []string) error {
+	known, err := client.ModelGet(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -453,7 +464,7 @@ func (c *configCommand) verifyKnownKeys(client configCommandAPI, keys []string) 
 		// Check if the key exists in the known config
 		// and warn the user if the key is not defined.
 		if _, exists := known[key]; !exists {
-			logger.Warningf(
+			logger.Warningf(context.TODO(),
 				"key %q is not defined in the current model configuration: possible misspelling", key)
 		}
 	}
@@ -517,7 +528,7 @@ func ConfigDetails() (map[string]common.PrintConfigSchema, error) {
 	specifics := make(map[string]common.PrintConfigSchema, len(defaultSchema))
 	for key, attr := range defaultSchema {
 		if attr.Secret || isModelAttribute(key) ||
-			attr.Group != environschema.EnvironGroup {
+			attr.Group != configschema.EnvironGroup {
 			continue
 		}
 		specifics[key] = common.PrintConfigSchema{

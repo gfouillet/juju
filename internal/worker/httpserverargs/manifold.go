@@ -4,25 +4,25 @@
 package httpserverargs
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	"gopkg.in/tomb.v2"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
-	workerstate "github.com/juju/juju/internal/worker/state"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/common"
 )
 
 // ManifoldConfig holds the resources needed to run an httpserverargs
 // worker.
 type ManifoldConfig struct {
 	ClockName          string
-	ControllerPortName string
-	StateName          string
+	DomainServicesName string
 
 	NewStateAuthenticator NewStateAuthenticatorFunc
 }
@@ -32,11 +32,8 @@ func (config ManifoldConfig) Validate() error {
 	if config.ClockName == "" {
 		return errors.NotValidf("empty ClockName")
 	}
-	if config.ControllerPortName == "" {
-		return errors.NotValidf("empty ControllerPortName")
-	}
-	if config.StateName == "" {
-		return errors.NotValidf("empty StateName")
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
 	}
 	if config.NewStateAuthenticator == nil {
 		return errors.NotValidf("nil NewStateAuthenticator")
@@ -44,42 +41,37 @@ func (config ManifoldConfig) Validate() error {
 	return nil
 }
 
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var clock clock.Clock
-	if err := context.Get(config.ClockName, &clock); err != nil {
+	if err := getter.Get(config.ClockName, &clock); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	// Ensure that the controller-port worker is running.
-	if err := context.Get(config.ControllerPortName, nil); err != nil {
+	var controllerDomainServices services.ControllerDomainServices
+	if err := getter.Get(config.DomainServicesName, &controllerDomainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var stTracker workerstate.StateTracker
-	if err := context.Get(config.StateName, &stTracker); err != nil {
-		return nil, errors.Trace(err)
-	}
-	statePool, err := stTracker.Use()
-	if err != nil {
+	var domainServicesGetter services.DomainServicesGetter
+	if err := getter.Get(config.DomainServicesName, &domainServicesGetter); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	mux := apiserverhttp.NewMux()
-	abort := make(chan struct{})
-	authenticator, err := config.NewStateAuthenticator(statePool, mux, clock, abort)
-	if err != nil {
-		_ = stTracker.Done()
-		return nil, errors.Trace(err)
-	}
-	w := newWorker(mux, authenticator, func() {
-		close(abort)
-		_ = stTracker.Done()
+	w, err := newWorker(workerConfig{
+		domainServicesGetter:    domainServicesGetter,
+		controllerConfigService: controllerDomainServices.ControllerConfig(),
+		accessService:           controllerDomainServices.Access(),
+		macaroonService:         controllerDomainServices.Macaroon(),
+		modelService:            controllerDomainServices.Model(),
+		mux:                     apiserverhttp.NewMux(),
+		clock:                   clock,
+		newStateAuthenticatorFn: config.NewStateAuthenticator,
 	})
-	return w, nil
+	return w, errors.Trace(err)
 }
 
 // Manifold returns a dependency.Manifold to run a worker to hold the
@@ -90,8 +82,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
 			config.ClockName,
-			config.ControllerPortName,
-			config.StateName,
+			config.DomainServicesName,
 		},
 		Start:  config.start,
 		Output: manifoldOutput,
@@ -103,7 +94,10 @@ var (
 	authenticatorType = reflect.TypeOf((*macaroon.LocalMacaroonAuthenticator)(nil)).Elem()
 )
 
-func manifoldOutput(in worker.Worker, out interface{}) error {
+func manifoldOutput(in worker.Worker, out any) error {
+	if w, ok := in.(*common.CleanupWorker); ok {
+		in = w.Worker
+	}
 	w, ok := in.(*argsWorker)
 	if !ok {
 		return errors.Errorf("expected worker of type *argsWorker, got %T", in)
@@ -113,7 +107,7 @@ func manifoldOutput(in worker.Worker, out interface{}) error {
 		elemType := rt.Elem()
 		switch {
 		case muxType.AssignableTo(elemType):
-			rv.Elem().Set(reflect.ValueOf(w.mux))
+			rv.Elem().Set(reflect.ValueOf(w.cfg.mux))
 			return nil
 		case authenticatorType.AssignableTo(elemType):
 			rv.Elem().Set(reflect.ValueOf(w.authenticator))
@@ -121,35 +115,4 @@ func manifoldOutput(in worker.Worker, out interface{}) error {
 		}
 	}
 	return errors.Errorf("unexpected output type %T", out)
-}
-
-func newWorker(
-	mux *apiserverhttp.Mux,
-	authenticator macaroon.LocalMacaroonAuthenticator,
-	cleanup func(),
-) worker.Worker {
-	w := argsWorker{
-		mux:           mux,
-		authenticator: authenticator,
-	}
-	w.tomb.Go(func() error {
-		<-w.tomb.Dying()
-		cleanup()
-		return nil
-	})
-	return &w
-}
-
-type argsWorker struct {
-	mux           *apiserverhttp.Mux
-	authenticator macaroon.LocalMacaroonAuthenticator
-	tomb          tomb.Tomb
-}
-
-func (w *argsWorker) Kill() {
-	w.tomb.Kill(nil)
-}
-
-func (w *argsWorker) Wait() error {
-	return w.tomb.Wait()
 }

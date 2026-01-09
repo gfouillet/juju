@@ -4,6 +4,7 @@
 package muxhttpserver
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -11,22 +12,17 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
-	"github.com/juju/juju/pki"
-	pkitls "github.com/juju/juju/pki/tls"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/pki"
+	pkitls "github.com/juju/juju/internal/pki/tls"
 )
 
 type Config struct {
 	Address string
 	Port    string
-}
-
-type Logger interface {
-	Debugf(string, ...interface{})
-	Errorf(string, ...interface{})
-	Infof(string, ...interface{})
 }
 
 // Server is the http server running inside this worker handling requests to
@@ -35,7 +31,7 @@ type Server struct {
 	catacomb catacomb.Catacomb
 	info     ServerInfo
 	listener net.Listener
-	logger   Logger
+	logger   logger.Logger
 	Mux      *apiserverhttp.Mux
 	server   *http.Server
 }
@@ -57,6 +53,7 @@ var (
 
 func catacombInvoke(server *Server) (*Server, error) {
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "http-server",
 		Site: &server.catacomb,
 		Work: server.loop,
 	}); err != nil {
@@ -65,7 +62,7 @@ func catacombInvoke(server *Server) (*Server, error) {
 	return server, nil
 }
 
-func NewServerWithOutTLS(logger Logger, conf Config) (*Server, error) {
+func NewServerWithOutTLS(logger logger.Logger, conf Config) (*Server, error) {
 	mux := apiserverhttp.NewMux()
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", conf.Address, conf.Port))
@@ -87,7 +84,7 @@ func NewServerWithOutTLS(logger Logger, conf Config) (*Server, error) {
 	return catacombInvoke(server)
 }
 
-func NewServer(authority pki.Authority, logger Logger, conf Config) (*Server, error) {
+func NewServer(authority pki.Authority, logger logger.Logger, conf Config) (*Server, error) {
 	mux := apiserverhttp.NewMux()
 
 	tlsConfig := &tls.Config{
@@ -151,10 +148,13 @@ func (s *Server) Info() ServerInfo {
 }
 
 func (s *Server) loop() error {
+	ctx, cancel := s.scopedContext()
+	defer cancel()
+
 	httpCh := make(chan error)
 
 	go func() {
-		s.logger.Infof("starting http server on %s", s.listener.Addr())
+		s.logger.Infof(ctx, "starting http server on %s", s.listener.Addr())
 		if s.server.TLSConfig == nil {
 			httpCh <- s.server.Serve(s.listener)
 		} else {
@@ -174,4 +174,8 @@ func (s *Server) loop() error {
 			return s.catacomb.ErrDying()
 		}
 	}
+}
+
+func (s *Server) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(s.catacomb.Context(context.Background()))
 }

@@ -7,13 +7,13 @@ run_deploy_aks_charms() {
 	juju add-model "test-deploy-aks-charms"
 
 	echo "Deploy some charms"
-	juju deploy juju-qa-dummy-sink --series jammy
-	juju deploy juju-qa-dummy-source --series jammy
+	juju deploy juju-qa-dummy-sink --base ubuntu@22.04
+	juju deploy juju-qa-dummy-source --base ubuntu@22.04
 
 	juju relate dummy-sink dummy-source
 
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
-	wait_for "dummy-source" "$(idle_condition "dummy-source" 1)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink")"
+	wait_for "dummy-source" "$(idle_condition "dummy-source")"
 
 	echo "Verify application"
 	juju config dummy-source token=yeah-boi

@@ -36,7 +36,6 @@ const (
 	cloudInitCfgDir
 	curtinInstallConfig
 	transientDataDir
-	controlSocket
 )
 
 const (
@@ -56,7 +55,6 @@ var nixVals = map[osVarType]string{
 	logDir:               NixLogDir,
 	dataDir:              NixDataDir,
 	transientDataDir:     NixTransientDataDir,
-	storageDir:           "/var/lib/juju/storage",
 	confDir:              "/etc/juju",
 	jujuExec:             "/usr/bin/juju-exec",
 	jujuDumpLogs:         "/usr/bin/juju-dumplogs",
@@ -67,7 +65,6 @@ var nixVals = map[osVarType]string{
 	instanceCloudInitDir: "/var/lib/cloud/instance",
 	cloudInitCfgDir:      "/etc/cloud/cloud.cfg.d",
 	curtinInstallConfig:  "/root/curtin-install-cfg.yaml",
-	controlSocket:        "/var/lib/juju/control.socket",
 }
 
 var winVals = map[osVarType]string{
@@ -75,7 +72,6 @@ var winVals = map[osVarType]string{
 	logDir:           "C:/Juju/log",
 	dataDir:          "C:/Juju/lib/juju",
 	transientDataDir: "C:/Juju/lib/juju-transient",
-	storageDir:       "C:/Juju/lib/juju/storage",
 	confDir:          "C:/Juju/etc",
 	jujuExec:         "C:/Juju/bin/juju-exec.exe",
 	jujuDumpLogs:     "C:/Juju/bin/juju-dumplogs.exe",
@@ -151,12 +147,6 @@ func CertDir(os OS) string {
 	return osVal(os, certDir)
 }
 
-// StorageDir returns a filesystem path to the folder used by juju to
-// mount machine-level storage.
-func StorageDir(os OS) string {
-	return osVal(os, storageDir)
-}
-
 // ConfDir returns the path to the directory where Juju may store
 // configuration files.
 func ConfDir(os OS) string {
@@ -197,9 +187,4 @@ func CurtinInstallConfig(os OS) string {
 // cloud config directory for a particular series.
 func CloudInitCfgDir(os OS) string {
 	return osVal(os, cloudInitCfgDir)
-}
-
-// ControlSocket returns the absolute path to the Juju control socket.
-func ControlSocket(os OS) string {
-	return osVal(os, controlSocket)
 }

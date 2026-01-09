@@ -4,13 +4,13 @@
 package ssh
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/gnuflag"
 	"github.com/juju/retry"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/network/ssh"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/network/ssh"
 )
 
 func NewDebugCodeCommand(hostChecker ssh.ReachableChecker, retryStrategy retry.CallArgs, publicKeyRetryStrategy retry.CallArgs) cmd.Command {
@@ -98,7 +98,7 @@ func (c *debugCodeCommand) SetFlags(f *gnuflag.FlagSet) {
 // and connects to it via SSH to execute the debug-hooks
 // script.
 func (c *debugCodeCommand) Run(ctx *cmd.Context) error {
-	if err := c.initAPIs(); err != nil {
+	if err := c.initAPIs(ctx); err != nil {
 		return err
 	}
 	defer c.closeAPIs()

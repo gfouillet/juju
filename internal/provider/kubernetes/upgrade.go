@@ -5,41 +5,35 @@ package kubernetes
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
-	apps "k8s.io/api/apps/v1"
+	"github.com/juju/names/v6"
 	core "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	appstyped "k8s.io/client-go/kubernetes/typed/apps/v1"
 
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/cloudconfig/podcfg"
 	k8sannotations "github.com/juju/juju/core/annotations"
-	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
 )
 
-func (k *kubernetesClient) Upgrade(agentTag string, vers version.Number) error {
+func (k *kubernetesClient) Upgrade(ctx context.Context, agentTag string, vers semversion.Number) error {
 	tag, err := names.ParseTag(agentTag)
 	if err != nil {
 		return errors.Annotate(err, "parsing agent tag to upgrade")
 	}
 
-	logger.Infof("handling upgrade request for tag %q to %s", tag, vers.String())
+	logger.Infof(context.TODO(), "handling upgrade request for tag %q to %s", tag, vers.String())
 
 	switch tag.Kind() {
 	case names.MachineTagKind:
 	case names.ControllerAgentTagKind:
-		return k.upgradeController(vers)
-	case names.ApplicationTagKind:
-		return k.upgradeOperator(tag, vers)
+		return k.upgradeController(ctx, vers)
 	case names.ModelTagKind:
-		return k.upgradeModelOperator(tag, vers)
+		return k.upgradeModelOperator(ctx, vers)
 	case names.UnitTagKind:
 		// Sidecar charms don't have an upgrade step.
 		// See PR 14974
@@ -49,13 +43,14 @@ func (k *kubernetesClient) Upgrade(agentTag string, vers version.Number) error {
 }
 
 func upgradeDeployment(
+	ctx context.Context,
 	name,
 	imagePath string,
-	vers version.Number,
+	vers semversion.Number,
 	labelVersion constants.LabelVersion,
 	broker appstyped.DeploymentInterface,
 ) error {
-	de, err := broker.Get(context.TODO(), name, meta.GetOptions{})
+	de, err := broker.Get(ctx, name, meta.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return errors.NotFoundf(
 			"deployment %q", name)
@@ -88,7 +83,7 @@ func upgradeDeployment(
 			Merge(utils.AnnotationsForVersion(vers.String(), labelVersion)).ToMap(),
 	)
 
-	if _, err := broker.Update(context.TODO(), de, meta.UpdateOptions{}); err != nil {
+	if _, err := broker.Update(ctx, de, meta.UpdateOptions{}); err != nil {
 		return errors.Annotatef(err, "updating deployment %q to %s",
 			name, vers)
 	}
@@ -96,16 +91,14 @@ func upgradeDeployment(
 }
 
 func upgradeOperatorOrControllerStatefulSet(
-	appName string,
+	ctx context.Context,
 	name string,
-	isOperator bool,
 	imagePath string,
-	baseImagePath string,
-	vers version.Number,
+	vers semversion.Number,
 	labelVersion constants.LabelVersion,
 	broker appstyped.StatefulSetInterface,
 ) error {
-	ss, err := broker.Get(context.TODO(), name, meta.GetOptions{})
+	ss, err := broker.Get(ctx, name, meta.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return errors.NotFoundf(
 			"statefulset %q", name)
@@ -126,13 +119,6 @@ func upgradeOperatorOrControllerStatefulSet(
 	}
 	ss.Spec.Template.Spec.Containers = newContainers
 
-	if isOperator {
-		err := patchOperatorToCharmBase(ss, appName, imagePath, baseImagePath)
-		if err != nil {
-			return errors.Annotatef(err, "unable to patch operator to charm base")
-		}
-	}
-
 	// update juju-version annotation.
 	// TODO(caas): consider how to upgrade to current annotations format safely.
 	// just ensure juju-version to current version for now.
@@ -145,7 +131,7 @@ func upgradeOperatorOrControllerStatefulSet(
 			Merge(utils.AnnotationsForVersion(vers.String(), labelVersion)).ToMap(),
 	)
 
-	if _, err := broker.Update(context.TODO(), ss, meta.UpdateOptions{}); err != nil {
+	if _, err := broker.Update(ctx, ss, meta.UpdateOptions{}); err != nil {
 		return errors.Annotatef(err, "updating statefulset %q to %s",
 			name, vers)
 	}
@@ -155,7 +141,7 @@ func upgradeOperatorOrControllerStatefulSet(
 func upgradePodTemplateSpec(
 	containers []core.Container,
 	imagePath string,
-	vers version.Number,
+	vers semversion.Number,
 ) ([]core.Container, error) {
 	jujudContainerIdx, found := findJujudContainer(containers)
 	if !found {
@@ -185,70 +171,4 @@ func findJujudContainer(containers []core.Container) (int, bool) {
 		}
 	}
 	return -1, false
-}
-
-func patchOperatorToCharmBase(ss *apps.StatefulSet, appName string, imagePath string, baseImagePath string) error {
-	for _, container := range ss.Spec.Template.Spec.InitContainers {
-		if container.Name == operatorInitContainerName {
-			// Already patched.
-			return nil
-		}
-	}
-
-	ss.Spec.Template.Spec.InitContainers = append(ss.Spec.Template.Spec.InitContainers, core.Container{
-		Name:            operatorInitContainerName,
-		ImagePullPolicy: core.PullIfNotPresent,
-		Image:           imagePath,
-		Command: []string{
-			"/bin/sh",
-		},
-		Args: []string{
-			"-c",
-			fmt.Sprintf(
-				caas.JujudCopySh,
-				"/opt/juju",
-				"",
-			),
-		},
-		VolumeMounts: []core.VolumeMount{{
-			Name:      "juju-bins",
-			MountPath: "/opt/juju",
-		}},
-	})
-
-	ss.Spec.Template.Spec.Volumes = append(ss.Spec.Template.Spec.Volumes, core.Volume{
-		Name: "juju-bins",
-		VolumeSource: core.VolumeSource{
-			EmptyDir: &core.EmptyDirVolumeSource{},
-		},
-	})
-
-	for i, container := range ss.Spec.Template.Spec.Containers {
-		if !podcfg.IsJujuOCIImage(container.Image) {
-			continue
-		}
-
-		jujudCmd := fmt.Sprintf("exec $JUJU_TOOLS_DIR/jujud caasoperator --application-name=%s --debug", appName)
-		jujuDataDir := paths.DataDir(paths.OSUnixLike)
-		container.Image = baseImagePath
-		container.Args = []string{
-			"-c",
-			fmt.Sprintf(
-				caas.JujudStartUpAltSh,
-				jujuDataDir,
-				"tools",
-				"/opt/juju",
-				jujudCmd,
-			),
-		}
-		container.VolumeMounts = append(container.VolumeMounts, core.VolumeMount{
-			Name:      "juju-bins",
-			MountPath: "/opt/juju",
-		})
-
-		ss.Spec.Template.Spec.Containers[i] = container
-		break
-	}
-
-	return nil
 }

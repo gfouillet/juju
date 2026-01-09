@@ -1,81 +1,116 @@
 // Copyright 2014 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package diskmanager_test
+package diskmanager
 
 import (
-	"errors"
+	"context"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/facade/facadetest"
-	"github.com/juju/juju/apiserver/facades/agent/diskmanager"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	"github.com/juju/juju/core/blockdevice"
+	"github.com/juju/juju/core/machine"
+	machinetesting "github.com/juju/juju/core/machine/testing"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/storage"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&DiskManagerSuite{})
+func TestDiskManagerSuite(t *testing.T) {
+	tc.Run(t, &DiskManagerSuite{})
+}
 
 type DiskManagerSuite struct {
-	coretesting.BaseSuite
-	resources  *common.Resources
 	authorizer *apiservertesting.FakeAuthorizer
-	st         *mockState
-	api        *diskmanager.DiskManagerAPI
+	api        *DiskManagerAPI
+
+	machineService     *MockMachineService
+	blockDeviceService *MockBlockDeviceService
 }
 
-func (s *DiskManagerSuite) SetUpTest(c *gc.C) {
-	s.BaseSuite.SetUpTest(c)
-	s.resources = common.NewResources()
+func (s *DiskManagerSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
 	tag := names.NewMachineTag("0")
 	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: tag}
-	s.st = &mockState{}
-	diskmanager.PatchState(s, s.st)
 
-	var err error
-	s.api, err = diskmanager.NewDiskManagerAPI(facadetest.Context{
-		Auth_: s.authorizer,
+	s.machineService = NewMockMachineService(ctrl)
+	s.blockDeviceService = NewMockBlockDeviceService(ctrl)
+
+	s.api = &DiskManagerAPI{
+		machineService:     s.machineService,
+		blockDeviceService: s.blockDeviceService,
+		authorizer:         s.authorizer,
+		getAuthFunc: func(ctx context.Context) (common.AuthFunc, error) {
+			return func(t names.Tag) bool {
+				return t == tag
+			}, nil
+		},
+	}
+
+	c.Cleanup(func() {
+		s.authorizer = nil
+		s.machineService = nil
+		s.blockDeviceService = nil
 	})
-	c.Assert(err, jc.ErrorIsNil)
+
+	return ctrl
 }
 
-func (s *DiskManagerSuite) TestSetMachineBlockDevices(c *gc.C) {
-	devices := []storage.BlockDevice{{DeviceName: "sda"}, {DeviceName: "sdb"}}
-	results, err := s.api.SetMachineBlockDevices(params.SetMachineBlockDevices{
+func (s *DiskManagerSuite) TestSetMachineBlockDevices(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	machineUUID := machinetesting.GenUUID(c)
+	expectedDevices := []blockdevice.BlockDevice{{
+		DeviceName: "sda",
+	}, {
+		DeviceName: "sdb",
+	}}
+
+	s.machineService.EXPECT().GetMachineUUID(
+		gomock.Any(), machine.Name("0")).Return(machineUUID, nil)
+	s.blockDeviceService.EXPECT().UpdateBlockDevicesForMachine(
+		gomock.Any(), machineUUID, expectedDevices).Return(nil)
+
+	results, err := s.api.SetMachineBlockDevices(c.Context(), params.SetMachineBlockDevices{
 		MachineBlockDevices: []params.MachineBlockDevices{{
-			Machine:      "machine-0",
-			BlockDevices: devices,
+			Machine: "machine-0",
+			BlockDevices: []params.BlockDevice{{
+				DeviceName: "sda",
+			}, {
+				DeviceName: "sdb",
+			}},
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.ErrorResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{{Error: nil}},
 	})
 }
 
-func (s *DiskManagerSuite) TestSetMachineBlockDevicesEmptyArgs(c *gc.C) {
-	results, err := s.api.SetMachineBlockDevices(params.SetMachineBlockDevices{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 0)
+func (s *DiskManagerSuite) TestSetMachineBlockDevicesEmptyArgs(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	results, err := s.api.SetMachineBlockDevices(c.Context(), params.SetMachineBlockDevices{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 0)
 }
 
-func (s *DiskManagerSuite) TestNewDiskManagerAPINonMachine(c *gc.C) {
-	tag := names.NewUnitTag("mysql/0")
-	s.authorizer = &apiservertesting.FakeAuthorizer{Tag: tag}
-	_, err := diskmanager.NewDiskManagerAPI(facadetest.Context{
-		Auth_: s.authorizer,
-	})
-	c.Assert(err, gc.ErrorMatches, "permission denied")
-}
+func (s *DiskManagerSuite) TestSetMachineBlockDevicesInvalidTags(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *DiskManagerSuite) TestSetMachineBlockDevicesInvalidTags(c *gc.C) {
-	results, err := s.api.SetMachineBlockDevices(params.SetMachineBlockDevices{
+	machineUUID := machinetesting.GenUUID(c)
+
+	s.machineService.EXPECT().GetMachineUUID(
+		gomock.Any(), machine.Name("0")).Return(machineUUID, nil)
+	s.blockDeviceService.EXPECT().UpdateBlockDevicesForMachine(
+		gomock.Any(), machineUUID, nil).Return(nil)
+
+	results, err := s.api.SetMachineBlockDevices(c.Context(), params.SetMachineBlockDevices{
 		MachineBlockDevices: []params.MachineBlockDevices{{
 			Machine: "machine-0",
 		}, {
@@ -84,8 +119,8 @@ func (s *DiskManagerSuite) TestSetMachineBlockDevicesInvalidTags(c *gc.C) {
 			Machine: "unit-mysql-0",
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.ErrorResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{{
 			Error: nil,
 		}, {
@@ -94,35 +129,23 @@ func (s *DiskManagerSuite) TestSetMachineBlockDevicesInvalidTags(c *gc.C) {
 			Error: &params.Error{Message: "permission denied", Code: "unauthorized access"},
 		}},
 	})
-	c.Assert(s.st.calls, gc.Equals, 1)
 }
 
-func (s *DiskManagerSuite) TestSetMachineBlockDevicesStateError(c *gc.C) {
-	s.st.err = errors.New("boom")
-	results, err := s.api.SetMachineBlockDevices(params.SetMachineBlockDevices{
+func (s *DiskManagerSuite) TestSetMachineBlockDevicesMachineNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.machineService.EXPECT().GetMachineUUID(
+		gomock.Any(), machine.Name("0")).Return("", machineerrors.MachineNotFound)
+
+	results, err := s.api.SetMachineBlockDevices(c.Context(), params.SetMachineBlockDevices{
 		MachineBlockDevices: []params.MachineBlockDevices{{
 			Machine: "machine-0",
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, gc.DeepEquals, params.ErrorResults{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.ErrorResults{
 		Results: []params.ErrorResult{{
-			Error: &params.Error{Message: "boom", Code: ""},
+			Error: &params.Error{Message: `machine "0" not found`, Code: "not found"},
 		}},
 	})
-}
-
-type mockState struct {
-	calls   int
-	devices map[string][]state.BlockDeviceInfo
-	err     error
-}
-
-func (st *mockState) SetMachineBlockDevices(machineId string, devices []state.BlockDeviceInfo) error {
-	st.calls++
-	if st.devices == nil {
-		st.devices = make(map[string][]state.BlockDeviceInfo)
-	}
-	st.devices[machineId] = devices
-	return st.err
 }

@@ -4,66 +4,69 @@
 package application_test
 
 import (
-	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/cmd/juju/application"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type SuspendRelationSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	mockAPI *mockSuspendAPI
 }
 
-func (s *SuspendRelationSuite) SetUpTest(c *gc.C) {
+func (s *SuspendRelationSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
-	s.mockAPI = &mockSuspendAPI{Stub: &testing.Stub{}}
+	s.mockAPI = &mockSuspendAPI{Stub: &testhelpers.Stub{}}
 	s.mockAPI.setRelationSuspendedFunc = func(relationIds []int, suspended bool, message string) error {
 		return s.mockAPI.NextErr()
 	}
 }
+func TestSuspendRelationSuite(t *testing.T) {
+	tc.Run(t, &SuspendRelationSuite{})
+}
 
-var _ = gc.Suite(&SuspendRelationSuite{})
-
-func (s *SuspendRelationSuite) runSuspendRelation(c *gc.C, args ...string) error {
+func (s *SuspendRelationSuite) runSuspendRelation(c *tc.C, args ...string) error {
 	store := jujuclienttesting.MinimalStore()
 	_, err := cmdtesting.RunCommand(c, application.NewSuspendRelationCommandForTest(s.mockAPI, store), args...)
 	return err
 }
 
-func (s *SuspendRelationSuite) TestSuspendRelationInvalidArguments(c *gc.C) {
+func (s *SuspendRelationSuite) TestSuspendRelationInvalidArguments(c *tc.C) {
 	// No arguments
 	err := s.runSuspendRelation(c)
-	c.Assert(err, gc.ErrorMatches, "no relation ids specified")
+	c.Assert(err, tc.ErrorMatches, "no relation ids specified")
 
 	// argument not an integer
 	err = s.runSuspendRelation(c, "application1")
-	c.Assert(err, gc.ErrorMatches, `relation ID "application1" not valid`)
+	c.Assert(err, tc.ErrorMatches, `relation ID "application1" not valid`)
 }
 
-func (s *SuspendRelationSuite) TestSuspendRelationSuccess(c *gc.C) {
+func (s *SuspendRelationSuite) TestSuspendRelationSuccess(c *tc.C) {
 	err := s.runSuspendRelation(c, "123", "456", "--message", "message")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.mockAPI.CheckCall(c, 0, "SetRelationSuspended", []int{123, 456}, true, "message")
 	s.mockAPI.CheckCall(c, 1, "Close")
 }
 
-func (s *SuspendRelationSuite) TestSuspendRelationFail(c *gc.C) {
+func (s *SuspendRelationSuite) TestSuspendRelationFail(c *tc.C) {
 	msg := "fail suspend-relation at API"
 	s.mockAPI.SetErrors(errors.New(msg))
 	err := s.runSuspendRelation(c, "123")
-	c.Assert(err, gc.ErrorMatches, msg)
+	c.Assert(err, tc.ErrorMatches, msg)
 	s.mockAPI.CheckCall(c, 0, "SetRelationSuspended", []int{123}, true, "")
 	s.mockAPI.CheckCall(c, 1, "Close")
 }
 
-func (s *SuspendRelationSuite) TestSuspendRelationBlocked(c *gc.C) {
+func (s *SuspendRelationSuite) TestSuspendRelationBlocked(c *tc.C) {
 	s.mockAPI.SetErrors(apiservererrors.OperationBlockedError("TestSuspendRelationBlocked"))
 	err := s.runSuspendRelation(c, "123")
 	coretesting.AssertOperationWasBlocked(c, err, ".*TestSuspendRelationBlocked.*")
@@ -72,7 +75,7 @@ func (s *SuspendRelationSuite) TestSuspendRelationBlocked(c *gc.C) {
 }
 
 type mockSuspendAPI struct {
-	*testing.Stub
+	*testhelpers.Stub
 	setRelationSuspendedFunc func(relationIds []int, suspended bool, message string) error
 }
 
@@ -81,7 +84,7 @@ func (s mockSuspendAPI) Close() error {
 	return s.NextErr()
 }
 
-func (s mockSuspendAPI) SetRelationSuspended(relationIds []int, suspended bool, message string) error {
+func (s mockSuspendAPI) SetRelationSuspended(ctx context.Context, relationIds []int, suspended bool, message string) error {
 	s.MethodCall(s, "SetRelationSuspended", relationIds, suspended, message)
 	return s.setRelationSuspendedFunc(relationIds, suspended, message)
 }

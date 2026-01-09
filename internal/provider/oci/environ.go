@@ -12,46 +12,48 @@ import (
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 	"github.com/kr/pretty"
 	ociCommon "github.com/oracle/oci-go-sdk/v65/common"
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 	ociIdentity "github.com/oracle/oci-go-sdk/v65/identity"
 
-	"github.com/juju/juju/cloudconfig/cloudinit"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/providerinit"
+	"github.com/juju/juju/controller"
 	corearch "github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
+	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/os/ostype"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	envcontext "github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
+	"github.com/juju/juju/internal/cloudconfig/cloudinit"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/providerinit"
 	"github.com/juju/juju/internal/provider/common"
-	providerCommon "github.com/juju/juju/internal/provider/oci/common"
-	"github.com/juju/juju/storage"
-	"github.com/juju/juju/tools"
+	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/tools"
 )
 
 type Environ struct {
+	common.CredentialInvalidator
 	environs.NoSpaceDiscoveryEnviron
 	environs.NoContainerAddressesEnviron
 
-	Compute    ComputeClient
-	Networking NetworkingClient
-	Storage    StorageClient
-	Firewall   FirewallClient
-	Identity   IdentityClient
-	ociConfig  ociCommon.ConfigurationProvider
-	p          *EnvironProvider
-	clock      clock.Clock
-	ecfgMutex  sync.Mutex
-	ecfgObj    *environConfig
-	namespace  instance.Namespace
+	Compute        ComputeClient
+	Networking     NetworkingClient
+	Storage        StorageClient
+	Firewall       FirewallClient
+	Identity       IdentityClient
+	ociConfig      ociCommon.ConfigurationProvider
+	p              *EnvironProvider
+	clock          clock.Clock
+	ecfgMutex      sync.Mutex
+	ecfgObj        *environConfig
+	namespace      instance.Namespace
+	controllerUUID string
 
 	// subnets contains one subnet for each availability domain
 	// these will get created once the environment is spun up, and
@@ -60,9 +62,13 @@ type Environ struct {
 }
 
 var _ common.ZonedEnviron = (*Environ)(nil)
+
 var _ storage.ProviderRegistry = (*Environ)(nil)
+
 var _ environs.Environ = (*Environ)(nil)
+
 var _ environs.Networking = (*Environ)(nil)
+
 var _ environs.NetworkingEnviron = (*Environ)(nil)
 
 func (e *Environ) ecfg() *environConfig {
@@ -71,13 +77,12 @@ func (e *Environ) ecfg() *environConfig {
 	return e.ecfgObj
 }
 
-func (e *Environ) allInstances(ctx envcontext.ProviderCallContext, tags map[string]string) ([]*ociInstance, error) {
+func (e *Environ) allInstances(ctx context.Context, tags map[string]string) ([]*ociInstance, error) {
 	compartment := e.ecfg().compartmentID()
 
 	insts, err := e.Compute.ListInstances(context.Background(), compartment)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	ret := []*ociInstance{}
@@ -99,15 +104,14 @@ func (e *Environ) allInstances(ctx envcontext.ProviderCallContext, tags map[stri
 		}
 		inst, err := newInstance(val, e)
 		if err != nil {
-			providerCommon.HandleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 		ret = append(ret, inst)
 	}
 	return ret, nil
 }
 
-func (e *Environ) getOCIInstance(ctx envcontext.ProviderCallContext, id instance.Id) (*ociInstance, error) {
+func (e *Environ) getOCIInstance(ctx context.Context, id instance.Id) (*ociInstance, error) {
 	instanceId := string(id)
 	request := ociCore.GetInstanceRequest{
 		InstanceId: &instanceId,
@@ -115,8 +119,7 @@ func (e *Environ) getOCIInstance(ctx envcontext.ProviderCallContext, id instance
 
 	response, err := e.Compute.GetInstance(context.Background(), request)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	return newInstance(response.Instance, e)
@@ -174,7 +177,7 @@ func (e *Environ) ping() error {
 }
 
 // AvailabilityZones is defined in the common.ZonedEnviron interface
-func (e *Environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (network.AvailabilityZones, error) {
+func (e *Environ) AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error) {
 	request := ociIdentity.ListAvailabilityDomainsRequest{
 		CompartmentId: e.ecfg().compartmentID(),
 	}
@@ -183,8 +186,7 @@ func (e *Environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (network
 	domains, err := e.Identity.ListAvailabilityDomains(ociCtx, request)
 
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	zones := network.AvailabilityZones{}
@@ -196,11 +198,10 @@ func (e *Environ) AvailabilityZones(ctx envcontext.ProviderCallContext) (network
 }
 
 // InstanceAvailabilityZoneNames implements common.ZonedEnviron.
-func (e *Environ) InstanceAvailabilityZoneNames(ctx envcontext.ProviderCallContext, ids []instance.Id) (map[instance.Id]string, error) {
+func (e *Environ) InstanceAvailabilityZoneNames(ctx context.Context, ids []instance.Id) (map[instance.Id]string, error) {
 	instances, err := e.Instances(ctx, ids)
 	if err != nil && err != environs.ErrPartialInstances {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	zones := make(map[instance.Id]string, 0)
 	for _, inst := range instances {
@@ -217,19 +218,18 @@ func (e *Environ) InstanceAvailabilityZoneNames(ctx envcontext.ProviderCallConte
 }
 
 // DeriveAvailabilityZones implements common.ZonedEnviron.
-func (e *Environ) DeriveAvailabilityZones(ctx envcontext.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
+func (e *Environ) DeriveAvailabilityZones(ctx context.Context, args environs.StartInstanceParams) ([]string, error) {
 	return nil, nil
 }
 
-func (e *Environ) getOciInstances(ctx envcontext.ProviderCallContext, ids ...instance.Id) ([]*ociInstance, error) {
+func (e *Environ) getOciInstances(ctx context.Context, ids ...instance.Id) ([]*ociInstance, error) {
 	ret := []*ociInstance{}
 
 	compartmentID := e.ecfg().compartmentID()
 
 	instances, err := e.Compute.ListInstances(context.Background(), compartmentID)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	if len(instances) == 0 {
@@ -239,8 +239,7 @@ func (e *Environ) getOciInstances(ctx envcontext.ProviderCallContext, ids ...ins
 	for _, val := range instances {
 		oInstance, err := newInstance(val, e)
 		if err != nil {
-			providerCommon.HandleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 		for _, id := range ids {
 			if oInstance.Id() == id {
@@ -255,11 +254,10 @@ func (e *Environ) getOciInstances(ctx envcontext.ProviderCallContext, ids ...ins
 	return ret, nil
 }
 
-func (e *Environ) getOciInstancesAsMap(ctx envcontext.ProviderCallContext, ids ...instance.Id) (map[instance.Id]*ociInstance, error) {
+func (e *Environ) getOciInstancesAsMap(ctx context.Context, ids ...instance.Id) (map[instance.Id]*ociInstance, error) {
 	instances, err := e.getOciInstances(ctx, ids...)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	ret := map[instance.Id]*ociInstance{}
 	for _, inst := range instances {
@@ -269,14 +267,13 @@ func (e *Environ) getOciInstancesAsMap(ctx envcontext.ProviderCallContext, ids .
 }
 
 // Instances implements environs.Environ.
-func (e *Environ) Instances(ctx envcontext.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error) {
+func (e *Environ) Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	ociInstances, err := e.getOciInstances(ctx, ids...)
 	if err != nil && err != environs.ErrPartialInstances {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	ret := []instances.Instance{}
@@ -293,7 +290,7 @@ func (e *Environ) Instances(ctx envcontext.ProviderCallContext, ids []instance.I
 // PrepareForBootstrap implements environs.Environ.
 func (e *Environ) PrepareForBootstrap(ctx environs.BootstrapContext, controllerName string) error {
 	if ctx.ShouldVerifyCredentials() {
-		logger.Infof("Logging into the oracle cloud infrastructure")
+		logger.Infof(ctx, "Logging into the oracle cloud infrastructure")
 		if err := e.ping(); err != nil {
 			return errors.Trace(err)
 		}
@@ -303,21 +300,12 @@ func (e *Environ) PrepareForBootstrap(ctx environs.BootstrapContext, controllerN
 }
 
 // Bootstrap implements environs.Environ.
-func (e *Environ) Bootstrap(ctx environs.BootstrapContext, callCtx envcontext.ProviderCallContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
-	return common.Bootstrap(ctx, e, callCtx, params)
-}
-
-// Create implements environs.Environ.
-func (e *Environ) Create(ctx envcontext.ProviderCallContext, params environs.CreateParams) error {
-	if err := e.ping(); err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return errors.Trace(err)
-	}
-	return nil
+func (e *Environ) Bootstrap(ctx environs.BootstrapContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
+	return common.Bootstrap(ctx, e, params)
 }
 
 // AdoptResources implements environs.Environ.
-func (e *Environ) AdoptResources(ctx envcontext.ProviderCallContext, controllerUUID string, fromVersion version.Number) error {
+func (e *Environ) AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error {
 	// TODO(cderici): implement AdoptResources for oci
 	return errors.NotImplementedf("AdoptResources")
 }
@@ -331,17 +319,17 @@ var unsupportedConstraints = []string{
 }
 
 // ConstraintsValidator implements environs.Environ.
-func (e *Environ) ConstraintsValidator(ctx envcontext.ProviderCallContext) (constraints.Validator, error) {
+func (e *Environ) ConstraintsValidator(ctx context.Context) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
 	validator.RegisterUnsupported(unsupportedConstraints)
 	validator.RegisterVocabulary(constraints.Arch, []string{corearch.AMD64, corearch.ARM64})
-	logger.Infof("Returning constraints validator: %v", validator)
+	logger.Infof(ctx, "Returning constraints validator: %v", validator)
 	return validator, nil
 }
 
 // SetConfig implements environs.Environ.
-func (e *Environ) SetConfig(cfg *config.Config) error {
-	ecfg, err := e.p.newConfig(cfg)
+func (e *Environ) SetConfig(ctx context.Context, cfg *config.Config) error {
+	ecfg, err := e.p.newConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -353,7 +341,7 @@ func (e *Environ) SetConfig(cfg *config.Config) error {
 	return nil
 }
 
-func (e *Environ) allControllerManagedInstances(ctx envcontext.ProviderCallContext, controllerUUID string) ([]*ociInstance, error) {
+func (e *Environ) allControllerManagedInstances(ctx context.Context, controllerUUID string) ([]*ociInstance, error) {
 	tags := map[string]string{
 		tags.JujuController: controllerUUID,
 	}
@@ -361,15 +349,14 @@ func (e *Environ) allControllerManagedInstances(ctx envcontext.ProviderCallConte
 }
 
 // ControllerInstances implements environs.Environ.
-func (e *Environ) ControllerInstances(ctx envcontext.ProviderCallContext, controllerUUID string) ([]instance.Id, error) {
+func (e *Environ) ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error) {
 	tags := map[string]string{
 		tags.JujuController:   controllerUUID,
 		tags.JujuIsController: "true",
 	}
 	instances, err := e.allInstances(ctx, tags)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	ids := []instance.Id{}
 	for _, val := range instances {
@@ -379,24 +366,23 @@ func (e *Environ) ControllerInstances(ctx envcontext.ProviderCallContext, contro
 }
 
 // Destroy implements environs.Environ.
-func (e *Environ) Destroy(ctx envcontext.ProviderCallContext) error {
+func (e *Environ) Destroy(ctx context.Context) error {
 	return common.Destroy(e, ctx)
 }
 
 // DestroyController implements environs.Environ.
-func (e *Environ) DestroyController(ctx envcontext.ProviderCallContext, controllerUUID string) error {
+func (e *Environ) DestroyController(ctx context.Context, controllerUUID string) error {
 	err := e.Destroy(ctx)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		logger.Errorf("Failed to destroy environment through controller: %s", errors.Trace(err))
+		err = e.HandleCredentialError(ctx, err)
+		logger.Errorf(ctx, "Failed to destroy environment through controller: %s", errors.Trace(err))
 	}
 	instances, err := e.allControllerManagedInstances(ctx, controllerUUID)
 	if err != nil {
 		if err == environs.ErrNoInstances {
 			return nil
 		}
-		providerCommon.HandleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	ids := make([]instance.Id, len(instances))
 	for i, val := range instances {
@@ -405,14 +391,12 @@ func (e *Environ) DestroyController(ctx envcontext.ProviderCallContext, controll
 
 	err = e.StopInstances(ctx, ids...)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
-	logger.Debugf("Cleaning up network resources")
-	err = e.cleanupNetworksAndSubnets(controllerUUID, "")
+	logger.Debugf(ctx, "Cleaning up network resources")
+	err = e.cleanupNetworksAndSubnets(ctx, controllerUUID, "")
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 
 	return nil
@@ -444,34 +428,29 @@ func (e *Environ) getCloudInitConfig(osname string, apiPort int, statePort int) 
 		cloudcfg.AddRunCmd(fmt.Sprintf("/sbin/iptables -I INPUT -p tcp --dport %d -j ACCEPT", apiPort))
 		cloudcfg.AddRunCmd(fmt.Sprintf("/sbin/iptables -I INPUT -p tcp --dport %d -j ACCEPT", statePort))
 		cloudcfg.AddScripts("/etc/init.d/netfilter-persistent save")
-	case ostype.CentOS:
-		cloudcfg.AddRunCmd(fmt.Sprintf("firewall-cmd --zone=public --add-port=%d/tcp --permanent", apiPort))
-		cloudcfg.AddRunCmd(fmt.Sprintf("firewall-cmd --zone=public --add-port=%d/tcp --permanent", statePort))
-		cloudcfg.AddRunCmd("firewall-cmd --reload")
 	}
 	return cloudcfg, nil
 }
 
 // StartInstance implements environs.InstanceBroker.
 func (e *Environ) StartInstance(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (*environs.StartInstanceResult, error) {
 	result, err := e.startInstance(ctx, args)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	return result, nil
 }
 
 func (e *Environ) startInstance(
-	ctx envcontext.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (*environs.StartInstanceResult, error) {
 	if args.ControllerUUID == "" {
 		return nil, errors.NotFoundf("Controller UUID")
 	}
 
-	networks, err := e.ensureNetworksAndSubnets(ctx, args.ControllerUUID, e.Config().UUID())
+	networks, err := e.ensureNetworksAndSubnets(ctx, e.Config().UUID())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -486,12 +465,12 @@ func (e *Environ) startInstance(
 	// refresh the global image cache
 	// this only hits the API every 30 minutes, otherwise just retrieves
 	// from cache
-	imgCache, err := refreshImageCache(e.Compute, e.ecfg().compartmentID())
+	imgCache, err := refreshImageCache(ctx, e.Compute, e.ecfg().compartmentID())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if logger.IsTraceEnabled() {
-		logger.Tracef("Image cache contains: %# v", pretty.Formatter(imgCache))
+	if logger.IsLevelEnabled(corelogger.TRACE) {
+		logger.Tracef(ctx, "Image cache contains: %# v", pretty.Formatter(imgCache))
 	}
 
 	arch, err := args.Tools.OneArch()
@@ -507,6 +486,7 @@ func (e *Environ) startInstance(
 	// check if we find an image that is compliant with the
 	// constraints provided in the oracle cloud account
 	spec, image, err := findInstanceSpec(
+		ctx,
 		args.InstanceConfig.Base,
 		arch,
 		args.Constraints,
@@ -520,7 +500,7 @@ func (e *Environ) startInstance(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Tracef("agent binaries: %v", tools)
+	logger.Tracef(ctx, "agent binaries: %v", tools)
 	if err = args.InstanceConfig.SetTools(tools); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -545,7 +525,7 @@ func (e *Environ) startInstance(
 	// status is not necessary
 	if args.InstanceConfig.IsController() {
 		apiPort = args.InstanceConfig.ControllerConfig.APIPort()
-		statePort = args.InstanceConfig.ControllerConfig.StatePort()
+		statePort = controller.DefaultStatePort
 		desiredStatus = ociCore.InstanceLifecycleStateRunning
 	} else {
 		desiredStatus = ociCore.InstanceLifecycleStateProvisioning
@@ -557,7 +537,7 @@ func (e *Environ) startInstance(
 	}
 
 	// compose userdata with the cloud config template
-	logger.Debugf("Composing userdata")
+	logger.Debugf(ctx, "Composing userdata")
 	userData, err := providerinit.ComposeUserData(
 		args.InstanceConfig,
 		cloudcfg,
@@ -571,12 +551,12 @@ func (e *Environ) startInstance(
 	if args.Constraints.RootDisk != nil {
 		rootDiskSizeGB = int64(*args.Constraints.RootDisk) / 1024
 		if int(*args.Constraints.RootDisk) < MinVolumeSizeMB {
-			logger.Warningf(
+			logger.Warningf(ctx,
 				"selected disk size is too small (%d MB). Setting root disk size to minimum volume size (%d MB)",
 				int(*args.Constraints.RootDisk), MinVolumeSizeMB)
 			rootDiskSizeGB = MinVolumeSizeMB / 1024
 		} else if int(*args.Constraints.RootDisk) > MaxVolumeSizeMB {
-			logger.Warningf(
+			logger.Warningf(ctx,
 				"selected disk size is too large (%d MB). Setting root disk size to maximum volume size (%d MB)",
 				int(*args.Constraints.RootDisk), MaxVolumeSizeMB)
 			rootDiskSizeGB = MaxVolumeSizeMB / 1024
@@ -632,7 +612,7 @@ func (e *Environ) startInstance(
 	if err := instance.waitForMachineStatus(desiredStatus, timeout); err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Infof("started instance %q", *machineId)
+	logger.Infof(ctx, "started instance %q", *machineId)
 
 	if desiredStatus == ociCore.InstanceLifecycleStateRunning && allocatePublicIP {
 		if err := instance.waitForPublicIP(ctx); err != nil {
@@ -679,19 +659,17 @@ func ensureShapeConfig(
 }
 
 // StopInstances implements environs.InstanceBroker.
-func (e *Environ) StopInstances(ctx envcontext.ProviderCallContext, ids ...instance.Id) error {
+func (e *Environ) StopInstances(ctx context.Context, ids ...instance.Id) error {
 	ociInstances, err := e.getOciInstances(ctx, ids...)
 	if err == environs.ErrNoInstances {
 		return nil
 	} else if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return err
+		return e.HandleCredentialError(ctx, err)
 	}
 
-	logger.Debugf("terminating instances %v", ids)
+	logger.Debugf(ctx, "terminating instances %v", ids)
 	if err := e.terminateInstances(ctx, ociInstances...); err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return err
+		return e.HandleCredentialError(ctx, err)
 	}
 
 	return nil
@@ -702,7 +680,7 @@ type instError struct {
 	err error
 }
 
-func (o *Environ) terminateInstances(ctx envcontext.ProviderCallContext, instances ...*ociInstance) error {
+func (e *Environ) terminateInstances(ctx context.Context, instances ...*ociInstance) error {
 	wg := sync.WaitGroup{}
 	wg.Add(len(instances))
 	errCh := make(chan instError, len(instances))
@@ -711,14 +689,14 @@ func (o *Environ) terminateInstances(ctx envcontext.ProviderCallContext, instanc
 			defer wg.Done()
 			if err := inst.deleteInstance(ctx); err != nil {
 				errCh <- instError{id: inst.Id(), err: err}
-				providerCommon.HandleCredentialError(err, ctx)
+				_ = e.HandleCredentialError(ctx, err)
 				return
 			}
 			err := inst.waitForMachineStatus(
 				ociCore.InstanceLifecycleStateTerminated,
 				resourcePollTimeout)
-			if err != nil && !errors.IsNotFound(err) {
-				providerCommon.HandleCredentialError(err, ctx)
+			if err != nil && !errors.Is(err, errors.NotFound) {
+				err = e.HandleCredentialError(ctx, err)
 				errCh <- instError{id: inst.Id(), err: err}
 			}
 		}(oInst)
@@ -747,14 +725,13 @@ func (o *Environ) terminateInstances(ctx envcontext.ProviderCallContext, instanc
 }
 
 // AllInstances implements environs.InstanceBroker.
-func (e *Environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (e *Environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	tags := map[string]string{
 		tags.JujuModel: e.Config().UUID(),
 	}
 	allInstances, err := e.allInstances(ctx, tags)
 	if err != nil {
-		providerCommon.HandleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	ret := []instances.Instance{}
@@ -765,7 +742,7 @@ func (e *Environ) AllInstances(ctx envcontext.ProviderCallContext) ([]instances.
 }
 
 // AllRunningInstances implements environs.InstanceBroker.
-func (e *Environ) AllRunningInstances(ctx envcontext.ProviderCallContext) ([]instances.Instance, error) {
+func (e *Environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
 	// e.allInstances() returns all but 'terminated' instances already, so
 	// "all instances is the same as "all running" instances here.
 	return e.AllInstances(ctx)
@@ -782,11 +759,11 @@ func (e *Environ) Config() *config.Config {
 }
 
 // PrecheckInstance implements environs.InstancePrechecker.
-func (e *Environ) PrecheckInstance(envcontext.ProviderCallContext, environs.PrecheckInstanceParams) error {
+func (e *Environ) PrecheckInstance(context.Context, environs.PrecheckInstanceParams) error {
 	return nil
 }
 
 // InstanceTypes implements environs.InstancePrechecker.
-func (e *Environ) InstanceTypes(envcontext.ProviderCallContext, constraints.Value) (instances.InstanceTypesWithCostMetadata, error) {
+func (e *Environ) InstanceTypes(context.Context, constraints.Value) (instances.InstanceTypesWithCostMetadata, error) {
 	return instances.InstanceTypesWithCostMetadata{}, errors.NotImplementedf("InstanceTypes")
 }

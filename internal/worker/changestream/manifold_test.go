@@ -4,53 +4,71 @@
 package changestream
 
 import (
-	clock "github.com/juju/clock"
+	"testing"
+
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/goleak"
 
 	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/logger"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 )
 
 type manifoldSuite struct {
 	baseSuite
 }
 
-var _ = gc.Suite(&manifoldSuite{})
-
-func (s *manifoldSuite) TestValidateConfig(c *gc.C) {
-	defer s.setupMocks(c).Finish()
-
-	cfg := s.getConfig()
-	c.Check(cfg.Validate(), jc.ErrorIsNil)
-
-	cfg.Clock = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.Logger = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.DBAccessor = ""
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.FileNotifyWatcher = ""
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	cfg = s.getConfig()
-	cfg.NewEventQueueWorker = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &manifoldSuite{})
 }
 
-func (s *manifoldSuite) getConfig() ManifoldConfig {
+func (s *manifoldSuite) TestValidateConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	cfg := s.getConfig(c)
+	c.Check(cfg.Validate(), tc.ErrorIsNil)
+
+	cfg.Clock = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.Logger = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.AgentName = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.DBAccessor = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.FileNotifyWatcher = ""
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.NewMetricsCollector = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+
+	cfg = s.getConfig(c)
+	cfg.NewWatchableDB = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
+}
+
+func (s *manifoldSuite) getConfig(c *tc.C) ManifoldConfig {
 	return ManifoldConfig{
-		DBAccessor:        "dbaccessor",
-		FileNotifyWatcher: "filenotifywatcher",
-		Clock:             s.clock,
-		Logger:            s.logger,
-		NewEventQueueWorker: func(coredatabase.TrackedDB, FileNotifier, clock.Clock, Logger) (EventQueueWorker, error) {
+		AgentName:            "agent",
+		DBAccessor:           "dbaccessor",
+		FileNotifyWatcher:    "filenotifywatcher",
+		Clock:                s.clock,
+		Logger:               loggertesting.WrapCheckLog(c),
+		NewMetricsCollector:  NewMetricsCollector,
+		PrometheusRegisterer: s.prometheusRegisterer,
+		NewWatchableDB: func(string, coredatabase.TxnRunner, FileNotifier, clock.Clock, NamespaceMetrics, logger.Logger) (WatchableDBWorker, error) {
 			return nil, nil
 		},
 	}

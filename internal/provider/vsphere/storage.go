@@ -4,17 +4,26 @@
 package vsphere
 
 import (
-	"github.com/juju/errors"
-
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/provider/common"
+	"github.com/juju/juju/internal/storage"
 )
+
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned.
+//
+// Implements [storage.ProviderRegistry] interface.
+func (*environ) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	return common.GetCommonRecommendedIAASPoolForKind(kind)
+}
 
 // StorageProviderTypes implements storage.ProviderRegistry.
 func (*environ) StorageProviderTypes() ([]storage.ProviderType, error) {
-	return nil, nil
+	return common.CommonIAASStorageProviderTypes(), nil
 }
 
 // StorageProvider implements storage.ProviderRegistry.
 func (*environ) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	return nil, errors.NotFoundf("storage provider %q", t)
+	return common.GetCommonIAASStorageProvider(t)
 }

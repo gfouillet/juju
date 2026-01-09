@@ -4,41 +4,8 @@
 package params
 
 import (
-	"github.com/juju/version/v2"
-
-	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/semversion"
 )
-
-// KubernetesDeploymentInfo holds deployment info from charm metadata.
-type KubernetesDeploymentInfo struct {
-	DeploymentType string `json:"deployment-type"`
-	ServiceType    string `json:"service-type"`
-}
-
-// KubernetesProvisioningInfo holds unit provisioning info.
-type KubernetesProvisioningInfo struct {
-	DeploymentInfo       *KubernetesDeploymentInfo    `json:"deployment-info,omitempty"`
-	PodSpec              string                       `json:"pod-spec"`
-	RawK8sSpec           string                       `json:"raw-k8s-spec,omitempty"`
-	Constraints          constraints.Value            `json:"constraints"`
-	Tags                 map[string]string            `json:"tags,omitempty"`
-	Filesystems          []KubernetesFilesystemParams `json:"filesystems,omitempty"`
-	Volumes              []KubernetesVolumeParams     `json:"volumes,omitempty"`
-	Devices              []KubernetesDeviceParams     `json:"devices,omitempty"`
-	CharmModifiedVersion int                          `json:"charm-modified-version,omitempty"`
-	ImageRepo            DockerImageInfo              `json:"image-repo,omitempty"`
-}
-
-// KubernetesProvisioningInfoResult holds unit provisioning info or an error.
-type KubernetesProvisioningInfoResult struct {
-	Error  *Error                      `json:"error,omitempty"`
-	Result *KubernetesProvisioningInfo `json:"result"`
-}
-
-// KubernetesProvisioningInfoResults holds multiple provisioning info results.
-type KubernetesProvisioningInfoResults struct {
-	Results []KubernetesProvisioningInfoResult `json:"results"`
-}
 
 // KubernetesFilesystemParams holds the parameters for creating a storage filesystem.
 type KubernetesFilesystemParams struct {
@@ -53,7 +20,6 @@ type KubernetesFilesystemParams struct {
 // KubernetesFilesystemAttachmentParams holds the parameters for
 // creating a filesystem attachment.
 type KubernetesFilesystemAttachmentParams struct {
-	Provider   string `json:"provider"`
 	MountPoint string `json:"mount-point,omitempty"`
 	ReadOnly   bool   `json:"read-only,omitempty"`
 }
@@ -90,7 +56,7 @@ type KubernetesFilesystemInfo struct {
 	Volume       KubernetesVolumeInfo   `json:"volume"`
 }
 
-// Volume describes a storage volume in the cloud
+// KubernetesVolumeInfo describes a storage volume in the cloud
 // as reported to the model.
 type KubernetesVolumeInfo struct {
 	VolumeId   string                 `json:"volume-id"`
@@ -114,6 +80,6 @@ type KubernetesDeviceParams struct {
 
 // KubernetesUpgradeArg holds args used to upgrade an operator.
 type KubernetesUpgradeArg struct {
-	AgentTag string         `json:"agent-tag"`
-	Version  version.Number `json:"version"`
+	AgentTag string            `json:"agent-tag"`
+	Version  semversion.Number `json:"version"`
 }

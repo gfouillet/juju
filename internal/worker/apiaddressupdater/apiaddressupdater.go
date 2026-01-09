@@ -4,22 +4,24 @@
 package apiaddressupdater
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
+	"github.com/juju/worker/v4"
 
+	"github.com/juju/juju/core/logger"
 	corenetwork "github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/network"
+	"github.com/juju/juju/internal/network"
 )
 
 // APIAddresser is an interface that is provided to NewAPIAddressUpdater
 // which can be used to watch for API address changes.
 type APIAddresser interface {
-	APIHostPorts() ([]corenetwork.ProviderHostPorts, error)
-	WatchAPIHostPorts() (watcher.NotifyWatcher, error)
+	APIHostPorts(context.Context) ([]corenetwork.ProviderHostPorts, error)
+	WatchAPIHostPorts(context.Context) (watcher.NotifyWatcher, error)
 }
 
 // APIAddressSetter is an interface that is provided to NewAPIAddressUpdater
@@ -32,7 +34,7 @@ type APIAddressSetter interface {
 type Config struct {
 	Addresser APIAddresser
 	Setter    APIAddressSetter
-	Logger    Logger
+	Logger    logger.Logger
 }
 
 // Validate returns an error if config cannot drive a Worker.
@@ -79,23 +81,23 @@ func NewAPIAddressUpdater(config Config) (worker.Worker, error) {
 }
 
 // SetUp is part of the watcher.NotifyHandler interface.
-func (c *APIAddressUpdater) SetUp() (watcher.NotifyWatcher, error) {
-	return c.config.Addresser.WatchAPIHostPorts()
+func (c *APIAddressUpdater) SetUp(ctx context.Context) (watcher.NotifyWatcher, error) {
+	return c.config.Addresser.WatchAPIHostPorts(ctx)
 }
 
 // Handle is part of the watcher.NotifyHandler interface.
-func (c *APIAddressUpdater) Handle(_ <-chan struct{}) error {
-	hps, err := c.getAddresses()
+func (c *APIAddressUpdater) Handle(ctx context.Context) error {
+	hps, err := c.getAddresses(ctx)
 	if err != nil {
 		return err
 	}
 
 	// Logging to identify lp: 1888453
 	if len(hps) == 0 {
-		c.config.Logger.Warningf("empty API host ports received. Updating using existing entries.")
+		c.config.Logger.Warningf(ctx, "empty API host ports received. Updating using existing entries.")
 	}
 
-	c.config.Logger.Debugf("updating API hostPorts to %+v", hps)
+	c.config.Logger.Debugf(ctx, "updating API hostPorts to %+v", hps)
 	c.mu.Lock()
 	// Protection case to possible help with lp: 1888453
 	if len(hps) != 0 {
@@ -122,8 +124,8 @@ func (c *APIAddressUpdater) Handle(_ <-chan struct{}) error {
 	return nil
 }
 
-func (c *APIAddressUpdater) getAddresses() ([]corenetwork.ProviderHostPorts, error) {
-	addresses, err := c.config.Addresser.APIHostPorts()
+func (c *APIAddressUpdater) getAddresses(ctx context.Context) ([]corenetwork.ProviderHostPorts, error) {
+	addresses, err := c.config.Addresser.APIHostPorts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting addresses: %v", err)
 	}
@@ -133,7 +135,7 @@ func (c *APIAddressUpdater) getAddresses() ([]corenetwork.ProviderHostPorts, err
 	hpsToSet := make([]corenetwork.ProviderHostPorts, 0)
 	for _, hostPorts := range addresses {
 		// Strip ports, filter, then add ports again.
-		filtered := network.FilterBridgeAddresses(hostPorts.Addresses())
+		filtered := network.FilterBridgeAddresses(ctx, hostPorts.Addresses())
 		hps := make(corenetwork.ProviderHostPorts, 0, len(filtered))
 		for _, hostPort := range hostPorts {
 			for _, addr := range filtered {
@@ -149,7 +151,7 @@ func (c *APIAddressUpdater) getAddresses() ([]corenetwork.ProviderHostPorts, err
 
 	// Logging to identify lp: 1888453
 	if len(hpsToSet) == 0 {
-		c.config.Logger.Warningf("get address returning zero results after filtering, non filtered list: %v", addresses)
+		c.config.Logger.Warningf(ctx, "get address returning zero results after filtering, non filtered list: %v", addresses)
 	}
 
 	return hpsToSet, nil

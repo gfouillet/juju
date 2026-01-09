@@ -5,6 +5,10 @@
 
 package filenotifywatcher
 
+import (
+	"github.com/fsnotify/fsnotify"
+)
+
 type watcher struct{}
 
 func newWatcher() (INotifyWatcher, error) {
@@ -15,7 +19,7 @@ func (w *watcher) Watch(path string) error {
 	return nil
 }
 
-func (w *watcher) Events() <-chan *inotify.Event {
+func (w *watcher) Events() <-chan fsnotify.Event {
 	return nil
 }
 

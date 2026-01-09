@@ -4,23 +4,24 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -87,7 +88,7 @@ type listCredentialsCommand struct {
 	personalCloudsFunc func() (map[string]jujucloud.Cloud, error)
 	cloudByNameFunc    func(string) (*jujucloud.Cloud, error)
 
-	listCredentialsAPIFunc func() (ListCredentialsAPI, error)
+	listCredentialsAPIFunc func(ctx context.Context) (ListCredentialsAPI, error)
 }
 
 // CloudCredential contains attributes used to define credentials for a cloud.
@@ -133,7 +134,7 @@ type credentialsMap struct {
 }
 
 type ListCredentialsAPI interface {
-	CredentialContents(cloud, credential string, withSecrets bool) ([]params.CredentialContentResult, error)
+	CredentialContents(ctx context.Context, cloud, credential string, withSecrets bool) ([]params.CredentialContentResult, error)
 	Close() error
 }
 
@@ -151,8 +152,8 @@ func NewListCredentialsCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *listCredentialsCommand) cloudAPI() (ListCredentialsAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *listCredentialsCommand) cloudAPI(ctx context.Context) (ListCredentialsAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -272,12 +273,12 @@ func (c *listCredentialsCommand) Run(ctxt *cmd.Context) error {
 }
 
 func (c *listCredentialsCommand) remoteCredentials(ctxt *cmd.Context) (map[string]CloudCredential, error) {
-	client, err := c.listCredentialsAPIFunc()
+	client, err := c.listCredentialsAPIFunc(ctxt)
 	if err != nil {
 		return nil, err
 	}
 	defer client.Close()
-	remotes, err := client.CredentialContents("", "", c.showSecrets)
+	remotes, err := client.CredentialContents(ctxt, "", "", c.showSecrets)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -312,7 +313,7 @@ func (c *listCredentialsCommand) localCredentials(ctxt *cmd.Context) (map[string
 	var missingClouds []string
 	for _, cloudName := range cloudNames {
 		cred, err := c.Store.CredentialForCloud(cloudName)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			continue
 		} else if err != nil {
 			ctxt.Warningf("error loading credential for cloud %v: %v", cloudName, err)
@@ -320,7 +321,7 @@ func (c *listCredentialsCommand) localCredentials(ctxt *cmd.Context) (map[string
 		}
 		if !c.showSecrets {
 			if err := removeSecrets(cloudName, cred, c.cloudByNameFunc); err != nil {
-				if errors.IsNotValid(err) {
+				if errors.Is(err, errors.NotValid) {
 					missingClouds = append(missingClouds, cloudName)
 					continue
 				}

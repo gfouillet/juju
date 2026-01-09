@@ -5,6 +5,7 @@ package introspection
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path"
 	"runtime"
@@ -37,6 +38,7 @@ func (osFileReaderWriter) WriteFile(filename string, data []byte, perm os.FileMo
 // WriteProfileFunctions writes the shellFuncs below to a file in the
 // /etc/profile.d directory so all bash terminals can easily access the
 // introspection worker.
+//
 // Deprecated: use UpdateProfileFunction with a FileReaderWriter.
 func WriteProfileFunctions(profileDir string) error {
 	return UpdateProfileFunctions(osFileReaderWriter{}, profileDir)
@@ -47,9 +49,10 @@ func WriteProfileFunctions(profileDir string) error {
 // introspection worker.
 func UpdateProfileFunctions(io FileReaderWriter, profileDir string) error {
 	if runtime.GOOS != "linux" {
-		logger.Debugf("skipping profile funcs install")
+		logger.Debugf(context.Background(), "skipping profile funcs install")
 		return nil
 	}
+
 	filename := profileFilename(profileDir)
 	shellFuncsBytes := []byte(shellFuncs)
 	if currentBytes, err := io.ReadFile(filename); err == nil {
@@ -90,7 +93,10 @@ juju_machine_agent_name () {
 }
 
 juju_controller_agent_name () {
-  local controller=$(find /var/lib/juju/agents -maxdepth 1 -type d -name 'controller-*' -printf %f)
+  local controller=$(juju_machine_agent_name)
+  if [ -z "$controller" ]; then
+    controller=$(find /var/lib/juju/agents -maxdepth 1 -type d -name 'controller-*' -printf %f)
+  fi
   echo $controller
 }
 
@@ -140,24 +146,8 @@ juju_engine_report () {
   juju_agent depengine
 }
 
-juju_statepool_report () {
-  juju_agent statepool
-}
-
-juju_pubsub_report () {
-  juju_agent pubsub
-}
-
 juju_metrics () {
   juju_agent metrics
-}
-
-juju_presence_report () {
-  juju_agent presence
-}
-
-juju_statetracker_report () {
-  juju_agent debug/pprof/juju/state/tracker?debug=1
 }
 
 juju_machine_lock () {
@@ -170,30 +160,46 @@ juju_unit_status () {
   juju_agent units?action=status
 }
 
-juju_stop_unit () {
-  # This requires some arguments.
-  if [ "$#" -lt 1 ]; then
-    echo "usage: juju_stop_unit <unit-name> [<unit-name>...]"
+juju_db_repl () {
+  local agent=$(juju_controller_agent_name)
+  if [ -z "${agent}" ]; then
+    echo "cannot identify agent"
     return 1
   fi
-  args=""
-  for i in "$@"; do
-    args="$args unit=$i"
-  done
-  juju_agent --post units action=stop $args
+
+  local type=$(printf ${agent} | cut -d- -f1)
+  local id=$(printf ${agent} | cut -d- -f2)
+  local flag="--${type}-id=${id}"
+
+  if [ -x "$(which sudo)" ]; then
+    sudo /var/lib/juju/tools/$agent/jujud db-repl ${flag}
+  else
+    /var/lib/juju/tools/$agent/jujud db-repl ${flag}
+  fi
 }
 
-juju_start_unit () {
-  # This requires some arguments.
-  if [ "$#" -lt 1 ]; then
-    echo "usage: juju_start_unit <unit-name> [<unit-name>...]"
-    return 1
-  fi
-  args=""
-  for i in "$@"; do
-    args="$args unit=$i"
+juju_object_store_contents () {
+  res=$(juju_object_store_contents_ "/var/lib/juju/objectstore")
+  res="Model    Name\n$res"
+  echo -e $res | column -t
+}
+
+juju_object_store_contents_ () {
+  target=${1:-.}
+  for i in "$target"; do
+    if [ -d "$i" ]; then
+      for sub in "$i"/*; do
+        s=$(juju_object_store_contents_ "$sub")
+        if [ -n "$s" ]; then
+           echo $s
+        fi
+      done
+    elif [ -f "$i" ]; then
+      m=$(dirname "$i" | xargs basename)
+      f=$(basename "$i")
+      echo "$m  $f\n"
+    fi
   done
-  juju_agent --post units action=start $args
 }
 
 juju_api_connection_sources () {
@@ -215,6 +221,21 @@ juju_api_connection_sources () {
   fi
 }
 
+juju_flightrecorder_start () {
+  duration=${1:-"0s"}
+  kind=${2:-"error"}
+  juju_agent "flightrecorder/start?kind=$kind&duration=$duration"
+}
+
+juju_flightrecorder_stop () {
+  juju_agent flightrecorder/stop
+}
+
+juju_flightrecorder_capture () {
+  kind=${1:-}
+  juju_agent flightrecorder/capture?kind=$kind
+}
+
 # This asks for the command of the current pid.
 # Can't use $0 nor $SHELL due to this being wrong in various situations.
 shell=$(ps -p "$$" -o comm --no-headers)
@@ -229,14 +250,12 @@ if [ "$shell" = "bash" ]; then
   export -f juju_heap_profile
   export -f juju_engine_report
   export -f juju_metrics
-  export -f juju_statepool_report
-  export -f juju_statetracker_report
-  export -f juju_pubsub_report
-  export -f juju_presence_report
   export -f juju_machine_lock
   export -f juju_unit_status
-  export -f juju_start_unit
-  export -f juju_stop_unit
+  export -f juju_db_repl
   export -f juju_api_connection_sources
+  export -f juju_flightrecorder_start
+  export -f juju_flightrecorder_stop
+  export -f juju_flightrecorder_capture
 fi
 `

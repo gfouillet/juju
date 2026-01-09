@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh/terminal"
 
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
 )
 
 // OSEnviron represents an interface around the os environment.

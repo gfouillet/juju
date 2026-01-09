@@ -4,56 +4,44 @@
 package machinemanager
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state/stateenvirons"
 )
 
 // InstanceTypes returns instance type information for the cloud and region
 // in which the current model is deployed.
-func (mm *MachineManagerAPI) InstanceTypes(cons params.ModelInstanceTypesConstraints) (params.InstanceTypesResults, error) {
-	return instanceTypes(mm, environs.GetEnviron, cons)
+func (mm *MachineManagerAPI) InstanceTypes(ctx context.Context, cons params.ModelInstanceTypesConstraints) (params.InstanceTypesResults, error) {
+	fetcher, err := mm.machineService.GetInstanceTypesFetcher(ctx)
+	if err != nil {
+		return params.InstanceTypesResults{}, errors.Trace(err)
+	}
+	return instanceTypes(ctx, fetcher, cons)
 }
 
-type environGetFunc func(st environs.EnvironConfigGetter, newEnviron environs.NewEnvironFunc) (environs.Environ, error)
-
-func instanceTypes(mm *MachineManagerAPI,
-	getEnviron environGetFunc,
+// instanceTypes reports back the results from the provider for what instance
+// types are available for given constraints.
+func instanceTypes(
+	ctx context.Context,
+	fetcher environs.InstanceTypesFetcher,
 	cons params.ModelInstanceTypesConstraints,
 ) (params.InstanceTypesResults, error) {
-	model, err := mm.st.Model()
-	if err != nil {
-		return params.InstanceTypesResults{}, errors.Trace(err)
-	}
-
-	cloudSpec := func() (environscloudspec.CloudSpec, error) {
-		return stateenvirons.CloudSpecForModel(model)
-	}
-	backend := common.NewEnvironConfigGetterFuncs(model.Config, cloudSpec, model.ControllerUUID())
-
-	env, err := getEnviron(backend, environs.New)
-	if err != nil {
-		return params.InstanceTypesResults{}, errors.Trace(err)
-	}
 	result := make([]params.InstanceTypesResult, len(cons.Constraints))
-	// TODO(perrito666) Cache the results to avoid excessive querying of the cloud.
 	for i, c := range cons.Constraints {
 		value := constraints.Value{}
 		if c.Value != nil {
 			value = *c.Value
 		}
-		itCons := common.NewInstanceTypeConstraints(
-			env,
-			mm.callContext,
+		itCons := newInstanceTypeConstraints(
+			fetcher,
 			value,
 		)
-		it, err := common.InstanceTypes(itCons)
+		it, err := getInstanceTypes(ctx, itCons)
 		if err != nil {
 			it = params.InstanceTypesResult{Error: apiservererrors.ServerError(err)}
 		}

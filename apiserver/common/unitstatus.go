@@ -1,103 +1,157 @@
-// Copyright 2016 Canonical Ltd.
+// Copyright 2025 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 package common
 
 import (
-	"fmt"
+	"context"
 
-	"github.com/juju/charm/v12/hooks"
+	"github.com/juju/clock"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/internal/worker/uniter/hook"
-	"github.com/juju/juju/internal/worker/uniter/operation"
-	"github.com/juju/juju/state"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	corestatus "github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/rpc/params"
 )
 
-// StatusAndErr pairs a StatusInfo with an error associated with
-// retrieving it.
-type StatusAndErr struct {
-	Status status.StatusInfo
-	Err    error
+type StatusService interface {
+	// GetUnitWorkloadStatus returns the workload status of the specified unit, returning an
+	// error satisfying [statuserrors.UnitNotFound] if the unit doesn't exist.
+	GetUnitWorkloadStatus(context.Context, coreunit.Name) (corestatus.StatusInfo, error)
+
+	// SetUnitWorkloadStatus sets the workload status of the specified unit, returning an
+	// error satisfying [statuserrors.UnitNotFound] if the unit doesn't exist.
+	SetUnitWorkloadStatus(context.Context, coreunit.Name, corestatus.StatusInfo) error
 }
 
-// UnitStatusGetter defines the unit functionality required to
-// determine unit agent and workload status.
-type UnitStatusGetter interface {
-	AgentStatus() (status.StatusInfo, error)
-	Status() (status.StatusInfo, error)
-	ShouldBeAssigned() bool
-	Name() string
-	Life() state.Life
-	IsSidecar() (bool, error)
+// UnitStatusSetter defines the API used to set the workload status of a unit.
+type UnitStatusSetter struct {
+	clock         clock.Clock
+	statusService StatusService
+	getCanModify  GetAuthFunc
 }
 
-// UnitStatus returns the unit agent and workload status for a given
-// unit, with special handling for agent presence.
-func (c *ModelPresenceContext) UnitStatus(unit UnitStatusGetter) (agent StatusAndErr, workload StatusAndErr) {
-	agent.Status, agent.Err = unit.AgentStatus()
-	workload.Status, workload.Err = unit.Status()
-	if !canBeLost(agent.Status, workload.Status) {
-		// The unit is allocating or installing - there's no point in
-		// enquiring about the agent liveness.
-		return
+// NewUnitStatusSetter returns a new UnitStatusSetter.
+func NewUnitStatusSetter(statusService StatusService, clock clock.Clock, getCanModify GetAuthFunc) *UnitStatusSetter {
+	return &UnitStatusSetter{
+		statusService: statusService,
+		getCanModify:  getCanModify,
+		clock:         clock,
 	}
+}
 
-	agentAlive, err := c.unitPresence(unit)
+// SetStatus sets the workload status of the specified units.
+func (s *UnitStatusSetter) SetStatus(ctx context.Context, args params.SetStatus) (params.ErrorResults, error) {
+	canModify, err := s.getCanModify(ctx)
 	if err != nil {
-		return
+		return params.ErrorResults{}, err
 	}
-	if unit.Life() != state.Dead && !agentAlive {
-		// If the unit is in error, it would be bad to throw away
-		// the error information as when the agent reconnects, that
-		// error information would then be lost.
-		// NOTE(nvinuesa): we must also keep the same workload status
-		// and *not* add the "agent lost" message when the workload is
-		// terminated. This happens on k8s sometimes when we remove an
-		// application but the pod is not removed immediately. See:
-		// https://bugs.launchpad.net/juju/+bug/1979292
-		if workload.Status.Status != status.Error &&
-			workload.Status.Status != status.Terminated {
 
-			workload.Status.Status = status.Unknown
-			workload.Status.Message = fmt.Sprintf("agent lost, see 'juju show-status-log %s'", unit.Name())
+	result := params.ErrorResults{
+		Results: make([]params.ErrorResult, len(args.Entities)),
+	}
+	if len(args.Entities) == 0 {
+		return result, nil
+	}
+	now := s.clock.Now()
+
+	for i, arg := range args.Entities {
+		tag, err := names.ParseUnitTag(arg.Tag)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
 		}
-		agent.Status.Status = status.Lost
-		agent.Status.Message = "agent is not communicating with the server"
-	}
-	return
-}
 
-func canBeLost(agent, workload status.StatusInfo) bool {
-	switch agent.Status {
-	case status.Allocating, status.Running:
-		return false
-	case status.Executing:
-		installMsg := operation.RunningHookMessage(
-			string(hooks.Install),
-			hook.Info{Kind: hooks.Install},
-		)
-		return agent.Message != installMsg
-	}
+		if !canModify(tag) {
+			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
+			continue
+		}
 
-	// TODO(fwereade/wallyworld): we should have an explicit place in the model
-	// to tell us when we've hit this point, instead of piggybacking on top of
-	// status and/or status history.
-
-	return isWorkloadInstalled(workload)
-}
-
-func isWorkloadInstalled(workload status.StatusInfo) bool {
-	switch workload.Status {
-	case status.Maintenance:
-		return workload.Message != status.MessageInstallingCharm
-	case status.Waiting:
-		switch workload.Message {
-		case status.MessageWaitForMachine:
-		case status.MessageInstallingAgent:
-		case status.MessageInitializingAgent:
-			return false
+		unitName, err := coreunit.NewName(tag.Id())
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		sInfo := corestatus.StatusInfo{
+			Status:  corestatus.Status(arg.Status),
+			Message: arg.Info,
+			Data:    arg.Data,
+			Since:   &now,
+		}
+		err = s.statusService.SetUnitWorkloadStatus(ctx, unitName, sInfo)
+		if errors.Is(err, applicationerrors.UnitNotFound) {
+			result.Results[i].Error = apiservererrors.ServerError(errors.NotFoundf("unit %q", unitName))
+			continue
+		} else if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
 		}
 	}
-	return true
+	return result, nil
+}
+
+// UnitStatusGetter defines the API used to get the workload status of a unit.
+type UnitStatusGetter struct {
+	clock         clock.Clock
+	statusService StatusService
+	getCanAccess  GetAuthFunc
+}
+
+// NewUnitStatusGetter returns a new UnitStatusGetter.
+func NewUnitStatusGetter(statusService StatusService, clock clock.Clock, getCanAccess GetAuthFunc) *UnitStatusGetter {
+	return &UnitStatusGetter{
+		statusService: statusService,
+		getCanAccess:  getCanAccess,
+		clock:         clock,
+	}
+}
+
+// Status returns the workload status of the specified units.
+func (s *UnitStatusGetter) Status(ctx context.Context, args params.Entities) (params.StatusResults, error) {
+	canAccess, err := s.getCanAccess(ctx)
+	if err != nil {
+		return params.StatusResults{}, err
+	}
+
+	result := params.StatusResults{
+		Results: make([]params.StatusResult, len(args.Entities)),
+	}
+
+	for i, entity := range args.Entities {
+		tag, err := names.ParseUnitTag(entity.Tag)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		if !canAccess(tag) {
+			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
+			continue
+		}
+
+		unitName, err := coreunit.NewName(tag.Id())
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		sInfo, err := s.statusService.GetUnitWorkloadStatus(ctx, unitName)
+		if errors.Is(err, applicationerrors.UnitNotFound) {
+			result.Results[i].Error = apiservererrors.ServerError(errors.NotFoundf("unit %q", unitName))
+			continue
+		} else if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		result.Results[i] = params.StatusResult{
+			Status: sInfo.Status.String(),
+			Info:   sInfo.Message,
+			Data:   sInfo.Data,
+			Since:  sInfo.Since,
+		}
+	}
+	return result, nil
 }

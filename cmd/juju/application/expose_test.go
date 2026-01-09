@@ -4,68 +4,100 @@
 package application
 
 import (
-	"runtime"
+	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	jujutesting "github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/rpc"
-	"github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/cmd/juju/application/mocks"
+	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/rpc/params"
 )
 
 type ExposeSuite struct {
-	jujutesting.RepoSuite
-	testing.CmdBlockHelper
+	testing.BaseSuite
 }
 
-func (s *ExposeSuite) SetUpTest(c *gc.C) {
-	if runtime.GOOS == "darwin" {
-		c.Skip("Mongo failures on macOS")
-	}
-	s.RepoSuite.SetUpTest(c)
-	s.CmdBlockHelper = testing.NewCmdBlockHelper(s.APIState)
-	c.Assert(s.CmdBlockHelper, gc.NotNil)
-	s.AddCleanup(func(*gc.C) { s.CmdBlockHelper.Close() })
+func TestExposeSuite(t *stdtesting.T) {
+	tc.Run(t, &ExposeSuite{})
 }
 
-var _ = gc.Suite(&ExposeSuite{})
+func runExpose(c *tc.C, api ApplicationExposeAPI, args ...string) error {
+	exposeCmd := &exposeCommand{api: api}
+	exposeCmd.SetClientStore(jujuclienttesting.MinimalStore())
 
-func runExpose(c *gc.C, args ...string) error {
-	_, err := cmdtesting.RunCommand(c, NewExposeCommand(), args...)
+	_, err := cmdtesting.RunCommand(c, modelcmd.WrapBase(exposeCmd), args...)
 	return err
 }
 
-func (s *ExposeSuite) assertExposed(c *gc.C, application string) {
-	svc, err := s.State.Application(application)
-	c.Assert(err, jc.ErrorIsNil)
-	exposed := svc.IsExposed()
-	c.Assert(exposed, jc.IsTrue)
+func (s *ExposeSuite) TestExpose(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Expose(gomock.Any(), "some-application-name", nil).Return(nil)
+	api.EXPECT().Close().Return(nil)
+
+	err := runExpose(c, api, "some-application-name")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *ExposeSuite) TestExpose(c *gc.C) {
-	s.Factory.MakeApplication(c, &factory.ApplicationParams{Name: "some-application-name"})
+func (s *ExposeSuite) TestExposeEndpoints(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	err := runExpose(c, "some-application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertExposed(c, "some-application-name")
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Expose(gomock.Any(), "some-application-name", map[string]params.ExposedEndpoint{
+		"ep1": {}, "ep2": {},
+	}).Return(nil)
+	api.EXPECT().Close().Return(nil)
 
-	err = runExpose(c, "nonexistent-application")
-	c.Assert(errors.Cause(err), gc.DeepEquals, &rpc.RequestError{
-		Message: `application "nonexistent-application" not found`,
-		Code:    "not found",
-	})
+	err := runExpose(c, api, "some-application-name", "--endpoints", "ep1,ep2")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *ExposeSuite) TestBlockExpose(c *gc.C) {
-	s.Factory.MakeApplication(c, &factory.ApplicationParams{Name: "some-application-name"})
+func (s *ExposeSuite) TestExposeSpaces(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
 
-	// Block operation
-	s.BlockAllChanges(c, "TestBlockExpose")
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Expose(gomock.Any(), "some-application-name", map[string]params.ExposedEndpoint{
+		"ep1": {ExposeToSpaces: []string{"sp1", "sp2"}},
+	}).Return(nil)
+	api.EXPECT().Close().Return(nil)
 
-	err := runExpose(c, "some-application-name")
-	s.AssertBlocked(c, err, ".*TestBlockExpose.*")
+	err := runExpose(c, api, "some-application-name", "--endpoints", "ep1", "--to-spaces", "sp1,sp2")
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *ExposeSuite) TestExposeCIDRS(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Expose(gomock.Any(), "some-application-name", map[string]params.ExposedEndpoint{
+		"ep1": {ExposeToCIDRs: []string{"cidr1", "cidr2"}},
+	}).Return(nil)
+	api.EXPECT().Close().Return(nil)
+
+	err := runExpose(c, api, "some-application-name", "--endpoints", "ep1", "--to-cidrs", "cidr1,cidr2")
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *ExposeSuite) TestBlockExpose(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	api := mocks.NewMockApplicationExposeAPI(ctrl)
+	api.EXPECT().Expose(gomock.Any(), "some-application-name", nil).Return(apiservererrors.OperationBlockedError("expose"))
+	api.EXPECT().Close().Return(nil)
+
+	err := runExpose(c, api, "some-application-name")
+	c.Assert(err, tc.NotNil)
+	c.Assert(strings.Contains(err.Error(), "All operations that change model have been disabled for the current model"), tc.IsTrue)
 }

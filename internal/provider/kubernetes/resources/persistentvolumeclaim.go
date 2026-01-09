@@ -13,9 +13,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/juju/juju/core/status"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
@@ -106,7 +106,7 @@ func (pvc *PersistentVolumeClaim) Get(ctx context.Context) error {
 
 // Delete removes the resource.
 func (pvc *PersistentVolumeClaim) Delete(ctx context.Context) error {
-	logger.Infof("deleting PVC %s due to call to PersistentVolumeClaim.Delete", pvc.Name)
+	logger.Infof(ctx, "deleting PVC %s due to call to PersistentVolumeClaim.Delete", pvc.Name)
 	err := pvc.client.Delete(ctx, pvc.Name, metav1.DeleteOptions{
 		PropagationPolicy: k8sconstants.DefaultPropagationPolicy(),
 	})

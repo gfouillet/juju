@@ -4,23 +4,24 @@
 package caasrbacmapper
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"k8s.io/client-go/informers"
+
+	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/logger"
 )
 
 type K8sBroker interface {
 	SharedInformerFactory() informers.SharedInformerFactory
 }
 
-type Logger interface {
-	Errorf(string, ...interface{})
-}
-
 type ManifoldConfig struct {
 	BrokerName string
-	Logger     Logger
+	Logger     logger.Logger
 }
 
 func Manifold(config ManifoldConfig) dependency.Manifold {
@@ -48,17 +49,21 @@ func manifoldOutput(in worker.Worker, out interface{}) error {
 	return nil
 }
 
-func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error) {
+func (c ManifoldConfig) Start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := c.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var broker K8sBroker
-	if err := context.Get(c.BrokerName, &broker); err != nil {
+	var broker caas.Broker
+	if err := getter.Get(c.BrokerName, &broker); err != nil {
 		return nil, errors.Trace(err)
 	}
+	k8sBroker, ok := broker.(K8sBroker)
+	if !ok {
+		return nil, errors.Errorf("broker does not implement K8sBroker")
+	}
 
-	return NewMapper(c.Logger, broker.SharedInformerFactory().Core().V1().ServiceAccounts())
+	return NewMapper(c.Logger, k8sBroker.SharedInformerFactory().Core().V1().ServiceAccounts())
 }
 
 func (c ManifoldConfig) Validate() error {

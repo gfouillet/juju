@@ -4,15 +4,16 @@
 package modelcmd
 
 import (
+	"context"
 	"os"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var (
@@ -186,7 +187,7 @@ func DetectCredential(cloudName string, provider environs.EnvironProvider) (*clo
 			err, "detecting credentials for %q cloud provider", cloudName,
 		)
 	}
-	logger.Tracef("provider detected credentials: %v", detected)
+	logger.Tracef(context.TODO(), "provider detected credentials: %v", detected)
 	if len(detected.AuthCredentials) == 0 {
 		return nil, errors.NotFoundf("credentials for cloud %q", cloudName)
 	}
@@ -212,7 +213,7 @@ func RegisterCredentials(provider environs.EnvironProvider, args RegisterCredent
 				err, "registering credentials for provider",
 			)
 		}
-		logger.Tracef("provider registered credentials: %v", found)
+		logger.Tracef(context.TODO(), "provider registered credentials: %v", found)
 		if len(found) == 0 {
 			return nil, errors.NotFoundf("credentials for provider")
 		}
@@ -221,7 +222,7 @@ func RegisterCredentials(provider environs.EnvironProvider, args RegisterCredent
 	return nil, nil
 }
 
-//go:generate go run go.uber.org/mock/mockgen -package modelcmd -destination cloudprovider_mock_test.go github.com/juju/juju/cmd/modelcmd TestCloudProvider
+//go:generate go run go.uber.org/mock/mockgen -typed -package modelcmd -destination cloudprovider_mock_test.go github.com/juju/juju/cmd/modelcmd TestCloudProvider
 
 // TestCloudProvider is used for testing.
 type TestCloudProvider interface {

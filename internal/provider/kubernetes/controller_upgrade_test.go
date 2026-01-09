@@ -4,21 +4,19 @@
 package kubernetes
 
 import (
-	"context"
 	"fmt"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/juju/juju/cloudconfig/podcfg"
-	"github.com/juju/juju/internal/provider/kubernetes/constants"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
 )
@@ -33,33 +31,35 @@ type ControllerUpgraderSuite struct {
 	broker *dummyUpgradeCAASController
 }
 
-var _ = gc.Suite(&ControllerUpgraderSuite{})
+func TestControllerUpgraderSuite(t *testing.T) {
+	tc.Run(t, &ControllerUpgraderSuite{})
+}
 
 func (d *dummyUpgradeCAASController) Client() kubernetes.Interface {
 	return d.client
 }
 
-func (d *dummyUpgradeCAASController) LabelVersion() constants.LabelVersion {
-	return constants.LabelVersion2
+func (d *dummyUpgradeCAASController) LabelVersion() k8sconstants.LabelVersion {
+	return k8sconstants.LabelVersion2
 }
 
 func (d *dummyUpgradeCAASController) Namespace() string {
 	return "test"
 }
 
-func (s *ControllerUpgraderSuite) SetUpTest(c *gc.C) {
+func (s *ControllerUpgraderSuite) SetUpTest(c *tc.C) {
 	s.broker = &dummyUpgradeCAASController{
 		client: fake.NewSimpleClientset(),
 	}
 }
 
-func (s *ControllerUpgraderSuite) TestControllerUpgrade(c *gc.C) {
+func (s *ControllerUpgraderSuite) TestControllerUpgrade(c *tc.C) {
 	var (
 		appName      = k8sconstants.JujuControllerStackName
 		oldImagePath = fmt.Sprintf("%s/%s:9.9.8", podcfg.JujudOCINamespace, podcfg.JujudOCIName)
 		newImagePath = fmt.Sprintf("%s/%s:9.9.9", podcfg.JujudOCINamespace, podcfg.JujudOCIName)
 	)
-	_, err := s.broker.Client().AppsV1().StatefulSets(s.broker.Namespace()).Create(context.TODO(),
+	_, err := s.broker.Client().AppsV1().StatefulSets(s.broker.Namespace()).Create(c.Context(),
 		&apps.StatefulSet{
 			ObjectMeta: meta.ObjectMeta{
 				Name: appName,
@@ -82,24 +82,24 @@ func (s *ControllerUpgraderSuite) TestControllerUpgrade(c *gc.C) {
 				},
 			},
 		}, meta.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(controllerUpgrade(appName, version.MustParse("9.9.9"), s.broker), jc.ErrorIsNil)
+	c.Assert(controllerUpgrade(c.Context(), appName, semversion.MustParse("9.9.9"), s.broker), tc.ErrorIsNil)
 
 	ss, err := s.broker.Client().AppsV1().StatefulSets(s.broker.Namespace()).
-		Get(context.TODO(), appName, meta.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ss.Spec.Template.Spec.Containers[0].Image, gc.Equals, newImagePath)
+		Get(c.Context(), appName, meta.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(ss.Spec.Template.Spec.Containers[0].Image, tc.Equals, newImagePath)
 
-	c.Assert(ss.Annotations[utils.AnnotationVersionKey(constants.LabelVersion2)], gc.Equals, version.MustParse("9.9.9").String())
-	c.Assert(ss.Spec.Template.Annotations[utils.AnnotationVersionKey(constants.LabelVersion2)], gc.Equals, version.MustParse("9.9.9").String())
+	c.Assert(ss.Annotations[utils.AnnotationVersionKey(k8sconstants.LabelVersion2)], tc.Equals, semversion.MustParse("9.9.9").String())
+	c.Assert(ss.Spec.Template.Annotations[utils.AnnotationVersionKey(k8sconstants.LabelVersion2)], tc.Equals, semversion.MustParse("9.9.9").String())
 }
 
-func (s *ControllerUpgraderSuite) TestControllerDoesNotExist(c *gc.C) {
+func (s *ControllerUpgraderSuite) TestControllerDoesNotExist(c *tc.C) {
 	var (
 		appName = k8sconstants.JujuControllerStackName
 	)
-	err := controllerUpgrade(appName, version.MustParse("9.9.9"), s.broker)
-	c.Assert(err, gc.NotNil)
-	c.Assert(errors.IsNotFound(err), jc.IsTrue)
+	err := controllerUpgrade(c.Context(), appName, semversion.MustParse("9.9.9"), s.broker)
+	c.Assert(err, tc.NotNil)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 }

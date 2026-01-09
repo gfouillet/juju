@@ -4,24 +4,25 @@
 package watcher
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"context"
+
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
-// StringsChannel is a change channel as described in the CoreWatcher docs.
-//
-// It sends a single value indicating a baseline set of values, and subsequent
-// values representing additions, changes, and/or removals of those values. The
-// precise semantics may depend upon the individual watcher.
-type StringsChannel <-chan []string
+// StringsChannel is a channel that receives a baseline set of values, and
+// subsequent values representing additions, changes, and/or removals of those
+// values.
+// This is deprecated; use <-chan []string instead.
+type StringsChannel = <-chan []string
 
-// StringsWatcher conveniently ties a StringsChannel to the worker.Worker that
-// represents its validity.
-type StringsWatcher interface {
-	CoreWatcher
-	Changes() StringsChannel
-}
+// StringsWatcher sends a single value indicating a baseline set of values, and
+// subsequent values representing additions, changes, and/or removals of those
+// values.
+type StringsWatcher = Watcher[[]string]
 
 // StringsHandler defines the operation of a StringsWorker.
 type StringsHandler interface {
@@ -29,7 +30,7 @@ type StringsHandler interface {
 	// SetUp is called once when creating a StringsWorker. It must return a
 	// StringsWatcher or an error. The StringsHandler takes responsibility for
 	// stopping any returned watcher and handling any errors.
-	SetUp() (StringsWatcher, error)
+	SetUp(ctx context.Context) (StringsWatcher, error)
 
 	// Handle is called with every value received from the StringsWatcher
 	// returned by SetUp. If it returns an error, the StringsWorker will be
@@ -38,7 +39,7 @@ type StringsHandler interface {
 	// If Handle runs any blocking operations it must pass through, or select
 	// on, the supplied abort channel; this channel will be closed when the
 	// StringsWorker is killed. An aborted Handle should not return an error.
-	Handle(abort <-chan struct{}, changes []string) error
+	Handle(ctx context.Context, changes []string) error
 
 	// TearDown is called once when stopping a StringsWorker, whether or not
 	// SetUp succeeded. It need not concern itself with the StringsWatcher, but
@@ -54,7 +55,7 @@ type StringsConfig struct {
 // Validate returns ann error if the config cannot start a StringsWorker.
 func (config StringsConfig) Validate() error {
 	if config.Handler == nil {
-		return errors.NotValidf("nil Handler")
+		return errors.Errorf("nil Handler %w", coreerrors.NotValid)
 	}
 	return nil
 }
@@ -62,17 +63,18 @@ func (config StringsConfig) Validate() error {
 // NewStringsWorker starts a new worker that runs a StringsHandler.
 func NewStringsWorker(config StringsConfig) (*StringsWorker, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	sw := &StringsWorker{
 		config: config,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "strings-watcher",
 		Site: &sw.catacomb,
 		Work: sw.loop,
 	})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return sw, nil
 }
@@ -84,18 +86,21 @@ type StringsWorker struct {
 }
 
 func (sw *StringsWorker) loop() (err error) {
+	ctx, cancel := sw.scopedContext()
+	defer cancel()
+
 	changes := sw.setUp()
 	defer sw.tearDown(err)
-	abort := sw.catacomb.Dying()
+
 	for {
 		select {
-		case <-abort:
+		case <-sw.catacomb.Dying():
 			return sw.catacomb.ErrDying()
 		case strings, ok := <-changes:
 			if !ok {
 				return errors.New("change channel closed")
 			}
-			err = sw.config.Handler.Handle(abort, strings)
+			err = sw.config.Handler.Handle(ctx, strings)
 			if err != nil {
 				return err
 			}
@@ -106,8 +111,11 @@ func (sw *StringsWorker) loop() (err error) {
 // setUp calls the handler's SetUp method; registers any returned watcher with
 // the worker's catacomb; and returns the watcher's changes channel. Any errors
 // encountered kill the worker and cause a nil channel to be returned.
-func (sw *StringsWorker) setUp() StringsChannel {
-	watcher, err := sw.config.Handler.SetUp()
+func (sw *StringsWorker) setUp() <-chan []string {
+	ctx, cancel := sw.scopedContext()
+	defer cancel()
+
+	watcher, err := sw.config.Handler.SetUp(ctx)
 	if err != nil {
 		sw.catacomb.Kill(err)
 	}
@@ -143,8 +151,16 @@ func (sw *StringsWorker) Wait() error {
 
 // Report implements dependency.Reporter.
 func (sw *StringsWorker) Report() map[string]interface{} {
-	if r, ok := sw.config.Handler.(worker.Reporter); ok {
-		return r.Report()
+	report := map[string]interface{}{
+		"type": "StringsWorker",
 	}
-	return nil
+
+	if r, ok := sw.config.Handler.(worker.Reporter); ok {
+		report["handler"] = r.Report()
+	}
+	return report
+}
+
+func (sw *StringsWorker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(sw.catacomb.Context(context.Background()))
 }

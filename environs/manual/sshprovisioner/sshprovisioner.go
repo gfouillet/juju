@@ -6,27 +6,30 @@ package sshprovisioner
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/shell"
-	"github.com/juju/utils/v3/ssh"
+	"github.com/juju/utils/v4"
+	"github.com/juju/utils/v4/shell"
+	"github.com/juju/utils/v4/ssh"
 
-	"github.com/juju/juju/cloudconfig"
-	"github.com/juju/juju/cloudconfig/cloudinit"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/sshinit"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/domain/machine"
 	"github.com/juju/juju/environs/manual"
+	"github.com/juju/juju/internal/cloudconfig"
+	"github.com/juju/juju/internal/cloudconfig/cloudinit"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/sshinit"
+	"github.com/juju/juju/internal/service"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/service"
 )
 
 // InitUbuntuUser adds the ubuntu user if it doesn't
@@ -41,7 +44,7 @@ import (
 // authorizedKeys may be empty, in which case the file
 // will be created and left empty.
 func InitUbuntuUser(host, login, authorizedKeys string, privateKeys string, read io.Reader, write io.Writer) error {
-	logger.Infof("initialising %q, user %q", host, login)
+	logger.Infof(context.TODO(), "initialising %q, user %q", host, login)
 
 	// To avoid unnecessary prompting for the specified login,
 	// initUbuntuUser will first attempt to ssh to the machine
@@ -52,7 +55,7 @@ func InitUbuntuUser(host, login, authorizedKeys string, privateKeys string, read
 	// get a failure if sudo prompts.
 	cmd := ssh.Command("ubuntu@"+host, []string{"sudo", "-n", "true"}, nil)
 	if cmd.Run() == nil {
-		logger.Infof("ubuntu user is already initialised")
+		logger.Infof(context.TODO(), "ubuntu user is already initialised")
 		return nil
 	}
 
@@ -104,9 +107,13 @@ fi`
 // by connecting to the machine and executing a bash script.
 var DetectBaseAndHardwareCharacteristics = detectBaseAndHardwareCharacteristics
 
-func detectBaseAndHardwareCharacteristics(host string) (hc instance.HardwareCharacteristics, base corebase.Base, err error) {
-	logger.Infof("Detecting base and characteristics on %s", host)
-	cmd := ssh.Command("ubuntu@"+host, []string{"/bin/bash"}, nil)
+func detectBaseAndHardwareCharacteristics(host, login string) (hc instance.HardwareCharacteristics, base corebase.Base,
+	err error) {
+	logger.Infof(context.TODO(), "Detecting base and characteristics on %s", host)
+	if login != "" {
+		host = login + "@" + host
+	}
+	cmd := ssh.Command(host, []string{"/bin/bash"}, nil)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -169,7 +176,7 @@ func detectBaseAndHardwareCharacteristics(host string) (hc instance.HardwareChar
 	}
 
 	// TODO(axw) calculate CpuPower. What algorithm do we use?
-	logger.Infof("base: %s, characteristics: %s", base, hc)
+	logger.Infof(context.TODO(), "base: %s, characteristics: %s", base, hc)
 	return hc, base, nil
 }
 
@@ -177,12 +184,15 @@ func detectBaseAndHardwareCharacteristics(host string) (hc instance.HardwareChar
 // exist on the host machine.
 var CheckProvisioned = checkProvisioned
 
-func checkProvisioned(host string) (bool, error) {
-	logger.Infof("Checking if %s is already provisioned", host)
+func checkProvisioned(host, login string) (bool, error) {
+	logger.Infof(context.TODO(), "Checking if %s is already provisioned", host)
 
 	script := service.ListServicesScript()
 
-	cmd := ssh.Command("ubuntu@"+host, []string{"/bin/bash"}, nil)
+	if login != "" {
+		host = login + "@" + host
+	}
+	cmd := ssh.Command(host, []string{"/bin/bash"}, nil)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -214,15 +224,15 @@ cat /proc/cpuinfo`
 // The hostname supplied should not include a username.
 // If we can, we will reverse lookup the hostname by its IP address, and use
 // the DNS resolved name, rather than the name that was supplied
-func gatherMachineParams(hostname string) (*params.AddMachineParams, error) {
+func gatherMachineParams(hostname string, login string) (*params.AddMachineParams, error) {
 
 	// Generate a unique nonce for the machine.
-	uuid, err := utils.NewUUID()
+	uuid, err := uuid.NewUUID()
 	if err != nil {
 		return nil, err
 	}
 
-	provisioned, err := checkProvisioned(hostname)
+	provisioned, err := checkProvisioned(hostname, login)
 	if err != nil {
 		return nil, errors.Annotatef(err, "error checking if provisioned")
 	}
@@ -230,7 +240,7 @@ func gatherMachineParams(hostname string) (*params.AddMachineParams, error) {
 		return nil, manual.ErrProvisioned
 	}
 
-	hc, machineBase, err := DetectBaseAndHardwareCharacteristics(hostname)
+	hc, machineBase, err := DetectBaseAndHardwareCharacteristics(hostname, login)
 	if err != nil {
 		return nil, errors.Annotatef(err, "error detecting linux hardware characteristics")
 	}
@@ -244,7 +254,7 @@ func gatherMachineParams(hostname string) (*params.AddMachineParams, error) {
 	// task. The provisioner task will happily remove any and all dead
 	// machines from state, but will ignore the associated instance ID
 	// if it isn't one that the environment provider knows about.
-	instanceId := instance.Id(manual.ManualInstancePrefix + hostname)
+	instanceId := instance.Id(machine.ManualInstancePrefix + hostname)
 	nonce := fmt.Sprintf("%s:%s", instanceId, uuid.String())
 	machineParams := &params.AddMachineParams{
 		Base:                    base,

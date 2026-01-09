@@ -4,19 +4,22 @@
 package deployer
 
 import (
-	"github.com/juju/charm/v12"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/charm"
 )
 
 type bundleSuite struct {
 }
 
-var _ = gc.Suite(&bundleSuite{})
+func TestBundleSuite(t *testing.T) {
+	tc.Run(t, &bundleSuite{})
+}
 
-func (s *bundleSuite) TestCheckExplicitBase(c *gc.C) {
+func (s *bundleSuite) TestCheckExplicitBase(c *tc.C) {
 	explicitBaseErrorUbuntu := "base must be explicitly provided for \"ch:ubuntu\" when image-id constraint is used"
 	explicitBaseError := "base must be explicitly provided for(.)*"
 
@@ -146,23 +149,6 @@ func (s *bundleSuite) TestCheckExplicitBase(c *gc.C) {
 						Constraints: "image-id=ubuntu-bf2",
 					},
 					"1": {
-						Constraints: "mem=2G",
-					},
-				},
-			},
-			deployBundle: deployBundle{},
-		},
-		{
-			title: "two apps, one with image-id, series in same app -> no error",
-			bundleData: &charm.BundleData{
-				Applications: map[string]*charm.ApplicationSpec{
-					"prometheus2": {
-						Charm:       "ch:prometheus2",
-						Series:      "focal",
-						Constraints: "image-id=ubuntu-bf2",
-					},
-					"ubuntu": {
-						Charm:       "ch:ubuntu",
 						Constraints: "mem=2G",
 					},
 				},
@@ -505,12 +491,12 @@ func (s *bundleSuite) TestCheckExplicitBase(c *gc.C) {
 	for i, test := range testCases {
 		c.Logf("test %d [%s]", i, test.title)
 
-		err := test.deployBundle.checkExplicitSeries(test.bundleData)
+		err := test.deployBundle.checkExplicitBase(test.bundleData)
 
 		if test.expectedError != "" {
-			c.Check(err, gc.ErrorMatches, test.expectedError)
+			c.Check(err, tc.ErrorMatches, test.expectedError)
 		} else {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		}
 	}
 }

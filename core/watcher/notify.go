@@ -4,23 +4,24 @@
 package watcher
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"context"
+
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 )
 
-// NotifyChannel is a change channel as described in the CoreWatcher docs.
-//
-// It sends a single value to indicate that the watch is active, and subsequent
-// values whenever the value(s) under observation change(s).
-type NotifyChannel <-chan struct{}
+// NotifyChannel is a channel that receives a single value to indicate that the
+// watch is active, and subsequent values whenever the value(s) under
+// observation change(s).
+// This is deprecated; use <-chan struct{} instead.
+type NotifyChannel = <-chan struct{}
 
-// NotifyWatcher conveniently ties a NotifyChannel to the worker.Worker that
-// represents its validity.
-type NotifyWatcher interface {
-	CoreWatcher
-	Changes() NotifyChannel
-}
+// NotifyWatcher sends a single value to indicate that the watch is active, and
+// subsequent values whenever the value(s) under observation change(s).
+type NotifyWatcher = Watcher[struct{}]
 
 // NotifyHandler defines the operation of a NotifyWorker.
 type NotifyHandler interface {
@@ -28,16 +29,16 @@ type NotifyHandler interface {
 	// SetUp is called once when creating a NotifyWorker. It must return a
 	// NotifyWatcher or an error. The NotifyHandler takes responsibility for
 	// stopping any returned watcher and handling any errors.
-	SetUp() (NotifyWatcher, error)
+	SetUp(context.Context) (NotifyWatcher, error)
 
 	// Handle is called whenever a value is received from the NotifyWatcher
 	// returned by SetUp. If it returns an error, the NotifyWorker will be
 	// stopped.
 	//
 	// If Handle runs any blocking operations it must pass through, or select
-	// on, the supplied abort channel; this channel will be closed when the
-	// NotifyWorker is killed. An aborted Handle should not return an error.
-	Handle(abort <-chan struct{}) error
+	// on, the supplied context done channel; the context will be canceled when
+	// the NotifyWorker is killed. An aborted Handle should not return an error.
+	Handle(context.Context) error
 
 	// TearDown is called once when stopping a NotifyWorker, whether or not
 	// SetUp succeeded. It need not concern itself with the NotifyWatcher, but
@@ -53,7 +54,7 @@ type NotifyConfig struct {
 // Validate returns an error if the config cannot start a NotifyWorker.
 func (config NotifyConfig) Validate() error {
 	if config.Handler == nil {
-		return errors.NotValidf("nil Handler")
+		return errors.Errorf("nil Handler %w", coreerrors.NotValid)
 	}
 	return nil
 }
@@ -61,42 +62,43 @@ func (config NotifyConfig) Validate() error {
 // NewNotifyWorker starts a new worker that runs a NotifyHandler.
 func NewNotifyWorker(config NotifyConfig) (*NotifyWorker, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	nw := &NotifyWorker{
 		config: config,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "notify-worker",
 		Site: &nw.catacomb,
 		Work: nw.loop,
 	})
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	return nw, nil
 }
 
 // NotifyWorker is a worker that wraps a NotifyWatcher.
 type NotifyWorker struct {
-	config   NotifyConfig
 	catacomb catacomb.Catacomb
+	config   NotifyConfig
 }
 
 func (nw *NotifyWorker) loop() (err error) {
 	changes := nw.setUp()
 	defer nw.tearDown(err)
-	abort := nw.catacomb.Dying()
+
 	for {
 		select {
-		case <-abort:
+		case <-nw.catacomb.Dying():
 			return nw.catacomb.ErrDying()
 		case _, ok := <-changes:
 			if !ok {
 				return errors.New("change channel closed")
 			}
-			err = nw.config.Handler.Handle(abort)
-			if err != nil {
-				return err
+
+			if err := nw.dispatchChange(); err != nil {
+				return errors.Capture(err)
 			}
 		}
 	}
@@ -105,8 +107,11 @@ func (nw *NotifyWorker) loop() (err error) {
 // setUp calls the handler's SetUp method; registers any returned watcher with
 // the worker's catacomb; and returns the watcher's changes channel. Any errors
 // encountered kill the worker and cause a nil channel to be returned.
-func (nw *NotifyWorker) setUp() NotifyChannel {
-	watcher, err := nw.config.Handler.SetUp()
+func (nw *NotifyWorker) setUp() <-chan struct{} {
+	ctx, cancel := nw.scopedContext()
+	defer cancel()
+
+	watcher, err := nw.config.Handler.SetUp(ctx)
 	if err != nil {
 		nw.catacomb.Kill(err)
 	}
@@ -128,6 +133,20 @@ func (nw *NotifyWorker) tearDown(err error) {
 	nw.catacomb.Kill(err)
 }
 
+func (nw *NotifyWorker) dispatchChange() error {
+	ctx, cancel := nw.scopedContext()
+	defer cancel()
+
+	err := nw.config.Handler.Handle(ctx)
+
+	// Ensure we don't return the context.Cancelled error when we've been
+	// aborted as per the documentation.
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return errors.Capture(err)
+}
+
 // Kill is part of the worker.Worker interface.
 func (nw *NotifyWorker) Kill() {
 	nw.catacomb.Kill(nil)
@@ -140,8 +159,16 @@ func (nw *NotifyWorker) Wait() error {
 
 // Report implements dependency.Reporter.
 func (nw *NotifyWorker) Report() map[string]interface{} {
-	if r, ok := nw.config.Handler.(worker.Reporter); ok {
-		return r.Report()
+	report := map[string]interface{}{
+		"type": "NotifyWorker",
 	}
-	return nil
+
+	if r, ok := nw.config.Handler.(worker.Reporter); ok {
+		report["handler"] = r.Report()
+	}
+	return report
+}
+
+func (nw *NotifyWorker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(nw.catacomb.Context(context.Background()))
 }

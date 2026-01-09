@@ -1,16 +1,11 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package cloud_test
+package cloud
 
-import (
-	"testing"
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/cloud_mock.go github.com/juju/juju/apiserver/facades/client/cloud CredentialService,CloudService,CloudAccessService
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/credential_mock.go github.com/juju/juju/domain/credential/service CredentialValidator
 
-	gc "gopkg.in/check.v1"
+var (
+	CloudToParams = cloudToParams
 )
-
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/cloud_mock.go github.com/juju/juju/apiserver/facades/client/cloud Backend,User,Model,ModelPoolBackend
-
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}

@@ -4,120 +4,113 @@
 package modelmanager
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
-	"sort"
 	"time"
 
-	"github.com/juju/description/v9"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	jujutxn "github.com/juju/txn/v3"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
-	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
+	commonmodel "github.com/juju/juju/apiserver/common/model"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
-	jujucloud "github.com/juju/juju/cloud"
-	"github.com/juju/juju/controller/modelmanager"
-	corebase "github.com/juju/juju/core/base"
-	"github.com/juju/juju/core/life"
+	coreagentbinary "github.com/juju/juju/core/agentbinary"
+	"github.com/juju/juju/core/credential"
+	coreerrors "github.com/juju/juju/core/errors"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
+	"github.com/juju/juju/core/semversion"
+	corestatus "github.com/juju/juju/core/status"
+	coreuser "github.com/juju/juju/core/user"
+	"github.com/juju/juju/domain/access"
+	accesserrors "github.com/juju/juju/domain/access/errors"
+	clouderrors "github.com/juju/juju/domain/cloud/errors"
+	credentialerrors "github.com/juju/juju/domain/credential/errors"
+	"github.com/juju/juju/domain/model"
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/environs/space"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/secrets/provider/kubernetes"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
-	"github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
 )
 
 var (
-	logger = loggo.GetLogger("juju.apiserver.modelmanager")
-
-	// Overridden by tests.
-	supportedFeaturesGetter = stateenvirons.SupportedFeatures
+	logger = internallogger.GetLogger("juju.apiserver.modelmanager")
 )
 
-type newCaasBrokerFunc func(_ stdcontext.Context, args environs.OpenParams) (caas.Broker, error)
+// ModelStatusAPI is the interface for the model status API.
+type ModelStatusAPI interface {
+	ModelStatus(ctx context.Context, req params.Entities) (params.ModelStatusResults, error)
+}
 
-// ModelManagerAPI implements the model manager interface and is
-// the concrete implementation of the api end point.
-// V10 of the facade does not return default-series or default-base
-// in model info
-type ModelManagerAPI struct {
-	*common.ModelStatusAPI
-	state       common.ModelManagerBackend
-	ctlrState   common.ModelManagerBackend
-	check       common.BlockCheckerInterface
-	authorizer  facade.Authorizer
-	toolsFinder common.ToolsFinder
-	apiUser     names.UserTag
-	isAdmin     bool
-	model       common.Model
-	getBroker   newCaasBrokerFunc
-	callContext context.ProviderCallContext
+// ModelManagerAPIV10 implements the model manager V10.
+type ModelManagerAPIV10 struct {
+	*ModelManagerAPI
 }
 
 // ModelManagerAPI implements the model manager interface and is
 // the concrete implementation of the api end point.
-type ModelManagerAPIV9 struct {
-	*ModelManagerAPI
+type ModelManagerAPI struct {
+	ModelStatusAPI
+
+	// Access control.
+	authorizer facade.Authorizer
+	isAdmin    bool
+	apiUser    names.UserTag
+
+	getBlockChecker BlockCheckerGetter
+
+	// Services required by the model manager.
+	accessService        AccessService
+	domainServicesGetter DomainServicesGetter
+	applicationService   ApplicationService
+	credentialService    CredentialService
+	modelService         ModelService
+	modelDefaultsService ModelDefaultsService
+	secretBackendService SecretBackendService
+	removalService       RemovalService
+
+	store objectstore.ObjectStore
+
+	controllerUUID      uuid.UUID
+	controllerModelUUID coremodel.UUID
 }
 
 // NewModelManagerAPI creates a new api server endpoint for managing
 // models.
-func NewModelManagerAPI(
-	st common.ModelManagerBackend,
-	ctlrSt common.ModelManagerBackend,
-	toolsFinder common.ToolsFinder,
-	getBroker newCaasBrokerFunc,
-	blockChecker common.BlockCheckerInterface,
-	authorizer facade.Authorizer,
-	m common.Model,
-	callCtx context.ProviderCallContext,
-) (*ModelManagerAPI, error) {
-	if !authorizer.AuthClient() {
-		return nil, apiservererrors.ErrPerm
-	}
-	// Since we know this is a user tag (because AuthClient is true),
-	// we just do the type assertion to the UserTag.
-	apiUser, _ := authorizer.GetAuthTag().(names.UserTag)
-	// Pretty much all of the user manager methods have special casing for admin
-	// users, so look once when we start and remember if the user is an admin.
-	err := authorizer.HasPermission(permission.SuperuserAccess, st.ControllerTag())
-	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return nil, errors.Trace(err)
-	}
-	isAdmin := err == nil
+func NewModelManagerAPI(ctx context.Context, isAdmin bool, apiUser names.UserTag, modelStatusAPI ModelStatusAPI,
+	controllerUUID uuid.UUID, controllerModelUUID coremodel.UUID, services Services, blockChecker BlockCheckerGetter,
+	authorizer facade.Authorizer) *ModelManagerAPI {
 
 	return &ModelManagerAPI{
-		ModelStatusAPI: common.NewModelStatusAPI(st, authorizer, apiUser),
-		state:          st,
-		ctlrState:      ctlrSt,
-		getBroker:      getBroker,
-		check:          blockChecker,
-		authorizer:     authorizer,
-		toolsFinder:    toolsFinder,
-		apiUser:        apiUser,
-		isAdmin:        isAdmin,
-		model:          m,
-		callContext:    callCtx,
-	}, nil
+		ModelStatusAPI:       modelStatusAPI,
+		domainServicesGetter: services.DomainServicesGetter,
+		credentialService:    services.CredentialService,
+		applicationService:   services.ApplicationService,
+		store:                services.ObjectStore,
+		getBlockChecker:      blockChecker,
+		authorizer:           authorizer,
+		apiUser:              apiUser,
+		isAdmin:              isAdmin,
+		modelService:         services.ModelService,
+		modelDefaultsService: services.ModelDefaultsService,
+		accessService:        services.AccessService,
+		secretBackendService: services.SecretBackendService,
+		removalService:       services.RemovalService,
+		controllerUUID:       controllerUUID,
+		controllerModelUUID:  controllerModelUUID,
+	}
 }
 
 // authCheck checks if the user is acting on their own behalf, or if they
 // are an administrator acting on behalf of another user.
-func (m *ModelManagerAPI) authCheck(user names.UserTag) error {
+func (m *ModelManagerAPI) authCheck(ctx context.Context, user names.UserTag) error {
 	if m.isAdmin {
-		logger.Tracef("%q is a controller admin", m.apiUser.Id())
+		logger.Tracef(ctx, "%q is a controller admin", m.apiUser.Id())
 		return nil
 	}
 
@@ -136,90 +129,45 @@ type ConfigSource interface {
 	Config() (*config.Config, error)
 }
 
-func (m *ModelManagerAPI) newModelConfig(
-	cloudSpec environscloudspec.CloudSpec,
-	args params.ModelCreateArgs,
-	source ConfigSource,
-) (*config.Config, error) {
-	// For now, we just smash to the two maps together as we store
-	// the account values and the model config together in the
-	// *config.Config instance.
-	joint := make(map[string]interface{})
-	for key, value := range args.Config {
-		joint[key] = value
-	}
-	if _, ok := joint[config.UUIDKey]; ok {
-		return nil, errors.New("uuid is generated, you cannot specify one")
-	}
-	if args.Name == "" {
-		return nil, errors.NewNotValid(nil, "Name must be specified")
-	}
-	if _, ok := joint[config.NameKey]; ok {
-		return nil, errors.New("name must not be specified in config")
-	}
-	joint[config.NameKey] = args.Name
-
-	baseConfig, err := source.Config()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	regionSpec := &environscloudspec.CloudRegionSpec{Cloud: cloudSpec.Name, Region: cloudSpec.Region}
-	if joint, err = m.state.ComposeNewModelConfig(joint, regionSpec); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	creator := modelmanager.ModelConfigCreator{
-		Provider: environs.Provider,
-		FindTools: func(n version.Number) (tools.List, error) {
-			if jujucloud.CloudTypeIsCAAS(cloudSpec.Type) {
-				return tools.List{&tools.Tools{Version: version.Binary{Number: n}}}, nil
-			}
-			toolsList, err := m.toolsFinder.FindAgents(common.FindAgentsParams{
-				Number: n,
-			})
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			return toolsList, nil
-		},
-	}
-	return creator.NewModelConfig(cloudSpec, baseConfig, joint)
-}
-
-func (m *ModelManagerAPI) checkAddModelPermission(cloudTag names.CloudTag, userTag names.UserTag) (bool, error) {
-	if err := m.authorizer.HasPermission(permission.AddModelAccess, cloudTag); !m.isAdmin && err != nil {
+func (m *ModelManagerAPI) checkAddModelPermission(ctx context.Context, cloudTag names.CloudTag) (bool, error) {
+	if err := m.authorizer.HasPermission(ctx, permission.AddModelAccess, cloudTag); !m.isAdmin && err != nil {
 		return false, errors.Trace(err)
 	}
 	return true, nil
 }
 
-// CreateModel creates a new model using the account and
-// model config specified in the args.
-func (m *ModelManagerAPI) CreateModel(args params.ModelCreateArgs) (params.ModelInfo, error) {
-	return m.createModel(args, false)
+// reloadSpaces wraps the call to ReloadSpaces and its returned errors.
+func reloadSpaces(ctx context.Context, modelNetworkService NetworkService) error {
+	if err := modelNetworkService.ReloadSpaces(ctx); err != nil {
+		if errors.Is(err, errors.NotSupported) {
+			logger.Debugf(ctx, "Not performing spaces load on a non-networking environment")
+		} else {
+			return errors.Annotate(err, "Failed to perform spaces discovery")
+		}
+	}
+	return nil
 }
 
 // CreateModel creates a new model using the account and
 // model config specified in the args.
-// V9 of the facade includes the model default-series and default-base
-// in it's output
-func (m *ModelManagerAPIV9) CreateModel(args params.ModelCreateArgs) (params.ModelInfo, error) {
-	return m.createModel(args, true)
-}
-
-func (m *ModelManagerAPI) createModel(args params.ModelCreateArgs, withDefaultOS bool) (params.ModelInfo, error) {
+func (m *ModelManagerAPI) CreateModel(ctx context.Context, args params.ModelCreateArgs) (params.ModelInfo, error) {
 	result := params.ModelInfo{}
 
-	// Get the controller model first. We need it both for the state
-	// server owner and the ability to get the config.
-	controllerModel, err := m.ctlrState.Model()
+	if args.TargetController != "" {
+		return result, errors.NewNotSupported(nil, "target-controller parameter is only supported on JAAS")
+	}
+
+	// We need to get the controller's default cloud and credential. To help
+	// Juju users when creating their first models we allow them to omit this
+	// information from the model creation args. If they have done exactly this
+	// we will try and apply the defaults where authorisation allows us to.
+	defaultCloudName, defaultCloudRegion, err := m.modelService.DefaultModelCloudInfo(ctx)
 	if err != nil {
-		return result, errors.Trace(err)
+		logger.Warningf(ctx, "failed to get default model cloud info: %v", err)
+		return result, internalerrors.Errorf("cannot find default model cloud and credential")
 	}
 
 	var cloudTag names.CloudTag
-	cloudRegionName := args.CloudRegion
 	if args.CloudTag != "" {
 		var err error
 		cloudTag, err = names.ParseCloudTag(args.CloudTag)
@@ -227,18 +175,16 @@ func (m *ModelManagerAPI) createModel(args params.ModelCreateArgs, withDefaultOS
 			return result, errors.Trace(err)
 		}
 	} else {
-		cloudTag = names.NewCloudTag(controllerModel.CloudName())
+		cloudTag = names.NewCloudTag(defaultCloudName)
 	}
-	if cloudRegionName == "" && cloudTag.Id() == controllerModel.CloudName() {
-		cloudRegionName = controllerModel.CloudRegion()
+	// We only set a cloud region default if the user has not supplied one and
+	// the cloud to use is the same as that of defaultCloudName.
+	if args.CloudRegion == "" && cloudTag.Id() == defaultCloudName {
+		args.CloudRegion = defaultCloudRegion
 	}
 
-	err = m.authorizer.HasPermission(permission.SuperuserAccess, m.state.ControllerTag())
-	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return result, errors.Trace(err)
-	}
-	if err != nil {
-		canAddModel, err := m.checkAddModelPermission(cloudTag, m.apiUser)
+	if !m.isAdmin {
+		canAddModel, err := m.checkAddModelPermission(ctx, cloudTag)
 		if err != nil {
 			return result, errors.Trace(err)
 		}
@@ -247,366 +193,241 @@ func (m *ModelManagerAPI) createModel(args params.ModelCreateArgs, withDefaultOS
 		}
 	}
 
-	ownerTag, err := names.ParseUserTag(args.OwnerTag)
-	if err != nil {
-		return result, errors.Trace(err)
+	qualifier := coremodel.Qualifier(args.Qualifier)
+	if err := qualifier.Validate(); err != nil {
+		return result, internalerrors.New(
+			"cannot create model with invalid qualifier",
+		).Add(coreerrors.NotValid)
 	}
 
-	// a special case of ErrPerm will happen if the user has add-model permission but is trying to
-	// create a model for another person, which is not yet supported.
-	if !m.isAdmin && ownerTag != m.apiUser {
-		return result, errors.Annotatef(apiservererrors.ErrPerm, "%q permission does not permit creation of models for different owners", permission.AddModelAccess)
+	// For now, if logged in user is not admin,
+	// the only allowed qualifier must correspond to
+	// the logged in user to retain expected behaviour.
+	if !m.isAdmin && qualifier != coremodel.QualifierFromUserTag(m.apiUser) {
+		return result, internalerrors.Errorf(
+			"cannot create model with qualifier %q", qualifier,
+		).Add(coreerrors.NotValid)
 	}
 
-	cloud, err := m.state.Cloud(cloudTag.Id())
-	if err != nil {
-		if errors.IsNotFound(err) && args.CloudTag != "" {
-			// A cloud was specified, and it was not found.
-			// Annotate the error with the supported clouds.
-			clouds, err := m.state.Clouds()
-			if err != nil {
-				return result, errors.Trace(err)
-			}
-			cloudNames := make([]string, 0, len(clouds))
-			for tag := range clouds {
-				cloudNames = append(cloudNames, tag.Id())
-			}
-			sort.Strings(cloudNames)
-			return result, errors.NewNotFound(err, fmt.Sprintf(
-				"cloud %q not found, expected one of %q",
-				cloudTag.Id(), cloudNames,
-			))
-		}
-		return result, errors.Annotate(err, "getting cloud definition")
+	// TODO (stickupkid): We need to create a saga (pattern) coordinator here,
+	// to ensure that anything written to both databases are at least rollback
+	// if there was an error. If a failure to rollback occurs, then the endpoint
+	// should at least be somewhat idempotent.
+	creationArgs := model.GlobalModelCreationArgs{
+		CloudRegion: args.CloudRegion,
+		Name:        args.Name,
+		Qualifier:   qualifier,
+		Cloud:       cloudTag.Id(),
 	}
-
-	var cloudCredentialTag names.CloudCredentialTag
 	if args.CloudCredentialTag != "" {
-		var err error
-		cloudCredentialTag, err = names.ParseCloudCredentialTag(args.CloudCredentialTag)
+		cloudCredentialTag, err := names.ParseCloudCredentialTag(args.CloudCredentialTag)
 		if err != nil {
 			return result, errors.Trace(err)
 		}
+		creationArgs.Credential = credential.KeyFromTag(cloudCredentialTag)
 	} else {
-		if ownerTag == controllerModel.Owner() {
-			cloudCredentialTag, _ = controllerModel.CloudCredentialTag()
-		} else {
-			// TODO(axw) check if the user has one and only one
-			// cloud credential, and if so, use it? For now, we
-			// require the user to specify a credential unless
-			// the cloud does not require one.
-			var hasEmpty bool
-			for _, authType := range cloud.AuthTypes {
-				if authType != jujucloud.EmptyAuthType {
-					continue
-				}
-				hasEmpty = true
-				break
-			}
-			if !hasEmpty {
-				return result, errors.NewNotValid(nil, "no credential specified")
-			}
-		}
-	}
-
-	var credential *jujucloud.Credential
-	if cloudCredentialTag != (names.CloudCredentialTag{}) {
-		credentialValue, err := m.state.CloudCredential(cloudCredentialTag)
+		// we're looking up credentials for the apiUser - what if JIMM is creating a model on behalf of another user (JIMM always
+		// specifies the credential, so we should be fine)
+		credKey, err := m.modelService.DefaultCloudCredentialKeyForOwner(ctx, coreuser.NameFromTag(m.apiUser), cloudTag.Id())
 		if err != nil {
-			return result, errors.Annotate(err, "getting credential")
-		}
-		cloudCredential := jujucloud.NewNamedCredential(
-			credentialValue.Name,
-			jujucloud.AuthType(credentialValue.AuthType),
-			credentialValue.Attributes,
-			credentialValue.Revoked,
-		)
-		credential = &cloudCredential
-	}
-
-	// Swap out the config default-series for default-base if it's set.
-	// TODO(stickupkid): This can be removed once we've fully migrated to bases.
-	if s, ok := args.Config[config.DefaultSeriesKey]; ok {
-		if _, ok := args.Config[config.DefaultBaseKey]; ok {
-			return result, errors.New("default-base and default-series cannot both be set")
-		}
-		if s == "" {
-			args.Config[config.DefaultBaseKey] = ""
-		} else {
-			base, err := corebase.GetBaseFromSeries(s.(string))
-			if err != nil {
+			// if we cannot find the default credential key, we continue as some clouds may allow model creation without
+			// credentials, so we error out only if this is NOT a NotFound error
+			if !errors.Is(err, credentialerrors.NotFound) {
 				return result, errors.Trace(err)
 			}
-			args.Config[config.DefaultBaseKey] = base.String()
 		}
-
-		delete(args.Config, config.DefaultSeriesKey)
+		creationArgs.Credential = credKey
 	}
 
-	cloudSpec, err := environscloudspec.MakeCloudSpec(cloud, cloudRegionName, credential)
+	userUUID, err := m.accessService.GetUserUUIDByName(ctx, coreuser.NameFromTag(m.apiUser))
+	switch {
+	case errors.Is(err, accesserrors.UserNotFound):
+		return result, internalerrors.Errorf(
+			"creator %q for model does not exist", m.apiUser.Name(),
+		).Add(coreerrors.NotFound)
+	case errors.Is(err, accesserrors.UserNameNotValid):
+		return result, internalerrors.New(
+			"cannot create model with invalid administrator",
+		).Add(coreerrors.NotValid)
+	case err != nil:
+		return result, internalerrors.Errorf(
+			"retrieving user %q for new model %q creator: %w",
+			m.apiUser.Name(), args.Name, err,
+		)
+	}
+	creationArgs.AdminUsers = []coreuser.UUID{userUUID}
+
+	// Create the model in the controller database.
+	modelUUID, activator, err := m.modelService.CreateModel(ctx, creationArgs)
+	switch {
+	case errors.Is(err, modelerrors.AlreadyExists):
+		return result, internalerrors.Errorf(
+			"model %s/%s already exists", args.Qualifier, args.Name,
+		).Add(coreerrors.AlreadyExists)
+	case errors.Is(err, modelerrors.CredentialNotValid):
+		return result, internalerrors.Errorf(
+			"cloud credential for new model is not valid",
+		).Add(coreerrors.NotFound)
+	case err != nil:
+		return result, internalerrors.Errorf(
+			"creating new model %s/%s: %w",
+			args.Qualifier, args.Name, err,
+		)
+	}
+
+	modelDomainServices, err := m.domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	var model common.Model
-	if jujucloud.CloudIsCAAS(cloud) {
-		model, err = m.newCAASModel(
-			cloudSpec,
-			args,
-			controllerModel,
-			cloudTag,
-			cloudRegionName,
-			cloudCredentialTag,
-			ownerTag)
-	} else {
-		model, err = m.newModel(
-			cloudSpec,
-			args,
-			controllerModel,
-			cloudTag,
-			cloudRegionName,
-			cloudCredentialTag,
-			ownerTag)
+	// TODO: move SetModelConfig and activator after createModelInfo.
+	modelConfigService := modelDomainServices.Config()
+	if err := modelConfigService.SetModelConfig(ctx, args.Config); err != nil {
+		return result, errors.Annotatef(err, "setting model config for model %q", creationArgs.Name)
 	}
+
+	if err := activator(ctx); err != nil {
+		return result, errors.Annotatef(err, "finalising model %q", creationArgs.Name)
+	}
+
+	// Create the model information in the model database.
+	// modelInfoCreate will be calling one of the Create* funcs on the model
+	// info service. When handling the error we need to handle the total set of
+	// possabilities.
+	err = m.createModelInfo(ctx, args.Config, modelDomainServices.ModelInfo())
+	switch {
+	case errors.Is(err, modelerrors.AlreadyExists):
+		return result, apiservererrors.ParamsErrorf(
+			params.CodeAlreadyExists,
+			"model %s/%s already exists in model database",
+			args.Qualifier, creationArgs.Name,
+		)
+	case errors.Is(err, modelerrors.AgentVersionNotSupported):
+		return result, apiservererrors.ParamsErrorf(
+			params.CodeNotValid,
+			"supplied agent version for new model %q is not supported: %s",
+			creationArgs.Name, err.Error(),
+		)
+	case errors.Is(err, coreerrors.NotValid):
+		return result, apiservererrors.ParamsErrorf(
+			params.CodeNotValid,
+			"supplied agent stream for new model %q is not supported: %s",
+			creationArgs.Name, err.Error(),
+		)
+	case err != nil:
+		return result, internalerrors.Errorf(
+			"creating information records for new model %q: %w",
+			creationArgs.Name, err,
+		)
+	}
+
+	// Reload the substrate spaces for the newly created model.
+	if err := reloadSpaces(ctx, modelDomainServices.Network()); err != nil {
+		return result, errors.Annotatef(err, "reloading spaces for model %q", creationArgs.Name)
+	}
+
+	modelInfo, err := m.getModelInfo(ctx, modelUUID)
 	if err != nil {
-		return result, errors.Trace(err)
+		return result, err
 	}
-	return m.getModelInfo(model.ModelTag(), false, withDefaultOS, true)
+
+	return modelInfo, nil
 }
 
-func (m *ModelManagerAPI) newCAASModel(
-	cloudSpec environscloudspec.CloudSpec,
-	createArgs params.ModelCreateArgs,
-	controllerModel common.Model,
-	cloudTag names.CloudTag,
-	cloudRegionName string,
-	cloudCredentialTag names.CloudCredentialTag,
-	ownerTag names.UserTag,
-) (_ common.Model, err error) {
-	newConfig, err := m.newModelConfig(cloudSpec, createArgs, controllerModel)
-	if err != nil {
-		return nil, errors.Annotate(err, "failed to create config")
-	}
-	controllerConfig, err := m.state.ControllerConfig()
-	if err != nil {
-		return nil, errors.Annotate(err, "getting controller config")
-	}
-
-	defer func() {
-		// Retain the error stack but with a better message.
-		if errors.IsAlreadyExists(err) {
-			err = errors.Wrap(err, errors.NewAlreadyExists(nil,
-				`
-the model cannot be created because a namespace with the proposed
-model name already exists in the k8s cluster.
-Please choose a different model name.
-`[1:],
-			))
+// createModelInfo establishes a new model within the model database.
+// This is required when creating new models as it seeds the model's controller
+// information to the model database and also establishes any provider resources
+// required by the model.
+func (m *ModelManagerAPI) createModelInfo(
+	ctx context.Context,
+	configArgs map[string]any,
+	modelInfoService ModelInfoService,
+) error {
+	suppliedAgentVersion := semversion.Zero
+	if agentVersionVal, exists := configArgs[config.AgentVersionKey]; exists {
+		agentVersionStr, isStr := agentVersionVal.(string)
+		if !isStr {
+			return internalerrors.New(
+				"cannot understand agent version value for new model",
+			).Add(coreerrors.NotValid)
 		}
-	}()
-
-	broker, err := m.getBroker(stdcontext.TODO(), environs.OpenParams{
-		ControllerUUID: controllerConfig.ControllerUUID(),
-		Cloud:          cloudSpec,
-		Config:         newConfig,
-	})
-	if err != nil {
-		return nil, errors.Annotate(err, "failed to open kubernetes client")
-	}
-
-	if err = broker.Create(
-		m.callContext,
-		environs.CreateParams{ControllerUUID: controllerConfig.ControllerUUID()},
-	); err != nil {
-		return nil, errors.Annotatef(err, "creating namespace %q", createArgs.Name)
-	}
-
-	storageProviderRegistry := stateenvirons.NewStorageProviderRegistry(broker)
-
-	model, st, err := m.state.NewModel(state.ModelArgs{
-		Type:                    state.ModelTypeCAAS,
-		CloudName:               cloudTag.Id(),
-		CloudRegion:             cloudRegionName,
-		CloudCredential:         cloudCredentialTag,
-		Config:                  newConfig,
-		Owner:                   ownerTag,
-		StorageProviderRegistry: storageProviderRegistry,
-	})
-	if err != nil {
-		// Clean up the model.
-		if e := broker.Destroy(m.callContext); e != nil {
-			logger.Warningf("failed to clean up the model, error %v", e)
+		var err error
+		suppliedAgentVersion, err = semversion.Parse(agentVersionStr)
+		if err != nil {
+			return internalerrors.Errorf(
+				"parsing agent version value for new model: %w", err,
+			)
 		}
-		return nil, errors.Annotate(err, "failed to create new model")
+		delete(configArgs, config.AgentVersionKey)
 	}
-	defer st.Close()
 
-	return model, nil
+	suppliedAgentStream := coreagentbinary.AgentStream("")
+	if agentStreamVal, exists := configArgs[config.AgentStreamKey]; exists {
+		agentStreamStr, isStr := agentStreamVal.(string)
+		if !isStr {
+			return internalerrors.New(
+				"cannot understand agent stream value for new model",
+			).Add(coreerrors.NotValid)
+		}
+		suppliedAgentStream = coreagentbinary.AgentStream(agentStreamStr)
+		delete(configArgs, config.AgentStreamKey)
+	}
+
+	// If the user has supplied both a target agent version and agent stream
+	if suppliedAgentVersion != semversion.Zero &&
+		suppliedAgentStream != coreagentbinary.AgentStream("") {
+		return modelInfoService.CreateModelWithAgentVersionStream(
+			ctx, suppliedAgentVersion, suppliedAgentStream,
+		)
+	}
+
+	// If the user has supplied a target agent version but no agent stream
+	if suppliedAgentVersion != semversion.Zero &&
+		suppliedAgentStream == coreagentbinary.AgentStream("") {
+		return modelInfoService.CreateModelWithAgentVersion(
+			ctx, suppliedAgentVersion,
+		)
+	}
+
+	// If the user has supplied an agent stream and not target agent version.
+	if suppliedAgentVersion == semversion.Zero &&
+		suppliedAgentStream != coreagentbinary.AgentStream("") {
+		// TODO: We don't have a way to set just the agent stream.
+	}
+
+	// If the user has supplied nothing.
+	return modelInfoService.CreateModel(ctx)
 }
 
-func (m *ModelManagerAPI) newModel(
-	cloudSpec environscloudspec.CloudSpec,
-	createArgs params.ModelCreateArgs,
-	controllerModel common.Model,
-	cloudTag names.CloudTag,
-	cloudRegionName string,
-	cloudCredentialTag names.CloudCredentialTag,
-	ownerTag names.UserTag,
-) (common.Model, error) {
-	newConfig, err := m.newModelConfig(cloudSpec, createArgs, controllerModel)
-	if err != nil {
-		return nil, errors.Annotate(err, "failed to create config")
-	}
-
-	controllerCfg, err := m.state.ControllerConfig()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	// Create the Environ.
-	env, err := environs.New(stdcontext.TODO(), environs.OpenParams{
-		ControllerUUID: controllerCfg.ControllerUUID(),
-		Cloud:          cloudSpec,
-		Config:         newConfig,
-	})
-	if err != nil {
-		return nil, errors.Annotate(err, "failed to open environ")
-	}
-
-	err = env.Create(
-		m.callContext,
-		environs.CreateParams{
-			ControllerUUID: controllerCfg.ControllerUUID(),
-		},
-	)
-	if err != nil {
-		return nil, errors.Annotate(err, "failed to create environ")
-	}
-	storageProviderRegistry := stateenvirons.NewStorageProviderRegistry(env)
-
-	// NOTE: check the agent-version of the config, and if it is > the current
-	// version, it is not supported, also check existing tools, and if we don't
-	// have tools for that version, also die.
-	model, st, err := m.state.NewModel(state.ModelArgs{
-		Type:                    state.ModelTypeIAAS,
-		CloudName:               cloudTag.Id(),
-		CloudRegion:             cloudRegionName,
-		CloudCredential:         cloudCredentialTag,
-		Config:                  newConfig,
-		Owner:                   ownerTag,
-		StorageProviderRegistry: storageProviderRegistry,
-		EnvironVersion:          env.Provider().Version(),
-	})
-	if err != nil {
-		// Clean up the model.
-		if e := env.Destroy(m.callContext); e != nil {
-			logger.Warningf("failed to clean up the model, error %v", e)
-		}
-		return nil, errors.Annotate(err, "failed to create new model")
-	}
-	defer st.Close()
-
-	if err = model.AutoConfigureContainerNetworking(env); err != nil {
-		if errors.IsNotSupported(err) {
-			logger.Debugf("Not performing container networking autoconfiguration on a non-networking environment")
-		} else {
-			return nil, errors.Annotate(err, "Failed to perform container networking autoconfiguration")
-		}
-	}
-
-	if err = space.ReloadSpaces(m.callContext, spaceStateShim{
-		ModelManagerBackend: st,
-	}, env); err != nil {
-		if errors.IsNotSupported(err) {
-			logger.Debugf("Not performing spaces load on a non-networking environment")
-		} else {
-			return nil, errors.Annotate(err, "Failed to perform spaces discovery")
-		}
-	}
-	return model, nil
-}
-
-func (m *ModelManagerAPI) dumpModel(args params.Entity, simplified bool) ([]byte, error) {
+func (m *ModelManagerAPI) dumpModel(ctx context.Context, args params.Entity) ([]byte, error) {
 	modelTag, err := names.ParseModelTag(args.Tag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	if !m.isAdmin {
-		if err := m.authorizer.HasPermission(permission.AdminAccess, modelTag); err != nil {
+		if err := m.authorizer.HasPermission(ctx, permission.AdminAccess, modelTag); err != nil {
 			return nil, err
 		}
 	}
 
-	st, release, err := m.state.GetBackend(modelTag.Id())
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, errors.Trace(apiservererrors.ErrBadId)
-		}
-		return nil, errors.Trace(err)
-	}
-	defer release()
-
-	exportConfig := state.ExportConfig{IgnoreIncompleteModel: true}
-	if simplified {
-		exportConfig.SkipActions = true
-		exportConfig.SkipAnnotations = true
-		exportConfig.SkipCloudImageMetadata = true
-		exportConfig.SkipCredentials = true
-		exportConfig.SkipIPAddresses = true
-		exportConfig.SkipSettings = true
-		exportConfig.SkipSSHHostKeys = true
-		exportConfig.SkipStatusHistory = true
-		exportConfig.SkipLinkLayerDevices = true
-	}
-
-	model, err := st.ExportPartial(exportConfig)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	bytes, err := description.Serialize(model)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return bytes, nil
-}
-
-func (m *ModelManagerAPI) dumpModelDB(args params.Entity) (map[string]interface{}, error) {
-	modelTag, err := names.ParseModelTag(args.Tag)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	if !m.isAdmin {
-		if err := m.authorizer.HasPermission(permission.AdminAccess, modelTag); err != nil {
-			return nil, err
-		}
-	}
-
-	st := m.state
-	if st.ModelTag() != modelTag {
-		newSt, release, err := m.state.GetBackend(modelTag.Id())
-		if errors.IsNotFound(err) {
-			return nil, errors.Trace(apiservererrors.ErrBadId)
-		} else if err != nil {
-			return nil, errors.Trace(err)
-		}
-		defer release()
-		st = newSt
-	}
-
-	return st.DumpAll()
+	return nil, errors.NotImplemented
 }
 
 // DumpModels will export the models into the database agnostic
 // representation. The user needs to either be a controller admin, or have
 // admin privileges on the model itself.
-func (m *ModelManagerAPI) DumpModels(args params.DumpModelRequest) params.StringResults {
+func (m *ModelManagerAPI) DumpModels(ctx context.Context, args params.DumpModelRequest) params.StringResults {
 	results := params.StringResults{
 		Results: make([]params.StringResult, len(args.Entities)),
 	}
 	for i, entity := range args.Entities {
-		bytes, err := m.dumpModel(entity, args.Simplified)
+		if args.Simplified {
+			results.Results[i].Error = apiservererrors.ServerError(errors.NotSupportedf("simplified model dump"))
+			continue
+		}
+
+		bytes, err := m.dumpModel(ctx, entity)
 		if err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 			continue
@@ -620,17 +441,12 @@ func (m *ModelManagerAPI) DumpModels(args params.DumpModelRequest) params.String
 // DumpModelsDB will gather all documents from all model collections
 // for the specified model. The map result contains a map of collection
 // names to lists of documents represented as maps.
-func (m *ModelManagerAPI) DumpModelsDB(args params.Entities) params.MapResults {
+func (m *ModelManagerAPI) DumpModelsDB(ctx context.Context, args params.Entities) params.MapResults {
 	results := params.MapResults{
 		Results: make([]params.MapResult, len(args.Entities)),
 	}
-	for i, entity := range args.Entities {
-		dumped, err := m.dumpModelDB(entity)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
-		results.Results[i].Result = dumped
+	for i := range args.Entities {
+		results.Results[i].Error = apiservererrors.ServerError(errors.NotImplementedf("DumpModelsDB"))
 	}
 	return results
 }
@@ -639,182 +455,346 @@ func (m *ModelManagerAPI) DumpModelsDB(args params.Entities) params.MapResults {
 // has access to in the current server.  Controller admins (superuser)
 // can list models for any user.  Other users
 // can only ask about their own models.
-func (m *ModelManagerAPI) ListModelSummaries(req params.ModelSummariesRequest) (params.ModelSummaryResults, error) {
-	return m.listModelSummaries(req, false)
-}
-
-// ListModelSummaries returns models that the specified user
-// has access to in the current server.  Controller admins (superuser)
-// can list models for any user.  Other users
-// can only ask about their own models.
-// V9 of the facade includes the model default-series and default-base
-// in it's output
-func (m *ModelManagerAPIV9) ListModelSummaries(req params.ModelSummariesRequest) (params.ModelSummaryResults, error) {
-	return m.listModelSummaries(req, true)
-}
-
-func (m *ModelManagerAPI) listModelSummaries(req params.ModelSummariesRequest, includeDefaultSeries bool) (params.ModelSummaryResults, error) {
-	result := params.ModelSummaryResults{}
-
+func (m *ModelManagerAPI) ListModelSummaries(ctx context.Context, req params.ModelSummariesRequest) (params.ModelSummaryResults, error) {
 	userTag, err := names.ParseUserTag(req.UserTag)
 	if err != nil {
-		return result, errors.Trace(err)
+		return params.ModelSummaryResults{}, errors.Trace(err)
 	}
 
-	err = m.authCheck(userTag)
+	err = m.authCheck(ctx, userTag)
 	if err != nil {
-		return result, errors.Trace(err)
+		return params.ModelSummaryResults{}, errors.Trace(err)
 	}
 
-	modelInfos, err := m.state.ModelSummariesForUser(userTag, req.All && m.isAdmin)
-	if err != nil {
-		return result, errors.Trace(err)
-	}
-
-	for _, mi := range modelInfos {
-		summary := m.makeModelSummary(mi)
-		if includeDefaultSeries {
-			summary.DefaultSeries = mi.DefaultSeries
+	if req.All {
+		if !m.isAdmin {
+			return params.ModelSummaryResults{}, fmt.Errorf(
+				"%w: cannot list all models as non-admin user", apiservererrors.ErrPerm,
+			)
 		}
-		result.Results = append(result.Results, params.ModelSummaryResult{Result: summary})
+		return m.listAllModelSummaries(ctx)
+	} else {
+		return m.listModelSummariesForUser(ctx, userTag)
 	}
-	return result, nil
-
 }
 
-func (m *ModelManagerAPI) makeModelSummary(mi state.ModelSummary) *params.ModelSummary {
+// listAllModelSummaries returns the model summary results containing summaries
+// for all the models known to the controller.
+func (m *ModelManagerAPI) listAllModelSummaries(ctx context.Context) (params.ModelSummaryResults, error) {
+	result := params.ModelSummaryResults{}
+	modelUUIDs, err := m.modelService.GetModelUUIDs(ctx)
+	if err != nil {
+		return result, apiservererrors.ServerError(err)
+	}
+
+	result.Results = make([]params.ModelSummaryResult, 0, len(modelUUIDs))
+	for _, modelUUID := range modelUUIDs {
+		services, err := m.domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if errors.Is(err, modelerrors.NotFound) {
+			logger.Debugf(
+				ctx,
+				"model %q was removed while compiling model summaries",
+				modelUUID,
+			)
+			continue
+		} else if err != nil {
+			return result, errors.Trace(err)
+		}
+
+		summary, err := services.ModelInfo().GetModelSummary(ctx)
+		if errors.Is(err, modelerrors.NotFound) {
+			logger.Debugf(
+				ctx,
+				"model %q was removed while compiling model summaries",
+				modelUUID,
+			)
+			continue
+		} else if err != nil {
+			return result, errors.Trace(err)
+		}
+
+		paramsSummary, err := makeModelSummary(ctx, summary)
+		if err != nil {
+			result.Results = append(
+				result.Results,
+				params.ModelSummaryResult{Error: apiservererrors.ServerError(err)},
+			)
+		} else {
+			result.Results = append(
+				result.Results,
+				params.ModelSummaryResult{Result: paramsSummary},
+			)
+		}
+	}
+	return result, nil
+}
+
+// listModelSummariesForUser returns the model summary results containing
+// summaries for all the models known to the user.
+func (m *ModelManagerAPI) listModelSummariesForUser(ctx context.Context, tag names.UserTag) (params.ModelSummaryResults, error) {
+	makeErrorReturn := func(err error) error {
+		switch {
+		case errors.Is(err, accesserrors.UserNotFound):
+			return apiservererrors.ParamsErrorf(
+				params.CodeNotFound, "user %q does not exist", tag.Id(),
+			)
+		case errors.Is(err, accesserrors.UserNameNotValid):
+			return apiservererrors.ParamsErrorf(
+				params.CodeNotValid,
+				"user name is not valid",
+			)
+		}
+
+		return internalerrors.Errorf(
+			"listing model summaries for user %q: %w", tag.Id(), err,
+		)
+	}
+	result := params.ModelSummaryResults{}
+	userUUID, err := m.accessService.GetUserUUIDByName(ctx, coreuser.NameFromTag(tag))
+	if err != nil {
+		return result, makeErrorReturn(err)
+	}
+
+	userModelUUIDs, err := m.modelService.ListModelUUIDsForUser(ctx, userUUID)
+	if err != nil {
+		return result, makeErrorReturn(err)
+	}
+
+	result.Results = make([]params.ModelSummaryResult, 0, len(userModelUUIDs))
+	for _, modelUUID := range userModelUUIDs {
+		services, err := m.domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if errors.Is(err, modelerrors.NotFound) {
+			logger.Debugf(
+				ctx,
+				"model %q was removed while compiling user %q model summaries",
+				modelUUID, tag.Id(),
+			)
+			continue
+		} else if err != nil {
+			return result, errors.Trace(err)
+		}
+
+		modelSummary, err := services.ModelInfo().GetUserModelSummary(ctx, userUUID)
+		switch {
+		// For these errors it indiciates the the state of the controller has
+		// changed since retrieving the list of model's for the user. That is ok
+		// and we can safely ignore them.
+		case errors.Is(err, modelerrors.NotFound):
+			logger.Debugf(
+				ctx,
+				"model %q was removed while compiling user %q model summaries",
+				modelUUID, tag.Id(),
+			)
+		case errors.Is(err, accesserrors.AccessNotFound):
+			logger.Debugf(
+				ctx,
+				"user %q has had their access to model removed while compiling summaries",
+				tag.Id(), modelUUID,
+			)
+		case err != nil:
+			return result, makeErrorReturn(err)
+		}
+
+		paramsSummary, err := makeUserModelSummary(ctx, modelSummary)
+		if err != nil {
+			result.Results = append(
+				result.Results,
+				params.ModelSummaryResult{
+					Error: apiservererrors.ServerError(err),
+				},
+			)
+			continue
+		}
+		result.Results = append(result.Results, params.ModelSummaryResult{
+			Result: paramsSummary,
+		})
+	}
+	return result, nil
+}
+
+func makeUserModelSummary(ctx context.Context, mi coremodel.UserModelSummary) (*params.ModelSummary, error) {
+	userAccess, err := commonmodel.EncodeAccess(mi.UserAccess)
+	if err != nil && !errors.Is(err, errors.NotValid) {
+		return nil, errors.Trace(err)
+	}
+	ms, err := makeModelSummary(ctx, mi.ModelSummary)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	ms.UserAccess = userAccess
+	ms.UserLastConnection = mi.UserLastConnection
+	return ms, nil
+}
+
+func makeModelSummary(ctx context.Context, mi coremodel.ModelSummary) (*params.ModelSummary, error) {
+	credTag, err := mi.CloudCredentialKey.Tag()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	// These should never be invalid since it has come from our database. We
+	// have to check anyway since the names package will panic if they are
+	// somehow not.
+	if !names.IsValidCloud(mi.CloudName) {
+		return nil, apiservererrors.ServerError(
+			fmt.Errorf("invalid cloud name %q", mi.CloudName),
+		)
+	}
+	cloudTag := names.NewCloudTag(mi.CloudName)
+
 	summary := &params.ModelSummary{
 		Name:           mi.Name,
-		UUID:           mi.UUID,
-		Type:           string(mi.Type),
-		OwnerTag:       names.NewUserTag(mi.Owner).String(),
+		UUID:           mi.UUID.String(),
+		Type:           mi.ModelType.String(),
+		Qualifier:      mi.Qualifier.String(),
 		ControllerUUID: mi.ControllerUUID,
 		IsController:   mi.IsController,
-		Life:           life.Value(mi.Life.String()),
+		Life:           mi.Life,
 
-		CloudTag:    mi.CloudTag,
+		CloudTag:    cloudTag.String(),
 		CloudRegion: mi.CloudRegion,
 
-		CloudCredentialTag: mi.CloudCredentialTag,
+		CloudCredentialTag: credTag.String(),
 
-		SLA: &params.ModelSLAInfo{
-			Level: mi.SLALevel,
-			Owner: mi.Owner,
+		ProviderType: mi.CloudType,
+		AgentVersion: &mi.AgentVersion,
+
+		Status: params.EntityStatus{
+			Status: mi.Status.Status,
+			Info:   mi.Status.Message,
+			Data:   mi.Status.Data,
+			Since:  mi.Status.Since,
 		},
-
-		ProviderType: mi.ProviderType,
-		AgentVersion: mi.AgentVersion,
-
-		Status:             common.EntityStatusFromState(mi.Status),
-		Counts:             []params.ModelEntityCount{},
-		UserLastConnection: mi.UserLastConnection,
+		Counts: []params.ModelEntityCount{},
 	}
 	if mi.MachineCount > 0 {
-		summary.Counts = append(summary.Counts, params.ModelEntityCount{params.Machines, mi.MachineCount})
+		summary.Counts = append(summary.Counts, params.ModelEntityCount{Entity: params.Machines, Count: mi.MachineCount})
 	}
 
 	if mi.CoreCount > 0 {
-		summary.Counts = append(summary.Counts, params.ModelEntityCount{params.Cores, mi.CoreCount})
+		summary.Counts = append(summary.Counts, params.ModelEntityCount{Entity: params.Cores, Count: mi.CoreCount})
 	}
 
 	if mi.UnitCount > 0 {
-		summary.Counts = append(summary.Counts, params.ModelEntityCount{params.Units, mi.UnitCount})
+		summary.Counts = append(summary.Counts, params.ModelEntityCount{Entity: params.Units, Count: mi.UnitCount})
 	}
 
-	access, err := common.StateToParamsUserAccessPermission(mi.Access)
-	if err == nil {
-		summary.UserAccess = access
-	}
 	if mi.Migration != nil {
-		migration := mi.Migration
-		startTime := migration.StartTime()
-		endTime := new(time.Time)
-		*endTime = migration.EndTime()
-		var zero time.Time
-		if *endTime == zero {
-			endTime = nil
-		}
-
 		summary.Migration = &params.ModelMigrationStatus{
-			Status: migration.StatusMessage(),
-			Start:  &startTime,
-			End:    endTime,
+			Status: mi.Migration.Status,
+			Start:  mi.Migration.Start,
+			End:    mi.Migration.End,
 		}
 	}
-	return summary
+
+	return summary, nil
 }
 
 // ListModels returns the models that the specified user
 // has access to in the current server.  Controller admins (superuser)
 // can list models for any user.  Other users
 // can only ask about their own models.
-func (m *ModelManagerAPI) ListModels(user params.Entity) (params.UserModelList, error) {
+func (m *ModelManagerAPI) ListModels(ctx context.Context, userEntity params.Entity) (params.UserModelList, error) {
 	result := params.UserModelList{}
 
-	userTag, err := names.ParseUserTag(user.Tag)
+	userTag, err := names.ParseUserTag(userEntity.Tag)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	err = m.authCheck(userTag)
+	err = m.authCheck(ctx, userTag)
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	modelInfos, err := m.state.ModelBasicInfoForUser(userTag, m.isAdmin)
+	userUUID, err := m.accessService.GetUserUUIDByName(ctx, coreuser.NameFromTag(userTag))
 	if err != nil {
 		return result, errors.Trace(err)
 	}
 
-	for _, mi := range modelInfos {
-		var ownerTag names.UserTag
-		if names.IsValidUser(mi.Owner) {
-			ownerTag = names.NewUserTag(mi.Owner)
+	var models []coremodel.Model
+	// If the currently logged in user is an admin we list all models in the
+	// controller.
+	if m.isAdmin {
+		models, err = m.modelService.GetAllModels(ctx)
+	} else {
+		models, err = m.modelService.ListModelsForUser(ctx, userUUID)
+	}
+
+	if err != nil {
+		return result, errors.Trace(err)
+	}
+
+	for _, mi := range models {
+		var lastConnection *time.Time
+		lc, err := m.accessService.LastModelLogin(ctx, coreuser.NameFromTag(userTag), mi.UUID)
+		if errors.Is(err, accesserrors.UserNeverAccessedModel) {
+			lastConnection = nil
+		} else if errors.Is(err, modelerrors.NotFound) {
+			// Continue if the model has been removed since we got the UUID.
+			continue
+		} else if err != nil {
+			return result, errors.Annotatef(err, "getting last login time for user %q on model %q", userTag.Name(), mi.Name)
 		} else {
-			// no reason to fail the request here, as it wasn't the users fault
-			logger.Warningf("for model %v, got an invalid owner: %q", mi.UUID, mi.Owner)
+			lastConnection = &lc
 		}
-		lastConnection := mi.LastConnection
+
 		result.UserModels = append(result.UserModels, params.UserModel{
 			Model: params.Model{
-				Name:     mi.Name,
-				UUID:     mi.UUID,
-				Type:     string(mi.Type),
-				OwnerTag: ownerTag.String(),
+				Name:      mi.Name,
+				UUID:      mi.UUID.String(),
+				Type:      mi.ModelType.String(),
+				Qualifier: mi.Qualifier.String(),
 			},
-			LastConnection: &lastConnection,
+			LastConnection: lastConnection,
 		})
 	}
-
 	return result, nil
 }
 
-// DestroyModels will try to destroy the specified models.
-// If there is a block on destruction, this method will return an error.
-// From ModelManager v7 onwards, DestroyModels gains 'force' and 'max-wait' parameters.
-func (m *ModelManagerAPI) DestroyModels(args params.DestroyModelsParams) (params.ErrorResults, error) {
+// DestroyModels will try to destroy the specified models. If there is a block
+// on destruction, this method will return an error.
+func (m *ModelManagerAPI) DestroyModels(ctx context.Context, args params.DestroyModelsParams) (params.ErrorResults, error) {
 	results := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Models)),
 	}
 
-	destroyModel := func(modelUUID string, destroyStorage, force *bool, maxWait *time.Duration, timeout *time.Duration) error {
-		st, releaseSt, err := m.state.GetBackend(modelUUID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer releaseSt()
-
-		model, err := st.Model()
-		if err != nil {
-			return errors.Trace(err)
-		}
+	destroyModel := func(modelUUID string, force *bool, maxWait *time.Duration) error {
+		modelTag := names.NewModelTag(modelUUID)
 		if !m.isAdmin {
-			if err := m.authorizer.HasPermission(permission.AdminAccess, model.ModelTag()); err != nil {
+			if err := m.authorizer.HasPermission(ctx, permission.AdminAccess, modelTag); err != nil {
 				return err
 			}
 		}
 
-		return errors.Trace(common.DestroyModel(st, destroyStorage, force, maxWait, timeout))
+		check, err := m.getBlockChecker(ctx, coremodel.UUID(modelUUID))
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		if err := check.DestroyAllowed(ctx); err != nil {
+			return errors.Trace(err)
+		}
+
+		var argForce bool
+		if force != nil {
+			argForce = *force
+		}
+		var argMaxWait time.Duration
+		if maxWait != nil {
+			argMaxWait = *maxWait
+		}
+
+		mUUID := coremodel.UUID(modelUUID)
+		modelDomainServices, err := m.domainServicesGetter.DomainServicesForModel(ctx, mUUID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		_, err = modelDomainServices.RemovalService().RemoveModel(ctx, mUUID, argForce, argMaxWait)
+		if err != nil && !errors.Is(err, modelerrors.NotFound) {
+			return errors.Annotatef(err, "removing model %q", modelUUID)
+		}
+
+		return nil
 	}
 
 	for i, arg := range args.Models {
@@ -823,7 +803,7 @@ func (m *ModelManagerAPI) DestroyModels(args params.DestroyModelsParams) (params
 			results.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		if err := destroyModel(tag.Id(), arg.DestroyStorage, arg.Force, arg.MaxWait, arg.Timeout); err != nil {
+		if err := destroyModel(tag.Id(), arg.Force, arg.MaxWait); err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
@@ -832,20 +812,22 @@ func (m *ModelManagerAPI) DestroyModels(args params.DestroyModelsParams) (params
 }
 
 // ModelInfo returns information about the specified models.
-func (m *ModelManagerAPI) ModelInfo(args params.Entities) (params.ModelInfoResults, error) {
-	return m.modelInfo(args, false)
-}
-
-// ModelInfo returns information about the specified models.
-// In V9 of the facade, we include DefaultSeries and DefaultBase within model
-// info
-func (m *ModelManagerAPIV9) ModelInfo(args params.Entities) (params.ModelInfoResults, error) {
-	return m.modelInfo(args, true)
-}
-
-func (m *ModelManagerAPI) modelInfo(args params.Entities, includeDefaultOS bool) (params.ModelInfoResults, error) {
+func (m *ModelManagerAPI) ModelInfo(ctx context.Context, args params.Entities) (params.ModelInfoResults, error) {
 	results := params.ModelInfoResults{
 		Results: make([]params.ModelInfoResult, len(args.Entities)),
+	}
+
+	checkWritePermission := func(tag names.ModelTag) bool {
+		if m.isAdmin {
+			return true
+		}
+		if err := m.authorizer.HasPermission(ctx, permission.AdminAccess, tag); err == nil {
+			return true
+		}
+		if err := m.authorizer.HasPermission(ctx, permission.WriteAccess, tag); err == nil {
+			return true
+		}
+		return false
 	}
 
 	getModelInfo := func(arg params.Entity) (params.ModelInfo, error) {
@@ -853,7 +835,15 @@ func (m *ModelManagerAPI) modelInfo(args params.Entities, includeDefaultOS bool)
 		if err != nil {
 			return params.ModelInfo{}, errors.Trace(err)
 		}
-		modelInfo, err := m.getModelInfo(tag, true, includeDefaultOS, false)
+		canWrite := checkWritePermission(tag)
+		if !canWrite {
+			// If the logged in user does not have at least read permission, we return an error.
+			if err := m.authorizer.HasPermission(ctx, permission.ReadAccess, tag); err != nil {
+				return params.ModelInfo{}, errors.Trace(apiservererrors.ErrPerm)
+			}
+		}
+
+		modelInfo, err := m.getModelInfo(ctx, coremodel.UUID(tag.Id()))
 		if err != nil {
 			return params.ModelInfo{}, errors.Trace(err)
 		}
@@ -862,12 +852,47 @@ func (m *ModelManagerAPI) modelInfo(args params.Entities, includeDefaultOS bool)
 			if err != nil {
 				return params.ModelInfo{}, errors.Trace(err)
 			}
-			credential, err := m.state.CloudCredential(credentialTag)
+			cred, err := m.credentialService.CloudCredential(ctx, credential.KeyFromTag(credentialTag))
 			if err != nil {
 				return params.ModelInfo{}, errors.Trace(err)
 			}
-			valid := credential.IsValid()
+			valid := !cred.Invalid
 			modelInfo.CloudCredentialValidity = &valid
+		}
+		if !canWrite {
+			return modelInfo, nil
+		}
+
+		modelUUID := coremodel.UUID(tag.Id())
+		modelDomainServices, err := m.domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if err != nil {
+			return params.ModelInfo{}, errors.Trace(err)
+		}
+		if modelInfo.Machines, err = commonmodel.ModelMachineInfo(ctx, modelDomainServices.Machine(), modelDomainServices.Status()); err != nil {
+			return params.ModelInfo{}, err
+		}
+
+		secretBackends, err := m.secretBackendService.BackendSummaryInfoForModel(ctx, modelUUID)
+		if err != nil {
+			return params.ModelInfo{}, errors.Trace(err)
+		}
+		for _, backend := range secretBackends {
+			name := backend.Name
+			if name == kubernetes.BackendName {
+				name = kubernetes.BuiltInName(modelInfo.Name)
+			}
+			modelInfo.SecretBackends = append(modelInfo.SecretBackends, params.SecretBackendResult{
+				// Don't expose the id.
+				NumSecrets: backend.NumSecrets,
+				Status:     backend.Status,
+				Message:    backend.Message,
+				Result: params.SecretBackend{
+					Name:                name,
+					BackendType:         backend.BackendType,
+					TokenRotateInterval: backend.TokenRotateInterval,
+					Config:              backend.Config,
+				},
+			})
 		}
 		return modelInfo, nil
 	}
@@ -883,40 +908,21 @@ func (m *ModelManagerAPI) modelInfo(args params.Entities, includeDefaultOS bool)
 	return results, nil
 }
 
-func (m *ModelManagerAPI) getModelInfo(tag names.ModelTag, withSecrets bool, withDefaultOS bool, modelCreator bool) (params.ModelInfo, error) {
-	// If the user is a controller superuser, they are considered a model
-	// admin.
-	adminAccess := m.isAdmin || modelCreator
-	if !adminAccess {
-		// otherwise we do a check to see if the user has admin access to the model
-		err := m.authorizer.HasPermission(permission.AdminAccess, tag)
-		adminAccess = err == nil
-	}
-	// Admin users also have write access to the model.
-	writeAccess := adminAccess
-	if !writeAccess {
-		// Otherwise we do a check to see if the user has write access to the model.
-		err := m.authorizer.HasPermission(permission.WriteAccess, tag)
-		writeAccess = err == nil
-	}
+func (m *ModelManagerAPI) getModelInfo(ctx context.Context, modelUUID coremodel.UUID) (params.ModelInfo, error) {
+	modelTag := names.NewModelTag(modelUUID.String())
 
-	// If the logged in user does not have at least read permission, we return an error.
-	if err := m.authorizer.HasPermission(permission.ReadAccess, tag); !writeAccess && err != nil {
-		return params.ModelInfo{}, errors.Trace(apiservererrors.ErrPerm)
-	}
-
-	st, release, err := m.state.GetBackend(tag.Id())
-	if errors.IsNotFound(err) {
-		return params.ModelInfo{}, errors.Trace(apiservererrors.ErrPerm)
-	} else if err != nil {
+	modelDomainServices, err := m.domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+	if err != nil {
 		return params.ModelInfo{}, errors.Trace(err)
 	}
-	defer release()
+	modelInfoService := modelDomainServices.ModelInfo()
+	modelInfo, err := modelInfoService.GetModelInfo(ctx)
+	if err != nil {
+		return params.ModelInfo{}, errors.Trace(err)
+	}
 
-	model, err := st.Model()
-	if errors.IsNotFound(err) {
-		return params.ModelInfo{}, errors.Trace(apiservererrors.ErrPerm)
-	} else if err != nil {
+	model, err := m.modelService.Model(ctx, modelUUID)
+	if err != nil {
 		return params.ModelInfo{}, errors.Trace(err)
 	}
 
@@ -925,121 +931,63 @@ func (m *ModelManagerAPI) getModelInfo(tag names.ModelTag, withSecrets bool, wit
 	// beginning of this method.
 
 	info := params.ModelInfo{
-		Name:           model.Name(),
-		Type:           string(model.Type()),
-		UUID:           model.UUID(),
-		ControllerUUID: model.ControllerUUID(),
-		IsController:   st.IsController(),
-		OwnerTag:       model.Owner().String(),
-		Life:           life.Value(model.Life().String()),
-		CloudTag:       names.NewCloudTag(model.CloudName()).String(),
-		CloudRegion:    model.CloudRegion(),
+		Name:           model.Name,
+		Type:           model.ModelType.String(),
+		UUID:           modelUUID.String(),
+		ControllerUUID: m.controllerUUID.String(),
+		IsController:   modelInfo.IsControllerModel,
+		Qualifier:      model.Qualifier.String(),
+		Life:           model.Life,
+		CloudTag:       names.NewCloudTag(model.Cloud).String(),
+		CloudRegion:    model.CloudRegion,
+		ProviderType:   model.CloudType,
 	}
 
-	if cloudCredentialTag, ok := model.CloudCredentialTag(); ok {
+	cloudCredentialTag, err := model.Credential.Tag()
+	if err != nil {
+		return params.ModelInfo{}, errors.Trace(err)
+	}
+	if !cloudCredentialTag.IsZero() {
 		info.CloudCredentialTag = cloudCredentialTag.String()
 	}
 
-	// All users with access to the model can see the SLA information.
-	info.SLA = &params.ModelSLAInfo{
-		Level: model.SLALevel(),
-		Owner: model.SLAOwner(),
-	}
-
-	// If model is not alive - dying or dead - or if it is being imported,
-	// there is no guarantee that the rest of the call will succeed.
-	// For these models we can ignore NotFound errors coming from persistence layer.
-	// However, for Alive models, these errors are genuine and cannot be ignored.
-	ignoreNotFoundError := model.Life() != state.Alive || model.MigrationMode() == state.MigrationModeImporting
-
-	// If we received an an error and cannot ignore it, we should consider it fatal and surface it.
-	// We should do the same if we can ignore NotFound errors but the given error is of some other type.
-	shouldErr := func(thisErr error) bool {
-		if thisErr == nil {
-			return false
-		}
-		return !ignoreNotFoundError || !errors.IsNotFound(thisErr)
-	}
-	cfg, err := model.Config()
-	if shouldErr(err) {
-		return params.ModelInfo{}, errors.Trace(err)
-	}
-	if err == nil {
-		info.ProviderType = cfg.Type()
-
-		if agentVersion, exists := cfg.AgentVersion(); exists {
-			info.AgentVersion = &agentVersion
-		}
-
-		// Optionally include DefaultBase and DefaultSeries. Facade versions 10+
-		// should not include these because series is deprecated, and the default OS
-		// is a property of model config, so should not be duplicated here
-		if withDefaultOS {
-			defaultBase := config.PreferredBase(cfg)
-			info.DefaultBase = defaultBase.String()
-			if defaultSeries, err := corebase.GetSeriesFromBase(defaultBase); err == nil {
-				info.DefaultSeries = defaultSeries
-			} else {
-				logger.Errorf("cannot get default series from base %q: %v", defaultBase, err)
-				// This is slightly defensive, but we should always show a series
-				// in the model info.
-				info.DefaultSeries = jujuversion.DefaultSupportedLTS()
-			}
-		}
-	}
-
-	status, err := model.Status()
-	if shouldErr(err) {
-		return params.ModelInfo{}, errors.Trace(err)
-	}
-	if err == nil {
-		entityStatus := common.EntityStatusFromState(status)
-		info.Status = entityStatus
-	}
-
-	users, err := model.Users()
-	if shouldErr(err) {
-		return params.ModelInfo{}, errors.Trace(err)
-	}
-	if err == nil {
-		for _, user := range users {
-			if !adminAccess && m.authCheck(user.UserTag) != nil {
-				// The authenticated user is neither the a controller
-				// superuser, a model administrator, nor the model user, so
-				// has no business knowing about other model user.
-				continue
-			}
-
-			userInfo, err := common.ModelUserInfo(user, model)
-			if err != nil {
-				return params.ModelInfo{}, errors.Trace(err)
-			}
-			info.Users = append(info.Users, userInfo)
-		}
-	}
-
-	migration, err := st.LatestMigration()
-	if err != nil && !errors.IsNotFound(err) {
-		return params.ModelInfo{}, errors.Trace(err)
-	}
-	if err == nil {
-		startTime := migration.StartTime()
-		endTime := new(time.Time)
-		*endTime = migration.EndTime()
-		var zero time.Time
-		if *endTime == zero {
-			endTime = nil
-		}
-		info.Migration = &params.ModelMigrationStatus{
-			Status: migration.StatusMessage(),
-			Start:  &startTime,
-			End:    endTime,
-		}
-	}
-
-	fs, err := supportedFeaturesGetter(model, environs.New)
+	modelAgentService := modelDomainServices.Agent()
+	agentVersion, err := modelAgentService.GetModelTargetAgentVersion(ctx)
 	if err != nil {
-		return params.ModelInfo{}, err
+		return params.ModelInfo{}, errors.Trace(err)
+	}
+	info.AgentVersion = &agentVersion
+
+	statusService := modelDomainServices.Status()
+	status, err := statusService.GetModelStatus(ctx)
+	if err != nil {
+		return params.ModelInfo{}, errors.Trace(err)
+	}
+	// Translate domain model status to params entity status. We put reason
+	// into the data map as this is where the contract to the client expects
+	// this value at the moment.
+	info.Status = params.EntityStatus{
+		Status: status.Status,
+		Info:   status.Message,
+		Data:   status.Data,
+		Since:  status.Since,
+	}
+
+	if status.Status == corestatus.Busy {
+		info.Migration = &params.ModelMigrationStatus{
+			Status: status.Message,
+			Start:  status.Since,
+		}
+	}
+
+	info.Users, err = commonmodel.ModelUserInfo(ctx, m.modelService, modelTag, coreuser.NameFromTag(m.apiUser), m.isAdmin)
+	if err != nil {
+		return params.ModelInfo{}, errors.Annotate(err, "getting model user info")
+	}
+
+	fs, err := m.applicationService.GetSupportedFeatures(ctx)
+	if err != nil {
+		return params.ModelInfo{}, errors.Trace(err)
 	}
 	for _, feat := range fs.AsList() {
 		mappedFeat := params.SupportedFeature{
@@ -1053,41 +1001,16 @@ func (m *ModelManagerAPI) getModelInfo(tag names.ModelTag, withSecrets bool, wit
 
 		info.SupportedFeatures = append(info.SupportedFeatures, mappedFeat)
 	}
-
-	// Users that do not have write access (only have read access) we return
-	// the info gathered so far.
-	if !writeAccess {
-		return info, nil
-	}
-
-	// For users with write access we also return info on machines and, if
-	// specified, info on secrets.
-
-	if info.Machines, err = common.ModelMachineInfo(st); shouldErr(err) {
-		return params.ModelInfo{}, err
-	}
-	if withSecrets {
-		if info.SecretBackends, err = commonsecrets.BackendSummaryInfo(
-			m.state, st, st, st.ControllerUUID(), false, commonsecrets.BackendFilter{},
-		); shouldErr(err) {
-			return params.ModelInfo{}, err
-		}
-		// Don't expose the id.
-		for i := range info.SecretBackends {
-			info.SecretBackends[i].ID = ""
-		}
-	}
-
 	return info, nil
 }
 
 // ModifyModelAccess changes the model access granted to users.
-func (m *ModelManagerAPI) ModifyModelAccess(args params.ModifyModelAccessRequest) (result params.ErrorResults, _ error) {
+func (m *ModelManagerAPI) ModifyModelAccess(ctx context.Context, args params.ModifyModelAccessRequest) (result params.ErrorResults, _ error) {
 	result = params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Changes)),
 	}
 
-	err := m.authorizer.HasPermission(permission.SuperuserAccess, m.state.ControllerTag())
+	err := m.authorizer.HasPermission(ctx, permission.SuperuserAccess, names.NewControllerTag(m.controllerUUID.String()))
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return result, errors.Trace(err)
 	}
@@ -1099,18 +1022,13 @@ func (m *ModelManagerAPI) ModifyModelAccess(args params.ModifyModelAccessRequest
 
 	for i, arg := range args.Changes {
 		modelAccess := permission.Access(arg.Access)
-		if err := permission.ValidateModelAccess(modelAccess); err != nil {
-			err = errors.Annotate(err, "could not modify model access")
-			result.Results[i].Error = apiservererrors.ServerError(err)
-			continue
-		}
 
 		modelTag, err := names.ParseModelTag(arg.ModelTag)
 		if err != nil {
 			result.Results[i].Error = apiservererrors.ServerError(errors.Annotate(err, "could not modify model access"))
 			continue
 		}
-		err = m.authorizer.HasPermission(permission.AdminAccess, modelTag)
+		err = m.authorizer.HasPermission(ctx, permission.AdminAccess, modelTag)
 		if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 			return result, errors.Trace(err)
 		}
@@ -1126,116 +1044,26 @@ func (m *ModelManagerAPI) ModifyModelAccess(args params.ModifyModelAccessRequest
 			result.Results[i].Error = apiservererrors.ServerError(errors.Annotate(err, "could not modify model access"))
 			continue
 		}
+		err = m.accessService.UpdatePermission(ctx, access.UpdatePermissionArgs{
+			AccessSpec: permission.AccessSpec{
+				Target: permission.ID{
+					ObjectType: permission.Model,
+					Key:        modelTag.Id(),
+				},
+				Access: modelAccess,
+			},
+			Change:  permission.AccessChange(arg.Action),
+			Subject: coreuser.NameFromTag(targetUserTag),
+		})
 
-		result.Results[i].Error = apiservererrors.ServerError(
-			changeModelAccess(m.state, modelTag, m.apiUser, targetUserTag, arg.Action, modelAccess, m.isAdmin))
+		result.Results[i].Error = apiservererrors.ServerError(err)
 	}
 	return result, nil
 }
 
-func userAuthorizedToChangeAccess(st common.ModelManagerBackend, userIsAdmin bool, userTag names.UserTag) error {
-	if userIsAdmin {
-		// Just confirm that the model that has been given is a valid model.
-		_, err := st.Model()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	}
-
-	// Get the current user's ModelUser for the Model to see if the user has
-	// permission to grant or revoke permissions on the model.
-	currentUser, err := st.UserAccess(userTag, st.ModelTag())
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// No, this user doesn't have permission.
-			return apiservererrors.ErrPerm
-		}
-		return errors.Annotate(err, "could not retrieve user")
-	}
-	if currentUser.Access != permission.AdminAccess {
-		return apiservererrors.ErrPerm
-	}
-	return nil
-}
-
-// changeModelAccess performs the requested access grant or revoke action for the
-// specified user on the specified model.
-func changeModelAccess(accessor common.ModelManagerBackend, modelTag names.ModelTag, apiUser, targetUserTag names.UserTag, action params.ModelAction, access permission.Access, userIsAdmin bool) error {
-	st, release, err := accessor.GetBackend(modelTag.Id())
-	if err != nil {
-		return errors.Annotate(err, "could not lookup model")
-	}
-	defer release()
-
-	if err := userAuthorizedToChangeAccess(st, userIsAdmin, apiUser); err != nil {
-		return errors.Trace(err)
-	}
-
-	model, err := st.Model()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	switch action {
-	case params.GrantModelAccess:
-		_, err = model.AddUser(state.UserAccessSpec{User: targetUserTag, CreatedBy: apiUser, Access: access})
-		if errors.IsAlreadyExists(err) {
-			modelUser, err := st.UserAccess(targetUserTag, modelTag)
-			if errors.IsNotFound(err) {
-				// Conflicts with prior check, must be inconsistent state.
-				err = jujutxn.ErrExcessiveContention
-			}
-			if err != nil {
-				return errors.Annotate(err, "could not look up model access for user")
-			}
-
-			// Only set access if greater access is being granted.
-			if modelUser.Access.EqualOrGreaterModelAccessThan(access) {
-				return errors.Errorf("user already has %q access or greater", access)
-			}
-			if _, err = st.SetUserAccess(modelUser.UserTag, modelUser.Object, access); err != nil {
-				return errors.Annotate(err, "could not set model access for user")
-			}
-			return nil
-		}
-		return errors.Annotate(err, "could not grant model access")
-
-	case params.RevokeModelAccess:
-		switch access {
-		case permission.ReadAccess:
-			// Revoking read access removes all access.
-			err := st.RemoveUserAccess(targetUserTag, modelTag)
-			return errors.Annotate(err, "could not revoke model access")
-		case permission.WriteAccess:
-			// Revoking write access sets read-only.
-			modelUser, err := st.UserAccess(targetUserTag, modelTag)
-			if err != nil {
-				return errors.Annotate(err, "could not look up model access for user")
-			}
-			_, err = st.SetUserAccess(modelUser.UserTag, modelUser.Object, permission.ReadAccess)
-			return errors.Annotate(err, "could not set model access to read-only")
-		case permission.AdminAccess:
-			// Revoking admin access sets read-write.
-			modelUser, err := st.UserAccess(targetUserTag, modelTag)
-			if err != nil {
-				return errors.Annotate(err, "could not look up model access for user")
-			}
-			_, err = st.SetUserAccess(modelUser.UserTag, modelUser.Object, permission.WriteAccess)
-			return errors.Annotate(err, "could not set model access to read-write")
-
-		default:
-			return errors.Errorf("don't know how to revoke %q access", access)
-		}
-
-	default:
-		return errors.Errorf("unknown action %q", action)
-	}
-}
-
 // ModelDefaultsForClouds returns the default config values for the specified
 // clouds.
-func (m *ModelManagerAPI) ModelDefaultsForClouds(args params.Entities) (params.ModelDefaultsResults, error) {
+func (m *ModelManagerAPI) ModelDefaultsForClouds(ctx context.Context, args params.Entities) (params.ModelDefaultsResults, error) {
 	result := params.ModelDefaultsResults{}
 	if !m.isAdmin {
 		return result, apiservererrors.ErrPerm
@@ -1247,20 +1075,23 @@ func (m *ModelManagerAPI) ModelDefaultsForClouds(args params.Entities) (params.M
 			result.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		result.Results[i] = m.modelDefaults(cloudTag.Id())
+		result.Results[i] = m.modelDefaults(ctx, cloudTag.Id())
 	}
 	return result, nil
 }
 
-func (m *ModelManagerAPI) modelDefaults(cloud string) params.ModelDefaultsResult {
+func (m *ModelManagerAPI) modelDefaults(ctx context.Context, cloud string) params.ModelDefaultsResult {
 	result := params.ModelDefaultsResult{}
-	values, err := m.ctlrState.ModelConfigDefaultValues(cloud)
+	modelDefaults, err := m.modelDefaultsService.CloudDefaults(ctx, cloud)
 	if err != nil {
+		if errors.Is(err, clouderrors.NotFound) {
+			err = errors.NotFoundf("cloud %q", cloud)
+		}
 		result.Error = apiservererrors.ServerError(err)
 		return result
 	}
-	result.Config = make(map[string]params.ModelDefaults)
-	for attr, val := range values {
+	result.Config = make(map[string]params.ModelDefaults, len(modelDefaults))
+	for attr, val := range modelDefaults {
 		settings := params.ModelDefaults{
 			Controller: val.Controller,
 			Default:    val.Default,
@@ -1277,94 +1108,105 @@ func (m *ModelManagerAPI) modelDefaults(cloud string) params.ModelDefaultsResult
 }
 
 // SetModelDefaults writes new values for the specified default model settings.
-func (m *ModelManagerAPI) SetModelDefaults(args params.SetModelDefaults) (params.ErrorResults, error) {
+func (m *ModelManagerAPI) SetModelDefaults(ctx context.Context, args params.SetModelDefaults) (params.ErrorResults, error) {
 	results := params.ErrorResults{Results: make([]params.ErrorResult, len(args.Config))}
-	if err := m.check.ChangeAllowed(); err != nil {
+	if !m.isAdmin {
+		return results, apiservererrors.ErrPerm
+	}
+
+	check, err := m.getBlockChecker(ctx, m.controllerModelUUID)
+	if err != nil {
 		return results, errors.Trace(err)
 	}
+
+	if err := check.ChangeAllowed(ctx); err != nil {
+		return results, errors.Trace(err)
+	}
+
 	for i, arg := range args.Config {
 		results.Results[i].Error = apiservererrors.ServerError(
-			m.setModelDefaults(arg),
+			m.setModelDefaults(ctx, arg),
 		)
 	}
 	return results, nil
 }
 
-func (m *ModelManagerAPI) setModelDefaults(args params.ModelDefaultValues) error {
-	if !m.isAdmin {
-		return apiservererrors.ErrPerm
+func (m *ModelManagerAPI) setModelDefaults(ctx context.Context, args params.ModelDefaultValues) error {
+	if args.CloudTag == "" {
+		return errors.New("missing cloud name")
 	}
-
-	if err := m.check.ChangeAllowed(); err != nil {
-		return errors.Trace(err)
+	cTag, err := names.ParseCloudTag(args.CloudTag)
+	if err != nil {
+		return errors.NewNotValid(err, fmt.Sprintf("cloud tag %q not valid", args.CloudTag))
 	}
-	// Make sure we don't allow changing agent-version.
-	if _, found := args.Config["agent-version"]; found {
-		return errors.New("agent-version cannot have a default value")
-	}
-
-	var rspec *environscloudspec.CloudRegionSpec
-	if args.CloudTag != "" {
-		spec, err := m.makeRegionSpec(args.CloudTag, args.CloudRegion)
-		if err != nil {
-			return errors.Trace(err)
+	if args.CloudRegion == "" {
+		err := m.modelDefaultsService.UpdateCloudDefaults(ctx, cTag.Id(), args.Config)
+		if errors.Is(err, clouderrors.NotFound) {
+			return errors.NotFoundf("cloud %q", cTag.Id())
 		}
-		rspec = spec
+		return err
 	}
-	return m.ctlrState.UpdateModelConfigDefaultValues(args.Config, nil, rspec)
+
+	err = m.modelDefaultsService.UpdateCloudRegionDefaults(ctx, cTag.Id(), args.CloudRegion, args.Config)
+	if errors.Is(err, clouderrors.NotFound) {
+		return errors.NotFoundf("cloud %q region %q", cTag.Id(), args.CloudRegion)
+	}
+	return err
 }
 
 // UnsetModelDefaults removes the specified default model settings.
-func (m *ModelManagerAPI) UnsetModelDefaults(args params.UnsetModelDefaults) (params.ErrorResults, error) {
+func (m *ModelManagerAPI) UnsetModelDefaults(ctx context.Context, args params.UnsetModelDefaults) (params.ErrorResults, error) {
 	results := params.ErrorResults{Results: make([]params.ErrorResult, len(args.Keys))}
 	if !m.isAdmin {
 		return results, apiservererrors.ErrPerm
 	}
 
-	if err := m.check.ChangeAllowed(); err != nil {
+	check, err := m.getBlockChecker(ctx, m.controllerModelUUID)
+	if err != nil {
+		return results, errors.Trace(err)
+	}
+
+	if err := check.ChangeAllowed(ctx); err != nil {
 		return results, errors.Trace(err)
 	}
 
 	for i, arg := range args.Keys {
-		var rspec *environscloudspec.CloudRegionSpec
-		if arg.CloudTag != "" {
-			spec, err := m.makeRegionSpec(arg.CloudTag, arg.CloudRegion)
-			if err != nil {
-				results.Results[i].Error = apiservererrors.ServerError(
-					errors.Trace(err))
-				continue
-			}
-			rspec = spec
-		}
 		results.Results[i].Error = apiservererrors.ServerError(
-			m.ctlrState.UpdateModelConfigDefaultValues(nil, arg.Keys, rspec),
+			m.unsetModelDefaults(ctx, arg),
 		)
 	}
 	return results, nil
 }
 
-// makeRegionSpec is a helper method for methods that call
-// state.UpdateModelConfigDefaultValues.
-func (m *ModelManagerAPI) makeRegionSpec(cloudTag, r string) (*environscloudspec.CloudRegionSpec, error) {
-	cTag, err := names.ParseCloudTag(cloudTag)
-	if err != nil {
-		return nil, errors.Trace(err)
+func (m *ModelManagerAPI) unsetModelDefaults(ctx context.Context, arg params.ModelUnsetKeys) error {
+	if arg.CloudTag == "" {
+		return errors.New("missing cloud name")
 	}
-	rspec, err := environscloudspec.NewCloudRegionSpec(cTag.Id(), r)
+
+	cTag, err := names.ParseCloudTag(arg.CloudTag)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return errors.NewNotValid(err, fmt.Sprintf("cloud tag %q not valid", arg.CloudTag))
 	}
-	return rspec, nil
+	if arg.CloudRegion == "" {
+		err := m.modelDefaultsService.RemoveCloudDefaults(ctx, cTag.Id(), arg.Keys)
+		if errors.Is(err, clouderrors.NotFound) {
+			return errors.NotFoundf("cloud %q", cTag.Id())
+		}
+		return err
+	}
+	err = m.modelDefaultsService.RemoveCloudRegionDefaults(ctx, cTag.Id(), arg.CloudRegion, arg.Keys)
+	if errors.Is(err, clouderrors.NotFound) {
+		return errors.NotFoundf("cloud %q region %q", cTag.Id(), arg.CloudRegion)
+	}
+	return err
 }
 
 // ChangeModelCredential changes cloud credential reference for models.
 // These new cloud credentials must already exist on the controller.
-func (m *ModelManagerAPI) ChangeModelCredential(args params.ChangeModelCredentialsParams) (params.ErrorResults, error) {
-	if err := m.check.ChangeAllowed(); err != nil {
-		return params.ErrorResults{}, errors.Trace(err)
-	}
+func (m *ModelManagerAPI) ChangeModelCredential(ctx context.Context, args params.ChangeModelCredentialsParams) (params.ErrorResults, error) {
 
-	err := m.authorizer.HasPermission(permission.SuperuserAccess, m.state.ControllerTag())
+	err := m.authorizer.HasPermission(ctx, permission.SuperuserAccess,
+		names.NewControllerTag(m.controllerUUID.String()))
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return params.ErrorResults{}, errors.Trace(err)
 	}
@@ -1374,12 +1216,20 @@ func (m *ModelManagerAPI) ChangeModelCredential(args params.ChangeModelCredentia
 		if controllerAdmin {
 			return nil
 		}
-		return m.authorizer.HasPermission(permission.AdminAccess, tag)
+		return m.authorizer.HasPermission(ctx, permission.AdminAccess, tag)
 	}
 
 	replaceModelCredential := func(arg params.ChangeModelCredentialParams) error {
 		modelTag, err := names.ParseModelTag(arg.ModelTag)
 		if err != nil {
+			return errors.Trace(err)
+		}
+
+		check, err := m.getBlockChecker(ctx, coremodel.UUID(modelTag.Id()))
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if err := check.ChangeAllowed(ctx); err != nil {
 			return errors.Trace(err)
 		}
 		if err := checkModelAccess(modelTag); err != nil {
@@ -1389,18 +1239,9 @@ func (m *ModelManagerAPI) ChangeModelCredential(args params.ChangeModelCredentia
 		if err != nil {
 			return errors.Trace(err)
 		}
-		model, releaser, err := m.state.GetModel(modelTag.Id())
-		if err != nil {
+		credentialKey := credential.KeyFromTag(credentialTag)
+		if err := m.modelService.UpdateCredential(ctx, coremodel.UUID(modelTag.Id()), credentialKey); err != nil {
 			return errors.Trace(err)
-		}
-		defer releaser()
-
-		updated, err := model.SetCloudCredential(credentialTag)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if !updated {
-			return errors.Errorf("model %v already uses credential %v", modelTag.Id(), credentialTag.Id())
 		}
 		return nil
 	}

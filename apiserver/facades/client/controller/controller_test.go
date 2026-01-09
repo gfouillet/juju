@@ -4,640 +4,438 @@
 package controller_test
 
 import (
-	stdcontext "context"
-	"encoding/json"
+	"context"
 	"regexp"
-	"time"
+	"slices"
+	"strings"
+	stdtesting "testing"
 
-	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	"github.com/juju/version/v2"
-	"github.com/juju/worker/v3/workertest"
-	"github.com/kr/pretty"
-	"github.com/prometheus/client_golang/prometheus"
-	gc "gopkg.in/check.v1"
-	"gopkg.in/macaroon.v2"
+	"github.com/juju/loggo/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/apiserver"
-	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/facade/facadetest"
 	"github.com/juju/juju/apiserver/facades/client/controller"
+	"github.com/juju/juju/apiserver/facades/client/controller/mocks"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/cloud"
-	corecontroller "github.com/juju/juju/controller"
-	"github.com/juju/juju/core/cache"
 	"github.com/juju/juju/core/leadership"
-	coremultiwatcher "github.com/juju/juju/core/multiwatcher"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/docker"
-	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/internal/worker/gate"
-	"github.com/juju/juju/internal/worker/modelcache"
-	"github.com/juju/juju/internal/worker/multiwatcher"
-	pscontroller "github.com/juju/juju/pubsub/controller"
+	"github.com/juju/juju/core/user"
+	usertesting "github.com/juju/juju/core/user/testing"
+	"github.com/juju/juju/domain/access"
+	"github.com/juju/juju/domain/blockcommand"
+	servicefactorytesting "github.com/juju/juju/domain/services/testing"
+	"github.com/juju/juju/internal/docker"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	internalservices "github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/internal/uuid"
+	jujujujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	"github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
 )
 
 type controllerSuite struct {
-	statetesting.StateSuite
+	servicefactorytesting.DomainServicesSuite
+
+	controllerConfigAttrs map[string]any
 
 	controller       *controller.ControllerAPI
-	resources        *common.Resources
 	authorizer       apiservertesting.FakeAuthorizer
-	hub              *pubsub.StructuredHub
-	context          facadetest.Context
+	context          facadetest.MultiModelContext
 	leadershipReader leadership.Reader
+	mockModelService *mocks.MockModelService
 }
 
-var _ = gc.Suite(&controllerSuite{})
+func TestControllerSuite(t *stdtesting.T) {
+	tc.Run(t, &controllerSuite{})
+}
 
-func (s *controllerSuite) SetUpTest(c *gc.C) {
+func (s *controllerSuite) TestStub(c *tc.C) {
+	c.Skip(`This suite is missing tests for the following scenarios:
+
+- Hosted model config is skipped because the tests aren't wired up correctly.
+- Initiate migration.
+- Initiate migration with spec fails.
+- Initiate migration with partial failure.
+- Migration prechecks fails.
+- Watch model summaries by non admin.
+- Watch all model summaries by admin.
+- Identity provider with and without URL in config.
+`)
+}
+
+func (s *controllerSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.mockModelService = mocks.NewMockModelService(ctrl)
+	s.controller = s.controllerAPI(c)
+
+	return ctrl
+}
+
+func (s *controllerSuite) SetUpSuite(c *tc.C) {
+	s.DomainServicesSuite.SetUpSuite(c)
+}
+
+func (s *controllerSuite) TearDownSuite(c *tc.C) {
+	s.DomainServicesSuite.TearDownSuite(c)
+}
+
+func (s *controllerSuite) SetUpTest(c *tc.C) {
+	if s.controllerConfigAttrs == nil {
+		s.controllerConfigAttrs = map[string]any{}
+	}
 	// Initial config needs to be set before the StateSuite SetUpTest.
-	s.InitialConfig = testing.CustomModelConfig(c, testing.Attrs{
-		"name": "controller",
-	})
-
-	s.StateSuite.SetUpTest(c)
-
-	allWatcherBacking, err := state.NewAllWatcherBacking(s.StatePool)
-	c.Assert(err, jc.ErrorIsNil)
-	multiWatcherWorker, err := multiwatcher.NewWorker(multiwatcher.Config{
-		Clock:                clock.WallClock,
-		Logger:               loggo.GetLogger("test"),
-		Backing:              allWatcherBacking,
-		PrometheusRegisterer: noopRegisterer{},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	// The worker itself is a coremultiwatcher.Factory.
-	s.AddCleanup(func(c *gc.C) { workertest.CleanKill(c, multiWatcherWorker) })
-
-	initialized := gate.NewLock()
-	s.hub = pubsub.NewStructuredHub(nil)
-	modelCache, err := modelcache.NewWorker(modelcache.Config{
-		StatePool:            s.StatePool,
-		Hub:                  s.hub,
-		InitializedGate:      initialized,
-		Logger:               loggo.GetLogger("test"),
-		WatcherFactory:       multiWatcherWorker.WatchController,
-		PrometheusRegisterer: noopRegisterer{},
-		Cleanup:              func() {},
-	}.WithDefaultRestartStrategy())
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddCleanup(func(c *gc.C) { workertest.CleanKill(c, modelCache) })
-
-	select {
-	case <-initialized.Unlocked():
-	case <-time.After(10 * time.Second):
-		c.Error("model cache not initialized after 10 seconds")
+	controllerCfg := testing.FakeControllerConfig()
+	for key, value := range s.controllerConfigAttrs {
+		controllerCfg[key] = value
 	}
 
-	var cacheController *cache.Controller
-	err = modelcache.ExtractCacheController(modelCache, &cacheController)
-	c.Assert(err, jc.ErrorIsNil)
+	s.ControllerConfig = controllerCfg
+	s.DomainServicesSuite.SetUpTest(c)
 
-	s.resources = common.NewResources()
-	s.AddCleanup(func(_ *gc.C) { s.resources.StopAll() })
+	domainServiceGetter := s.DomainServicesGetter(c, s.NoopObjectStore(c), s.NoopLeaseManager(c))
+	jujujujutesting.SeedDatabase(c, s.TxnRunner(), domainServiceGetter(s.ControllerModelUUID), controllerCfg)
 
+	owner := names.NewLocalUserTag("test-admin")
 	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag:      s.Owner,
-		AdminTag: s.Owner,
+		Tag:      owner,
+		AdminTag: owner,
 	}
 
 	s.leadershipReader = noopLeadershipReader{}
-
-	s.context = facadetest.Context{
-		State_:               s.State,
-		StatePool_:           s.StatePool,
-		Resources_:           s.resources,
-		Auth_:                s.authorizer,
-		Controller_:          cacheController,
-		Hub_:                 s.hub,
-		MultiwatcherFactory_: multiWatcherWorker,
-		LeadershipReader_:    s.leadershipReader,
+	s.context = facadetest.MultiModelContext{
+		ModelContext: facadetest.ModelContext{
+			Auth_:             s.authorizer,
+			DomainServices_:   s.ControllerDomainServices(c),
+			Logger_:           loggertesting.WrapCheckLog(c),
+			LeadershipReader_: s.leadershipReader,
+			ControllerUUID_:   tc.Must0(c, model.NewUUID).String(),
+			ModelUUID_:        tc.Must0(c, model.NewUUID),
+		},
+		DomainServicesForModelFunc_: func(modelUUID model.UUID) internalservices.DomainServices {
+			return s.ModelDomainServices(c, modelUUID)
+		},
 	}
-	controller, err := controller.LatestAPI(s.context)
-	c.Assert(err, jc.ErrorIsNil)
-	s.controller = controller
 
 	loggo.GetLogger("juju.apiserver.controller").SetLogLevel(loggo.TRACE)
 }
 
-func (s *controllerSuite) TestNewAPIRefusesNonClient(c *gc.C) {
+func (s *controllerSuite) TearDownTest(c *tc.C) {
+	s.DomainServicesSuite.TearDownTest(c)
+}
+
+// controllerAPI sets up and returns a new instance of the controller API,
+// It provides custom service getter functions and mock services
+// to allow test-level control over their behavior.
+func (s *controllerSuite) controllerAPI(c *tc.C) *controller.ControllerAPI {
+	stdCtx := c.Context()
+	ctx := s.context
+	var (
+		authorizer     = ctx.Auth()
+		domainServices = ctx.DomainServices()
+	)
+
+	credentialServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.CredentialService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Credential(), nil
+	}
+	upgradeServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.UpgradeService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Upgrade(), nil
+	}
+	modelAgentServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.ModelAgentService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Agent(), nil
+	}
+	modelConfigServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.ModelConfigService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Config(), nil
+	}
+	applicationServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.ApplicationService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Application(), nil
+	}
+	relationServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.RelationService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Relation(), nil
+	}
+	statusServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.StatusService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Status(), nil
+	}
+	blockCommandServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.BlockCommandService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.BlockCommand(), nil
+	}
+	machineServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.MachineService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Machine(), nil
+	}
+	cloudSpecServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.ModelProviderService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.ModelProvider(), nil
+	}
+	modelMigrationServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.ModelMigrationService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.ModelMigration(), nil
+	}
+	removalServiceGetter := func(c context.Context, modelUUID model.UUID) (controller.RemovalService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Removal(), nil
+	}
+
+	api, err := controller.NewControllerAPI(
+		stdCtx,
+		authorizer,
+		ctx.Logger().Child("controller"),
+		domainServices.ControllerConfig(),
+		domainServices.ControllerNode(),
+		domainServices.ExternalController(),
+		domainServices.Access(),
+		s.mockModelService,
+		domainServices.ModelInfo(),
+		domainServices.BlockCommand(),
+		modelMigrationServiceGetter,
+		credentialServiceGetter,
+		upgradeServiceGetter,
+		applicationServiceGetter,
+		relationServiceGetter,
+		statusServiceGetter,
+		modelAgentServiceGetter,
+		modelConfigServiceGetter,
+		blockCommandServiceGetter,
+		cloudSpecServiceGetter,
+		machineServiceGetter,
+		removalServiceGetter,
+		domainServices.Proxy(),
+		func(c context.Context, modelUUID model.UUID) (controller.ModelExporter, error) {
+			return ctx.ModelExporter(c, modelUUID)
+		},
+		ctx.ObjectStore(),
+		ctx.ControllerModelUUID(),
+		ctx.ControllerUUID(),
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	return api
+}
+
+func (s *controllerSuite) TestNewAPIRefusesNonClient(c *tc.C) {
 	anAuthoriser := apiservertesting.FakeAuthorizer{
 		Tag: names.NewUnitTag("mysql/0"),
 	}
-	endPoint, err := controller.LatestAPI(
-		facadetest.Context{
-			State_:     s.State,
-			StatePool_: s.StatePool,
-			Resources_: s.resources,
-			Auth_:      anAuthoriser,
-		})
-	c.Assert(endPoint, gc.IsNil)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	endPoint, err := controller.LatestAPI(c.Context(), facadetest.MultiModelContext{
+		ModelContext: facadetest.ModelContext{
+			Auth_:           anAuthoriser,
+			DomainServices_: s.ControllerDomainServices(c),
+			Logger_:         loggertesting.WrapCheckLog(c),
+		},
+	})
+	c.Assert(endPoint, tc.IsNil)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *controllerSuite) checkModelMatches(c *gc.C, model params.Model, expected *state.Model) {
-	c.Check(model.Name, gc.Equals, expected.Name())
-	c.Check(model.UUID, gc.Equals, expected.UUID())
-	c.Check(model.OwnerTag, gc.Equals, expected.Owner().String())
-}
+func (s *controllerSuite) TestHostedModelConfigs_OnlyHostedModelsReturned(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *controllerSuite) TestAllModels(c *gc.C) {
-	admin := s.Factory.MakeUser(c, &factory.UserParams{Name: "foobar"})
-
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "owned", Owner: admin.UserTag()}).Close()
-	remoteUserTag := names.NewUserTag("user@remote")
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "user", Owner: remoteUserTag})
-	defer st.Close()
-	model, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
-
-	model.AddUser(
-		state.UserAccessSpec{
-			User:        admin.UserTag(),
-			CreatedBy:   remoteUserTag,
-			DisplayName: "Foo Bar",
-			Access:      permission.WriteAccess})
-
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "no-access", Owner: remoteUserTag}).Close()
-
-	response, err := s.controller.AllModels()
-	c.Assert(err, jc.ErrorIsNil)
-	// The results are sorted.
-	expected := []string{"controller", "no-access", "owned", "user"}
-	var obtained []string
-	for _, userModel := range response.UserModels {
-		c.Assert(userModel.Type, gc.Equals, "iaas")
-		obtained = append(obtained, userModel.Name)
-		stateModel, ph, err := s.StatePool.GetModel(userModel.UUID)
-		c.Assert(err, jc.ErrorIsNil)
-		defer ph.Release()
-		s.checkModelMatches(c, userModel.Model, stateModel)
-	}
-	c.Assert(obtained, jc.DeepEquals, expected)
-}
-
-func (s *controllerSuite) TestHostedModelConfigs_OnlyHostedModelsReturned(c *gc.C) {
-	owner := s.Factory.MakeUser(c, nil)
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "first", Owner: owner.UserTag()}).Close()
-	remoteUserTag := names.NewUserTag("user@remote")
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "second", Owner: remoteUserTag}).Close()
-
-	results, err := s.controller.HostedModelConfigs()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results.Models), gc.Equals, 2)
+	s.mockModelService.EXPECT().GetAllModels(gomock.Any()).Return(
+		[]model.Model{
+			{
+				Name:      "first",
+				Qualifier: "prod",
+				UUID:      tc.Must0(c, model.NewUUID),
+			},
+			{
+				Name:      "second",
+				Qualifier: "staging",
+				UUID:      tc.Must0(c, model.NewUUID),
+			},
+		}, nil,
+	)
+	s.mockModelService.EXPECT().ControllerModel(gomock.Any()).Return(
+		model.Model{
+			Name:      "controller",
+			Qualifier: "prod",
+			UUID:      s.ControllerModelUUID,
+		}, nil,
+	)
+	results, err := s.controller.HostedModelConfigs(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(results.Models), tc.Equals, 2)
 
 	one := results.Models[0]
 	two := results.Models[1]
 
-	c.Assert(one.Name, gc.Equals, "first")
-	c.Assert(one.OwnerTag, gc.Equals, owner.UserTag().String())
-	c.Assert(two.Name, gc.Equals, "second")
-	c.Assert(two.OwnerTag, gc.Equals, remoteUserTag.String())
+	c.Assert(one.Name, tc.Equals, "first")
+	c.Assert(one.Qualifier, tc.Equals, "prod")
+	c.Assert(two.Name, tc.Equals, "second")
+	c.Assert(two.Qualifier, tc.Equals, "staging")
 }
 
-func (s *controllerSuite) makeCloudSpec(c *gc.C, pSpec *params.CloudSpec) environscloudspec.CloudSpec {
-	c.Assert(pSpec, gc.NotNil)
-	var credential *cloud.Credential
-	if pSpec.Credential != nil {
-		credentialValue := cloud.NewCredential(
-			cloud.AuthType(pSpec.Credential.AuthType),
-			pSpec.Credential.Attributes,
-		)
-		credential = &credentialValue
-	}
-	spec := environscloudspec.CloudSpec{
-		Type:             pSpec.Type,
-		Name:             pSpec.Name,
-		Region:           pSpec.Region,
-		Endpoint:         pSpec.Endpoint,
-		IdentityEndpoint: pSpec.IdentityEndpoint,
-		StorageEndpoint:  pSpec.StorageEndpoint,
-		Credential:       credential,
-	}
-	c.Assert(spec.Validate(), jc.ErrorIsNil)
-	return spec
-}
-
-func (s *controllerSuite) TestHostedModelConfigs_CanOpenEnviron(c *gc.C) {
-	owner := s.Factory.MakeUser(c, nil)
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "first", Owner: owner.UserTag()}).Close()
-	remoteUserTag := names.NewUserTag("user@remote")
-	s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "second", Owner: remoteUserTag}).Close()
-
-	results, err := s.controller.HostedModelConfigs()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(results.Models), gc.Equals, 2)
-
-	for _, model := range results.Models {
-		c.Assert(model.Error, gc.IsNil)
-
-		cfg, err := config.New(config.NoDefaults, model.Config)
-		c.Assert(err, jc.ErrorIsNil)
-		spec := s.makeCloudSpec(c, model.CloudSpec)
-		_, err = environs.New(stdcontext.TODO(), environs.OpenParams{
-			Cloud:  spec,
-			Config: cfg,
-		})
-		c.Assert(err, jc.ErrorIsNil)
-	}
-}
-
-func (s *controllerSuite) TestListBlockedModels(c *gc.C) {
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "test"})
-	defer st.Close()
-
-	s.State.SwitchBlockOn(state.DestroyBlock, "TestBlockDestroyModel")
-	s.State.SwitchBlockOn(state.ChangeBlock, "TestChangeBlock")
-	st.SwitchBlockOn(state.DestroyBlock, "TestBlockDestroyModel")
-	st.SwitchBlockOn(state.ChangeBlock, "TestChangeBlock")
-
-	list, err := s.controller.ListBlockedModels()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(list.Models, jc.DeepEquals, []params.ModelBlockInfo{
+func (s *controllerSuite) TestListBlockedModels(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	otherDomainServices := s.DefaultModelDomainServices(c)
+	otherBlockCommands := otherDomainServices.BlockCommand()
+	err := otherBlockCommands.SwitchBlockOn(c.Context(), blockcommand.ChangeBlock, "ChangeBlock")
+	c.Assert(err, tc.ErrorIsNil)
+	err = otherBlockCommands.SwitchBlockOn(c.Context(), blockcommand.DestroyBlock, "DestroyBlock")
+	c.Assert(err, tc.ErrorIsNil)
+	models := []model.Model{
 		{
-			Name:     "controller",
-			UUID:     s.State.ModelUUID(),
-			OwnerTag: s.Owner.String(),
-			Blocks: []string{
-				"BlockDestroy",
-				"BlockChange",
-			},
+			UUID:      s.DefaultModelUUID,
+			Name:      "test",
+			Qualifier: "prod",
+			ModelType: model.IAAS,
 		},
+	}
+	s.mockModelService.EXPECT().GetAllModels(gomock.Any()).Return(
+		models, nil,
+	)
+
+	list, err := s.controller.ListBlockedModels(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Assert(list.Models, tc.DeepEquals, []params.ModelBlockInfo{
 		{
-			Name:     "test",
-			UUID:     st.ModelUUID(),
-			OwnerTag: s.Owner.String(),
+			UUID:      s.DefaultModelUUID.String(),
+			Name:      "test",
+			Qualifier: "prod",
 			Blocks: []string{
-				"BlockDestroy",
 				"BlockChange",
+				"BlockDestroy",
 			},
 		},
 	})
 
 }
 
-func (s *controllerSuite) TestListBlockedModelsNoBlocks(c *gc.C) {
-	list, err := s.controller.ListBlockedModels()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(list.Models, gc.HasLen, 0)
+func (s *controllerSuite) TestListBlockedModelsNoBlocks(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.mockModelService.EXPECT().GetAllModels(gomock.Any()).Return(
+		nil, nil,
+	)
+	list, err := s.controller.ListBlockedModels(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(list.Models, tc.HasLen, 0)
 }
 
-func (s *controllerSuite) TestModelConfig(c *gc.C) {
-	controller, err := controller.NewControllerAPIv11(s.context)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *controllerSuite) TestControllerConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	cfg, err := s.controller.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	cfg, err := controller.ModelConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["name"], jc.DeepEquals, params.ConfigValue{Value: "controller"})
+	controllerConfigService := s.ControllerDomainServices(c).ControllerConfig()
+
+	cfgFromDB, err := controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cfg.Config["controller-uuid"], tc.Equals, cfgFromDB.ControllerUUID())
+	c.Assert(cfg.Config["api-port"], tc.Equals, cfgFromDB.APIPort())
 }
 
-func (s *controllerSuite) TestModelConfigFromNonController(c *gc.C) {
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "test"})
-	defer st.Close()
+func (s *controllerSuite) TestControllerConfigFromNonController(c *tc.C) {
 
-	authorizer := &apiservertesting.FakeAuthorizer{
-		Tag:      s.Owner,
-		AdminTag: s.Owner,
-	}
-	controller, err := controller.NewControllerAPIv11(
-		facadetest.Context{
-			State_:     st,
-			StatePool_: s.StatePool,
-			Resources_: common.NewResources(),
-			Auth_:      authorizer,
-		})
-
-	c.Assert(err, jc.ErrorIsNil)
-	cfg, err := controller.ModelConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["name"], jc.DeepEquals, params.ConfigValue{Value: "controller"})
-}
-
-func (s *controllerSuite) TestControllerConfig(c *gc.C) {
-	cfg, err := s.controller.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	cfgFromDB, err := s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["controller-uuid"], gc.Equals, cfgFromDB.ControllerUUID())
-	c.Assert(cfg.Config["state-port"], gc.Equals, cfgFromDB.StatePort())
-	c.Assert(cfg.Config["api-port"], gc.Equals, cfgFromDB.APIPort())
-}
-
-func (s *controllerSuite) TestControllerConfigFromNonController(c *gc.C) {
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "test"})
-	defer st.Close()
-
-	authorizer := &apiservertesting.FakeAuthorizer{Tag: s.Owner}
-	controller, err := controller.NewControllerAPIv11(
-		facadetest.Context{
-			State_:     st,
-			StatePool_: s.StatePool,
-			Resources_: common.NewResources(),
-			Auth_:      authorizer,
-		})
-	c.Assert(err, jc.ErrorIsNil)
-	cfg, err := controller.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	cfgFromDB, err := s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(cfg.Config["controller-uuid"], gc.Equals, cfgFromDB.ControllerUUID())
-	c.Assert(cfg.Config["state-port"], gc.Equals, cfgFromDB.StatePort())
-	c.Assert(cfg.Config["api-port"], gc.Equals, cfgFromDB.APIPort())
-}
-
-func (s *controllerSuite) TestRemoveBlocks(c *gc.C) {
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "test"})
-	defer st.Close()
-
-	s.State.SwitchBlockOn(state.DestroyBlock, "TestBlockDestroyModel")
-	s.State.SwitchBlockOn(state.ChangeBlock, "TestChangeBlock")
-	st.SwitchBlockOn(state.DestroyBlock, "TestBlockDestroyModel")
-	st.SwitchBlockOn(state.ChangeBlock, "TestChangeBlock")
-
-	err := s.controller.RemoveBlocks(params.RemoveBlocksArgs{All: true})
-	c.Assert(err, jc.ErrorIsNil)
-
-	blocks, err := s.State.AllBlocksForController()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(blocks, gc.HasLen, 0)
-}
-
-func (s *controllerSuite) TestRemoveBlocksNotAll(c *gc.C) {
-	err := s.controller.RemoveBlocks(params.RemoveBlocksArgs{})
-	c.Assert(err, gc.ErrorMatches, "not supported")
-}
-
-func (s *controllerSuite) TestWatchAllModels(c *gc.C) {
-	watcherId, err := s.controller.WatchAllModels()
-	c.Assert(err, jc.ErrorIsNil)
-
-	var disposed bool
-	watcherAPI_, err := apiserver.NewAllWatcher(facadetest.Context{
-		State_:     s.State,
-		StatePool_: s.StatePool,
-		Resources_: s.resources,
-		Auth_:      s.authorizer,
-		ID_:        watcherId.AllWatcherId,
-		Dispose_:   func() { disposed = true },
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	watcherAPI := watcherAPI_.(*apiserver.SrvAllWatcher)
-	defer func() {
-		err := watcherAPI.Stop()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(disposed, jc.IsTrue)
-	}()
-
-	done := make(chan bool)
-	defer close(done)
-	resultC := make(chan params.AllWatcherNextResults)
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				result, err := watcherAPI.Next()
-				if err != nil {
-					c.Assert(err, jc.Satisfies, coremultiwatcher.IsErrStopped)
-					return
-				}
-				resultC <- result
-			}
-		}
-	}()
-
-	select {
-	case result := <-resultC:
-		// Expect to see the initial model be reported.
-		deltas := result.Deltas
-		c.Assert(deltas, gc.HasLen, 1)
-		modelInfo := deltas[0].Entity.(*params.ModelUpdate)
-		c.Assert(modelInfo.ModelUUID, gc.Equals, s.State.ModelUUID())
-		c.Assert(modelInfo.IsController, gc.Equals, s.State.IsController())
-	case <-time.After(testing.LongWait):
-		c.Fatal("timed out")
-	}
-
-	// To ensure we really watch all models, make another one.
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Name: "test"})
-	defer st.Close()
-
-	// Update the model agent versions to ensure settings changes cause an update.
-	err = s.State.SetModelAgentVersion(version.MustParse("2.6.666"), nil, true)
-	c.Assert(err, jc.ErrorIsNil)
-	err = st.SetModelAgentVersion(version.MustParse("2.6.667"), nil, true)
-	c.Assert(err, jc.ErrorIsNil)
-	expectedVersions := map[string]string{
-		s.State.ModelUUID(): "2.6.666",
-		st.ModelUUID():      "2.6.667",
-	}
-
-	for resultCount := 0; resultCount != 2; {
-		select {
-		case result := <-resultC:
-			c.Logf("got change: %# v", pretty.Formatter(result))
-			for _, d := range result.Deltas {
-				if d.Removed {
-					continue
-				}
-				modelInfo, ok := d.Entity.(*params.ModelUpdate)
-				if !ok {
-					continue
-				}
-				if modelInfo.Config["agent-version"] == expectedVersions[modelInfo.ModelUUID] {
-					resultCount = resultCount + 1
-				}
-			}
-		case <-time.After(testing.LongWait):
-			c.Fatalf("timed out waiting for 2 model updates, got %d", resultCount)
-		}
-	}
-}
-
-func (s *controllerSuite) TestInitiateMigration(c *gc.C) {
-	// Create two hosted models to migrate.
-	st1 := s.Factory.MakeModel(c, nil)
-	defer st1.Close()
-	model1, err := st1.Model()
-	c.Assert(err, jc.ErrorIsNil)
-
-	st2 := s.Factory.MakeModel(c, nil)
-	defer st2.Close()
-	model2, err := st2.Model()
-	c.Assert(err, jc.ErrorIsNil)
-
-	mac, err := macaroon.New([]byte("secret"), []byte("id"), "location", macaroon.LatestVersion)
-	c.Assert(err, jc.ErrorIsNil)
-	macsJSON, err := json.Marshal([]macaroon.Slice{{mac}})
-	c.Assert(err, jc.ErrorIsNil)
-
-	controller.SetPreCheckResult(s, nil)
-
-	// Kick off migrations
-	args := params.InitiateMigrationArgs{
-		Specs: []params.MigrationSpec{
-			{
-				ModelTag: model1.ModelTag().String(),
-				TargetInfo: params.MigrationTargetInfo{
-					ControllerTag:   randomControllerTag(),
-					ControllerAlias: "", // intentionally left empty; simulates older client
-					Addrs:           []string{"1.1.1.1:1111", "2.2.2.2:2222"},
-					CACert:          "cert1",
-					AuthTag:         names.NewUserTag("admin1").String(),
-					Password:        "secret1",
-					Token:           "token1",
-				},
-			}, {
-				ModelTag: model2.ModelTag().String(),
-				TargetInfo: params.MigrationTargetInfo{
-					ControllerTag:   randomControllerTag(),
-					ControllerAlias: "target-controller",
-					Addrs:           []string{"3.3.3.3:3333"},
-					CACert:          "cert2",
-					AuthTag:         names.NewUserTag("admin2").String(),
-					Macaroons:       string(macsJSON),
-					Password:        "secret2",
-					Token:           "token2",
-				},
+	owner := names.NewUserTag("owner")
+	authorizer := &apiservertesting.FakeAuthorizer{Tag: owner}
+	controller, err := controller.LatestAPI(
+		c.Context(),
+		facadetest.MultiModelContext{
+			ModelContext: facadetest.ModelContext{
+				Auth_:           authorizer,
+				DomainServices_: s.ControllerDomainServices(c),
+				Logger_:         loggertesting.WrapCheckLog(c),
 			},
-		},
-	}
-	out, err := s.controller.InitiateMigration(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(out.Results, gc.HasLen, 2)
+		})
+	c.Assert(err, tc.ErrorIsNil)
+	cfg, err := controller.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	states := []*state.State{st1, st2}
-	for i, spec := range args.Specs {
-		c.Log(i)
-		st := states[i]
-		result := out.Results[i]
+	controllerConfigService := s.ControllerDomainServices(c).ControllerConfig()
 
-		c.Assert(result.Error, gc.IsNil)
-		c.Check(result.ModelTag, gc.Equals, spec.ModelTag)
-		expectedId := st.ModelUUID() + ":0"
-		c.Check(result.MigrationId, gc.Equals, expectedId)
-
-		// Ensure the migration made it into the DB correctly.
-		mig, err := st.LatestMigration()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Check(mig.Id(), gc.Equals, expectedId)
-		c.Check(mig.ModelUUID(), gc.Equals, st.ModelUUID())
-		c.Check(mig.InitiatedBy(), gc.Equals, s.Owner.Id())
-
-		targetInfo, err := mig.TargetInfo()
-		c.Assert(err, jc.ErrorIsNil)
-		c.Check(targetInfo.ControllerTag.String(), gc.Equals, spec.TargetInfo.ControllerTag)
-		c.Check(targetInfo.ControllerAlias, gc.Equals, spec.TargetInfo.ControllerAlias)
-		c.Check(targetInfo.Addrs, jc.SameContents, spec.TargetInfo.Addrs)
-		c.Check(targetInfo.CACert, gc.Equals, spec.TargetInfo.CACert)
-		c.Check(targetInfo.AuthTag.String(), gc.Equals, spec.TargetInfo.AuthTag)
-		c.Check(targetInfo.Password, gc.Equals, spec.TargetInfo.Password)
-		c.Check(targetInfo.Token, gc.Equals, spec.TargetInfo.Token)
-
-		if spec.TargetInfo.Macaroons != "" {
-			macJSONdb, err := json.Marshal(targetInfo.Macaroons)
-			c.Assert(err, jc.ErrorIsNil)
-			c.Check(string(macJSONdb), gc.Equals, spec.TargetInfo.Macaroons)
-		}
-	}
+	cfgFromDB, err := controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cfg.Config["controller-uuid"], tc.Equals, cfgFromDB.ControllerUUID())
+	c.Assert(cfg.Config["api-port"], tc.Equals, cfgFromDB.APIPort())
 }
 
-func (s *controllerSuite) TestInitiateMigrationSpecError(c *gc.C) {
-	// Create a hosted model to migrate.
-	st := s.Factory.MakeModel(c, nil)
-	defer st.Close()
-	model, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
+func (s *controllerSuite) TestRemoveBlocks(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	// Kick off the migration with missing details.
-	args := params.InitiateMigrationArgs{
-		Specs: []params.MigrationSpec{{
-			ModelTag: model.ModelTag().String(),
-			// TargetInfo missing
-		}},
-	}
-	out, err := s.controller.InitiateMigration(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(out.Results, gc.HasLen, 1)
-	result := out.Results[0]
-	c.Check(result.ModelTag, gc.Equals, args.Specs[0].ModelTag)
-	c.Check(result.MigrationId, gc.Equals, "")
-	c.Check(result.Error, gc.ErrorMatches, "controller tag: .+ is not a valid tag")
+	otherDomainServices := s.ModelDomainServices(c, s.DefaultModelUUID)
+	otherBlockCommands := otherDomainServices.BlockCommand()
+	err := otherBlockCommands.SwitchBlockOn(c.Context(), blockcommand.ChangeBlock, "TestChangeBlock")
+	c.Assert(err, tc.ErrorIsNil)
+	err = otherBlockCommands.SwitchBlockOn(c.Context(), blockcommand.DestroyBlock, "TestChangeBlock")
+	c.Assert(err, tc.ErrorIsNil)
+
+	otherBlocks, err := otherBlockCommands.GetBlocks(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(otherBlocks, tc.HasLen, 2)
+
+	s.mockModelService.EXPECT().GetModelUUIDs(gomock.Any()).Return(
+		[]model.UUID{
+			s.DefaultModelUUID,
+		}, nil,
+	)
+	err = s.controller.RemoveBlocks(c.Context(), params.RemoveBlocksArgs{All: true})
+	c.Assert(err, tc.ErrorIsNil)
+
+	otherBlocks, err = otherBlockCommands.GetBlocks(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(otherBlocks, tc.HasLen, 0)
 }
 
-func (s *controllerSuite) TestInitiateMigrationPartialFailure(c *gc.C) {
-	st := s.Factory.MakeModel(c, nil)
-	defer st.Close()
-	controller.SetPreCheckResult(s, nil)
+func (s *controllerSuite) TestRemoveBlocksNotAll(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	err := s.controller.RemoveBlocks(c.Context(), params.RemoveBlocksArgs{})
+	c.Assert(err, tc.ErrorMatches, "not supported")
+}
 
-	m, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
+func (s *controllerSuite) TestInitiateMigrationInvalidMacaroons(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
+	modelUUID := tc.Must0(c, model.NewUUID)
 	args := params.InitiateMigrationArgs{
 		Specs: []params.MigrationSpec{
 			{
-				ModelTag: m.ModelTag().String(),
-				TargetInfo: params.MigrationTargetInfo{
-					ControllerTag: randomControllerTag(),
-					Addrs:         []string{"1.1.1.1:1111", "2.2.2.2:2222"},
-					CACert:        "cert",
-					AuthTag:       names.NewUserTag("admin").String(),
-					Password:      "secret",
-				},
-			}, {
-				ModelTag: randomModelTag(), // Doesn't exist.
-			},
-		},
-	}
-	out, err := s.controller.InitiateMigration(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(out.Results, gc.HasLen, 2)
-
-	c.Check(out.Results[0].ModelTag, gc.Equals, m.ModelTag().String())
-	c.Check(out.Results[0].Error, gc.IsNil)
-
-	c.Check(out.Results[1].ModelTag, gc.Equals, args.Specs[1].ModelTag)
-	c.Check(out.Results[1].Error, gc.ErrorMatches, "model not found")
-}
-
-func (s *controllerSuite) TestInitiateMigrationInvalidMacaroons(c *gc.C) {
-	st := s.Factory.MakeModel(c, nil)
-	defer st.Close()
-
-	m, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.InitiateMigrationArgs{
-		Specs: []params.MigrationSpec{
-			{
-				ModelTag: m.ModelTag().String(),
+				ModelTag: names.NewModelTag(modelUUID.String()).String(),
 				TargetInfo: params.MigrationTargetInfo{
 					ControllerTag: randomControllerTag(),
 					Addrs:         []string{"1.1.1.1:1111", "2.2.2.2:2222"},
@@ -648,147 +446,28 @@ func (s *controllerSuite) TestInitiateMigrationInvalidMacaroons(c *gc.C) {
 			},
 		},
 	}
-	out, err := s.controller.InitiateMigration(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(out.Results, gc.HasLen, 1)
+	s.mockModelService.EXPECT().Model(gomock.Any(), modelUUID).Return(
+		model.Model{
+			UUID:      modelUUID,
+			Name:      "foo",
+			Qualifier: "admin",
+		}, nil,
+	)
+	out, err := s.controller.InitiateMigration(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(out.Results, tc.HasLen, 1)
 	result := out.Results[0]
-	c.Check(result.ModelTag, gc.Equals, args.Specs[0].ModelTag)
-	c.Check(result.Error, gc.ErrorMatches, "invalid macaroons: .+")
-}
-
-func (s *controllerSuite) TestInitiateMigrationPrecheckFail(c *gc.C) {
-	st := s.Factory.MakeModel(c, nil)
-	defer st.Close()
-
-	controller.SetPreCheckResult(s, errors.New("boom"))
-
-	m, err := st.Model()
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.InitiateMigrationArgs{
-		Specs: []params.MigrationSpec{{
-			ModelTag: m.ModelTag().String(),
-			TargetInfo: params.MigrationTargetInfo{
-				ControllerTag: randomControllerTag(),
-				Addrs:         []string{"1.1.1.1:1111"},
-				CACert:        "cert1",
-				AuthTag:       names.NewUserTag("admin1").String(),
-				Password:      "secret1",
-			},
-		}},
-	}
-	out, err := s.controller.InitiateMigration(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(out.Results, gc.HasLen, 1)
-	c.Check(out.Results[0].Error, gc.ErrorMatches, "boom")
-
-	active, err := st.IsMigrationActive()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(active, jc.IsFalse)
+	c.Check(result.ModelTag, tc.Equals, args.Specs[0].ModelTag)
+	c.Check(result.Error, tc.ErrorMatches, "invalid macaroons: .+")
 }
 
 func randomControllerTag() string {
-	uuid := utils.MustNewUUID().String()
+	uuid := uuid.MustNewUUID().String()
 	return names.NewControllerTag(uuid).String()
 }
 
-func randomModelTag() string {
-	uuid := utils.MustNewUUID().String()
-	return names.NewModelTag(uuid).String()
-}
-
-func (s *controllerSuite) modifyControllerAccess(c *gc.C, user names.UserTag, action params.ControllerAction, access string) error {
-	args := params.ModifyControllerAccessRequest{
-		Changes: []params.ModifyControllerAccess{{
-			UserTag: user.String(),
-			Action:  action,
-			Access:  access,
-		}}}
-	result, err := s.controller.ModifyControllerAccess(args)
-	c.Assert(err, jc.ErrorIsNil)
-	return result.OneError()
-}
-
-func (s *controllerSuite) controllerGrant(c *gc.C, user names.UserTag, access string) error {
-	return s.modifyControllerAccess(c, user, params.GrantControllerAccess, access)
-}
-
-func (s *controllerSuite) controllerRevoke(c *gc.C, user names.UserTag, access string) error {
-	return s.modifyControllerAccess(c, user, params.RevokeControllerAccess, access)
-}
-
-func (s *controllerSuite) TestGrantMissingUserFails(c *gc.C) {
-	user := names.NewLocalUserTag("foobar")
-	err := s.controllerGrant(c, user, string(permission.SuperuserAccess))
-	expectedErr := `could not grant controller access: user "foobar" does not exist locally: user "foobar" not found`
-	c.Assert(err, gc.ErrorMatches, expectedErr)
-}
-
-func (s *controllerSuite) TestRevokeSuperuserLeavesLoginAccess(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-
-	err := s.controllerGrant(c, user.UserTag(), string(permission.SuperuserAccess))
-	c.Assert(err, gc.IsNil)
-	ctag := names.NewControllerTag(s.State.ControllerUUID())
-	controllerUser, err := s.State.UserAccess(user.UserTag(), ctag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(controllerUser.Access, gc.Equals, permission.SuperuserAccess)
-
-	err = s.controllerRevoke(c, user.UserTag(), string(permission.SuperuserAccess))
-	c.Assert(err, gc.IsNil)
-
-	controllerUser, err = s.State.UserAccess(user.UserTag(), controllerUser.Object)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(controllerUser.Access, gc.Equals, permission.LoginAccess)
-}
-
-func (s *controllerSuite) TestRevokeLoginRemovesControllerUser(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-	err := s.controllerRevoke(c, user.UserTag(), string(permission.LoginAccess))
-	c.Assert(err, gc.IsNil)
-
-	ctag := names.NewControllerTag(s.State.ControllerUUID())
-	_, err = s.State.UserAccess(user.UserTag(), ctag)
-
-	c.Assert(errors.IsNotFound(err), jc.IsTrue)
-}
-
-func (s *controllerSuite) TestRevokeControllerMissingUser(c *gc.C) {
-	user := names.NewLocalUserTag("foobar")
-	err := s.controllerRevoke(c, user, string(permission.SuperuserAccess))
-	expectedErr := `could not look up controller access for user: user "foobar" not found`
-	c.Assert(err, gc.ErrorMatches, expectedErr)
-}
-
-func (s *controllerSuite) TestGrantOnlyGreaterAccess(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-
-	err := s.controllerGrant(c, user.UserTag(), string(permission.SuperuserAccess))
-	c.Assert(err, gc.IsNil)
-	ctag := names.NewControllerTag(s.State.ControllerUUID())
-	controllerUser, err := s.State.UserAccess(user.UserTag(), ctag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(controllerUser.Access, gc.Equals, permission.SuperuserAccess)
-
-	err = s.controllerGrant(c, user.UserTag(), string(permission.SuperuserAccess))
-	expectedErr := `could not grant controller access: user already has "superuser" access or greater`
-	c.Assert(err, gc.ErrorMatches, expectedErr)
-}
-
-func (s *controllerSuite) TestGrantControllerAddRemoteUser(c *gc.C) {
-	userTag := names.NewUserTag("foobar@ubuntuone")
-
-	err := s.controllerGrant(c, userTag, string(permission.SuperuserAccess))
-	c.Assert(err, jc.ErrorIsNil)
-
-	ctag := names.NewControllerTag(s.State.ControllerUUID())
-	controllerUser, err := s.State.UserAccess(userTag, ctag)
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(controllerUser.Access, gc.Equals, permission.SuperuserAccess)
-}
-
-func (s *controllerSuite) TestGrantControllerInvalidUserTag(c *gc.C) {
+func (s *controllerSuite) TestGrantControllerInvalidUserTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 	for _, testParam := range []struct {
 		tag      string
 		validTag bool
@@ -812,9 +491,6 @@ func (s *controllerSuite) TestGrantControllerInvalidUserTag(c *gc.C) {
 		validTag: true,
 	}, {
 		tag:      "user@",
-		validTag: false,
-	}, {
-		tag:      "user@ubuntuone",
 		validTag: false,
 	}, {
 		tag:      "user@ubuntuone",
@@ -848,231 +524,133 @@ func (s *controllerSuite) TestGrantControllerInvalidUserTag(c *gc.C) {
 				Access:  string(permission.SuperuserAccess),
 			}}}
 
-		result, err := s.controller.ModifyControllerAccess(args)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(result.OneError(), gc.ErrorMatches, expectedErr)
+		result, err := s.controller.ModifyControllerAccess(c.Context(), args)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(result.OneError(), tc.ErrorMatches, expectedErr)
 	}
 }
 
-func (s *controllerSuite) TestModifyControllerAccessEmptyArgs(c *gc.C) {
-	args := params.ModifyControllerAccessRequest{Changes: []params.ModifyControllerAccess{{}}}
-
-	result, err := s.controller.ModifyControllerAccess(args)
-	c.Assert(err, jc.ErrorIsNil)
-	expectedErr := `"" controller access not valid`
-	c.Assert(result.OneError(), gc.ErrorMatches, expectedErr)
-}
-
-func (s *controllerSuite) TestModifyControllerAccessInvalidAction(c *gc.C) {
-	var dance params.ControllerAction = "dance"
-	args := params.ModifyControllerAccessRequest{
-		Changes: []params.ModifyControllerAccess{{
-			UserTag: "user-user@local",
-			Action:  dance,
-			Access:  string(permission.LoginAccess),
-		}}}
-
-	result, err := s.controller.ModifyControllerAccess(args)
-	c.Assert(err, jc.ErrorIsNil)
-	expectedErr := `unknown action "dance"`
-	c.Assert(result.OneError(), gc.ErrorMatches, expectedErr)
-}
-
-func (s *controllerSuite) TestGetControllerAccess(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-	user2 := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-
-	err := s.controllerGrant(c, user.UserTag(), string(permission.SuperuserAccess))
-	c.Assert(err, gc.IsNil)
-	req := params.Entities{
-		Entities: []params.Entity{{Tag: user.Tag().String()}, {Tag: user2.Tag().String()}},
-	}
-	results, err := s.controller.GetControllerAccess(req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.DeepEquals, []params.UserAccessResult{{
-		Result: &params.UserAccess{
-			Access:  "superuser",
-			UserTag: user.Tag().String(),
-		}}, {
-		Result: &params.UserAccess{
-			Access:  "login",
-			UserTag: user2.Tag().String(),
-		}}})
-}
-
-func (s *controllerSuite) TestGetControllerAccessPermissions(c *gc.C) {
-	// Set up the user making the call.
-	user := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-	anAuthoriser := apiservertesting.FakeAuthorizer{
-		Tag: user.Tag(),
-	}
-	endpoint, err := controller.NewControllerAPIv11(
-		facadetest.Context{
-			State_:     s.State,
-			StatePool_: s.StatePool,
-			Resources_: s.resources,
-			Auth_:      anAuthoriser,
-		})
-	c.Assert(err, jc.ErrorIsNil)
-	args := params.ModifyControllerAccessRequest{
-		Changes: []params.ModifyControllerAccess{{
-			UserTag: user.Tag().String(),
-			Action:  params.GrantControllerAccess,
-			Access:  "superuser",
-		}}}
-	result, err := s.controller.ModifyControllerAccess(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.OneError(), jc.ErrorIsNil)
-
-	// We ask for permissions for a different user as well as ourselves.
-	differentUser := s.Factory.MakeUser(c, &factory.UserParams{NoModelUser: true})
-	req := params.Entities{
-		Entities: []params.Entity{{Tag: user.Tag().String()}, {Tag: differentUser.Tag().String()}},
-	}
-	results, err := endpoint.GetControllerAccess(req)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 2)
-	c.Assert(*results.Results[0].Result, jc.DeepEquals, params.UserAccess{
-		Access:  "superuser",
-		UserTag: user.Tag().String(),
-	})
-	c.Assert(*results.Results[1].Error, gc.DeepEquals, params.Error{
-		Message: "permission denied", Code: "unauthorized access",
-	})
-}
-
-func (s *controllerSuite) TestModelStatus(c *gc.C) {
+func (s *controllerSuite) TestModelStatus(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	modelTag := names.NewModelTag(s.context.ControllerModelUUID().String()).String()
 	// Check that we don't err out immediately if a model errs.
-	results, err := s.controller.ModelStatus(params.Entities{Entities: []params.Entity{{
+	results, err := s.controller.ModelStatus(c.Context(), params.Entities{Entities: []params.Entity{{
 		Tag: "bad-tag",
 	}, {
-		Tag: s.Model.ModelTag().String(),
+		Tag: modelTag,
 	}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 2)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, `"bad-tag" is not a valid tag`)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 2)
+	c.Assert(results.Results[0].Error, tc.ErrorMatches, `"bad-tag" is not a valid tag`)
 
 	// Check that we don't err out if a model errs even if some firsts in collection pass.
-	results, err = s.controller.ModelStatus(params.Entities{Entities: []params.Entity{{
-		Tag: s.Model.ModelTag().String(),
+	results, err = s.controller.ModelStatus(c.Context(), params.Entities{Entities: []params.Entity{{
+		Tag: modelTag,
 	}, {
 		Tag: "bad-tag",
 	}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 2)
-	c.Assert(results.Results[1].Error, gc.ErrorMatches, `"bad-tag" is not a valid tag`)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 2)
+	c.Assert(results.Results[1].Error, tc.ErrorMatches, `"bad-tag" is not a valid tag`)
 
 	// Check that we return successfully if no errors.
-	results, err = s.controller.ModelStatus(params.Entities{Entities: []params.Entity{{
-		Tag: s.Model.ModelTag().String(),
+	results, err = s.controller.ModelStatus(c.Context(), params.Entities{Entities: []params.Entity{{
+		Tag: modelTag,
 	}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
 }
 
-func (s *controllerSuite) TestConfigSet(c *gc.C) {
-	config, err := s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	// Sanity check.
-	c.Assert(config.AuditingEnabled(), gc.Equals, false)
-	c.Assert(config.SSHServerPort(), gc.Equals, 17022)
+func (s *controllerSuite) TestConfigSet(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	controllerConfigService := s.ControllerDomainServices(c).ControllerConfig()
 
-	err = s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	config, err := controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	// Sanity check.
+	c.Assert(config.AuditingEnabled(), tc.Equals, false)
+	c.Assert(config.SSHServerPort(), tc.Equals, 17022)
+
+	err = s.controller.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"auditing-enabled": true,
 	}})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	config, err = s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(config.AuditingEnabled(), gc.Equals, true)
+	config, err = controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(config.AuditingEnabled(), tc.Equals, true)
 }
 
-func (s *controllerSuite) TestConfigSetRequiresSuperUser(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{
-		Access: permission.ReadAccess,
-	})
+func (s *controllerSuite) TestConfigSetRequiresSuperUser(c *tc.C) {
 	anAuthoriser := apiservertesting.FakeAuthorizer{
-		Tag: user.Tag(),
+		Tag: names.NewUserTag("username"),
 	}
-	endpoint, err := controller.NewControllerAPIv11(
-		facadetest.Context{
-			State_:     s.State,
-			StatePool_: s.StatePool,
-			Resources_: s.resources,
-			Auth_:      anAuthoriser,
+	endpoint, err := controller.LatestAPI(
+		c.Context(),
+		facadetest.MultiModelContext{
+			ModelContext: facadetest.ModelContext{
+				Auth_:           anAuthoriser,
+				DomainServices_: s.ControllerDomainServices(c),
+				Logger_:         loggertesting.WrapCheckLog(c),
+			},
 		})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = endpoint.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	err = endpoint.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"something": 23,
 	}})
 
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *controllerSuite) TestConfigSetPublishesEvent(c *gc.C) {
-	done := make(chan struct{})
-	var config corecontroller.Config
-	s.hub.Subscribe(pscontroller.ConfigChanged, func(topic string, data pscontroller.ConfigChangedMessage, err error) {
-		c.Check(err, jc.ErrorIsNil)
-		config = data.Config
-		close(done)
-	})
+func (s *controllerSuite) TestConfigSetCAASImageRepo(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	// TODO(dqlite): move this test when ConfigSet CAASImageRepo logic moves.
+	controllerConfigService := s.ControllerDomainServices(c).ControllerConfig()
 
-	err := s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
-		"features": []string{"foo", "bar"},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
+	config, err := controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(config.CAASImageRepo(), tc.Equals, "")
 
-	select {
-	case <-done:
-	case <-time.After(testing.LongWait):
-		c.Fatal("no event sent}")
-	}
-
-	c.Assert(config.Features().SortedValues(), jc.DeepEquals, []string{"bar", "foo"})
-}
-
-func (s *controllerSuite) TestConfigSetCAASImageRepo(c *gc.C) {
-	config, err := s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(config.CAASImageRepo(), gc.Equals, "")
-
-	err = s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	err = s.controller.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"caas-image-repo": "juju-repo.local",
 	}})
-	c.Assert(err, gc.ErrorMatches, `cannot change caas-image-repo as it is not currently set`)
+	c.Assert(err, tc.ErrorMatches, `cannot change caas-image-repo as it is not currently set`)
 
-	err = s.State.UpdateControllerConfig(map[string]interface{}{
-		"caas-image-repo": "jujusolutions",
-	}, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	err = controllerConfigService.UpdateControllerConfig(
+		c.Context(),
+		map[string]interface{}{
+			"caas-image-repo": "jujusolutions",
+		}, nil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	err = s.controller.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"caas-image-repo": "juju-repo.local",
 	}})
-	c.Assert(err, gc.ErrorMatches, `cannot change caas-image-repo: repository read-only, only authentication can be updated`)
+	c.Assert(err, tc.ErrorMatches, `cannot change caas-image-repo: repository read-only, only authentication can be updated`)
 
-	err = s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	err = s.controller.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"caas-image-repo": `{"repository":"jujusolutions","username":"foo","password":"bar"}`,
 	}})
-	c.Assert(err, gc.ErrorMatches, `cannot change caas-image-repo: unable to add authentication details`)
+	c.Assert(err, tc.ErrorMatches, `cannot change caas-image-repo: unable to add authentication details`)
 
-	err = s.State.UpdateControllerConfig(map[string]interface{}{
-		"caas-image-repo": `{"repository":"jujusolutions","username":"bar","password":"foo"}`,
-	}, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	err = controllerConfigService.UpdateControllerConfig(
+		c.Context(),
+		map[string]interface{}{
+			"caas-image-repo": `{"repository":"jujusolutions","username":"bar","password":"foo"}`,
+		}, nil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = s.controller.ConfigSet(params.ControllerConfigSet{Config: map[string]interface{}{
+	err = s.controller.ConfigSet(c.Context(), params.ControllerConfigSet{Config: map[string]interface{}{
 		"caas-image-repo": `{"repository":"jujusolutions","username":"foo","password":"bar"}`,
 	}})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	config, err = s.State.ControllerConfig()
-	c.Assert(err, jc.ErrorIsNil)
+	config, err = controllerConfigService.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 	repoDetails, err := docker.NewImageRepoDetails(config.CAASImageRepo())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(repoDetails, gc.DeepEquals, docker.ImageRepoDetails{
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(repoDetails, tc.DeepEquals, docker.ImageRepoDetails{
 		Repository: "jujusolutions",
 		BasicAuthConfig: docker.BasicAuthConfig{
 			Username: "foo",
@@ -1081,164 +659,198 @@ func (s *controllerSuite) TestConfigSetCAASImageRepo(c *gc.C) {
 	})
 }
 
-func (s *controllerSuite) TestMongoVersion(c *gc.C) {
-	result, err := s.controller.MongoVersion()
-	c.Assert(err, jc.ErrorIsNil)
-
-	var resErr *params.Error
-	c.Assert(result.Error, gc.Equals, resErr)
-	// We can't guarantee which version of mongo is running, so let's just
-	// attempt to match it to a very basic version (major.minor.patch)
-	c.Assert(result.Result, gc.Matches, "^([0-9]{1,}).([0-9]{1,}).([0-9]{1,})$")
-}
-
-func (s *controllerSuite) TestIdentityProviderURL(c *gc.C) {
-	// Preserve default controller config as we will be mutating it just
-	// for this test
-	defer func(orig map[string]interface{}) {
-		s.ControllerConfig = orig
-	}(s.ControllerConfig)
-
-	// Our default test configuration does not specify an IdentityURL
-	urlRes, err := s.controller.IdentityProviderURL()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(urlRes.Result, gc.Equals, "")
-
-	// IdentityURL cannot be changed after bootstrap; we need to spin up
-	// another controller with IdentityURL pre-configured
-	s.TearDownTest(c)
-	expURL := "https://api.jujucharms.com/identity"
-	s.ControllerConfig = map[string]interface{}{
-		corecontroller.IdentityURL: expURL,
-	}
-	s.SetUpTest(c)
-
-	urlRes, err = s.controller.IdentityProviderURL()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(urlRes.Result, gc.Equals, expURL)
-}
-
-func (s *controllerSuite) newSummaryWatcherFacade(c *gc.C, id string) *apiserver.SrvModelSummaryWatcher {
-	context := s.context
-	context.ID_ = id
-	watcher, err := apiserver.NewModelSummaryWatcher(context)
-	c.Assert(err, jc.ErrorIsNil)
-	return watcher
-}
-
-func (s *controllerSuite) TestWatchAllModelSummariesByAdmin(c *gc.C) {
-	// Default authorizer is an admin.
-	result, err := s.controller.WatchAllModelSummaries()
-	c.Assert(err, jc.ErrorIsNil)
-
-	watcherAPI := s.newSummaryWatcherFacade(c, result.WatcherID)
-
-	resultC := make(chan params.SummaryWatcherNextResults)
-	go func() {
-		result, err := watcherAPI.Next()
-		c.Assert(err, jc.ErrorIsNil)
-		resultC <- result
-	}()
-
-	select {
-	case result := <-resultC:
-		// Expect to see the initial environment be reported.
-		c.Assert(result, jc.DeepEquals, params.SummaryWatcherNextResults{
-			Models: []params.ModelAbstract{
-				{
-					UUID:       "deadbeef-0bad-400d-8000-4b1d0d06f00d",
-					Controller: "", // TODO(thumper): add controller name next branch
-					Name:       "controller",
-					Admins:     []string{"test-admin"},
-					Cloud:      "dummy",
-					Region:     "dummy-region",
-					Status:     "green",
-					Messages:   []params.ModelSummaryMessage{},
-				}}})
-	case <-time.After(testing.LongWait):
-		c.Fatal("timed out")
-	}
-}
-
-func (s *controllerSuite) TestWatchAllModelSummariesByNonAdmin(c *gc.C) {
+func (s *controllerSuite) TestWatchAllModelSummariesByNonAdmin(c *tc.C) {
 	anAuthoriser := apiservertesting.FakeAuthorizer{
 		Tag: names.NewLocalUserTag("bob"),
 	}
 	endPoint, err := controller.LatestAPI(
-		facadetest.Context{
-			State_:     s.State,
-			StatePool_: s.StatePool,
-			Resources_: s.resources,
-			Auth_:      anAuthoriser,
+		c.Context(),
+		facadetest.MultiModelContext{
+			ModelContext: facadetest.ModelContext{
+				Auth_:           anAuthoriser,
+				DomainServices_: s.ControllerDomainServices(c),
+				Logger_:         loggertesting.WrapCheckLog(c),
+			},
 		})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	_, err = endPoint.WatchAllModelSummaries()
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	_, err = endPoint.WatchAllModelSummaries(c.Context())
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }
 
-func (s *controllerSuite) makeBobsModel(c *gc.C) string {
-	bob := s.Factory.MakeUser(c, &factory.UserParams{
-		Name:        "bob",
-		NoModelUser: true,
-	})
-	st := s.Factory.MakeModel(c, &factory.ModelParams{
-		Owner: bob.UserTag(),
-		Name:  "bobs-model"})
-	uuid := st.ModelUUID()
-	s.WaitForModelWatchersIdle(c, uuid)
-	st.Close()
-	return uuid
+type accessSuite struct {
+	authorizer apiservertesting.FakeAuthorizer
+
+	accessService       *mocks.MockControllerAccessService
+	modelService        *mocks.MockModelService
+	controllerUUID      string
+	controllerModelUUID model.UUID
 }
 
-func (s *controllerSuite) TestWatchModelSummariesByNonAdmin(c *gc.C) {
-	s.makeBobsModel(c)
+func TestAccessSuite(t *stdtesting.T) {
+	tc.Run(t, &accessSuite{})
+}
 
-	// Default authorizer is an admin. As a user, admin can't see
-	// Bob's model.
-	result, err := s.controller.WatchModelSummaries()
-	c.Assert(err, jc.ErrorIsNil)
-
-	watcherAPI := s.newSummaryWatcherFacade(c, result.WatcherID)
-
-	resultC := make(chan params.SummaryWatcherNextResults)
-	go func() {
-		result, err := watcherAPI.Next()
-		c.Assert(err, jc.ErrorIsNil)
-		resultC <- result
-	}()
-
-	select {
-	case result := <-resultC:
-		// Expect to see the initial environment be reported.
-		c.Assert(result, jc.DeepEquals, params.SummaryWatcherNextResults{
-			Models: []params.ModelAbstract{
-				{
-					UUID:       "deadbeef-0bad-400d-8000-4b1d0d06f00d",
-					Controller: "", // TODO(thumper): add controller name next branch
-					Name:       "controller",
-					Admins:     []string{"test-admin"},
-					Cloud:      "dummy",
-					Region:     "dummy-region",
-					Status:     "green",
-					Messages:   []params.ModelSummaryMessage{},
-				}}})
-	case <-time.After(testing.LongWait):
-		c.Fatal("timed out")
+func (s *accessSuite) SetUpTest(c *tc.C) {
+	owner := names.NewUserTag("owner")
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag:      owner,
+		AdminTag: owner,
 	}
 
+	s.controllerUUID = tc.Must0(c, model.NewUUID).String()
+	s.controllerModelUUID = tc.Must0(c, model.NewUUID)
 }
 
-type noopRegisterer struct {
-	prometheus.Registerer
+func (s *accessSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.accessService = mocks.NewMockControllerAccessService(ctrl)
+	s.modelService = mocks.NewMockModelService(ctrl)
+	return ctrl
 }
 
-func (noopRegisterer) Register(prometheus.Collector) error {
-	return nil
+func (s *accessSuite) controllerAPI(c *tc.C) *controller.ControllerAPI {
+	api, err := controller.NewControllerAPI(
+		c.Context(),
+		s.authorizer,
+		loggertesting.WrapCheckLog(c),
+		nil,
+		nil,
+		nil,
+		s.accessService,
+		s.modelService,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		s.controllerModelUUID,
+		s.controllerUUID,
+	)
+	c.Assert(err, tc.ErrorIsNil)
+
+	return api
 }
 
-func (noopRegisterer) Unregister(prometheus.Collector) bool {
-	return true
+func (s *accessSuite) TestModifyControllerAccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	userName := usertesting.GenNewName(c, "test-user")
+
+	updateArgs := access.UpdatePermissionArgs{
+		AccessSpec: permission.AccessSpec{
+			Access: permission.SuperuserAccess,
+			Target: permission.ID{
+				ObjectType: permission.Controller,
+				Key:        s.controllerUUID,
+			},
+		},
+		Change:  permission.Grant,
+		Subject: userName,
+	}
+	s.accessService.EXPECT().UpdatePermission(gomock.Any(), updateArgs).Return(nil)
+
+	args := params.ModifyControllerAccessRequest{Changes: []params.ModifyControllerAccess{{
+		UserTag: names.NewUserTag(userName.Name()).String(),
+		Action:  params.GrantControllerAccess,
+		Access:  string(permission.SuperuserAccess),
+	}}}
+
+	result, err := s.controllerAPI(c).ModifyControllerAccess(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+}
+
+func (s *accessSuite) TestGetControllerAccessPermissions(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	userTag := names.NewUserTag("test-user")
+	userName := user.NameFromTag(userTag)
+	differentUser := "different-test-user"
+
+	target := permission.AccessSpec{
+		Access: permission.SuperuserAccess,
+		Target: permission.ID{
+			ObjectType: permission.Controller,
+			Key:        s.controllerUUID,
+		},
+	}
+	s.accessService.EXPECT().ReadUserAccessLevelForTarget(gomock.Any(), userName, target.Target).Return(permission.SuperuserAccess, nil)
+
+	s.authorizer = apiservertesting.FakeAuthorizer{
+		Tag: userTag,
+	}
+
+	req := params.Entities{
+		Entities: []params.Entity{{Tag: userTag.String()}, {Tag: names.NewUserTag(differentUser).String()}},
+	}
+	results, err := s.controllerAPI(c).GetControllerAccess(c.Context(), req)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 2)
+	c.Assert(*results.Results[0].Result, tc.DeepEquals, params.UserAccess{
+		Access:  "superuser",
+		UserTag: userTag.String(),
+	})
+	c.Assert(*results.Results[1].Error, tc.DeepEquals, params.Error{
+		Message: "permission denied", Code: "unauthorized access",
+	})
+}
+
+func (s *accessSuite) TestAllModels(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	testAdmin := names.NewUserTag("owner")
+
+	models := []model.Model{
+		{
+			Name:      "controller",
+			Qualifier: "admin",
+			ModelType: model.IAAS,
+		},
+		{
+			Name:      "no-access",
+			Qualifier: "user@remote",
+			ModelType: model.IAAS,
+		},
+		{
+			Name:      "owned",
+			Qualifier: "admin",
+			ModelType: model.IAAS,
+		},
+		{
+			Name:      "user",
+			Qualifier: "user@remote",
+			ModelType: model.IAAS,
+		},
+	}
+	s.modelService.EXPECT().GetAllModels(gomock.Any()).Return(
+		models, nil,
+	)
+
+	// api user owner is "owner"
+	s.accessService.EXPECT().LastModelLogin(gomock.Any(), user.NameFromTag(testAdmin), gomock.Any()).Times(4)
+
+	response, err := s.controllerAPI(c).AllModels(c.Context())
+	slices.SortFunc(response.UserModels, func(x params.UserModel, y params.UserModel) int {
+		return strings.Compare(x.Name, y.Name)
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	for i, userModel := range response.UserModels {
+		c.Assert(userModel.Type, tc.Equals, model.IAAS.String())
+		c.Assert(models[i].Name, tc.Equals, userModel.Name)
+		c.Assert(models[i].Qualifier.String(), tc.Equals, userModel.Qualifier)
+		c.Assert(models[i].ModelType.String(), tc.Equals, userModel.Type)
+	}
 }
 
 type noopLeadershipReader struct {

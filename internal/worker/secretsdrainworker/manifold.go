@@ -7,22 +7,23 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	agentsecretsdrain "github.com/juju/juju/api/agent/secretsdrain"
 	"github.com/juju/juju/api/agent/secretsmanager"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/usersecretsdrain"
 	"github.com/juju/juju/core/leadership"
-	jujusecrets "github.com/juju/juju/secrets"
+	"github.com/juju/juju/core/logger"
+	jujusecrets "github.com/juju/juju/internal/secrets"
 )
 
 // ManifoldConfig describes the resources used by the secretsdrainworker worker.
 type ManifoldConfig struct {
 	APICallerName         string
 	LeadershipTrackerName string
-	Logger                Logger
+	Logger                logger.Logger
 
 	NewSecretsDrainFacade func(base.APICaller) SecretsDrainFacade
 	NewWorker             func(Config) (worker.Worker, error)
@@ -87,13 +88,13 @@ func (cfg ManifoldConfig) Validate() error {
 }
 
 // start is a StartFunc for a Worker manifold.
-func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (cfg ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var apiCaller base.APICaller
-	if err := context.Get(cfg.APICallerName, &apiCaller); err != nil {
+	if err := getter.Get(cfg.APICallerName, &apiCaller); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -103,7 +104,7 @@ func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, erro
 	if cfg.LeadershipTrackerName == "" {
 		leadershipTracker = passThroughLeadershipTracker{}
 	} else {
-		if err := context.Get(cfg.LeadershipTrackerName, &leadershipTracker); err != nil {
+		if err := getter.Get(cfg.LeadershipTrackerName, &leadershipTracker); err != nil {
 			return nil, errors.Trace(err)
 		}
 	}

@@ -8,275 +8,249 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+	"testing"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/api/client/application"
+	apiclient "github.com/juju/juju/api/client/client"
+	commoncharm "github.com/juju/juju/api/common/charm"
 	apicommoncharms "github.com/juju/juju/api/common/charms"
-	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/cmd/juju/application/deployer"
+	apputils "github.com/juju/juju/cmd/juju/application/utils"
+	"github.com/juju/juju/core/arch"
 	"github.com/juju/juju/core/base"
-	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/state/watcher"
+	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/internal/charm"
+	charmtesting "github.com/juju/juju/internal/charm/testing"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	coretesting "github.com/juju/juju/internal/testing"
+	jujutesting "github.com/juju/juju/juju/testing"
+	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/testcharms"
 )
 
 type BundleDeploySuite struct {
-	FakeStoreStateSuite
+	coretesting.BaseSuite
+
+	fakeAPI *fakeDeployAPI
 }
 
-func (s *BundleDeploySuite) SetUpSuite(c *gc.C) {
-	s.DeploySuiteBase.SetUpSuite(c)
-	s.PatchValue(&watcher.Period, 10*time.Millisecond)
+func TestBundleDeploySuite(t *testing.T) {
+	tc.Run(t, &BundleDeploySuite{})
 }
 
-func (s *BundleDeploySuite) SetUpTest(c *gc.C) {
-	// Set metering URL config so the config is set during bootstrap
-	if s.ControllerConfigAttrs == nil {
-		s.ControllerConfigAttrs = make(map[string]interface{})
+func (s *BundleDeploySuite) SetUpTest(c *tc.C) {
+	cfg := map[string]interface{}{
+		"name":           "name",
+		"uuid":           "deadbeef-0bad-400d-8000-4b1d0d06f00d",
+		"type":           "foo",
+		"secret-backend": "auto",
 	}
-
-	s.FakeStoreStateSuite.SetUpTest(c)
-	logger.SetLogLevel(loggo.TRACE)
+	s.fakeAPI = vanillaFakeModelAPI(cfg)
+	s.fakeAPI.deployerFactoryFunc = deployer.NewDeployerFactory
+	s.fakeAPI.Call("ListSpaces").Returns([]params.Space{{Name: "alpha", Id: "0"}}, error(nil))
 }
 
 // DeployBundleYAML uses the given bundle content to create a bundle in the
 // local repository and then deploy it. It returns the bundle deployment output
 // and error.
-func (s *BundleDeploySuite) DeployBundleYAML(c *gc.C, content string, extraArgs ...string) error {
-	_, _, err := s.DeployBundleYAMLWithOutput(c, content, extraArgs...)
+func (s *BundleDeploySuite) DeployBundleYAML(c *tc.C, content string, extraArgs ...string) error {
+	bundlePath := s.makeBundleDir(c, content)
+	args := append([]string{bundlePath}, extraArgs...)
+	err := s.runDeploy(c, args...)
 	return err
 }
 
-func (s *BundleDeploySuite) DeployBundleYAMLWithOutput(c *gc.C, content string, extraArgs ...string) (string, string, error) {
-	bundlePath := s.makeBundleDir(c, content)
-	args := append([]string{bundlePath}, extraArgs...)
-	return s.runDeployWithOutput(c, args...)
-}
-
-func (s *BundleDeploySuite) makeBundleDir(c *gc.C, content string) string {
+func (s *BundleDeploySuite) makeBundleDir(c *tc.C, content string) string {
 	bundlePath := filepath.Join(c.MkDir(), "example")
-	c.Assert(os.Mkdir(bundlePath, 0777), jc.ErrorIsNil)
+	c.Assert(os.Mkdir(bundlePath, 0777), tc.ErrorIsNil)
 	err := os.WriteFile(filepath.Join(bundlePath, "bundle.yaml"), []byte(content), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = os.WriteFile(filepath.Join(bundlePath, "README.md"), []byte("README"), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return bundlePath
 }
 
-type BundleDeployInvalidSeries struct {
-	BundleDeploySuite
+func (s *BundleDeploySuite) setupCharm(c *tc.C, url, name string, b base.Base) charm.Charm {
+	return s.setupCharmMaybeForce(c, url, name, b, arch.DefaultArchitecture, false)
 }
 
-var _ = gc.Suite(&BundleDeployInvalidSeries{})
+func (s *BundleDeploySuite) setupCharmMaybeForce(c *tc.C, url, name string, abase base.Base, arc string, force bool) charm.Charm {
+	baseURL := charm.MustParseURL(url)
+	resolveURL := charm.MustParseURL(url)
+	if resolveURL.Revision < 0 {
+		resolveURL.Revision = 1
+	}
+	noRevisionURL := charm.MustParseURL(url)
+	noRevisionURL.Revision = -1
+	charmHubURL := charm.MustParseURL(fmt.Sprintf("ch:%s", baseURL.Name))
+	// In order to replicate what the charmstore does in terms of matching, we
+	// brute force (badly) the various types of charm urls.
+	// TODO (stickupkid): This is terrible, the fact that you're bruteforcing
+	// a mock to replicate a charm store, means your test isn't unit testing
+	// at any level. Instead we should have tests that know exactly the url
+	// is and pass that. The new mocking tests do this.
+	charmURLs := []*charm.URL{
+		baseURL,
+		resolveURL,
+		noRevisionURL,
+		charmHubURL,
+	}
+	for _, url := range charmURLs {
+		for _, b := range []base.Base{{}, abase} {
+			for _, a := range []string{"", arc, arch.DefaultArchitecture} {
+				platform := corecharm.Platform{
+					Architecture: a,
+					OS:           b.OS,
+					Channel:      b.Channel.Track,
+				}
+				origin, err := apputils.MakeOrigin(charm.Schema(url.Schema), url.Revision, charm.Channel{}, platform)
+				c.Assert(err, tc.ErrorIsNil)
 
-func (s *BundleDeployInvalidSeries) TestDeployBundleLocalPathInvalidSeriesWithForce(c *gc.C) {
-	s.assertDeployBundleLocalPathInvalidSeriesWithForce(c, true)
+				s.fakeAPI.Call("ResolveCharm", url, origin, false).Returns(
+					resolveURL,
+					origin,
+					[]base.Base{abase},
+					error(nil),
+				)
+
+				origin.Risk = "stable"
+				s.fakeAPI.Call("ResolveCharm", url, origin, false).Returns(
+					resolveURL,
+					origin,
+					[]base.Base{abase},
+					error(nil),
+				)
+
+				s.fakeAPI.Call("AddCharm", resolveURL, origin, force).Returns(origin, error(nil))
+			}
+		}
+	}
+
+	var chDir charm.Charm
+	chDir, err := charmtesting.ReadCharmDir(testcharms.RepoWithSeries("bionic").CharmDirPath(name))
+	if err != nil {
+		if !os.IsNotExist(errors.Cause(err)) {
+			c.Fatal(err)
+			return nil
+		}
+		chDir = testcharms.RepoForSeries("bionic").CharmArchive(c.MkDir(), "dummy")
+	}
+	return chDir
 }
 
-func (s *BundleDeployInvalidSeries) TestDeployBundleLocalPathInvalidSeriesWithoutForce(c *gc.C) {
-	s.assertDeployBundleLocalPathInvalidSeriesWithForce(c, false)
+func (s *BundleDeploySuite) setupFakeBundle(c *tc.C, url string, allBase ...base.Base) {
+	bundleResolveURL := charm.MustParseURL(url)
+	baseURL := *bundleResolveURL
+	baseURL.Revision = -1
+	withCharmRepoResolvable(s.fakeAPI, &baseURL, base.Base{})
+
+	// Resolve a bundle with no revision and return a url with a version.  Ensure
+	// GetBundle expects the url with revision.
+	for _, b := range allBase {
+		origin, err := apputils.MakeOrigin(charm.Schema(bundleResolveURL.Schema), bundleResolveURL.Revision, charm.Channel{}, corecharm.Platform{
+			OS: b.OS, Channel: b.Channel.Track})
+		c.Assert(err, tc.ErrorIsNil)
+		origin.Revision = nil
+		s.fakeAPI.Call("ResolveBundleURL", &baseURL, origin).Returns(
+			bundleResolveURL,
+			origin,
+			error(nil),
+		)
+		s.fakeAPI.Call("GetBundle", bundleResolveURL).Returns(nil, error(nil))
+	}
 }
 
-func (s *BundleDeployInvalidSeries) assertDeployBundleLocalPathInvalidSeriesWithForce(c *gc.C, force bool) {
+func (s *BundleDeploySuite) runDeploy(c *tc.C, args ...string) error {
+	deployCmd := newDeployCommandForTest(s.fakeAPI)
+	_, err := cmdtesting.RunCommand(c, deployCmd, args...)
+	return err
+}
+
+func (s *BundleDeploySuite) TestDeployBundleInvalidFlags(c *tc.C) {
+	s.setupCharm(c, "ch:mysql-42", "mysql", base.MustParseBaseFromString("ubuntu@18.04"))
+	s.setupCharm(c, "ch:wordpress-47", "wordpress", base.MustParseBaseFromString("ubuntu@18.04"))
+	s.setupFakeBundle(c, "ch:wordpress-simple-1", base.Base{}, base.MustParseBaseFromString("ubuntu@18.04"), base.MustParseBaseFromString("ubuntu@16.04"))
+
+	err := s.runDeploy(c, "ch:wordpress-simple", "--config", "config.yaml")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: --config")
+	err = s.runDeploy(c, "ch:wordpress-simple", "-n", "2")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: -n")
+	err = s.runDeploy(c, "ch:wordpress-simple", "--base", "ubuntu@18.04")
+	c.Assert(err, tc.ErrorMatches, "options provided but not supported when deploying a bundle: --base")
+}
+
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithForce(c *tc.C) {
+	s.assertDeployBundleLocalPathInvalidBaseWithForce(c, true)
+}
+
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidBaseWithoutForce(c *tc.C) {
+	s.assertDeployBundleLocalPathInvalidBaseWithForce(c, false)
+}
+
+func (s *BundleDeploySuite) assertDeployBundleLocalPathInvalidBaseWithForce(c *tc.C, force bool) {
 	dir := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(dir, "dummy")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(dir, "dummy")
 
 	dummyURL := charm.MustParseURL("local:dummy-1")
-	withAllWatcher(s.fakeAPI)
 	withLocalCharmDeployable(s.fakeAPI, dummyURL, charmDir, force)
 	withLocalBundleCharmDeployable(
 		s.fakeAPI, dummyURL, base.MustParseBaseFromString("ubuntu@12.10"),
 		charmDir.Meta(), charmDir.Manifest(), force,
 	)
-	s.fakeAPI.Call("CharmInfo", "local:dummy-1").Returns(
-		&apicommoncharms.CharmInfo{
-			URL:  "local:dummy",
-			Meta: &charm.Meta{Name: "dummy", Series: []string{"jammy"}},
-		},
-		error(nil),
-	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
 
 	path := filepath.Join(dir, "mybundle")
-	data := `
-        series: quantal
+	data := fmt.Sprintf(`
+        default-base: ubuntu@12.10
         applications:
             dummy:
-                charm: ./dummy
+                charm: %s
                 num_units: 1
-    `
+    `, charmDir.Path)
 	err := os.WriteFile(path, []byte(data), 0644)
-	c.Assert(err, jc.ErrorIsNil)
-	args := []string{path}
+	c.Assert(err, tc.ErrorIsNil)
+	deployArgs := []string{path}
 	if force {
-		args = append(args, "--force")
+		deployArgs = append(deployArgs, "--force")
 	}
-	err = s.runDeploy(c, args...)
-	c.Assert(err, gc.ErrorMatches, "cannot deploy bundle: base: ubuntu@12.10/stable")
+	err = s.runDeploy(c, deployArgs...)
+	c.Assert(err, tc.ErrorMatches, "cannot deploy bundle: base: ubuntu@12.10/stable not supported")
 }
 
-func (s *BundleDeployInvalidSeries) TestDeployBundleLocalPathInvalidJujuSeries(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalPathInvalidJujuBase(c *tc.C) {
 	dir := c.MkDir()
-	charmDir := testcharms.RepoWithSeries("bionic").ClonedDir(dir, "dummy")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(dir, "jammyonly")
 
-	dummyURL := charm.MustParseURL("local:dummy-1")
-	withAllWatcher(s.fakeAPI)
-	withLocalCharmDeployable(s.fakeAPI, dummyURL, charmDir, false)
+	curl := charm.MustParseURL("local:jammyonly-1")
+	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
 	withLocalBundleCharmDeployable(
-		s.fakeAPI, dummyURL, base.MustParseBaseFromString("ubuntu@12.10"),
+		s.fakeAPI, curl, base.MustParseBaseFromString("ubuntu@20.04"),
 		charmDir.Meta(), charmDir.Manifest(), false,
 	)
-	s.fakeAPI.Call("CharmInfo", "local:dummy-1").Returns(
-		&apicommoncharms.CharmInfo{
-			URL:  "local:dummy",
-			Meta: &charm.Meta{Name: "dummy", Series: []string{"quantal", "jammy"}},
-		},
-		error(nil),
-	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
 
 	path := filepath.Join(dir, "mybundle")
-	data := `
-        series: focal
+	data := fmt.Sprintf(`
+        default-base: ubuntu@20.04
         applications:
-            dummy:
-                charm: ./dummy
+            jammyonly:
+                charm: %s
                 num_units: 1
-    `
+    `, charmDir.Path)
 	err := os.WriteFile(path, []byte(data), 0644)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = s.runDeploy(c, path)
-	c.Assert(err, gc.ErrorMatches, `cannot deploy bundle: base "ubuntu@20.04/stable" is not supported, supported bases are: .*`)
-}
-
-// NOTE:
-// Do not add new tests to this file.  The tests here are slowly migrating
-// to deployer/bundlerhandler_test.go in mock format.
-
-// LTS-dependent requires new entry upon new LTS release. There are numerous
-// places "xenial" exists in strings throughout this file. If we update the
-// target in testing/base.go:SetupSuite we'll need to also update the entries
-// herein.
-
-// NOTE(jack-w-shaw) These tests were originally part of the above suite. However,
-// the below were separated out so they could be skipped. They're restored properly
-// in 4.0
-
-type BundleDeployCharmStoreSuite struct {
-	BundleDeploySuite
-}
-
-var _ = gc.Suite(&BundleDeployCharmStoreSuite{})
-
-func (s *BundleDeployCharmStoreSuite) SetUpSuite(c *gc.C) {
-	c.Skip("this is a badly written e2e test that is invoking external APIs which we cannot mock")
-
-	s.BundleDeploySuite.SetUpSuite(c)
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleInvalidFlags(c *gc.C) {
-	s.setupCharm(c, "ch:xenial/mysql-42", "mysql", "bionic")
-	s.setupCharm(c, "ch:xenial/wordpress-47", "wordpress", "bionic")
-	s.setupBundle(c, "ch:bundle/wordpress-simple-1", "wordpress-simple", "bionic", "xenial")
-
-	err := s.runDeploy(c, "ch:bundle/wordpress-simple", "--config", "config.yaml")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: --config")
-	err = s.runDeploy(c, "ch:bundle/wordpress-simple", "-n", "2")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: -n")
-	err = s.runDeploy(c, "ch:bundle/wordpress-simple", "--series", "xenial")
-	c.Assert(err, gc.ErrorMatches, "options provided but not supported when deploying a bundle: --series")
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDryRunTwice(c *gc.C) {
-	s.setupCharmMaybeAdd(c, "ch:xenial/mysql-42", "mysql", "bionic", false)
-	s.setupCharmMaybeAdd(c, "ch:xenial/wordpress-47", "wordpress", "bionic", false)
-	s.setupBundle(c, "ch:bundle/wordpress-simple-1", "wordpress-simple", "bionic")
-
-	stdOut, _, err := s.runDeployWithOutput(c, "ch:bundle/wordpress-simple", "--dry-run")
-	c.Assert(err, jc.ErrorIsNil)
-	expected := "" +
-		"Changes to deploy bundle:\n" +
-		"- upload charm wordpress from charm-store for series xenial with architecture=amd64\n" +
-		"- upload charm mysql from charm-store for series xenial with architecture=amd64\n" +
-		"- deploy application wordpress from charm-store on xenial\n" +
-		"- deploy application mysql from charm-store on xenial\n" +
-		"- add unit wordpress/0 to new machine 1\n" +
-		"- add unit mysql/0 to new machine 0\n" +
-		"- add relation wordpress:db - mysql:db\n" +
-		"- set annotations for wordpress\n" +
-		"- set annotations for mysql"
-
-	c.Check(stdOut, gc.Equals, expected)
-	stdOut, _, err = s.runDeployWithOutput(c, "ch:bundle/wordpress-simple", "--dry-run")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(stdOut, gc.Equals, expected)
-
-	s.assertCharmsUploaded(c /* none */)
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{})
-	s.assertRelationsEstablished(c /* none */)
-	s.assertUnitsCreated(c, map[string]string{})
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalPath(c *gc.C) {
-	dir := c.MkDir()
-	testcharms.RepoWithSeries("bionic").ClonedDir(dir, "dummy")
-	path := filepath.Join(dir, "mybundle")
-	data := `
-         series: xenial
-         applications:
-             dummy:
-                 charm: ./dummy
-                 series: xenial
-                 num_units: 1
-     `
-	err := os.WriteFile(path, []byte(data), 0644)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.runDeploy(c, path)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "local:xenial/dummy-1")
-	ch, err := s.State.Charm("local:xenial/dummy-1")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"dummy": {
-			charm:  "local:xenial/dummy-1",
-			config: ch.Config().DefaultSettings(),
-		},
-	})
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalResources(c *gc.C) {
-	data := `
-        series: bionic
-        applications:
-            "dummy-resource":
-                charm: ./dummy-resource
-                series: bionic
-                num_units: 1
-                resources:
-                  dummy: ./dummy-resource.zip
-    `
-	dir := s.makeBundleDir(c, data)
-	testcharms.RepoWithSeries("bionic").ClonedDir(dir, "dummy-resource")
-	c.Assert(
-		os.WriteFile(filepath.Join(dir, "dummy-resource.zip"), []byte("zip file"), 0644),
-		jc.ErrorIsNil)
-	err := s.runDeploy(c, dir)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "local:bionic/dummy-resource-0")
-	ch, err := s.State.Charm("local:bionic/dummy-resource-0")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"dummy-resource": {
-			charm:  "local:bionic/dummy-resource-0",
-			config: ch.Config().DefaultSettings(),
-		},
-	})
+	c.Assert(err, tc.ErrorMatches, `cannot deploy bundle: base "ubuntu@20.04/stable" is not supported, supported bases are: .*`)
 }
 
 var deployBundleErrorsTests = []struct {
@@ -286,570 +260,603 @@ var deployBundleErrorsTests = []struct {
 }{{
 	about: "local charm not found",
 	content: `
-        applications:
-            mysql:
-                charm: ./mysql
-                num_units: 1
-    `,
+       applications:
+           mysql:
+               charm: ./mysql
+               num_units: 1
+   `,
 	err: `the provided bundle has the following errors:
 charm path in application "mysql" does not exist: .*mysql`,
 }, {
 	about: "charm store charm not found",
 	content: `
-        applications:
-            rails:
-                charm: ch:xenial/rails-42
-                num_units: 1
-    `,
+       applications:
+           rails:
+               charm: ch:xenial/rails
+               num_units: 1
+   `,
 	err: `cannot resolve charm or bundle "rails": .* charm or bundle not found`,
 }, {
 	about:   "invalid bundle content",
 	content: "!",
-	err:     `(?s)cannot unmarshal bundle contents:.* yaml: unmarshal errors:.*`,
+	err: `the provided bundle has the following errors:
+.*`,
 }, {
 	about: "invalid bundle data",
 	content: `
-        applications:
-            mysql:
-                charm: ch:mysql
-                num_units: -1
-    `,
+       applications:
+           mysql:
+               charm: ch:mysql
+               num_units: -1
+   `,
 	err: `the provided bundle has the following errors:
 negative number of units specified on application "mysql"`,
 }, {
 	about: "invalid constraints",
 	content: `
-        applications:
-            mysql:
-                charm: ch:mysql
-                num_units: 1
-                constraints: bad-wolf
-    `,
+       applications:
+           mysql:
+               charm: ch:mysql
+               num_units: 1
+               constraints: bad-wolf
+   `,
 	err: `the provided bundle has the following errors:
 invalid constraints "bad-wolf" in application "mysql": malformed constraint "bad-wolf"`,
 }, {
 	about: "multiple bundle verification errors",
 	content: `
-        applications:
-            mysql:
-                charm: ch:mysql
-                num_units: -1
-                constraints: bad-wolf
-    `,
+       applications:
+           mysql:
+               charm: ch:mysql
+               num_units: -1
+               constraints: bad-wolf
+   `,
 	err: `the provided bundle has the following errors:
 invalid constraints "bad-wolf" in application "mysql": malformed constraint "bad-wolf"
 negative number of units specified on application "mysql"`,
 }, {
 	about: "bundle inception",
 	content: `
-        applications:
-            example:
-                charm: local:wordpress
-                num_units: 1
-    `,
+       applications:
+           example:
+               charm: local:wordpress
+               num_units: 1
+   `,
 	err: `cannot deploy local charm at ".*wordpress": file does not exist`,
 }}
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleErrors(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleErrors(c *tc.C) {
 	for i, test := range deployBundleErrorsTests {
 		c.Logf("test %d: %s", i, test.about)
+
+		var args *apiclient.StatusArgs
+		s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
 		err := s.DeployBundleYAML(c, test.content)
-		pass := c.Check(err, gc.ErrorMatches, "cannot deploy bundle: "+test.err)
+		pass := c.Check(err, tc.ErrorMatches, "cannot deploy bundle: "+test.err)
 		if !pass {
 			c.Logf("error: \n%s\n", errors.ErrorStack(err))
 		}
 	}
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleWatcherTimeout(c *gc.C) {
-	c.Skip("Move me to bundle/bundlerhander_test.go and use mocks")
-	// Inject an "AllWatcher" that never delivers a result.
-	ch := make(chan struct{})
-	defer close(ch)
-	//watcher := mockAllWatcher{
-	//	next: func() []params.Delta {
-	//		<-ch
-	//		return nil
-	//	},
-	//}
-	//s.PatchValue(&watchAll, func(*api.Client) (api.AllWatch, error) {
-	//	return watcher, nil
-	//})
-
-	s.setupCharm(c, "ch:xenial/django-0", "django", "bionic")
-	s.setupCharm(c, "ch:xenial/wordpress-0", "wordpress", "bionic")
-	//s.PatchValue(&updateUnitStatusPeriod, 0*time.Second)
-	err := s.DeployBundleYAML(c, `
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadConfig(c *tc.C) {
+	charmsPath := c.MkDir()
+	mysqlPath := testcharms.RepoWithSeries("bionic").CharmArchivePath(charmsPath, "mysql")
+	wordpressPath := testcharms.RepoWithSeries("bionic").CharmArchivePath(charmsPath, "wordpress")
+	err := s.DeployBundleYAML(c, fmt.Sprintf(`
+       default-base: ubuntu@16.04
        applications:
-           django:
-               charm: django
-               num_units: 1
            wordpress:
-               charm: wordpress
+               charm: %s
                num_units: 1
-               to: [django]
-   `)
-	c.Assert(err, gc.ErrorMatches, `cannot deploy bundle: cannot retrieve placement for "wordpress" unit: cannot resolve machine: timeout while trying to get new changes from the watcher`)
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalDeploymentBadConfig(c *gc.C) {
-	charmsPath := c.MkDir()
-	mysqlPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "mysql")
-	wordpressPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "wordpress")
-	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-        series: xenial
-        applications:
-            wordpress:
-                charm: %s
-                num_units: 1
-            mysql:
-                charm: %s
-                num_units: 2
-        relations:
-            - ["wordpress:db", "mysql:server"]
-    `, wordpressPath, mysqlPath),
+           mysql:
+               charm: %s
+               num_units: 2
+       relations:
+           - ["wordpress:db", "mysql:server"]
+   `, wordpressPath, mysqlPath),
 		"--overlay", "missing-file")
-	c.Assert(err, gc.ErrorMatches, `cannot deploy bundle: unable to process overlays: "missing-file" not found`)
+	c.Assert(err, tc.ErrorMatches, `cannot deploy bundle: unable to process overlays: "missing-file" not found`)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalDeploymentLXDProfile(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentLXDProfile(c *tc.C) {
 	charmsPath := c.MkDir()
-	lxdProfilePath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "lxd-profile")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile")
+
+	curl := charm.MustParseURL("local:lxd-profile-0")
+	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, curl, base.MustParseBaseFromString("ubuntu@20.04"),
+		charmDir.Meta(), charmDir.Manifest(), false,
+	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
 	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-        series: bionic
-        applications:
-            lxd-profile:
-                charm: %s
-                num_units: 1
-    `, lxdProfilePath))
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "local:bionic/lxd-profile-0")
-	lxdProfile, err := s.State.Charm("local:bionic/lxd-profile-0")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"lxd-profile": {
-			charm:  "local:bionic/lxd-profile-0",
-			config: lxdProfile.Config().DefaultSettings(),
-		},
-	})
-	s.assertUnitsCreated(c, map[string]string{
-		"lxd-profile/0": "0",
-	})
+       default-base: ubuntu@20.04
+       applications:
+           lxd-profile:
+               charm: %s
+               num_units: 1
+   `, charmDir.Path))
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalDeploymentBadLXDProfile(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfile(c *tc.C) {
 	charmsPath := c.MkDir()
-	lxdProfilePath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "lxd-profile-fail")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile-fail")
+
+	curl := charm.MustParseURL("local:lxd-profile-fail-0")
+	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
+	withCharmDeployable(
+		s.fakeAPI, curl, defaultBase,
+		&charm.Meta{Name: "lxd-profile"},
+		false, 0, nil, nil,
+	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
 	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-        series: bionic
-        applications:
-            lxd-profile-fail:
-                charm: %s
-                num_units: 1
-    `, lxdProfilePath))
-	c.Assert(err, gc.ErrorMatches, "cannot deploy bundle: cannot deploy local charm at .*: invalid lxd-profile.yaml: contains device type \"unix-disk\"")
+       default-base: ubuntu@22.04
+       applications:
+           lxd-profile-fail:
+               charm: %s
+               num_units: 1
+   `, charmDir.Path))
+	c.Assert(err, tc.ErrorMatches, "cannot deploy bundle: cannot deploy local charm at .*: invalid lxd-profile.yaml: contains device type \"unix-disk\"")
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalDeploymentBadLXDProfileWithForce(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentBadLXDProfileWithForce(c *tc.C) {
 	charmsPath := c.MkDir()
-	lxdProfilePath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "lxd-profile-fail")
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "lxd-profile-fail")
+
+	curl := charm.MustParseURL("local:lxd-profile-fail-0")
+	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, true)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, curl, base.MustParseBaseFromString("ubuntu@20.04"),
+		charmDir.Meta(), charmDir.Manifest(), true,
+	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
 	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-        series: bionic
-        applications:
-            lxd-profile-fail:
-                charm: %s
-                num_units: 1
-    `, lxdProfilePath), "--force")
-	c.Assert(err, jc.ErrorIsNil)
+       default-base: ubuntu@20.04
+       applications:
+           lxd-profile-fail:
+               charm: %s
+               num_units: 1
+   `, charmDir.Path), "--force")
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *gc.C) {
+func (s *BundleDeploySuite) TestDeployBundleLocalDeploymentWithBundleOverlay(c *tc.C) {
 	configDir := c.MkDir()
 	configFile := filepath.Join(configDir, "config.yaml")
 	c.Assert(
 		os.WriteFile(
 			configFile, []byte(`
-                applications:
-                    wordpress:
-                        options:
-                            blog-title: include-file://title
-            `), 0644),
-		jc.ErrorIsNil)
+               applications:
+                   wordpress:
+                       options:
+                           blog-title: include-file://title
+           `), 0644),
+		tc.ErrorIsNil)
 	c.Assert(
 		os.WriteFile(
 			filepath.Join(configDir, "title"), []byte("magic bundle config"), 0644),
-		jc.ErrorIsNil)
+		tc.ErrorIsNil)
 
 	charmsPath := c.MkDir()
-	mysqlPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "mysql")
-	wordpressPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "wordpress")
+	mysqlDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "mysql")
+	wordpressDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "wordpress")
+
+	mysqlURL := charm.MustParseURL("local:mysql-1")
+	wordpressURL := charm.MustParseURL("local:wordpress-3")
+	withLocalCharmDeployable(s.fakeAPI, mysqlURL, mysqlDir, false)
+	withLocalCharmDeployable(s.fakeAPI, wordpressURL, wordpressDir, false)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, mysqlURL, defaultBase,
+		mysqlDir.Meta(), mysqlDir.Manifest(), false,
+	)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, wordpressURL, defaultBase,
+		wordpressDir.Meta(), wordpressDir.Manifest(), false,
+	)
+	deployArgs := application.DeployArgs{
+		CharmID: application.CharmID{
+			URL:    wordpressURL.String(),
+			Origin: commoncharm.Origin{Source: "local"},
+		},
+		CharmOrigin:     commoncharm.Origin{Source: "local", Base: defaultBase},
+		ApplicationName: "wordpress",
+		NumUnits:        0,
+		ConfigYAML:      "wordpress:\n  blog-title: magic bundle config\n",
+	}
+	s.fakeAPI.Call("Deploy", deployArgs).Returns(error(nil))
+	s.fakeAPI.Call("AddRelation",
+		[]interface{}{"wordpress:db", "mysql:server"}, []interface{}{},
+	).Returns(
+		&params.AddRelationResults{},
+		error(nil),
+	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
 	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-        series: xenial
-        applications:
-            wordpress:
-                charm: %s
-                num_units: 1
-            mysql:
-                charm: %s
-                num_units: 2
-        relations:
-            - ["wordpress:db", "mysql:server"]
-    `, wordpressPath, mysqlPath),
-		"--overlay", configFile)
-
-	c.Assert(err, jc.ErrorIsNil)
-	// Now check the blog-title of the wordpress.	le")
-	wordpress, err := s.State.Application("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	settings, err := wordpress.CharmConfig(model.GenerationMaster)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settings["blog-title"], gc.Equals, "magic bundle config")
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployLocalBundleWithRelativeCharmPaths(c *gc.C) {
-	bundleDir := c.MkDir()
-	_ = testcharms.RepoWithSeries("bionic").ClonedDirPath(bundleDir, "dummy")
-
-	bundleFile := filepath.Join(bundleDir, "bundle.yaml")
-	bundleContent := `
-series: bionic
-applications:
-  dummy:
-    charm: ./dummy
-`
-	c.Assert(
-		os.WriteFile(bundleFile, []byte(bundleContent), 0644),
-		jc.ErrorIsNil)
-
-	err := s.runDeploy(c, bundleFile)
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = s.State.Application("dummy")
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleLocalAndCharmStoreCharms(c *gc.C) {
-	charmsPath := c.MkDir()
-	wpch := s.setupCharm(c, "ch:xenial/wordpress-42", "wordpress", "bionic")
-	mysqlPath := testcharms.RepoWithSeries("bionic").ClonedDirPath(charmsPath, "mysql")
-	err := s.DeployBundleYAML(c, fmt.Sprintf(`
-       series: xenial
+       default-base: ubuntu@22.04
        applications:
            wordpress:
-               charm: ch:xenial/wordpress-42
-               series: xenial
+               charm: %s
                num_units: 1
            mysql:
                charm: %s
                num_units: 1
        relations:
            - ["wordpress:db", "mysql:server"]
-   `, mysqlPath))
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "local:xenial/mysql-1", "ch:xenial/wordpress-42")
-	mysqlch, err := s.State.Charm("local:xenial/mysql-1")
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"mysql": {
-			charm:  "local:xenial/mysql-1",
-			config: mysqlch.Config().DefaultSettings(),
-		},
-		"wordpress": {
-			charm:  "ch:xenial/wordpress-42",
-			config: wpch.Config().DefaultSettings(),
-		},
-	})
-	s.assertRelationsEstablished(c, "wordpress:db mysql:server")
-	s.assertUnitsCreated(c, map[string]string{
-		"mysql/0":     "1",
-		"wordpress/0": "0",
-	})
+`, wordpressDir.Path, mysqlDir.Path),
+		"--overlay", configFile)
+
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleApplicationDefaultArchConstraints(c *gc.C) {
-	wpch := s.setupCharm(c, "ch:xenial/wordpress-42", "wordpress", "bionic")
-	dch := s.setupCharm(c, "ch:bionic/dummy-0", "dummy", "bionic")
+func (s *BundleDeploySuite) TestDeployLocalBundleWithRelativeCharmPaths(c *tc.C) {
+	bundleDir := c.MkDir()
+	charmDir := testcharms.RepoWithSeries("bionic").CharmArchive(bundleDir, "dummy")
 
-	err := s.DeployBundleYAML(c, `
-       applications:
-           wordpress:
-               charm: ch:wordpress
-               constraints: mem=4G cores=2
-           customized:
-               charm: ch:dummy-0
-               num_units: 1
-               constraints: arch=amd64
-   `)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "ch:bionic/dummy-0", "ch:xenial/wordpress-42")
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"customized": {
-			charm:       "ch:bionic/dummy-0",
-			constraints: constraints.MustParse("arch=amd64"),
-			config:      dch.Config().DefaultSettings(),
-		},
-		"wordpress": {
-			charm:       "ch:xenial/wordpress-42",
-			constraints: constraints.MustParse("mem=4G cores=2"),
-			config:      wpch.Config().DefaultSettings(),
-		},
-	})
-	s.assertUnitsCreated(c, map[string]string{
-		"customized/0": "0",
-	})
+	bundleFile := filepath.Join(bundleDir, "bundle.yaml")
+	bundleContent := fmt.Sprintf(`
+default-base: ubuntu@20.04
+applications:
+ dummy:
+   charm: %s
+`, charmDir.Path)
+	c.Assert(
+		os.WriteFile(bundleFile, []byte(bundleContent), 0644),
+		tc.ErrorIsNil)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	curl := charm.MustParseURL("local:dummy-1")
+	withLocalCharmDeployable(s.fakeAPI, curl, charmDir, false)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, curl, base.MustParseBaseFromString("ubuntu@20.04"),
+		charmDir.Meta(), charmDir.Manifest(), false,
+	)
+
+	err := s.runDeploy(c, bundleFile)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleApplicationConstraints(c *gc.C) {
-	wpch := s.setupCharm(c, "ch:xenial/wordpress-42", "wordpress", "bionic")
-	dch := s.setupCharmWithArch(c, "ch:bionic/dummy-0", "dummy", "bionic", "s390x")
-
-	err := s.DeployBundleYAML(c, `
-       applications:
-           wordpress:
-               charm: ch:wordpress
-               series: bionic
-               constraints: mem=4G cores=2
-           customized:
-               charm: ch:dummy
-               revision: 0
-               channel: stable
-               series: xenial
-               num_units: 1
-               constraints: arch=s390x
-   `)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertCharmsUploaded(c, "ch:bionic/dummy-0", "ch:xenial/wordpress-42")
-	s.assertApplicationsDeployed(c, map[string]applicationInfo{
-		"customized": {
-			charm:       "ch:bionic/dummy-0",
-			constraints: constraints.MustParse("arch=s390x"),
-			config:      dch.Config().DefaultSettings(),
+func (s *BundleDeploySuite) TestDeployBundleLocalAndCharmhubCharms(c *tc.C) {
+	charmsPath := c.MkDir()
+	wordpressDir := s.setupCharm(c, "ch:wordpress-1", "wordpress", base.MustParseBaseFromString("ubuntu@20.04"))
+	mysqlDir := testcharms.RepoWithSeries("bionic").CharmArchive(charmsPath, "mysql")
+	mysqlURL := charm.MustParseURL("local:mysql-1")
+	wordpressURL := charm.MustParseURL("ch:wordpress-1")
+	withLocalCharmDeployable(s.fakeAPI, mysqlURL, mysqlDir, false)
+	withLocalBundleCharmDeployable(
+		s.fakeAPI, mysqlURL, defaultBase,
+		mysqlDir.Meta(), mysqlDir.Manifest(), false,
+	)
+	s.fakeAPI.Call("CharmInfo", wordpressURL.String()).Returns(
+		&apicommoncharms.CharmInfo{
+			URL:      wordpressURL.String(),
+			Meta:     wordpressDir.Meta(),
+			Manifest: wordpressDir.Manifest(),
 		},
-		"wordpress": {
-			charm:       "ch:xenial/wordpress-42",
-			constraints: constraints.MustParse("mem=4G cores=2"),
-			config:      wpch.Config().DefaultSettings(),
+		error(nil),
+	)
+	base := base.MustParseBaseFromString("ubuntu@20.04/stable")
+	deployArgs := application.DeployArgs{
+		CharmID: application.CharmID{
+			URL:    wordpressURL.String(),
+			Origin: commoncharm.Origin{Source: "charm-hub", Base: base, Risk: "stable"},
 		},
-	})
-	s.assertUnitsCreated(c, map[string]string{
-		"customized/0": "0",
-	})
-}
-
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleSetAnnotations(c *gc.C) {
-	s.setupCharm(c, "ch:xenial/wordpress", "wordpress", "bionic")
-	s.setupCharm(c, "ch:xenial/mysql", "mysql", "bionic")
-	s.setupBundle(c, "ch:bundle/wordpress-simple-1", "wordpress-simple", "bionic")
-
-	deploy := s.deployCommandForState()
-	_, err := cmdtesting.RunCommand(c, modelcmd.Wrap(deploy), "ch:bundle/wordpress-simple")
-	c.Assert(err, jc.ErrorIsNil)
-	application, err := s.State.Application("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	ann, err := s.Model.Annotations(application)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ann, jc.DeepEquals, map[string]string{"bundleURL": "ch:bundle/wordpress-simple-1"})
-	application2, err := s.State.Application("mysql")
-	c.Assert(err, jc.ErrorIsNil)
-	ann2, err := s.Model.Annotations(application2)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ann2, jc.DeepEquals, map[string]string{"bundleURL": "ch:bundle/wordpress-simple-1"})
-}
-
-func (s *BundleDeployCharmStoreSuite) TestLXCTreatedAsLXD(c *gc.C) {
-	s.setupCharm(c, "ch:xenial/wordpress-0", "wordpress", "bionic")
-
-	// Note that we use lxc here, to represent a 1.x bundle that specifies lxc.
-	content := `
-        applications:
-            wp:
-                charm: ch:wordpress
-                num_units: 1
-                to:
-                    - lxc:0
-                options:
-                    blog-title: these are the voyages
-            wp2:
-                charm: ch:wordpress
-                num_units: 1
-                to:
-                    - lxc:0
-                options:
-                    blog-title: these are the voyages
-        machines:
-            0:
-                series: xenial
-    `
-	_, output, err := s.DeployBundleYAMLWithOutput(c, content)
-	c.Assert(err, jc.ErrorIsNil)
-	expectedUnits := map[string]string{
-		"wp/0":  "0/lxd/0",
-		"wp2/0": "0/lxd/1",
+		CharmOrigin:     commoncharm.Origin{Source: "charm-hub", Base: base, Risk: "stable"},
+		ApplicationName: "wordpress",
+		NumUnits:        0,
 	}
-	idx := strings.Index(output, "Bundle has one or more containers specified as lxc. lxc containers are deprecated in Juju 2.0. lxd containers will be deployed instead.")
-	lastIdx := strings.LastIndex(output, "Bundle has one or more containers specified as lxc. lxc containers are deprecated in Juju 2.0. lxd containers will be deployed instead.")
-	// The message exists.
-	c.Assert(idx, jc.GreaterThan, -1)
-	// No more than one instance of the message was printed.
-	c.Assert(idx, gc.Equals, lastIdx)
-	s.assertUnitsCreated(c, expectedUnits)
+	s.fakeAPI.Call("Deploy", deployArgs).Returns(error(nil))
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "wordpress",
+		NumUnits:        1,
+	}).Returns([]string{"wordpress/0"}, error(nil))
+	s.fakeAPI.Call("AddRelation",
+		[]interface{}{"wordpress:db", "mysql:server"}, []interface{}{},
+	).Returns(
+		&params.AddRelationResults{},
+		error(nil),
+	)
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	err := s.DeployBundleYAML(c, fmt.Sprintf(`
+      default-base: ubuntu@22.04
+      applications:
+          wordpress:
+              charm: ch:wordpress
+              base: ubuntu@20.04
+              num_units: 1
+          mysql:
+              charm: %s
+              num_units: 1
+      relations:
+          - ["wordpress:db", "mysql:server"]
+  `, mysqlDir.Path))
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleMassiveUnitColocation(c *gc.C) {
-	s.setupCharm(c, "ch:bionic/django-42", "dummy", "bionic")
-	s.setupCharm(c, "ch:bionic/mem-47", "dummy", "bionic")
-	s.setupCharm(c, "ch:bionic/rails-0", "dummy", "bionic")
+func (s *BundleDeploySuite) TestErrorDeployingBundlesRequiringTrust(c *tc.C) {
+	specs := []struct {
+		descr      string
+		bundle     string
+		expAppList []string
+	}{
+		{
+			descr:      "bundle with a single app with the trust field set to true",
+			bundle:     "aws-integrator-trust-single",
+			expAppList: []string{"aws-integrator"},
+		},
+		{
+			descr:      "bundle with a multiple apps with the trust field set to true",
+			bundle:     "aws-integrator-trust-multi",
+			expAppList: []string{"aws-integrator", "gcp-integrator"},
+		},
+		{
+			descr:      "bundle with a single app with a 'trust: true' config option",
+			bundle:     "aws-integrator-trust-conf-param",
+			expAppList: []string{"aws-integrator"},
+		},
+	}
 
-	err := s.DeployBundleYAML(c, `
-       applications:
-           memcached:
-               charm: ch:mem
-               revision: 47
-               channel: stable
-               series: bionic
-               num_units: 3
-               to: [1, 2, 3]
-           django:
-               charm: ch:django
-               revision: 42
-               channel: stable
-               series: bionic
-               num_units: 4
-               to:
-                   - 1
-                   - lxd:memcached
-           ror:
-               charm: ch:rails
-               num_units: 3
-               to:
-                   - 1
-                   - kvm:3
-       machines:
-           1:
-               series: bionic
-           2:
-               series: bionic
-           3:
-               series: bionic
-   `)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertUnitsCreated(c, map[string]string{
-		"django/0":    "0",
-		"django/1":    "0/lxd/0",
-		"django/2":    "1/lxd/0",
-		"django/3":    "2/lxd/0",
-		"memcached/0": "0",
-		"memcached/1": "1",
-		"memcached/2": "2",
-		"ror/0":       "0",
-		"ror/1":       "2/kvm/0",
-		"ror/2":       "3",
-	})
+	for specIndex, spec := range specs {
+		c.Logf("[spec %d] %s", specIndex, spec.descr)
 
-	// Redeploy a very similar bundle with another application unit. The new unit
-	// is placed on the first unit of memcached. Due to ordering of the applications
-	// there is no deterministic way to determine "least crowded" in a meaningful way.
-	content := `
-       applications:
-           memcached:
-               charm: ch:mem
-               revision: 47
-               channel: stable
-               series: bionic
-               num_units: 3
-               to: [1, 2, 3]
-           django:
-               charm: ch:django
-               revision: 42
-               channel: stable
-               series: bionic
-               num_units: 4
-               to:
-                   - 1
-                   - lxd:memcached
-           node:
-               charm: ch:django
-               revision: 42
-               channel: stable
-               series: bionic
-               num_units: 1
-               to:
-                   - lxd:memcached
-       machines:
-           1:
-               series: bionic
-           2:
-               series: bionic
-           3:
-               series: bionic
-   `
-	stdOut, _, err := s.DeployBundleYAMLWithOutput(c, content)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(stdOut, gc.Equals, ""+
-		"Executing changes:\n"+
-		"- deploy application node from charm-hub on bionic using django\n"+
-		"- add unit node/0 to 0/lxd/0 to satisfy [lxd:memcached]",
-	)
+		expErr := fmt.Sprintf(`Bundle cannot be deployed without trusting applications with your cloud credentials.
+Please repeat the deploy command with the --trust argument if you consent to trust the following application(s):
+  - %s`, strings.Join(spec.expAppList, "\n  - "))
 
-	// Redeploy the same bundle again and check that nothing happens.
-	stdOut, _, err = s.DeployBundleYAMLWithOutput(c, content)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(stdOut, gc.Equals, "")
-	s.assertUnitsCreated(c, map[string]string{
-		"django/0":    "0",
-		"django/1":    "0/lxd/0",
-		"django/2":    "1/lxd/0",
-		"django/3":    "2/lxd/0",
-		"memcached/0": "0",
-		"memcached/1": "1",
-		"memcached/2": "2",
-		"node/0":      "0/lxd/1",
-		"ror/0":       "0",
-		"ror/1":       "2/kvm/0",
-		"ror/2":       "3",
-	})
+		bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), spec.bundle)
+		err := s.runDeploy(c, bundlePath)
+		c.Assert(err, tc.Not(tc.IsNil))
+		c.Assert(err.Error(), tc.Equals, expErr)
+	}
 }
 
-func (s *BundleDeployCharmStoreSuite) TestDeployBundleWithAnnotations_OutputIsCorrect(c *gc.C) {
-	s.setupCharm(c, "ch:bionic/django-42", "dummy", "bionic")
-	s.setupCharm(c, "ch:bionic/mem-47", "dummy", "bionic")
-	stdOut, stdErr, err := s.DeployBundleYAMLWithOutput(c, `
-       applications:
-           django:
-               charm: ch:django
-               num_units: 1
-               annotations:
-                   key1: value1
-                   key2: value2
-               to: [1]
-           memcached:
-               charm: ch:mem
-               revision: 47
-               channel: stable
-               series: bionic
-               num_units: 1
-       machines:
-           1:
-               annotations: {foo: bar}
-               series: bionic
-   `)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *BundleDeploySuite) TestDeployBundleWithChannel(c *tc.C) {
+	// The second charm from the bundle does not require trust so no
+	// additional configuration should be injected
+	ubURL := charm.MustParseURL("ch:ubuntu")
+	withCharmRepoResolvable(s.fakeAPI, ubURL, base.Base{})
 
-	c.Check(stdOut, gc.Equals, ""+
-		"Executing changes:\n"+
-		"- upload charm mem from charm-store for series bionic with architecture=amd64\n"+
-		"- upload charm django from charm-store for series bionic with architecture=amd64\n"+
-		"- deploy application memcached from charm-store on bionic using mem\n"+
-		"- deploy application django from charm-store on bionic\n"+
-		"- add new machine 0 (bundle machine 1)\n"+
-		"- add unit memcached/0 to new machine 1\n"+
-		"- add unit django/0 to new machine 0\n"+
-		"- set annotations for new machine 0\n"+
-		"- set annotations for django",
+	withCharmDeployable(
+		s.fakeAPI, ubURL, defaultBase,
+		&charm.Meta{Name: "ubuntu"},
+		false, 0, nil, nil,
 	)
-	c.Check(stdErr, gc.Equals, ""+
-		"Located charm \"django\" in charm-store\n"+
-		"Located charm \"mem\" in charm-store, revision 47\n"+
-		"Deploy of bundle completed.",
+
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "ubuntu",
+		NumUnits:        1,
+	}).Returns([]string{"ubuntu/0"}, error(nil))
+
+	s.fakeAPI.Call("ListSpaces").Returns([]params.Space{{Name: "alpha", Id: "0"}}, error(nil))
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "basic")
+	err := s.runDeploy(c, bundlePath, "--channel", "edge")
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *BundleDeploySuite) TestDeployBundlesRequiringTrust(c *tc.C) {
+	inURL := charm.MustParseURL("ch:aws-integrator")
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
+
+	// The aws-integrator charm requires trust and since the operator passes
+	// --trust we expect to see a "trust: true" config value in the yaml
+	// config passed to deploy.
+	//
+	// As withCharmDeployable does not support passing a "ConfigYAML"
+	// it's easier to just invoke it to set up all other calls and then
+	// explicitly Deploy here.
+	withCharmDeployable(
+		s.fakeAPI, inURL, defaultBase,
+		&charm.Meta{Name: "aws-integrator"},
+		false, 0, nil, nil,
 	)
+
+	origin := commoncharm.Origin{
+		Source: commoncharm.OriginCharmHub,
+		Base:   base.MakeDefaultBase("ubuntu", "22.04"),
+	}
+
+	deployURL := *inURL
+
+	dArgs := application.DeployArgs{
+		CharmID: application.CharmID{
+			URL:    deployURL.String(),
+			Origin: origin,
+		},
+		CharmOrigin:     origin,
+		ApplicationName: inURL.Name,
+		ConfigYAML:      "aws-integrator:\n  trust: \"true\"\n",
+	}
+
+	s.fakeAPI.Call("Deploy", dArgs).Returns(error(nil))
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "aws-integrator",
+		NumUnits:        1,
+	}).Returns([]string{"aws-integrator/0"}, error(nil))
+
+	s.fakeAPI.Call("ListSpaces").Returns([]params.Space{{Name: "alpha", Id: "0"}}, error(nil))
+
+	// The second charm from the bundle does not require trust so no
+	// additional configuration should be injected
+	ubURL := charm.MustParseURL("ch:ubuntu")
+	withCharmRepoResolvable(s.fakeAPI, ubURL, base.MustParseBaseFromString("ubuntu@22.04"))
+	withCharmRepoResolvable(s.fakeAPI, ubURL, base.Base{})
+	withCharmDeployable(
+		s.fakeAPI, ubURL, defaultBase,
+		&charm.Meta{Name: "ubuntu"},
+		false, 0, nil, nil,
+	)
+
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "ubuntu",
+		NumUnits:        1,
+	}).Returns([]string{"ubuntu/0"}, error(nil))
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "aws-integrator-trust-single")
+	err := s.runDeploy(c, bundlePath, "--trust")
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *BundleDeploySuite) TestDeployBundleWithOffers(c *tc.C) {
+	inURL := charm.MustParseURL("ch:apache2")
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
+
+	withCharmDeployable(
+		s.fakeAPI, inURL, defaultBase,
+		&charm.Meta{Name: "apache2"},
+		false, 0, nil, nil,
+	)
+
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "apache2",
+		NumUnits:        1,
+	}).Returns([]string{"apache2/0"}, error(nil))
+
+	s.fakeAPI.Call("Offer",
+		"deadbeef-0bad-400d-8000-4b1d0d06f00d",
+		"apache2",
+		[]string{"apache-website", "website-cache"},
+		"king",
+		"my-offer",
+		"",
+	).Returns([]params.ErrorResult{}, nil)
+
+	s.fakeAPI.Call("Offer",
+		"deadbeef-0bad-400d-8000-4b1d0d06f00d",
+		"apache2",
+		[]string{"apache-website"},
+		"king",
+		"my-other-offer",
+		"",
+	).Returns([]params.ErrorResult{}, nil)
+
+	s.fakeAPI.Call("GrantOffer",
+		"admin",
+		"admin",
+		[]string{"king/sword.my-offer"},
+	).Returns(errors.New(`cannot grant admin access to user admin on offer admin/controller.my-offer: user already has "admin" access or greater`))
+	s.fakeAPI.Call("GrantOffer",
+		"bar",
+		"consume",
+		[]string{"king/sword.my-offer"},
+	).Returns(nil)
+
+	s.fakeAPI.Call("ListSpaces").Returns([]params.Space{{Name: "alpha", Id: "0"}}, error(nil))
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "apache2-with-offers-legacy")
+	err := s.runDeploy(c, bundlePath)
+	c.Assert(err, tc.ErrorIsNil)
+
+	var offerCallCount int
+	var grantOfferCallCount int
+	for _, call := range s.fakeAPI.Calls() {
+		switch call.FuncName {
+		case "Offer":
+			offerCallCount++
+		case "GrantOffer":
+			grantOfferCallCount++
+		}
+	}
+	c.Assert(offerCallCount, tc.Equals, 2)
+	c.Assert(grantOfferCallCount, tc.Equals, 2)
+}
+
+func (s *BundleDeploySuite) TestDeployBundleWithSAAS(c *tc.C) {
+	inURL := charm.MustParseURL("ch:wordpress")
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.MustParseBaseFromString("ubuntu@22.04"))
+	withCharmRepoResolvable(s.fakeAPI, inURL, base.Base{})
+
+	withCharmDeployable(
+		s.fakeAPI, inURL, defaultBase,
+		&charm.Meta{Name: "wordpress"},
+		false, 0, nil, nil,
+	)
+
+	mac, err := jujutesting.NewMacaroon("id")
+	c.Assert(err, tc.ErrorIsNil)
+
+	s.fakeAPI.Call("AddUnits", application.AddUnitsParams{
+		ApplicationName: "wordpress",
+		NumUnits:        1,
+	}).Returns([]string{"wordpress/0"}, error(nil))
+
+	s.fakeAPI.Call("GetConsumeDetails",
+		"admin/default.mysql",
+	).Returns(params.ConsumeOfferDetails{
+		Offer: &params.ApplicationOfferDetailsV5{
+			OfferName: "mysql",
+			OfferURL:  "admin/default.mysql",
+		},
+		Macaroon: mac,
+		ControllerInfo: &params.ExternalControllerInfo{
+			ControllerTag: coretesting.ControllerTag.String(),
+			Addrs:         []string{"192.168.1.0"},
+			Alias:         "controller-alias",
+			CACert:        coretesting.CACert,
+		},
+	}, nil)
+
+	s.fakeAPI.Call("Consume",
+		crossmodel.ConsumeApplicationArgs{
+			Offer: params.ApplicationOfferDetailsV5{
+				OfferName: "mysql",
+				OfferURL:  "test:admin/default.mysql",
+			},
+			ApplicationAlias: "mysql",
+			Macaroon:         mac,
+			ControllerInfo: &crossmodel.ControllerInfo{
+				ControllerUUID: coretesting.ControllerTag.Id(),
+				Alias:          "controller-alias",
+				Addrs:          []string{"192.168.1.0"},
+				CACert:         coretesting.CACert,
+			},
+		},
+	).Returns("mysql", nil)
+
+	s.fakeAPI.Call("AddRelation",
+		[]interface{}{"wordpress:db", "mysql:db"}, []interface{}{},
+	).Returns(
+		&params.AddRelationResults{},
+		error(nil),
+	)
+
+	s.fakeAPI.Call("ListSpaces").Returns([]params.Space{{Name: "alpha", Id: "0"}}, error(nil))
+
+	var args *apiclient.StatusArgs
+	s.fakeAPI.Call("Status", args).Returns(&params.FullStatus{}, nil)
+
+	bundlePath := testcharms.RepoWithSeries("bionic").ClonedBundleDirPath(c.MkDir(), "wordpress-with-saas")
+	err = s.runDeploy(c, bundlePath)
+	c.Assert(err, tc.ErrorIsNil)
 }

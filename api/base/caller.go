@@ -5,19 +5,19 @@ package base
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"runtime/pprof"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/httprequest.v1"
 	"gopkg.in/macaroon.v2"
-)
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/caller_mock.go github.com/juju/juju/api/base APICaller,FacadeCaller
+	coretrace "github.com/juju/juju/core/trace"
+	"github.com/juju/juju/rpc"
+)
 
 // APICaller is implemented by the client-facing State object.
 // It defines the lowest level of API calls and is used by
@@ -28,7 +28,7 @@ type APICaller interface {
 	// APICall makes a call to the API server with the given object type,
 	// id, request and parameters. The response is filled in with the
 	// call's result if the call is successful.
-	APICall(objType string, version int, id, request string, params, response interface{}) error
+	APICall(ctx context.Context, objType string, version int, id, request string, params, response interface{}) error
 
 	// BestFacadeVersion returns the newest version of 'objType' that this
 	// client can use with the current API server.
@@ -52,9 +52,6 @@ type APICaller interface {
 
 	// BakeryClient returns the bakery client for this connection.
 	BakeryClient() MacaroonDischarger
-
-	// Context returns the standard context for this connection.
-	Context() context.Context
 
 	StreamConnector
 	ControllerStreamConnector
@@ -82,7 +79,7 @@ type StreamConnector interface {
 	// when making the initial HTTP request.
 	//
 	// The path must start with a "/".
-	ConnectStream(path string, attrs url.Values) (Stream, error)
+	ConnectStream(ctx context.Context, path string, attrs url.Values) (Stream, error)
 }
 
 // ControllerStreamConnector is implemented by the client-facing State object.
@@ -94,7 +91,7 @@ type ControllerStreamConnector interface {
 	// request.
 	//
 	// The path must be absolute and can't start with "/model".
-	ConnectControllerStream(path string, attrs url.Values, headers http.Header) (Stream, error)
+	ConnectControllerStream(ctx context.Context, path string, attrs url.Values, headers http.Header) (Stream, error)
 }
 
 // Stream represents a streaming connection to the API.
@@ -122,7 +119,7 @@ type FacadeCaller interface {
 	// FacadeCall will place a request against the API using the requested
 	// Facade and the best version that the API server supports that is
 	// also known to the client.
-	FacadeCall(request string, params, response interface{}) error
+	FacadeCall(ctx context.Context, request string, params, response interface{}) error
 
 	// Name returns the facade name.
 	Name() string
@@ -141,17 +138,60 @@ type facadeCaller struct {
 	facadeName  string
 	bestVersion int
 	caller      APICaller
+	tracer      coretrace.Tracer
 }
 
 var _ FacadeCaller = facadeCaller{}
 
+// NewFacadeCaller wraps an APICaller for a given facade name and the
+// best available version.
+func NewFacadeCaller(caller APICaller, facadeName string, options ...Option) FacadeCaller {
+	return NewFacadeCallerForVersion(caller, facadeName, caller.BestFacadeVersion(facadeName), options...)
+}
+
+// NewFacadeCallerForVersion wraps an APICaller for a given facade
+// name and version.
+func NewFacadeCallerForVersion(caller APICaller, facadeName string, version int, options ...Option) FacadeCaller {
+	fc := facadeCaller{
+		facadeName:  facadeName,
+		bestVersion: version,
+		caller:      caller,
+	}
+
+	for _, option := range options {
+		fc = option(fc)
+	}
+
+	return fc
+}
+
 // FacadeCall will place a request against the API using the requested
 // Facade and the best version that the API server supports that is
 // also known to the client. (id is always passed as the empty string.)
-func (fc facadeCaller) FacadeCall(request string, params, response interface{}) (err error) {
-	callInfo := fmt.Sprintf("%s.%s", fc.facadeName, request)
-	pprof.Do(context.Background(), pprof.Labels("rpc->", callInfo), func(ctx context.Context) {
+func (fc facadeCaller) FacadeCall(ctx context.Context, request string, params, response interface{}) (err error) {
+	// If the context doesn't already have a tracer, then inject the one
+	// associated with the facade caller.
+	ctx = coretrace.InjectTracerIfRequired(ctx, fc.tracer)
+
+	// The following trace is used to track the call to the facade.
+	ctx, span := coretrace.Start(ctx, coretrace.NameFromFunc(), coretrace.WithAttributes(
+		coretrace.StringAttr("call.facade", fc.facadeName),
+		coretrace.IntAttr("call.version", fc.bestVersion),
+		coretrace.StringAttr("call.request", request),
+	))
+	defer func() {
+		span.RecordError(err)
+		span.End()
+	}()
+
+	scope := span.Scope()
+	if scope.TraceID() != "" && scope.SpanID() != "" {
+		ctx = rpc.WithTracing(ctx, scope.TraceID(), scope.SpanID(), scope.TraceFlags())
+	}
+
+	pprof.Do(ctx, pprof.Labels(coretrace.OTELTraceID, scope.TraceID()), func(ctx context.Context) {
 		err = fc.caller.APICall(
+			ctx,
 			fc.facadeName, fc.bestVersion, "",
 			request, params, response,
 		)
@@ -179,18 +219,18 @@ func (fc facadeCaller) RawAPICaller() APICaller {
 	return fc.caller
 }
 
-// NewFacadeCaller wraps an APICaller for a given facade name and the
-// best available version.
-func NewFacadeCaller(caller APICaller, facadeName string) FacadeCaller {
-	return NewFacadeCallerForVersion(caller, facadeName, caller.BestFacadeVersion(facadeName))
+// Tracer returns the tracer to use for the facade caller.
+func (fc facadeCaller) Tracer() coretrace.Tracer {
+	return fc.tracer
 }
 
-// NewFacadeCallerForVersion wraps an APICaller for a given facade
-// name and version.
-func NewFacadeCallerForVersion(caller APICaller, facadeName string, version int) FacadeCaller {
-	return facadeCaller{
-		facadeName:  facadeName,
-		bestVersion: version,
-		caller:      caller,
+// Option is a function that can be used to configure a facade caller.
+type Option func(facadeCaller) facadeCaller
+
+// WithTracer sets the tracer to use for the facade caller.
+func WithTracer(tracer coretrace.Tracer) Option {
+	return func(o facadeCaller) facadeCaller {
+		o.tracer = tracer
+		return o
 	}
 }

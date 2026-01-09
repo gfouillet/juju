@@ -10,12 +10,12 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
 )
 
@@ -54,28 +54,22 @@ type PermissionDelegator struct {
 	Token jwt.Token
 }
 
-// TokenEntity represents the entity found within a JWT token and conforms to
-// state.Entity
-type TokenEntity struct {
-	User names.UserTag
-}
-
 // Authenticate implements EntityAuthenticator
-func (j *JWTAuthenticator) Parse(ctx context.Context, tok string) (jwt.Token, TokenEntity, error) {
+func (j *JWTAuthenticator) Parse(ctx context.Context, tok string) (jwt.Token, names.Tag, error) {
 	token, err := j.parser.Parse(ctx, tok)
 	if err != nil {
 		// Return a not implemented error if the parser is not configured.
 		// so that other authenticators are tried by the API server.
 		if errors.Is(err, errors.NotProvisioned) {
-			return nil, TokenEntity{}, errors.Trace(errors.NotImplemented)
+			return nil, nil, errors.Trace(errors.NotImplemented)
 		}
-		return nil, TokenEntity{}, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
-	entity, err := userFromToken(token)
+	userTag, err := userFromToken(token)
 	if err != nil {
-		return nil, TokenEntity{}, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
-	return token, entity, nil
+	return token, userTag, nil
 }
 
 // Authenticate implements EntityAuthenticator
@@ -96,13 +90,13 @@ func (j *JWTAuthenticator) Authenticate(req *http.Request) (authentication.AuthI
 		return authentication.AuthInfo{}, errors.NotFoundf("authorization header format")
 	}
 
-	token, entity, err := j.Parse(req.Context(), rawToken)
+	token, userTag, err := j.Parse(req.Context(), rawToken)
 	if err != nil {
 		return authentication.AuthInfo{}, fmt.Errorf("parsing jwt: %w", err)
 	}
 
 	return authentication.AuthInfo{
-		Entity:    entity,
+		Tag:       userTag,
 		Delegator: &PermissionDelegator{token},
 	}, nil
 }
@@ -110,53 +104,50 @@ func (j *JWTAuthenticator) Authenticate(req *http.Request) (authentication.AuthI
 // AuthenticateLoginRequest implements LoginAuthenticator
 func (j *JWTAuthenticator) AuthenticateLoginRequest(
 	ctx context.Context,
-	_, _ string,
+	_ string,
+	_ model.UUID,
 	authParams authentication.AuthParams,
 ) (authentication.AuthInfo, error) {
 	if authParams.Token == "" {
 		return authentication.AuthInfo{}, fmt.Errorf("auth token %w", errors.NotSupported)
 	}
 
-	token, entity, err := j.Parse(ctx, authParams.Token)
+	token, userTag, err := j.Parse(ctx, authParams.Token)
 	if err != nil {
 		return authentication.AuthInfo{}, fmt.Errorf("parsing login access token: %w", err)
 	}
 
 	return authentication.AuthInfo{
-		Entity:    entity,
+		Tag:       userTag,
 		Delegator: &PermissionDelegator{token},
 	}, nil
 }
 
-// Tag implements state.Entity
-func (t TokenEntity) Tag() names.Tag {
-	return t.User
-}
-
 // SubjectPermissions implements PermissionDelegator
 func (p *PermissionDelegator) SubjectPermissions(
-	e authentication.Entity,
-	subject names.Tag,
+	_ context.Context,
+	userName string,
+	target permission.ID,
 ) (a permission.Access, err error) {
-	if e.Tag().Id() == common.EveryoneTagName {
+	if userName == permission.EveryoneUserName.Name() {
 		// JWT auth process does not support everyone@external.
 		// The everyone@external will be never included in the JWT token at least for now.
 		return permission.NoAccess, nil
 	}
-	tokenEntity, err := userFromToken(p.Token)
+	userTag, err := userFromToken(p.Token)
 	if err != nil {
 		return permission.NoAccess, errors.Trace(err)
 	}
 	// We need to make very sure that the entity the request pertains to
 	// is the same entity this function was seeded with.
-	if tokenEntity.Tag().String() != e.Tag().String() {
+	if userTag.String() != names.NewUserTag(userName).String() {
 		err = fmt.Errorf(
 			"%w to use token permissions for one entity on another",
 			apiservererrors.ErrPerm,
 		)
 		return permission.NoAccess, errors.WithType(err, authentication.ErrorEntityMissingPermission)
 	}
-	return PermissionFromToken(p.Token, subject)
+	return PermissionFromToken(p.Token, target)
 }
 
 // PermissionsError implements PermissionDelegator
@@ -171,27 +162,27 @@ func (p *PermissionDelegator) PermissionError(
 	}
 }
 
-func userFromToken(token jwt.Token) (TokenEntity, error) {
+func userFromToken(token jwt.Token) (names.UserTag, error) {
 	userTag, err := names.ParseUserTag(token.Subject())
 	if err != nil {
-		return TokenEntity{}, errors.Annotate(err, "invalid user tag in authToken")
+		return names.UserTag{}, errors.Annotate(err, "invalid user tag in authToken")
 	}
-	return TokenEntity{userTag}, nil
+	return userTag, nil
 }
 
 // PermissionFromToken will extract the permission a jwt token has for the
 // provided subject. If no permission is found permission.NoAccess will be
 // returned.
-func PermissionFromToken(token jwt.Token, subject names.Tag) (permission.Access, error) {
+func PermissionFromToken(token jwt.Token, subject permission.ID) (permission.Access, error) {
 	var validate func(permission.Access) error
-	switch subject.Kind() {
-	case names.ControllerTagKind:
+	switch subject.ObjectType {
+	case permission.Controller:
 		validate = permission.ValidateControllerAccess
-	case names.ModelTagKind:
+	case permission.Model:
 		validate = permission.ValidateModelAccess
-	case names.CloudTagKind:
+	case permission.Cloud:
 		validate = permission.ValidateCloudAccess
-	case names.ApplicationOfferTagKind:
+	case permission.Offer:
 		validate = permission.ValidateOfferAccess
 	default:
 		return "", errors.NotValidf("%q as a target", subject)
@@ -200,10 +191,42 @@ func PermissionFromToken(token jwt.Token, subject names.Tag) (permission.Access,
 	if !ok || len(accessClaims) == 0 {
 		return permission.NoAccess, nil
 	}
-	access, ok := accessClaims[subject.String()]
+	tag, err := permissionIDToTag(subject)
+	if err != nil {
+		return permission.NoAccess, err
+	}
+	access, ok := accessClaims[tag.String()]
 	if !ok {
 		return permission.NoAccess, nil
 	}
 	result := permission.Access(fmt.Sprintf("%v", access))
 	return result, validate(result)
+}
+
+// permissionIDToTag returns a tag from a permission ID object.
+func permissionIDToTag(id permission.ID) (names.Tag, error) {
+	switch id.ObjectType {
+	case permission.Cloud:
+		if !names.IsValidCloud(id.Key) {
+			return nil, fmt.Errorf("invalid cloud id %q", id.Key)
+		}
+		return names.NewCloudTag(id.Key), nil
+	case permission.Controller:
+		if !names.IsValidController(id.Key) {
+			return nil, fmt.Errorf("invalid controller id %q", id.Key)
+		}
+		return names.NewControllerTag(id.Key), nil
+	case permission.Model:
+		if !names.IsValidModel(id.Key) {
+			return nil, fmt.Errorf("invalid model id %q", id.Key)
+		}
+		return names.NewModelTag(id.Key), nil
+	case permission.Offer:
+		if !names.IsValidApplicationOffer(id.Key) {
+			return nil, fmt.Errorf("invalid application offer id %q", id.Key)
+		}
+		return names.NewApplicationOfferTag(id.Key), nil
+	default:
+		return nil, errors.NotSupportedf("target id type %s", id.ObjectType)
+	}
 }

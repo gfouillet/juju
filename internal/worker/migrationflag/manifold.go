@@ -4,12 +4,14 @@
 package migrationflag
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
 
+	"github.com/juju/errors"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 )
 
 // logger is here to stop the desire of creating a package level logger.
@@ -25,7 +27,7 @@ type ManifoldConfig struct {
 	Check         Predicate
 
 	NewFacade func(base.APICaller) (Facade, error)
-	NewWorker func(Config) (worker.Worker, error)
+	NewWorker func(context.Context, Config) (worker.Worker, error)
 }
 
 // validate is called by start to check for bad configuration.
@@ -46,12 +48,12 @@ func (config ManifoldConfig) validate() error {
 }
 
 // start is a StartFunc for a Worker manifold.
-func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := config.validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var apiCaller base.APICaller
-	if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+	if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 		return nil, errors.Trace(err)
 	}
 	facade, err := config.NewFacade(apiCaller)
@@ -62,7 +64,7 @@ func (config ManifoldConfig) start(context dependency.Context) (worker.Worker, e
 	if !ok {
 		return nil, errors.New("API connection is controller-only (should never happen)")
 	}
-	worker, err := config.NewWorker(Config{
+	worker, err := config.NewWorker(context, Config{
 		Facade: facade,
 		Model:  modelTag.Id(),
 		Check:  config.Check,

@@ -4,26 +4,31 @@
 package errors
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jujutxn "github.com/juju/txn/v3"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/upgrade"
+	modelerrors "github.com/juju/juju/domain/model/errors"
+	secreterrors "github.com/juju/juju/domain/secret/errors"
+	secretbackenderrors "github.com/juju/juju/domain/secretbackend/errors"
+	interrors "github.com/juju/juju/internal/errors"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
-	stateerrors "github.com/juju/juju/state/errors"
 )
 
-var logger = loggo.GetLogger("juju.apiserver.common.errors")
+var logger = internallogger.GetLogger("juju.apiserver.common.errors")
 
 const (
 	// TODO(juju3): move to params
 	ErrBadId              = errors.ConstError("id not found")
-	ErrBadCreds           = errors.ConstError("invalid entity name or password")
+	ErrUnauthorized       = errors.ConstError("invalid entity name or password")
 	ErrNoCreds            = errors.ConstError("no credentials provided")
 	ErrLoginExpired       = errors.ConstError("login expired")
 	ErrPerm               = errors.ConstError("permission denied")
@@ -49,16 +54,10 @@ func OperationBlockedError(msg string) error {
 }
 
 var singletonErrorCodes = map[errors.ConstError]string{
-	stateerrors.ErrCannotEnterScopeYet:           params.CodeCannotEnterScopeYet,
-	stateerrors.ErrCannotEnterScope:              params.CodeCannotEnterScope,
-	stateerrors.ErrUnitHasSubordinates:           params.CodeUnitHasSubordinates,
-	stateerrors.ErrDead:                          params.CodeDead,
-	stateerrors.ErrApplicationShouldNotHaveUnits: params.CodeAppShouldNotHaveUnits,
-	jujutxn.ErrExcessiveContention:               params.CodeExcessiveContention, // TODO(dqlite): remove jujutxn.ErrExcessiveContention from api errors
-	leadership.ErrClaimDenied:                    params.CodeLeadershipClaimDenied,
-	lease.ErrClaimDenied:                         params.CodeLeaseClaimDenied,
+	errors.ConstError(leadership.ErrClaimDenied): params.CodeLeadershipClaimDenied,
+	errors.ConstError(lease.ErrClaimDenied):      params.CodeLeaseClaimDenied,
 	ErrBadId:                                     params.CodeNotFound,
-	ErrBadCreds:                                  params.CodeUnauthorized,
+	ErrUnauthorized:                              params.CodeUnauthorized,
 	ErrNoCreds:                                   params.CodeNoCreds,
 	ErrLoginExpired:                              params.CodeLoginExpired,
 	ErrPerm:                                      params.CodeUnauthorized,
@@ -69,9 +68,22 @@ var singletonErrorCodes = map[errors.ConstError]string{
 	ErrActionNotAvailable:                        params.CodeActionNotAvailable,
 }
 
+// ParamsErrorf is responsible for constructing a [params.Error] with the given
+// code and formatted error message.
+func ParamsErrorf(code string, format string, a ...any) *params.Error {
+	return &params.Error{
+		Code:    code,
+		Message: fmt.Sprintf(format, a...),
+	}
+}
+
 func singletonCode(err error) (string, bool) {
 	if e, is := errors.AsType[errors.ConstError](err); is {
 		code, ok := singletonErrorCodes[e]
+		return code, ok
+	}
+	if e, is := errors.AsType[interrors.ConstError](err); is {
+		code, ok := singletonErrorCodes[errors.ConstError(e)]
 		return code, ok
 	}
 	return "", false
@@ -101,7 +113,11 @@ func ServerErrorAndStatus(err error) (*params.Error, int) {
 		status = http.StatusUnauthorized
 	case params.CodeNotFound,
 		params.CodeUserNotFound,
-		params.CodeModelNotFound:
+		params.CodeModelNotFound,
+		params.CodeSecretNotFound,
+		params.CodeSecretRevisionNotFound,
+		params.CodeSecretConsumerNotFound,
+		params.CodeSecretBackendNotFound:
 		status = http.StatusNotFound
 	case params.CodeBadRequest:
 		status = http.StatusBadRequest
@@ -111,7 +127,8 @@ func ServerErrorAndStatus(err error) (*params.Error, int) {
 		// This should really be http.StatusForbidden but earlier versions
 		// of juju clients rely on the 400 status, so we leave it like that.
 		status = http.StatusBadRequest
-	case params.CodeForbidden:
+	case params.CodeForbidden,
+		params.CodeSecretBackendForbidden:
 		status = http.StatusForbidden
 	case params.CodeDischargeRequired:
 		status = http.StatusUnauthorized
@@ -138,8 +155,8 @@ func ServerError(err error) *params.Error {
 	if err == nil {
 		return nil
 	}
-	if logger.IsTraceEnabled() {
-		logger.Tracef("server RPC error %v", errors.Details(err))
+	if logger.IsLevelEnabled(corelogger.TRACE) {
+		logger.Tracef(context.TODO(), "server RPC error %v", errors.Details(err))
 	}
 
 	var (
@@ -148,11 +165,10 @@ func ServerError(err error) *params.Error {
 	)
 
 	var (
-		dischargeRequiredError       *DischargeRequiredError
-		notLeaderError               *NotLeaderError
-		redirectError                *RedirectError
-		upgradeSeriesValidationError *UpgradeSeriesValidationError
-		accessRequiredError          *AccessRequiredError
+		dischargeRequiredError *DischargeRequiredError
+		notLeaderError         *NotLeaderError
+		redirectError          *RedirectError
+		accessRequiredError    *AccessRequiredError
 	)
 	// Skip past annotations when looking for the code.
 	err = errors.Cause(err)
@@ -165,37 +181,35 @@ func ServerError(err error) *params.Error {
 		code = params.CodeNotFound
 	case errors.Is(err, errors.UserNotFound):
 		code = params.CodeUserNotFound
+	case errors.Is(err, secreterrors.SecretNotFound):
+		code = params.CodeSecretNotFound
+	case errors.Is(err, secreterrors.SecretRevisionNotFound):
+		code = params.CodeSecretRevisionNotFound
+	case errors.Is(err, secreterrors.SecretConsumerNotFound):
+		code = params.CodeSecretConsumerNotFound
+	case errors.Is(err, secretbackenderrors.NotFound):
+		code = params.CodeSecretBackendNotFound
+	case errors.Is(err, modelerrors.NotFound):
+		code = params.CodeModelNotFound
 	case errors.Is(err, errors.AlreadyExists):
 		code = params.CodeAlreadyExists
+	case errors.Is(err, secretbackenderrors.AlreadyExists):
+		code = params.CodeSecretBackendAlreadyExists
 	case errors.Is(err, errors.NotAssigned):
 		code = params.CodeNotAssigned
-	case errors.Is(err, stateerrors.HasAssignedUnitsError):
-		code = params.CodeHasAssignedUnits
-	case errors.Is(err, stateerrors.HasHostedModelsError):
-		code = params.CodeHasHostedModels
-	case errors.Is(err, stateerrors.PersistentStorageError):
-		code = params.CodeHasPersistentStorage
-	case errors.Is(err, stateerrors.ModelNotEmptyError):
-		code = params.CodeModelNotEmpty
 	case errors.Is(err, NoAddressSetError):
 		code = params.CodeNoAddressSet
 	case errors.Is(err, errors.NotProvisioned):
 		code = params.CodeNotProvisioned
 	case errors.Is(err, params.UpgradeInProgressError),
-		errors.Is(err, stateerrors.ErrUpgradeInProgress):
+		errors.Is(err, upgrade.ErrUpgradeInProgress):
 		code = params.CodeUpgradeInProgress
-	case errors.Is(err, stateerrors.HasAttachmentsError):
-		code = params.CodeMachineHasAttachedStorage
-	case errors.Is(err, stateerrors.HasContainersError):
-		code = params.CodeMachineHasContainers
-	case errors.Is(err, stateerrors.StorageAttachedError):
-		code = params.CodeStorageAttached
-	case errors.Is(err, stateerrors.IsControllerMemberError):
-		code = params.CodeTryAgain
 	case errors.Is(err, UnknownModelError):
 		code = params.CodeModelNotFound
 	case errors.Is(err, errors.NotSupported):
 		code = params.CodeNotSupported
+	case errors.Is(err, secretbackenderrors.NotSupported):
+		code = params.CodeSecretBackendNotSupported
 	case errors.Is(err, errors.BadRequest):
 		code = params.CodeBadRequest
 	case errors.Is(err, errors.MethodNotAllowed):
@@ -204,10 +218,16 @@ func ServerError(err error) *params.Error {
 		code = params.CodeNotImplemented
 	case errors.Is(err, errors.Forbidden):
 		code = params.CodeForbidden
+	case errors.Is(err, secretbackenderrors.Forbidden):
+		code = params.CodeSecretBackendForbidden
 	case errors.Is(err, errors.NotValid):
 		code = params.CodeNotValid
-	case errors.Is(err, IncompatibleBaseError), errors.Is(err, stateerrors.IncompatibleBaseError):
+	case errors.Is(err, secretbackenderrors.NotValid):
+		code = params.CodeSecretBackendNotValid
+	case errors.Is(err, IncompatibleBaseError):
 		code = params.CodeIncompatibleBase
+	case errors.Is(err, secreterrors.PermissionDenied):
+		code = params.CodeUnauthorized
 	case errors.As(err, &dischargeRequiredError):
 		code = params.CodeDischargeRequired
 		info = params.DischargeRequiredErrorInfo{
@@ -215,10 +235,6 @@ func ServerError(err error) *params.Error {
 			BakeryMacaroon: dischargeRequiredError.Macaroon,
 			// One macaroon fits all.
 			MacaroonPath: "/",
-		}.AsMap()
-	case errors.As(err, &upgradeSeriesValidationError):
-		info = params.UpgradeSeriesValidationErrorInfo{
-			Status: upgradeSeriesValidationError.Status,
 		}.AsMap()
 	case errors.As(err, &redirectError):
 		code = params.CodeRedirect

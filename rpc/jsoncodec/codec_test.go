@@ -8,35 +8,33 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	stdtesting "testing"
+	"testing"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/jsoncodec"
 )
 
 type suite struct {
-	testing.LoggingSuite
+	testhelpers.LoggingSuite
 }
 
-var _ = gc.Suite(&suite{})
-
-func TestPackage(t *stdtesting.T) {
-	gc.TestingT(t)
+func TestSuite(t *testing.T) {
+	tc.Run(t, &suite{})
 }
 
 type value struct {
 	X string
 }
 
-func (*suite) TestRead(c *gc.C) {
+func (*suite) TestRead(c *tc.C) {
 	for i, test := range []struct {
 		msg        string
 		expectHdr  rpc.Header
 		expectBody interface{}
+		expectErr  string
 	}{{
 		msg: `{"RequestId": 1, "Type": "foo", "Id": "id", "Request": "frob", "Params": {"X": "param"}}`,
 		expectHdr: rpc.Header{
@@ -47,7 +45,7 @@ func (*suite) TestRead(c *gc.C) {
 				Action: "frob",
 			},
 		},
-		expectBody: &value{X: "param"},
+		expectErr: `reading message: version 0 not supported`,
 	}, {
 		msg: `{"RequestId": 2, "Error": "an error", "ErrorCode": "a code"}`,
 		expectHdr: rpc.Header{
@@ -55,13 +53,13 @@ func (*suite) TestRead(c *gc.C) {
 			Error:     "an error",
 			ErrorCode: "a code",
 		},
-		expectBody: new(map[string]interface{}),
+		expectErr: `reading message: version 0 not supported`,
 	}, {
 		msg: `{"RequestId": 3, "Response": {"X": "result"}}`,
 		expectHdr: rpc.Header{
 			RequestId: 3,
 		},
-		expectBody: &value{X: "result"},
+		expectErr: `reading message: version 0 not supported`,
 	}, {
 		msg: `{"RequestId": 4, "Type": "foo", "Version": 2, "Id": "id", "Request": "frob", "Params": {"X": "param"}}`,
 		expectHdr: rpc.Header{
@@ -73,7 +71,7 @@ func (*suite) TestRead(c *gc.C) {
 				Action:  "frob",
 			},
 		},
-		expectBody: &value{X: "param"},
+		expectErr: `reading message: version 0 not supported`,
 	}, {
 		msg: `{"request-id": 1, "type": "foo", "id": "id", "request": "frob", "params": {"X": "param"}}`,
 		expectHdr: rpc.Header{
@@ -135,44 +133,49 @@ func (*suite) TestRead(c *gc.C) {
 		})
 		var hdr rpc.Header
 		err := codec.ReadHeader(&hdr)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(hdr, gc.DeepEquals, test.expectHdr)
+		if test.expectErr != "" {
+			c.Assert(err, tc.ErrorMatches, test.expectErr)
+			continue
+		}
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(hdr, tc.DeepEquals, test.expectHdr)
 
-		c.Assert(hdr.IsRequest(), gc.Equals, test.expectHdr.IsRequest())
+		c.Assert(hdr.IsRequest(), tc.Equals, test.expectHdr.IsRequest())
 
 		body := reflect.New(reflect.ValueOf(test.expectBody).Type().Elem()).Interface()
 		err = codec.ReadBody(body, test.expectHdr.IsRequest())
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(body, gc.DeepEquals, test.expectBody)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(body, tc.DeepEquals, test.expectBody)
 
 		err = codec.ReadHeader(&hdr)
-		c.Assert(err, gc.Equals, io.EOF)
+		c.Assert(err, tc.Equals, io.EOF)
 	}
 }
 
-func (*suite) TestErrorAfterClose(c *gc.C) {
+func (*suite) TestErrorAfterClose(c *tc.C) {
 	conn := &testConn{
 		err: errors.New("some error"),
 	}
 	codec := jsoncodec.New(conn)
 	var hdr rpc.Header
 	err := codec.ReadHeader(&hdr)
-	c.Assert(err, gc.ErrorMatches, "error receiving message: some error")
+	c.Assert(err, tc.ErrorMatches, "receiving message: some error")
 
 	err = codec.Close()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(conn.closed, jc.IsTrue)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(conn.closed, tc.IsTrue)
 
 	err = codec.ReadHeader(&hdr)
-	c.Assert(err, gc.Equals, io.EOF)
+	c.Assert(err, tc.Equals, io.EOF)
 }
 
-func (*suite) TestWrite(c *gc.C) {
+func (*suite) TestWrite(c *tc.C) {
 	for i, test := range []struct {
 		hdr       *rpc.Header
 		body      interface{}
 		isRequest bool
 		expect    string
+		expectErr string
 	}{{
 		hdr: &rpc.Header{
 			RequestId: 1,
@@ -182,15 +185,15 @@ func (*suite) TestWrite(c *gc.C) {
 				Action: "frob",
 			},
 		},
-		body:   &value{X: "param"},
-		expect: `{"RequestId": 1, "Type": "foo","Id":"id", "Request": "frob", "Params": {"X": "param"}}`,
+		body:      &value{X: "param"},
+		expectErr: `writing message: version 0 not supported`,
 	}, {
 		hdr: &rpc.Header{
 			RequestId: 2,
 			Error:     "an error",
 			ErrorCode: "a code",
 		},
-		expect: `{"RequestId": 2, "Error": "an error", "ErrorCode": "a code"}`,
+		expectErr: `writing message: version 0 not supported`,
 	}, {
 		hdr: &rpc.Header{
 			RequestId: 2,
@@ -200,13 +203,13 @@ func (*suite) TestWrite(c *gc.C) {
 				"ignored": "for version0",
 			},
 		},
-		expect: `{"RequestId": 2, "Error": "an error", "ErrorCode": "a code"}`,
+		expectErr: `writing message: version 0 not supported`,
 	}, {
 		hdr: &rpc.Header{
 			RequestId: 3,
 		},
-		body:   &value{X: "result"},
-		expect: `{"RequestId": 3, "Response": {"X": "result"}}`,
+		body:      &value{X: "result"},
+		expectErr: `writing message: version 0 not supported`,
 	}, {
 		hdr: &rpc.Header{
 			RequestId: 4,
@@ -217,8 +220,8 @@ func (*suite) TestWrite(c *gc.C) {
 				Action:  "frob",
 			},
 		},
-		body:   &value{X: "param"},
-		expect: `{"RequestId": 4, "Type": "foo", "Version": 2, "Request": "frob", "Params": {"X": "param"}}`,
+		body:      &value{X: "param"},
+		expectErr: `writing message: version 0 not supported`,
 	}, {
 		hdr: &rpc.Header{
 			RequestId: 1,
@@ -276,14 +279,18 @@ func (*suite) TestWrite(c *gc.C) {
 		var conn testConn
 		codec := jsoncodec.New(&conn)
 		err := codec.WriteMessage(test.hdr, test.body)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(conn.writeMsgs, gc.HasLen, 1)
+		if test.expectErr != "" {
+			c.Assert(err, tc.ErrorMatches, test.expectErr)
+			continue
+		}
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(conn.writeMsgs, tc.HasLen, 1)
 
 		assertJSONEqual(c, conn.writeMsgs[0], test.expect)
 	}
 }
 
-func (*suite) TestDumpRequest(c *gc.C) {
+func (*suite) TestDumpRequest(c *tc.C) {
 	for i, test := range []struct {
 		hdr    rpc.Header
 		body   interface{}
@@ -298,31 +305,31 @@ func (*suite) TestDumpRequest(c *gc.C) {
 			},
 		},
 		body:   struct{ Arg string }{Arg: "an arg"},
-		expect: `{"RequestId":1,"Type":"Foo","Id":"id","Request":"Something","Params":{"Arg":"an arg"}}`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 2,
 		},
 		body:   struct{ Ret string }{Ret: "return value"},
-		expect: `{"RequestId":2,"Response":{"Ret":"return value"}}`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 3,
 		},
-		expect: `{"RequestId":3}`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 4,
 			Error:     "an error",
 			ErrorCode: "an error code",
 		},
-		expect: `{"RequestId":4,"Error":"an error","ErrorCode":"an error code"}`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 5,
 		},
 		body:   make(chan int),
-		expect: `"marshal error: json: unsupported type: chan int"`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 1,
@@ -334,7 +341,7 @@ func (*suite) TestDumpRequest(c *gc.C) {
 			},
 		},
 		body:   struct{ Arg string }{Arg: "an arg"},
-		expect: `{"RequestId":1,"Type":"Foo","Version":2,"Id":"id","Request":"Something","Params":{"Arg":"an arg"}}`,
+		expect: `"version 0 not supported"`,
 	}, {
 		hdr: rpc.Header{
 			RequestId: 1,
@@ -391,23 +398,23 @@ func (*suite) TestDumpRequest(c *gc.C) {
 	}} {
 		c.Logf("test %d; %#v", i, test.hdr)
 		data := jsoncodec.DumpRequest(&test.hdr, test.body)
-		c.Check(string(data), gc.Equals, test.expect)
+		c.Check(string(data), tc.Equals, test.expect)
 	}
 }
 
 // assertJSONEqual compares the json strings v0
 // and v1 ignoring white space.
-func assertJSONEqual(c *gc.C, v0, v1 string) {
+func assertJSONEqual(c *tc.C, v0, v1 string) {
 	var m0, m1 interface{}
 	err := json.Unmarshal([]byte(v0), &m0)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = json.Unmarshal([]byte(v1), &m1)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	data0, err := json.Marshal(m0)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	data1, err := json.Marshal(m1)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(data0), gc.Equals, string(data1))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(data0), tc.Equals, string(data1))
 }
 
 type testConn struct {

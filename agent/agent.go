@@ -5,6 +5,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -16,11 +17,9 @@ import (
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/shell"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
+	"github.com/juju/utils/v4/shell"
 
 	"github.com/juju/juju/agent/constants"
 	"github.com/juju/juju/api"
@@ -28,11 +27,13 @@ import (
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/paths"
-	"github.com/juju/juju/mongo"
+	"github.com/juju/juju/core/semversion"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.agent")
+var logger = internallogger.GetLogger("juju.agent")
 
 const (
 	// BootstrapNonce is used as a nonce for the initial controller machine.
@@ -159,17 +160,15 @@ const (
 	MongoOplogSize    = "MONGO_OPLOG_SIZE"
 	NUMACtlPreference = "NUMA_CTL_PREFERENCE"
 
-	MgoStatsEnabled = "MGO_STATS_ENABLED"
-
 	// LoggingOverride will set the logging for this agent to the value
 	// specified. Model configuration will be ignored and this value takes
 	// precidence for the agent.
 	LoggingOverride = "LOGGING_OVERRIDE"
 
-	LogSinkDBLoggerBufferSize    = "LOGSINK_DBLOGGER_BUFFER_SIZE"
-	LogSinkDBLoggerFlushInterval = "LOGSINK_DBLOGGER_FLUSH_INTERVAL"
-	LogSinkRateLimitBurst        = "LOGSINK_RATELIMIT_BURST"
-	LogSinkRateLimitRefill       = "LOGSINK_RATELIMIT_REFILL"
+	LogSinkLoggerBufferSize    = "LOGSINK_LOGGER_BUFFER_SIZE"
+	LogSinkLoggerFlushInterval = "LOGSINK_LOGGER_FLUSH_INTERVAL"
+	LogSinkRateLimitBurst      = "LOGSINK_RATELIMIT_BURST"
+	LogSinkRateLimitRefill     = "LOGSINK_RATELIMIT_REFILL"
 
 	// These values are used to override various aspects of worker behaviour.
 	// They are used for debugging or testing purposes.
@@ -232,18 +231,14 @@ type Config interface {
 	// elements.
 	WriteCommands(renderer shell.Renderer) ([]string, error)
 
-	// StateServingInfo returns the details needed to run
+	// ControllerAgentInfo returns the details needed to run
 	// a controller and reports whether those details
 	// are available
-	StateServingInfo() (controller.StateServingInfo, bool)
+	ControllerAgentInfo() (controller.ControllerAgentInfo, bool)
 
 	// APIInfo returns details for connecting to the API server and
 	// reports whether the details are available.
 	APIInfo() (*api.Info, bool)
-
-	// MongoInfo returns details for connecting to the controller's mongo
-	// database and reports whether those details are available
-	MongoInfo() (*mongo.MongoInfo, bool)
 
 	// OldPassword returns the fallback password when connecting to the
 	// API server.
@@ -251,7 +246,7 @@ type Config interface {
 
 	// UpgradedToVersion returns the version for which all upgrade steps have been
 	// successfully run, which is also the same as the initially deployed version.
-	UpgradedToVersion() version.Number
+	UpgradedToVersion() semversion.Number
 
 	// LoggingConfig returns the logging config for this agent. Initially this
 	// value is empty, but as the agent gets notified of model agent config
@@ -272,14 +267,6 @@ type Config interface {
 	// collected metrics.
 	MetricsSpoolDir() string
 
-	// MongoMemoryProfile returns the profile to be used when setting
-	// mongo memory usage.
-	MongoMemoryProfile() mongo.MemoryProfile
-
-	// JujuDBSnapChannel returns the channel for installing mongo snaps in
-	// focal or later.
-	JujuDBSnapChannel() string
-
 	// AgentLogfileMaxSizeMB returns the maximum file size in MB of each
 	// agent/controller log file.
 	AgentLogfileMaxSizeMB() int
@@ -295,6 +282,36 @@ type Config interface {
 	// lower the threshold, the more queries will be output. A value of 0
 	// means all queries will be output.
 	QueryTracingThreshold() time.Duration
+
+	// DqliteBusyTimeout returns the busy timeout for dqlite database
+	// operations.
+	DqliteBusyTimeout() time.Duration
+
+	// OpenTelemetryEnabled returns whether the open telemetry is enabled.
+	OpenTelemetryEnabled() bool
+
+	// OpenTelemetryEndpoint returns the endpoint to use for open telemetry
+	// collection.
+	OpenTelemetryEndpoint() string
+
+	// OpenTelemetryInsecure returns if the endpoint is insecure. This is useful
+	// for local/development testing
+	OpenTelemetryInsecure() bool
+
+	// OpenTelemetryStackTraces return if debug stack traces should be enabled
+	// for each span.
+	OpenTelemetryStackTraces() bool
+
+	// OpenTelemetrySampleRatio returns the sample ratio to use for open
+	// telemetry collection.
+	OpenTelemetrySampleRatio() float64
+
+	// OpenTelemetryTailSamplingThreshold returns the threshold for tail-based
+	// sampling. The lower the threshold, the more spans will be sampled.
+	OpenTelemetryTailSamplingThreshold() time.Duration
+
+	// ObjectStoreType returns the type of object store to use.
+	ObjectStoreType() objectstore.BackendType
 
 	// DqlitePort returns the port that should be used by Dqlite. This should
 	// only be set during testing.
@@ -321,7 +338,7 @@ type configSetterOnly interface {
 
 	// SetUpgradedToVersion sets the version that
 	// the agent has successfully upgraded to.
-	SetUpgradedToVersion(newVersion version.Number)
+	SetUpgradedToVersion(newVersion semversion.Number)
 
 	// SetAPIHostPorts sets the API host/port addresses to connect to.
 	SetAPIHostPorts(servers []network.HostPorts) error
@@ -329,20 +346,9 @@ type configSetterOnly interface {
 	// SetCACert sets the CA cert used for validating API connections.
 	SetCACert(string)
 
-	// SetStateServingInfo sets the information needed
+	// SetControllerAgentInfo sets the information needed
 	// to run a controller
-	SetStateServingInfo(info controller.StateServingInfo)
-
-	// SetControllerAPIPort sets the controller API port in the config.
-	SetControllerAPIPort(port int)
-
-	// SetMongoMemoryProfile sets the passed policy as the one to be
-	// used.
-	SetMongoMemoryProfile(mongo.MemoryProfile)
-
-	// SetJujuDBSnapChannel sets the channel for installing mongo snaps
-	// when bootstrapping focal or later.
-	SetJujuDBSnapChannel(string)
+	SetControllerAgentInfo(info controller.ControllerAgentInfo)
 
 	// SetLoggingConfig sets the logging config value for the agent.
 	SetLoggingConfig(string)
@@ -352,6 +358,36 @@ type configSetterOnly interface {
 
 	// SetQueryTracingThreshold sets the threshold for query tracing.
 	SetQueryTracingThreshold(time.Duration)
+
+	// SetDqliteBusyTimeout sets the busy timeout for dqlite database
+	// operations.
+	SetDqliteBusyTimeout(time.Duration)
+
+	// SetOpenTelemetryEnabled sets whether open telemetry is enabled.
+	SetOpenTelemetryEnabled(bool)
+
+	// SetOpenTelemetryEndpoint sets the endpoint to use for open telemetry
+	// collection.
+	SetOpenTelemetryEndpoint(string)
+
+	// SetOpenTelemetryInsecure sets if the endpoint is insecure. This is
+	// useful for local/development testing
+	SetOpenTelemetryInsecure(bool)
+
+	// SetOpenTelemetryStackTraces sets the debug stack traces should be
+	// enabled for each span.
+	SetOpenTelemetryStackTraces(bool)
+
+	// SetOpenTelemetrySampleRatio sets the sample ratio to use for open
+	// telemetry collection.
+	SetOpenTelemetrySampleRatio(float64)
+
+	// SetOpenTelemetryTailSamplingThreshold sets the threshold for tail-based
+	// sampling. The lower the threshold, the more spans will be sampled.
+	SetOpenTelemetryTailSamplingThreshold(time.Duration)
+
+	// SetObjectStoreType sets the type of object store to use.
+	SetObjectStoreType(objectstore.BackendType)
 }
 
 // LogFileName returns the filename for the Agent's log file.
@@ -408,51 +444,63 @@ func (d *apiDetails) clone() *apiDetails {
 }
 
 type configInternal struct {
-	configFilePath         string
-	paths                  Paths
-	tag                    names.Tag
-	nonce                  string
-	controller             names.ControllerTag
-	model                  names.ModelTag
-	jobs                   []model.MachineJob
-	upgradedToVersion      version.Number
-	caCert                 string
-	apiDetails             *apiDetails
-	statePassword          string
-	oldPassword            string
-	servingInfo            *controller.StateServingInfo
-	loggingConfig          string
-	values                 map[string]string
-	mongoMemoryProfile     string
-	jujuDBSnapChannel      string
-	agentLogfileMaxSizeMB  int
-	agentLogfileMaxBackups int
-	queryTracingEnabled    bool
-	queryTracingThreshold  time.Duration
-	dqlitePort             int
+	configFilePath                     string
+	paths                              Paths
+	tag                                names.Tag
+	nonce                              string
+	controller                         names.ControllerTag
+	model                              names.ModelTag
+	jobs                               []model.MachineJob
+	upgradedToVersion                  semversion.Number
+	caCert                             string
+	apiDetails                         *apiDetails
+	statePassword                      string
+	oldPassword                        string
+	controllerAgentInfo                *controller.ControllerAgentInfo
+	loggingConfig                      string
+	values                             map[string]string
+	agentLogfileMaxSizeMB              int
+	agentLogfileMaxBackups             int
+	queryTracingEnabled                bool
+	queryTracingThreshold              time.Duration
+	dqliteBusyTimeout                  time.Duration
+	openTelemetryEnabled               bool
+	openTelemetryEndpoint              string
+	openTelemetryInsecure              bool
+	openTelemetryStackTraces           bool
+	openTelemetrySampleRatio           float64
+	openTelemetryTailSamplingThreshold time.Duration
+	objectStoreType                    objectstore.BackendType
+	dqlitePort                         int
 }
 
 // AgentConfigParams holds the parameters required to create
 // a new AgentConfig.
 type AgentConfigParams struct {
-	Paths                  Paths
-	Jobs                   []model.MachineJob
-	UpgradedToVersion      version.Number
-	Tag                    names.Tag
-	Password               string
-	Nonce                  string
-	Controller             names.ControllerTag
-	Model                  names.ModelTag
-	APIAddresses           []string
-	CACert                 string
-	Values                 map[string]string
-	MongoMemoryProfile     mongo.MemoryProfile
-	JujuDBSnapChannel      string
-	AgentLogfileMaxSizeMB  int
-	AgentLogfileMaxBackups int
-	QueryTracingEnabled    bool
-	QueryTracingThreshold  time.Duration
-	DqlitePort             int
+	Paths                              Paths
+	Jobs                               []model.MachineJob
+	UpgradedToVersion                  semversion.Number
+	Tag                                names.Tag
+	Password                           string
+	Nonce                              string
+	Controller                         names.ControllerTag
+	Model                              names.ModelTag
+	APIAddresses                       []string
+	CACert                             string
+	Values                             map[string]string
+	AgentLogfileMaxSizeMB              int
+	AgentLogfileMaxBackups             int
+	QueryTracingEnabled                bool
+	QueryTracingThreshold              time.Duration
+	DqliteBusyTimeout                  time.Duration
+	OpenTelemetryEnabled               bool
+	OpenTelemetryEndpoint              string
+	OpenTelemetryInsecure              bool
+	OpenTelemetryStackTraces           bool
+	OpenTelemetrySampleRatio           float64
+	OpenTelemetryTailSamplingThreshold time.Duration
+	ObjectStoreType                    objectstore.BackendType
+	DqlitePort                         int
 }
 
 // NewAgentConfig returns a new config object suitable for use for a
@@ -476,7 +524,7 @@ func NewAgentConfig(configParams AgentConfigParams) (ConfigSetterWriter, error) 
 	default:
 		return nil, errors.Errorf("entity tag must be MachineTag, UnitTag, ApplicationTag or ControllerAgentTag, got %T", configParams.Tag)
 	}
-	if configParams.UpgradedToVersion == version.Zero {
+	if configParams.UpgradedToVersion == semversion.Zero {
 		return nil, errors.Trace(requiredError("upgradedToVersion"))
 	}
 	if configParams.Password == "" {
@@ -502,23 +550,29 @@ func NewAgentConfig(configParams AgentConfigParams) (ConfigSetterWriter, error) 
 	// When/if this connection is successful, apicaller worker will generate
 	// a new secure password and update this agent's config.
 	config := &configInternal{
-		paths:                  NewPathsWithDefaults(configParams.Paths),
-		jobs:                   configParams.Jobs,
-		upgradedToVersion:      configParams.UpgradedToVersion,
-		tag:                    configParams.Tag,
-		nonce:                  configParams.Nonce,
-		controller:             configParams.Controller,
-		model:                  configParams.Model,
-		caCert:                 configParams.CACert,
-		oldPassword:            configParams.Password,
-		values:                 configParams.Values,
-		mongoMemoryProfile:     configParams.MongoMemoryProfile.String(),
-		jujuDBSnapChannel:      configParams.JujuDBSnapChannel,
-		agentLogfileMaxSizeMB:  configParams.AgentLogfileMaxSizeMB,
-		agentLogfileMaxBackups: configParams.AgentLogfileMaxBackups,
-		queryTracingEnabled:    configParams.QueryTracingEnabled,
-		queryTracingThreshold:  configParams.QueryTracingThreshold,
-		dqlitePort:             configParams.DqlitePort,
+		paths:                              NewPathsWithDefaults(configParams.Paths),
+		jobs:                               configParams.Jobs,
+		upgradedToVersion:                  configParams.UpgradedToVersion,
+		tag:                                configParams.Tag,
+		nonce:                              configParams.Nonce,
+		controller:                         configParams.Controller,
+		model:                              configParams.Model,
+		caCert:                             configParams.CACert,
+		oldPassword:                        configParams.Password,
+		values:                             configParams.Values,
+		agentLogfileMaxSizeMB:              configParams.AgentLogfileMaxSizeMB,
+		agentLogfileMaxBackups:             configParams.AgentLogfileMaxBackups,
+		queryTracingEnabled:                configParams.QueryTracingEnabled,
+		queryTracingThreshold:              configParams.QueryTracingThreshold,
+		dqliteBusyTimeout:                  configParams.DqliteBusyTimeout,
+		openTelemetryEnabled:               configParams.OpenTelemetryEnabled,
+		openTelemetryEndpoint:              configParams.OpenTelemetryEndpoint,
+		openTelemetryInsecure:              configParams.OpenTelemetryInsecure,
+		openTelemetryStackTraces:           configParams.OpenTelemetryStackTraces,
+		openTelemetrySampleRatio:           configParams.OpenTelemetrySampleRatio,
+		openTelemetryTailSamplingThreshold: configParams.OpenTelemetryTailSamplingThreshold,
+		objectStoreType:                    configParams.ObjectStoreType,
+		dqlitePort:                         configParams.DqlitePort,
 	}
 	if len(configParams.APIAddresses) > 0 {
 		config.apiDetails = &apiDetails{
@@ -537,7 +591,7 @@ func NewAgentConfig(configParams AgentConfigParams) (ConfigSetterWriter, error) 
 
 // NewStateMachineConfig returns a configuration suitable for
 // a machine running the controller.
-func NewStateMachineConfig(configParams AgentConfigParams, serverInfo controller.StateServingInfo) (ConfigSetterWriter, error) {
+func NewStateMachineConfig(configParams AgentConfigParams, serverInfo controller.ControllerAgentInfo) (ConfigSetterWriter, error) {
 	if serverInfo.Cert == "" {
 		return nil, errors.Trace(requiredError("controller cert"))
 	}
@@ -547,9 +601,6 @@ func NewStateMachineConfig(configParams AgentConfigParams, serverInfo controller
 	if serverInfo.CAPrivateKey == "" {
 		return nil, errors.Trace(requiredError("ca cert key"))
 	}
-	if serverInfo.StatePort == 0 {
-		return nil, errors.Trace(requiredError("state port"))
-	}
 	if serverInfo.APIPort == 0 {
 		return nil, errors.Trace(requiredError("api port"))
 	}
@@ -557,7 +608,7 @@ func NewStateMachineConfig(configParams AgentConfigParams, serverInfo controller
 	if err != nil {
 		return nil, err
 	}
-	config.SetStateServingInfo(serverInfo)
+	config.SetControllerAgentInfo(serverInfo)
 	return config, nil
 }
 
@@ -597,7 +648,7 @@ func ReadConfig(configFilePath string) (ConfigSetterWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	logger.Debugf("read agent config, format %q", format.version())
+	logger.Debugf(context.TODO(), "read agent config, format %q", format.version())
 	config.configFilePath = configFilePath
 	return config, nil
 }
@@ -608,7 +659,7 @@ func ParseConfigData(configData []byte) (ConfigSetterWriter, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Debugf("parsing agent config, format %q", format.version())
+	logger.Debugf(context.TODO(), "parsing agent config, format %q", format.version())
 	config.configFilePath = ConfigPath(config.paths.DataDir, config.tag)
 	return config, nil
 }
@@ -623,14 +674,14 @@ func (c0 *configInternal) Clone() Config {
 	for key, val := range c0.values {
 		c1.values[key] = val
 	}
-	if c0.servingInfo != nil {
-		info := *c0.servingInfo
-		c1.servingInfo = &info
+	if c0.controllerAgentInfo != nil {
+		info := *c0.controllerAgentInfo
+		c1.controllerAgentInfo = &info
 	}
 	return &c1
 }
 
-func (c *configInternal) SetUpgradedToVersion(newVersion version.Number) {
+func (c *configInternal) SetUpgradedToVersion(newVersion semversion.Number) {
 	c.upgradedToVersion = newVersion
 }
 
@@ -648,7 +699,7 @@ func (c *configInternal) SetAPIHostPorts(servers []network.HostPorts) error {
 		addrs = append(addrs, hps...)
 	}
 	c.apiDetails.addresses = addrs
-	logger.Debugf("API server address details %q written to agent config as %q", servers, addrs)
+	logger.Debugf(context.TODO(), "API server address details %q written to agent config as %q", servers, addrs)
 	return nil
 }
 
@@ -679,7 +730,7 @@ func (c *configInternal) SetOldPassword(oldPassword string) {
 }
 
 func (c *configInternal) SetPassword(newPassword string) {
-	if c.servingInfo != nil {
+	if c.controllerAgentInfo != nil {
 		c.statePassword = newPassword
 	}
 	if c.apiDetails != nil {
@@ -736,7 +787,7 @@ func (c *configInternal) Nonce() string {
 	return c.nonce
 }
 
-func (c *configInternal) UpgradedToVersion() version.Number {
+func (c *configInternal) UpgradedToVersion() semversion.Number {
 	return c.upgradedToVersion
 }
 
@@ -748,23 +799,17 @@ func (c *configInternal) Value(key string) string {
 	return c.values[key]
 }
 
-func (c *configInternal) StateServingInfo() (controller.StateServingInfo, bool) {
-	if c.servingInfo == nil {
-		return controller.StateServingInfo{}, false
+func (c *configInternal) ControllerAgentInfo() (controller.ControllerAgentInfo, bool) {
+	if c.controllerAgentInfo == nil {
+		return controller.ControllerAgentInfo{}, false
 	}
-	return *c.servingInfo, true
+	return *c.controllerAgentInfo, true
 }
 
-func (c *configInternal) SetStateServingInfo(info controller.StateServingInfo) {
-	c.servingInfo = &info
+func (c *configInternal) SetControllerAgentInfo(info controller.ControllerAgentInfo) {
+	c.controllerAgentInfo = &info
 	if c.statePassword == "" && c.apiDetails != nil {
 		c.statePassword = c.apiDetails.password
-	}
-}
-
-func (c *configInternal) SetControllerAPIPort(port int) {
-	if c.servingInfo != nil {
-		c.servingInfo.ControllerAPIPort = port
 	}
 }
 
@@ -807,30 +852,6 @@ func (c *configInternal) check() error {
 	return nil
 }
 
-// MongoMemoryProfile implements Config.
-func (c *configInternal) MongoMemoryProfile() mongo.MemoryProfile {
-	mprof := mongo.MemoryProfile(c.mongoMemoryProfile)
-	if err := mprof.Validate(); err != nil {
-		return mongo.MemoryProfileLow
-	}
-	return mongo.MemoryProfile(c.mongoMemoryProfile)
-}
-
-// SetMongoMemoryProfile implements configSetterOnly.
-func (c *configInternal) SetMongoMemoryProfile(v mongo.MemoryProfile) {
-	c.mongoMemoryProfile = v.String()
-}
-
-// JujuDBSnapChannel implements Config.
-func (c *configInternal) JujuDBSnapChannel() string {
-	return c.jujuDBSnapChannel
-}
-
-// SetJujuDBSnapChannel implements configSetterOnly.
-func (c *configInternal) SetJujuDBSnapChannel(snapChannel string) {
-	c.jujuDBSnapChannel = snapChannel
-}
-
 // AgentLogfileMaxSizeMB implements Config.
 func (c *configInternal) AgentLogfileMaxSizeMB() int {
 	return c.agentLogfileMaxSizeMB
@@ -859,6 +880,92 @@ func (c *configInternal) QueryTracingThreshold() time.Duration {
 // SetQueryTracingThreshold implements configSetterOnly.
 func (c *configInternal) SetQueryTracingThreshold(v time.Duration) {
 	c.queryTracingThreshold = v
+}
+
+// DqliteBusyTimeout implements Config.
+func (c *configInternal) DqliteBusyTimeout() time.Duration {
+	return c.dqliteBusyTimeout
+}
+
+// SetDqliteBusyTimeout implements configSetterOnly.
+func (c *configInternal) SetDqliteBusyTimeout(v time.Duration) {
+	// If the value is negative, set it to zero, we don't want negative
+	// timeouts. We can't error out here as this method is called from config
+	// change processing and that doesn't handle errors (annoyingly).
+	if v < 0 {
+		v = 0
+	}
+	c.dqliteBusyTimeout = v
+}
+
+// OpenTelemetryEnabled implements Config.
+func (c *configInternal) OpenTelemetryEnabled() bool {
+	return c.openTelemetryEnabled
+}
+
+// SetOpenTelemetryEnabled implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetryEnabled(v bool) {
+	c.openTelemetryEnabled = v
+}
+
+// OpenTelemetryEndpoint implements Config.
+func (c *configInternal) OpenTelemetryEndpoint() string {
+	return c.openTelemetryEndpoint
+}
+
+// SetOpenTelemetryEndpoint implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetryEndpoint(v string) {
+	c.openTelemetryEndpoint = v
+}
+
+// OpenTelemetryInsecure implements Config.
+func (c *configInternal) OpenTelemetryInsecure() bool {
+	return c.openTelemetryInsecure
+}
+
+// SetopenTelemetryInsecure implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetryInsecure(v bool) {
+	c.openTelemetryInsecure = v
+}
+
+// OpenTelemetryStackTraces implements Config.
+func (c *configInternal) OpenTelemetryStackTraces() bool {
+	return c.openTelemetryStackTraces
+}
+
+// SetOpenTelemetryStackTraces implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetryStackTraces(v bool) {
+	c.openTelemetryStackTraces = v
+}
+
+// OpenTelemetrySampleRatio implements Config.
+func (c *configInternal) OpenTelemetrySampleRatio() float64 {
+	return c.openTelemetrySampleRatio
+}
+
+// SetOpenTelemetryStackTraces implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetrySampleRatio(v float64) {
+	c.openTelemetrySampleRatio = v
+}
+
+// OpenTelemetryTailSamplingThreshold implements Config.
+func (c *configInternal) OpenTelemetryTailSamplingThreshold() time.Duration {
+	return c.openTelemetryTailSamplingThreshold
+}
+
+// SetOpenTelemetryTailSamplingThreshold implements configSetterOnly.
+func (c *configInternal) SetOpenTelemetryTailSamplingThreshold(v time.Duration) {
+	c.openTelemetryTailSamplingThreshold = v
+}
+
+// ObjectStoreType implements Config.
+func (c *configInternal) ObjectStoreType() objectstore.BackendType {
+	return c.objectStoreType
+}
+
+// SetObjectStoreType implements configSetterOnly.
+func (c *configInternal) SetObjectStoreType(v objectstore.BackendType) {
+	c.objectStoreType = v
 }
 
 var validAddr = regexp.MustCompile("^.+:[0-9]+$")
@@ -904,21 +1011,15 @@ func (c *configInternal) APIInfo() (*api.Info, bool) {
 	if c.apiDetails == nil || c.apiDetails.addresses == nil {
 		return nil, false
 	}
-	servingInfo, isController := c.StateServingInfo()
+	controllerAgentInfo, isController := c.ControllerAgentInfo()
 	addrs := c.apiDetails.addresses
 	// For controllers, we return only localhost - we should not connect
 	// to other controllers if we can talk locally.
 	if isController {
-		port := servingInfo.APIPort
-		// If the controller has been configured with a controller api port,
-		// we return that instead of the normal api port.
-		if servingInfo.ControllerAPIPort != 0 {
-			port = servingInfo.ControllerAPIPort
-		}
 		// TODO(macgreagoir) IPv6. Ubuntu still always provides IPv4
 		// loopback, and when/if this changes localhost should resolve
 		// to IPv6 loopback in any case (lp:1644009). Review.
-		localAPIAddr := net.JoinHostPort("localhost", strconv.Itoa(port))
+		localAPIAddr := net.JoinHostPort("localhost", strconv.Itoa(controllerAgentInfo.APIPort))
 
 		// TODO (manadart 2023-03-27): This is a temporary change from using
 		// *only* the localhost address, to fix an issue where we can get the
@@ -938,51 +1039,6 @@ func (c *configInternal) APIInfo() (*api.Info, bool) {
 		Tag:      c.tag,
 		Nonce:    c.nonce,
 		ModelTag: c.model,
-	}, true
-}
-
-// MongoInfo is defined on Config interface.
-func (c *configInternal) MongoInfo() (info *mongo.MongoInfo, ok bool) {
-	if c.apiDetails == nil || c.apiDetails.addresses == nil {
-		return nil, false
-	}
-	ssi, ok := c.StateServingInfo()
-	if !ok {
-		return nil, false
-	}
-	addrs := c.apiDetails.addresses
-	var netAddrs network.SpaceAddresses
-	for _, addr := range addrs {
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, false
-		}
-		if host == "localhost" {
-			continue
-		}
-		netAddrs = append(netAddrs, network.NewSpaceAddress(host))
-	}
-	// We should only be connecting to mongo on cloud local addresses,
-	// not fan or public etc.
-	hostPorts := network.SpaceAddressesWithPort(netAddrs, ssi.StatePort)
-	mongoAddrs := hostPorts.AllMatchingScope(network.ScopeMatchCloudLocal)
-
-	// We return localhost first and then all addresses of known API
-	// endpoints - this lets us connect to other Mongo instances and start
-	// state even if our own Mongo has not started yet (see lp:1749383 #1).
-	// TODO(macgreagoir) IPv6. Ubuntu still always provides IPv4 loopback,
-	// and when/if this changes localhost should resolve to IPv6 loopback
-	// in any case (lp:1644009). Review.
-	local := net.JoinHostPort("localhost", strconv.Itoa(ssi.StatePort))
-	mongoAddrs = append([]string{local}, mongoAddrs...)
-	logger.Debugf("potential mongo addresses: %v", mongoAddrs)
-	return &mongo.MongoInfo{
-		Info: mongo.Info{
-			Addrs:  mongoAddrs,
-			CACert: c.caCert,
-		},
-		Password: c.statePassword,
-		Tag:      c.tag,
 	}, true
 }
 

@@ -4,17 +4,17 @@
 package gce
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 // PrecheckInstance verifies that the provided series and constraints
 // are valid for use in creating an instance in this environment.
-func (env *environ) PrecheckInstance(ctx context.ProviderCallContext, args environs.PrecheckInstanceParams) error {
+func (env *environ) PrecheckInstance(ctx context.Context, args environs.PrecheckInstanceParams) error {
 	if _, err := env.DeriveAvailabilityZones(ctx, environs.StartInstanceParams{
 		Placement:         args.Placement,
 		VolumeAttachments: args.VolumeAttachments,
@@ -30,7 +30,7 @@ func (env *environ) PrecheckInstance(ctx context.ProviderCallContext, args envir
 
 	vpcLink, autosubnets, err := env.getVpcInfo(ctx)
 	if err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, errors.Trace(err))
 	}
 	if !autosubnets && vpcLink != nil {
 		subnetworks, err := env.gce.NetworkSubnetworks(ctx, env.cloud.Region, *vpcLink)
@@ -64,7 +64,7 @@ var instanceTypeConstraints = []string{
 
 // ConstraintsValidator returns a Validator value which is used to
 // validate and merge constraints.
-func (env *environ) ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error) {
+func (env *environ) ConstraintsValidator(ctx context.Context) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
 
 	validator.RegisterConflicts(
@@ -92,6 +92,6 @@ func (env *environ) ConstraintsValidator(ctx context.ProviderCallContext) (const
 
 // SupportNetworks returns whether the environment has support to
 // specify networks for applications and machines.
-func (env *environ) SupportNetworks(ctx context.ProviderCallContext) bool {
+func (env *environ) SupportNetworks(ctx context.Context) bool {
 	return false
 }

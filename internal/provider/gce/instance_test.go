@@ -4,10 +4,11 @@
 package gce_test
 
 import (
+	"testing"
+
 	"cloud.google.com/go/compute/apiv1/computepb"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
@@ -20,29 +21,31 @@ type instanceSuite struct {
 	gce.BaseSuite
 }
 
-var _ = gc.Suite(&instanceSuite{})
+func TestInstanceSuite(t *testing.T) {
+	tc.Run(t, &instanceSuite{})
+}
 
-func (s *instanceSuite) TestID(c *gc.C) {
+func (s *instanceSuite) TestID(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 	inst := s.NewEnvironInstance(env, "inst-0")
 	id := inst.Id()
-	c.Assert(id, gc.Equals, instance.Id("inst-0"))
+	c.Assert(id, tc.Equals, instance.Id("inst-0"))
 }
 
-func (s *instanceSuite) TestStatus(c *gc.C) {
+func (s *instanceSuite) TestStatus(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 	inst := s.NewEnvironInstance(env, "inst-0")
-	status := inst.Status(s.CallCtx).Message
-	c.Assert(status, gc.Equals, google.StatusRunning)
+	status := inst.Status(c.Context()).Message
+	c.Assert(status, tc.Equals, google.StatusRunning)
 }
 
-func (s *instanceSuite) TestAddresses(c *gc.C) {
+func (s *instanceSuite) TestAddresses(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -55,16 +58,16 @@ func (s *instanceSuite) TestAddresses(c *gc.C) {
 		Subnetwork: ptr("https://www.googleapis.com/compute/v1/projects/sonic-youth/regions/asia-east1/subnetworks/sub-network1"),
 	}}
 
-	addresses, err := inst.Addresses(s.CallCtx)
-	c.Assert(err, jc.ErrorIsNil)
+	addresses, err := inst.Addresses(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	expectedAddresses := network.ProviderAddresses{
 		network.NewMachineAddress("10.0.10.3", network.WithScope(network.ScopeCloudLocal)).AsProviderAddress(),
 	}
-	c.Assert(addresses, jc.DeepEquals, expectedAddresses)
+	c.Assert(addresses, tc.DeepEquals, expectedAddresses)
 }
 
-func (s *instanceSuite) TestOpenPorts(c *gc.C) {
+func (s *instanceSuite) TestOpenPorts(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -95,11 +98,11 @@ func (s *instanceSuite) TestOpenPorts(c *gc.C) {
 	rules := firewall.IngressRules{
 		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "0.0.0.0/0"),
 	}
-	err := inst.OpenPorts(s.CallCtx, "42", rules)
-	c.Assert(err, jc.ErrorIsNil)
+	err := inst.OpenPorts(c.Context(), "42", rules)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *instanceSuite) TestClosePorts(c *gc.C) {
+func (s *instanceSuite) TestClosePorts(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -121,11 +124,11 @@ func (s *instanceSuite) TestClosePorts(c *gc.C) {
 	rules := firewall.IngressRules{
 		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "0.0.0.0/0"),
 	}
-	err := inst.ClosePorts(s.CallCtx, "42", rules)
-	c.Assert(err, jc.ErrorIsNil)
+	err := inst.ClosePorts(c.Context(), "42", rules)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *instanceSuite) TestPorts(c *gc.C) {
+func (s *instanceSuite) TestPorts(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -143,11 +146,11 @@ func (s *instanceSuite) TestPorts(c *gc.C) {
 	}}, nil)
 
 	inst := s.NewEnvironInstance(env, "inst-0")
-	ports, err := inst.IngressRules(s.CallCtx, "42")
-	c.Assert(err, jc.ErrorIsNil)
+	ports, err := inst.IngressRules(c.Context(), "42")
+	c.Assert(err, tc.ErrorIsNil)
 
 	rules := firewall.IngressRules{
 		firewall.NewIngressRule(network.MustParsePortRange("80/tcp"), "0.0.0.0/0"),
 	}
-	c.Assert(ports, jc.DeepEquals, rules)
+	c.Assert(ports, tc.DeepEquals, rules)
 }

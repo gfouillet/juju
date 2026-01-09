@@ -4,10 +4,10 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // getConstraintsDoc is multi-line since we need to use ` to denote
@@ -57,8 +58,8 @@ const setConstraintsDocExamples = `
 // the constraints and set-constraints commands call
 type ConstraintsAPI interface {
 	Close() error
-	GetModelConstraints() (constraints.Value, error)
-	SetModelConstraints(constraints.Value) error
+	GetModelConstraints(context.Context) (constraints.Value, error)
+	SetModelConstraints(context.Context, constraints.Value) error
 }
 
 // NewModelGetConstraintsCommand returns a command to get model constraints.
@@ -92,11 +93,11 @@ func (c *modelGetConstraintsCommand) Init(args []string) error {
 	return cmd.CheckEmpty(args)
 }
 
-func (c *modelGetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
+func (c *modelGetConstraintsCommand) getAPI(ctx context.Context) (ConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -119,13 +120,13 @@ func (c *modelGetConstraintsCommand) SetFlags(f *gnuflag.FlagSet) {
 }
 
 func (c *modelGetConstraintsCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	cons, err := client.GetModelConstraints()
+	cons, err := client.GetModelConstraints(ctx)
 	if err != nil {
 		return err
 	}
@@ -165,11 +166,11 @@ func (c *modelSetConstraintsCommand) Init(args []string) (err error) {
 	return err
 }
 
-func (c *modelSetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
+func (c *modelSetConstraintsCommand) getAPI(ctx context.Context) (ConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -177,13 +178,13 @@ func (c *modelSetConstraintsCommand) getAPI() (ConstraintsAPI, error) {
 	return client, nil
 }
 
-func (c *modelSetConstraintsCommand) Run(_ *cmd.Context) (err error) {
-	client, err := c.getAPI()
+func (c *modelSetConstraintsCommand) Run(ctx *cmd.Context) (err error) {
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	err = client.SetModelConstraints(c.Constraints)
+	err = client.SetModelConstraints(ctx, c.Constraints)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }

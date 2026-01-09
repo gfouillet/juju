@@ -6,24 +6,22 @@ package caas
 import (
 	"context"
 
-	"github.com/juju/version/v2"
 	core "k8s.io/api/core/v1"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/devices"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
-
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/application_mock.go github.com/juju/juju/caas Application
 
 // Application is for interacting with the CAAS substrate.
 type Application interface {
 	Ensure(config ApplicationConfig) error
 	Exists() (DeploymentState, error)
 	Delete() error
-	Watch() (watcher.NotifyWatcher, error)
+	Watch(context.Context) (watcher.NotifyWatcher, error)
 	WatchReplicas() (watcher.NotifyWatcher, error)
 
 	// ApplicationPodSpec returns the pod spec needed to run the application workload.
@@ -49,13 +47,15 @@ type Application interface {
 	Service() (*Service, error)
 
 	// EnsurePVCs ensures that Persistent Volume Claims (PVCs) are created for the given
-	// filesystems and unit attachments. It creates PVCs based on the provided filesystem
-	// parameters and handles volume attachments for StatefulSet applications. Returns a
-	// cleanup function that can be used to delete the created PVCs if rollback is needed,
+	// filesystems, unit attachments, and storage unique ID. It creates PVCs
+	// based on the provided filesystem parameters and handles volume
+	// attachments for StatefulSet applications. Returns a cleanup function
+	// that can be used to delete the created PVCs if rollback is needed,
 	// and any error encountered during the process.
 	EnsurePVCs(
 		[]storage.KubernetesFilesystemParams,
 		map[string][]storage.KubernetesFilesystemUnitAttachmentParams,
+		string,
 	) error
 
 	ServiceInterface
@@ -92,7 +92,7 @@ type ApplicationState struct {
 // ApplicationConfig is the config passed to the application units.
 type ApplicationConfig struct {
 	// AgentVersion is the Juju version of the agent image.
-	AgentVersion version.Number
+	AgentVersion semversion.Number
 
 	// AgentImagePath is the docker registry URL for the charm container.
 	AgentImagePath string
@@ -151,6 +151,9 @@ type ApplicationConfig struct {
 
 	// CharmUser controls what user the charm/unit agent runs as.
 	CharmUser RunAs
+
+	// StorageUniqueID is used to construct the PVC name for an application.
+	StorageUniqueID string
 }
 
 // ContainerConfig describes a container that is deployed alonside the uniter/charm container.
@@ -159,7 +162,7 @@ type ContainerConfig struct {
 	Name string
 
 	// Image used to create the container.
-	Image resources.DockerImageDetails
+	Image resource.DockerImageDetails
 
 	// Mounts to storage that are to be provided within this container.
 	Mounts []MountConfig

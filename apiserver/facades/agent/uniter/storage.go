@@ -4,80 +4,140 @@
 package uniter
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/common/storagecommon"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/apiserver/internal"
+	coreerrors "github.com/juju/juju/core/errors"
+	corelife "github.com/juju/juju/core/life"
+	corestorage "github.com/juju/juju/core/storage"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/core/watcher"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/domain/blockdevice"
+	blockdeviceerrors "github.com/juju/juju/domain/blockdevice/errors"
+	"github.com/juju/juju/domain/storage"
+	domainstorageerrors "github.com/juju/juju/domain/storage/errors"
+	internalerrors "github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
 // StorageAPI provides access to the Storage API facade.
 type StorageAPI struct {
-	backend    backend
-	storage    storageAccess
-	resources  facade.Resources
-	accessUnit common.GetAuthFunc
+	blockDeviceService         BlockDeviceService
+	applicationService         ApplicationService
+	removalService             RemovalService
+	storageProvisioningService StorageProvisioningService
+	watcherRegistry            facade.WatcherRegistry
+	accessUnit                 common.GetAuthFunc
 }
 
 // newStorageAPI creates a new server-side Storage API facade.
 func newStorageAPI(
-	backend backend,
-	storage storageAccess,
-	resources facade.Resources,
+	blockDeviceService BlockDeviceService,
+	applicationService ApplicationService,
+	removalService RemovalService,
+	storageProvisioningService StorageProvisioningService,
+	watcherRegistry facade.WatcherRegistry,
 	accessUnit common.GetAuthFunc,
 ) (*StorageAPI, error) {
 
 	return &StorageAPI{
-		backend:    backend,
-		storage:    storage,
-		resources:  resources,
-		accessUnit: accessUnit,
+		blockDeviceService:         blockDeviceService,
+		applicationService:         applicationService,
+		removalService:             removalService,
+		storageProvisioningService: storageProvisioningService,
+		watcherRegistry:            watcherRegistry,
+		accessUnit:                 accessUnit,
 	}, nil
 }
 
+func (s *StorageAPI) getUnitUUID(
+	ctx context.Context, tag names.UnitTag,
+) (coreunit.UUID, error) {
+	unitUUID, err := s.applicationService.GetUnitUUID(ctx, coreunit.Name(tag.Id()))
+	switch {
+	case errors.Is(err, coreunit.InvalidUnitName):
+		return "", internalerrors.Errorf(
+			"invalid unit name for %q", tag.Id(),
+		).Add(errors.NotValid)
+	case errors.Is(err, applicationerrors.UnitNotFound):
+		return "", internalerrors.Errorf(
+			"unit %q not found", tag.Id(),
+		).Add(errors.NotFound)
+	case err != nil:
+		return "", internalerrors.Errorf("getting unit UUID for %q: %w", tag.Id(), err)
+	}
+	return unitUUID, nil
+}
+
 // UnitStorageAttachments returns the IDs of storage attachments for a collection of units.
-func (s *StorageAPI) UnitStorageAttachments(args params.Entities) (params.StorageAttachmentIdsResults, error) {
-	canAccess, err := s.accessUnit()
+func (s *StorageAPI) UnitStorageAttachments(ctx context.Context, args params.Entities) (params.StorageAttachmentIdsResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
 		return params.StorageAttachmentIdsResults{}, err
 	}
 	result := params.StorageAttachmentIdsResults{
 		Results: make([]params.StorageAttachmentIdsResult, len(args.Entities)),
 	}
-	for i, entity := range args.Entities {
-		storageAttachmentIds, err := s.getOneUnitStorageAttachmentIds(canAccess, entity.Tag)
-		if err == nil {
-			result.Results[i].Result = params.StorageAttachmentIds{
-				storageAttachmentIds,
-			}
+	one := func(entity string) ([]params.StorageAttachmentId, error) {
+		unitTag, err := names.ParseUnitTag(entity)
+		if err != nil {
+			return nil, internalerrors.Capture(err)
 		}
-		result.Results[i].Error = apiservererrors.ServerError(err)
-	}
-	return result, nil
-}
+		if !canAccess(unitTag) {
+			return nil, apiservererrors.ErrPerm
+		}
 
-func (s *StorageAPI) getOneUnitStorageAttachmentIds(canAccess common.AuthFunc, unitTag string) ([]params.StorageAttachmentId, error) {
-	tag, err := names.ParseUnitTag(unitTag)
-	if err != nil || !canAccess(tag) {
-		return nil, apiservererrors.ErrPerm
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
+		if err != nil {
+			return nil, internalerrors.Capture(err)
+		}
+		sIDs, err := s.storageProvisioningService.GetStorageAttachmentIDsForUnit(ctx, unitUUID)
+		switch {
+		case errors.Is(err, coreerrors.NotValid):
+			return nil, internalerrors.Errorf(
+				"invalid unit uuid for %q", unitTag.Id(),
+			).Add(errors.NotValid)
+		case errors.Is(err, applicationerrors.UnitNotFound):
+			return nil, internalerrors.Errorf(
+				"unit %q not found", unitTag.Id(),
+			).Add(errors.NotFound)
+		case err != nil:
+			return nil, internalerrors.Errorf(
+				"getting storage IDs for unit %q: %w", unitTag.Id(), err,
+			)
+		}
+
+		storageAttachmentIds := make([]params.StorageAttachmentId, 0, len(sIDs))
+		for _, sID := range sIDs {
+			if !names.IsValidStorage(sID) {
+				// This should never happen. But to avoid a panic, we
+				// return an error if we encounter an invalid storage ID.
+				return nil, internalerrors.Errorf(
+					"invalid storage ID %q for unit %q", sID, unitTag.Id(),
+				).Add(errors.NotValid)
+			}
+			storageAttachmentIds = append(storageAttachmentIds, params.StorageAttachmentId{
+				UnitTag:    unitTag.String(),
+				StorageTag: names.NewStorageTag(sID).String(),
+			})
+		}
+		return storageAttachmentIds, nil
 	}
-	stateStorageAttachments, err := s.storage.UnitStorageAttachments(tag)
-	if errors.IsNotFound(err) {
-		return nil, apiservererrors.ErrPerm
-	} else if err != nil {
-		return nil, err
-	}
-	result := make([]params.StorageAttachmentId, len(stateStorageAttachments))
-	for i, stateStorageAttachment := range stateStorageAttachments {
-		result[i] = params.StorageAttachmentId{
-			UnitTag:    unitTag,
-			StorageTag: stateStorageAttachment.StorageInstance().String(),
+	for i, entity := range args.Entities {
+		storageAttachmentIds, err := one(entity.Tag)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		result.Results[i].Result = params.StorageAttachmentIds{
+			Ids: storageAttachmentIds,
 		}
 	}
 	return result, nil
@@ -85,242 +145,343 @@ func (s *StorageAPI) getOneUnitStorageAttachmentIds(canAccess common.AuthFunc, u
 
 // DestroyUnitStorageAttachments marks each storage attachment of the
 // specified units as Dying.
-func (s *StorageAPI) DestroyUnitStorageAttachments(args params.Entities) (params.ErrorResults, error) {
-	canAccess, err := s.accessUnit()
-	if err != nil {
-		return params.ErrorResults{}, err
-	}
+func (s *StorageAPI) DestroyUnitStorageAttachments(ctx context.Context, args params.Entities) (params.ErrorResults, error) {
 	result := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Entities)),
 	}
-	one := func(tag string) error {
-		unitTag, err := names.ParseUnitTag(tag)
-		if err != nil {
-			return err
-		}
-		if !canAccess(unitTag) {
-			return apiservererrors.ErrPerm
-		}
-		return s.storage.DestroyUnitStorageAttachments(unitTag)
-	}
-	for i, entity := range args.Entities {
-		err := one(entity.Tag)
-		result.Results[i].Error = apiservererrors.ServerError(err)
-	}
+	// NOTE: this is a no-op since the storage attachment goes to dying through
+	// the cascade removal of a unit.
 	return result, nil
 }
 
 // StorageAttachments returns the storage attachments with the specified tags.
-func (s *StorageAPI) StorageAttachments(args params.StorageAttachmentIds) (params.StorageAttachmentResults, error) {
-	canAccess, err := s.accessUnit()
+func (s *StorageAPI) StorageAttachments(ctx context.Context, args params.StorageAttachmentIds) (params.StorageAttachmentResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
 		return params.StorageAttachmentResults{}, err
 	}
 	result := params.StorageAttachmentResults{
 		Results: make([]params.StorageAttachmentResult, len(args.Ids)),
 	}
-	for i, id := range args.Ids {
-		storageAttachment, err := s.getOneStorageAttachment(canAccess, id)
-		if err == nil {
-			result.Results[i].Result = storageAttachment
+	one := func(arg params.StorageAttachmentId) (params.StorageAttachment, error) {
+		unitTag, err := names.ParseUnitTag(arg.UnitTag)
+		if err != nil {
+			return params.StorageAttachment{}, internalerrors.Capture(err)
 		}
-		result.Results[i].Error = apiservererrors.ServerError(err)
+		if !canAccess(unitTag) {
+			return params.StorageAttachment{}, apiservererrors.ErrPerm
+		}
+
+		storageTag, err := names.ParseStorageTag(arg.StorageTag)
+		if err != nil {
+			return params.StorageAttachment{}, internalerrors.Capture(err)
+		}
+
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
+		if err != nil {
+			return params.StorageAttachment{}, internalerrors.Capture(err)
+		}
+
+		storageAttachmentUUID, err := s.storageProvisioningService.GetStorageAttachmentUUIDForUnit(
+			ctx, storageTag.Id(), unitUUID,
+		)
+		switch {
+		case errors.Is(err, domainstorageerrors.StorageInstanceNotFound):
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"storage instance %q not found", storageTag.Id(),
+			).Add(coreerrors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageAttachmentNotFound):
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"storage attachment not found for %q %q",
+				storageTag.Id(), unitTag.Id(),
+			).Add(coreerrors.NotFound)
+		case err != nil:
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"getting storage attachment uuid for %q unit %q: %w",
+				storageTag.Id(), arg.UnitTag, err,
+			)
+		}
+
+		info, err := s.storageProvisioningService.GetUnitStorageAttachmentInfo(
+			ctx, storageAttachmentUUID,
+		)
+		switch {
+		case errors.Is(err, domainstorageerrors.StorageAttachmentNotFound):
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"storage attachment %q for unit %q not found",
+				arg.StorageTag, unitTag.Id(),
+			).Add(coreerrors.NotFound)
+		case err != nil:
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"getting storage attachment info for storage %q unit %q: %w",
+				arg.StorageTag, unitTag.Id(), err,
+			)
+		}
+
+		sa := params.StorageAttachment{
+			StorageTag: storageTag.String(),
+			UnitTag:    unitTag.String(),
+		}
+		sa.Life, err = info.Life.Value()
+		if err != nil {
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"invalid life %q for storage attachment %q unit %q: %w",
+				info.Life, arg.StorageTag, unitTag.Id(), err,
+			)
+		}
+
+		if info.Kind == storage.StorageKindFilesystem {
+			if info.FilesystemMountPoint == "" {
+				return params.StorageAttachment{}, internalerrors.Errorf(
+					"mount point for storage attachment %q for unit %q missing",
+					arg.StorageTag, unitTag.Id(),
+				).Add(coreerrors.NotProvisioned)
+			}
+			sa.Kind = params.StorageKindFilesystem
+			sa.Location = info.FilesystemMountPoint
+			return sa, nil
+		} else if info.Kind != storage.StorageKindBlock {
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"invalid kind %q for storage attachment %q unit %q",
+				info.Kind, arg.StorageTag, unitTag.Id(),
+			)
+		}
+
+		if info.BlockDeviceUUID == "" {
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"storage attachment %q for unit %q not provisioned",
+				arg.StorageTag, unitTag.Id(),
+			).Add(coreerrors.NotProvisioned)
+		}
+
+		blockDevice, err := s.blockDeviceService.GetBlockDevice(
+			ctx, info.BlockDeviceUUID)
+		if errors.Is(err, blockdeviceerrors.BlockDeviceNotFound) {
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"block device for storage attachment %q for unit %q missing",
+				arg.StorageTag, unitTag.Id(),
+			).Add(coreerrors.NotProvisioned)
+		} else if err != nil {
+			return params.StorageAttachment{}, internalerrors.Capture(err)
+		}
+
+		devLink := blockdevice.IDLink(blockDevice.DeviceLinks)
+		if devLink == "" {
+			return params.StorageAttachment{}, internalerrors.Errorf(
+				"block device link for storage attachment %q for unit %q missing",
+				arg.StorageTag, unitTag.Id(),
+			).Add(coreerrors.NotProvisioned)
+		}
+
+		sa.Kind = params.StorageKindBlock
+		sa.Location = devLink
+
+		return sa, nil
+	}
+	for i, arg := range args.Ids {
+		sa, err := one(arg)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		result.Results[i].Result = sa
 	}
 	return result, nil
 }
 
 // StorageAttachmentLife returns the lifecycle state of the storage attachments
 // with the specified tags.
-func (s *StorageAPI) StorageAttachmentLife(args params.StorageAttachmentIds) (params.LifeResults, error) {
-	canAccess, err := s.accessUnit()
+func (s *StorageAPI) StorageAttachmentLife(ctx context.Context, args params.StorageAttachmentIds) (params.LifeResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
 		return params.LifeResults{}, err
 	}
 	result := params.LifeResults{
 		Results: make([]params.LifeResult, len(args.Ids)),
 	}
-	for i, id := range args.Ids {
-		stateStorageAttachment, err := s.getOneStateStorageAttachment(canAccess, id)
-		if err == nil {
-			life := stateStorageAttachment.Life()
-			result.Results[i].Life = life.Value()
+	one := func(arg params.StorageAttachmentId) (corelife.Value, error) {
+		unitTag, err := names.ParseUnitTag(arg.UnitTag)
+		if err != nil {
+			return "", internalerrors.Capture(err)
 		}
-		result.Results[i].Error = apiservererrors.ServerError(err)
+		if !canAccess(unitTag) {
+			return "", apiservererrors.ErrPerm
+		}
+
+		storageTag, err := names.ParseStorageTag(arg.StorageTag)
+		if err != nil {
+			return "", internalerrors.Capture(err)
+		}
+		storageID, err := corestorage.ParseID(storageTag.Id())
+		if errors.Is(err, corestorage.InvalidStorageID) {
+			return "", internalerrors.Errorf(
+				"invalid storage ID %q for unit %q", storageTag.Id(), unitTag.Id(),
+			).Add(errors.NotValid)
+		} else if err != nil {
+			return "", internalerrors.Errorf(
+				"parsing storage ID %q for unit %q: %w", storageTag.Id(), unitTag.Id(), err,
+			)
+		}
+
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
+		if err != nil {
+			return "", internalerrors.Capture(err)
+		}
+
+		life, err := s.storageProvisioningService.GetStorageAttachmentLife(ctx, unitUUID, storageID.String())
+		switch {
+		case errors.Is(err, coreerrors.NotValid):
+			return "", internalerrors.Errorf(
+				"invalid unit UUID %q for %q", unitUUID, unitTag.Id(),
+			).Add(errors.NotValid)
+		case errors.Is(err, applicationerrors.UnitNotFound):
+			return "", internalerrors.Errorf(
+				"unit %q not found", unitTag.Id(),
+			).Add(errors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageInstanceNotFound):
+			return "", internalerrors.Errorf(
+				"storage instance %q not found for unit %q", storageID, unitTag.Id(),
+			).Add(errors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageAttachmentNotFound):
+			return "", internalerrors.Errorf(
+				"storage attachment %q for unit %q not found", arg.StorageTag, unitTag.Id(),
+			).Add(errors.NotFound)
+		case err != nil:
+			return "", internalerrors.Errorf(
+				"getting storage attachment life for storage %q unit %q: %w",
+				arg.StorageTag, unitTag.Id(), err,
+			)
+		}
+		return life.Value()
+	}
+	for i, arg := range args.Ids {
+		life, err := one(arg)
+		if err != nil {
+			result.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+		result.Results[i].Life = life
 	}
 	return result, nil
-}
-
-func (s *StorageAPI) getOneStorageAttachment(canAccess common.AuthFunc, id params.StorageAttachmentId) (params.StorageAttachment, error) {
-	stateStorageAttachment, err := s.getOneStateStorageAttachment(canAccess, id)
-	if err != nil {
-		return params.StorageAttachment{}, err
-	}
-	return s.fromStateStorageAttachment(stateStorageAttachment)
-}
-
-func (s *StorageAPI) getOneStateStorageAttachment(canAccess common.AuthFunc, id params.StorageAttachmentId) (state.StorageAttachment, error) {
-	unitTag, err := names.ParseUnitTag(id.UnitTag)
-	if err != nil {
-		return nil, err
-	}
-	if !canAccess(unitTag) {
-		return nil, apiservererrors.ErrPerm
-	}
-	storageTag, err := names.ParseStorageTag(id.StorageTag)
-	if err != nil {
-		return nil, err
-	}
-	return s.storage.StorageAttachment(storageTag, unitTag)
-}
-
-func (s *StorageAPI) fromStateStorageAttachment(stateStorageAttachment state.StorageAttachment) (params.StorageAttachment, error) {
-	var hostTag names.Tag
-	hostTag = stateStorageAttachment.Unit()
-	u, err := s.backend.Unit(hostTag.Id())
-	if err != nil {
-		return params.StorageAttachment{}, err
-	}
-	if u.ShouldBeAssigned() {
-		hostTag, err = unitAssignedMachine(s.backend, stateStorageAttachment.Unit())
-		if err != nil {
-			return params.StorageAttachment{}, err
-		}
-	}
-
-	info, err := storagecommon.StorageAttachmentInfo(
-		s.storage, s.storage.VolumeAccess(), s.storage.FilesystemAccess(), stateStorageAttachment, hostTag)
-	if err != nil {
-		return params.StorageAttachment{}, err
-	}
-	stateStorageInstance, err := s.storage.StorageInstance(stateStorageAttachment.StorageInstance())
-	if err != nil {
-		return params.StorageAttachment{}, err
-	}
-	var ownerTag string
-	if owner, ok := stateStorageInstance.Owner(); ok {
-		ownerTag = owner.String()
-	}
-	return params.StorageAttachment{
-		stateStorageAttachment.StorageInstance().String(),
-		ownerTag,
-		stateStorageAttachment.Unit().String(),
-		params.StorageKind(stateStorageInstance.Kind()),
-		info.Location,
-		life.Value(stateStorageAttachment.Life().String()),
-	}, nil
 }
 
 // WatchUnitStorageAttachments creates watchers for a collection of units,
 // each of which can be used to watch for lifecycle changes to the corresponding
 // unit's storage attachments.
-func (s *StorageAPI) WatchUnitStorageAttachments(args params.Entities) (params.StringsWatchResults, error) {
-	canAccess, err := s.accessUnit()
+func (s *StorageAPI) WatchUnitStorageAttachments(ctx context.Context, args params.Entities) (params.StringsWatchResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
 		return params.StringsWatchResults{}, err
 	}
+
+	one := func(tag string) (watcher.StringsWatcher, error) {
+		unitTag, err := names.ParseUnitTag(tag)
+		if err != nil {
+			return nil, internalerrors.Errorf("parsing unit tag %q: %w", tag, err)
+		}
+		if !canAccess(unitTag) {
+			return nil, apiservererrors.ErrPerm
+		}
+
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
+		if err != nil {
+			return nil, internalerrors.Capture(err)
+		}
+
+		w, err := s.storageProvisioningService.WatchStorageAttachmentsForUnit(ctx, unitUUID)
+		if err != nil {
+			return nil, internalerrors.Capture(err)
+		}
+		return w, nil
+	}
+
 	results := params.StringsWatchResults{
 		Results: make([]params.StringsWatchResult, len(args.Entities)),
 	}
 	for i, entity := range args.Entities {
-		result, err := s.watchOneUnitStorageAttachments(entity.Tag, canAccess)
-		if err == nil {
-			results.Results[i] = result
+		w, err := one(entity.Tag)
+		if err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+			continue
 		}
-		results.Results[i].Error = apiservererrors.ServerError(err)
+
+		if results.Results[i].StringsWatcherId, results.Results[i].Changes, err = internal.EnsureRegisterWatcher(
+			ctx, s.watcherRegistry, w,
+		); err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+		}
 	}
 	return results, nil
-}
-
-func (s *StorageAPI) watchOneUnitStorageAttachments(tag string, canAccess func(names.Tag) bool) (params.StringsWatchResult, error) {
-	nothing := params.StringsWatchResult{}
-	unitTag, err := names.ParseUnitTag(tag)
-	if err != nil || !canAccess(unitTag) {
-		return nothing, apiservererrors.ErrPerm
-	}
-	watch := s.storage.WatchStorageAttachments(unitTag)
-	if changes, ok := <-watch.Changes(); ok {
-		return params.StringsWatchResult{
-			StringsWatcherId: s.resources.Register(watch),
-			Changes:          changes,
-		}, nil
-	}
-	return nothing, watcher.EnsureErr(watch)
 }
 
 // WatchStorageAttachments creates watchers for a collection of storage
 // attachments, each of which can be used to watch changes to storage
 // attachment info.
-func (s *StorageAPI) WatchStorageAttachments(args params.StorageAttachmentIds) (params.NotifyWatchResults, error) {
-	canAccess, err := s.accessUnit()
+func (s *StorageAPI) WatchStorageAttachments(ctx context.Context, args params.StorageAttachmentIds) (params.NotifyWatchResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
 		return params.NotifyWatchResults{}, err
 	}
+
+	one := func(id params.StorageAttachmentId) (watcher.NotifyWatcher, error) {
+		unitTag, err := names.ParseUnitTag(id.UnitTag)
+		if err != nil {
+			return nil, internalerrors.Errorf("parsing unit tag %q: %w", id.UnitTag, err)
+		}
+		if !canAccess(unitTag) {
+			return nil, apiservererrors.ErrPerm
+		}
+		storageTag, err := names.ParseStorageTag(id.StorageTag)
+		if err != nil {
+			return nil, internalerrors.Errorf("parsing storage tag %q: %w", id.StorageTag, err)
+		}
+
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
+		if err != nil {
+			return nil, internalerrors.Capture(err)
+		}
+		storageAttachmentUUID, err := s.storageProvisioningService.GetStorageAttachmentUUIDForUnit(ctx, storageTag.Id(), unitUUID)
+		switch {
+		case errors.Is(err, applicationerrors.UnitNotFound):
+			return nil, internalerrors.Errorf(
+				"unit %q not found", unitTag.Id(),
+			).Add(coreerrors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageInstanceNotFound):
+			return nil, internalerrors.Errorf(
+				"storage instance %q not found", storageTag.Id(),
+			).Add(coreerrors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageAttachmentNotFound):
+			return nil, internalerrors.Errorf(
+				"storage attachment not found for %q %q", storageTag.Id(), unitTag.Id(),
+			).Add(coreerrors.NotFound)
+		case err != nil:
+			return nil, internalerrors.Errorf(
+				"getting storage attachment uuid for %q unit %q: %w",
+				storageTag.Id(), id.UnitTag, err,
+			)
+		}
+		w, err := s.storageProvisioningService.WatchStorageAttachment(ctx, storageAttachmentUUID)
+		if err != nil {
+			return nil, internalerrors.Errorf(
+				"watching storage attachment for %q unit %q: %w",
+				storageTag.Id(), id.UnitTag, err,
+			)
+		}
+		return w, nil
+	}
+
 	results := params.NotifyWatchResults{
 		Results: make([]params.NotifyWatchResult, len(args.Ids)),
 	}
 	for i, id := range args.Ids {
-		result, err := s.watchOneStorageAttachment(id, canAccess)
-		if err == nil {
-			results.Results[i] = result
-		}
-		results.Results[i].Error = apiservererrors.ServerError(err)
-	}
-	return results, nil
-}
-
-func (s *StorageAPI) watchOneStorageAttachment(id params.StorageAttachmentId, canAccess func(names.Tag) bool) (params.NotifyWatchResult, error) {
-	// Watching a storage attachment is implemented as watching the
-	// underlying volume or filesystem attachment. The only thing
-	// we don't necessarily see in doing this is the lifecycle state
-	// changes, but these may be observed by using the
-	// WatchUnitStorageAttachments watcher.
-	nothing := params.NotifyWatchResult{}
-	unitTag, err := names.ParseUnitTag(id.UnitTag)
-	if err != nil || !canAccess(unitTag) {
-		return nothing, apiservererrors.ErrPerm
-	}
-	storageTag, err := names.ParseStorageTag(id.StorageTag)
-	if err != nil {
-		return nothing, err
-	}
-
-	var hostTag names.Tag
-	hostTag = unitTag
-	u, err := s.backend.Unit(unitTag.Id())
-	if err != nil {
-		return nothing, err
-	}
-	if u.ShouldBeAssigned() {
-		hostTag, err = unitAssignedMachine(s.backend, unitTag)
+		w, err := one(id)
 		if err != nil {
-			return nothing, err
+			results.Results[i].Error = apiservererrors.ServerError(err)
+			continue
 		}
-	}
-	watch, err := watchStorageAttachment(
-		s.storage, s.storage.VolumeAccess(), s.storage.FilesystemAccess(), storageTag, hostTag, unitTag)
-	if err != nil {
-		return nothing, errors.Trace(err)
-	}
-	if _, ok := <-watch.Changes(); ok {
-		return params.NotifyWatchResult{
-			NotifyWatcherId: s.resources.Register(watch),
-		}, nil
-	}
-	return nothing, watcher.EnsureErr(watch)
-}
-
-// RemoveStorageAttachments removes the specified storage
-// attachments from state.
-func (s *StorageAPI) RemoveStorageAttachments(args params.StorageAttachmentIds) (params.ErrorResults, error) {
-	canAccess, err := s.accessUnit()
-	if err != nil {
-		return params.ErrorResults{}, err
-	}
-	results := params.ErrorResults{
-		Results: make([]params.ErrorResult, len(args.Ids)),
-	}
-	for i, id := range args.Ids {
-		err := s.removeOneStorageAttachment(id, canAccess)
+		results.Results[i].NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(
+			ctx, s.watcherRegistry, w,
+		)
 		if err != nil {
 			results.Results[i].Error = apiservererrors.ServerError(err)
 		}
@@ -328,124 +489,77 @@ func (s *StorageAPI) RemoveStorageAttachments(args params.StorageAttachmentIds) 
 	return results, nil
 }
 
-func (s *StorageAPI) removeOneStorageAttachment(id params.StorageAttachmentId, canAccess func(names.Tag) bool) error {
-	unitTag, err := names.ParseUnitTag(id.UnitTag)
+// RemoveStorageAttachments removes the specified storage
+// attachments from state.
+func (s *StorageAPI) RemoveStorageAttachments(ctx context.Context, args params.StorageAttachmentIds) (params.ErrorResults, error) {
+	canAccess, err := s.accessUnit(ctx)
 	if err != nil {
-		return err
-	}
-	if !canAccess(unitTag) {
-		return apiservererrors.ErrPerm
-	}
-	storageTag, err := names.ParseStorageTag(id.StorageTag)
-	if err != nil {
-		return err
-	}
-	// TODO (anastasiamac 2019-04-04) We can now force storage removal
-	// but for now, while we have not an arg passed in, just hardcode.
-	err = s.storage.RemoveStorageAttachment(storageTag, unitTag, false)
-	if errors.IsNotFound(err) {
-		err = nil
-	}
-	return err
-}
-
-// addStorageToOneUnitOperation returns a ModelOperation for adding storage to
-// the specified unit.
-func (s *StorageAPI) addStorageToOneUnitOperation(unitTag names.UnitTag, addParams params.StorageAddParams, curCons map[string]state.StorageConstraints) (state.ModelOperation, error) {
-	validCons, err := validConstraints(addParams, curCons)
-	if err != nil {
-		return nil, errors.Annotatef(err, "adding storage %v for %v", addParams.StorageName, addParams.UnitTag)
+		return params.ErrorResults{}, err
 	}
 
-	modelOp, err := s.storage.AddStorageForUnitOperation(unitTag, addParams.StorageName, validCons)
-	if err != nil {
-		return nil, errors.Annotatef(err, "adding storage %v for %v", addParams.StorageName, addParams.UnitTag)
-	}
-
-	return modelOp, nil
-}
-
-func validConstraints(
-	p params.StorageAddParams,
-	cons map[string]state.StorageConstraints,
-) (state.StorageConstraints, error) {
-	emptyCons := state.StorageConstraints{}
-
-	result, ok := cons[p.StorageName]
-	if !ok {
-		return emptyCons, errors.NotFoundf("storage %q", p.StorageName)
-	}
-
-	onlyCount := params.StorageConstraints{Count: p.Constraints.Count}
-	if p.Constraints != onlyCount {
-		return emptyCons, errors.New("only count can be specified")
-	}
-
-	if p.Constraints.Count == nil || *p.Constraints.Count == 0 {
-		return emptyCons, errors.New("count must be specified")
-	}
-
-	result.Count = *p.Constraints.Count
-	return result, nil
-}
-
-// watchStorageAttachment returns a state.NotifyWatcher that reacts to changes
-// to the VolumeAttachmentInfo or FilesystemAttachmentInfo corresponding to the
-// tags specified.
-func watchStorageAttachment(
-	st storageInterface,
-	stVolume storageVolumeInterface,
-	stFile storageFilesystemInterface,
-	storageTag names.StorageTag,
-	hostTag names.Tag,
-	unitTag names.UnitTag,
-) (state.NotifyWatcher, error) {
-	storageInstance, err := st.StorageInstance(storageTag)
-	if err != nil {
-		return nil, errors.Annotate(err, "getting storage instance")
-	}
-	var watchers []state.NotifyWatcher
-	switch storageInstance.Kind() {
-	case state.StorageKindBlock:
-		if stVolume == nil {
-			return nil, errors.NotImplementedf("BlockStorage instance")
-		}
-		volume, err := stVolume.StorageInstanceVolume(storageTag)
+	one := func(id params.StorageAttachmentId) error {
+		unitTag, err := names.ParseUnitTag(id.UnitTag)
 		if err != nil {
-			return nil, errors.Annotate(err, "getting storage volume")
+			return internalerrors.Errorf(
+				"parsing unit tag %q: %w", id.UnitTag, err,
+			)
 		}
-		// We need to watch both the volume attachment, and the
-		// machine's block devices. A volume attachment's block
-		// device could change (most likely, become present).
-		watchers = []state.NotifyWatcher{
-			stVolume.WatchVolumeAttachment(hostTag, volume.VolumeTag()),
+		if !canAccess(unitTag) {
+			return apiservererrors.ErrPerm
+		}
+		storageTag, err := names.ParseStorageTag(id.StorageTag)
+		if err != nil {
+			return internalerrors.Errorf(
+				"parsing storage tag %q: %w", id.StorageTag, err,
+			)
 		}
 
-		// TODO(caas) - we currently only support block devices on machines.
-		if hostTag.Kind() == names.MachineTagKind {
-			// TODO(axw) 2015-09-30 #1501203
-			// We should filter the events to only those relevant
-			// to the volume attachment. This means we would need
-			// to either start th block device watcher after we
-			// have provisioned the volume attachment (cleaner?),
-			// or have the filter ignore changes until the volume
-			// attachment is provisioned.
-			watchers = append(watchers, stVolume.WatchBlockDevices(hostTag.(names.MachineTag)))
-		}
-	case state.StorageKindFilesystem:
-		if stFile == nil {
-			return nil, errors.NotImplementedf("FilesystemStorage instance")
-		}
-		filesystem, err := stFile.StorageInstanceFilesystem(storageTag)
+		unitUUID, err := s.getUnitUUID(ctx, unitTag)
 		if err != nil {
-			return nil, errors.Annotate(err, "getting storage filesystem")
+			return internalerrors.Capture(err)
 		}
-		watchers = []state.NotifyWatcher{
-			stFile.WatchFilesystemAttachment(hostTag, filesystem.FilesystemTag()),
+		uuid, err := s.storageProvisioningService.GetStorageAttachmentUUIDForUnit(
+			ctx, storageTag.Id(), unitUUID)
+		switch {
+		case errors.Is(err, domainstorageerrors.StorageAttachmentNotFound):
+			// Storage attachment was already removed.
+			return nil
+		case errors.Is(err, applicationerrors.UnitNotFound):
+			return internalerrors.Errorf(
+				"unit %q not found", unitTag.Id(),
+			).Add(coreerrors.NotFound)
+		case errors.Is(err, domainstorageerrors.StorageInstanceNotFound):
+			return internalerrors.Errorf(
+				"storage instance %q not found", storageTag.Id(),
+			).Add(coreerrors.NotFound)
+		case err != nil:
+			return internalerrors.Errorf(
+				"getting storage attachment uuid for %q unit %q: %w",
+				storageTag.Id(), id.UnitTag, err,
+			)
 		}
-	default:
-		return nil, errors.Errorf("invalid storage kind %v", storageInstance.Kind())
+
+		err = s.removalService.MarkStorageAttachmentAsDead(ctx, uuid)
+		if errors.Is(err, domainstorageerrors.StorageAttachmentNotFound) {
+			// Storage attachment was already removed.
+			return nil
+		} else if err != nil {
+			return internalerrors.Errorf(
+				"marking storage attachment for %q unit %q as dead: %w",
+				storageTag.Id(), id.UnitTag, err,
+			)
+		}
+		return nil
 	}
-	watchers = append(watchers, st.WatchStorageAttachment(storageTag, unitTag))
-	return common.NewMultiNotifyWatcher(watchers...), nil
+
+	results := params.ErrorResults{
+		Results: make([]params.ErrorResult, len(args.Ids)),
+	}
+	for i, id := range args.Ids {
+		err := one(id)
+		if err != nil {
+			results.Results[i].Error = apiservererrors.ServerError(err)
+		}
+	}
+	return results, nil
 }

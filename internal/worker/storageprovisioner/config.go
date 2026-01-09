@@ -6,35 +6,25 @@ package storageprovisioner
 import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/internal/worker/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/storage"
 )
-
-// Logger represents the methods used by the worker to log details.
-type Logger interface {
-	Tracef(string, ...interface{})
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // Config holds configuration and dependencies for a storageprovisioner worker.
 type Config struct {
-	Model                names.ModelTag
-	Scope                names.Tag
-	StorageDir           string
-	Applications         ApplicationWatcher
-	Volumes              VolumeAccessor
-	Filesystems          FilesystemAccessor
-	Life                 LifecycleManager
-	Registry             storage.ProviderRegistry
-	Machines             MachineAccessor
-	Status               StatusSetter
-	Clock                clock.Clock
-	Logger               Logger
-	CloudCallContextFunc common.CloudCallContextFunc
+	Model       names.ModelTag
+	Scope       names.Tag
+	StorageDir  string
+	Volumes     VolumeAccessor
+	Filesystems FilesystemAccessor
+	Life        LifecycleManager
+	Registry    storage.ProviderRegistry
+	Machines    MachineAccessor
+	Status      StatusSetter
+	Clock       clock.Clock
+	Logger      logger.Logger
 }
 
 // Validate returns an error if the config cannot be relied upon to start a worker.
@@ -56,9 +46,6 @@ func (config Config) Validate() error {
 	case names.ApplicationTag:
 		if config.StorageDir != "" {
 			return errors.NotValidf("application Scope with StorageDir")
-		}
-		if config.Applications == nil {
-			return errors.NotValidf("nil Applications")
 		}
 	default:
 		return errors.NotValidf("%T Scope", config.Scope)
@@ -83,9 +70,6 @@ func (config Config) Validate() error {
 	}
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")
-	}
-	if config.CloudCallContextFunc == nil {
-		return errors.NotValidf("nil CloudCallContextFunc")
 	}
 	return nil
 }

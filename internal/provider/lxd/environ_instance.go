@@ -4,16 +4,16 @@
 package lxd
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/version/v2"
+	"context"
 
-	"github.com/juju/juju/container/lxd"
+	"github.com/juju/errors"
+
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/internal/provider/common"
+	"github.com/juju/juju/internal/container/lxd"
 )
 
 // Instances returns the available instances in the environment that
@@ -21,7 +21,7 @@ import (
 // instances, the result at the corresponding index will be nil. In that
 // case the error will be environs.ErrPartialInstances (or
 // ErrNoInstances if none of the IDs match an instance).
-func (env *environ) Instances(ctx context.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error) {
+func (env *environ) Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error) {
 	if len(ids) == 0 {
 		return nil, environs.ErrNoInstances
 	}
@@ -32,9 +32,8 @@ func (env *environ) Instances(ctx context.ProviderCallContext, ids []instance.Id
 		// for each ID into the result. If there is a problem then we
 		// will return either ErrPartialInstances or ErrNoInstances.
 		// TODO(ericsnow) Skip returning here only for certain errors?
-		logger.Errorf("failed to get instances from LXD: %v", err)
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		err = errors.Trace(err)
+		logger.Errorf(ctx, "failed to get instances from LXD: %v", err)
+		err = errors.Trace(env.HandleCredentialError(ctx, err))
 	}
 
 	// Build the result, matching the provided instance IDs.
@@ -95,11 +94,10 @@ func (env *environ) prefixedInstances(prefix string) ([]*environInstance, error)
 
 // ControllerInstances returns the IDs of the instances corresponding
 // to juju controllers.
-func (env *environ) ControllerInstances(ctx context.ProviderCallContext, controllerUUID string) ([]instance.Id, error) {
+func (env *environ) ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error) {
 	containers, err := env.server().AliveContainers("juju-")
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return nil, errors.Trace(err)
+		return nil, errors.Trace(env.HandleCredentialError(ctx, err))
 	}
 
 	var results []instance.Id
@@ -119,11 +117,10 @@ func (env *environ) ControllerInstances(ctx context.ProviderCallContext, control
 
 // AdoptResources updates the controller tags on all instances to have the
 // new controller id. It's part of the Environ interface.
-func (env *environ) AdoptResources(ctx context.ProviderCallContext, controllerUUID string, fromVersion version.Number) error {
+func (env *environ) AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error {
 	instances, err := env.AllInstances(ctx)
 	if err != nil {
-		common.HandleCredentialError(IsAuthorisationFailure, err, ctx)
-		return errors.Annotate(err, "all instances")
+		return errors.Annotate(env.HandleCredentialError(ctx, err), "all instances")
 	}
 
 	var failed []instance.Id
@@ -137,7 +134,7 @@ func (env *environ) AdoptResources(ctx context.ProviderCallContext, controllerUU
 		// holding would be consistent with that on the server.
 		err := env.server().UpdateContainerConfig(string(id), map[string]string{qualifiedKey: controllerUUID})
 		if err != nil {
-			logger.Errorf("error setting controller uuid tag for %q: %v", id, err)
+			logger.Errorf(ctx, "error setting controller uuid tag for %q: %v", id, err)
 			failed = append(failed, id)
 		}
 	}

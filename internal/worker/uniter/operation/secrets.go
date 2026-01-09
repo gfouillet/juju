@@ -4,6 +4,7 @@
 package operation
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -30,8 +31,8 @@ func (op *noOpSecretsRemoved) String() string {
 }
 
 // Commit is part of the Operation interface.
-func (op *noOpSecretsRemoved) Commit(state State) (*State, error) {
-	err := op.callbacks.SecretsRemoved(op.deletedRevisions, op.deletedObsoleteRevisions)
+func (op *noOpSecretsRemoved) Commit(ctx context.Context, state State) (*State, error) {
+	err := op.callbacks.SecretsRemoved(ctx, op.deletedRevisions, op.deletedObsoleteRevisions)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

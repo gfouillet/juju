@@ -4,9 +4,11 @@
 package imagemetadata
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
+	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/arch"
@@ -140,11 +142,7 @@ type ImageConstraint struct {
 
 func NewImageConstraint(params simplestreams.LookupParams, imageID *string) (*ImageConstraint, error) {
 	if len(params.Releases) == 0 {
-		workloadVersions, err := corebase.AllWorkloadVersions()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		params.Releases = workloadVersions.SortedValues()
+		params.Releases = transform.Slice(corebase.WorkloadBases(), func(b corebase.Base) string { return b.Channel.Track })
 	}
 	if len(params.Arches) == 0 {
 		params.Arches = arch.AllSupportedArches
@@ -156,15 +154,6 @@ const (
 	// Used to specify the released image metadata.
 	ReleasedStream = "released"
 )
-
-// ImageRelease maps a base to an image version.
-func ImageRelease(base corebase.Base) (string, error) {
-	if base.OS != "centos" {
-		return base.Channel.Track, nil
-	}
-	// Centos requires special handling.
-	return "centos" + base.Channel.Track, nil
-}
 
 // idStream returns the string to use in making a product id
 // for the given product stream.
@@ -222,7 +211,7 @@ func (im *ImageMetadata) productId() string {
 // server.
 type SimplestreamsFetcher interface {
 	NewDataSource(simplestreams.Config) simplestreams.DataSource
-	GetMetadata([]simplestreams.DataSource, simplestreams.GetMetadataParams) ([]interface{}, *simplestreams.ResolveInfo, error)
+	GetMetadata(context.Context, []simplestreams.DataSource, simplestreams.GetMetadataParams) ([]interface{}, *simplestreams.ResolveInfo, error)
 }
 
 // Fetch returns a list of images for the specified cloud matching the
@@ -230,7 +219,7 @@ type SimplestreamsFetcher interface {
 // which has a file is the one used.
 // Signed data is preferred, but if there is no signed data available and
 // onlySigned is false, then unsigned data is used.
-func Fetch(fetcher SimplestreamsFetcher, sources []simplestreams.DataSource, cons *ImageConstraint) ([]*ImageMetadata, *simplestreams.ResolveInfo, error) {
+func Fetch(ctx context.Context, fetcher SimplestreamsFetcher, sources []simplestreams.DataSource, cons *ImageConstraint) ([]*ImageMetadata, *simplestreams.ResolveInfo, error) {
 	params := simplestreams.GetMetadataParams{
 		StreamsVersion:   currentStreamsVersion,
 		LookupConstraint: cons,
@@ -241,7 +230,7 @@ func Fetch(fetcher SimplestreamsFetcher, sources []simplestreams.DataSource, con
 		},
 	}
 
-	items, resolveInfo, err := fetcher.GetMetadata(sources, params)
+	items, resolveInfo, err := fetcher.GetMetadata(ctx, sources, params)
 	if err != nil {
 		return nil, resolveInfo, err
 	}

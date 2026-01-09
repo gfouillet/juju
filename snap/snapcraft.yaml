@@ -1,5 +1,5 @@
 name: juju
-version: 3.6.13
+version: 4.0.1
 summary: Juju - a model-driven operator lifecycle manager for K8s and machines
 license: AGPL-3.0
 description: |
@@ -124,7 +124,7 @@ parts:
       autoupdate
       ./autogen.sh
       ./configure --disable-shared --disable-gssapi --prefix "${CRAFT_STAGE}/snap-linux-musl"
-      
+
       make install
 
   libnsl:
@@ -150,7 +150,7 @@ parts:
       autoconf
 
       ./configure --disable-shared --prefix "${CRAFT_STAGE}/snap-linux-musl"
-      
+
       make install
 
   libuv:
@@ -224,7 +224,7 @@ parts:
       - libuv
       - libsqlite3
     source: https://github.com/canonical/dqlite.git
-    source-tag: v1.16.7
+    source-tag: v1.18.3-fixed
     source-type: git
     source-depth: 1
     plugin: nil
@@ -262,6 +262,7 @@ parts:
       set -ex
 
       # TODO: use make plugin.
+      export GOTOOLCHAIN=go1.25.0+auto
       export CC=musl-gcc
       export PKG_CONFIG_PATH="${CRAFT_STAGE}/snap-linux-musl/lib/pkgconfig"
       export PACKAGES="libuv dqlite liblz4 sqlite3"
@@ -272,7 +273,8 @@ parts:
       export CGO_LDFLAGS_ALLOW="(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"
       export GO_LDFLAGS='-s -w -extldflags "-static" -linkmode "external" -X github.com/juju/juju/version.GitCommit= -X github.com/juju/juju/version.GitTreeState= -X github.com/juju/juju/version.Grade= -X github.com/juju/juju/version.build='
       go mod download
-      go install -tags libsqlite3,dqlite -ldflags "${GO_LDFLAGS}" github.com/juju/juju/cmd/jujud
+      go install -tags libsqlite3,dqlite -ldflags "${GO_LDFLAGS}" github.com/juju/juju/cmd/jujud-controller
+      mv ${SNAPCRAFT_PART_INSTALL}/bin/jujud-controller ${SNAPCRAFT_PART_INSTALL}/bin/jujud
 
   juju:
     after:
@@ -285,6 +287,7 @@ parts:
       set -ex
 
       # TODO: use make plugin.
+      export GOTOOLCHAIN=go1.25.0+auto
       export GOBIN="${CRAFT_PART_INSTALL}/bin"
       export CGO_ENABLED=0
       export GO_LDFLAGS='-s -w -extldflags "-static" -X github.com/juju/juju/version.GitCommit= -X github.com/juju/juju/version.GitTreeState= -X github.com/juju/juju/version.Grade= -X github.com/juju/juju/version.build='

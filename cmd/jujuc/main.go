@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -13,19 +14,19 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3/exec"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4/exec"
 
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/debug/coveruploader"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
 	"github.com/juju/juju/juju/sockets"
 )
 
-var logger = loggo.GetLogger("juju.cmd.jujud")
+var logger = internallogger.GetLogger("juju.cmd.jujud")
 
 func init() {
 	rand.Seed(time.Now().UTC().UnixNano())
@@ -33,10 +34,10 @@ func init() {
 }
 
 const (
-	// exit_err is the value that is returned when the user has run juju in an invalid way.
-	exit_err = 2
-	// exit_panic is the value that is returned when we exit due to an unhandled panic.
-	exit_panic = 3
+	// ExitStatusCodeErr is the value that is returned when the user has run juju in an invalid way.
+	ExitStatusCodeErr = 2
+	// ExitStatusCodePanic is the value that is returned when we exit due to an unhandled panic.
+	ExitStatusCodePanic = 3
 )
 
 func getenv(name string) (string, error) {
@@ -181,15 +182,15 @@ func Main(args []string) int {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			buf = buf[:runtime.Stack(buf, false)]
-			logger.Criticalf("Unhandled panic: \n%v\n%s", r, buf)
-			os.Exit(exit_panic)
+			logger.Criticalf(context.TODO(), "Unhandled panic: \n%v\n%s", r, buf)
+			os.Exit(ExitStatusCodePanic)
 		}
 	}()
 
 	ctx, err := cmd.DefaultContext()
 	if err != nil {
 		cmd.WriteError(os.Stderr, err)
-		os.Exit(exit_err)
+		os.Exit(ExitStatusCodeErr)
 	}
 
 	var code int

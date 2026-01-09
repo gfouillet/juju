@@ -4,17 +4,19 @@
 package application
 
 import (
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
+	"context"
+	"time"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cmd/juju/application/deployer"
 	"github.com/juju/juju/cmd/juju/application/refresher"
 	"github.com/juju/juju/cmd/juju/application/store"
 	"github.com/juju/juju/cmd/juju/application/utils"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewRefreshCommandForTest(
@@ -41,25 +43,11 @@ func NewRefreshCommandForTest(
 		NewRefresherFactory:   refresher.NewRefresherFactory,
 		ModelConfigClient:     newModelConfigClient,
 		NewCharmHubClient:     newCharmHubClient,
+		RetryGetCharmCount:    1,
+		RetryGetCharmDelay:    1 * time.Millisecond,
 	}
 	cmd.SetClientStore(store)
 	cmd.SetAPIOpen(apiOpen)
-	return modelcmd.Wrap(cmd)
-}
-
-func NewRefreshCommandForStateTest(
-	newCharmAdder NewCharmAdderFunc,
-	newCharmClient func(base.APICallCloser) utils.CharmClient,
-	deployResources deployer.DeployResourcesFunc,
-	newCharmAPIClient func(conn base.APICallCloser) CharmRefreshClient,
-) cmd.Command {
-	cmd := newRefreshCommand()
-	cmd.NewCharmAdder = newCharmAdder
-	cmd.NewCharmClient = newCharmClient
-	if newCharmAPIClient != nil {
-		cmd.NewCharmRefreshClient = newCharmAPIClient
-	}
-	cmd.DeployResources = deployResources
 	return modelcmd.Wrap(cmd)
 }
 
@@ -93,7 +81,7 @@ func NewAddUnitCommandForTest(api applicationAddUnitAPI, store jujuclient.Client
 }
 
 // NewAddUnitCommandForTest returns an AddUnitCommand with the api provided as specified as well as overrides the refresh function.
-func NewAddUnitCommandForTestWithRefresh(api applicationAddUnitAPI, store jujuclient.ClientStore, refreshFunc func(jujuclient.ClientStore, string) error) modelcmd.ModelCommand {
+func NewAddUnitCommandForTestWithRefresh(api applicationAddUnitAPI, store jujuclient.ClientStore, refreshFunc func(context.Context, jujuclient.ClientStore, string) error) modelcmd.ModelCommand {
 	cmd := &addUnitCommand{api: api}
 	cmd.SetClientStore(store)
 	cmd.SetModelRefresh(refreshFunc)
@@ -122,7 +110,7 @@ func NewAddRelationCommandForTest(addAPI applicationAddRelationAPI, consumeAPI a
 
 // NewRemoveRelationCommandForTest returns an RemoveRelationCommand with the api provided as specified.
 func NewRemoveRelationCommandForTest(api ApplicationDestroyRelationAPI, store jujuclient.ClientStore) modelcmd.ModelCommand {
-	cmd := &removeRelationCommand{newAPIFunc: func() (ApplicationDestroyRelationAPI, error) {
+	cmd := &removeRelationCommand{newAPIFunc: func(ctx context.Context) (ApplicationDestroyRelationAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -140,21 +128,9 @@ func NewConsumeCommandForTest(
 	return modelcmd.Wrap(c)
 }
 
-// NewSetApplicationBaseCommandForTest returns a SetSeriesCommand with the specified api.
-func NewSetApplicationBaseCommandForTest(
-	setApplicationBaseAPI setApplicationBaseAPI,
-	store jujuclient.ClientStore,
-) modelcmd.ModelCommand {
-	cmd := &setApplicationBase{
-		apiClient: setApplicationBaseAPI,
-	}
-	cmd.SetClientStore(store)
-	return modelcmd.Wrap(cmd)
-}
-
 // NewSuspendRelationCommandForTest returns a SuspendRelationCommand with the api provided as specified.
 func NewSuspendRelationCommandForTest(api SetRelationSuspendedAPI, store jujuclient.ClientStore) modelcmd.ModelCommand {
-	cmd := &suspendRelationCommand{newAPIFunc: func() (SetRelationSuspendedAPI, error) {
+	cmd := &suspendRelationCommand{newAPIFunc: func(ctx context.Context) (SetRelationSuspendedAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -163,7 +139,7 @@ func NewSuspendRelationCommandForTest(api SetRelationSuspendedAPI, store jujucli
 
 // NewResumeRelationCommandForTest returns a ResumeRelationCommand with the api provided as specified.
 func NewResumeRelationCommandForTest(api SetRelationSuspendedAPI, store jujuclient.ClientStore) modelcmd.ModelCommand {
-	cmd := &resumeRelationCommand{newAPIFunc: func() (SetRelationSuspendedAPI, error) {
+	cmd := &resumeRelationCommand{newAPIFunc: func(ctx context.Context) (SetRelationSuspendedAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -172,7 +148,7 @@ func NewResumeRelationCommandForTest(api SetRelationSuspendedAPI, store jujuclie
 
 // NewRemoveSaasCommandForTest returns a RemoveSaasCommand with the api provided as specified.
 func NewRemoveSaasCommandForTest(api RemoveSaasAPI, store jujuclient.ClientStore) modelcmd.ModelCommand {
-	cmd := &removeSaasCommand{newAPIFunc: func() (RemoveSaasAPI, error) {
+	cmd := &removeSaasCommand{newAPIFunc: func(ctx context.Context) (RemoveSaasAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -181,7 +157,7 @@ func NewRemoveSaasCommandForTest(api RemoveSaasAPI, store jujuclient.ClientStore
 
 // NewScaleCommandForTest returns a ScaleCommand with the api provided as specified.
 func NewScaleCommandForTest(api scaleApplicationAPI, store jujuclient.ClientStore) modelcmd.ModelCommand {
-	cmd := &scaleApplicationCommand{newAPIFunc: func() (scaleApplicationAPI, error) {
+	cmd := &scaleApplicationCommand{newAPIFunc: func(ctx context.Context) (scaleApplicationAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -190,11 +166,11 @@ func NewScaleCommandForTest(api scaleApplicationAPI, store jujuclient.ClientStor
 
 func NewDiffBundleCommandForTest(api base.APICallCloser,
 	charmStoreFn func(base.APICallCloser, *charm.URL) (BundleResolver, error),
-	modelConsFn func() (ModelConstraintsClient, error),
+	modelConsFn func(ctx context.Context) (ModelConstraintsClient, error),
 	store jujuclient.ClientStore,
 ) modelcmd.ModelCommand {
 	cmd := &diffBundleCommand{
-		newAPIRootFn: func() (base.APICallCloser, error) {
+		newAPIRootFn: func(ctx context.Context) (base.APICallCloser, error) {
 			return api, nil
 		},
 		modelConstraintsClientFunc: modelConsFn,
@@ -209,7 +185,7 @@ func NewDiffBundleCommandForTest(api base.APICallCloser,
 }
 
 func NewShowCommandForTest(api ApplicationsInfoAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &showApplicationCommand{newAPIFunc: func() (ApplicationsInfoAPI, error) {
+	cmd := &showApplicationCommand{newAPIFunc: func(ctx context.Context) (ApplicationsInfoAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)
@@ -217,7 +193,7 @@ func NewShowCommandForTest(api ApplicationsInfoAPI, store jujuclient.ClientStore
 }
 
 func NewShowUnitCommandForTest(api UnitsInfoAPI, store jujuclient.ClientStore) cmd.Command {
-	cmd := &showUnitCommand{newAPIFunc: func() (UnitsInfoAPI, error) {
+	cmd := &showUnitCommand{newAPIFunc: func(ctx context.Context) (UnitsInfoAPI, error) {
 		return api, nil
 	}}
 	cmd.SetClientStore(store)

@@ -7,9 +7,6 @@
 ## Summary
 Lists disabled commands.
 
-## Usage
-```juju disabled-commands [options] ```
-
 ### Options
 | Flag | Default | Usage |
 | --- | --- | --- |
@@ -58,7 +55,6 @@ Commands that can be disabled are grouped based on logical operations as follows
     destroy-controller
     destroy-model
     disable-user
-    enable-ha
     enable-user
     expose
     import-filesystem

@@ -5,6 +5,7 @@ package user
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -14,26 +15,26 @@ import (
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/httprequest.v1"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/authentication"
 	apibase "github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/loginprovider"
-	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/juju/interact"
 	"github.com/juju/juju/cmd/modelcmd"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/pki"
 	"github.com/juju/juju/juju"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/pki"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -77,8 +78,8 @@ const loginExamples = `
 var (
 	apiOpen          = (*modelcmd.CommandBase).APIOpen
 	newAPIConnection = juju.NewAPIConnection
-	listModels       = func(c api.Connection, userName string) ([]apibase.UserModel, error) {
-		return modelmanager.NewClient(c).ListModels(userName)
+	listModels       = func(ctx context.Context, c api.Connection, userName string) ([]apibase.UserModel, error) {
+		return modelmanager.NewClient(c).ListModels(ctx, userName)
 	}
 	// loginClientStore is used as the client store. When it is nil,
 	// the default client store will be used.
@@ -171,7 +172,7 @@ func (c *loginCommand) run(ctx *cmd.Context) error {
 	switch {
 	case c.controllerName == "" && c.domain == "":
 		current, err := modelcmd.DetermineCurrentController(store)
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			return errors.Annotatef(err, "cannot get current controller")
 		}
 		c.controllerName = current
@@ -193,7 +194,7 @@ func (c *loginCommand) run(ctx *cmd.Context) error {
 	var controllerDetails *jujuclient.ControllerDetails
 	if c.controllerName != "" {
 		d, err := store.ControllerByName(c.controllerName)
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 		controllerDetails = d
@@ -217,7 +218,7 @@ func (c *loginCommand) run(ctx *cmd.Context) error {
 		// Fetch current details for the specified controller name so we
 		// can tell if the logged in user has changed.
 		d, err := store.AccountDetails(c.controllerName)
-		if err != nil && !errors.IsNotFound(err) {
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			return errors.Trace(err)
 		}
 		oldAccountDetails = d
@@ -286,7 +287,7 @@ use "juju unregister %s" to remove the existing controller.`[1:], c.domain, c.co
 	}
 	// Now list the models available so we can show them and store their
 	// details locally.
-	models, err := listModels(conn, accountDetails.User)
+	models, err := listModels(ctx, conn, accountDetails.User)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -306,7 +307,7 @@ func (c *loginCommand) existingControllerLogin(ctx *cmd.Context, store jujuclien
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		return newAPIConnection(args)
+		return newAPIConnection(ctx, args)
 	}
 
 	return c.login(ctx, currentAccountDetails, dial)
@@ -326,7 +327,7 @@ func (c *loginCommand) publicControllerLogin(
 	}
 	if !strings.ContainsAny(host, ".:") {
 		host1, err := c.getKnownControllerDomain(host, controllerName)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			return fail(errors.Errorf("%q is not a known public controller", host))
 		}
 		if err != nil {
@@ -374,7 +375,7 @@ func (c *loginCommand) publicControllerLogin(
 
 	var oidcLogin bool
 	dialOpts.LoginProvider = loginprovider.NewTryInOrderLoginProvider(
-		loggo.GetLogger("juju.cmd.loginprovider"),
+		internallogger.GetLogger("juju.cmd.loginprovider"),
 		api.NewClientCredentialsLoginProviderFromEnvironment(
 			func() { oidcLogin = true },
 		),
@@ -436,7 +437,7 @@ func (c *loginCommand) publicControllerLogin(
 			return nil, errors.Annotatef(err, "getting sni host from host %q", host)
 		}
 
-		return apiOpen(&c.CommandBase, &api.Info{
+		return apiOpen(&c.CommandBase, ctx, &api.Info{
 			Tag:         tag,
 			Password:    d.Password,
 			Addrs:       []string{host},
@@ -485,7 +486,7 @@ Run "juju logout" first before attempting to log in as a different user.`,
 				// user. If we encounter an error after here, we need to clear it.
 				c.onRunError = func() {
 					if err := c.ClearControllerMacaroons(c.ClientStore(), c.controllerName); err != nil {
-						logger.Errorf("failed to clear macaroon: %v", err)
+						logger.Errorf(context.TODO(), "failed to clear macaroon: %v", err)
 					}
 				}
 			}
@@ -500,7 +501,7 @@ Run "juju logout" first before attempting to log in as a different user.`,
 		if err == nil {
 			return conn, accountDetails, nil
 		}
-		if !errors.IsUnauthorized(err) {
+		if !errors.Is(err, errors.Unauthorized) {
 			return nil, nil, errors.Trace(err)
 		}
 	}
@@ -556,8 +557,8 @@ const badCred = "invalid entity name or password"
 
 const noModelsMessage = `
 There are no models available. You can add models with
-"juju add-model", or you can ask an administrator or owner
-of a model to grant access to that model with "juju grant".
+"juju add-model", or you can ask an administrator of a
+model to grant access to that model with "juju grant".
 `
 
 func (c *loginCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclient.ClientStore, controllerName, userName string, models []apibase.UserModel) error {
@@ -571,8 +572,7 @@ func (c *loginCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclient.C
 		// There is exactly one model shared,
 		// so set it as the current model.
 		model := models[0]
-		owner := names.NewUserTag(model.Owner)
-		modelName := jujuclient.JoinOwnerModelName(owner, model.Name)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		err := store.SetCurrentModel(controllerName, modelName)
 		if err != nil {
 			return errors.Trace(err)
@@ -585,18 +585,17 @@ There are %d models available. Use "juju switch" to select
 one of them:
 `, len(models))
 	user := names.NewUserTag(userName)
-	ownerModelNames := make(set.Strings)
+	userModelNames := make(set.Strings)
 	otherModelNames := make(set.Strings)
 	for _, model := range models {
-		if model.Owner == userName {
-			ownerModelNames.Add(model.Name)
+		if model.Qualifier == coremodel.QualifierFromUserTag(user) {
+			userModelNames.Add(model.Name)
 			continue
 		}
-		owner := names.NewUserTag(model.Owner)
-		modelName := common.OwnerQualifiedModelName(model.Name, owner, user)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		otherModelNames.Add(modelName)
 	}
-	for _, modelName := range ownerModelNames.SortedValues() {
+	for _, modelName := range userModelNames.SortedValues() {
 		fmt.Fprintf(ctx.Stderr, "  - juju switch %s\n", modelName)
 	}
 	for _, modelName := range otherModelNames.SortedValues() {
@@ -714,7 +713,7 @@ func friendlyUserName(user string) string {
 // case.
 func ensureNotKnownEndpoint(store jujuclient.ClientStore, endpoint string) error {
 	existingDetails, existingName, err := store.ControllerByAPIEndpoints(endpoint)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 
@@ -724,7 +723,7 @@ func ensureNotKnownEndpoint(store jujuclient.ClientStore, endpoint string) error
 
 	// Check if we know the username for this controller
 	accountDetails, err := store.AccountDetails(existingName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 

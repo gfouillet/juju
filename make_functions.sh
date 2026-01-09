@@ -59,7 +59,7 @@ microk8s_operator_update() {
 }
 
 juju_version() {
-    (cd "${PROJECT_DIR}" && go run version/helper/main.go)
+    (cd "${PROJECT_DIR}" && go run scripts/version/main.go)
 }
 
 operator_image_release_path() {
@@ -156,10 +156,6 @@ build_push_operator_image() {
 
 seed_repository() {
   set -x
-  "$DOCKER_BIN" pull "ghcr.io/juju/juju-db:${JUJU_DB_VERSION}"
-	"$DOCKER_BIN" tag "ghcr.io/juju/juju-db:${JUJU_DB_VERSION}" "${OCI_REGISTRY_USERNAME}/juju-db:${JUJU_DB_VERSION}"
-	"$DOCKER_BIN" push "${OCI_REGISTRY_USERNAME}/juju-db:${JUJU_DB_VERSION}"
-
   # copy all the lts that are available
   for (( i = 18; ; i += 2 )); do
     if "$DOCKER_BIN" pull "ghcr.io/juju/charm-base:ubuntu-$i.04" ; then

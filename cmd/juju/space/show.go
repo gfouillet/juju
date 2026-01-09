@@ -6,7 +6,6 @@ package space
 import (
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -14,7 +13,8 @@ import (
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -81,9 +81,9 @@ func (c *ShowSpaceCommand) Init(args []string) error {
 func (c *ShowSpaceCommand) Run(ctx *cmd.Context) error {
 	return c.RunWithSpaceAPI(ctx, func(api SpaceAPI, ctx *cmd.Context) error {
 		// Add the new space.
-		space, err := api.ShowSpace(c.Name)
+		space, err := api.ShowSpace(ctx, c.Name)
 		if err != nil {
-			if errors.IsNotSupported(err) {
+			if errors.Is(err, errors.NotSupported) {
 				ctx.Infof("cannot retrieve space %q: %v", c.Name, err)
 			}
 			if params.IsCodeUnauthorized(err) {

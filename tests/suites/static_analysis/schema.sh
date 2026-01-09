@@ -1,6 +1,9 @@
 run_schema() {
-	CUR_SHA=$(git show HEAD:apiserver/facades/schema.json | shasum -a 1 | awk '{ print $1 }')
-	CUR_AGENT_SHA=$(git show HEAD:apiserver/facades/agent-schema.json | shasum -a 1 | awk '{ print $1 }')
+	TMP_ORIG=$(mktemp -d /tmp/schema-XXXXX)
+	git show "HEAD:apiserver/facades/schema.json" >"${TMP_ORIG}/schema.json"
+	CUR_SHA=$(cat "${TMP_ORIG}/schema.json" | shasum -a 1 | awk '{ print $1 }')
+	git show "HEAD:apiserver/facades/agent-schema.json" >"${TMP_ORIG}/agent-schema.json"
+	CUR_AGENT_SHA=$(cat "${TMP_ORIG}/agent-schema.json" | shasum -a 1 | awk '{ print $1 }')
 	TMP=$(mktemp -d /tmp/schema-XXXXX)
 	OUT=$(make --no-print-directory SCHEMA_PATH="${TMP}" rebuild-schema 2>&1)
 	OUT_CODE=$?
@@ -17,10 +20,12 @@ run_schema() {
 
 	if [ "${CUR_SHA}" != "${NEW_SHA}" ]; then
 		(echo >&2 "\\nError: client facades schema is not in sync. Run 'make rebuild-schema' and commit source.")
+		(diff >&2 "${TMP_ORIG}/schema.json" "${TMP}/schema.json")
 		exit 1
 	fi
 	if [ "${CUR_AGENT_SHA}" != "${NEW_AGENT_SHA}" ]; then
 		(echo >&2 "\\nError: agent facades schema is not in sync. Run 'make rebuild-schema' and commit source.")
+		(diff >&2 "${TMP_ORIG}/agent-schema.json" "${TMP}/agent-schema.json")
 		exit 1
 	fi
 }

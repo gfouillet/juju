@@ -4,10 +4,11 @@
 package kubernetes
 
 import (
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"context"
+
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 )
 
@@ -39,10 +40,12 @@ func (u *upgradeCAASModelOperatorBridge) LabelVersion() constants.LabelVersion {
 }
 
 func modelOperatorUpgrade(
+	ctx context.Context,
 	operatorName string,
-	vers version.Number,
+	vers semversion.Number,
 	broker UpgradeCAASModelOperatorBroker) error {
 	return upgradeDeployment(
+		ctx,
 		operatorName,
 		"",
 		vers,
@@ -54,11 +57,11 @@ func (u *upgradeCAASModelOperatorBridge) Namespace() string {
 	return u.namespaceFn()
 }
 
-func (k *kubernetesClient) upgradeModelOperator(agentTag names.Tag, vers version.Number) error {
+func (k *kubernetesClient) upgradeModelOperator(ctx context.Context, vers semversion.Number) error {
 	broker := &upgradeCAASModelOperatorBridge{
 		clientFn:       k.client,
 		namespaceFn:    k.Namespace,
 		labelVersionFn: k.LabelVersion,
 	}
-	return modelOperatorUpgrade(modelOperatorName, vers, broker)
+	return modelOperatorUpgrade(ctx, modelOperatorName, vers, broker)
 }

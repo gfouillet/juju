@@ -4,18 +4,15 @@
 package api
 
 import (
-	"context"
 	"net/url"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
 	"github.com/juju/clock"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	gc "gopkg.in/check.v1"
-	"gopkg.in/macaroon.v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/core/network"
-	jujuproxy "github.com/juju/juju/proxy"
+	jujuproxy "github.com/juju/juju/internal/proxy"
 	"github.com/juju/juju/rpc/jsoncodec"
 )
 
@@ -30,8 +27,8 @@ var (
 	LoginWithClientCredentialsAPICall = &loginWithClientCredentialsAPICall
 )
 
-func DialAPI(info *Info, opts DialOpts) (jsoncodec.JSONConn, string, error) {
-	result, err := dialAPI(context.TODO(), info, opts)
+func DialAPI(c *tc.C, info *Info, opts DialOpts) (jsoncodec.JSONConn, string, error) {
+	result, err := dialAPI(c.Context(), info, opts)
 	if err != nil {
 		return nil, "", err
 	}
@@ -40,20 +37,20 @@ func DialAPI(info *Info, opts DialOpts) (jsoncodec.JSONConn, string, error) {
 
 // CookieURL returns the cookie URL of the connection.
 func CookieURL(c Connection) *url.URL {
-	return c.(*state).cookieURL
+	return c.(*conn).cookieURL
 }
 
 // UnderlyingConn returns the underlying transport connection.
 func UnderlyingConn(c Connection) jsoncodec.JSONConn {
-	return c.(*state).conn
+	return c.(*conn).conn
 }
 
 // RPCConnection defines the methods that are called on the rpc.Conn instance.
 type RPCConnection rpcConnection
 
-// TestingStateParams is the parameters for NewTestingState, so that you can
+// TestingConnectionParams is the parameters for NewTestingConnection, so that you can
 // only set the bits that you actually want to test.
-type TestingStateParams struct {
+type TestingConnectionParams struct {
 	Address        string
 	ModelTag       string
 	APIHostPorts   []network.MachineHostPorts
@@ -66,19 +63,24 @@ type TestingStateParams struct {
 	Proxier        jujuproxy.Proxier
 }
 
-// NewTestingState creates an api.State object that can be used for testing. It
-// isn't backed onto an actual API server, so actual RPC methods can't be
-// called on it. But it can be used for testing general behaviour.
-func NewTestingState(c *gc.C, params TestingStateParams) Connection {
+// NewTestingConnection creates an api.Connection object that can be used for testing.
+func NewTestingConnection(c *tc.C, params TestingConnectionParams) Connection {
 	var modelTag names.ModelTag
 	if params.ModelTag != "" {
 		t, err := names.ParseModelTag(params.ModelTag)
-		c.Assert(err, gc.IsNil)
+		c.Assert(err, tc.IsNil)
 		modelTag = t
 	}
-	url, err := url.Parse(params.Address)
-	c.Assert(err, gc.IsNil)
-	st := &state{
+	url := &url.URL{}
+	if params.Address != "" {
+		var err error
+		url, err = url.Parse(params.Address)
+		c.Assert(err, tc.IsNil)
+		c.Assert(url.Scheme, tc.Not(tc.Equals), "")
+		c.Assert(url.Host, tc.Not(tc.Equals), "")
+		c.Assert(url.Port(), tc.Not(tc.Equals), "")
+	}
+	conn := &conn{
 		client:         params.RPCConnection,
 		clock:          params.Clock,
 		addr:           url,
@@ -89,14 +91,7 @@ func NewTestingState(c *gc.C, params TestingStateParams) Connection {
 		broken:         params.Broken,
 		closed:         params.Closed,
 		proxier:        params.Proxier,
+		bakeryClient:   httpbakery.NewClient(),
 	}
-	return st
-}
-
-func ExtractMacaroons(conn Connection) ([]macaroon.Slice, error) {
-	st, ok := conn.(*state)
-	if !ok {
-		return nil, errors.Errorf("conn must be a real connection")
-	}
-	return httpbakery.MacaroonsForURL(st.bakeryClient.Client.Jar, st.cookieURL), nil
+	return conn
 }

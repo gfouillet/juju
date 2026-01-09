@@ -4,18 +4,20 @@
 package context
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/secrets"
 )
 
 // secretsChangeRecorder records the intent tp update, remove or
 // change secret access permission during a hook execution.
 type secretsChangeRecorder struct {
-	logger loggo.Logger
+	logger logger.Logger
 
 	pendingCreates map[string]uniter.SecretCreateArg
 	pendingUpdates map[string]uniter.SecretUpdateArg
@@ -29,7 +31,7 @@ type secretsChangeRecorder struct {
 	pendingTrackLatest map[string]bool
 }
 
-func newSecretsChangeRecorder(logger loggo.Logger) *secretsChangeRecorder {
+func newSecretsChangeRecorder(logger logger.Logger) *secretsChangeRecorder {
 	return &secretsChangeRecorder{
 		logger:             logger,
 		pendingCreates:     make(map[string]uniter.SecretCreateArg),
@@ -156,7 +158,7 @@ func (s *secretsChangeRecorder) revoke(arg uniter.SecretGrantRevokeArgs) {
 	s.pendingRevokes[arg.URI.ID] = append(s.pendingRevokes[arg.URI.ID], arg)
 }
 
-func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...secrets.AccessInfo) ([]secrets.AccessInfo, error) {
+func (s *secretsChangeRecorder) secretGrantInfo(ctx context.Context, uri *secrets.URI, applied ...secrets.AccessInfo) ([]secrets.AccessInfo, error) {
 	mergePendingGrants := func() {
 		grants, ok := s.pendingGrants[uri.ID]
 		if !ok {
@@ -166,7 +168,7 @@ func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...sec
 			params := grant.ToParams()
 			if len(params.SubjectTags) == 0 {
 				// This should never happen.
-				s.logger.Warningf("missing SubjectTags: %+v", params)
+				s.logger.Warningf(ctx, "missing SubjectTags: %+v", params)
 				continue
 			}
 			applied = append(applied, secrets.AccessInfo{
@@ -185,7 +187,7 @@ func (s *secretsChangeRecorder) secretGrantInfo(uri *secrets.URI, applied ...sec
 			params := revoke.ToParams()
 			if len(params.SubjectTags) == 0 {
 				// This should never happen.
-				s.logger.Warningf("missing SubjectTags: %+v", params)
+				s.logger.Warningf(ctx, "missing SubjectTags: %+v", params)
 				continue
 			}
 			for j, grant := range applied {

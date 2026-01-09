@@ -4,11 +4,10 @@
 package kubernetes
 
 import (
-	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -20,15 +19,17 @@ type servicesSuite struct {
 	client *fake.Clientset
 }
 
-var _ = gc.Suite(&servicesSuite{})
+func TestServicesSuite(t *testing.T) {
+	tc.Run(t, &servicesSuite{})
+}
 
-func (s *servicesSuite) SetUpTest(c *gc.C) {
+func (s *servicesSuite) SetUpTest(c *tc.C) {
 	s.client = fake.NewSimpleClientset()
 }
 
-func (s *servicesSuite) TestFindServiceForApplication(c *gc.C) {
+func (s *servicesSuite) TestFindServiceForApplication(c *tc.C) {
 	_, err := s.client.CoreV1().Services("test").Create(
-		context.TODO(),
+		c.Context(),
 		&core.Service{
 			ObjectMeta: meta.ObjectMeta{
 				Name: "wallyworld",
@@ -41,22 +42,22 @@ func (s *servicesSuite) TestFindServiceForApplication(c *gc.C) {
 		meta.CreateOptions{},
 	)
 
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	svc, err := findServiceForApplication(
-		context.TODO(),
+		c.Context(),
 		s.client.CoreV1().Services("test"),
 		"wallyworld",
 		constants.LabelVersion1,
 	)
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(svc.Name, gc.Equals, "wallyworld")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(svc.Name, tc.Equals, "wallyworld")
 }
 
-func (s *servicesSuite) TestFindServiceForApplicationWithEndpoints(c *gc.C) {
+func (s *servicesSuite) TestFindServiceForApplicationWithEndpoints(c *tc.C) {
 	_, err := s.client.CoreV1().Services("test").Create(
-		context.TODO(),
+		c.Context(),
 		&core.Service{
 			ObjectMeta: meta.ObjectMeta{
 				Name: "wallyworld",
@@ -68,10 +69,10 @@ func (s *servicesSuite) TestFindServiceForApplicationWithEndpoints(c *gc.C) {
 		},
 		meta.CreateOptions{},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.client.CoreV1().Services("test").Create(
-		context.TODO(),
+		c.Context(),
 		&core.Service{
 			ObjectMeta: meta.ObjectMeta{
 				Name: "wallyworld-endpoints",
@@ -83,22 +84,22 @@ func (s *servicesSuite) TestFindServiceForApplicationWithEndpoints(c *gc.C) {
 		},
 		meta.CreateOptions{},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	svc, err := findServiceForApplication(
-		context.TODO(),
+		c.Context(),
 		s.client.CoreV1().Services("test"),
 		"wallyworld",
 		constants.LabelVersion1,
 	)
 
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(svc.Name, gc.Equals, "wallyworld")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(svc.Name, tc.Equals, "wallyworld")
 }
 
-func (s *servicesSuite) TestFindServiceForApplicationWithMultiple(c *gc.C) {
+func (s *servicesSuite) TestFindServiceForApplicationWithMultiple(c *tc.C) {
 	_, err := s.client.CoreV1().Services("test").Create(
-		context.TODO(),
+		c.Context(),
 		&core.Service{
 			ObjectMeta: meta.ObjectMeta{
 				Name: "wallyworld",
@@ -110,10 +111,10 @@ func (s *servicesSuite) TestFindServiceForApplicationWithMultiple(c *gc.C) {
 		},
 		meta.CreateOptions{},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = s.client.CoreV1().Services("test").Create(
-		context.TODO(),
+		c.Context(),
 		&core.Service{
 			ObjectMeta: meta.ObjectMeta{
 				Name: "wallyworld-v2",
@@ -125,25 +126,25 @@ func (s *servicesSuite) TestFindServiceForApplicationWithMultiple(c *gc.C) {
 		},
 		meta.CreateOptions{},
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	_, err = findServiceForApplication(
-		context.TODO(),
+		c.Context(),
 		s.client.CoreV1().Services("test"),
 		"wallyworld",
 		constants.LabelVersion1,
 	)
 
-	c.Assert(errors.Is(err, errors.NotValid), jc.IsTrue)
+	c.Assert(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *servicesSuite) TestFindServiceForApplicationMissing(c *gc.C) {
+func (s *servicesSuite) TestFindServiceForApplicationMissing(c *tc.C) {
 	_, err := findServiceForApplication(
-		context.TODO(),
+		c.Context(),
 		s.client.CoreV1().Services("test"),
 		"wallyworld",
 		constants.LabelVersion1,
 	)
 
-	c.Assert(errors.Is(err, errors.NotFound), jc.IsTrue)
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 }

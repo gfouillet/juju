@@ -4,11 +4,13 @@
 package vsphere
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/schema"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/internal/configschema"
 	"github.com/juju/juju/internal/provider/vsphere/internal/vsphereclient"
 )
 
@@ -24,30 +26,30 @@ const (
 
 // configFields is the spec for each vmware config value's type.
 var (
-	configSchema = environschema.Fields{
+	configSchema = configschema.Fields{
 		cfgExternalNetwork: {
 			Description: "An external network that VMs will be connected to. The resulting IP address for a VM will be used as its public address.",
-			Type:        environschema.Tstring,
+			Type:        configschema.Tstring,
 		},
 		cfgDatastore: {
 			Description: "The datastore in which to create VMs. If this is not specified, the process will abort unless there is only one datastore available.",
-			Type:        environschema.Tstring,
+			Type:        configschema.Tstring,
 		},
 		cfgPrimaryNetwork: {
 			Description: "The primary network that VMs will be connected to. If this is not specified, Juju will look for a network named \"VM Network\".",
-			Type:        environschema.Tstring,
+			Type:        configschema.Tstring,
 		},
 		cfgForceVMHardwareVersion: {
 			Description: "The HW compatibility version to use when cloning a VM template to create a VM. The version must be supported by the remote compute resource, and greater or equal to the template’s version.",
-			Type:        environschema.Tint,
+			Type:        configschema.Tint,
 		},
 		cfgEnableDiskUUID: {
 			Description: "Expose consistent disk UUIDs to the VM, equivalent to disk.EnableUUID. The default is True.",
-			Type:        environschema.Tbool,
+			Type:        configschema.Tbool,
 		},
 		cfgDiskProvisioningType: {
 			Description: "Specify how the disk should be provisioned when cloning the VM template. Allowed values are: thickEagerZero (default), thick and thin.",
-			Type:        environschema.Tstring,
+			Type:        configschema.Tstring,
 		},
 	}
 
@@ -88,9 +90,9 @@ var configFields = func() schema.Fields {
 
 // newValidConfig builds a new environConfig from the provided Config
 // and returns it. The resulting config values are validated.
-func newValidConfig(cfg *config.Config) (*environConfig, error) {
+func newValidConfig(ctx context.Context, cfg *config.Config) (*environConfig, error) {
 	// Ensure that the provided config is valid.
-	if err := config.Validate(cfg, nil); err != nil {
+	if err := config.Validate(ctx, cfg, nil); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -167,7 +169,7 @@ func (c *environConfig) diskProvisioningType() vsphereclient.DiskProvisioningTyp
 }
 
 // Schema returns the configuration schema for an environment.
-func (environProvider) Schema() environschema.Fields {
+func (environProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -185,6 +187,12 @@ func (p environProvider) ConfigSchema() schema.Fields {
 // provider specific config attributes.
 func (p environProvider) ConfigDefaults() schema.Defaults {
 	return configDefaults
+}
+
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (p *environProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return nil, nil
 }
 
 // validate checks vmware-specific config values.
@@ -221,14 +229,14 @@ func (c environConfig) validate() error {
 
 // update applies changes from the provided config to the env config.
 // Changes to any immutable attributes result in an error.
-func (c *environConfig) update(cfg *config.Config) error {
+func (c *environConfig) update(ctx context.Context, cfg *config.Config) error {
 	// Validate the updates. newValidConfig does not modify the "known"
 	// config attributes so it is safe to call Validate here first.
-	if err := config.Validate(cfg, c.Config); err != nil {
+	if err := config.Validate(ctx, cfg, c.Config); err != nil {
 		return errors.Trace(err)
 	}
 
-	updates, err := newValidConfig(cfg)
+	updates, err := newValidConfig(ctx, cfg)
 	if err != nil {
 		return errors.Trace(err)
 	}

@@ -7,21 +7,21 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
 
 	jujucmd "github.com/juju/juju/cmd"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // JujuLogContext is the Context for the JujuLogCommand
 //
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/juju-log_mock.go github.com/juju/juju/internal/worker/uniter/runner/jujuc JujuLogContext
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/juju-log_mock.go github.com/juju/juju/internal/worker/uniter/runner/jujuc JujuLogContext
 type JujuLogContext interface {
 	UnitName() string
 	HookRelation() (ContextRelation, error)
-	GetLogger(module string) loggo.Logger
+	GetLoggerByName(module string) corelogger.Logger
 }
 
 // JujuLogCommand implements the juju-log command.
@@ -69,30 +69,30 @@ func (c *JujuLogCommand) Run(ctx *cmd.Context) error {
 	if c.formatFlag != "" {
 		fmt.Fprintf(ctx.Stderr, "--format flag deprecated for command %q", c.Info().Name)
 	}
-	logger := c.ctx.GetLogger(fmt.Sprintf("unit.%s.juju-log", c.ctx.UnitName()))
+	logger := c.ctx.GetLoggerByName(fmt.Sprintf("unit.%s.juju-log", c.ctx.UnitName()))
 
-	logLevel := loggo.INFO
+	logLevel := corelogger.INFO
 	if c.Debug {
-		logLevel = loggo.DEBUG
+		logLevel = corelogger.DEBUG
 	} else if c.Level != "" {
 		var ok bool
-		logLevel, ok = loggo.ParseLevel(c.Level)
+		logLevel, ok = corelogger.ParseLevelFromString(c.Level)
 		if !ok {
-			logger.Warningf("Specified log level of %q is not valid", c.Level)
-			logLevel = loggo.INFO
+			logger.Warningf(ctx, "Specified log level of %q is not valid", c.Level)
+			logLevel = corelogger.INFO
 		}
 	}
 
 	prefix := ""
 	if r, err := c.ctx.HookRelation(); err == nil {
 		prefix = r.FakeId() + ": "
-	} else if errors.IsNotImplemented(err) {
+	} else if errors.Is(err, errors.NotImplemented) {
 		// if the hook relation is not implemented, then we want to continue
 		// without a FakeId
-	} else if !errors.IsNotFound(err) {
+	} else if !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 
-	logger.Logf(logLevel, "%s%s", prefix, c.Message)
+	logger.Logf(ctx, logLevel, corelogger.Labels{}, "%s%s", prefix, c.Message)
 	return nil
 }

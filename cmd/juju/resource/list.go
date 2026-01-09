@@ -4,23 +4,24 @@
 package resource
 
 import (
+	"context"
 	"sort"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/resources"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	coreresources "github.com/juju/juju/core/resources"
+	coreresources "github.com/juju/juju/core/resource"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // ListClient has the API client methods needed by ListCommand.
 type ListClient interface {
 	// ListResources returns info about resources for applications in the model.
-	ListResources(applications []string) ([]coreresources.ApplicationResources, error)
+	ListResources(ctx context.Context, applications []string) ([]coreresources.ApplicationResources, error)
 	// Close closes the connection.
 	Close() error
 }
@@ -29,7 +30,7 @@ type ListClient interface {
 type ListCommand struct {
 	modelcmd.ModelCommandBase
 
-	newClient func() (ListClient, error)
+	newClient func(ctx context.Context) (ListClient, error)
 
 	details bool
 	out     cmd.Output
@@ -40,8 +41,8 @@ type ListCommand struct {
 // by a charm.
 func NewListCommand() modelcmd.ModelCommand {
 	c := &ListCommand{}
-	c.newClient = func() (ListClient, error) {
-		apiRoot, err := c.NewAPIRoot()
+	c.newClient = func(ctx context.Context) (ListClient, error) {
+		apiRoot, err := c.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -112,7 +113,7 @@ func (c *ListCommand) Init(args []string) error {
 
 // Run implements cmd.Command.Run.
 func (c *ListCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.newClient()
+	apiclient, err := c.newClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -130,7 +131,7 @@ func (c *ListCommand) Run(ctx *cmd.Context) error {
 		unit = c.target
 	}
 
-	vals, err := apiclient.ListResources([]string{application})
+	vals, err := apiclient.ListResources(ctx, []string{application})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -141,7 +142,7 @@ func (c *ListCommand) Run(ctx *cmd.Context) error {
 
 	// It's a lot easier to read and to digest a list of resources
 	// when they are ordered.
-	sort.Sort(charmResourceList(v.CharmStoreResources))
+	sort.Sort(charmResourceList(v.RepositoryResources))
 	sort.Sort(resourceList(v.Resources))
 	for _, u := range v.UnitResources {
 		sort.Sort(resourceList(u.Resources))
@@ -194,7 +195,7 @@ func (c *ListCommand) formatUnitResources(ctx *cmd.Context, unit, application st
 	resources := unitResources(unit, application, sr)
 	res := make([]FormattedAppResource, len(sr.Resources))
 	for i, r := range sr.Resources {
-		if unitResource, ok := resources[r.ID]; ok {
+		if unitResource, ok := resources[r.UUID.String()]; ok {
 			// Unit has this application resource,
 			// so use unit's version.
 			r = unitResource
@@ -214,7 +215,7 @@ func (c *ListCommand) formatUnitResources(ctx *cmd.Context, unit, application st
 func unitResources(unit, application string, sr coreresources.ApplicationResources) map[string]coreresources.Resource {
 	var res []coreresources.Resource
 	for _, r := range sr.UnitResources {
-		if r.Tag.Id() == unit {
+		if r.Name.String() == unit {
 			res = r.Resources
 		}
 	}
@@ -223,7 +224,7 @@ func unitResources(unit, application string, sr coreresources.ApplicationResourc
 	}
 	unitResourcesById := make(map[string]coreresources.Resource)
 	for _, r := range res {
-		unitResourcesById[r.ID] = r
+		unitResourcesById[r.UUID.String()] = r
 	}
 	return unitResourcesById
 }

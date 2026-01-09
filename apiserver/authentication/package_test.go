@@ -3,12 +3,4 @@
 
 package authentication_test
 
-import (
-	"testing"
-
-	coretesting "github.com/juju/juju/testing"
-)
-
-func TestAll(t *testing.T) {
-	coretesting.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package authentication_test -destination package_mock_test.go github.com/juju/juju/apiserver/authentication AgentPasswordService

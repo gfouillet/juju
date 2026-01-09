@@ -4,16 +4,18 @@
 package storageprovisioner
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/api/agent/storageprovisioner"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/internal/worker/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/storage"
 )
 
 // ModelManifoldConfig defines a storage provisioner's configuration and dependencies.
@@ -21,52 +23,45 @@ type ModelManifoldConfig struct {
 	APICallerName       string
 	StorageRegistryName string
 
-	Clock                        clock.Clock
-	Model                        names.ModelTag
-	StorageDir                   string
-	NewCredentialValidatorFacade func(base.APICaller) (common.CredentialAPI, error)
-	NewWorker                    func(config Config) (worker.Worker, error)
-	Logger                       Logger
+	Clock      clock.Clock
+	Model      names.ModelTag
+	StorageDir string
+	NewWorker  func(config Config) (worker.Worker, error)
+	Logger     logger.Logger
 }
 
 // ModelManifold returns a dependency.Manifold that runs a storage provisioner.
 func ModelManifold(config ModelManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{config.APICallerName, config.StorageRegistryName},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, errors.Trace(err)
 			}
 			var registry storage.ProviderRegistry
-			if err := context.Get(config.StorageRegistryName, &registry); err != nil {
+			if err := getter.Get(config.StorageRegistryName, &registry); err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			api, err := storageprovisioner.NewState(apiCaller)
+			api, err := storageprovisioner.NewClient(apiCaller)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			credentialAPI, err := config.NewCredentialValidatorFacade(apiCaller)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
 			w, err := config.NewWorker(Config{
-				Model:                config.Model,
-				Scope:                config.Model,
-				StorageDir:           config.StorageDir,
-				Applications:         api,
-				Volumes:              api,
-				Filesystems:          api,
-				Life:                 api,
-				Registry:             registry,
-				Machines:             api,
-				Status:               api,
-				Clock:                config.Clock,
-				Logger:               config.Logger,
-				CloudCallContextFunc: common.NewCloudCallContextFunc(credentialAPI),
+				Model:       config.Model,
+				Scope:       config.Model,
+				StorageDir:  config.StorageDir,
+				Volumes:     api,
+				Filesystems: api,
+				Life:        api,
+				Registry:    registry,
+				Machines:    api,
+				Status:      api,
+				Clock:       config.Clock,
+				Logger:      config.Logger,
 			})
 			if err != nil {
 				return nil, errors.Trace(err)

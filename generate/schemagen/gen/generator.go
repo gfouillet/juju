@@ -13,14 +13,12 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/jsonschema-gen"
-	"github.com/juju/rpcreflect"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/generate/schemagen/jsonschema-gen"
+	"github.com/juju/juju/internal/rpcreflect"
 )
-
-//go:generate go run go.uber.org/mock/mockgen -package gen -destination describeapi_mock.go -write_package_comment=false github.com/juju/juju/generate/schemagen/gen APIServer,Registry,PackageRegistry,Linker
 
 type APIServer interface {
 	AllFacades() Registry
@@ -35,10 +33,6 @@ type Registry interface {
 
 type PackageRegistry interface {
 	LoadPackage() (*packages.Package, error)
-}
-
-type Linker interface {
-	Links(string, facade.Factory) []string
 }
 
 // Option to be passed to Connect to customize the resulting instance.
@@ -75,7 +69,7 @@ var (
 )
 
 // Generate a FacadeSchema from the APIServer
-func Generate(pkgRegistry PackageRegistry, linker Linker, client APIServer, options ...Option) ([]FacadeSchema, error) {
+func Generate(pkgRegistry PackageRegistry, client APIServer, options ...Option) ([]FacadeSchema, error) {
 	opts := newOptions()
 	for _, option := range options {
 		option(opts)
@@ -129,7 +123,6 @@ func Generate(pkgRegistry PackageRegistry, linker Linker, client APIServer, opti
 
 		result[i].Name = facade.Name
 		result[i].Version = version
-		result[i].AvailableTo = linker.Links(facade.Name, facade.Factory)
 
 		var objType *rpcreflect.ObjType
 		kind, err := registry.GetType(facade.Name, version)
@@ -191,7 +184,6 @@ type FacadeSchema struct {
 	Name        string
 	Description string
 	Version     int
-	AvailableTo []string
 	Schema      *jsonschema.Schema
 }
 

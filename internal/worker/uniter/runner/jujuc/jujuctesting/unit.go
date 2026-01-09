@@ -4,17 +4,19 @@
 package jujuctesting
 
 import (
-	"github.com/juju/charm/v12"
+	"context"
+
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/application"
+	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
 )
 
 // Unit holds the values for the hook context.
 type Unit struct {
 	Name           string
-	ConfigSettings charm.Settings
+	ConfigSettings charm.Config
 	GoalState      application.GoalState
 	K8sSpec        string
 	RawK8sSpec     string
@@ -36,7 +38,7 @@ func (c *ContextUnit) UnitName() string {
 }
 
 // ConfigSettings implements jujuc.ContextUnit.
-func (c *ContextUnit) ConfigSettings() (charm.Settings, error) {
+func (c *ContextUnit) ConfigSettings(context.Context) (charm.Config, error) {
 	c.stub.AddCall("ConfigSettings")
 	if err := c.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -46,7 +48,7 @@ func (c *ContextUnit) ConfigSettings() (charm.Settings, error) {
 }
 
 // GoalState implements jujuc.ContextUnit.
-func (c *ContextUnit) GoalState() (*application.GoalState, error) {
+func (c *ContextUnit) GoalState(context.Context) (*application.GoalState, error) {
 	c.stub.AddCall("GoalState")
 	if err := c.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
@@ -54,41 +56,7 @@ func (c *ContextUnit) GoalState() (*application.GoalState, error) {
 	return &c.info.GoalState, nil
 }
 
-func (c *ContextUnit) SetPodSpec(specYaml string) error {
-	c.stub.AddCall("SetPodSpec", specYaml)
-	if err := c.stub.NextErr(); err != nil {
-		return errors.Trace(err)
-	}
-	c.info.K8sSpec = specYaml
-	return nil
-}
-
-func (c *ContextUnit) GetPodSpec() (string, error) {
-	c.stub.AddCall("GetPodSpec")
-	if err := c.stub.NextErr(); err != nil {
-		return c.info.K8sSpec, errors.Trace(err)
-	}
-	return c.info.K8sSpec, nil
-}
-
-func (c *ContextUnit) SetRawK8sSpec(specYaml string) error {
-	c.stub.AddCall("SetRawK8sSpec", specYaml)
-	if err := c.stub.NextErr(); err != nil {
-		return errors.Trace(err)
-	}
-	c.info.RawK8sSpec = specYaml
-	return nil
-}
-
-func (c *ContextUnit) GetRawK8sSpec() (string, error) {
-	c.stub.AddCall("GetRawK8sSpec")
-	if err := c.stub.NextErr(); err != nil {
-		return c.info.RawK8sSpec, errors.Trace(err)
-	}
-	return c.info.RawK8sSpec, nil
-}
-
-func (c *ContextUnit) CloudSpec() (*params.CloudSpec, error) {
+func (c *ContextUnit) CloudSpec(context.Context) (*params.CloudSpec, error) {
 	c.stub.AddCall("CloudSpec")
 	if err := c.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)

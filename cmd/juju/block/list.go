@@ -4,21 +4,22 @@
 package block
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -26,11 +27,11 @@ import (
 // commands for the model.
 func NewListCommand() cmd.Command {
 	return modelcmd.Wrap(&listCommand{
-		apiFunc: func(c newAPIRoot) (blockListAPI, error) {
-			return getBlockAPI(c)
+		apiFunc: func(ctx context.Context, c newAPIRoot) (blockListAPI, error) {
+			return getBlockAPI(ctx, c)
 		},
-		controllerAPIFunc: func(c newControllerAPIRoot) (controllerListAPI, error) {
-			return getControllerAPI(c)
+		controllerAPIFunc: func(ctx context.Context, c newControllerAPIRoot) (controllerListAPI, error) {
+			return getControllerAPI(ctx, c)
 		},
 	})
 }
@@ -42,8 +43,8 @@ Lists disabled commands for the model.
 // listCommand list blocks.
 type listCommand struct {
 	modelcmd.ModelCommandBase
-	apiFunc           func(newAPIRoot) (blockListAPI, error)
-	controllerAPIFunc func(newControllerAPIRoot) (controllerListAPI, error)
+	apiFunc           func(context.Context, newAPIRoot) (blockListAPI, error)
+	controllerAPIFunc func(context.Context, newControllerAPIRoot) (controllerListAPI, error)
 	all               bool
 	out               cmd.Output
 }
@@ -89,13 +90,13 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 const noBlocks = "No commands are currently disabled."
 
 func (c *listCommand) listForModel(ctx *cmd.Context) (err error) {
-	api, err := c.apiFunc(c)
+	api, err := c.apiFunc(ctx, c)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	result, err := api.List()
+	result, err := api.List(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -107,13 +108,13 @@ func (c *listCommand) listForModel(ctx *cmd.Context) (err error) {
 }
 
 func (c *listCommand) listForController(ctx *cmd.Context) (err error) {
-	api, err := c.controllerAPIFunc(c)
+	api, err := c.controllerAPIFunc(ctx, c)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	result, err := api.ListBlockedModels()
+	result, err := api.ListBlockedModels(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -138,14 +139,14 @@ func (c *listCommand) formatter(writer io.Writer, value interface{}) error {
 // blockListAPI defines the client API methods that block list command uses.
 type blockListAPI interface {
 	Close() error
-	List() ([]params.Block, error)
+	List(ctx context.Context) ([]params.Block, error)
 }
 
 // controllerListAPI defines the methods on the controller API endpoint
 // that the blocks command calls.
 type controllerListAPI interface {
 	Close() error
-	ListBlockedModels() ([]params.ModelBlockInfo, error)
+	ListBlockedModels(context.Context) ([]params.ModelBlockInfo, error)
 }
 
 // BlockInfo defines the serialization behaviour of the block information.
@@ -184,7 +185,7 @@ func formatBlocks(writer io.Writer, value interface{}) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
+	w := output.Wrapper{TabWriter: tw}
 	w.Println("Disabled commands", "Message")
 	for _, info := range blocks {
 		w.Println(info.Commands, info.Message)
@@ -195,12 +196,12 @@ func formatBlocks(writer io.Writer, value interface{}) error {
 }
 
 type newControllerAPIRoot interface {
-	NewControllerAPIRoot() (api.Connection, error)
+	NewControllerAPIRoot(ctx context.Context) (api.Connection, error)
 }
 
 // getControllerAPI returns a block api for block manipulation.
-func getControllerAPI(c newControllerAPIRoot) (*controller.Client, error) {
-	root, err := c.NewControllerAPIRoot()
+func getControllerAPI(ctx context.Context, c newControllerAPIRoot) (*controller.Client, error) {
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -210,21 +211,15 @@ func getControllerAPI(c newControllerAPIRoot) (*controller.Client, error) {
 type modelBlockInfo struct {
 	Name        string   `yaml:"name" json:"name"`
 	UUID        string   `yaml:"model-uuid" json:"model-uuid"`
-	Owner       string   `yaml:"owner" json:"owner"`
 	CommandSets []string `yaml:"disabled-commands,omitempty" json:"disabled-commands,omitempty"`
 }
 
 func FormatModelBlockInfo(all []params.ModelBlockInfo) ([]modelBlockInfo, error) {
 	output := make([]modelBlockInfo, len(all))
 	for i, one := range all {
-		tag, err := names.ParseUserTag(one.OwnerTag)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
 		output[i] = modelBlockInfo{
-			Name:        one.Name,
+			Name:        jujuclient.QualifyModelName(one.Qualifier, one.Name),
 			UUID:        one.UUID,
-			Owner:       tag.Id(),
 			CommandSets: blocksToStr(one.Blocks),
 		}
 	}
@@ -240,10 +235,10 @@ func FormatTabularBlockedModels(writer io.Writer, value interface{}) error {
 	}
 
 	tw := output.TabWriter(writer)
-	w := output.Wrapper{tw}
-	w.Println("Name", "Model UUID", "Owner", "Disabled commands")
+	w := output.Wrapper{TabWriter: tw}
+	w.Println("Name", "Model UUID", "Disabled commands")
 	for _, model := range models {
-		w.Println(model.Name, model.UUID, model.Owner, strings.Join(model.CommandSets, ", "))
+		w.Println(model.Name, model.UUID, strings.Join(model.CommandSets, ", "))
 	}
 	tw.Flush()
 	return nil

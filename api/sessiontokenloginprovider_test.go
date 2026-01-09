@@ -5,30 +5,52 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	stdtesting "testing"
 
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	jujutesting "github.com/juju/juju/juju/testing"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	apiservertesting "github.com/juju/juju/apiserver/testing"
+	jujuhttp "github.com/juju/juju/internal/http"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-type sessionTokenLoginProviderSuite struct {
-	jujutesting.JujuConnSuite
+type sessionTokenLoginProviderProviderSuite struct {
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&sessionTokenLoginProviderSuite{})
+func TestSessionTokenLoginProviderProviderSuite(t *stdtesting.T) {
+	tc.Run(t, &sessionTokenLoginProviderProviderSuite{})
+}
+func (s *sessionTokenLoginProviderProviderSuite) APIInfo() *api.Info {
+	srv := apiservertesting.NewAPIServer(func(modelUUID string) (interface{}, error) {
+		var err error
+		if modelUUID != "" && modelUUID != testing.ModelTag.Id() {
+			err = fmt.Errorf("%w: %q", apiservererrors.UnknownModelError, modelUUID)
+		}
+		return &testRootAPI{}, err
+	})
+	s.AddCleanup(func(_ *tc.C) { srv.Close() })
+	info := &api.Info{
+		Addrs:          srv.Addrs,
+		CACert:         testing.CACert,
+		ControllerUUID: testing.ControllerTag.Id(),
+		ModelTag:       testing.ModelTag,
+	}
+	return info
+}
 
-func (s *sessionTokenLoginProviderSuite) TestSessionTokenLogin(c *gc.C) {
-	info := s.APIInfo(c)
+func (s *sessionTokenLoginProviderProviderSuite) TestSessionTokenLogin(c *tc.C) {
+	info := s.APIInfo()
 
 	sessionToken := "test-session-token"
 	userCode := "1234567"
@@ -36,7 +58,7 @@ func (s *sessionTokenLoginProviderSuite) TestSessionTokenLogin(c *gc.C) {
 
 	var obtainedSessionToken string
 
-	s.PatchValue(api.LoginDeviceAPICall, func(_ base.APICaller, request interface{}, response interface{}) error {
+	s.PatchValue(api.LoginDeviceAPICall, func(ctx context.Context, _ base.APICaller, request interface{}, response interface{}) error {
 		lr := struct {
 			UserCode        string `json:"user-code"`
 			VerificationURI string `json:"verification-uri"`
@@ -53,7 +75,7 @@ func (s *sessionTokenLoginProviderSuite) TestSessionTokenLogin(c *gc.C) {
 		return json.Unmarshal(data, response)
 	})
 
-	s.PatchValue(api.GetDeviceSessionTokenAPICall, func(_ base.APICaller, request interface{}, response interface{}) error {
+	s.PatchValue(api.GetDeviceSessionTokenAPICall, func(ctx context.Context, _ base.APICaller, request interface{}, response interface{}) error {
 		lr := struct {
 			SessionToken string `json:"session-token"`
 		}{
@@ -68,7 +90,7 @@ func (s *sessionTokenLoginProviderSuite) TestSessionTokenLogin(c *gc.C) {
 		return json.Unmarshal(data, response)
 	})
 
-	s.PatchValue(api.LoginWithSessionTokenAPICall, func(_ base.APICaller, request interface{}, response interface{}) error {
+	s.PatchValue(api.LoginWithSessionTokenAPICall, func(ctx context.Context, _ base.APICaller, request interface{}, response interface{}) error {
 		data, err := json.Marshal(request)
 		if err != nil {
 			return errors.Trace(err)
@@ -111,34 +133,34 @@ func (s *sessionTokenLoginProviderSuite) TestSessionTokenLogin(c *gc.C) {
 		func(sessionToken string) {
 			obtainedSessionToken = sessionToken
 		})
-	apiState, err := api.Open(&api.Info{
+	apiState, err := api.Open(c.Context(), &api.Info{
 		Addrs:          info.Addrs,
 		ControllerUUID: info.ControllerUUID,
 		CACert:         info.CACert,
 	}, api.DialOpts{
 		LoginProvider: lp,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = apiState.Close() }()
 
-	c.Check(output.String(), gc.Equals, "Please visit http://localhost:8080/test-verification and enter code 1234567 to log in.\n")
-	c.Check(obtainedSessionToken, gc.Equals, sessionToken)
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(output.String(), tc.Equals, "Please visit http://localhost:8080/test-verification and enter code 1234567 to log in.\n")
+	c.Check(obtainedSessionToken, tc.Equals, sessionToken)
+	c.Check(err, tc.ErrorIsNil)
 }
 
-func (s *sessionTokenLoginProviderSuite) TestInvalidSessionTokenLogin(c *gc.C) {
-	info := s.APIInfo(c)
+func (s *sessionTokenLoginProviderProviderSuite) TestInvalidSessionTokenLogin(c *tc.C) {
+	info := s.APIInfo()
 
 	expectedErr := &params.Error{
 		Message: "unauthorized",
 		Code:    params.CodeUnauthorized,
 	}
-	s.PatchValue(api.LoginWithSessionTokenAPICall, func(_ base.APICaller, request interface{}, response interface{}) error {
+	s.PatchValue(api.LoginWithSessionTokenAPICall, func(_ context.Context, _ base.APICaller, request interface{}, response interface{}) error {
 		return expectedErr
 	})
 
 	var output bytes.Buffer
-	_, err := api.Open(&api.Info{
+	_, err := api.Open(c.Context(), &api.Info{
 		Addrs:          info.Addrs,
 		ControllerUUID: info.ControllerUUID,
 		CACert:         info.CACert,
@@ -149,17 +171,18 @@ func (s *sessionTokenLoginProviderSuite) TestInvalidSessionTokenLogin(c *gc.C) {
 			func(sessionToken string) {},
 		),
 	})
-	c.Assert(err, jc.ErrorIs, expectedErr)
+	c.Assert(err, tc.ErrorIs, expectedErr)
 }
 
 // A separate suite for tests that don't need to communicate with a controller.
 type sessionTokenLoginProviderBasicSuite struct {
-	coretesting.BaseSuite
+	testing.BaseSuite
 }
 
-var _ = gc.Suite(&sessionTokenLoginProviderBasicSuite{})
-
-func (s *sessionTokenLoginProviderBasicSuite) TestSessionTokenAuthHeader(c *gc.C) {
+func TestSessionTokenLoginProviderBasicSuite(t *stdtesting.T) {
+	tc.Run(t, &sessionTokenLoginProviderBasicSuite{})
+}
+func (s *sessionTokenLoginProviderBasicSuite) TestSessionTokenAuthHeader(c *tc.C) {
 	var output bytes.Buffer
 	testCases := []struct {
 		desc     string
@@ -182,10 +205,10 @@ func (s *sessionTokenLoginProviderBasicSuite) TestSessionTokenAuthHeader(c *gc.C
 		c.Logf("test %d: %s", i, tC.desc)
 		header, err := tC.lp.AuthHeader()
 		if tC.err != "" {
-			c.Assert(err, gc.ErrorMatches, tC.err)
+			c.Assert(err, tc.ErrorMatches, tC.err)
 		} else {
-			c.Assert(err, jc.ErrorIsNil)
-			c.Check(tC.expected, gc.DeepEquals, header)
+			c.Assert(err, tc.ErrorIsNil)
+			c.Check(tC.expected, tc.DeepEquals, header)
 		}
 	}
 }

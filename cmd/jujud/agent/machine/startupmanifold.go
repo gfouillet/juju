@@ -4,27 +4,22 @@
 package machine
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	worker "github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/api"
+	corelogger "github.com/juju/juju/core/logger"
 )
-
-// Logger represents the logging methods used by this manifold.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Criticalf(string, ...interface{})
-	Tracef(string, ...interface{})
-}
 
 // MachineStartupConfig provides the dependencies for the
 // machinestartup manifold.
 type MachineStartupConfig struct {
 	APICallerName  string
-	MachineStartup func(api.Connection, Logger) error
-	Logger         Logger
+	MachineStartup func(context.Context, api.Connection, corelogger.Logger) error
+	Logger         corelogger.Logger
 }
 
 func (c MachineStartupConfig) Validate() error {
@@ -47,21 +42,21 @@ func MachineStartupManifold(config MachineStartupConfig) dependency.Manifold {
 		Inputs: []string{
 			config.APICallerName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, err
 			}
-			config.Logger.Debugf("Starting machine setup requiring an API connection")
+			config.Logger.Debugf(context.TODO(), "Starting machine setup requiring an API connection")
 
 			// Get API connection.
 			var apiConn api.Connection
-			if err := context.Get(config.APICallerName, &apiConn); err != nil {
+			if err := getter.Get(config.APICallerName, &apiConn); err != nil {
 				return nil, err
 			}
-			if err := config.MachineStartup(apiConn, config.Logger); err != nil {
+			if err := config.MachineStartup(ctx, apiConn, config.Logger); err != nil {
 				return nil, err
 			}
-			config.Logger.Debugf("Finished machine setup requiring an API connection")
+			config.Logger.Debugf(context.TODO(), "Finished machine setup requiring an API connection")
 			return nil, dependency.ErrUninstall
 		},
 	}

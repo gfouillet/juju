@@ -5,117 +5,215 @@ package caasapplicationprovisioner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/clock"
+	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
+	"gopkg.in/yaml.v3"
 
 	"github.com/juju/juju/caas"
-	"github.com/juju/juju/cloudconfig/podcfg"
+	coreapplication "github.com/juju/juju/core/application"
+	"github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
+	coreresource "github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/rpc/params"
+	coreunit "github.com/juju/juju/core/unit"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	"github.com/juju/juju/domain/storageprovisioning"
+	"github.com/juju/juju/internal/charm"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
+	"github.com/juju/juju/internal/docker"
+	internalstorage "github.com/juju/juju/internal/storage"
 )
+
+// UpdateStatusState is used by UpdateState to not refresh known state.
+type UpdateStatusState map[coreunit.Name]applicationservice.UpdateCAASUnitParams
+
+// ProvisioningInfo holds all the information required to create the application
+// in kubernetes.
+type ProvisioningInfo struct {
+	Version              semversion.Number
+	APIAddresses         []string
+	CACert               string
+	Tags                 map[string]string
+	Constraints          constraints.Value
+	Devices              []devices.KubernetesDeviceParams
+	Base                 base.Base
+	ImageDetails         coreresource.DockerImageDetails
+	CharmModifiedVersion int
+	Trust                bool
+	Scale                int
+
+	CharmMeta           *charm.Meta
+	Images              map[string]coreresource.DockerImageDetails
+	FilesystemTemplates []storageprovisioning.FilesystemTemplate
+	StorageResourceTags map[string]string
+}
 
 // ApplicationOps defines all the operations the application worker can perform.
 // This is exported for testing only.
 type ApplicationOps interface {
-	AppAlive(appName string, app caas.Application, password string, lastApplied *caas.ApplicationConfig,
-		facade CAASProvisionerFacade, clk clock.Clock, logger Logger) error
+	ProvisioningInfo(
+		ctx context.Context, appName string, appUUID coreapplication.UUID,
+		facade CAASProvisionerFacade,
+		storageProvisioningService StorageProvisioningService,
+		applicationService ApplicationService,
+		resourceOpenerGetter ResourceOpenerGetter,
+		lastProvisioningInfo *ProvisioningInfo,
+		logger logger.Logger) (*ProvisioningInfo, error)
 
-	AppDying(appName string, app caas.Application, appLife life.Value,
-		facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error
+	AppAlive(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, password string, lastApplied *caas.ApplicationConfig,
+		provisioningInfo *ProvisioningInfo, statusService StatusService,
+		clk clock.Clock, logger logger.Logger) error
 
-	AppDead(appName string, app caas.Application,
-		broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, clk clock.Clock, logger Logger) error
+	AppDying(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, appLife life.Value, facade CAASProvisionerFacade,
+		applicationService ApplicationService, statusService StatusService,
+		logger logger.Logger) error
 
-	VerifyCharmUpgraded(appName string,
-		facade CAASProvisionerFacade, tomb Tomb, logger Logger) (shouldExit bool, err error)
+	AppDead(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, broker CAASBroker, applicationService ApplicationService,
+		statusService StatusService,
+		clk clock.Clock, logger logger.Logger) error
 
-	UpgradePodSpec(appName string,
-		broker CAASBroker, clk clock.Clock, tomb Tomb, logger Logger) error
+	EnsureTrust(ctx context.Context, appName string, app caas.Application,
+		applicationService ApplicationService, logger logger.Logger) error
 
-	EnsureTrust(appName string, app caas.Application,
-		unitFacade CAASUnitProvisionerFacade, logger Logger) error
+	UpdateState(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, lastReportedStatus UpdateStatusState,
+		broker CAASBroker, applicationService ApplicationService, statusService StatusService,
+		clk clock.Clock, logger logger.Logger) (UpdateStatusState, error)
 
-	UpdateState(appName string, app caas.Application, lastReportedStatus map[string]status.StatusInfo,
-		broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) (map[string]status.StatusInfo, error)
-
-	RefreshApplicationStatus(appName string, app caas.Application, appLife life.Value,
-		facade CAASProvisionerFacade, logger Logger) error
+	RefreshApplicationStatus(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, appLife life.Value, statusService StatusService,
+		clk clock.Clock, logger logger.Logger) error
 
 	WaitForTerminated(appName string, app caas.Application,
 		clk clock.Clock) error
 
-	ReconcileDeadUnitScale(appName string, app caas.Application,
-		facade CAASProvisionerFacade, logger Logger) error
+	ReconcileDeadUnitScale(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, facade CAASProvisionerFacade,
+		applicationService ApplicationService, statusService StatusService,
+		logger logger.Logger) error
 
-	EnsureScale(appName string, app caas.Application, appLife life.Value,
-		facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error
+	EnsureScale(ctx context.Context, appName string, appUUID coreapplication.UUID,
+		app caas.Application, appLife life.Value, facade CAASProvisionerFacade,
+		applicationService ApplicationService, statusService StatusService,
+		logger logger.Logger) error
 }
 
-type applicationOps struct {
+type applicationOps struct{}
+
+var _ ApplicationOps = &applicationOps{}
+
+func (applicationOps) ProvisioningInfo(
+	ctx context.Context, appName string, appUUID coreapplication.UUID,
+	facade CAASProvisionerFacade,
+	storageProvisioningService StorageProvisioningService,
+	applicationService ApplicationService,
+	resourceOpenerGetter ResourceOpenerGetter,
+	lastProvisioningInfo *ProvisioningInfo,
+	logger logger.Logger) (*ProvisioningInfo, error) {
+	return provisioningInfo(ctx, appName, appUUID, facade, storageProvisioningService, applicationService, resourceOpenerGetter, lastProvisioningInfo, logger)
 }
 
-func (applicationOps) AppAlive(appName string, app caas.Application, password string, lastApplied *caas.ApplicationConfig,
-	facade CAASProvisionerFacade, clk clock.Clock, logger Logger) error {
-	return appAlive(appName, app, password, lastApplied, facade, clk, logger)
+func (applicationOps) AppAlive(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application,
+	password string, lastApplied *caas.ApplicationConfig,
+	provisioningInfo *ProvisioningInfo, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	return appAlive(ctx, appName, appUUID, app, password,
+		lastApplied, provisioningInfo, statusService,
+		clk, logger)
 }
 
-func (applicationOps) AppDying(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error {
-	return appDying(appName, app, appLife, facade, unitFacade, logger)
+func (applicationOps) AppDying(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService, statusService StatusService,
+	logger logger.Logger,
+) error {
+	return appDying(ctx, appName, appUUID, app, appLife, facade, applicationService, statusService, logger)
 }
 
-func (applicationOps) AppDead(appName string, app caas.Application,
-	broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, clk clock.Clock, logger Logger) error {
-	return appDead(appName, app, broker, facade, unitFacade, clk, logger)
+func (applicationOps) AppDead(ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, broker CAASBroker,
+	applicationService ApplicationService, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	return appDead(ctx, appName, appUUID, app, broker, applicationService, statusService, clk, logger)
 }
 
-func (applicationOps) VerifyCharmUpgraded(appName string,
-	facade CAASProvisionerFacade, tomb Tomb, logger Logger) (shouldExit bool, err error) {
-	return verifyCharmUpgraded(appName, facade, tomb, logger)
+func (applicationOps) EnsureTrust(
+	ctx context.Context,
+	appName string, app caas.Application,
+	applicationService ApplicationService,
+	logger logger.Logger,
+) error {
+	return ensureTrust(ctx, appName, app, applicationService, logger)
 }
 
-func (applicationOps) UpgradePodSpec(appName string,
-	broker CAASBroker, clk clock.Clock, tomb Tomb, logger Logger) error {
-	return upgradePodSpec(appName, broker, clk, tomb, logger)
+func (applicationOps) UpdateState(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, lastReportedStatus UpdateStatusState,
+	broker CAASBroker, applicationService ApplicationService, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) (UpdateStatusState, error) {
+	return updateState(ctx, appName, appUUID, app, lastReportedStatus, broker, applicationService, statusService, clk, logger)
 }
 
-func (applicationOps) EnsureTrust(appName string, app caas.Application,
-	unitFacade CAASUnitProvisionerFacade, logger Logger) error {
-	return ensureTrust(appName, app, unitFacade, logger)
+func (applicationOps) RefreshApplicationStatus(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	return refreshApplicationStatus(ctx, appName, appUUID, app, appLife, statusService, clk, logger)
 }
 
-func (applicationOps) UpdateState(appName string, app caas.Application, lastReportedStatus map[string]status.StatusInfo,
-	broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) (map[string]status.StatusInfo, error) {
-	return updateState(appName, app, lastReportedStatus, broker, facade, unitFacade, logger)
-}
-
-func (applicationOps) RefreshApplicationStatus(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, logger Logger) error {
-	return refreshApplicationStatus(appName, app, appLife, facade, logger)
-}
-
-func (applicationOps) WaitForTerminated(appName string, app caas.Application,
-	clk clock.Clock) error {
+func (applicationOps) WaitForTerminated(
+	appName string, app caas.Application,
+	clk clock.Clock,
+) error {
 	return waitForTerminated(appName, app, clk)
 }
 
-func (applicationOps) ReconcileDeadUnitScale(appName string, app caas.Application,
-	facade CAASProvisionerFacade, logger Logger) error {
-	return reconcileDeadUnitScale(appName, app, facade, logger)
+func (applicationOps) ReconcileDeadUnitScale(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService, statusService StatusService,
+	logger logger.Logger,
+) error {
+	return reconcileDeadUnitScale(ctx, appName, appUUID, app, facade, applicationService, statusService, logger)
 }
 
-func (applicationOps) EnsureScale(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error {
-	return ensureScale(appName, app, appLife, facade, unitFacade, logger)
+func (applicationOps) EnsureScale(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService, statusService StatusService,
+	logger logger.Logger,
+) error {
+	return ensureScale(ctx, appName, appUUID, app, appLife, facade, applicationService, statusService, logger)
 }
 
 type Tomb interface {
@@ -125,22 +223,12 @@ type Tomb interface {
 
 // appAlive handles the life.Alive state for the CAAS application. It handles invoking the
 // CAAS broker to create the resources in the k8s cluster for this application.
-func appAlive(appName string, app caas.Application, password string, lastApplied *caas.ApplicationConfig,
-	facade CAASProvisionerFacade, clk clock.Clock, logger Logger) error {
-	logger.Debugf("ensuring application %q exists", appName)
-
-	provisionInfo, err := facade.ProvisioningInfo(appName)
-	if err != nil {
-		return errors.Annotate(err, "retrieving provisioning info")
-	}
-	if provisionInfo.CharmURL == nil {
-		return errors.Errorf("missing charm url in provision info")
-	}
-
-	charmInfo, err := facade.CharmInfo(provisionInfo.CharmURL.String())
-	if err != nil {
-		return errors.Annotatef(err, "retrieving charm deployment info for %q", appName)
-	}
+func appAlive(ctx context.Context, appName string, appUUID coreapplication.UUID,
+	app caas.Application, password string, lastApplied *caas.ApplicationConfig,
+	pi *ProvisioningInfo, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	logger.Debugf(ctx, "ensuring application %q exists", appName)
 
 	appState, err := app.Exists()
 	if err != nil {
@@ -153,17 +241,11 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 		}
 	}
 
-	images, err := facade.ApplicationOCIResources(appName)
-	if err != nil {
-		return errors.Annotate(err, "getting OCI image resources")
-	}
-
-	ch := charmInfo.Charm()
-	charmBaseImage, err := podcfg.ImageForBase(provisionInfo.ImageDetails.Repository, charm.Base{
-		Name: provisionInfo.Base.OS,
+	charmBaseImage, err := podcfg.ImageForBase(pi.ImageDetails.Repository, charm.Base{
+		Name: pi.Base.OS,
 		Channel: charm.Channel{
-			Track: provisionInfo.Base.Channel.Track,
-			Risk:  charm.Risk(provisionInfo.Base.Channel.Risk),
+			Track: pi.Base.Channel.Track,
+			Risk:  charm.Risk(pi.Base.Channel.Risk),
 		},
 	})
 	if err != nil {
@@ -171,7 +253,7 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 	}
 
 	containers := make(map[string]caas.ContainerConfig)
-	for k, v := range ch.Meta().Containers {
+	for k, v := range pi.CharmMeta.Containers {
 		container := caas.ContainerConfig{
 			Name: k,
 			Uid:  v.Uid,
@@ -180,7 +262,7 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 		if v.Resource == "" {
 			return errors.NotValidf("empty container resource reference")
 		}
-		image, ok := images[v.Resource]
+		image, ok := pi.Images[v.Resource]
 		if !ok {
 			return errors.NotFoundf("referenced charm base image resource %s", v.Resource)
 		}
@@ -194,28 +276,69 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 		containers[k] = container
 	}
 
-	// TODO(sidecar): container.Mounts[*].Path <= consolidate? => provisionInfo.Filesystems[*].Attachment.Path
+	storageUniqueID := getStorageUniqueID(appUUID)
+
+	makeKubernetesFilesystemParams := func(
+		fst storageprovisioning.FilesystemTemplate,
+		attachments []storageprovisioning.FilesystemAttachmentTemplate,
+		forWorkload bool,
+	) internalstorage.KubernetesFilesystemParams {
+		k8sFileSystemParamAttachments := make(
+			[]internalstorage.KubernetesFilesystemAttachmentParams,
+			len(attachments),
+		)
+
+		for i, attachment := range attachments {
+			k8sFileSystemParamAttachments[i] = internalstorage.KubernetesFilesystemAttachmentParams{
+				ReadOnly:      attachment.ReadOnly,
+				Path:          attachment.MountPoint,
+				ContainerName: attachment.ContainerKey,
+			}
+		}
+
+		return internalstorage.KubernetesFilesystemParams{
+			StorageName: fst.StorageName,
+			Size:        fst.SizeMiB,
+			Provider:    internalstorage.ProviderType(fst.ProviderType),
+			Attributes: transform.Map(fst.Attributes, func(k, v string) (string, any) {
+				return k, v
+			}),
+			Attachments:  k8sFileSystemParamAttachments,
+			ResourceTags: pi.StorageResourceTags,
+		}
+	}
+
+	filesystems := []internalstorage.KubernetesFilesystemParams{}
+	for _, fst := range pi.FilesystemTemplates {
+		filesystems = append(filesystems, makeKubernetesFilesystemParams(
+			fst,
+			fst.Attachments,
+			false,
+		))
+	}
+
 	config := caas.ApplicationConfig{
-		IsPrivateImageRepo:   provisionInfo.ImageDetails.IsPrivate(),
+		IsPrivateImageRepo:   pi.ImageDetails.IsPrivate(),
 		IntroductionSecret:   password,
-		AgentVersion:         provisionInfo.Version,
-		AgentImagePath:       provisionInfo.ImageDetails.RegistryPath,
-		ControllerAddresses:  strings.Join(provisionInfo.APIAddresses, ","),
-		ControllerCertBundle: provisionInfo.CACert,
-		ResourceTags:         provisionInfo.Tags,
-		Constraints:          provisionInfo.Constraints,
-		Filesystems:          provisionInfo.Filesystems,
-		Devices:              provisionInfo.Devices,
+		AgentVersion:         pi.Version,
+		AgentImagePath:       pi.ImageDetails.RegistryPath,
+		ControllerAddresses:  strings.Join(pi.APIAddresses, ","),
+		ControllerCertBundle: pi.CACert,
+		ResourceTags:         pi.Tags,
+		Constraints:          pi.Constraints,
+		Filesystems:          filesystems,
+		Devices:              pi.Devices,
 		CharmBaseImagePath:   charmBaseImage,
 		Containers:           containers,
-		CharmModifiedVersion: provisionInfo.CharmModifiedVersion,
-		Trust:                provisionInfo.Trust,
+		CharmModifiedVersion: pi.CharmModifiedVersion,
+		Trust:                pi.Trust,
 		// TODO(jneo8): Now units scaling from 0->N follow the same flow.
 		// The provisionInfo.Scale is no longer used, so in theory we
 		// could delete this field. Should investigate refactoring.
-		InitialScale: 0,
+		InitialScale:    0,
+		StorageUniqueID: storageUniqueID,
 	}
-	switch ch.Meta().CharmUser {
+	switch pi.CharmMeta.CharmUser {
 	case charm.RunAsDefault:
 		config.CharmUser = caas.RunAsDefault
 	case charm.RunAsRoot:
@@ -225,13 +348,13 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 	case charm.RunAsNonRoot:
 		config.CharmUser = caas.RunAsNonRoot
 	default:
-		return errors.NotValidf("unknown RunAs for CharmUser: %q", ch.Meta().CharmUser)
+		return errors.NotValidf("unknown RunAs for CharmUser: %q", pi.CharmMeta.CharmUser)
 	}
 	reason := "unchanged"
 	// TODO(sidecar): implement Equals method for caas.ApplicationConfig
 	if !reflect.DeepEqual(config, *lastApplied) {
 		if err = app.Ensure(config); err != nil {
-			_ = setApplicationStatus(appName, status.Error, err.Error(), nil, facade, logger)
+			_ = setApplicationStatus(ctx, appName, status.Error, err.Error(), nil, statusService, clk, logger)
 			return errors.Annotatef(err, "ensuring application %q", appName)
 		}
 		*lastApplied = config
@@ -240,20 +363,25 @@ func appAlive(appName string, app caas.Application, password string, lastApplied
 			reason = "updated"
 		}
 	}
-	logger.Debugf("application %q was %q", appName, reason)
+	logger.Debugf(ctx, "application %q was %q", appName, reason)
 	return nil
 }
 
 // appDying handles the life.Dying state for the CAAS application. It deals with scaling down
 // the application and removing units.
-func appDying(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error {
-	logger.Debugf("application %q dying", appName)
-	err := ensureScale(appName, app, appLife, facade, unitFacade, logger)
+func appDying(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService, statusService StatusService,
+	logger logger.Logger,
+) (err error) {
+	logger.Debugf(ctx, "application %q dying", appName)
+	err = ensureScale(ctx, appName, appUUID, app, appLife, facade, applicationService, statusService, logger)
 	if err != nil {
 		return errors.Annotate(err, "cannot scale dying application to 0")
 	}
-	err = reconcileDeadUnitScale(appName, app, facade, logger)
+	err = reconcileDeadUnitScale(ctx, appName, appUUID, app, facade, applicationService, statusService, logger)
 	if err != nil {
 		return errors.Annotate(err, "cannot reconcile dead units in dying application")
 	}
@@ -262,9 +390,13 @@ func appDying(appName string, app caas.Application, appLife life.Value,
 
 // appDead handles the life.Dead state for the CAAS application. It ensures the application
 // is removed from the k8s cluster and unblocks the cleanup of the application in state.
-func appDead(appName string, app caas.Application,
-	broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, clk clock.Clock, logger Logger) error {
-	logger.Debugf("application %q dead", appName)
+func appDead(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, broker CAASBroker,
+	applicationService ApplicationService, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	logger.Debugf(ctx, "application %q dead", appName)
 	err := app.Delete()
 	if err != nil {
 		return errors.Trace(err)
@@ -273,136 +405,32 @@ func appDead(appName string, app caas.Application,
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = updateState(appName, app, nil, broker, facade, unitFacade, logger)
+	_, err = updateState(ctx, appName, appUUID, app, nil, broker, applicationService, statusService, clk, logger)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// TODO(k8s): re-implement this to prevent a dead app from going away through
+	// creating a new domain concept that holds the application until this worker
+	// has destroyed all the k8s resources.
+	//
 	// Clear "has-resources" flag so state knows it can now remove the application.
-	err = facade.ClearApplicationResources(appName)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return nil
-}
-
-// verifyCharmUpgraded waits till the charm is upgraded to a v2 charm.
-func verifyCharmUpgraded(appName string,
-	facade CAASProvisionerFacade, tomb Tomb, logger Logger) (shouldExit bool, err error) {
-	appStateWatcher, err := facade.WatchApplication(appName)
-	if err != nil {
-		return false, errors.Annotatef(err, "failed to watch for changes to application %q when verifying charm upgrade", appName)
-	}
-	defer appStateWatcher.Kill()
-
-	appStateChanges := appStateWatcher.Changes()
-	for {
-		charmInfo, err := facade.ApplicationCharmInfo(appName)
-		if errors.Is(err, errors.NotFound) {
-			logger.Debugf("application %q no longer exists", appName)
-			return true, nil
-		} else if err != nil {
-			return false, errors.Annotatef(err, "failed to get charm info for application %q", appName)
-		}
-		format := charm.MetaFormat(charmInfo.Charm())
-		if format >= charm.FormatV2 {
-			logger.Debugf("application %q is now a v2 charm", appName)
-			return false, nil
-		}
-
-		appLife, err := facade.Life(appName)
-		if errors.Is(err, errors.NotFound) {
-			logger.Debugf("application %q no longer exists", appName)
-			return true, nil
-		} else if err != nil {
-			return false, errors.Trace(err)
-		}
-		if appLife == life.Dead {
-			logger.Debugf("application %q now dead", appName)
-			return true, nil
-		}
-
-		// Wait for next app change, then loop to check charm format again.
-		select {
-		case <-appStateChanges:
-		case <-tomb.Dying():
-			return false, tomb.ErrDying()
-		}
-	}
-}
-
-// upgradePodSpec checks to see if the application used to be a podspec statefulset charm
-// and then to trigger an upgrade and wait for it to complete.
-func upgradePodSpec(appName string,
-	broker CAASBroker, clk clock.Clock, tomb Tomb, logger Logger) error {
-	// If the application has an operator pod due to upgrading the charm from a pod-spec charm
-	// to a sidecar charm, delete it. Also delete workload pod.
-	const maxDeleteLoops = 20
-	for i := 0; ; i++ {
-		if i >= maxDeleteLoops {
-			return fmt.Errorf("couldn't delete operator and service with %d tries", maxDeleteLoops)
-		}
-		if i > 0 {
-			select {
-			case <-clk.After(3 * time.Second):
-			case <-tomb.Dying():
-				return tomb.ErrDying()
-			}
-		}
-
-		exists, err := broker.OperatorExists(appName)
-		if err != nil {
-			return errors.Annotatef(err, "checking if %q has an operator pod due to upgrading the charm from a pod-spec charm to a sidecar charm", appName)
-		}
-		if !exists.Exists {
-			break
-		}
-
-		logger.Infof("app %q has just been upgraded from a podspec charm to sidecar, now deleting workload and operator pods", appName)
-		err = broker.DeleteService(appName)
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			return errors.Annotatef(err, "deleting workload pod for application %q", appName)
-		}
-
-		// Wait till the units are gone, to ensure worker code isn't messing
-		// with old units, only new sidecar pods.
-		const maxUnitsLoops = 20
-		for j := 0; ; j++ {
-			if j >= maxUnitsLoops {
-				return fmt.Errorf("pods still present after %d tries", maxUnitsLoops)
-			}
-			units, err := broker.Units(appName, caas.ModeWorkload)
-			if err != nil && !errors.Is(err, errors.NotFound) {
-				return errors.Annotatef(err, "fetching workload units for application %q", appName)
-			}
-			if len(units) == 0 {
-				break
-			}
-			logger.Debugf("%q: waiting for workload pods to be deleted", appName)
-			select {
-			case <-clk.After(3 * time.Second):
-			case <-tomb.Dying():
-				return tomb.ErrDying()
-			}
-		}
-
-		err = broker.DeleteOperator(appName)
-		if err != nil && !errors.Is(err, errors.NotFound) {
-			return errors.Annotatef(err, "deleting operator pod for application %q", appName)
-		}
-	}
 	return nil
 }
 
 // ensureTrust updates the applications Trust status on the CAAS broker, giving it
 // access to the k8s api via a service account.
-func ensureTrust(appName string, app caas.Application,
-	unitFacade CAASUnitProvisionerFacade, logger Logger) error {
-	desiredTrust, err := unitFacade.ApplicationTrust(appName)
+func ensureTrust(
+	ctx context.Context,
+	appName string, app caas.Application,
+	applicationService ApplicationService,
+	logger logger.Logger,
+) error {
+	desiredTrust, err := applicationService.GetApplicationTrustSetting(ctx, appName)
 	if err != nil {
 		return errors.Annotatef(err, "fetching application %q desired trust", appName)
 	}
 
-	logger.Debugf("updating application %q trust to %v", appName, desiredTrust)
+	logger.Debugf(ctx, "updating application %q trust to %v", appName, desiredTrust)
 	err = app.Trust(desiredTrust)
 	if err != nil {
 		return errors.Annotatef(
@@ -416,30 +444,42 @@ func ensureTrust(appName string, app caas.Application,
 
 // updateState reports back information about the CAAS application into state, such as
 // status, IP addresses and volume info.
-func updateState(appName string, app caas.Application, lastReportedStatus map[string]status.StatusInfo,
-	broker CAASBroker, facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) (map[string]status.StatusInfo, error) {
-	appTag := names.NewApplicationTag(appName).String()
-	appStatus := params.EntityStatus{}
+func updateState(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application,
+	lastReportedStatus UpdateStatusState,
+	broker CAASBroker, applicationService ApplicationService, statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) (UpdateStatusState, error) {
 	svc, err := app.Service()
 	if err != nil && !errors.Is(err, errors.NotFound) {
 		return nil, errors.Trace(err)
 	}
 	if svc != nil {
-		appStatus = params.EntityStatus{
-			Status: svc.Status.Status,
-			Info:   svc.Status.Message,
-			Data:   svc.Status.Data,
-		}
-		err = unitFacade.UpdateApplicationService(params.UpdateApplicationServiceArg{
-			ApplicationTag: appTag,
-			ProviderId:     svc.Id,
-			Addresses:      params.FromProviderAddresses(svc.Addresses...),
-		})
-		if errors.Is(err, errors.NotFound) {
-			// Do nothing
-		} else if err != nil {
+		err := applicationService.UpdateCloudService(
+			ctx, appName, svc.Id, svc.Addresses)
+		if err != nil {
 			return nil, errors.Trace(err)
 		}
+		now := clk.Now()
+		err = statusService.SetOperatorStatus(ctx, appName, status.StatusInfo{
+			Status:  svc.Status.Status,
+			Message: svc.Status.Message,
+			Data:    svc.Status.Data,
+			Since:   &now,
+		})
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+
+	unitToPod, err := applicationService.GetAllUnitCloudContainerIDsForApplication(ctx, appUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	podToUnit := make(map[string]coreunit.Name, len(unitToPod))
+	for k, v := range unitToPod {
+		podToUnit[v] = k
 	}
 
 	units, err := app.Units()
@@ -447,96 +487,61 @@ func updateState(appName string, app caas.Application, lastReportedStatus map[st
 		return nil, errors.Trace(err)
 	}
 
-	reportedStatus := make(map[string]status.StatusInfo)
-	args := params.UpdateApplicationUnits{
-		ApplicationTag: appTag,
-		Status:         appStatus,
-	}
+	reportedStatus := make(UpdateStatusState, len(units))
 	for _, u := range units {
-		// For pods managed by the substrate, any marked as dying
-		// are treated as non-existing.
-		if u.Dying {
+		unitName, ok := podToUnit[u.Id]
+		if !ok {
+			// This pod exists outside of Juju's knowledge. Ignore it for now.
 			continue
 		}
-		unitStatus := u.Status
-		lastStatus, ok := lastReportedStatus[u.Id]
-		reportedStatus[u.Id] = unitStatus
-		// TODO: Determine a better way to propagate status
-		// without constantly overriding the juju state value.
+
+		args := applicationservice.UpdateCAASUnitParams{
+			ProviderID: &u.Id,
+			Address:    &u.Address,
+			Ports:      &u.Ports,
+		}
+		args.AgentStatus, args.CloudContainerStatus = updateStatus(u.Status, clk)
+
+		lastStatus, ok := lastReportedStatus[unitName]
+		reportedStatus[unitName] = args
 		if ok {
-			// If we've seen the same status value previously,
-			// report as unknown as this value is ignored.
-			if reflect.DeepEqual(lastStatus, unitStatus) {
-				unitStatus = status.StatusInfo{
-					Status: status.Unknown,
-				}
+			if reflect.DeepEqual(lastStatus, args) {
+				// We've already reported this.
+				continue
 			}
 		}
-		unitParams := params.ApplicationUnitParams{
-			ProviderId: u.Id,
-			Address:    u.Address,
-			Ports:      u.Ports,
-			Stateful:   u.Stateful,
-			Status:     unitStatus.Status.String(),
-			Info:       unitStatus.Message,
-			Data:       unitStatus.Data,
-		}
-		// Fill in any filesystem info for volumes attached to the unit.
-		// A unit will not become active until all required volumes are
-		// provisioned, so it makes sense to send this information along
-		// with the units to which they are attached.
-		for _, info := range u.FilesystemInfo {
-			unitParams.FilesystemInfo = append(unitParams.FilesystemInfo, params.KubernetesFilesystemInfo{
-				StorageName:  info.StorageName,
-				FilesystemId: info.FilesystemId,
-				Size:         info.Size,
-				MountPoint:   info.MountPoint,
-				ReadOnly:     info.ReadOnly,
-				Status:       info.Status.Status.String(),
-				Info:         info.Status.Message,
-				Data:         info.Status.Data,
-				Volume: params.KubernetesVolumeInfo{
-					VolumeId:   info.Volume.VolumeId,
-					Size:       info.Volume.Size,
-					Persistent: info.Volume.Persistent,
-					Status:     info.Volume.Status.Status.String(),
-					Info:       info.Volume.Status.Message,
-					Data:       info.Volume.Status.Data,
-				},
-			})
-		}
-		args.Units = append(args.Units, unitParams)
-	}
 
-	appUnitInfo, err := facade.UpdateUnits(args)
-	if err != nil {
-		// We can ignore not found errors as the worker will get stopped anyway.
-		// We can also ignore Forbidden errors raised from SetScale because disordered events could happen often.
-		if !errors.Is(err, errors.Forbidden) && !errors.Is(err, errors.NotFound) {
+		err = applicationService.UpdateCAASUnit(ctx, unitName, args)
+		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		logger.Warningf("update units %v", err)
 	}
 
-	if appUnitInfo != nil {
-		for _, unitInfo := range appUnitInfo.Units {
-			unit, err := names.ParseUnitTag(unitInfo.UnitTag)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			err = broker.AnnotateUnit(appName, caas.ModeSidecar, unitInfo.ProviderId, unit)
-			if errors.Is(err, errors.NotFound) {
-				continue
-			} else if err != nil {
-				return nil, errors.Trace(err)
-			}
+	for unitName, podName := range unitToPod {
+		lastReported := lastReportedStatus[unitName]
+		if lastReported.ProviderID != nil &&
+			*lastReported.ProviderID == podName {
+			// The pod has already been annotated.
+			continue
+		}
+
+		unitTag := names.NewUnitTag(unitName.String())
+		err := broker.AnnotateUnit(ctx, appName, podName, unitTag)
+		if errors.Is(err, errors.NotFound) {
+			continue
+		} else if err != nil {
+			return nil, errors.Trace(err)
 		}
 	}
 	return reportedStatus, nil
 }
 
-func refreshApplicationStatus(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, logger Logger) error {
+func refreshApplicationStatus(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
 	if appLife != life.Alive {
 		return nil
 	}
@@ -548,16 +553,17 @@ func refreshApplicationStatus(appName string, app caas.Application, appLife life
 		return errors.Trace(err)
 	}
 
-	// refresh the units information.
-	units, err := facade.Units(appName)
-	if errors.Is(err, errors.NotFound) {
+	// refresh the unit's information.
+	unitStatuses, err := statusService.GetUnitAgentStatusesForApplication(ctx, appUUID)
+	if errors.Is(err, applicationerrors.ApplicationNotFound) {
 		return nil
 	} else if err != nil {
 		return errors.Trace(err)
 	}
 	readyUnitsCount := 0
-	for _, unit := range units {
-		if unit.UnitStatus.AgentStatus.Status == string(status.Active) {
+	for _, unit := range unitStatuses {
+		switch unit.Status {
+		case status.Idle, status.Executing:
 			readyUnitsCount++
 		}
 	}
@@ -565,9 +571,9 @@ func refreshApplicationStatus(appName string, app caas.Application, appLife life
 		// Only set status to waiting for scale up.
 		// When the application gets scaled down, the desired units will be kept running and
 		// the application should be active always.
-		return setApplicationStatus(appName, status.Waiting, "waiting for units to settle down", nil, facade, logger)
+		return setApplicationStatus(ctx, appName, status.Waiting, "waiting for units to settle down", nil, statusService, clk, logger)
 	}
-	return setApplicationStatus(appName, status.Active, "", nil, facade, logger)
+	return setApplicationStatus(ctx, appName, status.Active, "", nil, statusService, clk, logger)
 }
 
 func waitForTerminated(appName string, app caas.Application,
@@ -598,48 +604,44 @@ func waitForTerminated(appName string, app caas.Application,
 	return errors.Trace(retry.Call(retryCallArgs))
 }
 
-// reconcileDeadUnitScale is setup to respond to CAAS sidecard units that become
+// reconcileDeadUnitScale is setup to respond to CAAS sidecar units that become
 // dead. It takes stock of what the current desired scale is for the application
 // and the number of dead units in the application. Once the number of dead units
-// has reached the a point where the desired scale has been achieved this func
-// can go ahead and removed the units from CAAS provider.
-func reconcileDeadUnitScale(appName string, app caas.Application,
-	facade CAASProvisionerFacade, logger Logger) error {
-	units, err := facade.Units(appName)
+// has reached the point where the desired scale has been achieved this func
+// can go ahead and remove the units from CAAS provider.
+func reconcileDeadUnitScale(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService,
+	statusService StatusService,
+	logger logger.Logger,
+) error {
+	unitNamesAndLives, err := applicationService.GetAllUnitLifeForApplication(ctx, appUUID)
 	if err != nil {
 		return fmt.Errorf("getting units for application %s: %w", appName, err)
 	}
 
-	ps, err := facade.ProvisioningState(appName)
+	ps, err := applicationService.GetApplicationScalingState(ctx, appName)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if ps == nil || !ps.Scaling {
+	if !ps.Scaling {
 		return nil
 	}
 
 	desiredScale := ps.ScaleTarget
 	unitsToRemove := 0
 
-	var deadUnits []params.CAASUnit
-	for _, unit := range units {
-		unitLife, err := facade.Life(unit.Tag.Id())
-		if err != nil {
-			return fmt.Errorf("getting life for unit %q: %w", unit.Tag, err)
-		}
-		unitTag, ok := unit.Tag.(names.UnitTag)
-		if !ok {
-			return fmt.Errorf("expected a unit tag; got %q", unit.Tag)
-		}
-
-		if unitTag.Number() < desiredScale {
+	var deadUnits []coreunit.Name
+	for unitName, unitLife := range unitNamesAndLives {
+		if unitName.Number() < desiredScale {
 			// This is a unit we want to keep.
 			continue
 		}
 		unitsToRemove++
-
 		if unitLife == life.Dead {
-			deadUnits = append(deadUnits, unit)
+			deadUnits = append(deadUnits, unitName)
 		}
 	}
 
@@ -649,7 +651,12 @@ func reconcileDeadUnitScale(appName string, app caas.Application,
 		return nil
 	}
 
-	if err := ensureScaleWithFsAttachments(appName, app, desiredScale, facade, logger); err != nil && !errors.Is(err, errors.NotFound) {
+	storageUniqueID := getStorageUniqueID(appUUID)
+	err = ensureScaleWithFsAttachments(
+		ctx, appName, app, desiredScale,
+		facade, logger, storageUniqueID,
+	)
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return fmt.Errorf(
 			"scaling application %q to scale %d: %w",
 			appName,
@@ -668,24 +675,29 @@ func reconcileDeadUnitScale(appName string, app caas.Application,
 	}
 
 	for _, deadUnit := range deadUnits {
-		logger.Infof("removing dead unit %s", deadUnit.Tag.Id())
-		if err := facade.RemoveUnit(deadUnit.Tag.Id()); err != nil && !errors.Is(err, errors.NotFound) {
-			return fmt.Errorf("removing dead unit %q: %w", deadUnit.Tag.Id(), err)
+		logger.Infof(ctx, "removing dead unit %s", deadUnit)
+		if err := facade.RemoveUnit(ctx, string(deadUnit)); err != nil && !errors.Is(err, errors.NotFound) {
+			return fmt.Errorf("removing dead unit %q: %w", deadUnit, err)
 		}
 	}
 
-	return updateProvisioningState(appName, false, 0, facade)
+	return updateProvisioningState(ctx, appName, false, 0, applicationService)
 }
 
 // ensureScale determines how and when to scale up or down based on
 // current scale targets that have yet to be met.
-func ensureScale(appName string, app caas.Application, appLife life.Value,
-	facade CAASProvisionerFacade, unitFacade CAASUnitProvisionerFacade, logger Logger) error {
+func ensureScale(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID, app caas.Application, appLife life.Value,
+	facade CAASProvisionerFacade,
+	applicationService ApplicationService, statusService StatusService,
+	logger logger.Logger,
+) error {
 	var err error
 	var desiredScale int
 	switch appLife {
 	case life.Alive:
-		desiredScale, err = unitFacade.ApplicationScale(appName)
+		desiredScale, err = applicationService.GetApplicationScale(ctx, appName)
 		if err != nil {
 			return errors.Annotatef(err, "fetching application %q desired scale", appName)
 		}
@@ -695,17 +707,14 @@ func ensureScale(appName string, app caas.Application, appLife life.Value,
 		return errors.NotImplementedf("unknown life %q", appLife)
 	}
 
-	ps, err := facade.ProvisioningState(appName)
+	ps, err := applicationService.GetApplicationScalingState(ctx, appName)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if ps == nil {
-		ps = &params.CAASApplicationProvisioningState{}
-	}
 
-	logger.Debugf("updating application %q scale to %d", appName, desiredScale)
+	logger.Debugf(ctx, "updating application %q scale to %d", appName, desiredScale)
 	if !ps.Scaling || appLife != life.Alive {
-		err := updateProvisioningState(appName, true, desiredScale, facade)
+		err := updateProvisioningState(ctx, appName, true, desiredScale, applicationService)
 		if err != nil {
 			return err
 		}
@@ -713,32 +722,66 @@ func ensureScale(appName string, app caas.Application, appLife life.Value,
 		ps.ScaleTarget = desiredScale
 	}
 
-	units, err := facade.Units(appName)
+	units, err := applicationService.GetAllUnitLifeForApplication(ctx, appUUID)
 	if err != nil {
 		return err
 	}
 
-	if ps.ScaleTarget >= len(units) {
-		err := ensureScaleWithFsAttachments(appName, app, ps.ScaleTarget, facade, logger)
+	unitScale := 0
+	for unitName := range units {
+		nextUnitNumber := unitName.Number() + 1
+		if nextUnitNumber > unitScale {
+			unitScale = nextUnitNumber
+		}
+	}
+
+	if ps.ScaleTarget >= unitScale {
+		storageUniqueID := appUUID.String()[:6]
+		err := ensureScaleWithFsAttachments(
+			ctx,
+			appName,
+			app,
+			ps.ScaleTarget,
+			facade,
+			logger,
+			storageUniqueID,
+		)
 
 		if appLife != life.Alive && errors.Is(err, errors.NotFound) {
-			logger.Infof("dying application %q is already removed", appName)
+			logger.Infof(ctx, "dying application %q is already removed from k8s", appName)
+			return updateProvisioningState(ctx, appName, false, 0, applicationService)
 		} else if err != nil {
 			return err
 		}
-		return updateProvisioningState(appName, false, 0, facade)
-	}
-
-	unitsToDestroy, err := app.UnitsToRemove(context.TODO(), ps.ScaleTarget)
-	if err != nil && errors.Is(err, errors.NotFound) {
+		if ps.ScaleTarget > len(units) {
+			// Scaling up must see units created.
+			return tryAgain
+		}
+		err = updateProvisioningState(ctx, appName, false, 0, applicationService)
+		if err != nil {
+			return err
+		}
+		if ps.ScaleTarget != desiredScale {
+			// if the current scale target doesn't equal the desired scale
+			// we need to rerun this.
+			logger.Debugf(ctx, "application %q currently scaling to %d but desired scale is %d", appName, ps.ScaleTarget, desiredScale)
+			return tryAgain
+		}
 		return nil
-	} else if err != nil {
-		return fmt.Errorf("scaling application %q to desired scale %d: %w",
-			appName, ps.ScaleTarget, err)
 	}
 
+	var unitsToDestroy []string
+	for unitName, unitLife := range units {
+		if unitName.Number() < ps.ScaleTarget {
+			// This is a unit we want to keep.
+			continue
+		}
+		if unitLife == life.Alive {
+			unitsToDestroy = append(unitsToDestroy, unitName.String())
+		}
+	}
 	if len(unitsToDestroy) > 0 {
-		if err := facade.DestroyUnits(unitsToDestroy); err != nil {
+		if err := facade.DestroyUnits(ctx, unitsToDestroy); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -746,26 +789,39 @@ func ensureScale(appName string, app caas.Application, appLife life.Value,
 	if ps.ScaleTarget != desiredScale {
 		// if the current scale target doesn't equal the desired scale
 		// we need to rerun this.
-		logger.Debugf("application %q currently scaling to %d but desired scale is %d", appName, ps.ScaleTarget, desiredScale)
+		logger.Debugf(ctx, "application %q currently scaling to %d but desired scale is %d", appName, ps.ScaleTarget, desiredScale)
 		return tryAgain
 	}
 	return nil
 }
 
-func setApplicationStatus(appName string, s status.Status, reason string, data map[string]interface{},
-	facade CAASProvisionerFacade, logger Logger) error {
-	logger.Tracef("updating application %q status to %q, %q, %v", appName, s, reason, data)
-	return facade.SetOperatorStatus(appName, s, reason, data)
+func getStorageUniqueID(appUUID coreapplication.UUID) string {
+	return appUUID.String()[:6]
 }
 
-func updateProvisioningState(appName string, scaling bool, scaleTarget int,
-	facade CAASProvisionerFacade) error {
-	newPs := params.CAASApplicationProvisioningState{
-		Scaling:     scaling,
-		ScaleTarget: scaleTarget,
-	}
-	err := facade.SetProvisioningState(appName, newPs)
-	if params.IsCodeTryAgain(err) {
+func setApplicationStatus(
+	ctx context.Context,
+	appName string, s status.Status, reason string, data map[string]any,
+	statusService StatusService,
+	clk clock.Clock, logger logger.Logger,
+) error {
+	logger.Tracef(ctx, "updating application %q status to %q, %q, %v", appName, s, reason, data)
+	now := clk.Now()
+	return statusService.SetOperatorStatus(ctx, appName, status.StatusInfo{
+		Status:  s,
+		Message: reason,
+		Data:    data,
+		Since:   &now,
+	})
+}
+
+func updateProvisioningState(
+	ctx context.Context,
+	appName string, scaling bool, scaleTarget int,
+	applicationService ApplicationService,
+) error {
+	err := applicationService.SetApplicationScalingState(ctx, appName, scaleTarget, scaling)
+	if errors.Is(err, applicationerrors.ScalingStateInconsistent) {
 		return tryAgain
 	} else if err != nil {
 		return errors.Annotatef(err, "setting provisiong state for application %q", appName)
@@ -774,20 +830,196 @@ func updateProvisioningState(appName string, scaling bool, scaleTarget int,
 }
 
 // ensureScaleWithFsAttachments scales an application while ensuring required PVCs are created.
-func ensureScaleWithFsAttachments(appName string, app caas.Application, scaleTarget int,
-	facade CAASProvisionerFacade, logger Logger,
+func ensureScaleWithFsAttachments(
+	ctx context.Context, appName string,
+	app caas.Application, scaleTarget int,
+	facade CAASProvisionerFacade, logger logger.Logger, storageUniqueID string,
 ) error {
-	logger.Infof("scaling application %q to desired scale %d", appName, scaleTarget)
+	logger.Infof(ctx, "scaling application %q to desired scale %d", appName, scaleTarget)
 
 	// Get filesystem provisioning info.
-	info, err := facade.FilesystemProvisioningInfo(appName)
+	info, err := facade.FilesystemProvisioningInfo(ctx, appName)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	// Ensure PVCs exist.
-	if err := app.EnsurePVCs(info.Filesystems, info.FilesystemUnitAttachments); err != nil {
+	err = app.EnsurePVCs(
+		info.Filesystems,
+		info.FilesystemUnitAttachments,
+		storageUniqueID,
+	)
+	if err != nil {
 		return err
 	}
 	return app.Scale(scaleTarget)
+}
+
+func provisioningInfo(
+	ctx context.Context,
+	appName string, appUUID coreapplication.UUID,
+	facade CAASProvisionerFacade,
+	storageProvisioningService StorageProvisioningService,
+	applicationService ApplicationService,
+	resourceOpenerGetter ResourceOpenerGetter,
+	lastProvisioningInfo *ProvisioningInfo,
+	logger logger.Logger,
+) (*ProvisioningInfo, error) {
+	// TODO(k8s): stop calling onto the facade to get these.
+	res, err := facade.ProvisioningInfo(ctx, appName)
+	if err != nil {
+		return nil, errors.Annotate(err, "retrieving provisioning info")
+	}
+
+	pi := &ProvisioningInfo{
+		Version:              res.Version,
+		APIAddresses:         res.APIAddresses,
+		CACert:               res.CACert,
+		Tags:                 res.Tags,
+		Constraints:          res.Constraints,
+		Devices:              res.Devices,
+		Base:                 res.Base,
+		ImageDetails:         res.ImageDetails,
+		CharmModifiedVersion: res.CharmModifiedVersion,
+		Trust:                res.Trust,
+		Scale:                res.Scale,
+	}
+
+	fsTemplates, err := storageProvisioningService.GetFilesystemTemplatesForApplication(ctx, appUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	pi.FilesystemTemplates = fsTemplates
+
+	storageResourceTags, err := storageProvisioningService.GetStorageResourceTagsForApplication(ctx, appUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	pi.StorageResourceTags = storageResourceTags
+
+	if lastProvisioningInfo != nil {
+		if pi.CharmModifiedVersion == lastProvisioningInfo.CharmModifiedVersion {
+			pi.CharmMeta = lastProvisioningInfo.CharmMeta
+			pi.Images = lastProvisioningInfo.Images
+			return pi, nil
+		}
+	}
+
+	charm, _, err := applicationService.GetCharmByApplicationUUID(ctx, appUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	pi.CharmMeta = charm.Meta()
+
+	ro, err := resourceOpenerGetter.ResourceOpenerForApplication(ctx, appUUID, appName)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	pi.Images = make(map[string]coreresource.DockerImageDetails)
+	for _, v := range charm.Meta().Resources {
+		if v.Type != charmresource.TypeContainerImage {
+			continue
+		}
+		opened, err := ro.OpenResource(ctx, v.Name)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		rsc, err := readDockerImageResource(opened)
+		_ = opened.Close()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		pi.Images[v.Name] = rsc
+		err = ro.SetResourceUsed(ctx, opened.UUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+
+	return pi, nil
+}
+
+// updateStatus constructs the agent and cloud container status values.
+func updateStatus(podStatus status.StatusInfo, clk clock.Clock) (
+	agentStatus *status.StatusInfo,
+	cloudContainerStatus *status.StatusInfo,
+) {
+	now := clk.Now()
+	switch podStatus.Status {
+	case status.Unknown:
+		// The container runtime can spam us with unimportant
+		// status updates, so ignore any irrelevant ones.
+		return nil, nil
+	case status.Allocating:
+		// The container runtime has decided to restart the pod.
+		agentStatus = &status.StatusInfo{
+			Status:  status.Allocating,
+			Message: podStatus.Message,
+			Since:   &now,
+		}
+		cloudContainerStatus = &status.StatusInfo{
+			Status:  status.Waiting,
+			Message: podStatus.Message,
+			Data:    podStatus.Data,
+			Since:   &now,
+		}
+	case status.Running:
+		// A pod has finished starting so the workload is now active.
+		agentStatus = &status.StatusInfo{
+			Status: status.Idle,
+			Since:  &now,
+		}
+		cloudContainerStatus = &status.StatusInfo{
+			Status:  status.Running,
+			Message: podStatus.Message,
+			Data:    podStatus.Data,
+			Since:   &now,
+		}
+	case status.Error:
+		agentStatus = &status.StatusInfo{
+			Status:  status.Error,
+			Message: podStatus.Message,
+			Data:    podStatus.Data,
+			Since:   &now,
+		}
+		cloudContainerStatus = &status.StatusInfo{
+			Status:  status.Error,
+			Message: podStatus.Message,
+			Data:    podStatus.Data,
+			Since:   &now,
+		}
+	case status.Blocked:
+		agentStatus = &status.StatusInfo{
+			Status: status.Idle,
+			Since:  &now,
+		}
+		cloudContainerStatus = &status.StatusInfo{
+			Status:  status.Blocked,
+			Message: podStatus.Message,
+			Data:    podStatus.Data,
+			Since:   &now,
+		}
+	}
+	return agentStatus, cloudContainerStatus
+}
+
+func readDockerImageResource(reader io.Reader) (coreresource.DockerImageDetails, error) {
+	contents, err := io.ReadAll(reader)
+	if err != nil {
+		return coreresource.DockerImageDetails{}, errors.Trace(err)
+	}
+	var details docker.DockerImageDetails
+	if err := json.Unmarshal(contents, &details); err != nil {
+		if err := yaml.Unmarshal(contents, &details); err != nil {
+			return coreresource.DockerImageDetails{}, errors.Annotate(err, "file neither valid json or yaml")
+		}
+	}
+	if err := docker.ValidateDockerRegistryPath(details.RegistryPath); err != nil {
+		return coreresource.DockerImageDetails{}, err
+	}
+	return coreresource.DockerImageDetails{
+		RegistryPath:     details.RegistryPath,
+		ImageRepoDetails: docker.ConvertToResourceImageDetails(details.ImageRepoDetails),
+	}, nil
 }

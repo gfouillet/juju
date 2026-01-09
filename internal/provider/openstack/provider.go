@@ -6,7 +6,7 @@
 package openstack
 
 import (
-	stdcontext "context"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -29,36 +29,36 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/collections/transform"
 	"github.com/juju/errors"
-	"github.com/juju/http/v2"
 	"github.com/juju/jsonschema"
-	"github.com/juju/loggo"
 	"github.com/juju/retry"
-	"github.com/juju/utils/v3"
-	"github.com/juju/version/v2"
+	"github.com/juju/utils/v4"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/cloudconfig/cloudinit"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/providerinit"
 	"github.com/juju/juju/cmd/juju/interact"
 	"github.com/juju/juju/core/constraints"
+	coreerrors "github.com/juju/juju/core/errors"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/tags"
+	"github.com/juju/juju/internal/cloudconfig/cloudinit"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/providerinit"
+	internalerrors "github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/http"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
 
-var logger = loggo.GetLogger("juju.provider.openstack")
+var logger = internallogger.GetLogger("juju.provider.openstack")
 
 type EnvironProvider struct {
 	environs.ProviderCredentials
@@ -166,8 +166,8 @@ func (EnvironProvider) Version() int {
 	return currentProviderVersion
 }
 
-func (p EnvironProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
-	logger.Infof("opening model %q", args.Config.Name())
+func (p EnvironProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+	logger.Infof(ctx, "opening model %q", args.Config.Name())
 	uuid := args.Config.UUID()
 	namespace, err := instance.NewNamespace(uuid)
 	if err != nil {
@@ -175,25 +175,37 @@ func (p EnvironProvider) Open(ctx stdcontext.Context, args environs.OpenParams) 
 	}
 
 	e := &Environ{
-		name:           args.Config.Name(),
-		modelUUID:      uuid,
-		namespace:      namespace,
-		clock:          clock.WallClock,
-		configurator:   p.Configurator,
-		flavorFilter:   p.FlavorFilter,
-		controllerUUID: args.ControllerUUID,
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, IsAuthorisationFailure),
+		name:                  args.Config.Name(),
+		modelUUID:             uuid,
+		namespace:             namespace,
+		clock:                 clock.WallClock,
+		configurator:          p.Configurator,
+		flavorFilter:          p.FlavorFilter,
+		controllerUUID:        args.ControllerUUID,
 	}
 
-	if err := e.SetConfig(args.Config); err != nil {
+	if err := e.SetConfig(ctx, args.Config); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if err := e.SetCloudSpec(ctx, args.Cloud); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	e.networking, e.firewaller, err = p.getEnvironNetworkingFirewaller(e)
+	e.networking, e.firewaller, err = p.getEnvironNetworkingFirewaller(ctx, e)
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+
+	e.volumeURL, err = getVolumeEndpointURL(
+		ctx, e.clientUnlocked, e.cloudUnlocked.Region,
+	)
+	if err != nil && !internalerrors.Is(err, coreerrors.NotFound) {
+		return nil, internalerrors.Errorf(
+			"getting volume endpoint url for region: %w", err,
+		)
+	} else if err == nil {
+		logger.Debugf(ctx, "volume URL: %q", e.volumeURL.String())
 	}
 
 	return e, nil
@@ -202,7 +214,7 @@ func (p EnvironProvider) Open(ctx stdcontext.Context, args environs.OpenParams) 
 // getEnvironNetworkingFirewaller returns Networking and Firewaller for the
 // new Environ.  Both require Neutron to be support by the OpenStack cloud,
 // so create together.
-func (p EnvironProvider) getEnvironNetworkingFirewaller(e *Environ) (Networking, Firewaller, error) {
+func (p EnvironProvider) getEnvironNetworkingFirewaller(ctx context.Context, e *Environ) (Networking, Firewaller, error) {
 	// TODO (hml) 2019-12-05
 	// We want to ensure a failure if an old nova networking OpenStack is
 	// added as a new model to a multi-cloud controller.  However the
@@ -210,15 +222,15 @@ func (p EnvironProvider) getEnvironNetworkingFirewaller(e *Environ) (Networking,
 	// thus causing failures and panics in the setup of the majority of
 	// provider unit tests.  Or a rewrite of code and/or tests.
 	// See LP:1855343
-	if err := authenticateClient(e.client()); err != nil {
+	if err := authenticateClient(ctx, e.client()); err != nil {
 		return nil, nil, errors.Trace(err)
 	}
 	if !e.supportsNeutron() {
 		// This should turn into a failure, left as an Error message for now to help
 		// provide context for failing networking calls by this environ.  Previously
 		// this was covered by switchingNetworking{} and switchingFirewaller{}.
-		logger.Errorf("Using unsupported OpenStack APIs. Neutron networking " +
-			"is not supported by this OpenStack cloud.\n  Please use OpenStack Queens or " +
+		logger.Errorf(ctx, "Using unsupported OpenStack APIs. Neutron networking "+
+			"is not supported by this OpenStack cloud.\n  Please use OpenStack Queens or "+
 			"newer to maintain compatibility.")
 	}
 	networking := newNetworking(e)
@@ -251,10 +263,9 @@ func (p EnvironProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p EnvironProvider) Ping(ctx context.ProviderCallContext, endpoint string) error {
+func (p EnvironProvider) Ping(ctx context.Context, endpoint string) error {
 	c := p.ClientFromEndpoint(endpoint)
 	if _, err := c.IdentityAuthOptions(); err != nil {
-		handleCredentialError(err, ctx)
 		return errors.Annotatef(err, "No Openstack server running at %s", endpoint)
 	}
 	return nil
@@ -266,23 +277,9 @@ func newGooseClient(endpoint string) client.AuthenticatingClient {
 	return client.NewNonValidatingClient(&identity.Credentials{URL: endpoint}, 0, nil)
 }
 
-// PrepareConfig is specified in the EnvironProvider interface.
-func (p EnvironProvider) PrepareConfig(args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-
-	// Set the default block-storage source.
-	attrs := make(map[string]interface{})
-	if _, ok := args.Config.StorageDefaultBlockSource(); !ok {
-		attrs[config.StorageDefaultBlockSourceKey] = CinderProviderType
-	}
-
-	cfg, err := args.Config.Apply(attrs)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return cfg, nil
+// ValidateCloud is specified in the EnvironProvider interface.
+func (p EnvironProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 // AgentMetadataLookupParams returns parameters which are used to query agent metadata to
@@ -306,8 +303,8 @@ func (p EnvironProvider) metadataLookupParams(region string) (*simplestreams.Met
 	}, nil
 }
 
-func (p EnvironProvider) newConfig(cfg *config.Config) (*environConfig, error) {
-	valid, err := p.Validate(cfg, nil)
+func (p EnvironProvider) newConfig(ctx context.Context, cfg *config.Config) (*environConfig, error) {
+	valid, err := p.Validate(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +312,7 @@ func (p EnvironProvider) newConfig(cfg *config.Config) (*environConfig, error) {
 }
 
 type Environ struct {
+	common.CredentialInvalidator
 	environs.NoSpaceDiscoveryEnviron
 	environs.NoContainerAddressesEnviron
 
@@ -358,9 +356,11 @@ type Environ struct {
 }
 
 var _ environs.Environ = (*Environ)(nil)
+
 var _ environs.NetworkingEnviron = (*Environ)(nil)
+
 var _ simplestreams.HasRegion = (*Environ)(nil)
-var _ context.Distributor = (*Environ)(nil)
+
 var _ environs.InstanceTagger = (*Environ)(nil)
 
 type openstackInstance struct {
@@ -389,13 +389,12 @@ func (inst *openstackInstance) String() string {
 
 var _ instances.Instance = (*openstackInstance)(nil)
 
-func (inst *openstackInstance) Refresh(ctx context.ProviderCallContext) error {
+func (inst *openstackInstance) Refresh(ctx context.Context) error {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	server, err := inst.e.nova().GetServer(inst.serverDetail.Id)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return err
+		return inst.e.HandleCredentialError(ctx, err)
 	}
 	inst.serverDetail = server
 	return nil
@@ -411,7 +410,7 @@ func (inst *openstackInstance) Id() instance.Id {
 	return instance.Id(inst.getServerDetail().Id)
 }
 
-func (inst *openstackInstance) Status(ctx context.ProviderCallContext) instance.Status {
+func (inst *openstackInstance) Status(ctx context.Context) instance.Status {
 	instStatus := inst.getServerDetail().Status
 	var jujuStatus status.Status
 	switch instStatus {
@@ -455,7 +454,9 @@ func (inst *openstackInstance) hardwareCharacteristics() *instance.HardwareChara
 		hc.CpuPower = inst.instType.CpuPower
 		// tags not currently supported on openstack
 	}
-	hc.AvailabilityZone = &inst.serverDetail.AvailabilityZone
+	if inst.serverDetail.AvailabilityZone != "" {
+		hc.AvailabilityZone = &inst.serverDetail.AvailabilityZone
+	}
 	// If the instance was started with a volume block device mapping, select the first
 	// boot disk as the reported RootDisk size.
 	if inst.runOpts != nil {
@@ -473,13 +474,12 @@ func (inst *openstackInstance) hardwareCharacteristics() *instance.HardwareChara
 
 // getAddresses returns the existing server information on addresses,
 // but fetches the details over the api again if no addresses exist.
-func (inst *openstackInstance) getAddresses(ctx context.ProviderCallContext) (map[string][]nova.IPAddress, error) {
+func (inst *openstackInstance) getAddresses(ctx context.Context) (map[string][]nova.IPAddress, error) {
 	addrs := inst.getServerDetail().Addresses
 	if len(addrs) == 0 {
 		server, err := inst.e.nova().GetServer(string(inst.Id()))
 		if err != nil {
-			handleCredentialError(err, ctx)
-			return nil, err
+			return nil, inst.e.HandleCredentialError(ctx, err)
 		}
 		addrs = server.Addresses
 	}
@@ -488,7 +488,7 @@ func (inst *openstackInstance) getAddresses(ctx context.ProviderCallContext) (ma
 
 // Addresses implements network.Addresses() returning generic address
 // details for the instances, and calling the openstack api if needed.
-func (inst *openstackInstance) Addresses(ctx context.ProviderCallContext) (network.ProviderAddresses, error) {
+func (inst *openstackInstance) Addresses(ctx context.Context) (network.ProviderAddresses, error) {
 	addresses, err := inst.getAddresses(ctx)
 	if err != nil {
 		return nil, err
@@ -496,13 +496,13 @@ func (inst *openstackInstance) Addresses(ctx context.ProviderCallContext) (netwo
 	var floatingIP string
 	if inst.floatingIP != nil {
 		floatingIP = *inst.floatingIP
-		logger.Debugf("instance %v has floating IP address: %v", inst.Id(), floatingIP)
+		logger.Debugf(ctx, "instance %v has floating IP address: %v", inst.Id(), floatingIP)
 	}
-	return convertNovaAddresses(floatingIP, addresses), nil
+	return convertNovaAddresses(ctx, floatingIP, addresses), nil
 }
 
 // convertNovaAddresses returns nova addresses in generic format
-func convertNovaAddresses(publicIP string, addresses map[string][]nova.IPAddress) network.ProviderAddresses {
+func convertNovaAddresses(ctx context.Context, publicIP string, addresses map[string][]nova.IPAddress) network.ProviderAddresses {
 	var machineAddresses []network.ProviderAddress
 	if publicIP != "" {
 		publicAddr := network.NewMachineAddress(publicIP, network.WithScope(network.ScopePublic)).AsProviderAddress()
@@ -528,7 +528,7 @@ func convertNovaAddresses(publicIP string, addresses map[string][]nova.IPAddress
 			}
 			machineAddr := network.NewMachineAddress(address.Address, network.WithScope(networkScope)).AsProviderAddress()
 			if machineAddr.Type != addrType {
-				logger.Warningf("derived address type %v, nova reports %v", machineAddr.Type, addrType)
+				logger.Warningf(ctx, "derived address type %v, nova reports %v", machineAddr.Type, addrType)
 			}
 			machineAddresses = append(machineAddresses, machineAddr)
 		}
@@ -536,15 +536,15 @@ func convertNovaAddresses(publicIP string, addresses map[string][]nova.IPAddress
 	return machineAddresses
 }
 
-func (inst *openstackInstance) OpenPorts(ctx context.ProviderCallContext, machineId string, rules firewall.IngressRules) error {
+func (inst *openstackInstance) OpenPorts(ctx context.Context, machineId string, rules firewall.IngressRules) error {
 	return inst.e.firewaller.OpenInstancePorts(ctx, inst, machineId, rules)
 }
 
-func (inst *openstackInstance) ClosePorts(ctx context.ProviderCallContext, machineId string, rules firewall.IngressRules) error {
+func (inst *openstackInstance) ClosePorts(ctx context.Context, machineId string, rules firewall.IngressRules) error {
 	return inst.e.firewaller.CloseInstancePorts(ctx, inst, machineId, rules)
 }
 
-func (inst *openstackInstance) IngressRules(ctx context.ProviderCallContext, machineId string) (firewall.IngressRules, error) {
+func (inst *openstackInstance) IngressRules(ctx context.Context, machineId string) (firewall.IngressRules, error) {
 	return inst.e.firewaller.InstanceIngressRules(ctx, inst, machineId)
 }
 
@@ -589,7 +589,7 @@ var unsupportedConstraints = []string{
 }
 
 // ConstraintsValidator is defined on the Environs interface.
-func (e *Environ) ConstraintsValidator(ctx context.ProviderCallContext) (constraints.Validator, error) {
+func (e *Environ) ConstraintsValidator(ctx context.Context) (constraints.Validator, error) {
 	validator := constraints.NewValidator()
 	validator.RegisterConflicts(
 		[]string{constraints.InstanceType},
@@ -600,8 +600,7 @@ func (e *Environ) ConstraintsValidator(ctx context.ProviderCallContext) (constra
 	novaClient := e.nova()
 	flavors, err := novaClient.ListFlavorsDetail()
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	instTypeNames := make([]string, len(flavors))
 	for i, flavor := range flavors {
@@ -629,14 +628,13 @@ func (z *openstackAvailabilityZone) Available() bool {
 }
 
 // AvailabilityZones returns a slice of availability zones.
-func (e *Environ) AvailabilityZones(ctx context.ProviderCallContext) (network.AvailabilityZones, error) {
+func (e *Environ) AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error) {
 	zones, err := novaListAvailabilityZones(e.nova())
 	if gooseerrors.IsNotImplemented(err) {
 		return nil, errors.NotImplementedf("availability zones")
 	}
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	availabilityZones := make(network.AvailabilityZones, len(zones))
@@ -648,11 +646,10 @@ func (e *Environ) AvailabilityZones(ctx context.ProviderCallContext) (network.Av
 
 // InstanceAvailabilityZoneNames returns the availability zone names for each
 // of the specified instances.
-func (e *Environ) InstanceAvailabilityZoneNames(ctx context.ProviderCallContext, ids []instance.Id) (map[instance.Id]string, error) {
+func (e *Environ) InstanceAvailabilityZoneNames(ctx context.Context, ids []instance.Id) (map[instance.Id]string, error) {
 	instances, err := e.Instances(ctx, ids)
 	if err != nil && err != environs.ErrPartialInstances {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	zones := make(map[instance.Id]string)
 	for _, inst := range instances {
@@ -673,11 +670,10 @@ type openstackPlacement struct {
 }
 
 // DeriveAvailabilityZones is part of the common.ZonedEnviron interface.
-func (e *Environ) DeriveAvailabilityZones(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error) {
+func (e *Environ) DeriveAvailabilityZones(ctx context.Context, args environs.StartInstanceParams) ([]string, error) {
 	availabilityZone, err := e.deriveAvailabilityZone(ctx, args.Placement, args.VolumeAttachments)
-	if err != nil && !errors.IsNotImplemented(err) {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+	if err != nil && !errors.Is(err, errors.NotImplemented) {
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	if availabilityZone != "" {
 		return []string{availabilityZone}, nil
@@ -685,7 +681,7 @@ func (e *Environ) DeriveAvailabilityZones(ctx context.ProviderCallContext, args 
 	return nil, nil
 }
 
-func (e *Environ) parsePlacement(ctx context.ProviderCallContext, placement string) (*openstackPlacement, error) {
+func (e *Environ) parsePlacement(ctx context.Context, placement string) (*openstackPlacement, error) {
 	pos := strings.IndexRune(placement, '=')
 	if pos == -1 {
 		return nil, errors.Errorf("unknown placement directive: %v", placement)
@@ -694,8 +690,7 @@ func (e *Environ) parsePlacement(ctx context.ProviderCallContext, placement stri
 	case "zone":
 		zones, err := e.AvailabilityZones(ctx)
 		if err != nil {
-			handleCredentialError(err, ctx)
-			return nil, errors.Trace(err)
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 		if err := zones.Validate(value); err != nil {
 			return nil, errors.Trace(err)
@@ -707,7 +702,7 @@ func (e *Environ) parsePlacement(ctx context.ProviderCallContext, placement stri
 }
 
 // PrecheckInstance is defined on the environs.InstancePrechecker interface.
-func (e *Environ) PrecheckInstance(ctx context.ProviderCallContext, args environs.PrecheckInstanceParams) error {
+func (e *Environ) PrecheckInstance(ctx context.Context, args environs.PrecheckInstanceParams) error {
 	if _, err := e.deriveAvailabilityZone(ctx, args.Placement, args.VolumeAttachments); err != nil {
 		return errors.Trace(err)
 	}
@@ -726,8 +721,7 @@ func (e *Environ) PrecheckInstance(ctx context.ProviderCallContext, args environ
 		novaClient := e.nova()
 		flavors, err := novaClient.ListFlavorsDetail()
 		if err != nil {
-			handleCredentialError(err, ctx)
-			return err
+			return e.HandleCredentialError(ctx, err)
 		}
 		flavorFound := false
 		for _, flavor := range flavors {
@@ -745,13 +739,13 @@ func (e *Environ) PrecheckInstance(ctx context.ProviderCallContext, args environ
 }
 
 // PrepareForBootstrap is part of the Environ interface.
-func (e *Environ) PrepareForBootstrap(_ environs.BootstrapContext, _ string) error {
+func (e *Environ) PrepareForBootstrap(ctx environs.BootstrapContext, _ string) error {
 	// Verify credentials.
-	if err := authenticateClient(e.client()); err != nil {
+	if err := authenticateClient(ctx, e.client()); err != nil {
 		return err
 	}
 	if !e.supportsNeutron() {
-		logger.Errorf(`Using unsupported OpenStack APIs.
+		logger.Errorf(ctx, `Using unsupported OpenStack APIs.
 
   Neutron networking is not supported by this OpenStack cloud.
 
@@ -764,30 +758,16 @@ func (e *Environ) PrepareForBootstrap(_ environs.BootstrapContext, _ string) err
 	return nil
 }
 
-// Create is part of the Environ interface.
-func (e *Environ) Create(ctx context.ProviderCallContext, args environs.CreateParams) error {
-	// Verify credentials.
-	if err := authenticateClient(e.client()); err != nil {
-		handleCredentialError(err, ctx)
-		return err
-	}
-	// TODO(axw) 2016-08-04 #1609643
-	// Create global security group(s) here.
-	return nil
-}
-
-func (e *Environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.ProviderCallContext, args environs.BootstrapParams) (*environs.BootstrapResult, error) {
+func (e *Environ) Bootstrap(ctx environs.BootstrapContext, args environs.BootstrapParams) (*environs.BootstrapResult, error) {
 	// The client's authentication may have been reset when finding tools if the agent-version
 	// attribute was updated so we need to re-authenticate. This will be a no-op if already authenticated.
 	// An authenticated client is needed for the URL() call below.
-	if err := authenticateClient(e.client()); err != nil {
-		handleCredentialError(err, callCtx)
-		return nil, err
+	if err := authenticateClient(ctx, e.client()); err != nil {
+		return nil, e.HandleCredentialError(ctx, err)
 	}
-	result, err := common.Bootstrap(ctx, e, callCtx, args)
+	result, err := common.Bootstrap(ctx, e, args)
 	if err != nil {
-		handleCredentialError(err, callCtx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	return result, nil
 }
@@ -799,7 +779,7 @@ func (e *Environ) supportsNeutron() bool {
 	return ok
 }
 
-func (e *Environ) ControllerInstances(ctx context.ProviderCallContext, controllerUUID string) ([]instance.Id, error) {
+func (e *Environ) ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error) {
 	// Find all instances tagged with tags.JujuIsController.
 	instances, err := e.allControllerManagedInstances(ctx, controllerUUID)
 	if err != nil {
@@ -881,13 +861,13 @@ type authenticator interface {
 	Authenticate() error
 }
 
-var authenticateClient = func(auth authenticator) error {
+var authenticateClient = func(ctx context.Context, auth authenticator) error {
 	err := auth.Authenticate()
 	if err != nil {
 		// Log the error in case there are any useful hints,
 		// but provide a readable and helpful error message
 		// to the user.
-		logger.Debugf("Authenticate() failed: %v", err)
+		logger.Debugf(ctx, "Authenticate() failed: %v", err)
 		if gooseerrors.IsUnauthorised(err) {
 			return errors.Errorf("authentication failed : %v\n"+
 				"Please ensure the credentials are correct. A common mistake is\n"+
@@ -899,8 +879,8 @@ var authenticateClient = func(auth authenticator) error {
 	return nil
 }
 
-func (e *Environ) SetConfig(cfg *config.Config) error {
-	ecfg, err := providerInstance.newConfig(cfg)
+func (e *Environ) SetConfig(ctx context.Context, cfg *config.Config) error {
+	ecfg, err := providerInstance.newConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -914,7 +894,7 @@ func (e *Environ) SetConfig(cfg *config.Config) error {
 }
 
 // SetCloudSpec is specified in the environs.Environ interface.
-func (e *Environ) SetCloudSpec(_ stdcontext.Context, spec environscloudspec.CloudSpec) error {
+func (e *Environ) SetCloudSpec(_ context.Context, spec environscloudspec.CloudSpec) error {
 	e.ecfgMutex.Lock()
 	defer e.ecfgMutex.Unlock()
 
@@ -978,8 +958,8 @@ func identityClientVersion(authURL string) (int, error) {
 		_, tail = path.Split(strings.TrimRight(urlpath, "/"))
 	}
 	versionNumStr := strings.TrimPrefix(tail, "v")
-	logger.Debugf("authURL: %s", authURL)
-	major, _, err := version.ParseMajorMinor(versionNumStr)
+	logger.Debugf(context.TODO(), "authURL: %s", authURL)
+	major, _, err := semversion.ParseMajorMinor(versionNumStr)
 	if len(tail) < 2 || tail[0] != 'v' || err != nil {
 		// There must be a '/v' in the URL path.
 		// At this stage only '/Vxxx' and '/vxxx' are valid where xxx is major.minor version.
@@ -997,7 +977,7 @@ func getKeystoneImageSource(env environs.Environ) (simplestreams.DataSource, err
 	if !ok {
 		return nil, errors.NotSupportedf("non-openstack model")
 	}
-	return e.getKeystoneDataSource(&e.keystoneImageDataSourceMutex, &e.keystoneImageDataSource, "product-streams")
+	return e.getKeystoneDataSource(context.TODO(), &e.keystoneImageDataSourceMutex, &e.keystoneImageDataSource, "product-streams")
 }
 
 // getKeystoneToolsSource is a tools.ToolsDataSourceFunc that
@@ -1007,10 +987,10 @@ func getKeystoneToolsSource(env environs.Environ) (simplestreams.DataSource, err
 	if !ok {
 		return nil, errors.NotSupportedf("non-openstack model")
 	}
-	return e.getKeystoneDataSource(&e.keystoneToolsDataSourceMutex, &e.keystoneToolsDataSource, "juju-tools")
+	return e.getKeystoneDataSource(context.TODO(), &e.keystoneToolsDataSourceMutex, &e.keystoneToolsDataSource, "juju-tools")
 }
 
-func (e *Environ) getKeystoneDataSource(mu *sync.Mutex, datasource *simplestreams.DataSource, keystoneName string) (simplestreams.DataSource, error) {
+func (e *Environ) getKeystoneDataSource(ctx context.Context, mu *sync.Mutex, datasource *simplestreams.DataSource, keystoneName string) (simplestreams.DataSource, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	if *datasource != nil {
@@ -1019,7 +999,7 @@ func (e *Environ) getKeystoneDataSource(mu *sync.Mutex, datasource *simplestream
 
 	cl := e.client()
 	if !cl.IsAuthenticated() {
-		if err := authenticateClient(cl); err != nil {
+		if err := authenticateClient(ctx, cl); err != nil {
 			return nil, err
 		}
 	}
@@ -1059,29 +1039,19 @@ func (e *Environ) assignPublicIP(fip *string, serverId string) (err error) {
 	return err
 }
 
-// DistributeInstances implements the state.InstanceDistributor policy.
-func (e *Environ) DistributeInstances(
-	ctx context.ProviderCallContext, candidates, distributionGroup []instance.Id, limitZones []string,
-) ([]instance.Id, error) {
-	valid, err := common.DistributeInstances(e, ctx, candidates, distributionGroup, limitZones)
-	if err != nil {
-		handleCredentialError(err, ctx)
-		return valid, err
-	}
-	return valid, nil
-}
-
 // StartInstance is specified in the InstanceBroker interface.
 func (e *Environ) StartInstance(
-	ctx context.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (*environs.StartInstanceResult, error) {
 	res, err := e.startInstance(ctx, args)
-	handleCredentialError(err, ctx)
-	return res, errors.Trace(err)
+	if err != nil {
+		return nil, e.HandleCredentialError(ctx, err)
+	}
+	return res, nil
 }
 
 func (e *Environ) startInstance(
-	ctx context.ProviderCallContext, args environs.StartInstanceParams,
+	ctx context.Context, args environs.StartInstanceParams,
 ) (_ *environs.StartInstanceResult, err error) {
 	if err := e.validateAvailabilityZone(ctx, args); err != nil {
 		return nil, errors.Trace(err)
@@ -1113,7 +1083,7 @@ func (e *Environ) startInstance(
 		return nil, environs.ZoneIndependentError(err)
 	}
 
-	networks, err := e.networksForInstance(args, cloudCfg)
+	networks, err := e.networksForInstance(ctx, args, cloudCfg)
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
 	}
@@ -1122,7 +1092,7 @@ func (e *Environ) startInstance(
 	if err != nil {
 		return nil, environs.ZoneIndependentError(errors.Annotate(err, "cannot make user data"))
 	}
-	logger.Debugf("openstack user data; %d bytes", len(userData))
+	logger.Debugf(ctx, "openstack user data; %d bytes", len(userData))
 
 	machineName := resourceName(
 		e.namespace,
@@ -1161,7 +1131,7 @@ func (e *Environ) startInstance(
 			}
 			if net.PortSecurityEnabled != nil && !*net.PortSecurityEnabled {
 				createSecurityGroups = *net.PortSecurityEnabled
-				logger.Infof("network %q has port_security_enabled set to false. Not using security groups.", net.Id)
+				logger.Infof(ctx, "network %q has port_security_enabled set to false. Not using security groups.", net.Id)
 				break
 			}
 		}
@@ -1201,12 +1171,15 @@ func (e *Environ) startInstance(
 				return nil
 			},
 			NotifyFunc: func(lastError error, attempt int) {
-				_ = args.StatusCallback(status.Provisioning,
+				_ = args.StatusCallback(
+					ctx,
+					status.Provisioning,
 					fmt.Sprintf("%s, wait 10 seconds before retry, attempt %d", lastError, attempt), nil)
 			},
 			IsFatalError: func(err error) bool {
 				return err != errStillBuilding
 			},
+			Stop: ctx.Done(),
 		})
 		if err != nil {
 			return nil, err
@@ -1225,7 +1198,7 @@ func (e *Environ) startInstance(
 				break
 			}
 			if server == nil {
-				logger.Warningf("may have lost contact with nova api while creating instances, some stray instances may be around and need to be deleted")
+				logger.Warningf(ctx, "may have lost contact with nova api while creating instances, some stray instances may be around and need to be deleted")
 				break
 			}
 			var serverDetail *nova.ServerDetail
@@ -1234,9 +1207,9 @@ func (e *Environ) startInstance(
 				// If we got an error back (eg. StillBuilding)
 				// we need to terminate the instance before
 				// retrying to avoid leaking resources.
-				logger.Warningf("Unable to retrieve details for created instance %q: %v; attempting to terminate it", server.Id, err)
+				logger.Warningf(ctx, "Unable to retrieve details for created instance %q: %v; attempting to terminate it", server.Id, err)
 				if termErr := e.terminateInstances(ctx, []instance.Id{instance.Id(server.Id)}); termErr != nil {
-					logger.Errorf("Failed to delete instance %q: %v; manual cleanup required", server.Id, termErr)
+					logger.Errorf(ctx, "Failed to delete instance %q: %v; manual cleanup required", server.Id, termErr)
 				}
 				server = nil
 				break
@@ -1249,11 +1222,11 @@ func (e *Environ) startInstance(
 				if serverDetail.Fault != nil {
 					faultMsg = fmt.Sprintf(" with fault %q", serverDetail.Fault.Message)
 				} else {
-					logger.Debugf("getting active server details from nova failed without fault details")
+					logger.Debugf(ctx, "getting active server details from nova failed without fault details")
 				}
-				logger.Infof("Deleting instance %q in ERROR state%v", server.Id, faultMsg)
+				logger.Infof(ctx, "Deleting instance %q in ERROR state%v", server.Id, faultMsg)
 				if err = e.terminateInstances(ctx, []instance.Id{instance.Id(server.Id)}); err != nil {
-					logger.Errorf("Failed to delete instance in ERROR state %q: %v; manual cleanup required", server.Id, err)
+					logger.Errorf(ctx, "Failed to delete instance in ERROR state %q: %v; manual cleanup required", server.Id, err)
 				}
 				server = nil
 				err = errors.New(faultMsg)
@@ -1285,10 +1258,10 @@ func (e *Environ) startInstance(
 		if err := e.firewaller.DeleteMachineGroup(ctx, args.InstanceConfig.MachineId); err != nil {
 			// If we failed to clean up the security groups, we need the user
 			// to manually clean them up.
-			logger.Errorf("cannot cleanup security groups: %v", err)
+			logger.Errorf(ctx, "cannot cleanup security groups: %v", err)
 		}
 
-		logger.Debugf("cannot run instance full error: %q", err)
+		logger.Debugf(ctx, "cannot run instance full error: %q", err)
 		err = errors.Annotate(errors.Cause(err), "cannot run instance")
 		// Improve the error message if there is no valid network.
 		if isInvalidNetworkError(err) {
@@ -1315,7 +1288,7 @@ func (e *Environ) startInstance(
 		instType:     &spec.InstanceType,
 		runOpts:      &opts,
 	}
-	logger.Infof("started instance %q", inst.Id())
+	logger.Infof(ctx, "started instance %q", inst.Id())
 	var withPublicIP bool
 	// Any machine constraint for allocating a public IP address
 	// overrides the (deprecated) model config.
@@ -1329,22 +1302,22 @@ func (e *Environ) startInstance(
 		e.publicIPMutex.Lock()
 		defer e.publicIPMutex.Unlock()
 		var publicIP *string
-		logger.Debugf("allocating public IP address for openstack node")
+		logger.Debugf(ctx, "allocating public IP address for openstack node")
 		if fip, err := e.networking.AllocatePublicIP(inst.Id()); err != nil {
 			if err := e.terminateInstances(ctx, []instance.Id{inst.Id()}); err != nil {
 				// ignore the failure at this stage, just log it
-				logger.Debugf("failed to terminate instance %q: %v", inst.Id(), err)
+				logger.Debugf(ctx, "failed to terminate instance %q: %v", inst.Id(), err)
 			}
 			return nil, environs.ZoneIndependentError(errors.Annotate(err, "cannot allocate a public IP as needed"))
 		} else {
 			publicIP = fip
-			logger.Infof("allocated public IP %s", *publicIP)
+			logger.Infof(ctx, "allocated public IP %s", *publicIP)
 		}
 
 		if err := e.assignPublicIP(publicIP, string(inst.Id())); err != nil {
 			if err := e.terminateInstances(ctx, []instance.Id{inst.Id()}); err != nil {
 				// ignore the failure at this stage, just log it
-				logger.Debugf("failed to terminate instance %q: %v", inst.Id(), err)
+				logger.Debugf(ctx, "failed to terminate instance %q: %v", inst.Id(), err)
 			}
 			return nil, environs.ZoneIndependentError(errors.Annotatef(err,
 				"cannot assign public address %s to instance %q",
@@ -1376,7 +1349,7 @@ func (e *Environ) userFriendlyInvalidNetworkError(err error) error {
 // validateAvailabilityZone validates AZs supplied in StartInstanceParams.
 // args.AvailabilityZone should only be set if this OpenStack supports zones.
 // We need to validate it if supplied.
-func (e *Environ) validateAvailabilityZone(ctx context.ProviderCallContext, args environs.StartInstanceParams) error {
+func (e *Environ) validateAvailabilityZone(ctx context.Context, args environs.StartInstanceParams) error {
 	if args.AvailabilityZone == "" {
 		return nil
 	}
@@ -1404,9 +1377,10 @@ func (e *Environ) validateAvailabilityZone(ctx context.ProviderCallContext, args
 // This is necessary so that the correct Netplan representation for the
 // associated NICs is rendered in the instance that they will be attached to.
 func (e *Environ) networksForInstance(
+	ctx context.Context,
 	args environs.StartInstanceParams, cloudCfg cloudinit.NetworkingConfig,
 ) ([]nova.ServerNetworks, error) {
-	networks, err := e.networksForModel()
+	networks, err := e.networksForModel(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1425,7 +1399,7 @@ func (e *Environ) networksForInstance(
 			"space constraints and/or bindings were supplied, but no OpenStack networks can be determined")
 	}
 
-	subnetIDForZone, err := subnetInZone(args.AvailabilityZone, args.SubnetsToZones)
+	subnetIDForZone, err := subnetInZone(ctx, args.AvailabilityZone, args.SubnetsToZones)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1446,7 +1420,7 @@ func (e *Environ) networksForInstance(
 			break
 		}
 
-		logger.Infof("created new port %q connected to Openstack subnet %q", port.Id, subnetID)
+		logger.Infof(ctx, "created new port %q connected to Openstack subnet %q", port.Id, subnetID)
 		subnetNetworks = append(subnetNetworks, nova.ServerNetworks{
 			NetworkId: subnetNet.Id,
 			PortId:    port.Id,
@@ -1473,7 +1447,7 @@ func (e *Environ) networksForInstance(
 	if err != nil {
 		err1 := e.DeletePorts(subnetNetworks)
 		if err1 != nil {
-			logger.Errorf("Unable to delete ports from the provider %+v", subnetNetworks)
+			logger.Errorf(ctx, "Unable to delete ports from the provider %+v", subnetNetworks)
 		}
 		return nil, errors.Annotatef(err, "creating ports for instance")
 	}
@@ -1483,7 +1457,7 @@ func (e *Environ) networksForInstance(
 
 // subnetInZone chooses a subnet at random for each entry in the input slice of
 // subnet:zones that is in the input availability zone.
-func subnetInZone(az string, subnetsToZones []map[network.Id][]string) ([]network.Id, error) {
+func subnetInZone(ctx context.Context, az string, subnetsToZones []map[network.Id][]string) ([]network.Id, error) {
 	// Attempt to filter the constraint/binding subnet IDs for the supplied
 	// availability zone.
 	// The zone is supplied by the provisioner based on its attempt to maintain
@@ -1506,7 +1480,7 @@ func subnetInZone(az string, subnetsToZones []map[network.Id][]string) ([]networ
 			// Add subnets without zone-limited networks.
 			for subnetID, zones := range nic {
 				if len(zones) == 0 {
-					logger.Warningf(
+					logger.Warningf(ctx,
 						"subnet %q is not in a network with availability zones listed; assuming availability in zone %q",
 						subnetID, az)
 					subnetIDs = append(subnetIDs, subnetID)
@@ -1554,7 +1528,7 @@ func (e *Environ) DeletePorts(networks []nova.ServerNetworks) error {
 		// It would be nice to generalize this so we have the same expected
 		// behaviour from all our slices of errors.
 		for _, err := range errs {
-			logger.Errorf("Unable to delete port with error: %v", err)
+			logger.Errorf(context.TODO(), "Unable to delete port with error: %v", err)
 		}
 		return errs[0]
 	}
@@ -1563,7 +1537,7 @@ func (e *Environ) DeletePorts(networks []nova.ServerNetworks) error {
 
 // networksForModel returns the Openstack network list
 // based on current model configuration.
-func (e *Environ) networksForModel() ([]neutron.NetworkV2, error) {
+func (e *Environ) networksForModel(ctx context.Context) ([]neutron.NetworkV2, error) {
 	var resolvedNetworks []neutron.NetworkV2
 	networkIDs := set.NewStrings()
 	cfgNets := e.ecfg().networks()
@@ -1571,7 +1545,7 @@ func (e *Environ) networksForModel() ([]neutron.NetworkV2, error) {
 	for _, cfgNet := range cfgNets {
 		networks, err := e.networking.ResolveNetworks(cfgNet, false)
 		if err != nil {
-			logger.Warningf("filtering networks for %q", cfgNet)
+			logger.Warningf(ctx, "filtering networks for %q", cfgNet)
 		}
 
 		for _, net := range networks {
@@ -1591,11 +1565,11 @@ func (e *Environ) networksForModel() ([]neutron.NetworkV2, error) {
 		return nil, errors.Errorf("unable to determine networks for configured list: %v", cfgNets)
 	}
 
-	logger.Debugf("using network IDs %v", networkIDs.Values())
+	logger.Debugf(ctx, "using network IDs %v", networkIDs.Values())
 	return resolvedNetworks, nil
 }
 
-func (e *Environ) configureRootDisk(_ context.ProviderCallContext, args environs.StartInstanceParams,
+func (e *Environ) configureRootDisk(_ context.Context, args environs.StartInstanceParams,
 	spec *instances.InstanceSpec, runOpts *nova.RunServerOpts) error {
 	rootDiskSource := rootDiskSourceLocal
 	if args.Constraints.HasRootDiskSource() {
@@ -1640,14 +1614,13 @@ func (e *Environ) configureRootDisk(_ context.ProviderCallContext, args environs
 }
 
 func (e *Environ) deriveAvailabilityZone(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	placement string,
 	volumeAttachments []storage.VolumeAttachmentParams,
 ) (string, error) {
 	volumeAttachmentsZone, err := e.volumeAttachmentsZone(volumeAttachments)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return "", errors.Trace(err)
+		return "", e.HandleCredentialError(ctx, err)
 	}
 	if placement == "" {
 		return volumeAttachmentsZone, nil
@@ -1683,7 +1656,7 @@ func (e *Environ) volumeAttachmentsZone(volumeAttachments []storage.VolumeAttach
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	volumes, err := modelCinderVolumes(cinderProvider.storageAdapter, cinderProvider.modelUUID)
+	volumes, err := modelCinderVolumes(cinderProvider.storageAdaptor, cinderProvider.modelUUID)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -1725,11 +1698,10 @@ func isInvalidNetworkError(err error) bool {
 	return false
 }
 
-func (e *Environ) StopInstances(ctx context.ProviderCallContext, ids ...instance.Id) error {
-	logger.Debugf("terminating instances %v", ids)
+func (e *Environ) StopInstances(ctx context.Context, ids ...instance.Id) error {
+	logger.Debugf(ctx, "terminating instances %v", ids)
 	if err := e.terminateInstances(ctx, ids); err != nil {
-		handleCredentialError(err, ctx)
-		return err
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
@@ -1742,15 +1714,14 @@ func (e *Environ) isAliveServer(server nova.ServerDetail) bool {
 	return false
 }
 
-func (e *Environ) listServers(ctx context.ProviderCallContext, ids []instance.Id) ([]nova.ServerDetail, error) {
+func (e *Environ) listServers(ctx context.Context, ids []instance.Id) ([]nova.ServerDetail, error) {
 	wantedServers := make([]nova.ServerDetail, 0, len(ids))
 	if len(ids) == 1 {
 		// Common case, single instance, may return NotFound
 		var maybeServer *nova.ServerDetail
 		maybeServer, err := e.nova().GetServer(string(ids[0]))
 		if err != nil {
-			handleCredentialError(err, ctx)
-			return nil, err
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 		// Only return server details if it is currently alive
 		if maybeServer != nil && e.isAliveServer(*maybeServer) {
@@ -1761,8 +1732,7 @@ func (e *Environ) listServers(ctx context.ProviderCallContext, ids []instance.Id
 	// List all instances in the environment.
 	instances, err := e.AllRunningInstances(ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	// Return only servers with the wanted ids that are currently alive
 	for _, inst := range instances {
@@ -1784,11 +1754,10 @@ func (e *Environ) listServers(ctx context.ProviderCallContext, ids []instance.Id
 
 // updateFloatingIPAddresses updates the instances with any floating IP address
 // that have been assigned to those instances.
-func (e *Environ) updateFloatingIPAddresses(ctx context.ProviderCallContext, instances map[string]instances.Instance) error {
+func (e *Environ) updateFloatingIPAddresses(ctx context.Context, instances map[string]instances.Instance) error {
 	servers, err := e.nova().ListServersDetail(jujuMachineFilter())
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return err
+		return e.HandleCredentialError(ctx, err)
 	}
 	for _, server := range servers {
 		// server.Addresses is a map with entries containing []nova.IPAddress
@@ -1807,21 +1776,20 @@ func (e *Environ) updateFloatingIPAddresses(ctx context.ProviderCallContext, ins
 	return nil
 }
 
-func (e *Environ) Instances(ctx context.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error) {
+func (e *Environ) Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
 	foundServers, err := e.listServers(ctx, ids)
 	if err != nil {
-		logger.Debugf("error listing servers: %v", err)
-		if !IsNotFoundError(err) {
-			handleCredentialError(err, ctx)
-			return nil, err
+		logger.Debugf(ctx, "error listing servers: %v", err)
+		if !isNotFoundError(err) {
+			return nil, e.HandleCredentialError(ctx, err)
 		}
 	}
 
-	logger.Tracef("%d/%d live servers found", len(foundServers), len(ids))
+	logger.Tracef(ctx, "%d/%d live servers found", len(foundServers), len(ids))
 	if len(foundServers) == 0 {
 		return nil, environs.ErrNoInstances
 	}
@@ -1852,21 +1820,20 @@ func (e *Environ) Instances(ctx context.ProviderCallContext, ids []instance.Id) 
 }
 
 // AdoptResources is part of the Environ interface.
-func (e *Environ) AdoptResources(ctx context.ProviderCallContext, controllerUUID string, fromVersion version.Number) error {
+func (e *Environ) AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error {
 	var failed []string
 	controllerTag := map[string]string{tags.JujuController: controllerUUID}
 
 	instances, err := e.AllInstances(ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	for _, instance := range instances {
 		err := e.TagInstance(ctx, instance.Id(), controllerTag)
 		if err != nil {
-			logger.Errorf("error updating controller tag for instance %s: %v", instance.Id(), err)
-			failed = append(failed, string(instance.Id()))
-			if denied := common.MaybeHandleCredentialError(IsAuthorisationFailure, err, ctx); denied {
+			logger.Errorf(ctx, "error updating controller tag for instance %s: %v", instance.Id(), err)
+			failed = append(failed, instance.Id().String())
+			if denied, _ := e.MaybeInvalidateCredentialError(ctx, err); denied {
 				// If we have an invvalid credential, there is no need to proceed: we'll fail 100%.
 				break
 			}
@@ -1875,15 +1842,13 @@ func (e *Environ) AdoptResources(ctx context.ProviderCallContext, controllerUUID
 
 	failedVolumes, err := e.adoptVolumes(controllerTag, ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	failed = append(failed, failedVolumes...)
 
 	err = e.firewaller.UpdateGroupController(ctx, controllerUUID)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	if len(failed) != 0 {
 		return errors.Errorf("error updating controller tag for some resources: %v", failed)
@@ -1891,15 +1856,14 @@ func (e *Environ) AdoptResources(ctx context.ProviderCallContext, controllerUUID
 	return nil
 }
 
-func (e *Environ) adoptVolumes(controllerTag map[string]string, ctx context.ProviderCallContext) ([]string, error) {
+func (e *Environ) adoptVolumes(controllerTag map[string]string, ctx context.Context) ([]string, error) {
 	cinder, err := e.cinderProvider()
-	if errors.IsNotSupported(err) {
-		logger.Debugf("volumes not supported: not transferring ownership for volumes")
+	if errors.Is(err, errors.NotSupported) {
+		logger.Debugf(ctx, "volumes not supported: not transferring ownership for volumes")
 		return nil, nil
 	}
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	// TODO(axw): fix the storage API.
 	storageConfig, err := storage.NewConfig("cinder", CinderProviderType, nil)
@@ -1908,22 +1872,20 @@ func (e *Environ) adoptVolumes(controllerTag map[string]string, ctx context.Prov
 	}
 	volumeSource, err := cinder.VolumeSource(storageConfig)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	volumeIds, err := volumeSource.ListVolumes(ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, errors.Trace(err)
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 
 	var failed []string
 	for _, volumeId := range volumeIds {
-		_, err := cinder.storageAdapter.SetVolumeMetadata(volumeId, controllerTag)
+		_, err := cinder.storageAdaptor.SetVolumeMetadata(volumeId, controllerTag)
 		if err != nil {
-			logger.Errorf("error updating controller tag for volume %s: %v", volumeId, err)
+			logger.Errorf(ctx, "error updating controller tag for volume %s: %v", volumeId, err)
 			failed = append(failed, volumeId)
-			if denied := common.MaybeHandleCredentialError(IsAuthorisationFailure, err, ctx); denied {
+			if denied, _ := e.MaybeInvalidateCredentialError(ctx, err); denied {
 				// If we have an invvalid credential, there is no need to proceed: we'll fail 100%.
 				break
 			}
@@ -1933,18 +1895,17 @@ func (e *Environ) adoptVolumes(controllerTag map[string]string, ctx context.Prov
 }
 
 // AllInstances returns all instances in this environment.
-func (e *Environ) AllInstances(ctx context.ProviderCallContext) ([]instances.Instance, error) {
+func (e *Environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	tagFilter := tagValue{tags.JujuModel, e.ecfg().UUID()}
 	instances, err := e.allInstances(ctx, tagFilter)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return instances, err
+		return instances, e.HandleCredentialError(ctx, err)
 	}
 	return instances, nil
 }
 
 // AllRunningInstances returns all running, available instances in this environment.
-func (e *Environ) AllRunningInstances(ctx context.ProviderCallContext) ([]instances.Instance, error) {
+func (e *Environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
 	// e.allInstances(...) already handles all instances irrespective of the state, so
 	// here 'all' is also 'all running'.
 	return e.AllInstances(ctx)
@@ -1952,12 +1913,11 @@ func (e *Environ) AllRunningInstances(ctx context.ProviderCallContext) ([]instan
 
 // allControllerManagedInstances returns all instances managed by this
 // environment's controller, matching the optionally specified filter.
-func (e *Environ) allControllerManagedInstances(ctx context.ProviderCallContext, controllerUUID string) ([]instances.Instance, error) {
+func (e *Environ) allControllerManagedInstances(ctx context.Context, controllerUUID string) ([]instances.Instance, error) {
 	tagFilter := tagValue{tags.JujuController, controllerUUID}
 	instances, err := e.allInstances(ctx, tagFilter)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return instances, err
+		return instances, e.HandleCredentialError(ctx, err)
 	}
 	return instances, nil
 }
@@ -1968,11 +1928,10 @@ type tagValue struct {
 
 // allControllerManagedInstances returns all instances managed by this
 // environment's controller, matching the optionally specified filter.
-func (e *Environ) allInstances(ctx context.ProviderCallContext, tagFilter tagValue) ([]instances.Instance, error) {
+func (e *Environ) allInstances(ctx context.Context, tagFilter tagValue) ([]instances.Instance, error) {
 	servers, err := e.nova().ListServersDetail(jujuMachineFilter())
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	instsById := make(map[string]instances.Instance)
 	for _, server := range servers {
@@ -1986,8 +1945,7 @@ func (e *Environ) allInstances(ctx context.ProviderCallContext, tagFilter tagVal
 		}
 	}
 	if err := e.updateFloatingIPAddresses(ctx, instsById); err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
+		return nil, e.HandleCredentialError(ctx, err)
 	}
 	insts := make([]instances.Instance, 0, len(instsById))
 	for _, inst := range instsById {
@@ -1996,43 +1954,38 @@ func (e *Environ) allInstances(ctx context.ProviderCallContext, tagFilter tagVal
 	return insts, nil
 }
 
-func (e *Environ) Destroy(ctx context.ProviderCallContext) error {
+func (e *Environ) Destroy(ctx context.Context) error {
 	err := common.Destroy(e, ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	// Delete all security groups remaining in the model.
 	if err := e.firewaller.DeleteAllModelGroups(ctx); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
 // DestroyController implements the Environ interface.
-func (e *Environ) DestroyController(ctx context.ProviderCallContext, controllerUUID string) error {
+func (e *Environ) DestroyController(ctx context.Context, controllerUUID string) error {
 	if err := e.Destroy(ctx); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Annotate(err, "destroying controller model")
+		return errors.Annotate(e.HandleCredentialError(ctx, err), "destroying controller model")
 	}
 	// In case any hosted environment hasn't been cleaned up yet,
 	// we also attempt to delete their resources when the controller
 	// environment is destroyed.
 	if err := e.destroyControllerManagedEnvirons(ctx, controllerUUID); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Annotate(err, "destroying managed models")
+		return errors.Annotate(e.HandleCredentialError(ctx, err), "destroying managed models")
 	}
 	if err := e.firewaller.DeleteAllControllerGroups(ctx, controllerUUID); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
 // destroyControllerManagedEnvirons destroys all environments managed by this
 // models's controller.
-func (e *Environ) destroyControllerManagedEnvirons(ctx context.ProviderCallContext, controllerUUID string) error {
+func (e *Environ) destroyControllerManagedEnvirons(ctx context.Context, controllerUUID string) error {
 	// Terminate all instances managed by the controller.
 	insts, err := e.allControllerManagedInstances(ctx, controllerUUID)
 	if err != nil {
@@ -2043,30 +1996,26 @@ func (e *Environ) destroyControllerManagedEnvirons(ctx context.ProviderCallConte
 		instIds[i] = inst.Id()
 	}
 	if err := e.terminateInstances(ctx, instIds); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Annotate(err, "terminating instances")
+		return errors.Annotate(e.HandleCredentialError(ctx, err), "terminating instances")
 	}
 
 	// Delete all volumes managed by the controller.
 	cinder, err := e.cinderProvider()
 	if err == nil {
-		volumes, err := controllerCinderVolumes(cinder.storageAdapter, controllerUUID)
+		volumes, err := controllerCinderVolumes(cinder.storageAdaptor, controllerUUID)
 		if err != nil {
-			handleCredentialError(err, ctx)
-			return errors.Annotate(err, "listing volumes")
+			return errors.Annotate(e.HandleCredentialError(ctx, err), "listing volumes")
 		}
 		volIds := volumeInfoToVolumeIds(cinderToJujuVolumeInfos(volumes))
-		errs := foreachVolume(ctx, cinder.storageAdapter, volIds, destroyVolume)
+		errs := foreachVolume(ctx, e.CredentialInvalidator, cinder.storageAdaptor, volIds, destroyVolume)
 		for i, err := range errs {
 			if err == nil {
 				continue
 			}
-			handleCredentialError(err, ctx)
-			return errors.Annotatef(err, "destroying volume %q", volIds[i])
+			return errors.Annotatef(e.HandleCredentialError(ctx, err), "destroying volume %q", volIds[i])
 		}
-	} else if !errors.IsNotSupported(err) {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+	} else if !errors.Is(err, errors.NotSupported) {
+		return e.HandleCredentialError(ctx, err)
 	}
 
 	// Security groups for hosted models are destroyed by the
@@ -2121,52 +2070,46 @@ func rulesToRuleInfo(groupId string, rules firewall.IngressRules) []neutron.Rule
 	return result
 }
 
-func (e *Environ) OpenPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (e *Environ) OpenPorts(ctx context.Context, rules firewall.IngressRules) error {
 	if err := e.firewaller.OpenPorts(ctx, rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
-func (e *Environ) ClosePorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (e *Environ) ClosePorts(ctx context.Context, rules firewall.IngressRules) error {
 	if err := e.firewaller.ClosePorts(ctx, rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
-func (e *Environ) IngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
+func (e *Environ) IngressRules(ctx context.Context) (firewall.IngressRules, error) {
 	rules, err := e.firewaller.IngressRules(ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return rules, errors.Trace(err)
+		return rules, e.HandleCredentialError(ctx, err)
 	}
 	return rules, nil
 }
 
-func (e *Environ) OpenModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (e *Environ) OpenModelPorts(ctx context.Context, rules firewall.IngressRules) error {
 	if err := e.firewaller.OpenModelPorts(ctx, rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
-func (e *Environ) CloseModelPorts(ctx context.ProviderCallContext, rules firewall.IngressRules) error {
+func (e *Environ) CloseModelPorts(ctx context.Context, rules firewall.IngressRules) error {
 	if err := e.firewaller.CloseModelPorts(ctx, rules); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Trace(err)
+		return e.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
 
-func (e *Environ) ModelIngressRules(ctx context.ProviderCallContext) (firewall.IngressRules, error) {
+func (e *Environ) ModelIngressRules(ctx context.Context) (firewall.IngressRules, error) {
 	rules, err := e.firewaller.ModelIngressRules(ctx)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return rules, errors.Trace(err)
+		return rules, e.HandleCredentialError(ctx, err)
 	}
 	return rules, nil
 }
@@ -2175,7 +2118,7 @@ func (e *Environ) Provider() environs.EnvironProvider {
 	return providerInstance
 }
 
-func (e *Environ) terminateInstances(ctx context.ProviderCallContext, ids []instance.Id) error {
+func (e *Environ) terminateInstances(ctx context.Context, ids []instance.Id) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -2188,8 +2131,8 @@ func (e *Environ) terminateInstances(ctx context.ProviderCallContext, ids []inst
 		return nil
 	}
 	if err != nil {
-		logger.Debugf("error retrieving security groups for %v: %v", ids, err)
-		if denied := common.MaybeHandleCredentialError(IsAuthorisationFailure, err, ctx); denied {
+		logger.Debugf(ctx, "error retrieving security groups for %v: %v", ids, err)
+		if denied, _ := e.MaybeInvalidateCredentialError(ctx, err); denied {
 			// We'll likely fail all subsequent calls if we have an invalid credential.
 			return errors.Trace(err)
 		}
@@ -2201,23 +2144,23 @@ func (e *Environ) terminateInstances(ctx context.ProviderCallContext, ids []inst
 	for _, id := range ids {
 		// Attempt to destroy the ports that could have been created when using
 		// spaces.
-		if err := e.terminateInstanceNetworkPorts(id); err != nil {
-			logger.Errorf("error attempting to remove ports associated with instance %q: %v", id, err)
+		if err := e.terminateInstanceNetworkPorts(ctx, id); err != nil {
+			logger.Errorf(ctx, "error attempting to remove ports associated with instance %q: %v", id, err)
 			// Unfortunately there is nothing we can do here, there could be
 			// orphan ports left.
 		}
 
 		// Once ports have been deleted, attempt to delete the server.
 		err = novaClient.DeleteServer(string(id))
-		if IsNotFoundError(err) {
+		if isNotFoundError(err) {
 			continue
 		}
 		if err != nil {
-			logger.Debugf("error terminating instance %q: %v", id, err)
+			logger.Debugf(ctx, "error terminating instance %q: %v", id, err)
 			if firstErr == nil {
 				firstErr = err
 			}
-			if denied := common.MaybeHandleCredentialError(IsAuthorisationFailure, err, ctx); denied {
+			if denied, _ := e.MaybeInvalidateCredentialError(ctx, err); denied {
 				// We'll likely fail all subsequent calls if we have an invalid credential.
 				return errors.Trace(err)
 			}
@@ -2225,7 +2168,7 @@ func (e *Environ) terminateInstances(ctx context.ProviderCallContext, ids []inst
 	}
 
 	if len(securityGroupNames) > 0 {
-		logger.Tracef("deleting security groups %v", securityGroupNames)
+		logger.Tracef(ctx, "deleting security groups %v", securityGroupNames)
 		if err := e.firewaller.DeleteGroups(ctx, securityGroupNames...); err != nil {
 			return err
 		}
@@ -2234,7 +2177,7 @@ func (e *Environ) terminateInstances(ctx context.ProviderCallContext, ids []inst
 	return firstErr
 }
 
-func (e *Environ) terminateInstanceNetworkPorts(id instance.Id) error {
+func (e *Environ) terminateInstanceNetworkPorts(ctx context.Context, id instance.Id) error {
 	novaClient := e.nova()
 	osInterfaces, err := novaClient.ListOSInterfaces(string(id))
 	if err != nil {
@@ -2277,7 +2220,7 @@ func (e *Environ) terminateInstanceNetworkPorts(id instance.Id) error {
 	for _, change := range changes.SortedValues() {
 		// Delete a port. If we encounter an error add it to the list of errors
 		// and continue until we've exhausted all the ports to delete.
-		logger.Tracef("Deleting port %s", change)
+		logger.Tracef(ctx, "Deleting port %s", change)
 		if err := client.DeletePortV2(change); err != nil {
 			errs = append(errs, err)
 			continue
@@ -2300,11 +2243,7 @@ func (e *Environ) AgentMetadataLookupParams(region string) (*simplestreams.Metad
 // ImageMetadataLookupParams returns parameters which are used to query image simple-streams metadata.
 func (e *Environ) ImageMetadataLookupParams(region string) (*simplestreams.MetadataLookupParams, error) {
 	base := config.PreferredBase(e.ecfg())
-	release, err := imagemetadata.ImageRelease(base)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return e.metadataLookupParams(region, release)
+	return e.metadataLookupParams(region, base.Channel.Track)
 }
 
 // MetadataLookupParams returns parameters which are used to query simple-streams metadata.
@@ -2336,10 +2275,9 @@ func (e *Environ) cloudSpec(region string) (simplestreams.CloudSpec, error) {
 }
 
 // TagInstance implements environs.InstanceTagger.
-func (e *Environ) TagInstance(ctx context.ProviderCallContext, id instance.Id, tags map[string]string) error {
+func (e *Environ) TagInstance(ctx context.Context, id instance.Id, tags map[string]string) error {
 	if err := e.nova().SetServerMetadata(string(id), tags); err != nil {
-		handleCredentialError(err, ctx)
-		return errors.Annotate(err, "setting server metadata")
+		return errors.Annotate(e.HandleCredentialError(ctx, err), "setting server metadata")
 	}
 	return nil
 }
@@ -2376,63 +2314,40 @@ func validateAuthURL(authURL string) error {
 }
 
 // Subnets is specified on environs.Networking.
-func (e *Environ) Subnets(
-	ctx context.ProviderCallContext, instId instance.Id, subnetIds []network.Id,
-) ([]network.SubnetInfo, error) {
-	subnets, err := e.networking.Subnets(instId, subnetIds)
+func (e *Environ) Subnets(ctx context.Context, subnetIds []network.Id) ([]network.SubnetInfo, error) {
+	subnets, err := e.networking.Subnets(subnetIds)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return subnets, errors.Trace(err)
+		return subnets, e.HandleCredentialError(ctx, err)
 	}
 	return subnets, nil
 }
 
 // NetworkInterfaces is specified on environs.Networking.
-func (e *Environ) NetworkInterfaces(ctx context.ProviderCallContext, ids []instance.Id) ([]network.InterfaceInfos, error) {
+func (e *Environ) NetworkInterfaces(ctx context.Context, ids []instance.Id) ([]network.InterfaceInfos, error) {
 	infos, err := e.networking.NetworkInterfaces(ids)
 	if err != nil {
-		handleCredentialError(err, ctx)
-		return infos, errors.Trace(err)
+		return infos, e.HandleCredentialError(ctx, err)
 	}
 
 	return infos, nil
 }
 
 // SupportsSpaces is specified on environs.Networking.
-func (e *Environ) SupportsSpaces(context.ProviderCallContext) (bool, error) {
+func (e *Environ) SupportsSpaces() (bool, error) {
 	return true, nil
-}
-
-// SuperSubnets is specified on environs.Networking
-func (e *Environ) SuperSubnets(ctx context.ProviderCallContext) ([]string, error) {
-	subnets, err := e.networking.Subnets("", nil)
-	if err != nil {
-		handleCredentialError(err, ctx)
-		return nil, err
-	}
-	cidrs := make([]string, len(subnets))
-	for i, subnet := range subnets {
-		cidrs[i] = subnet.CIDR
-	}
-	return cidrs, nil
-}
-
-// AreSpacesRoutable is specified on environs.NetworkingEnviron.
-func (*Environ) AreSpacesRoutable(ctx context.ProviderCallContext, space1, space2 *environs.ProviderSpaceInfo) (bool, error) {
-	return false, nil
 }
 
 // SupportsRulesWithIPV6CIDRs returns true if the environment supports ingress
 // rules containing IPV6 CIDRs. It is part of the FirewallFeatureQuerier
 // interface.
-func (e *Environ) SupportsRulesWithIPV6CIDRs(ctx context.ProviderCallContext) (bool, error) {
+func (e *Environ) SupportsRulesWithIPV6CIDRs(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
 // ValidateCloudEndpoint returns nil if the current model can talk to the openstack
 // endpoint. Used as validation during model upgrades.
 // Implements environs.CloudEndpointChecker
-func (env *Environ) ValidateCloudEndpoint(ctx context.ProviderCallContext) error {
+func (env *Environ) ValidateCloudEndpoint(ctx context.Context) error {
 	err := env.Provider().Ping(ctx, env.cloud().Endpoint)
 	return errors.Trace(err)
 }

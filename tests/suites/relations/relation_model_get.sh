@@ -9,15 +9,14 @@ run_relation_model_get() {
 
 	ensure "${model_name}" "${file}"
 
-	juju deploy ./testcharms/charms/dummy-sink
-	juju deploy ./testcharms/charms/dummy-source
+	juju deploy juju-qa-dummy-sink
+	juju deploy juju-qa-dummy-source --config token=becomegreen
 
 	echo "Establish relation"
 	juju integrate dummy-sink dummy-source
-	juju config dummy-source token=becomegreen
 
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0 0)"
-	wait_for "dummy-source" "$(idle_condition "dummy-source" 1 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
+	wait_for "dummy-source" "$(idle_condition "dummy-source" 0)"
 
 	echo "Figure out the right relation IDs to use for hook command invocations"
 	sink_rel_id=$(juju exec --unit dummy-source/0 "relation-ids sink" | cut -d':' -f2)
@@ -32,10 +31,10 @@ run_relation_model_get() {
 	another_model_name="test-relation-model-get-another"
 	juju add-model "${another_model_name}"
 
-	juju deploy ./testcharms/charms/dummy-sink
+	juju deploy juju-qa-dummy-sink
 	juju integrate dummy-sink "${model_name}.dummy-source"
 
-	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
 
 	echo "Figure out the right relation IDs to use for hook command invocations"
 	sink_rel_id=$(juju exec --unit dummy-sink/0 "relation-ids source" | cut -d':' -f2)

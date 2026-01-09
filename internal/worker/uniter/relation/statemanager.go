@@ -4,28 +4,31 @@
 package relation
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/kr/pretty"
 	"gopkg.in/yaml.v2"
 
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
 // NewStateManager creates a new StateManager instance.
-func NewStateManager(rw UnitStateReadWriter, logger Logger) (StateManager, error) {
+func NewStateManager(ctx context.Context, rw UnitStateReadWriter, logger logger.Logger) (StateManager, error) {
 	mgr := &stateManager{unitStateRW: rw, logger: logger}
-	return mgr, mgr.initialize()
+	err := mgr.initialize(ctx)
+	return mgr, err
 }
 
 type stateManager struct {
 	unitStateRW   UnitStateReadWriter
 	relationState map[int]State
-	logger        Logger
+	logger        logger.Logger
 	mu            sync.Mutex
 }
 
@@ -43,7 +46,7 @@ func (m *stateManager) Relation(id int) (*State, error) {
 // RemoveRelation removes the state for the given id from the
 // manager.  The change to the manager is only made when the
 // data is successfully saved.
-func (m *stateManager) RemoveRelation(id int, unitGetter UnitGetter, knownUnits map[string]bool) error {
+func (m *stateManager) RemoveRelation(ctx context.Context, id int, unitGetter UnitGetter, knownUnits map[string]bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st, ok := m.relationState[id]
@@ -57,7 +60,7 @@ func (m *stateManager) RemoveRelation(id int, unitGetter UnitGetter, knownUnits 
 	for unitName := range st.Members {
 		unitExists, ok := knownUnits[unitName]
 		if !ok {
-			_, err := unitGetter.Unit(names.NewUnitTag(unitName))
+			_, err := unitGetter.Unit(ctx, names.NewUnitTag(unitName))
 			if err != nil && !params.IsCodeNotFoundOrCodeUnauthorized(err) {
 				return errors.Trace(err)
 			}
@@ -65,7 +68,7 @@ func (m *stateManager) RemoveRelation(id int, unitGetter UnitGetter, knownUnits 
 			knownUnits[unitName] = unitExists
 		}
 		if !unitExists {
-			m.logger.Warningf("unit %v in relation %d no longer exists", unitName, id)
+			m.logger.Warningf(ctx, "unit %v in relation %d no longer exists", unitName, id)
 			continue
 		}
 		knownMembers.Add(unitName)
@@ -73,7 +76,7 @@ func (m *stateManager) RemoveRelation(id int, unitGetter UnitGetter, knownUnits 
 	if knownMembers.Size() != 0 {
 		return errors.New(fmt.Sprintf("cannot remove persisted state, relation %d has members: %v", id, knownMembers.SortedValues()))
 	}
-	if err := m.remove(id); err != nil {
+	if err := m.remove(ctx, id); err != nil {
 		return err
 	}
 	delete(m.relationState, id)
@@ -99,10 +102,10 @@ func (m *stateManager) KnownIDs() []int {
 // SetRelation persists the given state, overwriting the previous
 // state for a given id or creating state at a new id. The change to
 // the manager is only made when the data is successfully saved.
-func (m *stateManager) SetRelation(st *State) error {
+func (m *stateManager) SetRelation(ctx context.Context, st *State) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.write(st); err != nil {
+	if err := m.write(ctx, st); err != nil {
 		return errors.Annotatef(err, "could not persist relation %d state", st.RelationId)
 	}
 	m.relationState[st.RelationId] = *st
@@ -119,14 +122,14 @@ func (m *stateManager) RelationFound(id int) bool {
 }
 
 // initialize loads the current state into the manager.
-func (m *stateManager) initialize() error {
-	unitState, err := m.unitStateRW.State()
-	if err != nil && !errors.IsNotFound(err) {
+func (m *stateManager) initialize(ctx context.Context) error {
+	unitState, err := m.unitStateRW.State(ctx)
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 	m.relationState = make(map[int]State, len(unitState.RelationState))
-	if m.logger.IsTraceEnabled() {
-		m.logger.Tracef("initialising state manager: %# v", pretty.Formatter(unitState.RelationState))
+	if m.logger.IsLevelEnabled(logger.TRACE) {
+		m.logger.Tracef(ctx, "initialising state manager: %# v", pretty.Formatter(unitState.RelationState))
 	}
 	for k, v := range unitState.RelationState {
 		var state State
@@ -138,7 +141,7 @@ func (m *stateManager) initialize() error {
 	return nil
 }
 
-func (m *stateManager) write(st *State) error {
+func (m *stateManager) write(ctx context.Context, st *State) error {
 	newSt, err := m.stateToPersist()
 	if err != nil {
 		return errors.Trace(err)
@@ -148,16 +151,16 @@ func (m *stateManager) write(st *State) error {
 		return errors.Trace(err)
 	}
 	newSt[st.RelationId] = str
-	return m.unitStateRW.SetState(params.SetUnitStateArg{RelationState: &newSt})
+	return m.unitStateRW.SetState(ctx, params.SetUnitStateArg{RelationState: &newSt})
 }
 
-func (m *stateManager) remove(id int) error {
+func (m *stateManager) remove(ctx context.Context, id int) error {
 	newSt, err := m.stateToPersist()
 	if err != nil {
 		return errors.Trace(err)
 	}
 	delete(newSt, id)
-	return m.unitStateRW.SetState(params.SetUnitStateArg{RelationState: &newSt})
+	return m.unitStateRW.SetState(ctx, params.SetUnitStateArg{RelationState: &newSt})
 }
 
 // stateToPersist transforms the relationState of this manager

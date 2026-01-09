@@ -4,42 +4,149 @@
 package sshserver
 
 import (
+	"context"
 	"os"
+	"testing"
 
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	"github.com/juju/worker/v3/workertest"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dt "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/feature"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/watchertest"
+	"github.com/juju/juju/internal/featureflag"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/juju/osenv"
 )
 
 type manifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
+
+	controllerConfigService *MockControllerConfigService
 }
 
-var _ = gc.Suite(&manifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &manifoldSuite{})
+}
 
-func (s *manifoldSuite) SetUpTest(c *gc.C) {
-	err := os.Setenv(osenv.JujuFeatureFlagEnvKey, feature.SSHJump)
-	c.Assert(err, jc.ErrorIsNil)
+func (s *manifoldSuite) SetUpTest(c *tc.C) {
+	err := os.Setenv(osenv.JujuFeatureFlagEnvKey, featureflag.SSHJump)
+	c.Assert(err, tc.ErrorIsNil)
 	featureflag.SetFlagsFromEnvironment(osenv.JujuFeatureFlagEnvKey)
 }
 
-func newManifoldConfig(l loggo.Logger, modifier func(cfg *ManifoldConfig)) *ManifoldConfig {
+func (s *manifoldSuite) TestConfigValidate(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Check config as expected.
+
+	cfg := s.newManifoldConfig(c, func(cfg *ManifoldConfig) {})
+	c.Assert(cfg.Validate(), tc.IsNil)
+
+	// Entirely missing.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.DomainServicesName = ""
+		cfg.NewServerWrapperWorker = nil
+		cfg.NewServerWorker = nil
+		cfg.GetControllerConfigService = nil
+		cfg.Logger = nil
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+	// Missing domain services name.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.DomainServicesName = ""
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+	// Missing NewServerWrapperWorker.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.NewServerWrapperWorker = nil
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+	// Missing NewServerWorker.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.NewServerWorker = nil
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+	// Missing GetControllerConfigService.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.GetControllerConfigService = nil
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+	// Missing Logger.
+	cfg = s.newManifoldConfig(c, func(cfg *ManifoldConfig) {
+		cfg.Logger = nil
+	})
+	c.Check(errors.Is(cfg.Validate(), errors.NotValid), tc.IsTrue)
+
+}
+
+func (s *manifoldSuite) TestManifoldStart(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Setup the manifold
+	manifold := Manifold(ManifoldConfig{
+		DomainServicesName:     "domain-services",
+		NewServerWrapperWorker: NewServerWrapperWorker,
+		NewServerWorker: func(ServerWorkerConfig) (worker.Worker, error) {
+			return workertest.NewErrorWorker(nil), nil
+		},
+		GetControllerConfigService: func(getter dependency.Getter, name string) (ControllerConfigService, error) {
+			return s.controllerConfigService, nil
+		},
+		Logger: loggertesting.WrapCheckLog(c),
+	})
+
+	// Check the inputs are as expected
+	c.Assert(manifold.Inputs, tc.DeepEquals, []string{"domain-services"})
+
+	// Start the worker
+	result, err := manifold.Start(
+		c.Context(),
+		dt.StubGetter(map[string]interface{}{}),
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, result)
+
+	c.Check(result, tc.NotNil)
+	workertest.CleanKill(c, result)
+}
+
+func (s *manifoldSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.controllerConfigService = NewMockControllerConfigService(ctrl)
+
+	s.controllerConfigService.EXPECT().WatchControllerConfig(gomock.Any()).DoAndReturn(func(context.Context) (watcher.Watcher[[]string], error) {
+		return watchertest.NewMockStringsWatcher(make(<-chan []string)), nil
+	}).AnyTimes()
+	return ctrl
+}
+
+func (s *manifoldSuite) newManifoldConfig(c *tc.C, modifier func(cfg *ManifoldConfig)) *ManifoldConfig {
 	cfg := &ManifoldConfig{
-		NewServerWrapperWorker: func(ServerWrapperWorkerConfig) (worker.Worker, error) { return nil, nil },
-		NewServerWorker:        func(ServerWorkerConfig) (worker.Worker, error) { return nil, nil },
-		Logger:                 l,
-		APICallerName:          "api-caller",
+		DomainServicesName: "domain-services",
+		NewServerWrapperWorker: func(ServerWrapperWorkerConfig) (worker.Worker, error) {
+			return nil, nil
+		},
+		NewServerWorker: func(ServerWorkerConfig) (worker.Worker, error) {
+			return nil, nil
+		},
+		GetControllerConfigService: func(getter dependency.Getter, name string) (ControllerConfigService, error) {
+			return s.controllerConfigService, nil
+		},
+		Logger: loggertesting.WrapCheckLog(c),
 	}
 
 	modifier(cfg)
@@ -47,101 +154,33 @@ func newManifoldConfig(l loggo.Logger, modifier func(cfg *ManifoldConfig)) *Mani
 	return cfg
 }
 
-func (s *manifoldSuite) TestConfigValidate(c *gc.C) {
-	l := loggo.GetLogger("test")
-	// Check config as expected.
-
-	cfg := newManifoldConfig(l, func(cfg *ManifoldConfig) {})
-	c.Assert(cfg.Validate(), jc.ErrorIsNil)
-
-	// Entirely missing.
-	cfg = newManifoldConfig(l, func(cfg *ManifoldConfig) {
-		cfg.NewServerWrapperWorker = nil
-		cfg.NewServerWorker = nil
-		cfg.Logger = nil
-	})
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	// Missing NewServerWrapperWorker.
-	cfg = newManifoldConfig(l, func(cfg *ManifoldConfig) {
-		cfg.NewServerWrapperWorker = nil
-	})
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	// Missing NewServerWorker.
-	cfg = newManifoldConfig(l, func(cfg *ManifoldConfig) {
-		cfg.NewServerWorker = nil
-	})
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	// Missing Logger.
-	cfg = newManifoldConfig(l, func(cfg *ManifoldConfig) {
-		cfg.Logger = nil
-	})
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-	// Empty APICallerName.
-	cfg = newManifoldConfig(l, func(cfg *ManifoldConfig) {
-		cfg.APICallerName = ""
-	})
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
-
-}
-
-func (s *manifoldSuite) TestManifoldStart(c *gc.C) {
-	// Setup the manifold
-	manifold := Manifold(ManifoldConfig{
-		APICallerName: "api-caller",
-		NewServerWrapperWorker: func(ServerWrapperWorkerConfig) (worker.Worker, error) {
-			return workertest.NewDeadWorker(nil), nil
-		},
-		NewServerWorker: func(ServerWorkerConfig) (worker.Worker, error) { return nil, nil },
-		Logger:          loggo.GetLogger("test"),
-	})
-
-	// Check the inputs are as expected
-	c.Assert(manifold.Inputs, gc.DeepEquals, []string{
-		"api-caller",
-	})
-
-	// Start the worker
-	w, err := manifold.Start(
-		dt.StubContext(nil, map[string]interface{}{
-			"api-caller": mockAPICaller{},
-		}),
-	)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(w, gc.NotNil)
-	workertest.CleanKill(c, w)
-}
-
-type mockAPICaller struct {
-	base.APICaller
-}
-
-func (a mockAPICaller) BestFacadeVersion(facade string) int {
-	return 0
-}
-
-func (s *manifoldSuite) TestManifoldUninstall(c *gc.C) {
+func (s *manifoldSuite) TestManifoldUninstall(c *tc.C) {
 	// Unset feature flag
 	os.Unsetenv(osenv.JujuFeatureFlagEnvKey)
 	featureflag.SetFlagsFromEnvironment(osenv.JujuFeatureFlagEnvKey)
 
+	defer s.setupMocks(c).Finish()
+
+	// Setup the manifold
 	manifold := Manifold(ManifoldConfig{
-		APICallerName: "api-caller",
-		NewServerWrapperWorker: func(ServerWrapperWorkerConfig) (worker.Worker, error) {
-			return workertest.NewDeadWorker(nil), nil
+		DomainServicesName:     "domain-services",
+		NewServerWrapperWorker: NewServerWrapperWorker,
+		NewServerWorker: func(ServerWorkerConfig) (worker.Worker, error) {
+			return workertest.NewErrorWorker(nil), nil
 		},
-		NewServerWorker: func(ServerWorkerConfig) (worker.Worker, error) { return nil, nil },
-		Logger:          loggo.GetLogger("test"),
+		GetControllerConfigService: func(getter dependency.Getter, name string) (ControllerConfigService, error) {
+			return s.controllerConfigService, nil
+		},
+		Logger: loggertesting.WrapCheckLog(c),
 	})
+
+	// Check the inputs are as expected
+	c.Assert(manifold.Inputs, tc.DeepEquals, []string{"domain-services"})
+
 	// Start the worker
 	_, err := manifold.Start(
-		dt.StubContext(nil, map[string]interface{}{
-			"api-caller": mockAPICaller{},
-		}),
+		c.Context(),
+		dt.StubGetter(map[string]interface{}{}),
 	)
-	c.Assert(err, jc.ErrorIs, dependency.ErrUninstall)
-
+	c.Assert(err, tc.ErrorIs, dependency.ErrUninstall)
 }

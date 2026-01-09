@@ -4,8 +4,10 @@
 package keyupdater
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apiwatcher "github.com/juju/juju/api/watcher"
@@ -13,23 +15,30 @@ import (
 	"github.com/juju/juju/rpc/params"
 )
 
-// State provides access to a worker's view of the state.
-type State struct {
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
+// Client provides access to a worker's client facade.
+type Client struct {
 	facade base.FacadeCaller
 }
 
-// NewState returns a version of the state that provides functionality required by the worker.
-func NewState(caller base.APICaller) *State {
-	return &State{base.NewFacadeCaller(caller, "KeyUpdater")}
+// NewClient returns a version of the state that provides functionality required by the worker.
+func NewClient(caller base.APICaller, options ...Option) *Client {
+	return &Client{base.NewFacadeCaller(caller, "KeyUpdater", options...)}
 }
 
 // AuthorisedKeys returns the authorised ssh keys for the machine specified by machineTag.
-func (st *State) AuthorisedKeys(tag names.MachineTag) ([]string, error) {
+func (c *Client) AuthorisedKeys(ctx context.Context, tag names.MachineTag) ([]string, error) {
 	var results params.StringsResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: tag.String()}},
 	}
-	err := st.facade.FacadeCall("AuthorisedKeys", args, &results)
+	err := c.facade.FacadeCall(ctx, "AuthorisedKeys", args, &results)
 	if err != nil {
 		// TODO: Not directly tested
 		return nil, err
@@ -47,12 +56,12 @@ func (st *State) AuthorisedKeys(tag names.MachineTag) ([]string, error) {
 
 // WatchAuthorisedKeys returns a notify watcher that looks for changes in the
 // authorised ssh keys for the machine specified by machineTag.
-func (st *State) WatchAuthorisedKeys(tag names.MachineTag) (watcher.NotifyWatcher, error) {
+func (c *Client) WatchAuthorisedKeys(ctx context.Context, tag names.MachineTag) (watcher.NotifyWatcher, error) {
 	var results params.NotifyWatchResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: tag.String()}},
 	}
-	err := st.facade.FacadeCall("WatchAuthorisedKeys", args, &results)
+	err := c.facade.FacadeCall(ctx, "WatchAuthorisedKeys", args, &results)
 	if err != nil {
 		// TODO: Not directly tested
 		return nil, err
@@ -66,6 +75,6 @@ func (st *State) WatchAuthorisedKeys(tag names.MachineTag) (watcher.NotifyWatche
 		//  TODO: Not directly tested
 		return nil, result.Error
 	}
-	w := apiwatcher.NewNotifyWatcher(st.facade.RawAPICaller(), result)
+	w := apiwatcher.NewNotifyWatcher(c.facade.RawAPICaller(), result)
 	return w, nil
 }

@@ -6,27 +6,23 @@ package apiserver
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery/checkers"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/pubsub/v2"
+	"github.com/juju/names/v6"
 	"github.com/juju/ratelimit"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4/catacomb"
 	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication"
@@ -34,40 +30,66 @@ import (
 	"github.com/juju/juju/apiserver/authentication/macaroon"
 	"github.com/juju/juju/apiserver/common"
 	"github.com/juju/juju/apiserver/common/apihttp"
-	"github.com/juju/juju/apiserver/common/crossmodel"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/apiserver/httpcontext"
+	"github.com/juju/juju/apiserver/internal/crossmodel"
+	crossmodelbakery "github.com/juju/juju/apiserver/internal/crossmodel/bakery"
+	handlerscrossmodel "github.com/juju/juju/apiserver/internal/handlers/crossmodel"
+	"github.com/juju/juju/apiserver/internal/handlers/objects"
+	handlersresources "github.com/juju/juju/apiserver/internal/handlers/resources"
+	resourcesdownload "github.com/juju/juju/apiserver/internal/handlers/resources/download"
 	"github.com/juju/juju/apiserver/logsink"
 	"github.com/juju/juju/apiserver/observer"
 	"github.com/juju/juju/apiserver/stateauthenticator"
 	"github.com/juju/juju/apiserver/websocket"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/auditlog"
-	"github.com/juju/juju/core/cache"
-	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/lease"
-	"github.com/juju/juju/core/multiwatcher"
+	corelogger "github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/core/resources"
+	coreresource "github.com/juju/juju/core/resource"
 	"github.com/juju/juju/core/securitylog"
-	"github.com/juju/juju/internal/worker/syslogger"
-	"github.com/juju/juju/pubsub/apiserver"
-	controllermsg "github.com/juju/juju/pubsub/controller"
-	"github.com/juju/juju/resource"
+	coretrace "github.com/juju/juju/core/trace"
+	coreunit "github.com/juju/juju/core/unit"
+	internalerrors "github.com/juju/juju/internal/errors"
+	internallogger "github.com/juju/juju/internal/logger"
+	internalmacaroon "github.com/juju/juju/internal/macaroon"
+	"github.com/juju/juju/internal/resource"
+	resourcecharmhub "github.com/juju/juju/internal/resource/charmhub"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/trace"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/jsoncodec"
-	"github.com/juju/juju/state"
 )
 
-var logger = loggo.GetLogger("juju.apiserver")
+// ErrAPIServerDying is used to indicate to *third parties* that the
+// api-server worker is dying, instead of catacomb.ErrDying, which is
+// unsuitable for propagating inter-worker.
+// This error indicates to consuming workers that their dependency has
+// become unmet and a restart by the dependency engine is imminent.
+const ErrAPIServerDying = errors.ConstError("api-server worker is dying")
 
-var defaultHTTPMethods = []string{"GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS"}
+var logger = internallogger.GetLogger("juju.apiserver")
+
+var defaultHTTPMethods = []string{
+	http.MethodGet,
+	http.MethodPost,
+	http.MethodHead,
+	http.MethodPut,
+	http.MethodDelete,
+	http.MethodOptions,
+}
 
 // Server holds the server side of the API.
 type Server struct {
-	tomb      tomb.Tomb
+	catacomb  catacomb.Catacomb
 	clock     clock.Clock
 	pingClock clock.Clock
 	wg        sync.WaitGroup
@@ -86,13 +108,12 @@ type Server struct {
 	httpAuthenticators  []authentication.HTTPAuthenticator
 	loginAuthenticators []authentication.LoginAuthenticator
 
-	offerAuthCtxt          *crossmodel.AuthContext
-	lastConnectionID       uint64
-	newObserver            observer.ObserverFactory
-	allowModelAccess       bool
-	logSinkWriter          io.WriteCloser
+	connectionID     uint64
+	newObserver      observer.ObserverFactory
+	allowModelAccess bool
+
 	logsinkRateLimitConfig logsink.RateLimitConfig
-	apiServerLoggers       apiServerLoggers
+	logSink                corelogger.ModelLogger
 	getAuditConfig         func() auditlog.Config
 	upgradeComplete        func() bool
 	mux                    *apiserverhttp.Mux
@@ -138,9 +159,13 @@ type ServerConfig struct {
 	Tag       names.Tag
 	DataDir   string
 	LogDir    string
-	Hub       *pubsub.StructuredHub
-	Presence  presence.Recorder
 	Mux       *apiserverhttp.Mux
+
+	// ControllerUUID is the controller unique identifier.
+	ControllerUUID string
+
+	// ControllerModelUUID is the ID for the controller model.
+	ControllerModelUUID coremodel.UUID
 
 	// LocalMacaroonAuthenticator is the request authenticator used for verifying
 	// local user macaroons.
@@ -150,22 +175,6 @@ type ServerConfig struct {
 	// tokens when the controller has been bootstrapped with a trusted token
 	// provider.
 	JWTAuthenticator jwt.Authenticator
-
-	// MultiwatcherFactory is used by the API server to create
-	// multiwatchers. The real factory is managed by the multiwatcher
-	// worker.
-	MultiwatcherFactory multiwatcher.Factory
-
-	// StatePool is the StatePool used for looking up State
-	// to pass to facades. StatePool will not be closed by the
-	// server; it is the callers responsibility to close it
-	// after the apiserver has exited.
-	StatePool *state.StatePool
-
-	// Controller is the in-memory representation of the models
-	// in the controller. It is kept up to date with an all model
-	// watcher and the modelcache worker.
-	Controller *cache.Controller
 
 	// UpgradeComplete is a function that reports whether or not
 	// the if the agent running the API server has completed
@@ -197,9 +206,8 @@ type ServerConfig struct {
 	// DefaultLogSinkConfig() will be used.
 	LogSinkConfig *LogSinkConfig
 
-	// SysLogger is a logger that will tee the output from logging
-	// to the local syslog.
-	SysLogger syslogger.SysLogger
+	// LogSink is used to store log records received from connected agents.
+	LogSink corelogger.ModelLogger
 
 	// GetAuditConfig holds a function that returns the current audit
 	// logging config. The function may return updated values, so
@@ -209,6 +217,9 @@ type ServerConfig struct {
 	// LeaseManager gives access to leadership and singular claimers
 	// and checkers for use in API facades.
 	LeaseManager lease.Manager
+
+	// FlightRecorder is used to capture flight recordings of the API server.
+	FlightRecorder flightrecorder.FlightRecorder
 
 	// MetricsCollector defines all the metrics to be collected for the
 	// apiserver
@@ -220,29 +231,41 @@ type ServerConfig struct {
 	// CharmhubHTTPClient is the HTTP client used for Charmhub API requests.
 	CharmhubHTTPClient facade.HTTPClient
 
-	// DBGetter supplies sql.DB references on request, for named databases.
-	DBGetter coredatabase.DBGetter
+	// MacaroonHTTPClient is the HTTP client used to make requests to
+	// third party macaroon services.
+	MacaroonHTTPClient facade.HTTPClient
+
+	// DomainServicesGetter provides access to the services.
+	DomainServicesGetter services.DomainServicesGetter
+
+	// ControllerConfigService provides access to the controller config.
+	ControllerConfigService ControllerConfigService
+
+	// DBGetter returns WatchableDB implementations based on namespace.
+	DBGetter changestream.WatchableDBGetter
+
+	// TracerGetter returns a tracer for the given namespace, this is used
+	// for opentelmetry tracing.
+	TracerGetter trace.TracerGetter
+
+	// ObjectStoreGetter returns an object store for the given namespace.
+	// This is used for retrieving blobs for charms and agents.
+	ObjectStoreGetter objectstore.ObjectStoreGetter
+
+	// WatcherRegistryGetter is used to register and manage watchers.
+	WatcherRegistryGetter watcherregistry.WatcherRegistryGetter
 }
 
 // Validate validates the API server configuration.
 func (c ServerConfig) Validate() error {
-	if c.StatePool == nil {
-		return errors.NotValidf("missing StatePool")
-	}
-	if c.Controller == nil {
-		return errors.NotValidf("missing Controller")
-	}
-	if c.MultiwatcherFactory == nil {
-		return errors.NotValidf("missing MultiwatcherFactory")
-	}
-	if c.Hub == nil {
-		return errors.NotValidf("missing Hub")
-	}
-	if c.Presence == nil {
-		return errors.NotValidf("missing Presence")
-	}
 	if c.Mux == nil {
 		return errors.NotValidf("missing Mux")
+	}
+	if c.ControllerUUID == "" {
+		return errors.NotValidf("missing ControllerUUID")
+	}
+	if c.ControllerModelUUID == "" {
+		return errors.NotValidf("missing ControllerModelUUID")
 	}
 	if c.LocalMacaroonAuthenticator == nil {
 		return errors.NotValidf("missing local macaroon authenticator")
@@ -264,11 +287,29 @@ func (c ServerConfig) Validate() error {
 			return errors.Annotate(err, "validating logsink configuration")
 		}
 	}
-	if c.SysLogger == nil {
-		return errors.NotValidf("nil SysLogger")
+	if c.LogSink == nil {
+		return errors.NotValidf("nil LogSink")
 	}
 	if c.MetricsCollector == nil {
 		return errors.NotValidf("missing MetricsCollector")
+	}
+	if c.DBGetter == nil {
+		return errors.NotValidf("missing DBGetter")
+	}
+	if c.DomainServicesGetter == nil {
+		return errors.NotValidf("missing DomainServicesGetter")
+	}
+	if c.ControllerConfigService == nil {
+		return errors.NotValidf("missing ControllerConfigService")
+	}
+	if c.TracerGetter == nil {
+		return errors.NotValidf("missing TracerGetter")
+	}
+	if c.ObjectStoreGetter == nil {
+		return errors.NotValidf("missing ObjectStoreGetter")
+	}
+	if c.WatcherRegistryGetter == nil {
+		return errors.NotValidf("missing WatcherRegistryGetter")
 	}
 	return nil
 }
@@ -281,7 +322,7 @@ func (c ServerConfig) pingClock() clock.Clock {
 }
 
 // NewServer serves API requests using the given configuration.
-func NewServer(cfg ServerConfig) (*Server, error) {
+func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	if cfg.LogSinkConfig == nil {
 		logSinkConfig := DefaultLogSinkConfig()
 		cfg.LogSinkConfig = &logSinkConfig
@@ -294,54 +335,56 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// server needs to run before mongo upgrades have happened and
 	// any state manipulation may be relying on features of the
 	// database added by upgrades. Here be dragons.
-	return newServer(cfg)
+	return newServer(ctx, cfg)
 }
 
 const readyTimeout = time.Second * 30
 
-func newServer(cfg ServerConfig) (_ *Server, err error) {
-	systemState, err := cfg.StatePool.SystemState()
+func newServer(ctx context.Context, cfg ServerConfig) (_ *Server, err error) {
+	controllerDomainServices, err := cfg.DomainServicesGetter.ServicesForModel(ctx, cfg.ControllerModelUUID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	controllerConfig, err := systemState.ControllerConfig()
+	controllerConfigService := controllerDomainServices.ControllerConfig()
+	controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
-		return nil, errors.Annotate(err, "unable to get controller config")
+		return nil, errors.Annotate(err, "getting controller config")
 	}
 
+	macaroonService := controllerDomainServices.Macaroon()
+	offersThirdPartyKeyPair, err := macaroonService.GetOffersThirdPartyKey(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	httpAuthenticators := []authentication.HTTPAuthenticator{cfg.LocalMacaroonAuthenticator, cfg.JWTAuthenticator}
+	loginAuthenticators := []authentication.LoginAuthenticator{cfg.LocalMacaroonAuthenticator, cfg.JWTAuthenticator}
+
 	shared, err := newSharedServerContext(sharedServerConfig{
-		statePool:           cfg.StatePool,
-		controller:          cfg.Controller,
-		multiwatcherFactory: cfg.MultiwatcherFactory,
-		centralHub:          cfg.Hub,
-		presence:            cfg.Presence,
-		leaseManager:        cfg.LeaseManager,
-		controllerConfig:    controllerConfig,
-		logger:              loggo.GetLogger("juju.apiserver"),
-		charmhubHTTPClient:  cfg.CharmhubHTTPClient,
-		dbGetter:            cfg.DBGetter,
+		flightRecorder:           cfg.FlightRecorder,
+		leaseManager:             cfg.LeaseManager,
+		controllerUUID:           cfg.ControllerUUID,
+		controllerModelUUID:      cfg.ControllerModelUUID,
+		controllerConfig:         controllerConfig,
+		loginTokenRefreshURL:     controllerConfig.LoginTokenRefreshURL(),
+		offersThirdPartyKeyPair:  offersThirdPartyKeyPair,
+		logger:                   internallogger.GetLogger("juju.apiserver"),
+		clock:                    cfg.Clock,
+		charmhubHTTPClient:       cfg.CharmhubHTTPClient,
+		macaroonHTTPClient:       cfg.MacaroonHTTPClient,
+		dbGetter:                 cfg.DBGetter,
+		domainServicesGetter:     cfg.DomainServicesGetter,
+		controllerDomainServices: controllerDomainServices,
+		tracerGetter:             cfg.TracerGetter,
+		objectStoreGetter:        cfg.ObjectStoreGetter,
+		machineTag:               cfg.Tag,
+		dataDir:                  cfg.DataDir,
+		logDir:                   cfg.LogDir,
+		watcherRegistryGetter:    cfg.WatcherRegistryGetter,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	systemState, err = cfg.StatePool.SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	model, err := systemState.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	modelConfig, err := model.Config()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	loggingOutputs, _ := modelConfig.LoggingOutput()
-
-	httpAuthenticators := []authentication.HTTPAuthenticator{cfg.LocalMacaroonAuthenticator, cfg.JWTAuthenticator}
-	loginAuthenticators := []authentication.LoginAuthenticator{cfg.LocalMacaroonAuthenticator, cfg.JWTAuthenticator}
 
 	srv := &Server{
 		clock:                         cfg.Clock,
@@ -366,84 +409,28 @@ func newServer(cfg ServerConfig) (_ *Server, err error) {
 			Burst:  cfg.LogSinkConfig.RateLimitBurst,
 			Clock:  cfg.Clock,
 		},
-		getAuditConfig: cfg.GetAuditConfig,
-		apiServerLoggers: apiServerLoggers{
-			syslogger:           cfg.SysLogger,
-			loggingOutputs:      loggingOutputs,
-			clock:               cfg.Clock,
-			loggerBufferSize:    cfg.LogSinkConfig.DBLoggerBufferSize,
-			loggerFlushInterval: cfg.LogSinkConfig.DBLoggerFlushInterval,
-		},
+		getAuditConfig:      cfg.GetAuditConfig,
+		logSink:             cfg.LogSink,
 		metricsCollector:    cfg.MetricsCollector,
 		execEmbeddedCommand: cfg.ExecEmbeddedCommand,
 
 		healthStatus: "starting",
 	}
 	srv.updateAgentRateLimiter(controllerConfig)
-	srv.updateResourceDownloadLimiters(controllerConfig)
-
-	// We are able to get the current controller config before subscribing to changes
-	// because the changes are only ever published in response to an API call,
-	// and we know that we can't make any API calls until the server has started.
-	unsubscribeControllerConfig, err := cfg.Hub.Subscribe(
-		controllermsg.ConfigChanged,
-		func(topic string, data controllermsg.ConfigChangedMessage, err error) {
-			if err != nil {
-				logger.Criticalf("programming error in %s message data: %v", topic, err)
-				return
-			}
-			srv.updateAgentRateLimiter(data.Config)
-			srv.updateResourceDownloadLimiters(data.Config)
-		})
-	if err != nil {
-		logger.Criticalf("programming error in subscribe function: %v", err)
+	if err := srv.updateResourceDownloadLimiters(controllerConfig); err != nil {
 		return nil, errors.Trace(err)
-	}
-
-	srv.shared.cancel = srv.tomb.Dying()
-
-	// The auth context for authenticating access to application offers.
-	srv.offerAuthCtxt, err = newOfferAuthcontext(cfg.StatePool)
-	if err != nil {
-		unsubscribeControllerConfig()
-		return nil, errors.Trace(err)
-	}
-
-	if model.Type() == state.ModelTypeCAAS {
-		// CAAS controller writes log to stdout. We should ensure that we don't
-		// close the logSinkWriter when we stopping the tomb, otherwise we get
-		// no output to stdout anymore.
-		srv.logSinkWriter = nonCloseableWriter{
-			WriteCloser: os.Stdout,
-		}
-	} else {
-		srv.logSinkWriter, err = logsink.NewFileWriter(
-			filepath.Join(srv.logDir, "logsink.log"),
-			controllerConfig.AgentLogfileMaxSizeMB(),
-			controllerConfig.AgentLogfileMaxBackups(),
-		)
-		if err != nil {
-			return nil, errors.Annotate(err, "creating logsink writer")
-		}
-	}
-
-	unsubscribe, err := cfg.Hub.Subscribe(apiserver.RestartTopic, func(string, map[string]interface{}) {
-		srv.tomb.Kill(dependency.ErrBounce)
-	})
-	if err != nil {
-		unsubscribeControllerConfig()
-		return nil, errors.Annotate(err, "unable to subscribe to restart message")
 	}
 
 	ready := make(chan struct{})
-	srv.tomb.Go(func() error {
-		defer srv.apiServerLoggers.dispose()
-		defer srv.logSinkWriter.Close()
-		defer srv.shared.Close()
-		defer unsubscribe()
-		defer unsubscribeControllerConfig()
-		return srv.loop(ready)
-	})
+	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "apiserver",
+		Site: &srv.catacomb,
+		Work: func() error {
+			return srv.loop(ready)
+		},
+	}); err != nil {
+		return nil, errors.Trace(err)
+	}
 
 	// Don't return until all handlers have been registered.
 	select {
@@ -453,18 +440,6 @@ func newServer(cfg ServerConfig) (_ *Server, err error) {
 	}
 
 	return srv, nil
-}
-
-// nonCloseableWriter ensures that we never close the underlying writer. If the
-// underlying writer is os.stdout and we close that, then nothing will be
-// written until a new instance of the program is launched.
-type nonCloseableWriter struct {
-	io.WriteCloser
-}
-
-// Close does not do anything in this instance.
-func (nonCloseableWriter) Close() error {
-	return nil
 }
 
 // Report is shown in the juju_engine_report.
@@ -484,24 +459,33 @@ func (srv *Server) Report() map[string]interface{} {
 
 // Dead returns a channel that signals when the server has exited.
 func (srv *Server) Dead() <-chan struct{} {
-	return srv.tomb.Dead()
+	return srv.catacomb.Dead()
 }
 
 // Stop stops the server and returns when all running requests
 // have completed.
 func (srv *Server) Stop() error {
-	srv.tomb.Kill(nil)
-	return srv.tomb.Wait()
+	srv.Kill()
+	return srv.Wait()
 }
 
 // Kill implements worker.Worker.Kill.
 func (srv *Server) Kill() {
-	srv.tomb.Kill(nil)
+	srv.catacomb.Kill(nil)
 }
 
 // Wait implements worker.Worker.Wait.
 func (srv *Server) Wait() error {
-	return srv.tomb.Wait()
+	// If the server was killed, and in turn any watchers associated with the
+	// catacomb are cancelled whilst a request is being processed, it will
+	// return context.Canceled. This is expected and should not be treated as an
+	// error.
+	if err := srv.catacomb.Wait(); errors.Is(err, context.Canceled) {
+		return nil
+	} else if err != nil {
+		return errors.Trace(err)
+	}
+	return nil
 }
 
 func (srv *Server) updateAgentRateLimiter(cfg controller.Config) {
@@ -511,18 +495,25 @@ func (srv *Server) updateAgentRateLimiter(cfg controller.Config) {
 	srv.agentRateLimitRate = cfg.AgentRateLimitRate()
 	if srv.agentRateLimitMax > 0 {
 		srv.agentRateLimit = ratelimit.NewBucketWithClock(
-			srv.agentRateLimitRate, int64(srv.agentRateLimitMax), rateClock{srv.clock})
+			srv.agentRateLimitRate, int64(srv.agentRateLimitMax), rateClock{Clock: srv.clock})
 	} else {
 		srv.agentRateLimit = nil
 	}
 }
 
-func (srv *Server) updateResourceDownloadLimiters(cfg controller.Config) {
+func (srv *Server) updateResourceDownloadLimiters(cfg controller.Config) error {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	globalLimit := cfg.ControllerResourceDownloadLimit()
 	appLimit := cfg.ApplicationResourceDownloadLimit()
-	srv.resourceLock = resource.NewResourceDownloadLimiter(globalLimit, appLimit)
+
+	var err error
+	srv.resourceLock, err = resource.NewResourceDownloadLimiter(globalLimit, appLimit)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	return nil
 }
 
 func (srv *Server) getResourceDownloadLimiter() resource.ResourceDownloadLock {
@@ -584,26 +575,26 @@ func (w logsinkMetricsCollectorWrapper) LogReadCount(modelUUID, state string) pr
 // essentials for the http request recorder.
 type httpRequestRecorderWrapper struct {
 	collector *Collector
-	modelUUID string
+	modelUUID coremodel.UUID
 }
 
 // Record an outgoing request which produced an http.Response.
 func (w httpRequestRecorderWrapper) Record(method string, url *url.URL, res *http.Response, rtt time.Duration) {
 	// Note: Do not log url.Path as REST queries _can_ include the name of the
 	// entities (charms, architectures, etc).
-	w.collector.TotalRequests.WithLabelValues(w.modelUUID, url.Host, strconv.FormatInt(int64(res.StatusCode), 10)).Inc()
+	w.collector.TotalRequests.WithLabelValues(w.modelUUID.String(), url.Host, strconv.FormatInt(int64(res.StatusCode), 10)).Inc()
 	if res.StatusCode >= 400 {
-		w.collector.TotalRequestErrors.WithLabelValues(w.modelUUID, url.Host).Inc()
+		w.collector.TotalRequestErrors.WithLabelValues(w.modelUUID.String(), url.Host).Inc()
 	}
-	w.collector.TotalRequestsDuration.WithLabelValues(w.modelUUID, url.Host).Observe(rtt.Seconds())
+	w.collector.TotalRequestsDuration.WithLabelValues(w.modelUUID.String(), url.Host).Observe(rtt.Seconds())
 }
 
 // RecordError records an outgoing request that returned back an error.
 func (w httpRequestRecorderWrapper) RecordError(method string, url *url.URL, err error) {
 	// Note: Do not log url.Path as REST queries _can_ include the name of the
 	// entities (charms, architectures, etc).
-	w.collector.TotalRequests.WithLabelValues(w.modelUUID, url.Host, "unknown").Inc()
-	w.collector.TotalRequestErrors.WithLabelValues(w.modelUUID, url.Host).Inc()
+	w.collector.TotalRequests.WithLabelValues(w.modelUUID.String(), url.Host, "unknown").Inc()
+	w.collector.TotalRequestErrors.WithLabelValues(w.modelUUID.String(), url.Host).Inc()
 }
 
 // loop is the main loop for the server.
@@ -624,7 +615,20 @@ func (srv *Server) loop(ready chan struct{}) error {
 		}
 	}
 
+	ctx := srv.catacomb.Context(context.Background())
+
+	controllerConfigService := srv.shared.controllerDomainServices.ControllerConfig()
+	controllerConfigWatcher, err := controllerConfigService.WatchControllerConfig(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	if err := srv.catacomb.Add(controllerConfigWatcher); err != nil {
+		return errors.Trace(err)
+	}
+
 	close(ready)
+
 	srv.mu.Lock()
 	srv.healthStatus = "running"
 	// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
@@ -634,25 +638,49 @@ func (srv *Server) loop(ready chan struct{}) error {
 	})
 	srv.mu.Unlock()
 
-	<-srv.tomb.Dying()
+	for {
+		select {
+		case <-srv.catacomb.Dying():
+			srv.mu.Lock()
+			srv.healthStatus = "stopping"
+			// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
+			securitylog.LogSystem(securitylog.SystemLifecycleSecurityEvent{
+				Event: securitylog.SystemLifecycleEventShutdown,
+				Actor: securitylog.DefaultAdminName,
+			})
+			srv.mu.Unlock()
 
-	srv.mu.Lock()
-	srv.healthStatus = "stopping"
-	// Security Event Logging: This log statement is required to comply with Canonical's SSDLC Security Event Logging policy.
-	securitylog.LogSystem(securitylog.SystemLifecycleSecurityEvent{
-		Event: securitylog.SystemLifecycleEventShutdown,
-		Actor: securitylog.DefaultAdminName,
-	})
-	srv.mu.Unlock()
+			srv.wg.Wait() // wait for any outstanding requests to complete.
+			return ErrAPIServerDying
 
-	srv.wg.Wait() // wait for any outstanding requests to complete.
-	return tomb.ErrDying
+		case <-controllerConfigWatcher.Changes():
+			controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
+			if err != nil {
+				logger.Errorf(ctx, "failed to get controller config: %v", err)
+				continue
+			}
+
+			srv.updateAgentRateLimiter(controllerConfig)
+			srv.shared.updateControllerConfig(ctx, controllerConfig)
+
+			// If the update fails, there is nothing else we can do but log the
+			// error. The server will continue to run with the old limits.
+			if err := srv.updateResourceDownloadLimiters(controllerConfig); err != nil {
+				logger.Errorf(ctx, "failed to update resource download limiters: %v", err)
+				continue
+			}
+		}
+	}
 }
 
-func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
-	const modelRoutePrefix = "/model/:modeluuid"
-	const charmsObjectsRoutePrefix = "/model-:modeluuid/charms/:object"
+const (
+	modelRoutePrefix         = "/model/:modeluuid"
+	charmsObjectsRoutePrefix = "/model-:modeluuid/charms/:object"
+	objectsRoutePrefix       = "/model-:modeluuid/objects/:object"
+	migrateResourcesPrefix   = "/migrate/resources"
+)
 
+func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 	type handler struct {
 		pattern         string
 		methods         []string
@@ -662,12 +690,9 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		tracked         bool
 		noModelUUID     bool
 	}
+
 	var endpoints []apihttp.Endpoint
-	systemState, err := srv.shared.statePool.SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	controllerModelUUID := systemState.ModelUUID()
+	controllerModelUUID := srv.shared.controllerModelUUID
 
 	httpAuthenticator := authentication.HTTPStrategicAuthenticator(srv.httpAuthenticators)
 
@@ -687,21 +712,32 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 				Authorizer:    handler.authorizer,
 			}
 		}
+
+		// Register the [httpcontext.ControllerModelSignalHandler] for every
+		// handler.
+		h = httpcontext.ControllerModelSignalHandler{
+			ControllerModelUUID: controllerModelUUID,
+			Handler:             h,
+		}
+
 		if !handler.noModelUUID {
 			if strings.HasPrefix(handler.pattern, modelRoutePrefix) {
 				h = &httpcontext.QueryModelHandler{
 					Handler: h,
 					Query:   ":modeluuid",
 				}
-			} else if strings.HasPrefix(handler.pattern, charmsObjectsRoutePrefix) {
-				h = &httpcontext.BucketModelHandler{
+			} else if strings.HasPrefix(handler.pattern, charmsObjectsRoutePrefix) ||
+				// The charm upload path differs from [modelRoutePrefix] hence
+				// the existence of this special case.
+				strings.HasPrefix(handler.pattern, objectsRoutePrefix) {
+				h = &httpcontext.QueryModelHandler{
 					Handler: h,
 					Query:   ":modeluuid",
 				}
 			} else {
-				h = &httpcontext.ImpliedModelHandler{
-					Handler:   h,
-					ModelUUID: controllerModelUUID,
+				h = &httpcontext.ControllerModelHandler{
+					Handler:             h,
+					ControllerModelUUID: controllerModelUUID,
 				}
 			}
 		}
@@ -717,10 +753,9 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 	httpCtxt := httpContext{srv: srv}
 	mainAPIHandler := srv.monitoredHandler(http.HandlerFunc(srv.apiHandler), "api")
 	healthHandler := srv.monitoredHandler(http.HandlerFunc(srv.healthHandler), "health")
-	logStreamHandler := srv.monitoredHandler(newLogStreamEndpointHandler(httpCtxt), "logstream")
 	embeddedCLIHandler := srv.monitoredHandler(newEmbeddedCLIHandler(httpCtxt), "commands")
 	controllerAdminAuthorizer := controllerAdminAuthorizer{
-		controllerTag: systemState.ControllerTag(),
+		controllerTag: names.NewControllerTag(srv.shared.controllerUUID),
 	}
 	var debuglogAuth httpcontext.CompositeAuthorizer = []authentication.Authorizer{
 		tagKindAuthorizer{names.MachineTagKind, names.ControllerAgentTagKind},
@@ -729,165 +764,152 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 			perm: permission.ReadAccess,
 		},
 	}
-	debugLogHandler := srv.monitoredHandler(newDebugLogDBHandler(
+	debugLogHandler := srv.monitoredHandler(newDebugLogTailerHandler(
 		httpCtxt,
 		httpAuthenticator,
 		debuglogAuth,
+		srv.logDir,
 	), "log")
-	pubsubHandler := srv.monitoredHandler(newPubSubHandler(httpCtxt, srv.shared.centralHub), "pubsub")
 	logSinkHandler := logsink.NewHTTPHandler(
-		newAgentLogWriteCloserFunc(httpCtxt, srv.logSinkWriter, &srv.apiServerLoggers),
+		newAgentLogWriteFunc(httpCtxt, srv.logSink),
 		httpCtxt.stop(),
 		&srv.logsinkRateLimitConfig,
 		logsinkMetricsCollectorWrapper{collector: srv.metricsCollector},
-		controllerModelUUID,
+		controllerModelUUID.String(),
 	)
 	logSinkAuthorizer := tagKindAuthorizer(stateauthenticator.AgentTags)
 	logTransferHandler := logsink.NewHTTPHandler(
 		// We don't need to save the migrated logs
 		// to a logfile as well as to the DB.
-		newMigrationLogWriteCloserFunc(httpCtxt, &srv.apiServerLoggers),
+		newMigrationLogWriteFunc(httpCtxt, srv.logSink),
 		httpCtxt.stop(),
 		nil, // no rate-limiting
 		logsinkMetricsCollectorWrapper{collector: srv.metricsCollector},
-		controllerModelUUID,
+		controllerModelUUID.String(),
 	)
-	modelRestHandler := &modelRestHandler{
-		ctxt:    httpCtxt,
-		dataDir: srv.dataDir,
-	}
-	modelRestServer := srv.monitoredHandler(&RestHTTPHandler{
-		GetHandler: modelRestHandler.ServeGet,
-	}, "rest")
-	modelCharmsHandler := &charmsHandler{
-		ctxt:          httpCtxt,
-		dataDir:       srv.dataDir,
-		stateAuthFunc: httpCtxt.stateForRequestAuthenticatedUser,
-	}
-	modelCharmsHTTPHandler := srv.monitoredHandler(&CharmsHTTPHandler{
-		PostHandler: modelCharmsHandler.ServePost,
-		GetHandler:  modelCharmsHandler.ServeGet,
-	}, "charms")
-	var modelCharmsUploadAuthorizer httpcontext.CompositeAuthorizer = []authentication.Authorizer{
+	var charmsObjectsAuthorizer httpcontext.CompositeAuthorizer = []authentication.Authorizer{
 		controllerAdminAuthorizer,
 		modelPermissionAuthorizer{
 			perm: permission.WriteAccess,
 		},
 	}
 
-	modelObjectsCharmsHandler := &objectsCharmHandler{
-		ctxt:          httpCtxt,
-		stateAuthFunc: httpCtxt.stateForRequestAuthenticatedUser,
-	}
-	modelObjectsCharmsHTTPHandler := srv.monitoredHandler(&objectsCharmHTTPHandler{
-		GetHandler:          modelObjectsCharmsHandler.ServeGet,
-		PutHandler:          modelObjectsCharmsHandler.ServePut,
-		LegacyCharmsHandler: modelCharmsHTTPHandler,
-	}, "charms")
+	modelObjectsCharmsHTTPHandler := srv.monitoredHandler(objects.NewObjectsCharmHTTPHandler(
+		&applicationServiceGetter{ctxt: httpCtxt},
+		objects.CharmURLFromLocator,
+	), "charms")
+	modelObjectsHTTPHandler := srv.monitoredHandler(objects.NewObjectsHTTPHandler(
+		&objectStoreServiceGetter{ctxt: httpCtxt},
+	), "objects")
 
-	modelToolsUploadHandler := srv.monitoredHandler(&toolsUploadHandler{
-		ctxt:          httpCtxt,
-		stateAuthFunc: httpCtxt.stateForRequestAuthenticatedUser,
-	}, "tools")
-	var modelToolsUploadAuthorizer httpcontext.CompositeAuthorizer = []authentication.Authorizer{
+	modelToolsUploadHandler := srv.monitoredHandler(newToolsUploadHandler(
+		BlockCheckerGetterForServices(httpCtxt.domainServicesForRequestContext),
+		modelAgentBinaryStoreForHTTPContext(httpCtxt),
+	), "tools")
+
+	// toolsUploadAuthorizer defines the authorizer that MUST be used for tools
+	// uploading in the controller. If the user is a controller admin then we
+	// can allow the request through, this must also be the case the if the
+	// model being uploaded to is the controller model. All other models it is
+	// acceptable for the user to be a model admin.
+	var toolsUploadAuthorizer httpcontext.CompositeAuthorizer = []authentication.Authorizer{
 		controllerAdminAuthorizer,
-		modelPermissionAuthorizer{
-			perm: permission.AdminAccess,
+		controllerModelPermissionAuthorizer{
+			controllerAdminAuthorizer: controllerAdminAuthorizer,
+			fallThroughAuthorizer: modelPermissionAuthorizer{
+				perm: permission.AdminAccess,
+			},
+			ModelAuthorizationInfo: modelAuthorizationInfoForRequest(),
 		},
 	}
+
 	modelToolsDownloadHandler := srv.monitoredHandler(newToolsDownloadHandler(httpCtxt), "tools")
-	resourcesHandler := srv.monitoredHandler(&ResourcesHandler{
-		StateAuthFunc: func(req *http.Request, tagKinds ...string) (ResourcesBackend, state.PoolHelper, names.Tag,
-			error) {
-			st, entity, err := httpCtxt.stateForRequestAuthenticatedTag(req, tagKinds...)
-			if err != nil {
-				return nil, nil, nil, errors.Trace(err)
-			}
 
-			rst := st.Resources()
-			return rst, st, entity.Tag(), nil
-		},
-		ChangeAllowedFunc: func(req *http.Request) error {
-			st, err := httpCtxt.stateForRequestUnauthenticated(req)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			defer st.Release()
-
-			blockChecker := common.NewBlockChecker(st)
-			if err := blockChecker.ChangeAllowed(); err != nil {
-				return errors.Trace(err)
-			}
-			return nil
-		},
-	}, "applications")
-	unitResourcesHandler := srv.monitoredHandler(&UnitResourcesHandler{
-		NewOpener: func(req *http.Request, tagKinds ...string) (resources.Opener, state.PoolHelper, error) {
-			st, _, err := httpCtxt.stateForRequestAuthenticatedTag(req, tagKinds...)
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
-
-			tagStr := req.URL.Query().Get(":unit")
-			tag, err := names.ParseUnitTag(tagStr)
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
-			opener, err := resource.NewResourceOpener(st.State, srv.getResourceDownloadLimiter, tag.Id())
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
-			return opener, st, nil
-		},
-	}, "units")
-
-	migrateCharmsHandler := &charmsHandler{
-		ctxt:          httpCtxt,
-		dataDir:       srv.dataDir,
-		stateAuthFunc: httpCtxt.stateForMigrationImporting,
+	resourceAuthFunc := func(req *http.Request, tagKinds ...string) (names.Tag, error) {
+		return httpCtxt.authenticatedTagFromRequest(req, tagKinds...)
 	}
-	migrateCharmsHTTPHandler := &CharmsHTTPHandler{
-		PostHandler: migrateCharmsHandler.ServePost,
-		GetHandler:  migrateCharmsHandler.ServeUnsupported,
+	resourceChangeAllowedFunc := func(ctx context.Context) error {
+		serviceFactory, err := httpCtxt.domainServicesForRequestContext(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		blockChecker := common.NewBlockChecker(serviceFactory.BlockCommand())
+		if err := blockChecker.ChangeAllowed(ctx); err != nil {
+			return errors.Trace(err)
+		}
+		return nil
 	}
-	migrateObjectsCharmsHandler := &objectsCharmHandler{
-		ctxt:          httpCtxt,
-		stateAuthFunc: httpCtxt.stateForMigrationImporting,
-	}
-	migrateObjectsCharmsHTTPHandler := srv.monitoredHandler(&objectsCharmHTTPHandler{
-		PutHandler:          migrateObjectsCharmsHandler.ServePut,
-		GetHandler:          migrateObjectsCharmsHandler.ServeUnsupported,
-		LegacyCharmsHandler: migrateCharmsHTTPHandler,
-	}, "charms")
-	migrateToolsUploadHandler := srv.monitoredHandler(&toolsUploadHandler{
-		ctxt:          httpCtxt,
-		stateAuthFunc: httpCtxt.stateForMigrationImporting,
-	}, "tools")
-	resourcesMigrationUploadHandler := srv.monitoredHandler(&resourcesMigrationUploadHandler{
-		ctxt:          httpCtxt,
-		stateAuthFunc: httpCtxt.stateForMigrationImporting,
-	}, "resources")
-	backupHandler := srv.monitoredHandler(&backupHandler{ctxt: httpCtxt}, "backups")
-	registerHandler := srv.monitoredHandler(&registerUserHandler{ctxt: httpCtxt}, "register")
+	resourcesHandler := srv.monitoredHandler(handlersresources.NewResourceHandler(
+		resourceAuthFunc,
+		resourceChangeAllowedFunc,
+		&resourcesResourceServiceGetter{domainServiceForRequest: httpCtxt.domainServicesForRequest},
+		&resourcesApplicationServiceGetter{domainServiceForRequest: httpCtxt.domainServicesForRequest},
+		resourcesdownload.NewDownloader(logger.Child("resourcedownloader"), resourcesdownload.DefaultFileSystem()),
+		logger,
+	), "applications")
+	unitResourceNewOpenerFunc := resourceOpenerGetter(func(req *http.Request, tagKinds ...string) (coreresource.Opener, error) {
+		tagStr := req.URL.Query().Get(":unit")
+		tag, err := names.ParseUnitTag(tagStr)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		unitName, err := coreunit.NewName(tag.Id())
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+		domainServices, err := httpCtxt.domainServicesForRequest(req)
+		if err != nil {
+			return nil, errors.Trace(errors.Annotate(err, "cannot get domain services for unit resource request"))
+		}
+		args := resource.ResourceOpenerArgs{
+			ApplicationService: domainServices.Application(),
+			ResourceService:    domainServices.Resource(),
+			CharmhubClientGetter: resourcecharmhub.NewCharmHubOpener(
+				domainServices.Config(),
+			),
+		}
+
+		opener, err := resource.NewResourceOpenerForUnit(
+			req.Context(),
+			args,
+			srv.getResourceDownloadLimiter,
+			unitName,
+		)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return opener, nil
+	})
+	unitResourcesHandler := srv.monitoredHandler(handlersresources.NewUnitResourcesHandler(
+		unitResourceNewOpenerFunc,
+		logger,
+	), "units")
+
+	migrateObjectsCharmsHTTPHandler := srv.monitoredHandler(objects.NewObjectsCharmHTTPHandler(
+		&migratingObjectsApplicationServiceGetter{ctxt: httpCtxt},
+		objects.CharmURLFromLocatorDuringMigration,
+	), "charms")
+	migrateToolsUploadHandler := srv.monitoredHandler(newToolsUploadHandler(
+		BlockCheckerGetterForServices(httpCtxt.domainServicesForRequestContext),
+		migratingAgentBinaryStoreForHTTPContext(httpCtxt),
+	), "tools")
+	resourcesMigrationUploadHandler := srv.monitoredHandler(handlersresources.NewResourceMigrationUploadHandler(
+		&resourcesModelServiceGetter{domainServiceForRequest: httpCtxt.domainServicesDuringMigrationForRequest},
+		&resourcesResourceServiceGetter{domainServiceForRequest: httpCtxt.domainServicesDuringMigrationForRequest},
+		logger,
+	), "applications")
+	registerHandler := srv.monitoredHandler(&registerUserHandler{
+		ctxt: httpCtxt,
+	}, "register")
 
 	// HTTP handler for application offer macaroon authentication.
-	addOfferAuthHandlers(srv.offerAuthCtxt, srv.mux)
+	if err := handlerscrossmodel.AddOfferAuthHandlers(srv.shared, srv.shared.offersThirdPartyKeyPair, srv.mux, srv.shared.logger); err != nil {
+		return nil, errors.Trace(err)
+	}
 
 	handlers := []handler{{
-		// This handler is model specific even though it only
-		// ever makes sense for a controller because the API
-		// caller that is handed to the worker that is forwarding
-		// the messages between controllers is bound to the
-		// /model/:modeluuid namespace.
-		pattern:    modelRoutePrefix + "/pubsub",
-		handler:    pubsubHandler,
-		tracked:    true,
-		authorizer: controllerAuthorizer{},
-	}, {
-		pattern: modelRoutePrefix + "/logstream",
-		handler: logStreamHandler,
-		tracked: true,
-	}, {
 		pattern: modelRoutePrefix + "/log",
 		handler: debugLogHandler,
 		tracked: true,
@@ -910,22 +932,9 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		tracked:         true,
 		unauthenticated: true,
 	}, {
-		pattern: modelRoutePrefix + "/rest/1.0/:entity/:name/:attribute",
-		handler: modelRestServer,
-	}, {
-		// GET /charms has no authorizer
-		pattern: modelRoutePrefix + "/charms",
-		methods: []string{"GET"},
-		handler: modelCharmsHTTPHandler,
-	}, {
-		pattern:    modelRoutePrefix + "/charms",
-		methods:    []string{"POST"},
-		handler:    modelCharmsHTTPHandler,
-		authorizer: modelCharmsUploadAuthorizer,
-	}, {
 		pattern:    modelRoutePrefix + "/tools",
 		handler:    modelToolsUploadHandler,
-		authorizer: modelToolsUploadAuthorizer,
+		authorizer: toolsUploadAuthorizer,
 	}, {
 		pattern:         modelRoutePrefix + "/tools/:version",
 		handler:         modelToolsDownloadHandler,
@@ -937,15 +946,6 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		pattern: modelRoutePrefix + "/units/:unit/resources/:resource",
 		handler: unitResourcesHandler,
 	}, {
-		pattern:    modelRoutePrefix + "/backups",
-		handler:    backupHandler,
-		authorizer: controllerAdminAuthorizer,
-	}, {
-		// Legacy migration endpoint. Used by Juju 3.3 and prior
-		pattern:    "/migrate/charms",
-		handler:    srv.monitoredHandler(migrateCharmsHTTPHandler, "charms"),
-		authorizer: controllerAdminAuthorizer,
-	}, {
 		pattern:    "/migrate/charms/:object",
 		handler:    migrateObjectsCharmsHTTPHandler,
 		authorizer: controllerAdminAuthorizer,
@@ -954,7 +954,7 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		handler:    migrateToolsUploadHandler,
 		authorizer: controllerAdminAuthorizer,
 	}, {
-		pattern:    "/migrate/resources",
+		pattern:    migrateResourcesPrefix,
 		handler:    resourcesMigrationUploadHandler,
 		authorizer: controllerAdminAuthorizer,
 	}, {
@@ -993,10 +993,6 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		handler:         registerHandler,
 		unauthenticated: true,
 	}, {
-		pattern:    "/tools",
-		handler:    modelToolsUploadHandler,
-		authorizer: controllerAdminAuthorizer,
-	}, {
 		pattern:         "/tools/:version",
 		handler:         modelToolsDownloadHandler,
 		unauthenticated: true,
@@ -1008,17 +1004,6 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		// for discharge required errors to be handled correctly.
 		unauthenticated: true,
 	}, {
-		// GET /charms has no authorizer
-		pattern: "/charms",
-		methods: []string{"GET"},
-		handler: modelCharmsHTTPHandler,
-	}, {
-		pattern:    "/charms",
-		methods:    []string{"POST"},
-		handler:    modelCharmsHTTPHandler,
-		authorizer: modelCharmsUploadAuthorizer,
-	}, {
-		// GET has no authorizer
 		pattern: charmsObjectsRoutePrefix,
 		methods: []string{"GET"},
 		handler: modelObjectsCharmsHTTPHandler,
@@ -1026,7 +1011,11 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		pattern:    charmsObjectsRoutePrefix,
 		methods:    []string{"PUT"},
 		handler:    modelObjectsCharmsHTTPHandler,
-		authorizer: modelCharmsUploadAuthorizer,
+		authorizer: charmsObjectsAuthorizer,
+	}, {
+		pattern: objectsRoutePrefix,
+		methods: []string{"GET"},
+		handler: modelObjectsHTTPHandler,
 	}}
 	if srv.registerIntrospectionHandlers != nil {
 		add := func(subpath string, h http.Handler) {
@@ -1051,27 +1040,27 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 // is shutting down.
 //
 // Note: It is only safe to use trackRequests with API handlers which
-// are interruptible (i.e. they pay attention to the apiserver tomb)
+// are interruptible (i.e. they pay attention to the apiserver catacomb)
 // or are guaranteed to be short-lived. If it's used with long running
-// API handlers which don't watch the apiserver's tomb, apiserver
+// API handlers which don't watch the apiserver's catacomb, apiserver
 // shutdown will be blocked until the API handler returns.
 func (srv *Server) trackRequests(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Care must be taken to not increment the waitgroup count
 		// after the listener has closed.
 		//
-		// First we check to see if the tomb has not yet been killed
-		// because the closure of the listener depends on the tomb being
+		// First we check to see if the catacomb has not yet been killed
+		// because the closure of the listener depends on the catacomb being
 		// killed to trigger the defer block in srv.run.
 		select {
-		case <-srv.tomb.Dying():
+		case <-srv.catacomb.Dying():
 			// This request was accepted before the listener was closed
-			// but after the tomb was killed. As we're in the process of
+			// but after the catacomb was killed. As we're in the process of
 			// shutting down, do not consider this request as in progress,
 			// just send a 503 and return.
 			http.Error(w, "apiserver shutdown in progress", http.StatusServiceUnavailable)
 		default:
-			// If we get here then the tomb was not killed therefore the
+			// If we get here then the catacomb was not killed therefore the
 			// listener is still open. It is safe to increment the
 			// wg counter as wg.Wait in srv.run has not yet been called.
 			srv.wg.Add(1)
@@ -1089,32 +1078,67 @@ func (srv *Server) healthHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
-	fmt.Fprintf(w, "%s\n", status)
+	_, _ = fmt.Fprintf(w, "%s\n", status)
 }
 
 func (srv *Server) apiHandler(w http.ResponseWriter, req *http.Request) {
-	connectionID := atomic.AddUint64(&srv.lastConnectionID, 1)
+	connectionID := atomic.AddUint64(&srv.connectionID, 1)
 	fd := -1
 	if v, ok := req.Context().Value("raw-http-fd").(int); ok {
 		fd = v
 	}
 
 	apiObserver := srv.newObserver()
-	apiObserver.Join(req, connectionID, fd)
-	defer apiObserver.Leave()
+	apiObserver.Join(req.Context(), req, connectionID, fd)
+	defer func() {
+		// Don't use the request context as it will cause the Leave to be
+		// cancelled and not report the leave correctly. Giving it a timeout
+		// should ensure that the request doesn't hang indefinitely.
+		ctx, cancel := context.WithTimeout(srv.catacomb.Context(context.Background()), time.Second*5)
+		defer cancel()
+
+		apiObserver.Leave(ctx)
+	}()
+
+	// Create a new offer auth context. This will be used to bake new
+	// macaroons for offers, and to validate incoming macaroons.
+	crossModelAuthContext, err := srv.shared.NewCrossModelAuthContext(req.Context(), req.Host)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create offer auth context: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	websocket.Serve(w, req, func(conn *websocket.Conn) {
-		modelUUID := httpcontext.RequestModelUUID(req)
-		logger.Tracef("got a request for model %q fd:%v", modelUUID)
+		modelUUID, modelOnlyLogin := httpcontext.RequestModelUUID(req.Context())
+
+		// If the modelUUID wasn't present in the request, then this is
+		// considered a controller-only login.
+		controllerOnlyLogin := !modelOnlyLogin
+
+		// If the request is for the controller model, then we need to
+		// resolve the modelUUID to the controller model.
+		resolvedModelUUID := coremodel.UUID(modelUUID)
+		if controllerOnlyLogin {
+			resolvedModelUUID = srv.shared.controllerModelUUID
+		}
+
+		// Put the modelUUID into the context for the request. This will
+		// allow the peeling of the modelUUID from the request to be
+		// deferred to the facade methods.
+		ctx := coremodel.WithContextModelUUID(req.Context(), resolvedModelUUID)
+
+		logger.Tracef(ctx, "got a request for model %q fd:%v", modelUUID, fd)
 		if err := srv.serveConn(
-			req.Context(),
+			srv.catacomb.Context(ctx),
 			conn,
-			modelUUID,
+			resolvedModelUUID,
+			controllerOnlyLogin,
 			connectionID,
 			apiObserver,
 			req.Host,
+			crossModelAuthContext,
 		); err != nil {
-			logger.Errorf("error serving RPCs: %v", err)
+			logger.Errorf(ctx, "error serving RPCs: %v", err)
 		}
 	})
 }
@@ -1122,46 +1146,75 @@ func (srv *Server) apiHandler(w http.ResponseWriter, req *http.Request) {
 func (srv *Server) serveConn(
 	ctx context.Context,
 	wsConn *websocket.Conn,
-	modelUUID string,
+	modelUUID coremodel.UUID,
+	controllerOnlyLogin bool,
 	connectionID uint64,
 	apiObserver observer.Observer,
 	host string,
+	crossModelAuthContext facade.CrossModelAuthContext,
 ) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	tracer, err := srv.shared.tracerGetter.GetTracer(
+		ctx,
+		coretrace.Namespace("apiserver", modelUUID.String()),
+	)
+	if err != nil {
+		logger.Infof(ctx, "failed to get tracer for model %q: %v", modelUUID, err)
+		tracer = coretrace.NoopTracer{}
+	}
+
+	domainServices, err := srv.shared.domainServicesGetter.ServicesForModel(ctx, modelUUID)
+	if err != nil {
+		return errors.Annotatef(err, "getting domain services for model %q", modelUUID)
+	}
+
+	// Grab the object store for the model.
+	objectStore, err := srv.shared.objectStoreGetter.GetObjectStore(ctx, modelUUID.String())
+	if err != nil {
+		return errors.Annotatef(err, "getting object store for model %q", modelUUID)
+	}
+
+	// Grab the object store for the controller, this is primarily used for
+	// the agent tools.
+	controllerObjectStore, err := srv.shared.objectStoreGetter.GetObjectStore(ctx, database.ControllerNS)
+	if err != nil {
+		return errors.Annotatef(err, "getting controller object store")
+	}
+
+	watcherRegistry, err := srv.shared.watcherRegistryGetter.GetWatcherRegistry(ctx, connectionID)
+	if err != nil {
+		return errors.Annotatef(err, "getting watcher registry for connection %d", connectionID)
+	}
+
 	codec := jsoncodec.NewWebsocket(wsConn.Conn)
-	recorderFactory := observer.NewRecorderFactory(
-		apiObserver, nil, observer.NoCaptureArgs)
+	recorderFactory := observer.NewRecorderFactory(apiObserver, nil, observer.NoCaptureArgs)
 	conn := rpc.NewConn(codec, recorderFactory)
 
-	// Note that we don't overwrite modelUUID here because
-	// newAPIHandler treats an empty modelUUID as signifying
-	// the API version used.
-	resolvedModelUUID := modelUUID
-	statePool := srv.shared.statePool
-	if modelUUID == "" {
-		systemState, err := statePool.SystemState()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		resolvedModelUUID = systemState.ModelUUID()
-	}
-	var (
-		st *state.PooledState
-		h  *apiHandler
+	handler, err := newAPIHandler(
+		ctx,
+		srv,
+		conn,
+		domainServices,
+		srv.shared.domainServicesGetter,
+		tracer,
+		objectStore,
+		srv.shared.objectStoreGetter,
+		controllerObjectStore,
+		watcherRegistry,
+		modelUUID,
+		controllerOnlyLogin,
+		connectionID,
+		host,
+		crossModelAuthContext,
 	)
-
-	var stateClosing <-chan struct{}
-	st, err := statePool.Get(resolvedModelUUID)
-	if err == nil {
-		defer st.Release()
-		stateClosing = st.Removing()
-		h, err = newAPIHandler(srv, st.State, conn, modelUUID, connectionID, host)
-	}
 	if errors.Is(err, errors.NotFound) {
-		err = fmt.Errorf("%w: %q", apiservererrors.UnknownModelError, resolvedModelUUID)
+		err = fmt.Errorf("%w: %q", apiservererrors.UnknownModelError, modelUUID)
 	}
 
 	if err != nil {
-		conn.ServeRoot(&errRoot{errors.Trace(err)}, recorderFactory, serverError)
+		conn.ServeRoot(&errRoot{err: errors.Trace(err)}, recorderFactory, serverError)
 	} else {
 		// Set up the admin apis used to accept logins and direct
 		// requests to the relevant business facade.
@@ -1169,15 +1222,15 @@ func (srv *Server) serveConn(
 		// time login changes in a non-backwards compatible way.
 		adminAPIs := make(map[int]interface{})
 		for apiVersion, factory := range adminAPIFactories {
-			adminAPIs[apiVersion] = factory(srv, h, apiObserver)
+			adminAPIs[apiVersion] = factory(srv, handler, apiObserver)
 		}
-		conn.ServeRoot(newAdminRoot(h, adminAPIs), recorderFactory, serverError)
+		conn.ServeRoot(newAdminRoot(handler, adminAPIs), recorderFactory, serverError)
 	}
 	conn.Start(ctx)
 	select {
 	case <-conn.Dead():
-	case <-srv.tomb.Dying():
-	case <-stateClosing:
+		cancel(errors.ConstError("rpc connection closed"))
+	case <-srv.catacomb.Dying():
 	}
 	return conn.Close()
 }
@@ -1187,10 +1240,6 @@ func (srv *Server) publicDNSName() string {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	return srv.publicDNSName_
-}
-
-func serverError(err error) error {
-	return apiservererrors.ServerError(err)
 }
 
 // GetAuditConfig returns a copy of the current audit logging
@@ -1210,4 +1259,188 @@ func (srv *Server) monitoredHandler(handler http.Handler, label string) http.Han
 		defer gauge.Dec()
 		handler.ServeHTTP(w, r)
 	})
+}
+
+func newOfferAuthContext(
+	ctx context.Context,
+	accessService AccessService,
+	macaroonService MacaroonService,
+	keyPair *bakery.KeyPair,
+	host,
+	controllerUUID string,
+	controllerModelUUID coremodel.UUID,
+	loginTokenRefreshURL string,
+	httpClient crossmodelbakery.HTTPClient,
+	clock clock.Clock,
+	logger corelogger.Logger,
+) (*crossmodel.AuthContext, error) {
+	bakery, err := getMacaroonBakeryByURL(
+		loginTokenRefreshURL,
+		macaroonService,
+		keyPair,
+		host,
+		controllerModelUUID,
+		httpClient,
+		clock,
+		logger,
+	)
+	if err != nil {
+		return nil, errors.Annotate(err, "getting macaroon bakery")
+	}
+
+	// Create a auth context for offer authentication.
+	return crossmodel.NewAuthContext(
+		accessService,
+		bakery,
+		keyPair,
+		controllerUUID,
+		controllerModelUUID,
+		clock,
+		logger,
+	), nil
+}
+
+func authContextLocation(modelUUID coremodel.UUID) string {
+	return "juju model " + modelUUID.String()
+}
+
+const (
+	localOfferAccessLocationPath = "/offeraccess"
+)
+
+func getMacaroonBakeryByURL(
+	endpoint string,
+	macaroonService MacaroonService,
+	key *bakery.KeyPair,
+	host string,
+	controllerModelUUID coremodel.UUID,
+	httpClient crossmodelbakery.HTTPClient,
+	clock clock.Clock,
+	logger corelogger.Logger,
+) (crossmodel.OfferBakery, error) {
+	location := authContextLocation(controllerModelUUID)
+	checker := checkers.New(internalmacaroon.MacaroonNamespace)
+	authorizer := crossmodel.NewCMRAuthorizer(logger)
+
+	// Create a local bakery for validating macaroons.
+	if endpoint == "" {
+		// Create an endpoint that will be used for third-party caveats
+		// that require discharge from the local controller.
+		endpoint := localEndpointURL(host)
+		return crossmodelbakery.NewLocalOfferBakery(
+			key,
+			location, endpoint,
+			macaroonService,
+			checker, authorizer,
+			clock, logger,
+		)
+	}
+
+	// We have a URL, it's intended to be used by JAAS, but it's possible
+	// that another service could be used here. It's a shame that we don't use
+	// a login token service kind here, that way we could ensure that we're
+	// creating the correct kind of bakery.
+	return crossmodelbakery.NewJAASOfferBakery(
+		key,
+		location, endpoint,
+		macaroonService,
+		checker, authorizer,
+		httpClient,
+		clock, logger,
+	)
+}
+
+func localEndpointURL(serverHost string) string {
+	return (&url.URL{
+		Scheme: "https",
+		Host:   serverHost,
+		Path:   localOfferAccessLocationPath,
+	}).String()
+}
+
+func serverError(err error) error {
+	return apiservererrors.ServerError(err)
+}
+
+type applicationServiceGetter struct {
+	ctxt httpContext
+}
+
+func (a *applicationServiceGetter) Application(r *http.Request) (objects.ApplicationService, error) {
+	domainServices, err := a.ctxt.domainServicesForRequest(r)
+	if err != nil {
+		return nil, internalerrors.Capture(err)
+	}
+
+	return domainServices.Application(), nil
+}
+
+type migratingObjectsApplicationServiceGetter struct {
+	ctxt httpContext
+}
+
+func (a *migratingObjectsApplicationServiceGetter) Application(r *http.Request) (objects.ApplicationService, error) {
+	domainServices, err := a.ctxt.domainServicesDuringMigrationForRequest(r)
+	if err != nil {
+		return nil, internalerrors.Capture(err)
+	}
+	return domainServices.Application(), nil
+}
+
+type objectStoreServiceGetter struct {
+	ctxt httpContext
+}
+
+func (a *objectStoreServiceGetter) ObjectStore(r *http.Request) (objects.ObjectStoreService, error) {
+	objectStore, err := a.ctxt.objectStoreForRequest(r.Context())
+	if err != nil {
+		return nil, internalerrors.Capture(err)
+	}
+
+	return objectStore, nil
+}
+
+type domainServiceGetter func(r *http.Request) (services.DomainServices, error)
+
+type resourcesModelServiceGetter struct {
+	domainServiceForRequest domainServiceGetter
+}
+
+func (m *resourcesModelServiceGetter) Model(r *http.Request) (handlersresources.ModelService, error) {
+	domainServices, err := m.domainServiceForRequest(r)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return domainServices.ModelInfo(), nil
+}
+
+type resourcesApplicationServiceGetter struct {
+	domainServiceForRequest domainServiceGetter
+}
+
+func (a *resourcesApplicationServiceGetter) Application(r *http.Request) (handlersresources.ApplicationService, error) {
+	domainServices, err := a.domainServiceForRequest(r)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return domainServices.Application(), nil
+}
+
+type resourcesResourceServiceGetter struct {
+	domainServiceForRequest domainServiceGetter
+}
+
+func (a *resourcesResourceServiceGetter) Resource(r *http.Request) (handlersresources.ResourceService, error) {
+	domainServices, err := a.domainServiceForRequest(r)
+	if err != nil {
+		return nil, internalerrors.Capture(err)
+	}
+	return domainServices.Resource(), nil
+}
+
+type resourceOpenerGetter func(r *http.Request, tagKinds ...string) (coreresource.Opener, error)
+
+func (rog resourceOpenerGetter) Opener(r *http.Request, tagKinds ...string) (coreresource.Opener, error) {
+	return rog(r, tagKinds...)
 }

@@ -20,17 +20,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 	"github.com/juju/retry"
-	"github.com/juju/utils/v3"
 	abstractions "github.com/microsoft/kiota-abstractions-go"
-	"github.com/microsoftgraph/msgraph-sdk-go"
+	msgraphsdkgo "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/applications"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/serviceprincipals"
+
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.provider.azure.internal.auth")
+var logger = internallogger.GetLogger("juju.provider.azure.internal.auth")
 
 const (
 	// passwordExpiryDuration is how long the application password we
@@ -222,7 +222,7 @@ func (c *ServicePrincipalCreator) ensureRoleDefinition(
 		roleDefinitionId, err = c.getExistingRoleDefinition(ctx, roleDefinitionClient, "", roleName)
 	}
 	if err == nil {
-		logger.Debugf("found existing role definition %q", roleDefinitionId)
+		logger.Debugf(ctx, "found existing role definition %q", roleDefinitionId)
 		return roleDefinitionId, nil
 	} else if !errors.Is(err, errors.NotFound) {
 		return "", errors.Annotate(err, "finding existing tenant scoped role definition")
@@ -272,7 +272,7 @@ func (c *ServicePrincipalCreator) ensureEnterpriseApplication(
 	result := resp.GetValue()
 	if len(result) > 0 {
 		id := toValue(result[0].GetAppId())
-		logger.Debugf("found existing Juju application %q", id)
+		logger.Debugf(ctx, "found existing Juju application %q", id)
 		return id, nil
 	}
 
@@ -481,7 +481,7 @@ func (c *ServicePrincipalCreator) clock() clock.Clock {
 
 func (c *ServicePrincipalCreator) newUUID() (uuid.UUID, error) {
 	if c.NewUUID == nil {
-		u, err := utils.NewUUID()
+		u, err := uuid.NewUUID()
 		if err != nil {
 			return uuid.UUID{}, errors.Trace(err)
 		}

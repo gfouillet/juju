@@ -3,12 +3,4 @@
 
 package logger_test
 
-import (
-	stdtesting "testing"
-
-	"github.com/juju/juju/testing"
-)
-
-func TestAll(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package logger_test -destination service_mock_test.go github.com/juju/juju/apiserver/facades/agent/logger ModelConfigService

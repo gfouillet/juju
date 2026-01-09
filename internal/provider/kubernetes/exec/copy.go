@@ -6,6 +6,7 @@ package exec
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -53,24 +54,24 @@ func (cp *CopyParams) validate() error {
 	return nil
 }
 
-// Exec copy files/directories from host to a pod or from a pod to host.
-func (c client) Copy(params CopyParams, cancel <-chan struct{}) error {
+// Copy copies files/directories from host to a pod or from a pod to host.
+func (c client) Copy(ctx context.Context, params CopyParams, cancel <-chan struct{}) error {
 	if err := params.validate(); err != nil {
 		return errors.Trace(err)
 	}
 	if params.Src.PodName != "" {
-		return c.copyFromPod(params, cancel)
+		return c.copyFromPod(ctx, params, cancel)
 	}
 	if params.Dest.PodName != "" {
-		return c.copyToPod(params, cancel)
+		return c.copyToPod(ctx, params, cancel)
 	}
 	return errors.NewNotValid(nil, "either copy from a pod or to a pod")
 }
 
-func (c client) copyFromPod(params CopyParams, cancel <-chan struct{}) error {
+func (c client) copyFromPod(ctx context.Context, params CopyParams, cancel <-chan struct{}) error {
 	src := params.Src
 	dest := params.Dest
-	logger.Debugf("copying from %v to %v", src, dest)
+	logger.Debugf(context.TODO(), "copying from %v to %v", src, dest)
 
 	reader, writer := c.pipGetter()
 	var stderr bytes.Buffer
@@ -85,8 +86,8 @@ func (c client) copyFromPod(params CopyParams, cancel <-chan struct{}) error {
 
 	go func() {
 		defer writer.Close()
-		if err := c.Exec(execParams, cancel); err != nil {
-			logger.Errorf("make tar %q failed: %v", src.Path, err)
+		if err := c.Exec(ctx, execParams, cancel); err != nil {
+			logger.Errorf(context.TODO(), "make tar %q failed: %v", src.Path, err)
 		}
 	}()
 	prefix := getPrefix(src.Path)
@@ -136,10 +137,10 @@ func isDestRelative(base, dest string) bool {
 
 // this is inspired by kubectl cmd package.
 // - https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/cp/cp.go
-func (c client) copyToPod(params CopyParams, cancel <-chan struct{}) (err error) {
+func (c client) copyToPod(ctx context.Context, params CopyParams, cancel <-chan struct{}) (err error) {
 	src := params.Src
 	dest := params.Dest
-	logger.Debugf("copying from %v to %v", src, dest)
+	logger.Debugf(context.TODO(), "copying from %v to %v", src, dest)
 
 	if _, err = os.Stat(src.Path); err != nil {
 		return errors.NewNotValid(nil, fmt.Sprintf("%q does not exist on local", src.Path))
@@ -149,7 +150,7 @@ func (c client) copyToPod(params CopyParams, cancel <-chan struct{}) (err error)
 		dest.Path = strings.TrimSuffix(dest.Path, "/")
 	}
 
-	if err = c.checkRemotePathIsDir(dest, cancel); err == nil {
+	if err = c.checkRemotePathIsDir(ctx, dest, cancel); err == nil {
 		dest.Path = path.Join(dest.Path, path.Base(src.Path))
 	}
 
@@ -157,9 +158,9 @@ func (c client) copyToPod(params CopyParams, cancel <-chan struct{}) (err error)
 
 	go func() {
 		defer writer.Close()
-		err = makeTar(src.Path, dest.Path, writer)
-		if err != nil {
-			logger.Errorf("make tar %q failed: %v", src.Path, err)
+
+		if err := makeTar(src.Path, dest.Path, writer); err != nil {
+			logger.Errorf(context.TODO(), "make tar %q failed: %v", src.Path, err)
 		}
 	}()
 
@@ -180,10 +181,10 @@ func (c client) copyToPod(params CopyParams, cancel <-chan struct{}) (err error)
 		Stdout:        &stdout,
 		Stderr:        &stderr,
 	}
-	return errors.Trace(c.Exec(execParams, cancel))
+	return errors.Trace(c.Exec(ctx, execParams, cancel))
 }
 
-func (c client) checkRemotePathIsDir(rec FileResource, cancel <-chan struct{}) error {
+func (c client) checkRemotePathIsDir(ctx context.Context, rec FileResource, cancel <-chan struct{}) error {
 	if rec.PodName == "" {
 		return errors.NotValidf("empty pod name")
 	}
@@ -195,7 +196,7 @@ func (c client) checkRemotePathIsDir(rec FileResource, cancel <-chan struct{}) e
 		Stdout:        &stdout,
 		Stderr:        &stderr,
 	}
-	return errors.Trace(c.Exec(execParams, cancel))
+	return errors.Trace(c.Exec(ctx, execParams, cancel))
 }
 
 // Based on code from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/cp/cp.go
@@ -252,7 +253,7 @@ func recursiveTar(srcBase, srcFile, destBase, destFile string, tw *tar.Writer) e
 				return err
 			}
 		} else if stat.Mode()&os.ModeSocket != 0 {
-			logger.Warningf("socket file %q ignored", fpath)
+			logger.Warningf(context.TODO(), "socket file %q ignored", fpath)
 		} else {
 			// case regular file or other file type like pipe.
 			hdr, err := tar.FileInfoHeader(stat, fpath)
@@ -269,9 +270,9 @@ func recursiveTar(srcBase, srcFile, destBase, destFile string, tw *tar.Writer) e
 			if err != nil {
 				return err
 			}
-			defer f.Close()
 
 			if _, err := io.Copy(tw, f); err != nil {
+				_ = f.Close()
 				return err
 			}
 			return f.Close()
@@ -305,7 +306,7 @@ func unTarAll(src FileResource, reader io.Reader, destDir, prefix string) error 
 		destFileName := filepath.Join(destDir, header.Name[len(prefix):])
 
 		if !isDestRelative(destDir, destFileName) {
-			logger.Warningf("file %q is outside target destination, skipping", destFileName)
+			logger.Warningf(context.TODO(), "file %q is outside target destination, skipping", destFileName)
 			continue
 		}
 
@@ -321,15 +322,15 @@ func unTarAll(src FileResource, reader io.Reader, destDir, prefix string) error 
 		}
 
 		if mode&os.ModeSymlink != 0 {
-			logger.Warningf("skipping symlink: %q -> %q", destFileName, header.Linkname)
+			logger.Warningf(context.TODO(), "skipping symlink: %q -> %q", destFileName, header.Linkname)
 			continue
 		}
 		outFile, err := os.Create(destFileName)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		defer outFile.Close()
 		if _, err := io.Copy(outFile, tarReader); err != nil {
+			_ = outFile.Close()
 			return errors.Trace(err)
 		}
 		if err := outFile.Close(); err != nil {

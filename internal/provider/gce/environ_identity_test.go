@@ -4,24 +4,23 @@
 package gce_test
 
 import (
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
-func (s *environSuite) TestSupportsInstanceRole(c *gc.C) {
+func (s *environSuite) TestSupportsInstanceRole(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
-	c.Assert(env.SupportsInstanceRoles(s.CallCtx), jc.IsTrue)
+	c.Assert(env.SupportsInstanceRoles(c.Context()), tc.IsTrue)
 }
 
-func (s *environSuite) TestCreateAutoInstanceRole(c *gc.C) {
+func (s *environSuite) TestCreateAutoInstanceRole(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -34,7 +33,7 @@ func (s *environSuite) TestCreateAutoInstanceRole(c *gc.C) {
 			controller.ControllerUUIDKey: testing.ControllerTag.Id(),
 		},
 	}
-	res, err := env.CreateAutoInstanceRole(s.CallCtx, p)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(res, gc.Equals, "fred@googledev.com")
+	res, err := env.CreateAutoInstanceRole(c.Context(), p)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res, tc.Equals, "fred@googledev.com")
 }

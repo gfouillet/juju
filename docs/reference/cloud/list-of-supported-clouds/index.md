@@ -6,18 +6,17 @@
 
 Amazon EC2 <the-amazon-ec2-cloud-and-juju>
 Amazon EKS <the-amazon-eks-cloud-and-juju>
-Equinix Metal <the-equinix-metal-cloud-and-juju>
 Canonical K8s <the-canonical-ks-cloud-and-juju>
 Google GCE <the-google-gce-cloud-and-juju>
 Google GKE <the-google-gke-cloud-and-juju>
 LXD <the-lxd-cloud-and-juju>
 MAAS <the-maas-cloud-and-juju>
-Manual <the-manual-cloud-and-juju>
 MicroK8s <the-microk8s-cloud-and-juju>
 Microsoft Azure <the-microsoft-azure-cloud-and-juju>
 Microsoft AKS <the-microsoft-aks-cloud-and-juju>
 OpenStack <the-openstack-cloud-and-juju>
 Oracle OCI <the-oracle-oci-cloud-and-juju>
+Unmanaged <the-unmanaged-cloud-and-juju>
 VMware vSphere <the-vmware-vsphere-cloud-and-juju>
 ```
 
@@ -27,14 +26,13 @@ Juju supports all of the following clouds. Click to find out more about using yo
 ## List of supported machine clouds
 
 - {ref}`Amazon EC2 <cloud-ec2>`
-- {ref}`Equinix Metal <cloud-equinix>`
 - {ref}`Google GCE <cloud-gce>`
 - {ref}`LXD <cloud-lxd>`
 - {ref}`MAAS <cloud-maas>`
-- {ref}`Manual <cloud-manual>`
 - {ref}`Microsoft Azure <cloud-azure>`
 - {ref}`OpenStack <cloud-openstack>`
 - {ref}`Oracle OCI <cloud-oci>`
+- {ref}`Unmanaged <cloud-unmanaged>`
 - {ref}`VMware vSphere <cloud-vsphere>`
 
 (list-of-supported-kubernetes-clouds)=

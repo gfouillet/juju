@@ -4,10 +4,11 @@
 package resolver
 
 import (
-	"github.com/juju/charm/v12/hooks"
+	"context"
+
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
@@ -45,43 +46,12 @@ func (s *resolverOpFactory) NewSkipHook(info hook.Info) (operation.Operation, er
 	return s.wrapHookOp(op, info), nil
 }
 
-func (s *resolverOpFactory) NewNoOpFinishUpgradeSeries() (operation.Operation, error) {
-	op, err := s.Factory.NewNoOpFinishUpgradeSeries()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	f := func(*operation.State) {
-		s.LocalState.UpgradeMachineStatus = model.UpgradeSeriesNotStarted
-	}
-	op = onCommitWrapper{op, f}
-	return op, nil
-}
-
 func (s *resolverOpFactory) NewUpgrade(charmURL string) (operation.Operation, error) {
 	op, err := s.Factory.NewUpgrade(charmURL)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return s.wrapUpgradeOp(op, charmURL), nil
-}
-
-func (s *resolverOpFactory) NewRemoteInit(runningStatus remotestate.ContainerRunningStatus) (operation.Operation, error) {
-	op, err := s.Factory.NewRemoteInit(runningStatus)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return onCommitWrapper{op, func(*operation.State) {
-		s.LocalState.ContainerRunningStatus = &runningStatus
-		s.LocalState.OutdatedRemoteCharm = false
-	}}, nil
-}
-
-func (s *resolverOpFactory) NewSkipRemoteInit(retry bool) (operation.Operation, error) {
-	op, err := s.Factory.NewSkipRemoteInit(retry)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return op, nil
 }
 
 func (s *resolverOpFactory) NewRevertUpgrade(charmURL string) (operation.Operation, error) {
@@ -100,8 +70,8 @@ func (s *resolverOpFactory) NewResolvedUpgrade(charmURL string) (operation.Opera
 	return s.wrapUpgradeOp(op, charmURL), nil
 }
 
-func (s *resolverOpFactory) NewAction(id string) (operation.Operation, error) {
-	op, err := s.Factory.NewAction(id)
+func (s *resolverOpFactory) NewAction(ctx context.Context, id string) (operation.Operation, error) {
+	op, err := s.Factory.NewAction(ctx, id)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -155,25 +125,6 @@ func (s *resolverOpFactory) wrapUpgradeOp(op operation.Operation, charmURL strin
 
 func (s *resolverOpFactory) wrapHookOp(op operation.Operation, info hook.Info) operation.Operation {
 	switch info.Kind {
-	case hooks.PreSeriesUpgrade:
-		op = onPrepareWrapper{op, func() {
-			//on prepare the local status should be made to reflect
-			//that the upgrade process for this united has started.
-			s.LocalState.UpgradeMachineStatus = s.RemoteState.UpgradeMachineStatus
-		}}
-		op = onCommitWrapper{op, func(*operation.State) {
-			// on commit, the local status should indicate the hook
-			// has completed. The remote status should already
-			// indicate completion. We sync the states here.
-			s.LocalState.UpgradeMachineStatus = model.UpgradeSeriesPrepareCompleted
-		}}
-	case hooks.PostSeriesUpgrade:
-		op = onPrepareWrapper{op, func() {
-			s.LocalState.UpgradeMachineStatus = s.RemoteState.UpgradeMachineStatus
-		}}
-		op = onCommitWrapper{op, func(*operation.State) {
-			s.LocalState.UpgradeMachineStatus = model.UpgradeSeriesCompleted
-		}}
 	case hooks.ConfigChanged:
 		configHash := s.RemoteState.ConfigHash
 		trustHash := s.RemoteState.TrustHash
@@ -186,11 +137,6 @@ func (s *resolverOpFactory) wrapHookOp(op operation.Operation, info hook.Info) o
 				state.TrustHash = trustHash
 				state.AddressesHash = addressesHash
 			}
-		}}
-	case hooks.LeaderSettingsChanged:
-		v := s.RemoteState.LeaderSettingsVersion
-		op = onCommitWrapper{op, func(*operation.State) {
-			s.LocalState.LeaderSettingsVersion = v
 		}}
 	}
 
@@ -220,8 +166,8 @@ type onCommitWrapper struct {
 	onCommit func(*operation.State)
 }
 
-func (op onCommitWrapper) Commit(state operation.State) (*operation.State, error) {
-	st, err := op.Operation.Commit(state)
+func (op onCommitWrapper) Commit(ctx context.Context, state operation.State) (*operation.State, error) {
+	st, err := op.Operation.Commit(ctx, state)
 	if err != nil {
 		return nil, err
 	}
@@ -239,8 +185,8 @@ type onPrepareWrapper struct {
 	onPrepare func()
 }
 
-func (op onPrepareWrapper) Prepare(state operation.State) (*operation.State, error) {
-	st, err := op.Operation.Prepare(state)
+func (op onPrepareWrapper) Prepare(ctx context.Context, state operation.State) (*operation.State, error) {
+	st, err := op.Operation.Prepare(ctx, state)
 	if err != nil {
 		return nil, err
 	}

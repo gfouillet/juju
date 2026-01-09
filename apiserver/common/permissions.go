@@ -4,37 +4,43 @@
 package common
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"context"
 
-	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+
 	"github.com/juju/juju/core/permission"
+	coreuser "github.com/juju/juju/core/user"
+	accesserrors "github.com/juju/juju/domain/access/errors"
 )
 
-// EveryoneTagName represents a special group that encompasses
-// all external users.
-const EveryoneTagName = "everyone@external"
-
 // UserAccessFunc represents a func that can answer the question about what
-// level of access a user entity has for a given subject tag.
-type UserAccessFunc func(names.UserTag, names.Tag) (permission.Access, error)
+// level of access a user has for a given target.
+type UserAccessFunc func(ctx context.Context, userName coreuser.Name, target permission.ID) (permission.Access, error)
 
 // HasPermission returns true if the specified user has the specified
 // permission on target.
 func HasPermission(
-	accessGetter UserAccessFunc, utag names.Tag,
-	requestedPermission permission.Access, target names.Tag,
+	ctx context.Context,
+	accessGetter UserAccessFunc,
+	utag names.Tag,
+	requestedPermission permission.Access,
+	target names.Tag,
 ) (bool, error) {
+	var objectType permission.ObjectType
 	var validate func(permission.Access) error
 	switch target.Kind() {
 	case names.ControllerTagKind:
+		objectType = permission.Controller
 		validate = permission.ValidateControllerAccess
 	case names.ModelTagKind:
+		objectType = permission.Model
 		validate = permission.ValidateModelAccess
 	case names.ApplicationOfferTagKind:
+		objectType = permission.Offer
 		validate = permission.ValidateOfferAccess
 	case names.CloudTagKind:
+		objectType = permission.Cloud
 		validate = permission.ValidateCloudAccess
 	default:
 		return false, nil
@@ -45,16 +51,18 @@ func HasPermission(
 
 	userTag, ok := utag.(names.UserTag)
 	if !ok {
-		// lets not reveal more than is strictly necessary
+		// Reveal no more than is strictly necessary.
 		return false, nil
 	}
 
-	userAccess, err := GetPermission(accessGetter, userTag, target)
-	if err != nil && !errors.IsNotFound(err) {
+	userAccess, err := accessGetter(ctx, coreuser.NameFromTag(userTag), permission.ID{
+		ObjectType: objectType,
+		Key:        target.Id(),
+	})
+	if err != nil && !(errors.Is(err, accesserrors.AccessNotFound) || errors.Is(err, accesserrors.UserNotFound)) {
 		return false, errors.Annotatef(err, "while obtaining %s user", target.Kind())
 	}
-	// returning this kind of information would be too much information to reveal too.
-	if errors.IsNotFound(err) || userAccess == permission.NoAccess {
+	if userAccess == permission.NoAccess {
 		return false, nil
 	}
 
@@ -66,55 +74,4 @@ func HasPermission(
 		return false, nil
 	}
 	return true, nil
-}
-
-// GetPermission returns the permission a user has on the specified target.
-func GetPermission(accessGetter UserAccessFunc, userTag names.UserTag, target names.Tag) (permission.Access, error) {
-	userAccess, err := accessGetter(userTag, target)
-	if err != nil && !errors.IsNotFound(err) {
-		return permission.NoAccess, errors.Annotatef(err, "while obtaining %s user", target.Kind())
-	}
-	// there is a special case for external users, a group called everyone@external
-	if !userTag.IsLocal() {
-		// TODO(perrito666) remove the following section about everyone group
-		// when groups are implemented.
-		everyoneTag := names.NewUserTag(EveryoneTagName)
-		everyoneAccess, err := accessGetter(everyoneTag, target)
-		if err != nil && !errors.IsNotFound(err) {
-			return permission.NoAccess, errors.Trace(err)
-		}
-		if userAccess == permission.NoAccess && everyoneAccess != permission.NoAccess {
-			userAccess = everyoneAccess
-		}
-		if everyoneAccess.EqualOrGreaterControllerAccessThan(userAccess) {
-			userAccess = everyoneAccess
-		}
-	}
-	return userAccess, nil
-}
-
-// HasModelAdmin reports whether or not a user has admin access to the
-// specified model. A user has model access if they are a controller
-// superuser, or if they have been explicitly granted admin access to the
-// model.
-func HasModelAdmin(
-	authorizer facade.Authorizer,
-	controllerTag names.ControllerTag,
-	modelTag names.ModelTag,
-) (bool, error) {
-	// superusers have admin for all models.
-	err := authorizer.HasPermission(permission.SuperuserAccess, controllerTag)
-	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return false, err
-	}
-
-	if err == nil {
-		return true, nil
-	}
-
-	err = authorizer.HasPermission(permission.AdminAccess, modelTag)
-	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return false, err
-	}
-	return err == nil, nil
 }

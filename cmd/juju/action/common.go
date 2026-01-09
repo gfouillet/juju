@@ -5,7 +5,7 @@ package action
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -16,25 +16,25 @@ import (
 	"time"
 
 	"github.com/juju/ansiterm"
-	"github.com/juju/charm/v12"
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/mattn/go-isatty"
 	"gopkg.in/yaml.v2"
 
 	actionapi "github.com/juju/juju/api/client/action"
-	"github.com/juju/juju/cmd/output"
-	"github.com/juju/juju/core/actions"
+	"github.com/juju/juju/core/operation"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.action")
+var logger = internallogger.GetLogger("juju.cmd.juju.action")
 
 const (
 	// leaderSnippet is a regular expression for unit ID-like syntax that is used
@@ -112,11 +112,11 @@ func (c *runCommandBase) Init(_ []string) error {
 	return nil
 }
 
-func (c *runCommandBase) ensureAPI() (err error) {
+func (c *runCommandBase) ensureAPI(ctx context.Context) (err error) {
 	if c.api != nil {
 		return nil
 	}
-	c.api, err = c.NewActionAPIClient()
+	c.api, err = c.NewActionAPIClient(ctx)
 	return errors.Trace(err)
 }
 
@@ -273,7 +273,7 @@ func (c *runCommandBase) waitForTasks(ctx *cmd.Context, runningTasks []enqueuedA
 	haveLogs := false
 	if len(runningTasks) == 1 {
 		var err error
-		logsWatcher, err = c.api.WatchActionProgress(runningTasks[0].task)
+		logsWatcher, err = c.api.WatchActionProgress(ctx, runningTasks[0].task)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -311,7 +311,7 @@ func (c *runCommandBase) waitForTasks(ctx *cmd.Context, runningTasks []enqueuedA
 		} else {
 			c.progressf(ctx, "Waiting for task %v...\n", result.task)
 		}
-		actionResult, err := GetActionResult(c.api, result.task, c.clock, wait)
+		actionResult, err := GetActionResult(ctx, c.api, result.task, c.clock, wait)
 		if i == 0 {
 			waitForWatcher()
 			if haveLogs {
@@ -320,7 +320,7 @@ func (c *runCommandBase) waitForTasks(ctx *cmd.Context, runningTasks []enqueuedA
 			}
 		}
 		if err != nil {
-			if errors.IsTimeout(err) {
+			if errors.Is(err, errors.Timeout) {
 				return nil, c.handleTimeout(runningTasks, resultReceivers)
 			}
 			return nil, errors.Trace(err)
@@ -439,7 +439,7 @@ func (c *runCommandBase) formatJson(writer io.Writer, value interface{}) error {
 // GetActionResult tries to repeatedly fetch a task until it is
 // in a completed state and then it returns it.
 // It waits for a maximum of "wait" before returning with the latest action status.
-func GetActionResult(api APIClient, requestedId string, clk clock.Clock, wait clock.Timer) (actionapi.ActionResult, error) {
+func GetActionResult(ctx context.Context, api APIClient, requestedId string, clk clock.Clock, wait clock.Timer) (actionapi.ActionResult, error) {
 	var (
 		result actionapi.ActionResult
 		err    error
@@ -451,7 +451,7 @@ func GetActionResult(api APIClient, requestedId string, clk clock.Clock, wait cl
 	// Loop over results until we get "failed" or "completed".  Wait for
 	// timer, and reset it each time.
 	for {
-		result, err = fetchResult(api, requestedId)
+		result, err = fetchResult(ctx, api, requestedId)
 		if err != nil {
 			return result, err
 		}
@@ -463,7 +463,7 @@ func GetActionResult(api APIClient, requestedId string, clk clock.Clock, wait cl
 		default:
 			return result, nil
 		}
-		logger.Debugf("after %s action was still %v, will wait %s more before next check",
+		logger.Debugf(context.TODO(), "after %s action was still %v, will wait %s more before next check",
 			clk.Now().Sub(startTime), result.Status, retryTime)
 
 		// Block until a tick happens, or the wait arrives.
@@ -491,10 +491,10 @@ func GetActionResult(api APIClient, requestedId string, clk clock.Clock, wait cl
 
 // fetchResult queries the given API for the given Action ID, and
 // makes sure the results are acceptable, returning an error if they are not.
-func fetchResult(api APIClient, requestedId string) (actionapi.ActionResult, error) {
+func fetchResult(ctx context.Context, api APIClient, requestedId string) (actionapi.ActionResult, error) {
 	none := actionapi.ActionResult{}
 
-	actions, err := api.Actions([]string{requestedId})
+	actions, err := api.Actions(ctx, []string{requestedId})
 	if err != nil {
 		return none, err
 	}
@@ -680,7 +680,7 @@ func formatActionResult(id string, result actionapi.ActionResult, utc bool) (map
 	if len(result.Log) > 0 {
 		var logs []string
 		for _, msg := range result.Log {
-			logs = append(logs, formatLogMessage(actions.ActionMessage{
+			logs = append(logs, formatLogMessage(operation.TaskLogMessage{
 				Timestamp: msg.Timestamp,
 				Message:   msg.Message,
 			}, false, utc, false))
@@ -787,8 +787,7 @@ const (
 )
 
 func decodeLogMessage(encodedMessage string, utc bool) (string, error) {
-	var actionMessage actions.ActionMessage
-	err := json.Unmarshal([]byte(encodedMessage), &actionMessage)
+	actionMessage, err := operation.DecodeTaskLogEntry(encodedMessage)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -814,7 +813,7 @@ func formatTimestamp(timestamp time.Time, progressFormat, utc, plain bool) strin
 	return timestamp.Format(timestampFormat)
 }
 
-func formatLogMessage(actionMessage actions.ActionMessage, progressFormat, utc, plain bool) string {
+func formatLogMessage(actionMessage operation.TaskLogMessage, progressFormat, utc, plain bool) string {
 	return fmt.Sprintf("%v %v", formatTimestamp(actionMessage.Timestamp, progressFormat, utc, plain), actionMessage.Message)
 }
 
@@ -836,7 +835,7 @@ func processLogMessages(
 				for _, msg := range messages {
 					logMsg, err := decodeLogMessage(msg, utc)
 					if err != nil {
-						logger.Warningf("badly formatted action log message: %v\n%v", err, msg)
+						logger.Warningf(context.TODO(), "badly formatted action log message: %v\n%v", err, msg)
 						continue
 					}
 					handler(ctx, logMsg)

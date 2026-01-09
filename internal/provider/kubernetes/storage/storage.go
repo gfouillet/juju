@@ -20,17 +20,9 @@ import (
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
-	"github.com/juju/juju/storage"
-	storageprovider "github.com/juju/juju/storage/provider"
+	"github.com/juju/juju/internal/storage"
+	storageprovider "github.com/juju/juju/internal/storage/provider"
 )
-
-// GetMountPathForFilesystem returns mount path.
-func GetMountPathForFilesystem(idx int, appName string, fs storage.KubernetesFilesystemParams) string {
-	if fs.Attachment != nil {
-		return fs.Attachment.Path
-	}
-	return fmt.Sprintf("%s/fs/%s/%s/%d", constants.StorageBaseDir, appName, fs.StorageName, idx)
-}
 
 // FilesystemStatus returns filesystem status.
 func FilesystemStatus(pvcPhase corev1.PersistentVolumeClaimPhase) status.Status {
@@ -80,7 +72,7 @@ func VolumeSourceForFilesystem(fs storage.KubernetesFilesystemParams) (*corev1.V
 	case storageprovider.TmpfsProviderType:
 		medium, ok := fs.Attributes[constants.StorageMedium]
 		if !ok {
-			medium = corev1.StorageMediumMemory
+			medium = corev1.StorageMediumDefault
 		}
 		return &corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -117,9 +109,9 @@ func StorageClassSpec(cfg k8s.StorageProvisioner, labelVersion constants.LabelVe
 func VolumeInfo(pv *resources.PersistentVolume, now time.Time) caas.VolumeInfo {
 	size := quantityAsMibiBytes(*pv.Spec.Capacity.Storage())
 	return caas.VolumeInfo{
-		VolumeId:   pv.Name,
-		Size:       size,
-		Persistent: true,
+		PersistentVolumeName: pv.Name,
+		Size:                 size,
+		Persistent:           true,
 		Status: status.StatusInfo{
 			Status:  VolumeStatus(pv.Status.Phase),
 			Message: pv.Status.Message,
@@ -138,18 +130,18 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 			size = quantityAsMibiBytes(*volume.EmptyDir.SizeLimit)
 		}
 		return &caas.FilesystemInfo{
-			Size:         size,
-			FilesystemId: volume.Name,
-			MountPoint:   volumeMount.MountPath,
-			ReadOnly:     volumeMount.ReadOnly,
+			Size:                      size,
+			PersistentVolumeClaimName: volume.Name,
+			MountPoint:                volumeMount.MountPath,
+			ReadOnly:                  volumeMount.ReadOnly,
 			Status: status.StatusInfo{
 				Status: status.Attached,
 				Since:  &now,
 			},
 			Volume: caas.VolumeInfo{
-				VolumeId:   volume.Name,
-				Size:       size,
-				Persistent: false,
+				PersistentVolumeName: volume.Name,
+				Size:                 size,
+				Persistent:           false,
 				Status: status.StatusInfo{
 					Status: status.Attached,
 					Since:  &now,
@@ -158,7 +150,7 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 		}, nil
 	} else if volume.PersistentVolumeClaim == nil || volume.PersistentVolumeClaim.ClaimName == "" {
 		// Ignore volumes which are not Juju managed filesystems.
-		logger.Debugf("ignoring blank EmptyDir, PersistentVolumeClaim or ClaimName")
+		logger.Debugf(context.TODO(), "ignoring blank EmptyDir, PersistentVolumeClaim or ClaimName")
 		return nil, errors.NotSupportedf("volume %v", volume)
 	}
 
@@ -170,7 +162,7 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 	}
 
 	if pvc.Status.Phase == corev1.ClaimPending {
-		logger.Debugf(fmt.Sprintf("PersistentVolumeClaim for %v is pending", pvc.Name))
+		logger.Debugf(context.TODO(), fmt.Sprintf("PersistentVolumeClaim for %v is pending", pvc.Name))
 		return nil, nil
 	}
 
@@ -204,7 +196,7 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 
 	pv := resources.NewPersistentVolume(client.CoreV1().PersistentVolumes(), pvc.Spec.VolumeName, nil)
 	err = pv.Get(ctx)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		// Ignore volumes which don't exist (yet).
 		return nil, nil
 	}
@@ -213,11 +205,14 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 	}
 
 	return &caas.FilesystemInfo{
-		StorageName:  storageName,
-		Size:         quantityAsMibiBytes(*pvc.Spec.Resources.Requests.Storage()),
-		FilesystemId: string(pvc.UID),
-		MountPoint:   volumeMount.MountPath,
-		ReadOnly:     volumeMount.ReadOnly,
+		StorageName: storageName,
+		Size:        quantityAsMibiBytes(*pvc.Spec.Resources.Requests.Storage()),
+		// TODO(storage): TODO(migration): this value used to be the pvc.UID but
+		// is now the pvc.Name. Both are unique, but pvc.Name is better for
+		// end-users and is the same as what is done for PersistentVolumes.
+		PersistentVolumeClaimName: pvc.Name,
+		MountPoint:                volumeMount.MountPath,
+		ReadOnly:                  volumeMount.ReadOnly,
 		Status: status.StatusInfo{
 			Status:  FilesystemStatus(pvc.Status.Phase),
 			Message: statusMessage,
@@ -229,8 +224,7 @@ func FilesystemInfo(ctx context.Context, client kubernetes.Interface,
 
 // PersistentVolumeClaimSpec returns k8s PVC spec.
 func PersistentVolumeClaimSpec(params VolumeParams) *corev1.PersistentVolumeClaimSpec {
-	return &corev1.PersistentVolumeClaimSpec{
-		StorageClassName: &params.StorageConfig.StorageClass,
+	spec := &corev1.PersistentVolumeClaimSpec{
 		Resources: corev1.VolumeResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceStorage: params.Size,
@@ -238,6 +232,10 @@ func PersistentVolumeClaimSpec(params VolumeParams) *corev1.PersistentVolumeClai
 		},
 		AccessModes: []corev1.PersistentVolumeAccessMode{params.AccessMode},
 	}
+	if params.StorageConfig.StorageClass != "" {
+		spec.StorageClassName = &params.StorageConfig.StorageClass
+	}
+	return spec
 }
 
 // StorageProvisioner returns storage provisioner.

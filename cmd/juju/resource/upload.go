@@ -4,27 +4,28 @@
 package resource
 
 import (
+	"context"
 	"io"
 
-	charmresource "github.com/juju/charm/v12/resource"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/resources"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
-	coreresources "github.com/juju/juju/core/resources"
+	coreresources "github.com/juju/juju/core/resource"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // UploadClient has the API client methods needed by UploadCommand.
 type UploadClient interface {
 	// Upload sends the resource to Juju.
-	Upload(application, name, filename, pendingID string, resource io.ReadSeeker) error
+	Upload(ctx context.Context, application, name, filename, pendingID string, resource io.ReadSeeker) error
 
 	// ListResources returns info about resources for applications in the model.
-	ListResources(applications []string) ([]coreresources.ApplicationResources, error)
+	ListResources(ctx context.Context, applications []string) ([]coreresources.ApplicationResources, error)
 
 	// Close closes the client.
 	Close() error
@@ -34,7 +35,7 @@ type UploadClient interface {
 type UploadCommand struct {
 	modelcmd.ModelCommandBase
 
-	newClient func() (UploadClient, error)
+	newClient func(ctx context.Context) (UploadClient, error)
 
 	application   string
 	resourceValue resourceValue
@@ -44,8 +45,8 @@ type UploadCommand struct {
 // by a charm.
 func NewUploadCommand() modelcmd.ModelCommand {
 	c := &UploadCommand{}
-	c.newClient = func() (UploadClient, error) {
-		apiRoot, err := c.NewAPIRoot()
+	c.newClient = func(ctx context.Context) (UploadClient, error) {
+		apiRoot, err := c.NewAPIRoot(ctx)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -62,32 +63,31 @@ The format is
 
     <resource name>=<resource>
 
-where the resource name is the name from the metadata.yaml file of the charm
-and where, depending on the type of the resource, the resource can be specified
-as follows:
+where ` + "`<resource name>`" + ` is the name from the ` + "`metadata.yaml`" +
+		` (` + "`charmcraft.yaml`" + `) file of the charm and ` + "`<resource>`" +
+		` is the resource itself, which can be supplied as follows:
 
-- If the resource is type ` + "`file`" + `, you can specify it by providing one of the following:
+- For a resource type ` + "`file`" + `:
 
-    a. the resource revision number.
+    a. that has been uploaded to Charmhub: the resource revision number.
 
-    b. a path to a local file. Caveat: If you choose this, you will not be able
-	 to go back to using a resource from Charmhub.
+    b. that is local to your machine: a path to the local file. Caveat: If you choose this, you will
+	not be able to go back to using a resource from Charmhub.
 
-- If the resource is type ` + "`oci-image`" + `, you can specify it by providing one of the following:
+- For a resource type ` + "`oci-image`" + `:
 
-    a. the resource revision number.
+    a. that has been uploaded to Charmhub: the resource revision number.
 
-	b. a path to the local file for your private OCI image as well as the
-	username and password required to access the private OCI image.
-	Caveat: If you choose this, you will not be able to go back to using a
-	resource from Charmhub.
+	b. that is local to your machine: a path to the local ` + "`json`" + ` or ` + "`yaml`" + ` file
+	that contains the details for your private OCI image (local image path, username, password, etc.).
+	Caveat: If you choose this, you will not be able to go back to using a resource from Charmhub.
 
-    c. a link to a public OCI image. Caveat: If you choose this, you will not be
-	 able to go back to using a resource from Charmhub.
+    c. For a resource that has been uploaded to a public OCI registry: a link to the public OCI image.
+	Caveat: If you choose this, you will not be able to go back to using a resource from Charmhub.
 
 `
 	attachExample = `
-    juju attach-resource mysql resource-name=foo
+    juju attach-resource easyrsa easyrsa=./EasyRSA-3.0.7.tgz
 
     juju attach-resource ubuntu-k8s ubuntu_image=ubuntu
 
@@ -98,10 +98,11 @@ as follows:
 // Info implements cmd.Command.Info
 func (c *UploadCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
-		Name:    "attach-resource",
-		Args:    "application <resource name>=<resource>",
-		Purpose: "Update a resource for an application.",
-		Doc:     attachDoc,
+		Name:     "attach-resource",
+		Args:     "application <resource name>=<resource>",
+		Purpose:  "Update a resource for an application.",
+		Doc:      attachDoc,
+		Examples: attachExample,
 		SeeAlso: []string{
 			"resources",
 			"charm-resources",
@@ -149,14 +150,14 @@ func (c *UploadCommand) addResourceValue(arg string) error {
 }
 
 // Run implements cmd.Command.Run.
-func (c *UploadCommand) Run(*cmd.Context) error {
-	apiclient, err := c.newClient()
+func (c *UploadCommand) Run(ctx *cmd.Context) error {
+	apiclient, err := c.newClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer apiclient.Close()
 
-	result, err := apiclient.ListResources([]string{c.application})
+	result, err := apiclient.ListResources(ctx, []string{c.application})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -167,7 +168,7 @@ func (c *UploadCommand) Run(*cmd.Context) error {
 		}
 	}
 
-	if err := c.upload(c.resourceValue, apiclient); err != nil {
+	if err := c.upload(ctx, c.resourceValue, apiclient); err != nil {
 		return errors.Annotatef(err, "failed to upload resource %q", c.resourceValue.name)
 	}
 	return nil
@@ -175,13 +176,13 @@ func (c *UploadCommand) Run(*cmd.Context) error {
 
 // upload opens the given file and calls the apiclient to upload it to the given
 // application with the given name.
-func (c *UploadCommand) upload(rf resourceValue, client UploadClient) error {
+func (c *UploadCommand) upload(ctx context.Context, rf resourceValue, client UploadClient) error {
 	f, err := OpenResource(rf.value, rf.resourceType, c.Filesystem().Open)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer f.Close()
-	err = client.Upload(rf.application, rf.name, rf.value, "", f)
+	err = client.Upload(ctx, rf.application, rf.name, rf.value, "", f)
 	if err := block.ProcessBlockedError(err, block.BlockChange); err != nil {
 		return errors.Trace(err)
 	}

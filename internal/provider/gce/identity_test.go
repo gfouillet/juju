@@ -4,8 +4,9 @@
 package gce_test
 
 import (
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	stdtesting "testing"
+
+	"github.com/juju/tc"
 
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/constraints"
@@ -18,34 +19,36 @@ type identitySuite struct {
 	gce.BaseSuite
 }
 
-var _ = gc.Suite(&identitySuite{})
+func TestIdentitySuite(t *stdtesting.T) {
+	tc.Run(t, &identitySuite{})
+}
 
-func (s *identitySuite) TestFinaliseBootstrapCredentialInstanceRole(c *gc.C) {
+func (s *identitySuite) TestFinaliseBootstrapCredentialInstanceRole(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 
-	ctx := envtesting.BootstrapTODOContext(c)
+	ctx := envtesting.BootstrapContext(c.Context(), c)
 	args := environs.BootstrapParams{
 		BootstrapConstraints: constraints.MustParse("instance-role=fred@googledev.com"),
 	}
 	cred := &jujucloud.Credential{}
 	got, err := env.FinaliseBootstrapCredential(ctx, args, cred)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	want := jujucloud.NewCredential("service-account", map[string]string{
 		"service-account": "fred@googledev.com",
 	})
-	c.Assert(got, jc.DeepEquals, &want)
+	c.Assert(got, tc.DeepEquals, &want)
 }
 
-func (s *identitySuite) TestFinaliseBootstrapCredentialInstanceRoleAndServiceAccount(c *gc.C) {
+func (s *identitySuite) TestFinaliseBootstrapCredentialInstanceRoleAndServiceAccount(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 
-	ctx := envtesting.BootstrapTODOContext(c)
+	ctx := envtesting.BootstrapTestContext(c)
 	args := environs.BootstrapParams{
 		BootstrapConstraints: constraints.MustParse("instance-role=fred@googledev.com"),
 	}
@@ -53,23 +56,23 @@ func (s *identitySuite) TestFinaliseBootstrapCredentialInstanceRoleAndServiceAcc
 		"service-account": "fred@googledev.com",
 	})
 	got, err := env.FinaliseBootstrapCredential(ctx, args, &cred)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	want := jujucloud.NewCredential("service-account", map[string]string{
 		"service-account": "fred@googledev.com",
 	})
-	c.Assert(got, jc.DeepEquals, &want)
+	c.Assert(got, tc.DeepEquals, &want)
 }
 
-func (s *identitySuite) TestFinaliseBootstrapCredentialNoInstanceRole(c *gc.C) {
+func (s *identitySuite) TestFinaliseBootstrapCredentialNoInstanceRole(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
 	env := s.SetupEnv(c, s.MockService)
 
-	ctx := envtesting.BootstrapTODOContext(c)
+	ctx := envtesting.BootstrapContext(c.Context(), c)
 	args := environs.BootstrapParams{}
 	cred := &jujucloud.Credential{}
 	got, err := env.FinaliseBootstrapCredential(ctx, args, cred)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(got, jc.DeepEquals, cred)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(got, tc.DeepEquals, cred)
 }

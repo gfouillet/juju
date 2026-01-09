@@ -4,6 +4,8 @@
 package kubernetes
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	k8s "github.com/juju/juju/caas/kubernetes"
@@ -27,10 +29,10 @@ func (p kubernetesEnvironProvider) DetectClouds() ([]cloud.Cloud, error) {
 		clouds = append(clouds, mk8sCloud)
 		return clouds, nil
 	}
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		err = errors.Annotatef(err, "microk8s is not installed")
 	}
-	logger.Debugf("failed to query local microk8s: %s", err.Error())
+	logger.Debugf(context.TODO(), "failed to query local microk8s: %s", err.Error())
 	return clouds, nil
 }
 

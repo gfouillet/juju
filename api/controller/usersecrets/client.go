@@ -4,14 +4,20 @@
 package usersecrets
 
 import (
-	"github.com/juju/errors"
+	"context"
 
 	"github.com/juju/juju/api/base"
 	apiwatcher "github.com/juju/juju/api/watcher"
-	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client is the api client for the UserSecretsManager facade.
 type Client struct {
@@ -19,51 +25,28 @@ type Client struct {
 }
 
 // NewClient creates a secret backends manager api client.
-func NewClient(caller base.APICaller) *Client {
+func NewClient(caller base.APICaller, options ...Option) *Client {
 	return &Client{
-		facade: base.NewFacadeCaller(caller, "UserSecretsManager"),
+		facade: base.NewFacadeCaller(caller, "UserSecretsManager", options...),
 	}
 }
 
 // WatchRevisionsToPrune returns a watcher that triggers on secret
 // obsolete revision changes.
-func (c *Client) WatchRevisionsToPrune() (watcher.StringsWatcher, error) {
-	var result params.StringsWatchResult
-	err := c.facade.FacadeCall("WatchRevisionsToPrune", nil, &result)
+func (c *Client) WatchRevisionsToPrune(ctx context.Context) (watcher.NotifyWatcher, error) {
+	var result params.NotifyWatchResult
+	err := c.facade.FacadeCall(ctx, "WatchRevisionsToPrune", nil, &result)
 	if err != nil {
 		return nil, err
 	}
 	if result.Error != nil {
 		return nil, params.TranslateWellKnownError(result.Error)
 	}
-	w := apiwatcher.NewStringsWatcher(c.facade.RawAPICaller(), result)
+	w := apiwatcher.NewNotifyWatcher(c.facade.RawAPICaller(), result)
 	return w, nil
 }
 
-// DeleteRevisions deletes the specified revisions of the secret.
-func (c *Client) DeleteRevisions(uri *secrets.URI, revisions ...int) error {
-	if uri == nil {
-		return errors.Errorf("uri cannot be nil")
-	}
-	if len(revisions) == 0 {
-		return errors.Errorf("at least one revision must be specified")
-	}
-	arg := params.DeleteSecretArg{
-		URI:       uri.String(),
-		Revisions: revisions,
-	}
-
-	var results params.ErrorResults
-	err := c.facade.FacadeCall("DeleteRevisions", params.DeleteSecretArgs{Args: []params.DeleteSecretArg{arg}}, &results)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if len(results.Results) != 1 {
-		return errors.Errorf("unexpected number of results: %d", len(results.Results))
-	}
-	result := results.Results[0]
-	if result.Error != nil {
-		return params.TranslateWellKnownError(result.Error)
-	}
-	return nil
+// DeleteObsoleteUserSecrets deletes any obsolete user secret revisions.
+func (c *Client) DeleteObsoleteUserSecretRevisions(ctx context.Context) error {
+	return c.facade.FacadeCall(ctx, "DeleteObsoleteUserSecretRevisions", nil, nil)
 }

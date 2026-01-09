@@ -4,78 +4,70 @@
 package modelworkermanager
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"time"
 
-	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
 
+	agentengine "github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/apiserver/apiserverhttp"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/http"
+	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/core/life"
 	corelogger "github.com/juju/juju/core/logger"
-	"github.com/juju/juju/pki"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/pki"
+	"github.com/juju/juju/internal/services"
+	internalworker "github.com/juju/juju/internal/worker"
+	"github.com/juju/juju/internal/worker/apiremoterelationcaller"
 )
 
-// ModelWatcher provides an interface for watching the additiona and
-// removal of models.
-type ModelWatcher interface {
-	WatchModels() state.StringsWatcher
-}
+// MetricSink describes a way to unregister a model metrics collector. This
+// ensures that we correctly tidy up after the removal of a model.
+type MetricSink = agentengine.MetricSink
 
-// Controller provides an interface for getting models by UUID,
-// and other details needed to pass into the function to start workers for a model.
-// Once a model is no longer required, the returned function must
-// be called to dispose of the model.
-type Controller interface {
-	Config() (controller.Config, error)
-	Model(modelUUID string) (Model, func(), error)
-	RecordLogger(modelUUID string) (RecordLogger, error)
-}
+// ModelService provides access to the model services required by the
+// apiserver.
+type ModelService interface {
+	// WatchActivatedModels returns a watcher that emits an event containing the model UUID
+	// when a model becomes activated or an activated model receives an update.
+	WatchActivatedModels(ctx context.Context) (watcher.StringsWatcher, error)
 
-// Model represents a model.
-type Model interface {
-	MigrationMode() state.MigrationMode
-	Type() state.ModelType
-	Name() string
-	Owner() names.UserTag
-}
-
-// RecordLogger writes logs to backing store.
-type RecordLogger interface {
-	io.Closer
-	// Log writes the given log records to the logger's storage.
-	Log([]corelogger.LogRecord) error
-}
-
-// ModelLogger is a database backed loggo Writer.
-type ModelLogger interface {
-	loggo.Writer
-	Close() error
+	// Model returns the model associated with the provided uuid.
+	Model(ctx context.Context, uuid model.UUID) (model.Model, error)
 }
 
 // ModelMetrics defines a way to create metrics for a model.
 type ModelMetrics interface {
-	ForModel(names.ModelTag) engine.MetricSink
+	ForModel(names.ModelTag) MetricSink
 }
+
+// GetControllerConfigFunc is a function that returns the controller config,
+// from the given service.
+type GetControllerConfigFunc func(ctx context.Context, domainServices services.DomainServices) (controller.Config, error)
 
 // NewModelConfig holds the information required by the NewModelWorkerFunc
 // to start the workers for the specified model
 type NewModelConfig struct {
-	Authority        pki.Authority
-	ModelName        string // Use a fully qualified name "<namespace>-<name>"
-	ModelUUID        string
-	ModelType        state.ModelType
-	ModelLogger      ModelLogger
-	ModelMetrics     engine.MetricSink
-	Mux              *apiserverhttp.Mux
-	ControllerConfig controller.Config
+	Authority                     pki.Authority
+	ModelName                     string
+	ModelQualifier                model.Qualifier
+	ModelUUID                     string
+	ModelType                     model.ModelType
+	ModelMetrics                  MetricSink
+	LoggerContext                 corelogger.LoggerContext
+	ControllerConfig              controller.Config
+	ProviderServicesGetter        ProviderServicesGetter
+	DomainServices                services.DomainServices
+	LeaseManager                  lease.Manager
+	HTTPClientGetter              http.HTTPClientGetter
+	APIRemoteRelationClientGetter apiremoterelationcaller.APIRemoteCallerGetter
 }
 
 // NewModelWorkerFunc should return a worker responsible for running
@@ -86,16 +78,20 @@ type NewModelWorkerFunc func(config NewModelConfig) (worker.Worker, error)
 // Config holds the dependencies and configuration necessary to run
 // a model worker manager.
 type Config struct {
-	Authority      pki.Authority
-	Clock          clock.Clock
-	Logger         Logger
-	MachineID      string
-	ModelWatcher   ModelWatcher
-	ModelMetrics   ModelMetrics
-	Mux            *apiserverhttp.Mux
-	Controller     Controller
-	NewModelWorker NewModelWorkerFunc
-	ErrorDelay     time.Duration
+	Authority                     pki.Authority
+	Logger                        corelogger.Logger
+	ModelMetrics                  ModelMetrics
+	Mux                           *apiserverhttp.Mux
+	NewModelWorker                NewModelWorkerFunc
+	ErrorDelay                    time.Duration
+	LogSinkGetter                 corelogger.ModelLogSinkGetter
+	ProviderServicesGetter        ProviderServicesGetter
+	DomainServicesGetter          services.DomainServicesGetter
+	ModelService                  ModelService
+	GetControllerConfig           GetControllerConfigFunc
+	LeaseManager                  lease.Manager
+	HTTPClientGetter              http.HTTPClientGetter
+	APIRemoteRelationClientGetter apiremoterelationcaller.APIRemoteCallerGetter
 }
 
 // Validate returns an error if config cannot be expected to drive
@@ -104,29 +100,41 @@ func (config Config) Validate() error {
 	if config.Authority == nil {
 		return errors.NotValidf("nil authority")
 	}
-	if config.Clock == nil {
-		return errors.NotValidf("nil Clock")
-	}
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")
 	}
-	if config.MachineID == "" {
-		return errors.NotValidf("empty MachineID")
-	}
-	if config.ModelWatcher == nil {
-		return errors.NotValidf("nil ModelWatcher")
+	if config.ModelService == nil {
+		return errors.NotValidf("nil ModelService")
 	}
 	if config.ModelMetrics == nil {
 		return errors.NotValidf("nil ModelMetrics")
 	}
-	if config.Controller == nil {
-		return errors.NotValidf("nil Controller")
-	}
 	if config.NewModelWorker == nil {
 		return errors.NotValidf("nil NewModelWorker")
 	}
+	if config.LogSinkGetter == nil {
+		return errors.NotValidf("nil LogSinkGetter")
+	}
 	if config.ErrorDelay <= 0 {
 		return errors.NotValidf("non-positive ErrorDelay")
+	}
+	if config.ProviderServicesGetter == nil {
+		return errors.NotValidf("nil ProviderServicesGetter")
+	}
+	if config.DomainServicesGetter == nil {
+		return errors.NotValidf("nil DomainServicesGetter")
+	}
+	if config.GetControllerConfig == nil {
+		return errors.NotValidf("nil GetControllerConfig")
+	}
+	if config.LeaseManager == nil {
+		return errors.NotValidf("nil LeaseManager")
+	}
+	if config.HTTPClientGetter == nil {
+		return errors.NotValidf("nil HTTPClientGetter")
+	}
+	if config.APIRemoteRelationClientGetter == nil {
+		return errors.NotValidf("nil APIRemoteRelationClientGetter")
 	}
 	return nil
 }
@@ -136,15 +144,32 @@ func New(config Config) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	m := &modelWorkerManager{
-		config: config,
-	}
 
-	err := catacomb.Invoke(catacomb.Plan{
-		Site: &m.catacomb,
-		Work: m.loop,
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:          "model-worker-manager",
+		IsFatal:       neverFatal,
+		ShouldRestart: internalworker.ShouldRunnerRestart,
+		MoreImportant: neverImportant,
+		RestartDelay:  config.ErrorDelay,
+		Logger:        internalworker.WrapLogger(config.Logger),
 	})
 	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	m := &modelWorkerManager{
+		config: config,
+		runner: runner,
+	}
+
+	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "model-worker-manager",
+		Site: &m.catacomb,
+		Work: m.loop,
+		Init: []worker.Worker{
+			m.runner,
+		},
+	}); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return m, nil
@@ -167,59 +192,15 @@ func (m *modelWorkerManager) Wait() error {
 }
 
 func (m *modelWorkerManager) loop() error {
-	controllerConfig, err := m.config.Controller.Config()
+	ctx, cancel := m.scopedContext()
+	defer cancel()
+	watcher, err := m.config.ModelService.WatchActivatedModels(ctx)
 	if err != nil {
-		return errors.Annotate(err, "unable to get controller config")
-	}
-	m.runner = worker.NewRunner(worker.RunnerParams{
-		IsFatal:       neverFatal,
-		MoreImportant: neverImportant,
-		RestartDelay:  m.config.ErrorDelay,
-		Logger:        m.config.Logger,
-	})
-	if err := m.catacomb.Add(m.runner); err != nil {
 		return errors.Trace(err)
 	}
-	watcher := m.config.ModelWatcher.WatchModels()
+
 	if err := m.catacomb.Add(watcher); err != nil {
 		return errors.Trace(err)
-	}
-
-	modelChanged := func(modelUUID string) error {
-		model, release, err := m.config.Controller.Model(modelUUID)
-		if errors.IsNotFound(err) {
-			// Model was removed, ignore it.
-			// The reason we ignore it here is that one of the embedded
-			// workers is also responding to the model life changes and
-			// when it returns a NotFound error, which is determined as a
-			// fatal error for the model worker engine. This causes it to be
-			// removed from the runner above. However since the runner itself
-			// has neverFatal as an error handler, the runner itself doesn't
-			// propagate the error.
-			return nil
-		} else if err != nil {
-			return errors.Trace(err)
-		}
-		defer release()
-
-		if !isModelActive(model) {
-			// Ignore this model until it's activated - we
-			// never want to run workers for an importing
-			// model.
-			// https://bugs.launchpad.net/juju/+bug/1646310
-			return nil
-		}
-
-		cfg := NewModelConfig{
-			Authority:        m.config.Authority,
-			ModelName:        fmt.Sprintf("%s-%s", model.Owner().Id(), model.Name()),
-			ModelUUID:        modelUUID,
-			ModelType:        model.Type(),
-			ModelMetrics:     m.config.ModelMetrics.ForModel(names.NewModelTag(modelUUID)),
-			Mux:              m.config.Mux,
-			ControllerConfig: controllerConfig,
-		}
-		return errors.Trace(m.ensure(cfg))
 	}
 
 	for {
@@ -231,7 +212,7 @@ func (m *modelWorkerManager) loop() error {
 				return errors.New("changes stopped")
 			}
 			for _, modelUUID := range uuids {
-				if err := modelChanged(modelUUID); err != nil {
+				if err := m.modelChanged(ctx, modelUUID); err != nil {
 					return errors.Trace(err)
 				}
 			}
@@ -239,39 +220,102 @@ func (m *modelWorkerManager) loop() error {
 	}
 }
 
-func (m *modelWorkerManager) ensure(cfg NewModelConfig) error {
-	starter := m.starter(cfg)
-	if err := m.runner.StartWorker(cfg.ModelUUID, starter); !errors.IsAlreadyExists(err) {
+func (m *modelWorkerManager) modelChanged(ctx context.Context, modelUUID string) error {
+	model, err := m.config.ModelService.Model(ctx, model.UUID(modelUUID))
+
+	// If the model is not found, it means two things, either it was removed or
+	// more likely it was never activated. In either case, we don't need to
+	// start a worker for it.
+	if !internalworker.ShouldRunnerRestart(err) || model.Life == life.Dead {
+		// Model was removed rip it out from the runners This ensures that we
+		// don't have any dangling references. Since the runner itself has
+		// neverFatal as an error handler, the runner itself doesn't propagate
+		// the error.
+		if err := m.runner.StopAndRemoveWorker(modelUUID, ctx.Done()); err != nil && !errors.Is(err, errors.NotFound) {
+			return errors.Annotatef(err, "removing model worker for %q", modelUUID)
+		}
+		return nil
+	} else if err != nil {
 		return errors.Trace(err)
 	}
+
+	cfg := NewModelConfig{
+		Authority:      m.config.Authority,
+		ModelName:      model.Name,
+		ModelQualifier: model.Qualifier,
+		ModelUUID:      modelUUID,
+		ModelType:      model.ModelType,
+		ModelMetrics:   m.config.ModelMetrics.ForModel(names.NewModelTag(modelUUID)),
+	}
+
+	// Creates a new worker func based on the model config.
+	newWorker, err := m.newWorkerFuncFromConfig(ctx, cfg)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	// If the worker is already running, this will return an AlreadyExists
+	// error and the start function will not be called.
+	if err := m.runner.StartWorker(ctx, modelUUID, func(ctx context.Context) (worker.Worker, error) {
+		return newWorker(ctx)
+	}); !errors.Is(err, errors.AlreadyExists) {
+		return errors.Trace(err)
+	}
+
 	return nil
 }
 
-func (m *modelWorkerManager) starter(cfg NewModelConfig) func() (worker.Worker, error) {
-	return func() (worker.Worker, error) {
-		modelUUID := cfg.ModelUUID
-		modelName := fmt.Sprintf("%q (%s)", cfg.ModelName, cfg.ModelUUID)
-		m.config.Logger.Debugf("starting workers for model %s", modelName)
+func (m *modelWorkerManager) newWorkerFuncFromConfig(ctx context.Context, cfg NewModelConfig) (func(context.Context) (worker.Worker, error), error) {
+	modelUUID := model.UUID(cfg.ModelUUID)
+	modelName := fmt.Sprintf("%s/%s", cfg.ModelQualifier, cfg.ModelName)
+	absoluteModelName := fmt.Sprintf("%q (%s)", modelName, modelUUID)
 
-		recordLogger, err := m.config.Controller.RecordLogger(modelUUID)
+	// Get the provider domain services for the model.
+	cfg.ProviderServicesGetter = m.config.ProviderServicesGetter
+
+	cfg.LeaseManager = m.config.LeaseManager
+	cfg.HTTPClientGetter = m.config.HTTPClientGetter
+	cfg.APIRemoteRelationClientGetter = m.config.APIRemoteRelationClientGetter
+
+	// We don't want to get this in the start worker function because it
+	// won't change. Hammering the domainservices getter to get the services
+	// if the model worker is constantly restarting isn't helping anyone.
+	// Especially if the model is in a bad state.
+	domainServices, err := m.config.DomainServicesGetter.ServicesForModel(ctx, modelUUID)
+	if err != nil {
+		return nil, errors.Annotate(err, "unable to get domain services")
+	}
+	cfg.DomainServices = domainServices
+
+	// LoggerContext for the model worker, this is then used for all
+	// logging.
+	cfg.LoggerContext, err = m.config.LogSinkGetter.GetLoggerContext(ctx, modelUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return func(ctx context.Context) (worker.Worker, error) {
+		m.config.Logger.Debugf(ctx, "starting workers for model %s", absoluteModelName)
+
+		// Get the controller config for the model worker so that we correctly
+		// handle the case where the controller config changes between model
+		// worker restarts.
+		controllerConfig, err := m.config.GetControllerConfig(ctx, domainServices)
 		if err != nil {
-			return nil, errors.Annotatef(err, "unable to create db logger for %s", modelName)
+			return nil, errors.Annotate(err, "unable to get controller config")
 		}
+		cfg.ControllerConfig = controllerConfig
 
-		cfg.ModelLogger = newModelLogger(
-			"controller-"+m.config.MachineID,
-			modelUUID,
-			recordLogger,
-			m.config.Clock,
-			m.config.Logger,
-		)
 		worker, err := m.config.NewModelWorker(cfg)
 		if err != nil {
-			cfg.ModelLogger.Close()
-			return nil, errors.Annotatef(err, "cannot manage model %s", modelName)
+			return nil, errors.Annotatef(err, "cannot manage model %s", absoluteModelName)
 		}
 		return worker, nil
-	}
+	}, nil
+}
+
+func (m *modelWorkerManager) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(m.catacomb.Context(context.Background()))
 }
 
 func neverFatal(error) bool {
@@ -282,12 +326,8 @@ func neverImportant(error, error) bool {
 	return false
 }
 
-func isModelActive(m Model) bool {
-	return m.MigrationMode() != state.MigrationModeImporting
-}
-
 // Report shows up in the dependency engine report.
-func (m *modelWorkerManager) Report() map[string]interface{} {
+func (m *modelWorkerManager) Report() map[string]any {
 	if m.runner == nil {
 		return nil
 	}

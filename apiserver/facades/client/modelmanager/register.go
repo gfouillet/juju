@@ -4,84 +4,126 @@
 package modelmanager
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/common"
+	commonmodel "github.com/juju/juju/apiserver/common/model"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/caas"
-	"github.com/juju/juju/environs/context"
-	"github.com/juju/juju/state/stateenvirons"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/internal/uuid"
 )
+
+// BlockCheckerGetter is a function that returns a BlockCheckerInterface which
+// allows checking blocked commands on a model.
+type BlockCheckerGetter func(ctx context.Context, modelUUID coremodel.UUID) (common.BlockCheckerInterface, error)
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("ModelManager", 10, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV10(ctx)
+	registry.MustRegisterForMultiModel("ModelManager", 10, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+		return newFacadeV10(stdCtx, ctx)
+	}, reflect.TypeOf((*ModelManagerAPIV10)(nil)))
+	// v11 handles requests with a model qualifier instead of a model owner.
+	registry.MustRegisterForMultiModel("ModelManager", 11, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+		return newFacadeV11(stdCtx, ctx)
 	}, reflect.TypeOf((*ModelManagerAPI)(nil)))
-	registry.MustRegister("ModelManager", 9, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV9(ctx)
-	}, reflect.TypeOf((*ModelManagerAPIV9)(nil)))
-}
-
-// newFacadeV9 is used for API registration.
-func newFacadeV9(ctx facade.Context) (*ModelManagerAPIV9, error) {
-	api, err := newFacadeV10(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &ModelManagerAPIV9{api}, nil
 }
 
 // newFacadeV10 is used for API registration.
-func newFacadeV10(ctx facade.Context) (*ModelManagerAPI, error) {
-	st := ctx.State()
-	pool := ctx.StatePool()
-	ctlrSt, err := pool.SystemState()
+func newFacadeV10(stdCtx context.Context, ctx facade.MultiModelContext) (*ModelManagerAPIV10, error) {
+	api, err := newFacadeV11(stdCtx, ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	return &ModelManagerAPIV10{ModelManagerAPI: api}, nil
+}
+
+// newFacadeV11 is used for API registration.
+func newFacadeV11(stdCtx context.Context, ctx facade.MultiModelContext) (*ModelManagerAPI, error) {
 	auth := ctx.Auth()
-
-	model, err := st.Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	modelUUID := model.UUID()
-
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	configGetter := stateenvirons.EnvironConfigGetter{Model: model}
-	newEnviron := common.EnvironFuncForModel(model, configGetter)
-
-	ctrlModel, err := ctlrSt.Model()
-	if err != nil {
-		return nil, err
-	}
-	urlGetter := common.NewToolsURLGetter(modelUUID, systemState)
-	toolsFinder := common.NewToolsFinder(configGetter, st, urlGetter, newEnviron)
-
 	// Since we know this is a user tag (because AuthClient is true),
 	// we just do the type assertion to the UserTag.
 	if !auth.AuthClient() {
 		return nil, apiservererrors.ErrPerm
 	}
+	// Pretty much all of the user manager methods have special casing for admin
+	// users, so look once when we start and remember if the user is an admin.
+	err := auth.HasPermission(stdCtx, permission.SuperuserAccess, names.NewControllerTag(ctx.ControllerUUID()))
+	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
+		return nil, errors.Trace(err)
+	}
+	isAdmin := err == nil
+	// Since we know this is a user tag (because AuthClient is true),
+	// we just do the type assertion to the UserTag.
 	apiUser, _ := auth.GetAuthTag().(names.UserTag)
-	backend := common.NewUserAwareModelManagerBackend(model, pool, apiUser)
-	return NewModelManagerAPI(
-		backend,
-		common.NewModelManagerBackend(ctrlModel, pool),
-		toolsFinder,
-		caas.New,
-		common.NewBlockChecker(backend),
+
+	controllerUUID, err := uuid.UUIDFromString(ctx.ControllerUUID())
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	domainServicesGetter := domainServicesGetter{ctx: ctx}
+
+	machineServiceGetter := func(ctx context.Context, modelUUID coremodel.UUID) (commonmodel.MachineService, error) {
+		svc, err := domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Machine(), nil
+	}
+	statusServiceGetter := func(ctx context.Context, modelUUID coremodel.UUID) (commonmodel.StatusService, error) {
+		svc, err := domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return svc.Status(), nil
+	}
+
+	blockCheckerGetter := func(ctx context.Context, modelUUID coremodel.UUID) (common.BlockCheckerInterface, error) {
+		svc, err := domainServicesGetter.DomainServicesForModel(ctx, modelUUID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return common.NewBlockChecker(svc.BlockCommand()), nil
+	}
+
+	domainServices := ctx.DomainServices()
+	modelStatusAPI := commonmodel.NewModelStatusAPI(
+		ctx.ControllerUUID(),
+		ctx.ModelUUID().String(),
+		domainServices.Model(),
+		machineServiceGetter,
+		statusServiceGetter,
 		auth,
-		model,
-		context.CallContext(st),
+		apiUser,
 	)
+
+	return NewModelManagerAPI(
+		stdCtx,
+		isAdmin,
+		apiUser,
+		modelStatusAPI,
+		controllerUUID,
+		ctx.ModelUUID(),
+		Services{
+			DomainServicesGetter: domainServicesGetter,
+			CredentialService:    domainServices.Credential(),
+			ModelService:         domainServices.Model(),
+			ModelDefaultsService: domainServices.ModelDefaults(),
+			AccessService:        domainServices.Access(),
+			ObjectStore:          ctx.ObjectStore(),
+			SecretBackendService: domainServices.SecretBackend(),
+			NetworkService:       domainServices.Network(),
+			MachineService:       domainServices.Machine(),
+			ApplicationService:   domainServices.Application(),
+			RemovalService:       domainServices.Removal(),
+		},
+		blockCheckerGetter,
+		auth,
+	), nil
 }

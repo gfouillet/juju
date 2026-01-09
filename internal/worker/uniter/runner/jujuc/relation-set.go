@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/utils/v3/keyvalues"
+	"github.com/juju/utils/v4/keyvalues"
 	goyaml "gopkg.in/yaml.v2"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const relationSetDoc = `
@@ -183,12 +183,12 @@ func (c *RelationSetCommand) Run(ctx *cmd.Context) (err error) {
 		} else if isLeader == false {
 			return errors.Errorf("cannot write relation settings")
 		}
-		settings, err = r.ApplicationSettings()
+		settings, err = r.ApplicationSettings(ctx)
 		if err != nil {
 			return errors.Annotate(err, "cannot read relation application settings")
 		}
 	} else {
-		settings, err = r.Settings()
+		settings, err = r.Settings(ctx)
 		if err != nil {
 			return errors.Annotate(err, "cannot read relation settings")
 		}

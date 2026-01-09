@@ -5,35 +5,39 @@ package controller_test
 
 import (
 	"encoding/json"
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	apitesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/api/controller/controller"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	corecontroller "github.com/juju/juju/controller"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/permission"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	proxyfactory "github.com/juju/juju/proxy/factory"
+	proxyfactory "github.com/juju/juju/internal/proxy/factory"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type Suite struct {
-	jujutesting.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&Suite{})
+func TestSuite(t *testing.T) {
+	tc.Run(t, &Suite{})
+}
 
-func (s *Suite) TestDestroyController(c *gc.C) {
-	var stub jujutesting.Stub
+func (s *Suite) TestDestroyController(c *tc.C) {
+	var stub testhelpers.Stub
 	apiCaller := apitesting.BestVersionCaller{
 		BestVersion: 11,
 		APICallerFunc: func(objType string, version int, id, request string, arg, result interface{}) error {
@@ -47,17 +51,17 @@ func (s *Suite) TestDestroyController(c *gc.C) {
 	force := true
 	maxWait := time.Minute
 	timeout := time.Hour
-	err := client.DestroyController(controller.DestroyControllerParams{
+	err := client.DestroyController(c.Context(), controller.DestroyControllerParams{
 		DestroyModels:  true,
 		DestroyStorage: &destroyStorage,
 		Force:          &force,
 		MaxWait:        &maxWait,
 		ModelTimeout:   &timeout,
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	stub.CheckCalls(c, []jujutesting.StubCall{
-		{"Controller.DestroyController", []interface{}{params.DestroyControllerArgs{
+	stub.CheckCalls(c, []testhelpers.StubCall{
+		{FuncName: "Controller.DestroyController", Args: []interface{}{params.DestroyControllerArgs{
 			DestroyModels:  true,
 			DestroyStorage: &destroyStorage,
 			Force:          &force,
@@ -67,7 +71,7 @@ func (s *Suite) TestDestroyController(c *gc.C) {
 	})
 }
 
-func (s *Suite) TestDestroyControllerError(c *gc.C) {
+func (s *Suite) TestDestroyControllerError(c *tc.C) {
 	apiCaller := apitesting.BestVersionCaller{
 		BestVersion: 4,
 		APICallerFunc: func(objType string, version int, id, request string, arg, result interface{}) error {
@@ -75,37 +79,37 @@ func (s *Suite) TestDestroyControllerError(c *gc.C) {
 		},
 	}
 	client := controller.NewClient(apiCaller)
-	err := client.DestroyController(controller.DestroyControllerParams{})
-	c.Assert(err, gc.ErrorMatches, "nope")
+	err := client.DestroyController(c.Context(), controller.DestroyControllerParams{})
+	c.Assert(err, tc.ErrorMatches, "nope")
 }
 
-func (s *Suite) TestInitiateMigration(c *gc.C) {
+func (s *Suite) TestInitiateMigration(c *tc.C) {
 	s.checkInitiateMigration(c, makeSpec())
 }
 
-func (s *Suite) TestInitiateMigrationEmptyCACert(c *gc.C) {
+func (s *Suite) TestInitiateMigrationEmptyCACert(c *tc.C) {
 	spec := makeSpec()
 	spec.TargetCACert = ""
 	s.checkInitiateMigration(c, spec)
 }
 
-func (s *Suite) TestInitiateMigrationSkipUserChecks(c *gc.C) {
+func (s *Suite) TestInitiateMigrationSkipUserChecks(c *tc.C) {
 	spec := makeSpec()
 	spec.SkipUserChecks = true
 	s.checkInitiateMigration(c, spec)
 }
 
-func (s *Suite) checkInitiateMigration(c *gc.C, spec controller.MigrationSpec) {
+func (s *Suite) checkInitiateMigration(c *tc.C, spec controller.MigrationSpec) {
 	client, stub := makeInitiateMigrationClient(params.InitiateMigrationResults{
 		Results: []params.InitiateMigrationResult{{
 			MigrationId: "id",
 		}},
 	})
-	id, err := client.InitiateMigration(spec)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(id, gc.Equals, "id")
-	stub.CheckCalls(c, []jujutesting.StubCall{
-		{"Controller.InitiateMigration", []interface{}{specToArgs(spec)}},
+	id, err := client.InitiateMigration(c.Context(), spec)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(id, tc.Equals, "id")
+	stub.CheckCalls(c, []testhelpers.StubCall{
+		{FuncName: "Controller.InitiateMigration", Args: []interface{}{specToArgs(spec)}},
 	})
 }
 
@@ -136,71 +140,71 @@ func specToArgs(spec controller.MigrationSpec) params.InitiateMigrationArgs {
 	}
 }
 
-func (s *Suite) TestInitiateMigrationError(c *gc.C) {
+func (s *Suite) TestInitiateMigrationError(c *tc.C) {
 	client, _ := makeInitiateMigrationClient(params.InitiateMigrationResults{
 		Results: []params.InitiateMigrationResult{{
 			Error: apiservererrors.ServerError(errors.New("boom")),
 		}},
 	})
-	id, err := client.InitiateMigration(makeSpec())
-	c.Check(id, gc.Equals, "")
-	c.Check(err, gc.ErrorMatches, "boom")
+	id, err := client.InitiateMigration(c.Context(), makeSpec())
+	c.Check(id, tc.Equals, "")
+	c.Check(err, tc.ErrorMatches, "boom")
 }
 
-func (s *Suite) TestInitiateMigrationResultMismatch(c *gc.C) {
+func (s *Suite) TestInitiateMigrationResultMismatch(c *tc.C) {
 	client, _ := makeInitiateMigrationClient(params.InitiateMigrationResults{
 		Results: []params.InitiateMigrationResult{
 			{MigrationId: "id"},
 			{MigrationId: "wtf"},
 		},
 	})
-	id, err := client.InitiateMigration(makeSpec())
-	c.Check(id, gc.Equals, "")
-	c.Check(err, gc.ErrorMatches, "unexpected number of results returned")
+	id, err := client.InitiateMigration(c.Context(), makeSpec())
+	c.Check(id, tc.Equals, "")
+	c.Check(err, tc.ErrorMatches, "unexpected number of results returned")
 }
 
-func (s *Suite) TestInitiateMigrationCallError(c *gc.C) {
+func (s *Suite) TestInitiateMigrationCallError(c *tc.C) {
 	apiCaller := apitesting.APICallerFunc(func(string, int, string, string, interface{}, interface{}) error {
 		return errors.New("boom")
 	})
 	client := controller.NewClient(apiCaller)
-	id, err := client.InitiateMigration(makeSpec())
-	c.Check(id, gc.Equals, "")
-	c.Check(err, gc.ErrorMatches, "boom")
+	id, err := client.InitiateMigration(c.Context(), makeSpec())
+	c.Check(id, tc.Equals, "")
+	c.Check(err, tc.ErrorMatches, "boom")
 }
 
-func (s *Suite) TestInitiateMigrationValidationError(c *gc.C) {
+func (s *Suite) TestInitiateMigrationValidationError(c *tc.C) {
 	client, stub := makeInitiateMigrationClient(params.InitiateMigrationResults{})
 	spec := makeSpec()
 	spec.ModelUUID = "not-a-uuid"
-	id, err := client.InitiateMigration(spec)
-	c.Check(id, gc.Equals, "")
-	c.Check(err, gc.ErrorMatches, "client-side validation failed: model UUID not valid")
-	c.Check(stub.Calls(), gc.HasLen, 0) // API call shouldn't have happened
+	id, err := client.InitiateMigration(c.Context(), spec)
+	c.Check(id, tc.Equals, "")
+	c.Check(err, tc.ErrorMatches, "client-side validation failed: model UUID not valid")
+	c.Check(stub.Calls(), tc.HasLen, 0) // API call shouldn't have happened
 }
 
-func (s *Suite) TestHostedModelConfigs_CallError(c *gc.C) {
+func (s *Suite) TestHostedModelConfigs_CallError(c *tc.C) {
 	apiCaller := apitesting.APICallerFunc(func(string, int, string, string, interface{}, interface{}) error {
 		return errors.New("boom")
 	})
 	client := controller.NewClient(apiCaller)
-	config, err := client.HostedModelConfigs()
-	c.Check(config, gc.HasLen, 0)
-	c.Check(err, gc.ErrorMatches, "boom")
+	config, err := client.HostedModelConfigs(c.Context())
+	c.Check(config, tc.HasLen, 0)
+	c.Check(err, tc.ErrorMatches, "boom")
 }
 
-func (s *Suite) TestHostedModelConfigs_FormatResults(c *gc.C) {
-	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Assert(objType, gc.Equals, "Controller")
-		c.Assert(request, gc.Equals, "HostedModelConfigs")
-		c.Assert(arg, gc.IsNil)
+func (s *Suite) TestHostedModelConfigs_FormatResults(c *tc.C) {
+	apiCaller := apitesting.BestVersionCaller{APICallerFunc: func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Assert(objType, tc.Equals, "Controller")
+		c.Assert(request, tc.Equals, "HostedModelConfigs")
+		c.Assert(arg, tc.IsNil)
 		out := result.(*params.HostedModelConfigsResults)
-		c.Assert(out, gc.NotNil)
+		c.Assert(out, tc.NotNil)
 		*out = params.HostedModelConfigsResults{
 			Models: []params.HostedModelConfig{
 				{
-					Name:     "first",
-					OwnerTag: "user-foo@bar",
+					Name:      "first",
+					Qualifier: "prod",
 					Config: map[string]interface{}{
 						"name": "first",
 					},
@@ -209,48 +213,42 @@ func (s *Suite) TestHostedModelConfigs_FormatResults(c *gc.C) {
 						Name: "first",
 					},
 				}, {
-					Name:     "second",
-					OwnerTag: "bad-tag",
-				}, {
-					Name:     "third",
-					OwnerTag: "user-foo@bar",
+					Name:      "third",
+					Qualifier: "prod",
 					Config: map[string]interface{}{
-						"name": "third",
+						"name": "second",
 					},
 					CloudSpec: &params.CloudSpec{
-						Name: "third",
+						Name: "second",
 					},
 				},
 			},
 		}
 		return nil
-	})
+	}, BestVersion: 13}
 	client := controller.NewClient(apiCaller)
-	config, err := client.HostedModelConfigs()
-	c.Assert(config, gc.HasLen, 3)
-	c.Assert(err, jc.ErrorIsNil)
+	config, err := client.HostedModelConfigs(c.Context())
+	c.Assert(config, tc.HasLen, 2)
+	c.Assert(err, tc.ErrorIsNil)
 	first := config[0]
-	c.Assert(first.Name, gc.Equals, "first")
-	c.Assert(first.Owner, gc.Equals, names.NewUserTag("foo@bar"))
-	c.Assert(first.Config, gc.DeepEquals, map[string]interface{}{
+	c.Assert(first.Name, tc.Equals, "first")
+	c.Assert(first.Qualifier, tc.Equals, "prod")
+	c.Assert(first.Config, tc.DeepEquals, map[string]interface{}{
 		"name": "first",
 	})
-	c.Assert(first.CloudSpec, gc.DeepEquals, environscloudspec.CloudSpec{
+	c.Assert(first.CloudSpec, tc.DeepEquals, environscloudspec.CloudSpec{
 		Type: "magic",
 		Name: "first",
 	})
 	second := config[1]
-	c.Assert(second.Name, gc.Equals, "second")
-	c.Assert(second.Error.Error(), gc.Equals, `"bad-tag" is not a valid tag`)
-	third := config[2]
-	c.Assert(third.Name, gc.Equals, "third")
-	c.Assert(third.Error.Error(), gc.Equals, "validating CloudSpec: empty Type not valid")
+	c.Assert(second.Name, tc.Equals, "third")
+	c.Assert(second.Error.Error(), tc.Equals, "validating CloudSpec: empty Type not valid")
 }
 
 func makeInitiateMigrationClient(results params.InitiateMigrationResults) (
-	*controller.Client, *jujutesting.Stub,
+	*controller.Client, *testhelpers.Stub,
 ) {
-	var stub jujutesting.Stub
+	var stub testhelpers.Stub
 	apiCaller := apitesting.APICallerFunc(
 		func(objType string, version int, id, request string, arg, result interface{}) error {
 			stub.AddCall(objType+"."+request, arg)
@@ -283,45 +281,45 @@ func makeSpec() controller.MigrationSpec {
 }
 
 func randomUUID() string {
-	return utils.MustNewUUID().String()
+	return uuid.MustNewUUID().String()
 }
 
-func (s *Suite) TestModelStatusEmpty(c *gc.C) {
-	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
-		c.Check(objType, gc.Equals, "Controller")
-		c.Check(id, gc.Equals, "")
-		c.Check(request, gc.Equals, "ModelStatus")
-		c.Check(result, gc.FitsTypeOf, &params.ModelStatusResults{})
+func (s *Suite) TestModelStatusEmpty(c *tc.C) {
+	apiCaller := apitesting.BestVersionCaller{APICallerFunc: func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "ModelStatus")
+		c.Check(result, tc.FitsTypeOf, &params.ModelStatusResults{})
 
 		return nil
-	})
+	}, BestVersion: 13}
 
 	client := controller.NewClient(apiCaller)
-	results, err := client.ModelStatus()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, []base.ModelStatus{})
+	results, err := client.ModelStatus(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, []base.ModelStatus{})
 }
 
-func (s *Suite) TestModelStatus(c *gc.C) {
+func (s *Suite) TestModelStatus(c *tc.C) {
 	apiCaller := apitesting.BestVersionCaller{
-		BestVersion: 4,
+		BestVersion: 13,
 		APICallerFunc: func(objType string, version int, id, request string, arg, result interface{}) error {
-			c.Check(objType, gc.Equals, "Controller")
-			c.Check(id, gc.Equals, "")
-			c.Check(request, gc.Equals, "ModelStatus")
-			c.Check(arg, jc.DeepEquals, params.Entities{
-				[]params.Entity{
+			c.Check(objType, tc.Equals, "Controller")
+			c.Check(id, tc.Equals, "")
+			c.Check(request, tc.Equals, "ModelStatus")
+			c.Check(arg, tc.DeepEquals, params.Entities{
+				Entities: []params.Entity{
 					{Tag: coretesting.ModelTag.String()},
 					{Tag: coretesting.ModelTag.String()},
 				},
 			})
-			c.Check(result, gc.FitsTypeOf, &params.ModelStatusResults{})
+			c.Check(result, tc.FitsTypeOf, &params.ModelStatusResults{})
 
 			out := result.(*params.ModelStatusResults)
 			out.Results = []params.ModelStatus{
 				{
 					ModelTag:           coretesting.ModelTag.String(),
-					OwnerTag:           "user-glenda",
+					Qualifier:          "prod",
 					ApplicationCount:   3,
 					HostedMachineCount: 2,
 					Life:               "alive",
@@ -338,95 +336,95 @@ func (s *Suite) TestModelStatus(c *gc.C) {
 	}
 
 	client := controller.NewClient(apiCaller)
-	results, err := client.ModelStatus(coretesting.ModelTag, coretesting.ModelTag)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results[0], jc.DeepEquals, base.ModelStatus{
+	results, err := client.ModelStatus(c.Context(), coretesting.ModelTag, coretesting.ModelTag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results[0], tc.DeepEquals, base.ModelStatus{
 		UUID:               coretesting.ModelTag.Id(),
 		TotalMachineCount:  1,
 		HostedMachineCount: 2,
 		ApplicationCount:   3,
-		Owner:              "glenda",
+		Qualifier:          "prod",
 		Life:               life.Alive,
 		Machines:           []base.Machine{{Id: "0", InstanceId: "inst-ance", Status: "pending"}},
 	})
-	c.Assert(results[1].Error, gc.ErrorMatches, "model error")
+	c.Assert(results[1].Error, tc.ErrorMatches, "model error")
 }
 
-func (s *Suite) TestModelStatusError(c *gc.C) {
+func (s *Suite) TestModelStatusError(c *tc.C) {
 	apiCaller := apitesting.APICallerFunc(
 		func(objType string, version int, id, request string, args, result interface{}) error {
 			return errors.New("model error")
 		})
 	client := controller.NewClient(apiCaller)
-	out, err := client.ModelStatus(coretesting.ModelTag, coretesting.ModelTag)
-	c.Assert(err, gc.ErrorMatches, "model error")
-	c.Assert(out, gc.IsNil)
+	out, err := client.ModelStatus(c.Context(), coretesting.ModelTag, coretesting.ModelTag)
+	c.Assert(err, tc.ErrorMatches, "model error")
+	c.Assert(out, tc.IsNil)
 }
 
-func (s *Suite) TestConfigSet(c *gc.C) {
+func (s *Suite) TestConfigSet(c *tc.C) {
 	apiCaller := apitesting.BestVersionCaller{
 		BestVersion: 5,
 		APICallerFunc: func(objType string, version int, id, request string, args, result interface{}) error {
-			c.Assert(objType, gc.Equals, "Controller")
-			c.Assert(version, gc.Equals, 5)
-			c.Assert(request, gc.Equals, "ConfigSet")
-			c.Assert(result, gc.IsNil)
-			c.Assert(args, gc.DeepEquals, params.ControllerConfigSet{Config: map[string]interface{}{
+			c.Assert(objType, tc.Equals, "Controller")
+			c.Assert(version, tc.Equals, 5)
+			c.Assert(request, tc.Equals, "ConfigSet")
+			c.Assert(result, tc.IsNil)
+			c.Assert(args, tc.DeepEquals, params.ControllerConfigSet{Config: map[string]interface{}{
 				"some-setting": 345,
 			}})
 			return errors.New("ruth mundy")
 		},
 	}
 	client := controller.NewClient(apiCaller)
-	err := client.ConfigSet(map[string]interface{}{
+	err := client.ConfigSet(c.Context(), map[string]interface{}{
 		"some-setting": 345,
 	})
-	c.Assert(err, gc.ErrorMatches, "ruth mundy")
+	c.Assert(err, tc.ErrorMatches, "ruth mundy")
 }
 
-func (s *Suite) TestWatchModelSummaries(c *gc.C) {
+func (s *Suite) TestWatchModelSummaries(c *tc.C) {
 	apiCaller := apitesting.BestVersionCaller{
 		BestVersion: 9,
 		APICallerFunc: func(objType string, version int, id, request string, args, result interface{}) error {
-			c.Check(objType, gc.Equals, "Controller")
-			c.Check(version, gc.Equals, 9)
-			c.Check(request, gc.Equals, "WatchModelSummaries")
-			c.Check(result, gc.FitsTypeOf, &params.SummaryWatcherID{})
-			c.Check(args, gc.IsNil)
+			c.Check(objType, tc.Equals, "Controller")
+			c.Check(version, tc.Equals, 9)
+			c.Check(request, tc.Equals, "WatchModelSummaries")
+			c.Check(result, tc.FitsTypeOf, &params.SummaryWatcherID{})
+			c.Check(args, tc.IsNil)
 			return errors.New("some error")
 		},
 	}
 	client := controller.NewClient(apiCaller)
-	watcher, err := client.WatchModelSummaries()
-	c.Assert(err, gc.ErrorMatches, "some error")
-	c.Assert(watcher, gc.IsNil)
+	watcher, err := client.WatchModelSummaries(c.Context())
+	c.Assert(err, tc.ErrorMatches, "some error")
+	c.Assert(watcher, tc.IsNil)
 }
 
-func (s *Suite) TestWatchAllModelSummaries(c *gc.C) {
+func (s *Suite) TestWatchAllModelSummaries(c *tc.C) {
 	apiCaller := apitesting.BestVersionCaller{
 		BestVersion: 9,
 		APICallerFunc: func(objType string, version int, id, request string, args, result interface{}) error {
-			c.Check(objType, gc.Equals, "Controller")
-			c.Check(version, gc.Equals, 9)
-			c.Check(request, gc.Equals, "WatchAllModelSummaries")
-			c.Check(result, gc.FitsTypeOf, &params.SummaryWatcherID{})
-			c.Check(args, gc.IsNil)
+			c.Check(objType, tc.Equals, "Controller")
+			c.Check(version, tc.Equals, 9)
+			c.Check(request, tc.Equals, "WatchAllModelSummaries")
+			c.Check(result, tc.FitsTypeOf, &params.SummaryWatcherID{})
+			c.Check(args, tc.IsNil)
 			return errors.New("some error")
 		},
 	}
 	client := controller.NewClient(apiCaller)
-	watcher, err := client.WatchAllModelSummaries()
-	c.Assert(err, gc.ErrorMatches, "some error")
-	c.Assert(watcher, gc.IsNil)
+	watcher, err := client.WatchAllModelSummaries(c.Context())
+	c.Assert(err, tc.ErrorMatches, "some error")
+	c.Assert(watcher, tc.IsNil)
 }
 
-func (s *Suite) TestDashboardConnectionInfo(c *gc.C) {
+func (s *Suite) TestDashboardConnectionInfo(c *tc.C) {
 	apiCaller := apitesting.APICallerFunc(
 		func(objType string, version int, id, request string, args, result interface{}) error {
-			c.Assert(objType, gc.Equals, "Controller")
-			c.Assert(request, gc.Equals, "DashboardConnectionInfo")
-			c.Assert(args, gc.IsNil)
-			c.Assert(result, gc.FitsTypeOf, &params.DashboardConnectionInfo{})
+			c.Assert(objType, tc.Equals, "Controller")
+			c.Assert(request, tc.Equals, "DashboardConnectionInfo")
+			c.Assert(args, tc.IsNil)
+			c.Assert(result, tc.FitsTypeOf, &params.DashboardConnectionInfo{})
 			*(result.(*params.DashboardConnectionInfo)) = params.DashboardConnectionInfo{
 				SSHConnection: &params.DashboardConnectionSSHTunnel{
 					Model:  "c:controller",
@@ -438,33 +436,166 @@ func (s *Suite) TestDashboardConnectionInfo(c *gc.C) {
 			return nil
 		})
 	client := controller.NewClient(apiCaller)
-	connectionInfo, err := client.DashboardConnectionInfo(proxyfactory.NewFactory())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(connectionInfo.SSHTunnel, gc.NotNil)
+	connectionInfo, err := client.DashboardConnectionInfo(c.Context(), proxyfactory.NewFactory())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(connectionInfo.SSHTunnel, tc.NotNil)
 }
 
-func (s *Suite) TestValidateMigrationCredentials(c *gc.C) {
+func (s *Suite) TestAllModels(c *tc.C) {
+	now := time.Now()
+	apiCaller := apitesting.BestVersionCaller{APICallerFunc: func(objType string, version int, id, request string, args, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "AllModels")
+		c.Check(args, tc.IsNil)
+		c.Check(result, tc.FitsTypeOf, &params.UserModelList{})
+		*(result.(*params.UserModelList)) = params.UserModelList{
+			UserModels: []params.UserModel{{
+				Model: params.Model{
+					Name:      "test",
+					UUID:      coretesting.ModelTag.Id(),
+					Type:      "iaas",
+					Qualifier: "prod",
+				},
+				LastConnection: &now,
+			}},
+		}
+		return nil
+	}, BestVersion: 13}
+
+	client := controller.NewClient(apiCaller)
+	m, err := client.AllModels(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m, tc.DeepEquals, []base.UserModel{{
+		Name:           "test",
+		UUID:           coretesting.ModelTag.Id(),
+		Type:           "iaas",
+		Qualifier:      "prod",
+		LastConnection: &now,
+	}})
+}
+
+func (s *Suite) TestControllerConfig(c *tc.C) {
+	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, args, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "ControllerConfig")
+		c.Check(args, tc.IsNil)
+		c.Check(result, tc.FitsTypeOf, &params.ControllerConfigResult{})
+		*(result.(*params.ControllerConfigResult)) = params.ControllerConfigResult{
+			Config: map[string]interface{}{
+				"api-port": 666,
+			},
+		}
+		return nil
+	})
+
+	client := controller.NewClient(apiCaller)
+	m, err := client.ControllerConfig(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m, tc.DeepEquals, corecontroller.Config{"api-port": 666})
+}
+
+func (s *Suite) TestListBlockedModels(c *tc.C) {
+	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, args, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "ListBlockedModels")
+		c.Check(args, tc.IsNil)
+		c.Check(result, tc.FitsTypeOf, &params.ModelBlockInfoList{})
+		*(result.(*params.ModelBlockInfoList)) = params.ModelBlockInfoList{
+			Models: []params.ModelBlockInfo{{
+				Name:      "controller",
+				UUID:      coretesting.ModelTag.Id(),
+				Qualifier: "prod",
+				Blocks: []string{
+					"BlockChange",
+					"BlockDestroy",
+				},
+			}},
+		}
+		return nil
+	})
+
+	client := controller.NewClient(apiCaller)
+	results, err := client.ListBlockedModels(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, []params.ModelBlockInfo{
+		{
+			Name:      "controller",
+			UUID:      coretesting.ModelTag.Id(),
+			Qualifier: "prod",
+			Blocks: []string{
+				"BlockChange",
+				"BlockDestroy",
+			},
+		},
+	})
+}
+
+func (s *Suite) TestRemoveBlocks(c *tc.C) {
+	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, args, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "RemoveBlocks")
+		c.Check(args, tc.DeepEquals, params.RemoveBlocksArgs{All: true})
+		c.Check(result, tc.IsNil)
+		return errors.New("some error")
+	})
+
+	client := controller.NewClient(apiCaller)
+	err := client.RemoveBlocks(c.Context())
+	c.Assert(err, tc.ErrorMatches, "some error")
+}
+
+func (s *Suite) TestGetControllerAccess(c *tc.C) {
+	apiCaller := apitesting.APICallerFunc(func(objType string, version int, id, request string, args, result interface{}) error {
+		c.Check(objType, tc.Equals, "Controller")
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "GetControllerAccess")
+		c.Check(args, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "user-fred"}},
+		})
+		c.Check(result, tc.FitsTypeOf, &params.UserAccessResults{})
+		*(result.(*params.UserAccessResults)) = params.UserAccessResults{
+			Results: []params.UserAccessResult{{
+				Result: &params.UserAccess{
+					UserTag: "user-fred",
+					Access:  "superuser",
+				},
+			}},
+		}
+		return nil
+	})
+
+	client := controller.NewClient(apiCaller)
+	access, err := client.GetControllerAccess(c.Context(), "fred")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(access, tc.Equals, permission.SuperuserAccess)
+}
+
+func (s *Suite) TestValidateMigrationCredentials(c *tc.C) {
 	spec := makeSpec()
 	spec.TargetMacaroons = nil
 	spec.TargetPassword = ""
 	spec.TargetToken = ""
 	err := spec.Validate()
-	c.Assert(err, gc.ErrorMatches, "missing authentication secrets not valid")
+	c.Assert(err, tc.ErrorMatches, "missing authentication secrets not valid")
 
 	// Valid with a macaroon.
 	spec.TargetMacaroons = []macaroon.Slice{{}}
 	err = spec.Validate()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Valid with a password.
 	spec.TargetMacaroons = nil
 	spec.TargetPassword = "password"
 	err = spec.Validate()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Valid with a token.
 	spec.TargetPassword = ""
 	spec.TargetToken = "token"
 	err = spec.Validate()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

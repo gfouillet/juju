@@ -4,18 +4,20 @@
 package storage
 
 import (
+	"context"
 	"regexp"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apistorage "github.com/juju/juju/api/client/storage"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/cmd"
+	internalstorage "github.com/juju/juju/internal/storage"
 )
 
 // NewImportFilesystemCommand returns a command used to import a filesystem.
@@ -40,13 +42,13 @@ func NewImportFilesystemCommand(
 
 // NewStorageImporterFunc is the type of a function passed to
 // NewImportFilesystemCommand, in order to acquire a StorageImporter.
-type NewStorageImporterFunc func(*StorageCommandBase) (StorageImporter, error)
+type NewStorageImporterFunc func(context.Context, *StorageCommandBase) (StorageImporter, error)
 
 // NewStorageImporter returns a new StorageImporter,
 // given a StorageCommandBase.
-func NewStorageImporter(cmd *StorageCommandBase) (StorageImporter, error) {
-	api, err := cmd.NewStorageAPI()
-	return apiStorageImporter{api}, err
+func NewStorageImporter(ctx context.Context, cmd *StorageCommandBase) (StorageImporter, error) {
+	api, err := cmd.NewStorageAPI(ctx)
+	return apiStorageImporter{Client: api}, err
 }
 
 const (
@@ -155,7 +157,7 @@ func (c *importFilesystemCommand) Info() *cmd.Info {
 
 // Run implements Command.Run.
 func (c *importFilesystemCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc(&c.StorageCommandBase)
+	api, err := c.newAPIFunc(ctx, &c.StorageCommandBase)
 	if err != nil {
 		return err
 	}
@@ -166,7 +168,8 @@ func (c *importFilesystemCommand) Run(ctx *cmd.Context) (err error) {
 		c.storageProviderId, c.storagePool, c.storageName,
 	)
 	storageTag, err := api.ImportStorage(
-		storage.StorageKindFilesystem,
+		ctx,
+		internalstorage.StorageKindFilesystem,
 		c.storagePool, c.storageProviderId, c.storageName, c.force,
 	)
 	if err != nil {
@@ -181,7 +184,8 @@ type StorageImporter interface {
 	Close() error
 
 	ImportStorage(
-		kind storage.StorageKind,
+		ctx context.Context,
+		kind internalstorage.StorageKind,
 		storagePool, storageProviderId, storageName string,
 		force bool,
 	) (names.StorageTag, error)
@@ -192,7 +196,8 @@ type apiStorageImporter struct {
 }
 
 func (a apiStorageImporter) ImportStorage(
-	kind storage.StorageKind, storagePool, storageProviderId, storageName string, force bool,
+	ctx context.Context,
+	kind internalstorage.StorageKind, storagePool, storageProviderId, storageName string, force bool,
 ) (names.StorageTag, error) {
-	return a.Import(kind, storagePool, storageProviderId, storageName, force)
+	return a.Import(ctx, kind, storagePool, storageProviderId, storageName, force)
 }

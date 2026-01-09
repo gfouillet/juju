@@ -4,6 +4,7 @@
 package modelcmd
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
@@ -19,10 +19,11 @@ import (
 	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/client/usermanager"
 	"github.com/juju/juju/api/controller/controller"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/interact"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient"
 )
 
 var (
@@ -187,7 +188,7 @@ func (c *ControllerCommandBase) initController0() error {
 
 // SetControllerName implements ControllerCommand.SetControllerName.
 func (c *ControllerCommandBase) SetControllerName(controllerName string, allowDefault bool) error {
-	logger.Infof("setting controllerName to %q %v", controllerName, allowDefault)
+	logger.Infof(context.TODO(), "setting controllerName to %q %v", controllerName, allowDefault)
 	c._controllerName = controllerName
 	c.allowDefaultController = allowDefault
 	if c.runStarted {
@@ -225,8 +226,8 @@ func (c *ControllerCommandBase) CookieJar() (http.CookieJar, error) {
 
 // NewModelManagerAPIClient returns an API client for the
 // ModelManager on the current controller using the current credentials.
-func (c *ControllerCommandBase) NewModelManagerAPIClient() (*modelmanager.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *ControllerCommandBase) NewModelManagerAPIClient(ctx context.Context) (*modelmanager.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -235,8 +236,8 @@ func (c *ControllerCommandBase) NewModelManagerAPIClient() (*modelmanager.Client
 
 // NewControllerAPIClient returns an API client for the Controller on
 // the current controller using the current credentials.
-func (c *ControllerCommandBase) NewControllerAPIClient() (*controller.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *ControllerCommandBase) NewControllerAPIClient(ctx context.Context) (*controller.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -245,8 +246,8 @@ func (c *ControllerCommandBase) NewControllerAPIClient() (*controller.Client, er
 
 // NewUserManagerAPIClient returns an API client for the UserManager on the
 // current controller using the current credentials.
-func (c *ControllerCommandBase) NewUserManagerAPIClient() (*usermanager.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *ControllerCommandBase) NewUserManagerAPIClient(ctx context.Context) (*usermanager.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -256,46 +257,46 @@ func (c *ControllerCommandBase) NewUserManagerAPIClient() (*usermanager.Client, 
 // NewAPIRoot returns a restricted API for the current controller using the current
 // credentials.  Only the UserManager and ModelManager may be accessed
 // through this API connection.
-func (c *ControllerCommandBase) NewAPIRoot() (api.Connection, error) {
-	return c.newAPIRoot("")
+func (c *ControllerCommandBase) NewAPIRoot(ctx context.Context) (api.Connection, error) {
+	return c.newAPIRoot(ctx, "")
 }
 
 // NewModelAPIRoot returns a new connection to the API server for the named model
 // in the specified controller.
-func (c *ControllerCommandBase) NewModelAPIRoot(modelName string) (api.Connection, error) {
+func (c *ControllerCommandBase) NewModelAPIRoot(ctx context.Context, modelName string) (api.Connection, error) {
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	_, err = c.store.ModelByName(controllerName, modelName)
 	if err != nil {
-		if !errors.IsNotFound(err) {
+		if !errors.Is(err, errors.NotFound) {
 			return nil, errors.Trace(err)
 		}
 		// The model isn't known locally, so query the models
 		// available in the controller, and cache them locally.
-		if err := c.RefreshModels(c.store, controllerName); err != nil {
+		if err := c.RefreshModels(ctx, c.store, controllerName); err != nil {
 			return nil, errors.Annotate(err, "refreshing models")
 		}
 	}
-	return c.newAPIRoot(modelName)
+	return c.newAPIRoot(ctx, modelName)
 }
 
-func (c *ControllerCommandBase) newAPIRoot(modelName string) (api.Connection, error) {
+func (c *ControllerCommandBase) newAPIRoot(ctx context.Context, modelName string) (api.Connection, error) {
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return c.CommandBase.NewAPIRoot(c.store, controllerName, modelName)
+	return c.CommandBase.NewAPIRoot(ctx, c.store, controllerName, modelName)
 }
 
 // ModelUUIDs returns the model UUIDs for the given model names.
-func (c *ControllerCommandBase) ModelUUIDs(modelNames []string) ([]string, error) {
+func (c *ControllerCommandBase) ModelUUIDs(ctx context.Context, modelNames []string) ([]string, error) {
 	controllerName, err := c.ControllerName()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return c.CommandBase.ModelUUIDs(c.ClientStore(), controllerName, modelNames)
+	return c.CommandBase.ModelUUIDs(ctx, c.ClientStore(), controllerName, modelNames)
 }
 
 // CurrentAccountDetails returns details of the account associated with
@@ -404,7 +405,7 @@ func (w *controllerCommandWrapper) Run(ctx *cmd.Context) error {
 }
 
 func translateControllerError(store jujuclient.ClientStore, err error) error {
-	if !errors.IsNotFound(err) {
+	if !errors.Is(err, errors.NotFound) {
 		return err
 	}
 	controllers, err2 := store.AllControllers()
@@ -479,7 +480,7 @@ func (c *OptionalControllerCommand) MaybePrompt(ctxt *cmd.Context, action string
 	}
 
 	currentController, err := DetermineCurrentController(c.Store)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 

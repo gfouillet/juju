@@ -5,23 +5,22 @@ package machine_test
 
 import (
 	"bytes"
+	"context"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/cmd/cmdtest"
 	"github.com/juju/juju/cmd/juju/machine"
 	"github.com/juju/juju/cmd/juju/machine/mocks"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/internal/provider/dummy"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
 )
 
 type RemoveMachineSuite struct {
@@ -33,15 +32,17 @@ type RemoveMachineSuite struct {
 	facadeVersion int
 }
 
-var _ = gc.Suite(&RemoveMachineSuite{})
+func TestRemoveMachineSuite(t *stdtesting.T) {
+	tc.Run(t, &RemoveMachineSuite{})
+}
 
-func (s *RemoveMachineSuite) SetUpTest(c *gc.C) {
+func (s *RemoveMachineSuite) SetUpTest(c *tc.C) {
 	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	s.apiConnection = &mockAPIConnection{}
 	s.facadeVersion = 10
 }
 
-func (s *RemoveMachineSuite) setup(c *gc.C) *gomock.Controller {
+func (s *RemoveMachineSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.mockApi = mocks.NewMockRemoveMachineAPI(ctrl)
@@ -54,17 +55,17 @@ func (s *RemoveMachineSuite) setup(c *gc.C) *gomock.Controller {
 	return ctrl
 }
 
-func (s *RemoveMachineSuite) run(c *gc.C, args ...string) (*cmd.Context, error) {
+func (s *RemoveMachineSuite) run(c *tc.C, args ...string) (*cmd.Context, error) {
 	remove, _ := machine.NewRemoveCommandForTest(s.apiConnection, s.mockApi, s.mockModelConfigApi)
 	return cmdtesting.RunCommand(c, remove, args...)
 }
 
-func (s *RemoveMachineSuite) runWithContext(ctx *cmd.Context, args ...string) (chan dummy.Operation, chan error) {
+func (s *RemoveMachineSuite) runWithContext(ctx *cmd.Context, args ...string) chan error {
 	remove, _ := machine.NewRemoveCommandForTest(s.apiConnection, s.mockApi, s.mockModelConfigApi)
-	return cmdtest.RunCommandWithDummyProvider(ctx, remove, args...)
+	return cmdtesting.RunCommandWithContext(ctx, remove, args...)
 }
 
-func defaultDestroyMachineResult(_, _, _ bool, _ *time.Duration, machines ...string) ([]params.DestroyMachineResult, error) {
+func defaultDestroyMachineResult(ctx context.Context, _, _, _ bool, _ *time.Duration, machines ...string) ([]params.DestroyMachineResult, error) {
 	results := make([]params.DestroyMachineResult, len(machines))
 	for i := range results {
 		results[i].Info = &params.DestroyMachineInfo{MachineId: machines[i]}
@@ -72,7 +73,7 @@ func defaultDestroyMachineResult(_, _, _ bool, _ *time.Duration, machines ...str
 	return results, nil
 }
 
-func (s *RemoveMachineSuite) TestInit(c *gc.C) {
+func (s *RemoveMachineSuite) TestInit(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	for i, test := range []struct {
@@ -132,32 +133,32 @@ func (s *RemoveMachineSuite) TestInit(c *gc.C) {
 		wrappedCommand, removeCmd := machine.NewRemoveCommandForTest(s.apiConnection, s.mockApi, s.mockModelConfigApi)
 		err := cmdtesting.InitCommand(wrappedCommand, test.args)
 		if test.errorString == "" {
-			c.Check(err, jc.ErrorIsNil)
-			c.Check(removeCmd.Force, gc.Equals, test.force)
-			c.Check(removeCmd.KeepInstance, gc.Equals, test.keep)
-			c.Check(removeCmd.DryRun, gc.Equals, test.dryRun)
-			c.Check(removeCmd.MachineIds, jc.DeepEquals, test.machines)
+			c.Check(err, tc.ErrorIsNil)
+			c.Check(removeCmd.Force, tc.Equals, test.force)
+			c.Check(removeCmd.KeepInstance, tc.Equals, test.keep)
+			c.Check(removeCmd.DryRun, tc.Equals, test.dryRun)
+			c.Check(removeCmd.MachineIds, tc.DeepEquals, test.machines)
 		} else {
-			c.Check(err, gc.ErrorMatches, test.errorString)
+			c.Check(err, tc.ErrorMatches, test.errorString)
 		}
 	}
 }
 
-func (s *RemoveMachineSuite) TestRemove(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemove(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, false, gomock.Any(), "1", "2/lxd/1")
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, false, gomock.Any(), "1", "2/lxd/1")
 
 	_, err := s.run(c, "--no-prompt", "1", "2/lxd/1")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *RemoveMachineSuite) TestRemoveNoWaitWithoutForce(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveNoWaitWithoutForce(c *tc.C) {
 	_, err := s.run(c, "--no-prompt", "1", "--no-wait")
-	c.Assert(err, gc.ErrorMatches, `--no-wait without --force not valid`)
+	c.Assert(err, tc.ErrorMatches, `--no-wait without --force not valid`)
 }
 
-func (s *RemoveMachineSuite) TestRemoveOutput(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveOutput(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	results := []params.DestroyMachineResult{{
@@ -172,16 +173,16 @@ func (s *RemoveMachineSuite) TestRemoveOutput(c *gc.C) {
 			DetachedStorage:  []params.Entity{{"storage-baz-2"}},
 		},
 	}}
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, false, gomock.Any(), "1", "2/lxd/1").Return(results, nil)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, false, gomock.Any(), "1", "2/lxd/1").Return(results, nil)
 
 	ctx, err := s.run(c, "--no-prompt", "1", "2/lxd/1")
-	c.Assert(err, gc.Equals, cmd.ErrSilent)
+	c.Assert(err, tc.Equals, cmd.ErrSilent)
 	stderr := cmdtesting.Stderr(ctx)
 	stdout := cmdtesting.Stdout(ctx)
-	c.Assert(stderr, gc.Equals, `
+	c.Assert(stderr, tc.Equals, `
 ERROR removing machine failed: oy vey machine 1
 `[1:])
-	c.Assert(stdout, gc.Equals, `
+	c.Assert(stdout, tc.Equals, `
 will remove machine 2/lxd/1
 - will remove unit foo/0
 - will remove storage bar/1
@@ -189,39 +190,39 @@ will remove machine 2/lxd/1
 `[1:])
 }
 
-func (s *RemoveMachineSuite) TestRemoveKeep(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveKeep(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, true, false, gomock.Any(), "1", "2")
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, true, false, gomock.Any(), "1", "2")
 
 	_, err := s.run(c, "--no-prompt", "--keep-instance", "1", "2")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *RemoveMachineSuite) TestRemoveOutputKeep(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveOutputKeep(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, true, false, gomock.Any(), "1", "2").DoAndReturn(defaultDestroyMachineResult)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, true, false, gomock.Any(), "1", "2").DoAndReturn(defaultDestroyMachineResult)
 
 	ctx, err := s.run(c, "--no-prompt", "--keep-instance", "1", "2")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	stdout := cmdtesting.Stdout(ctx)
-	c.Assert(stdout, gc.Equals, `
+	c.Assert(stdout, tc.Equals, `
 will remove machine 1 (but retaining cloud instance)
 will remove machine 2 (but retaining cloud instance)
 `[1:])
 }
 
-func (s *RemoveMachineSuite) TestRemoveForce(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveForce(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(true, false, false, gomock.Any(), "1", "2/lxd/1")
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), true, false, false, gomock.Any(), "1", "2/lxd/1")
 
 	_, err := s.run(c, "--no-prompt", "--force", "1", "2/lxd/1")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *RemoveMachineSuite) TestRemoveWithContainers(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveWithContainers(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	results := []params.DestroyMachineResult{{
@@ -240,12 +241,12 @@ func (s *RemoveMachineSuite) TestRemoveWithContainers(c *gc.C) {
 			}},
 		},
 	}}
-	s.mockApi.EXPECT().DestroyMachinesWithParams(true, false, false, gomock.Any(), "1").Return(results, nil)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), true, false, false, gomock.Any(), "1").Return(results, nil)
 
 	ctx, err := s.run(c, "--no-prompt", "--force", "1")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	stdout := cmdtesting.Stdout(ctx)
-	c.Assert(stdout, gc.Equals, `
+	c.Assert(stdout, tc.Equals, `
 will remove machine 1
 - will remove unit foo/0
 - will remove storage bar/1
@@ -257,143 +258,89 @@ will remove machine 1/lxd/2
 `[1:])
 }
 
-func (s *RemoveMachineSuite) TestRemoveDryRun(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveDryRun(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, true, gomock.Any(), "1", "2")
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, true, gomock.Any(), "1", "2")
 
 	_, err := s.run(c, "--dry-run", "1", "2")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *RemoveMachineSuite) TestRemoveOutputDryRun(c *gc.C) {
+func (s *RemoveMachineSuite) TestRemoveOutputDryRun(c *tc.C) {
 	defer s.setup(c).Finish()
 
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, true, gomock.Any(), "1", "2").DoAndReturn(defaultDestroyMachineResult)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, true, gomock.Any(), "1", "2").DoAndReturn(defaultDestroyMachineResult)
 
 	ctx, err := s.run(c, "--dry-run", "1", "2")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	stdout := cmdtesting.Stdout(ctx)
-	c.Assert(stdout, gc.Equals, `
+	c.Assert(stdout, tc.Equals, `
 will remove machine 1
 will remove machine 2
 `[1:])
 }
 
-func (s *RemoveMachineSuite) TestRemoveDryRunOldFacade(c *gc.C) {
-	s.facadeVersion = 9
-	defer s.setup(c).Finish()
-
-	_, err := s.run(c, "--dry-run", "1", "2")
-	c.Assert(err, gc.Equals, machine.ErrDryRunNotSupported)
-}
-
-func (s *RemoveMachineSuite) TestRemovePromptOldFacade(c *gc.C) {
-	s.facadeVersion = 9
+func (s *RemoveMachineSuite) TestRemovePrompt(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	var stdin bytes.Buffer
 	ctx := cmdtesting.Context(c)
 	ctx.Stdin = &stdin
 
-	attrs := dummy.SampleConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
-	s.mockModelConfigApi.EXPECT().ModelGet().Return(attrs, nil)
-
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, false, gomock.Any(), "1", "2")
+	attrs := testing.FakeConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
+	s.mockModelConfigApi.EXPECT().ModelGet(gomock.Any()).Return(attrs, nil)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, true, gomock.Any(), "1", "2")
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, false, gomock.Any(), "1", "2")
 
 	stdin.WriteString("y")
-	_, errc := s.runWithContext(ctx, "1", "2")
+	errc := s.runWithContext(ctx, "1", "2")
 
 	select {
 	case err := <-errc:
-		c.Check(err, jc.ErrorIsNil)
+		c.Check(err, tc.ErrorIsNil)
 	case <-time.After(testing.LongWait):
 		c.Fatal("command took too long")
 	}
 }
 
-func (s *RemoveMachineSuite) TestRemovePrompt(c *gc.C) {
-	defer s.setup(c).Finish()
-
-	var stdin bytes.Buffer
-	ctx := cmdtesting.Context(c)
-	ctx.Stdin = &stdin
-
-	attrs := dummy.SampleConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
-	s.mockModelConfigApi.EXPECT().ModelGet().Return(attrs, nil)
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, true, gomock.Any(), "1", "2")
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, false, gomock.Any(), "1", "2")
-
-	stdin.WriteString("y")
-	_, errc := s.runWithContext(ctx, "1", "2")
-
-	select {
-	case err := <-errc:
-		c.Check(err, jc.ErrorIsNil)
-	case <-time.After(testing.LongWait):
-		c.Fatal("command took too long")
-	}
-}
-
-func (s *RemoveMachineSuite) TestRemovePromptOldFacadeAborted(c *gc.C) {
-	s.facadeVersion = 9
+func (s *RemoveMachineSuite) TestRemovePromptAborted(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	ctx := cmdtesting.Context(c)
 	var stdin bytes.Buffer
 	ctx.Stdin = &stdin
 
-	attrs := dummy.SampleConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
-	s.mockModelConfigApi.EXPECT().ModelGet().Return(attrs, nil)
+	attrs := testing.FakeConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
+	s.mockModelConfigApi.EXPECT().ModelGet(gomock.Any()).Return(attrs, nil)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, true, gomock.Any(), "1", "2")
 
 	stdin.WriteString("n")
-	_, errc := s.runWithContext(ctx, "1", "2")
+	errc := s.runWithContext(ctx, "1", "2")
 
 	select {
 	case err := <-errc:
-		c.Check(err, gc.ErrorMatches, "machine removal: aborted")
+		c.Check(err, tc.ErrorMatches, "machine removal: aborted")
 	case <-time.After(testing.LongWait):
 		c.Fatal("command took too long")
 	}
 }
 
-func (s *RemoveMachineSuite) TestRemovePromptAborted(c *gc.C) {
-	defer s.setup(c).Finish()
-
-	ctx := cmdtesting.Context(c)
-	var stdin bytes.Buffer
-	ctx.Stdin = &stdin
-
-	attrs := dummy.SampleConfig().Merge(map[string]interface{}{config.ModeKey: config.RequiresPromptsMode})
-	s.mockModelConfigApi.EXPECT().ModelGet().Return(attrs, nil)
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, true, gomock.Any(), "1", "2")
-
-	stdin.WriteString("n")
-	_, errc := s.runWithContext(ctx, "1", "2")
-
-	select {
-	case err := <-errc:
-		c.Check(err, gc.ErrorMatches, "machine removal: aborted")
-	case <-time.After(testing.LongWait):
-		c.Fatal("command took too long")
-	}
-}
-
-func (s *RemoveMachineSuite) TestBlockedError(c *gc.C) {
+func (s *RemoveMachineSuite) TestBlockedError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	removeError := apiservererrors.OperationBlockedError("TestBlockedError")
-	s.mockApi.EXPECT().DestroyMachinesWithParams(false, false, false, gomock.Any(), "1").Return(nil, removeError)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), false, false, false, gomock.Any(), "1").Return(nil, removeError)
 
 	_, err := s.run(c, "--no-prompt", "1")
 	testing.AssertOperationWasBlocked(c, err, ".*TestBlockedError.*")
 }
 
-func (s *RemoveMachineSuite) TestForceBlockedError(c *gc.C) {
+func (s *RemoveMachineSuite) TestForceBlockedError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	removeError := apiservererrors.OperationBlockedError("TestForceBlockedError")
-	s.mockApi.EXPECT().DestroyMachinesWithParams(true, false, false, gomock.Any(), "1").Return(nil, removeError)
+	s.mockApi.EXPECT().DestroyMachinesWithParams(gomock.Any(), true, false, false, gomock.Any(), "1").Return(nil, removeError)
 
 	_, err := s.run(c, "--no-prompt", "--force", "1")
 	testing.AssertOperationWasBlocked(c, err, ".*TestForceBlockedError.*")

@@ -4,8 +4,18 @@
 package ssh
 
 import (
+	"context"
+	"net/url"
+
+	"github.com/juju/retry"
+
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/environs/cloudspec"
+	jujussh "github.com/juju/juju/internal/network/ssh"
 	k8sexec "github.com/juju/juju/internal/provider/kubernetes/exec"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type (
@@ -28,8 +38,8 @@ func (c *sshContainer) CleanupRun() {
 	c.cleanupRun()
 }
 
-func (c *sshContainer) ResolveTarget(target string) (*resolvedTarget, error) {
-	return c.resolveTarget(target)
+func (c *sshContainer) ResolveTarget(ctx context.Context, target string) (*resolvedTarget, error) {
+	return c.resolveTarget(ctx, target)
 }
 
 func (c *sshContainer) SSH(ctx Context, enablePty bool, target *resolvedTarget) error {
@@ -41,7 +51,7 @@ func (c *sshContainer) Copy(ctx Context) error {
 }
 
 func (c *sshContainer) GetExecClient() (k8sexec.Executor, error) {
-	return c.getExecClient()
+	return c.getExecClient(context.TODO())
 }
 
 func (c *sshContainer) ModelName() string {
@@ -52,8 +62,8 @@ func (c *sshContainer) SetArgs(args []string) {
 	c.setArgs(args)
 }
 
-func (c *sshContainer) InitRun(mc ModelCommand) (err error) {
-	return c.initRun(mc)
+func (c *sshContainer) InitRun(ctx context.Context, mc ModelCommand) (err error) {
+	return c.initRun(ctx, mc)
 }
 
 func (c *sshContainer) Namespace() string {
@@ -62,23 +72,22 @@ func (c *sshContainer) Namespace() string {
 
 type SSHContainerInterfaceForTest interface {
 	CleanupRun()
-	ResolveTarget(string) (*resolvedTarget, error)
+	ResolveTarget(context.Context, string) (*resolvedTarget, error)
 	SSH(Context, bool, *resolvedTarget) error
 	Copy(ctx Context) error
 	GetExecClient() (k8sexec.Executor, error)
 	ModelName() string
 	SetArgs([]string)
-	InitRun(mc ModelCommand) (err error)
+	InitRun(ctx context.Context, mc ModelCommand) (err error)
 	Namespace() string
 }
 
 func NewSSHContainer(
 	modelUUID, modelName string,
 	applicationAPI ApplicationAPI,
-	charmsAPI CharmsAPI,
+	charmsAPI CharmAPI,
 	execClient k8sexec.Executor,
 	sshClient SSHClientAPI,
-	remote bool,
 	containerName string,
 	controllerAPI SSHControllerAPI,
 ) SSHContainerInterfaceForTest {
@@ -86,14 +95,128 @@ func NewSSHContainer(
 		modelUUID:      modelUUID,
 		modelName:      modelName,
 		applicationAPI: applicationAPI,
-		charmsAPI:      charmsAPI,
+		charmAPI:       charmsAPI,
 		execClient:     execClient,
 		sshClient:      sshClient,
 		execClientGetter: func(string, cloudspec.CloudSpec) (k8sexec.Executor, error) {
 			return execClient, nil
 		},
-		remote:        remote,
 		container:     containerName,
 		controllerAPI: controllerAPI,
 	}
+}
+
+func clientStore() jujuclient.ClientStore {
+	store := jujuclienttesting.MinimalStore()
+	models := store.Models["arthur"]
+	models.Models["admin/controller"] = jujuclient.ModelDetails{
+		ModelUUID: uuid.MustNewUUID().String(),
+		ModelType: model.IAAS,
+	}
+	store.Models["arthur"] = models
+	store.Models["arthur"].CurrentModel = "controller"
+	store.Accounts["arthur"] = jujuclient.AccountDetails{User: "admin"}
+	return store
+}
+
+func NewSSHCommandForTest(
+	applicationAPI ApplicationAPI,
+	sshClient SSHClientAPI,
+	statusClient StatusClientAPI,
+	hostChecker jujussh.ReachableChecker,
+	isTerminal func(interface{}) bool,
+	retryStrategy retry.CallArgs,
+	publicKeyRetryStrategy retry.CallArgs,
+) *sshCommand {
+	c := &sshCommand{
+		hostChecker:            hostChecker,
+		isTerminal:             isTerminal,
+		retryStrategy:          retryStrategy,
+		publicKeyRetryStrategy: publicKeyRetryStrategy,
+	}
+	c.sshMachine.sshClient = sshClient
+	c.sshMachine.leaderAPI = applicationAPI
+	c.statusClient = statusClient
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
+	c.SetClientStore(clientStore())
+	return c
+}
+
+func NewSCPCommandForTest(
+	applicationAPI ApplicationAPI,
+	sshClient SSHClientAPI,
+	statusClient StatusClientAPI,
+	hostChecker jujussh.ReachableChecker,
+	retryStrategy retry.CallArgs,
+	publicKeyRetryStrategy retry.CallArgs,
+) *scpCommand {
+	c := &scpCommand{
+		hostChecker:            hostChecker,
+		retryStrategy:          retryStrategy,
+		publicKeyRetryStrategy: publicKeyRetryStrategy,
+	}
+	c.sshMachine.sshClient = sshClient
+	c.sshMachine.leaderAPI = applicationAPI
+	c.statusClient = statusClient
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
+	c.SetClientStore(clientStore())
+	return c
+}
+
+func NewDebugHooksCommandForTest(
+	applicationAPI ApplicationAPI,
+	sshClient SSHClientAPI,
+	statusClient StatusClientAPI,
+	charmAPI CharmAPI,
+	hostChecker jujussh.ReachableChecker,
+	retryStrategy retry.CallArgs,
+	publicKeyRetryStrategy retry.CallArgs,
+) *debugHooksCommand {
+	c := &debugHooksCommand{
+		sshCommand: sshCommand{
+			hostChecker:            hostChecker,
+			retryStrategy:          retryStrategy,
+			publicKeyRetryStrategy: publicKeyRetryStrategy,
+			sshContainer: sshContainer{
+				applicationAPI: applicationAPI,
+				charmAPI:       charmAPI,
+			},
+		},
+	}
+	c.sshMachine.sshClient = sshClient
+	c.sshMachine.leaderAPI = applicationAPI
+	c.statusClient = statusClient
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
+	c.SetClientStore(clientStore())
+	return c
+}
+
+func NewDebugCodeCommandForTest(
+	applicationAPI ApplicationAPI,
+	sshClient SSHClientAPI,
+	statusClient StatusClientAPI,
+	charmAPI CharmAPI,
+	hostChecker jujussh.ReachableChecker,
+	retryStrategy retry.CallArgs,
+	publicKeyRetryStrategy retry.CallArgs,
+) *debugCodeCommand {
+	c := &debugCodeCommand{
+		debugHooksCommand: debugHooksCommand{
+			sshCommand: sshCommand{
+				hostChecker:            hostChecker,
+				retryStrategy:          retryStrategy,
+				publicKeyRetryStrategy: publicKeyRetryStrategy,
+				sshContainer: sshContainer{
+					applicationAPI: applicationAPI,
+					charmAPI:       charmAPI,
+				},
+			},
+		},
+	}
+	c.sshMachine.sshClient = sshClient
+	c.sshMachine.leaderAPI = applicationAPI
+	c.statusClient = statusClient
+	c.apiAddr = &url.URL{Host: "localhost:6666"}
+	c.SetClientStore(clientStore())
+	return c
 }

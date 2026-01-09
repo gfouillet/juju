@@ -4,19 +4,22 @@
 package secretbackendrotate
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/secretsbackendmanager"
+	"github.com/juju/juju/core/logger"
 )
 
 // ManifoldConfig holds dependencies and configuration for a
 // secretbackendrotate worker.
 type ManifoldConfig struct {
-	Logger        Logger
+	Logger        logger.Logger
 	APICallerName string
 }
 
@@ -30,13 +33,13 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	}
 }
 
-func (c ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (c ManifoldConfig) start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := c.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var apiCaller base.APICaller
-	if err := context.Get(c.APICallerName, &apiCaller); err != nil {
+	if err := getter.Get(c.APICallerName, &apiCaller); err != nil {
 		return nil, err
 	}
 	return NewWorker(Config{

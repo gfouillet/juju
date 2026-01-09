@@ -14,20 +14,19 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
 
-	"github.com/juju/juju/charmhub"
-	"github.com/juju/juju/charmhub/transport"
 	jujucmd "github.com/juju/juju/cmd"
-	"github.com/juju/juju/cmd/output/progress"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
-	"github.com/juju/juju/version"
+	"github.com/juju/juju/core/output/progress"
+	"github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/charmhub/transport"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
@@ -41,8 +40,7 @@ the OS, separated by ` + "`@`" + `. For example, ` + "`--base ubuntu@22.04`" + `
 By default, the latest revision in the default channel will be
 downloaded. To download the latest revision from another channel,
 use ` + "`--channel`" + `. To download a specific revision, use ` + "`--revision`" + `,
-which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + `, ` + "`--channel`" + ` or
-` + "`--series`" + `.
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
 
 Adding a hyphen as the second argument allows the download to be piped
 to ` + "`stdout`" + `.
@@ -98,7 +96,6 @@ func (c *downloadCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.charmHubCommand.SetFlags(f)
 
 	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("Specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.series, "series", SeriesAll, "Specify a series. DEPRECATED use `--base`")
 	f.StringVar(&c.base, "base", "", "Specify a base")
 	f.StringVar(&c.channel, "channel", "", "Specify a channel to use instead of the default release")
 	f.IntVar(&c.revision, "revision", -1, "Specify a revision of the charm to download")
@@ -110,16 +107,11 @@ func (c *downloadCommand) SetFlags(f *gnuflag.FlagSet) {
 // Init initializes the download command, including validating the provided
 // flags. It implements part of the cmd.Command interface.
 func (c *downloadCommand) Init(args []string) error {
-	if c.base != "" && (c.series != "" && c.series != SeriesAll) {
-		return errors.New("--series and --base cannot be specified together")
-	}
-
 	hasArch := c.arch != ArchAll && c.arch != ""
 	hasBase := c.base != ""
 	hasChannel := c.channel != ""
-	hasSeries := c.series != SeriesAll && c.series != ""
-	if c.revision != -1 && (hasArch || hasBase || hasChannel || hasSeries) {
-		return errors.New("--revision cannot be specified together with --arch, --base, --channel or --series")
+	if c.revision != -1 && (hasArch || hasBase || hasChannel) {
+		return errors.New("--revision cannot be specified together with --arch, --base or --channel")
 	}
 
 	if err := c.charmHubCommand.Init(args); err != nil {
@@ -153,7 +145,7 @@ func (c *downloadCommand) Init(args []string) error {
 func (c *downloadCommand) validateCharmOrBundle(charmOrBundle string) (*charm.URL, error) {
 	curl, err := charm.ParseURL(charmOrBundle)
 	if err != nil {
-		logger.Debugf("%s", err)
+		logger.Debugf(context.TODO(), "%s", err)
 		return nil, errors.NotValidf("charm or bundle name, %q, is", charmOrBundle)
 	}
 	if !charm.CharmHub.Matches(curl.Schema) {
@@ -169,18 +161,6 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.series == SeriesAll {
-		c.series = ""
-	} else if c.series != "" {
-		cmdContext.Warningf("series flag is deprecated, use --base instead")
-		if base, err = corebase.GetBaseFromSeries(c.series); err != nil {
-			return errors.Annotatef(err, "attempting to convert %q to a base", c.series)
-		}
-		c.base = base.String()
-		c.series = ""
-	}
 	if c.base != "" {
 		if base, err = corebase.ParseBaseFromString(c.base); err != nil {
 			return errors.Trace(err)
@@ -189,7 +169,7 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 
 	cfg := charmhub.Config{
 		URL:    c.charmHubURL,
-		Logger: downloadLogger{Context: cmdContext},
+		Logger: logger,
 	}
 
 	if c.pipeToStdout {
@@ -257,11 +237,12 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 
 	ctx = context.WithValue(ctx, charmhub.DownloadNameKey, entity.Name)
 
+	var digest *charmhub.Digest
 	if c.noProgress {
-		err = client.Download(ctx, resourceURL, path)
+		digest, err = client.Download(ctx, resourceURL, path)
 	} else {
 		pb := progress.MakeProgressBar(cmdContext.Stdout)
-		err = client.Download(ctx, resourceURL, path, charmhub.WithProgressBar(pb))
+		digest, err = client.Download(ctx, resourceURL, path, charmhub.WithProgressBar(pb))
 	}
 	if err != nil {
 		return errors.Trace(err)
@@ -274,11 +255,11 @@ func (c *downloadCommand) Run(cmdContext *cmd.Context) error {
 		return nil
 	}
 
-	// Ensure we calculate the hash of the file.
-	calculatedHash, err := c.calculateHash(path)
+	calculatedHash, err := c.calculateHashFromDigest(path, digest)
 	if err != nil {
 		return errors.Trace(err)
 	}
+
 	if calculatedHash != entitySHA {
 		return errors.Errorf(`Checksum of download failed for %q:
 Expected:   %s
@@ -299,19 +280,23 @@ Calculated: %s`, c.charmOrBundle, entitySHA, calculatedHash)
 				return errors.Trace(err)
 			}
 			rscCtx := context.WithValue(ctx, charmhub.DownloadNameKey, resource.Name)
+
+			var digest *charmhub.Digest
 			if c.noProgress {
-				err = client.Download(rscCtx, rscURL, rscPath)
+				digest, err = client.Download(rscCtx, rscURL, rscPath)
 			} else {
 				pb := progress.MakeProgressBar(cmdContext.Stdout)
-				err = client.Download(rscCtx, rscURL, rscPath, charmhub.WithProgressBar(pb))
+				digest, err = client.Download(rscCtx, rscURL, rscPath, charmhub.WithProgressBar(pb))
 			}
 			if err != nil {
 				return errors.Trace(err)
 			}
-			rscHash, err := c.calculateHash(rscPath)
+
+			rscHash, err := c.calculateHashFromDigest(path, digest)
 			if err != nil {
 				return errors.Trace(err)
 			}
+
 			if rscHash != resource.Download.HashSHA256 {
 				return errors.Errorf(`Checksum of download failed for %q resource %s:
 Expected:   %s
@@ -346,6 +331,13 @@ Install the %q %s with:
 	return nil
 }
 
+func (c *downloadCommand) calculateHashFromDigest(path string, digest *charmhub.Digest) (string, error) {
+	if digest == nil {
+		return c.calculateHash(path)
+	}
+	return digest.SHA256, nil
+}
+
 func (c *downloadCommand) refresh(
 	ctx context.Context, cmdContext *cmd.Context,
 	client CharmHubClient,
@@ -362,7 +354,7 @@ func (c *downloadCommand) refresh(
 
 	var refreshConfig charmhub.RefreshConfig
 	if c.revision == -1 {
-		refreshConfig, err = charmhub.InstallOneFromChannel(c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
+		refreshConfig, err = charmhub.InstallOneFromChannel(ctx, c.charmOrBundle, normChannel.String(), charmhub.RefreshBase{
 			Architecture: normBase.Architecture,
 			Name:         normBase.OS,
 			Channel:      normBase.Channel,
@@ -371,7 +363,7 @@ func (c *downloadCommand) refresh(
 			return nil, nil, errors.Trace(err)
 		}
 	} else {
-		refreshConfig, err = charmhub.InstallOneFromRevision(c.charmOrBundle, c.revision)
+		refreshConfig, err = charmhub.InstallOneFromRevision(ctx, c.charmOrBundle, c.revision)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
@@ -459,28 +451,6 @@ func (c *downloadCommand) calculateHash(path string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
-}
-
-type downloadLogger struct {
-	Context *cmd.Context
-}
-
-func (d downloadLogger) IsTraceEnabled() bool {
-	return !d.Context.Quiet()
-}
-
-func (d downloadLogger) Errorf(msg string, args ...interface{}) {
-	d.Context.Verbosef(msg, args...)
-}
-
-func (d downloadLogger) Debugf(msg string, args ...interface{}) {
-	d.Context.Verbosef(msg, args...)
-}
-
-func (d downloadLogger) Tracef(msg string, args ...interface{}) {}
-
-func (d downloadLogger) ChildWithLabels(name string, labels ...string) loggo.Logger {
-	return logger.ChildWithLabels(name, labels...)
 }
 
 type stdoutFileSystem struct{}

@@ -4,12 +4,14 @@
 package runner
 
 import (
-	"github.com/juju/charm/v12"
+	stdcontext "context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/core/actions"
+	coreoperation "github.com/juju/juju/core/operation"
+	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
@@ -21,14 +23,14 @@ type Factory interface {
 
 	// NewCommandRunner returns an execution context suitable for running
 	// an arbitrary script.
-	NewCommandRunner(commandInfo context.CommandInfo) (Runner, error)
+	NewCommandRunner(stdCtx stdcontext.Context, commandInfo context.CommandInfo) (Runner, error)
 
 	// NewHookRunner returns an execution context suitable for running the
 	// supplied hook definition (which must be valid).
-	NewHookRunner(hookInfo hook.Info) (Runner, error)
+	NewHookRunner(stdCtx stdcontext.Context, hookInfo hook.Info) (Runner, error)
 
 	// NewActionRunner returns an execution context suitable for running the action.
-	NewActionRunner(action *uniter.Action, cancel <-chan struct{}) (Runner, error)
+	NewActionRunner(stdCtx stdcontext.Context, action *uniter.Action, cancel <-chan struct{}) (Runner, error)
 }
 
 // NewFactory returns a Factory capable of creating runners for executing
@@ -37,7 +39,6 @@ func NewFactory(
 	paths context.Paths,
 	contextFactory context.ContextFactory,
 	newProcessRunner NewRunnerFunc,
-	remoteExecutor ExecFunc,
 ) (
 	Factory, error,
 ) {
@@ -45,7 +46,6 @@ func NewFactory(
 		paths:            paths,
 		contextFactory:   contextFactory,
 		newProcessRunner: newProcessRunner,
-		remoteExecutor:   remoteExecutor,
 	}
 
 	return f, nil
@@ -57,45 +57,49 @@ type factory struct {
 	// Fields that shouldn't change in a factory's lifetime.
 	paths            context.Paths
 	newProcessRunner NewRunnerFunc
-	remoteExecutor   ExecFunc
 }
 
 // NewCommandRunner exists to satisfy the Factory interface.
-func (f *factory) NewCommandRunner(commandInfo context.CommandInfo) (Runner, error) {
-	ctx, err := f.contextFactory.CommandContext(commandInfo)
+func (f *factory) NewCommandRunner(stdCtx stdcontext.Context, commandInfo context.CommandInfo) (Runner, error) {
+	ctx, err := f.contextFactory.CommandContext(stdCtx, commandInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	runner := f.newProcessRunner(ctx, f.paths, f.remoteExecutor)
+	runner := f.newProcessRunner(ctx, f.paths)
 	return runner, nil
 }
 
 // NewHookRunner exists to satisfy the Factory interface.
-func (f *factory) NewHookRunner(hookInfo hook.Info) (Runner, error) {
+func (f *factory) NewHookRunner(stdCtx stdcontext.Context, hookInfo hook.Info) (Runner, error) {
 	if err := hookInfo.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	ctx, err := f.contextFactory.HookContext(hookInfo)
+	ctx, err := f.contextFactory.HookContext(stdCtx, hookInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	runner := f.newProcessRunner(ctx, f.paths, f.remoteExecutor)
+	runner := f.newProcessRunner(ctx, f.paths)
 	return runner, nil
 }
 
 // NewActionRunner exists to satisfy the Factory interface.
-func (f *factory) NewActionRunner(action *uniter.Action, cancel <-chan struct{}) (Runner, error) {
-	ch, err := getCharm(f.paths.GetCharmDir())
+func (f *factory) NewActionRunner(stdCtx stdcontext.Context, action *uniter.Action, cancel <-chan struct{}) (Runner, error) {
+	charmDir := f.paths.GetCharmDir()
+	meta, err := charm.ReadCharmDirMetadata(charmDir)
 	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	actions, err := charm.ReadCharmDirActions(meta.Name, f.paths.GetCharmDir())
+	if err != nil && !errors.Is(err, charm.FileNotFound) {
 		return nil, errors.Trace(err)
 	}
 
 	name := action.Name()
-	spec, ok := actions.PredefinedActionsSpec[name]
-	if !ok {
+	spec, ok := coreoperation.PredefinedActionsSpec[name]
+	if !ok && actions != nil {
 		var ok bool
-		spec, ok = ch.Actions().ActionSpecs[name]
+		spec, ok = actions.ActionSpecs[name]
 		if !ok {
 			return nil, charmrunner.NewBadActionError(name, "not defined")
 		}
@@ -105,21 +109,16 @@ func (f *factory) NewActionRunner(action *uniter.Action, cancel <-chan struct{})
 	if err := spec.ValidateParams(params); err != nil {
 		return nil, charmrunner.NewBadActionError(name, err.Error())
 	}
+	if params, err = spec.InsertDefaults(params); err != nil {
+		return nil, charmrunner.NewBadActionError(name, err.Error())
+	}
 
 	tag := names.NewActionTag(action.ID())
 	actionData := context.NewActionData(name, &tag, params, cancel)
-	ctx, err := f.contextFactory.ActionContext(actionData)
+	ctx, err := f.contextFactory.ActionContext(stdCtx, actionData)
 	if err != nil {
 		return nil, charmrunner.NewBadActionError(name, err.Error())
 	}
-	runner := f.newProcessRunner(ctx, f.paths, f.remoteExecutor)
+	runner := f.newProcessRunner(ctx, f.paths)
 	return runner, nil
-}
-
-func getCharm(charmPath string) (charm.Charm, error) {
-	ch, err := charm.ReadCharm(charmPath)
-	if err != nil {
-		return nil, err
-	}
-	return ch, nil
 }

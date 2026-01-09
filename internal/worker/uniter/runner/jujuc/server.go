@@ -5,6 +5,7 @@ package jujuc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,18 +15,18 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/utils/v3/exec"
+	"github.com/juju/utils/v4/exec"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/sockets"
 )
 
 // This logger is fine being package level as this jujuc executable
 // is separate from the uniter in that it is run inside hooks.
-var logger = loggo.GetLogger("jujuc")
+var logger = internallogger.GetLogger("jujuc")
 
 // ErrNoStdin is returned by Jujuc.Main if the hook tool requests
 // stdin, and none is supplied.
@@ -51,13 +52,6 @@ var baseCommands = map[string]creator{
 	"status-set":              NewStatusSetCommand,
 	"network-get":             NewNetworkGetCommand,
 	"application-version-set": NewApplicationVersionSetCommand,
-	"k8s-spec-set":            constructCommandCreator("k8s-spec-set", NewK8sSpecSetCommand),
-	"k8s-spec-get":            constructCommandCreator("k8s-spec-get", NewK8sSpecGetCommand),
-	"k8s-raw-set":             NewK8sRawSetCommand,
-	"k8s-raw-get":             NewK8sRawGetCommand,
-	// "pod" variants are deprecated.
-	"pod-spec-set": constructCommandCreator("pod-spec-set", NewK8sSpecSetCommand),
-	"pod-spec-get": constructCommandCreator("pod-spec-get", NewK8sSpecGetCommand),
 
 	"goal-state":     NewGoalStateCommand,
 	"credential-get": NewCredentialGetCommand,
@@ -65,14 +59,6 @@ var baseCommands = map[string]creator{
 	"state-get":    NewStateGetCommand,
 	"state-delete": NewStateDeleteCommand,
 	"state-set":    NewStateSetCommand,
-}
-
-type functionCmdCreator func(Context, string) (cmd.Command, error)
-
-func constructCommandCreator(name string, newCmd functionCmdCreator) creator {
-	return func(ctx Context) (cmd.Command, error) {
-		return newCmd(ctx, name)
-	}
 }
 
 var secretCommands = map[string]creator{
@@ -93,19 +79,11 @@ var storageCommands = map[string]creator{
 }
 
 var leaderCommands = map[string]creator{
-	"is-leader":  NewIsLeaderCommand,
-	"leader-get": NewLeaderGetCommand,
-	"leader-set": NewLeaderSetCommand,
+	"is-leader": NewIsLeaderCommand,
 }
 
 var resourceCommands = map[string]creator{
 	"resource-get": NewResourceGetCmd,
-}
-
-var payloadCommands = map[string]creator{
-	"payload-register":   NewPayloadRegisterCmd,
-	"payload-unregister": NewPayloadUnregisterCmd,
-	"payload-status-set": NewPayloadStatusSetCmd,
 }
 
 var actionCommands = map[string]creator{
@@ -126,7 +104,6 @@ func allEnabledCommands() map[string]creator {
 	add(storageCommands)
 	add(leaderCommands)
 	add(resourceCommands)
-	add(payloadCommands)
 	add(secretCommands)
 	add(actionCommands)
 	return all
@@ -143,7 +120,6 @@ func allHookCommands() map[string]creator {
 	add(storageCommands)
 	add(leaderCommands)
 	add(resourceCommands)
-	add(payloadCommands)
 	add(secretCommands)
 	return all
 }
@@ -244,8 +220,6 @@ type Request struct {
 	// is empty.
 	StdinSet bool
 	Stdin    []byte
-
-	Token string
 }
 
 // CmdGetter looks up a Command implementation connected to a particular Context.
@@ -255,7 +229,6 @@ type CmdGetter func(contextId, cmdName string) (cmd.Command, error)
 type Jujuc struct {
 	mu     sync.Mutex
 	getCmd CmdGetter
-	token  string
 }
 
 // badReqErrorf returns an error indicating a bad Request.
@@ -266,9 +239,6 @@ func badReqErrorf(format string, v ...interface{}) error {
 // Main runs the Command specified by req, and fills in resp. A single command
 // is run at a time.
 func (j *Jujuc) Main(req Request, resp *exec.ExecResponse) error {
-	if req.Token != j.token {
-		return badReqErrorf("token does not match")
-	}
 	if req.CommandName == "" {
 		return badReqErrorf("command not specified")
 	}
@@ -288,19 +258,22 @@ func (j *Jujuc) Main(req Request, resp *exec.ExecResponse) error {
 		stdin = noStdinReader{}
 	}
 	var stdout, stderr bytes.Buffer
+	// TODO(wallyworld) - We should not allow direct construction of cmd.Context
+	// since this can result in the embedded context.Context being nil.
 	ctx := &cmd.Context{
-		Dir:    req.Dir,
-		Stdin:  stdin,
-		Stdout: &stdout,
-		Stderr: &stderr,
+		Context: context.Background(),
+		Dir:     req.Dir,
+		Stdin:   stdin,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	// Beware, reducing the log level of the following line will lead
 	// to passwords leaking if passed as args.
-	logger.Tracef("running hook tool %q %q", req.CommandName, req.Args)
-	logger.Debugf("running hook tool %q for %s", req.CommandName, req.ContextId)
-	logger.Tracef("hook context id %q; dir %q", req.ContextId, req.Dir)
+	logger.Tracef(ctx, "running hook tool %q %q", req.CommandName)
+	logger.Debugf(ctx, "running hook tool %q for %s", req.CommandName, req.ContextId)
+	logger.Tracef(ctx, "hook context id %q; dir %q", req.ContextId, req.Dir)
 	wrapper := &cmdWrapper{c, nil}
 	resp.Code = cmd.Main(wrapper, ctx, req.Args)
 	if errors.Cause(wrapper.err) == ErrNoStdin {
@@ -325,9 +298,9 @@ type Server struct {
 // NewServer creates an RPC server bound to socketPath, which can execute
 // remote command invocations against an appropriate Context. It will not
 // actually do so until Run is called.
-func NewServer(getCmd CmdGetter, socket sockets.Socket, token string) (*Server, error) {
+func NewServer(getCmd CmdGetter, socket sockets.Socket) (*Server, error) {
 	server := rpc.NewServer()
-	if err := server.Register(&Jujuc{getCmd: getCmd, token: token}); err != nil {
+	if err := server.Register(&Jujuc{getCmd: getCmd}); err != nil {
 		return nil, err
 	}
 	listener, err := sockets.Listen(socket)

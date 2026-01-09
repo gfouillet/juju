@@ -3,12 +3,4 @@
 
 package authenticationworker_test
 
-import (
-	stdtesting "testing"
-
-	coretesting "github.com/juju/juju/testing"
-)
-
-func TestPackage(t *stdtesting.T) {
-	coretesting.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/updater_mocks.go github.com/juju/juju/internal/worker/authenticationworker Client

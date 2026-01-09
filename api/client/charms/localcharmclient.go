@@ -15,13 +15,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/api/base"
+	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/lxdprofile"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/charm"
 )
 
 // LocalCharmClient allows access to the API endpoints
@@ -32,27 +33,21 @@ type LocalCharmClient struct {
 	charmPutter CharmPutter
 }
 
+// NewLocalCharmClient creates a client which can be used to
+// upload local charms to the server
 func NewLocalCharmClient(st base.APICallCloser) (*LocalCharmClient, error) {
-	httpPutter, err := newHTTPPutter(st)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	s3Putter, err := newS3Putter(st)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	fallbackPutter, err := newFallbackPutter(s3Putter, httpPutter)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	frontend, backend := base.NewClientFacade(st, "Charms")
-	return &LocalCharmClient{ClientFacade: frontend, facade: backend, charmPutter: fallbackPutter}, nil
+	return &LocalCharmClient{ClientFacade: frontend, facade: backend, charmPutter: s3Putter}, nil
 }
 
 // AddLocalCharm prepares the given charm with a local: schema in its
 // URL, and uploads it via the API server, returning the assigned
 // charm URL.
-func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool, agentVersion version.Number) (*charm.URL, error) {
+func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force bool, agentVersion semversion.Number) (*charm.URL, error) {
 	if curl.Schema != "local" {
 		return nil, errors.Errorf("expected charm URL with local: schema, got %q", curl.String())
 	}
@@ -69,22 +64,6 @@ func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force 
 	// Package the charm for uploading.
 	var archive *os.File
 	switch ch := ch.(type) {
-	case *charm.CharmDir:
-		var err error
-		if archive, err = os.CreateTemp("", "charm"); err != nil {
-			return nil, errors.Annotate(err, "cannot create temp file")
-		}
-		defer func() {
-			_ = archive.Close()
-			_ = os.Remove(archive.Name())
-		}()
-
-		if err := ch.ArchiveTo(archive); err != nil {
-			return nil, errors.Annotate(err, "cannot repackage charm")
-		}
-		if _, err := archive.Seek(0, os.SEEK_SET); err != nil {
-			return nil, errors.Annotate(err, "cannot rewind packaged charm")
-		}
 	case *charm.CharmArchive:
 		var err error
 		if archive, err = os.Open(ch.Path); err != nil {
@@ -92,7 +71,7 @@ func (c *LocalCharmClient) AddLocalCharm(curl *charm.URL, ch charm.Charm, force 
 		}
 		defer archive.Close()
 	default:
-		return nil, errors.Errorf("unknown charm type %T", ch)
+		return nil, errors.Errorf("unsupported charm type %T", ch)
 	}
 
 	anyHooksOrDispatch, err := hasHooksOrDispatch(archive.Name())
@@ -183,9 +162,9 @@ func isHook(f *zip.File) bool {
 	}
 }
 
-func (c *LocalCharmClient) validateCharmVersion(ch charm.Charm, agentVersion version.Number) error {
+func (c *LocalCharmClient) validateCharmVersion(ch charm.Charm, agentVersion semversion.Number) error {
 	minver := ch.Meta().MinJujuVersion
-	if minver != version.Zero {
+	if minver != semversion.Zero {
 		return jujuversion.CheckJujuMinVersion(minver, agentVersion)
 	}
 	return nil
@@ -201,5 +180,5 @@ func hashArchive(archive *os.File) (string, error) {
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	return hex.EncodeToString(hash.Sum(nil))[0:7], nil
+	return hex.EncodeToString(hash.Sum(nil))[0:corecharm.MinSHA256PrefixLength], nil
 }

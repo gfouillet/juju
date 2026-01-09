@@ -4,22 +4,22 @@
 package deployer
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/utils/v3/voyeur"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4/dependency"
 
 	coreagent "github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/internal/s3client"
+	coretrace "github.com/juju/juju/core/trace"
 	"github.com/juju/juju/internal/worker"
 	"github.com/juju/juju/internal/worker/agent"
 	"github.com/juju/juju/internal/worker/apiaddressupdater"
@@ -32,18 +32,19 @@ import (
 	"github.com/juju/juju/internal/worker/migrationflag"
 	"github.com/juju/juju/internal/worker/migrationminion"
 	"github.com/juju/juju/internal/worker/retrystrategy"
-	"github.com/juju/juju/internal/worker/s3caller"
 	"github.com/juju/juju/internal/worker/secretsdrainworker"
+	"github.com/juju/juju/internal/worker/trace"
 	"github.com/juju/juju/internal/worker/uniter"
+	"github.com/juju/juju/internal/worker/units3caller"
 	"github.com/juju/juju/internal/worker/upgrader"
 )
 
 // UnitManifoldsConfig allows specialisation of the result of Manifolds.
 type UnitManifoldsConfig struct {
 
-	// LoggingContext holds the unit writers so that the loggers
+	// LoggerContext holds the unit writers so that the loggers
 	// for the unit get tagged with the right source.
-	LoggingContext *loggo.Context
+	LoggerContext corelogger.LoggerContext
 
 	// Agent contains the agent that will be wrapped and made available to
 	// its dependencies via a dependency.Engine.
@@ -62,7 +63,7 @@ type UnitManifoldsConfig struct {
 	// ValidateMigration is called by the migrationminion during the
 	// migration process to check that the agent will be ok when
 	// connected to the new target controller.
-	ValidateMigration func(base.APICaller) error
+	ValidateMigration func(context.Context, base.APICaller) error
 
 	// UpdateLoggerConfig is a function that will save the specified
 	// config value as the logging config in the agent.conf file.
@@ -110,7 +111,7 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 		apiConfigWatcherName: apiconfigwatcher.Manifold(apiconfigwatcher.ManifoldConfig{
 			AgentName:          agentName,
 			AgentConfigChanged: config.AgentConfigChanged,
-			Logger:             config.LoggingContext.GetLogger("juju.worker.apiconfigwatcher"),
+			Logger:             config.LoggerContext.GetLogger("juju.worker.apiconfigwatcher"),
 		}),
 
 		// The api caller is a thin concurrent wrapper around a connection
@@ -124,19 +125,16 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			APIOpen:              api.Open,
 			NewConnection:        apicaller.ScaryConnect,
 			Filter:               connectFilter,
-			Logger:               config.LoggingContext.GetLogger("juju.worker.apicaller"),
+			Logger:               config.LoggerContext.GetLogger("juju.worker.apicaller"),
 		}),
 
 		// The S3 API caller is a shim API that wraps the /charms REST
 		// API for uploading and downloading charms. It provides a
 		// S3-compatible API.
-		s3CallerName: s3caller.Manifold(s3caller.ManifoldConfig{
-			AgentName:            agentName,
-			APIConfigWatcherName: apiConfigWatcherName,
-			APICallerName:        apiCallerName,
-			NewS3Client:          s3client.NewS3Client,
-			Filter:               connectFilter,
-			Logger:               loggo.GetLogger("juju.worker.s3caller"),
+		s3CallerName: units3caller.Manifold(units3caller.ManifoldConfig{
+			APICallerName: apiCallerName,
+			NewClient:     units3caller.NewS3Client,
+			Logger:        config.LoggerContext.GetLogger("juju.worker.units3caller"),
 		}),
 
 		// The log sender is a leaf worker that sends log messages to some
@@ -173,7 +171,7 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			ValidateMigration: config.ValidateMigration,
 			NewFacade:         migrationminion.NewFacade,
 			NewWorker:         migrationminion.NewWorker,
-			Logger:            config.LoggingContext.GetLogger("juju.worker.migrationminion", corelogger.MIGRATION),
+			Logger:            config.LoggerContext.GetLogger("juju.worker.migrationminion", corelogger.MIGRATION),
 		}),
 
 		// The logging config updater is a leaf worker that indirectly
@@ -183,8 +181,8 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 		loggingConfigUpdaterName: ifNotMigrating(loggerworker.Manifold(loggerworker.ManifoldConfig{
 			AgentName:       agentName,
 			APICallerName:   apiCallerName,
-			LoggingContext:  config.LoggingContext,
-			Logger:          config.LoggingContext.GetLogger("juju.worker.logger"),
+			LoggerContext:   config.LoggerContext,
+			Logger:          config.LoggerContext.GetLogger("juju.worker.logger"),
 			UpdateAgentFunc: config.UpdateLoggerConfig,
 		})),
 
@@ -194,7 +192,7 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 		apiAddressUpdaterName: ifNotMigrating(apiaddressupdater.Manifold(apiaddressupdater.ManifoldConfig{
 			AgentName:     agentName,
 			APICallerName: apiCallerName,
-			Logger:        config.LoggingContext.GetLogger("juju.worker.apiaddressupdater"),
+			Logger:        config.LoggerContext.GetLogger("juju.worker.apiaddressupdater"),
 		})),
 
 		// The charmdir resource coordinates whether the charm directory is
@@ -220,7 +218,7 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			APICallerName: apiCallerName,
 			NewFacade:     retrystrategy.NewFacade,
 			NewWorker:     retrystrategy.NewRetryStrategyWorker,
-			Logger:        config.LoggingContext.GetLogger("juju.worker.retrystrategy"),
+			Logger:        config.LoggerContext.GetLogger("juju.worker.retrystrategy"),
 		})),
 
 		// The uniter installs charms; manages the unit's presence in its
@@ -233,28 +231,37 @@ func UnitManifolds(config UnitManifoldsConfig) dependency.Manifolds {
 			ModelType:             model.IAAS,
 			APICallerName:         apiCallerName,
 			S3CallerName:          s3CallerName,
+			TraceName:             traceName,
 			MachineLock:           config.MachineLock,
 			Clock:                 config.Clock,
 			LeadershipTrackerName: leadershipTrackerName,
 			CharmDirName:          charmDirName,
 			HookRetryStrategyName: hookRetryStrategyName,
 			TranslateResolverErr:  uniter.TranslateFortressErrors,
-			Logger:                config.LoggingContext.GetLogger("juju.worker.uniter"),
+			Logger:                config.LoggerContext.GetLogger("juju.worker.uniter"),
 		})),
+
+		traceName: trace.Manifold(trace.ManifoldConfig{
+			AgentName:       agentName,
+			Clock:           config.Clock,
+			Logger:          config.LoggerContext.GetLogger("juju.worker.trace"),
+			NewTracerWorker: trace.NewTracerWorker,
+			Kind:            coretrace.KindUnit,
+		}),
 
 		// For the nested deployer, the upgrade worker is only used to record
 		// the running agent version for the unit. It then stops.
 		upgraderName: upgrader.Manifold(upgrader.ManifoldConfig{
 			AgentName:     agentName,
 			APICallerName: apiCallerName,
-			Logger:        config.LoggingContext.GetLogger("juju.worker.upgrader"),
+			Logger:        config.LoggerContext.GetLogger("juju.worker.upgrader"),
 			Clock:         config.Clock,
 		}),
 
 		// The secretDrainWorker is the worker that drains secrets from the inactive backend to the current active backend.
 		secretDrainWorker: ifNotMigrating(secretsdrainworker.Manifold(secretsdrainworker.ManifoldConfig{
 			APICallerName:         apiCallerName,
-			Logger:                config.LoggingContext.GetLogger("juju.worker.secretsdrainworker"),
+			Logger:                config.LoggerContext.GetLogger("juju.worker.secretsdrainworker"),
 			LeadershipTrackerName: leadershipTrackerName,
 			NewSecretsDrainFacade: secretsdrainworker.NewSecretsDrainFacadeForAgent,
 			NewWorker:             secretsdrainworker.NewWorker,
@@ -289,6 +296,7 @@ const (
 	hookRetryStrategyName = "hook-retry-strategy"
 	uniterName            = "uniter"
 	upgraderName          = "upgrader"
+	traceName             = "trace"
 
 	secretDrainWorker = "secret-drain-worker"
 )

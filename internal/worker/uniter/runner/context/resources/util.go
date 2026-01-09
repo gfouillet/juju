@@ -4,21 +4,18 @@
 package resources
 
 import (
+	"context"
 	"io"
+
+	"github.com/juju/juju/core/logger"
 )
 
-// Logger exposes the logger functionality needed by closeAndLog.
-type Logger interface {
-	// Errorf formats the provided log message and writes it to the log.
-	Errorf(string, ...interface{})
-}
-
 // closeAndLog calls the closer's Close() and logs any error returned therefrom.
-func closeAndLog(closer io.Closer, label string, logger Logger) {
+func closeAndLog(closer io.Closer, label string, logger logger.Logger) {
 	if closer == nil {
 		return
 	}
 	if err := closer.Close(); err != nil {
-		logger.Errorf("while closing %s: %v", label, err)
+		logger.Errorf(context.Background(), "while closing %s: %v", label, err)
 	}
 }

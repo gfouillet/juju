@@ -14,7 +14,6 @@ import (
 	"github.com/juju/errors"
 	ociCore "github.com/oracle/oci-go-sdk/v65/core"
 
-	"github.com/juju/juju/core/arch"
 	corearch "github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	coreconstraints "github.com/juju/juju/core/constraints"
@@ -36,7 +35,6 @@ const (
 	// ImageTypeGeneric should work on any type of instance (bare metal or virtual)
 	ImageTypeGeneric ImageType = "generic"
 
-	centOS   = "CentOS"
 	ubuntuOS = "Canonical Ubuntu"
 
 	staleImageCacheTimeoutInMinutes = 30
@@ -258,38 +256,23 @@ func getImageType(img ociCore.Image) ImageType {
 // NewInstanceImage returns a populated InstanceImage from the ociCore.Image
 // struct returned by oci's API, the image's architecture or an error.
 func NewInstanceImage(img ociCore.Image, compartmentID *string) (InstanceImage, string, error) {
-	var (
-		err       error
-		arch      string
-		base      corebase.Base
-		isMinimal bool
-		imgType   InstanceImage
-	)
-	switch osName := *img.OperatingSystem; osName {
-	case centOS:
-		base = corebase.MakeDefaultBase("centos", *img.OperatingSystemVersion)
-		// For the moment, only x86 shapes are supported
-		arch = corearch.AMD64
-	case ubuntuOS:
-		base, arch, isMinimal = parseUbuntuImage(img)
-	default:
+	if osName := *img.OperatingSystem; osName != ubuntuOS {
 		return InstanceImage{}, "", errors.NotSupportedf("os %s", osName)
 	}
-
-	imgType.ImageType = getImageType(img)
-	imgType.Id = *img.Id
-	imgType.Base = base
-	imgType.Raw = img
-	imgType.CompartmentId = compartmentID
-	imgType.IsMinimal = isMinimal
-
+	base, arch, isMinimal := parseUbuntuImage(img)
 	version, err := NewImageVersion(img)
 	if err != nil {
 		return InstanceImage{}, "", err
 	}
-	imgType.Version = version
-
-	return imgType, arch, nil
+	return InstanceImage{
+		ImageType:     getImageType(img),
+		Id:            *img.Id,
+		Base:          base,
+		Raw:           img,
+		CompartmentId: compartmentID,
+		IsMinimal:     isMinimal,
+		Version:       version,
+	}, arch, nil
 }
 
 // parseUbuntuImage returns the base and architecture of the returned image
@@ -410,9 +393,9 @@ func archTypeByProcessorDescription(input string) string {
 	var archType string
 	description := strings.ToLower(input)
 	if strings.Contains(description, "ampere") {
-		archType = arch.ARM64
+		archType = corearch.ARM64
 	} else if strings.Contains(description, "intel") || strings.Contains(description, "amd") {
-		archType = arch.AMD64
+		archType = corearch.AMD64
 	}
 	return archType
 }
@@ -437,7 +420,7 @@ func instTypeByShapeName(shape string) string {
 	}
 }
 
-func refreshImageCache(cli ComputeClient, compartmentID *string) (*ImageCache, error) {
+func refreshImageCache(ctx context.Context, cli ComputeClient, compartmentID *string) (*ImageCache, error) {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
 
@@ -456,15 +439,15 @@ func refreshImageCache(cli ComputeClient, compartmentID *string) (*ImageCache, e
 		img, arch, err := NewInstanceImage(val, compartmentID)
 		if err != nil {
 			if val.Id != nil {
-				logger.Debugf("error parsing image %q: %q", *val.Id, err)
+				logger.Debugf(ctx, "error parsing image %q: %q", *val.Id, err)
 			} else {
-				logger.Debugf("error parsing image %q", err)
+				logger.Debugf(ctx, "error parsing image %q", err)
 			}
 			continue
 		}
 		// For the moment juju does not support minimal ubuntu
 		if img.IsMinimal {
-			logger.Tracef("ubuntu minimal images (%q), not supported", *val.DisplayName)
+			logger.Tracef(ctx, "ubuntu minimal images (%q), not supported", *val.DisplayName)
 			continue
 		}
 		// Only set the instance types to the images that we correctly
@@ -480,7 +463,7 @@ func refreshImageCache(cli ComputeClient, compartmentID *string) (*ImageCache, e
 		// in case one of them doesn't.
 		for _, instType := range instTypes {
 			if instType.Arch != arch {
-				logger.Debugf("instance type %s has arch %s while image %s only supports %s", instType.Name, instType.Arch, *val.Id, arch)
+				logger.Debugf(ctx, "instance type %s has arch %s while image %s only supports %s", instType.Name, instType.Arch, *val.Id, arch)
 			}
 		}
 		img.SetInstanceTypes(instTypes)
@@ -508,13 +491,14 @@ func refreshImageCache(cli ComputeClient, compartmentID *string) (*ImageCache, e
 // findInstanceSpec returns an *InstanceSpec, imagelist name
 // satisfying the supplied instanceConstraint
 func findInstanceSpec(
+	ctx context.Context,
 	base corebase.Base,
 	arch string,
 	constraints coreconstraints.Value,
 	imgCache *ImageCache,
 ) (*instances.InstanceSpec, string, error) {
 	allImageMetadata := imgCache.ImageMetadata(base, arch, *constraints.VirtType)
-	logger.Debugf("received %d image(s): %v", len(allImageMetadata), allImageMetadata)
+	logger.Debugf(ctx, "received %d image(s): %v", len(allImageMetadata), allImageMetadata)
 
 	ic := &instances.InstanceConstraint{
 		Base:        base,

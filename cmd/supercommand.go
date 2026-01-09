@@ -4,28 +4,29 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/loggo"
 	"golang.org/x/crypto/ssh/terminal"
 
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/juju/osenv"
-	jujuversion "github.com/juju/juju/version"
 )
 
 func init() {
 	// If the environment key is empty, ConfigureLoggers returns nil and does
 	// nothing.
-	err := loggo.ConfigureLoggers(os.Getenv(osenv.JujuStartupLoggingConfigEnvKey))
+	err := internallogger.ConfigureLoggers(os.Getenv(osenv.JujuStartupLoggingConfigEnvKey))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR parsing %s: %s\n\n", osenv.JujuStartupLoggingConfigEnvKey, err)
 	}
 }
 
-var logger = loggo.GetLogger("juju.cmd")
+var logger = internallogger.GetLogger("juju.cmd")
 
 // DefaultLog is the default command logging implementation.
 var DefaultLog = &cmd.Log{
@@ -53,8 +54,8 @@ func NewSuperCommand(p cmd.SuperCommandParams) *cmd.SuperCommand {
 }
 
 func runNotifier(name string) {
-	logger.Infof("running %s [%s %s %s %s]", name, jujuversion.Current, jujuversion.GitCommit, runtime.Compiler, runtime.Version())
-	logger.Debugf("  args: %#v", os.Args)
+	logger.Infof(context.TODO(), "running %s [%s %s %s %s]", name, jujuversion.Current, jujuversion.GitCommit, runtime.Compiler, runtime.Version())
+	logger.Debugf(context.TODO(), "  args: %#v", os.Args)
 }
 
 func Info(i *cmd.Info) *cmd.Info {

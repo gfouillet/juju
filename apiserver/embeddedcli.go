@@ -4,6 +4,7 @@
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,21 +13,20 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	gorillaws "github.com/gorilla/websocket"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/mitchellh/go-linereader"
 
+	"github.com/juju/juju/api/jujuclient"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/httpcontext"
 	"github.com/juju/juju/apiserver/websocket"
+	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/feature"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 func newEmbeddedCLIHandler(
@@ -34,27 +34,27 @@ func newEmbeddedCLIHandler(
 ) http.Handler {
 	return &embeddedCLIHandler{
 		ctxt:   ctxt,
-		logger: loggo.GetLogger("juju.apiserver.embeddedcli"),
+		logger: internallogger.GetLogger("juju.apiserver.embeddedcli"),
 	}
 }
 
 // embeddedCLIHandler handles requests to run Juju CLi commands directly on the controller.
 type embeddedCLIHandler struct {
 	ctxt   httpContext
-	logger loggo.Logger
+	logger corelogger.Logger
 }
 
 // ServeHTTP implements the http.Handler interface.
 func (h *embeddedCLIHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	handler := func(socket *websocket.Conn) {
-		h.logger.Tracef("start of *embeddedCLIHandler.ServeHTTP")
+		h.logger.Tracef(req.Context(), "start of *embeddedCLIHandler.ServeHTTP")
 		defer socket.Close()
 
 		// If we get to here, no more errors to report, so we report a nil
 		// error.  This way the first line of the socket is always a json
 		// formatted simple error.
 		if sendErr := socket.SendInitialErrorV0(nil); sendErr != nil {
-			h.logger.Errorf("closing websocket, %v", sendErr)
+			h.logger.Errorf(req.Context(), "closing websocket, %v", sendErr)
 			return
 		}
 
@@ -69,7 +69,11 @@ func (h *embeddedCLIHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		ticker := time.NewTicker(websocket.PingPeriod)
 		defer ticker.Stop()
 
-		modelUUID := httpcontext.RequestModelUUID(req)
+		modelUUID, valid := httpcontext.RequestModelUUID(req.Context())
+		if !valid {
+			h.logger.Errorf(req.Context(), "invalid model UUID")
+			return
+		}
 		commandCh := h.receiveCommands(socket)
 		for {
 			select {
@@ -80,21 +84,21 @@ func (h *embeddedCLIHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
 				if err := socket.WriteControl(gorillaws.PingMessage, []byte{}, deadline); err != nil {
 					// This error is expected if the other end goes away. By
 					// returning we close the socket through the defer call.
-					h.logger.Debugf("failed to write ping: %s", err)
+					h.logger.Debugf(req.Context(), "failed to write ping: %s", err)
 					return
 				}
 			case jujuCmd := <-commandCh:
-				h.logger.Debugf("running embedded commands: %#v", jujuCmd)
-				cmdErr := h.runEmbeddedCommands(socket, modelUUID, jujuCmd)
+				h.logger.Debugf(req.Context(), "running embedded commands: %#v", jujuCmd)
+				cmdErr := h.runEmbeddedCommands(req.Context(), socket, modelUUID, jujuCmd)
 				// Only developers need this for debugging.
-				if cmdErr != nil && featureflag.Enabled(feature.DeveloperMode) {
-					h.logger.Debugf("command exec error: %v", cmdErr)
+				if cmdErr != nil && featureflag.Enabled(featureflag.DeveloperMode) {
+					h.logger.Debugf(req.Context(), "command exec error: %v", cmdErr)
 				}
 				if err := socket.WriteJSON(params.CLICommandStatus{
 					Done:  true,
 					Error: apiservererrors.ServerError(cmdErr),
 				}); err != nil {
-					h.logger.Errorf("sending command result to caller: %v", err)
+					h.logger.Errorf(req.Context(), "sending command result to caller: %v", err)
 				}
 			}
 		}
@@ -115,9 +119,9 @@ func (h *embeddedCLIHandler) receiveCommands(socket *websocket.Conn) <-chan para
 				// Since we don't give a list of expected error codes,
 				// any CloseError type is considered unexpected.
 				if gorillaws.IsUnexpectedCloseError(err) {
-					h.logger.Tracef("websocket closed")
+					h.logger.Tracef(context.TODO(), "websocket closed")
 				} else {
-					h.logger.Errorf("embedded CLI receive error: %v", err)
+					h.logger.Errorf(context.TODO(), "embedded CLI receive error: %v", err)
 				}
 				return
 			}
@@ -135,6 +139,7 @@ func (h *embeddedCLIHandler) receiveCommands(socket *websocket.Conn) <-chan para
 }
 
 func (h *embeddedCLIHandler) runEmbeddedCommands(
+	ctx context.Context,
 	ws *websocket.Conn,
 	modelUUID string,
 	commands params.CLICommands,
@@ -143,21 +148,29 @@ func (h *embeddedCLIHandler) runEmbeddedCommands(
 	// Figure out what model to run the commands on.
 	resolvedModelUUID := modelUUID
 	if resolvedModelUUID == "" {
-		systemState, err := h.ctxt.srv.shared.statePool.SystemState()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		resolvedModelUUID = systemState.ModelUUID()
+		resolvedModelUUID = h.ctxt.srv.shared.controllerModelUUID.String()
 	}
-	m, closer, err := h.ctxt.srv.shared.statePool.GetModel(resolvedModelUUID)
+	modelServices, err := h.ctxt.srv.shared.domainServicesGetter.ServicesForModel(ctx, model.UUID(resolvedModelUUID))
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer closer.Release()
+	modelInfo, err := modelServices.ModelInfo().GetModelInfo(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	// TODO (stickupkid): This is actually terrible. We should refactor
+	// this out, so we can just pass an interface the handler, that hides
+	// all of this nonsense.
+	controllerDomainServices, err := h.ctxt.srv.shared.domainServicesGetter.ServicesForModel(ctx, h.ctxt.srv.shared.controllerModelUUID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	controllerConfigService := controllerDomainServices.ControllerConfig()
 
 	// Make a pipe to stream the stdout/stderr of the commands.
 	errCh := make(chan error, 1)
-	in, err := runCLICommands(m, errCh, commands, h.ctxt.srv.execEmbeddedCommand)
+	in, err := runCLICommands(ctx, controllerConfigService, modelInfo, errCh, commands, h.ctxt.srv.execEmbeddedCommand)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -194,7 +207,7 @@ done:
 			if err := ws.WriteJSON(params.CLICommandStatus{
 				Output: []string{line},
 			}); err != nil {
-				h.logger.Warningf("error writing CLI output: %v", err)
+				h.logger.Warningf(ctx, "error writing CLI output: %v", err)
 				cmdErr = err
 				break done
 			}
@@ -230,7 +243,7 @@ type ExecEmbeddedCommandFunc func(ctx *cmd.Context, store jujuclient.ClientStore
 
 // runCLICommands creates a CLI command instance with an in-memory copy of the controller,
 // model, and account details and runs the command against the host controller.
-func runCLICommands(m *state.Model, errCh chan<- error, commands params.CLICommands, execEmbeddedCommand ExecEmbeddedCommandFunc) (io.Reader, error) {
+func runCLICommands(ctx context.Context, controllerConfigService ControllerConfigService, m model.ModelInfo, errCh chan<- error, commands params.CLICommands, execEmbeddedCommand ExecEmbeddedCommandFunc) (io.Reader, error) {
 	if commands.User == "" {
 		return nil, errors.NotSupportedf("CLI command for anonymous user")
 	}
@@ -239,7 +252,7 @@ func runCLICommands(m *state.Model, errCh chan<- error, commands params.CLIComma
 		return nil, errors.NotValidf("user name %q", commands.User)
 	}
 
-	cfg, err := m.State().ControllerConfig()
+	cfg, err := controllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -260,13 +273,12 @@ func runCLICommands(m *state.Model, errCh chan<- error, commands params.CLIComma
 	}
 	store.CurrentControllerName = controllerName
 
-	qualifiedModelName := jujuclient.JoinOwnerModelName(m.Owner(), m.Name())
+	qualifiedModelName := jujuclient.QualifyModelName(names.NewUserTag(m.CredentialOwner.Name()).Id(), m.Name)
 	store.Models[controllerName] = &jujuclient.ControllerModels{
 		Models: map[string]jujuclient.ModelDetails{
 			qualifiedModelName: {
-				ModelUUID:    m.UUID(),
-				ModelType:    model.ModelType(m.Type()),
-				ActiveBranch: commands.ActiveBranch,
+				ModelUUID: m.UUID.String(),
+				ModelType: m.Type,
 			},
 		},
 		CurrentModel: qualifiedModelName,

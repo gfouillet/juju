@@ -4,21 +4,21 @@
 package storage_test
 
 import (
+	"context"
 	"errors"
+	"testing"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/api/jujuclient"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	"github.com/juju/juju/cmd/juju/storage"
 	"github.com/juju/juju/core/model"
-	_ "github.com/juju/juju/internal/provider/dummy"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
-	jujustorage "github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	jujustorage "github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type ImportFilesystemSuite struct {
@@ -26,9 +26,11 @@ type ImportFilesystemSuite struct {
 	importer mockStorageImporter
 }
 
-var _ = gc.Suite(&ImportFilesystemSuite{})
+func TestImportFilesystemSuite(t *testing.T) {
+	tc.Run(t, &ImportFilesystemSuite{})
+}
 
-func (s *ImportFilesystemSuite) SetUpTest(c *gc.C) {
+func (s *ImportFilesystemSuite) SetUpTest(c *tc.C) {
 	s.SubStorageSuite.SetUpTest(c)
 	s.importer = mockStorageImporter{}
 }
@@ -47,25 +49,25 @@ var initErrorTests = []struct {
 	expectedErr: `"123" is not a valid storage name`,
 }}
 
-func (s *ImportFilesystemSuite) TestInitErrors(c *gc.C) {
+func (s *ImportFilesystemSuite) TestInitErrors(c *tc.C) {
 	for i, t := range initErrorTests {
 		c.Logf("test %d for %q", i, t.args)
 		_, err := s.run(c, t.args...)
-		c.Assert(err, gc.ErrorMatches, t.expectedErr)
+		c.Assert(err, tc.ErrorMatches, t.expectedErr)
 	}
 }
 
-func (s *ImportFilesystemSuite) TestImportSuccess(c *gc.C) {
+func (s *ImportFilesystemSuite) TestImportSuccess(c *tc.C) {
 	ctx, err := s.run(c, "foo", "bar", "baz")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, `
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Assert(cmdtesting.Stderr(ctx), tc.Equals, `
 importing "bar" from storage pool "foo" as storage "baz"
 imported storage baz/0
 `[1:])
 
-	s.importer.CheckCalls(c, []testing.StubCall{
+	s.importer.CheckCalls(c, []testhelpers.StubCall{
 		{"ImportStorage", []interface{}{
 			jujustorage.StorageKindFilesystem,
 			"foo", "bar", "baz", false,
@@ -74,17 +76,17 @@ imported storage baz/0
 	})
 }
 
-func (s *ImportFilesystemSuite) TestImportError(c *gc.C) {
+func (s *ImportFilesystemSuite) TestImportError(c *tc.C) {
 	s.importer.SetErrors(errors.New("nope"))
 
 	ctx, err := s.run(c, "foo", "bar", "baz")
-	c.Assert(err, gc.ErrorMatches, "nope")
+	c.Assert(err, tc.ErrorMatches, "nope")
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, `importing "bar" from storage pool "foo" as storage "baz"`+"\n")
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Assert(cmdtesting.Stderr(ctx), tc.Equals, `importing "bar" from storage pool "foo" as storage "baz"`+"\n")
 }
 
-func (s *ImportFilesystemSuite) TestImportSuccessCAAS(c *gc.C) {
+func (s *ImportFilesystemSuite) TestImportSuccessCAAS(c *tc.C) {
 	store := jujuclienttesting.MinimalStore()
 	store.Models["arthur"] = &jujuclient.ControllerModels{
 		CurrentModel: "king/sword",
@@ -95,15 +97,15 @@ func (s *ImportFilesystemSuite) TestImportSuccessCAAS(c *gc.C) {
 	s.store = store
 
 	ctx, err := s.run(c, "foo", "bar", "baz")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, `
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Assert(cmdtesting.Stderr(ctx), tc.Equals, `
 importing "bar" from storage pool "foo" as storage "baz"
 imported storage baz/0
 `[1:])
 
-	s.importer.CheckCalls(c, []testing.StubCall{
+	s.importer.CheckCalls(c, []testhelpers.StubCall{
 		{"ImportStorage", []interface{}{
 			jujustorage.StorageKindFilesystem,
 			"foo", "bar", "baz", false,
@@ -112,17 +114,17 @@ imported storage baz/0
 	})
 }
 
-func (s *ImportFilesystemSuite) TestImportWithForce(c *gc.C) {
+func (s *ImportFilesystemSuite) TestImportWithForce(c *tc.C) {
 	ctx, err := s.run(c, "--force", "foo", "bar", "baz")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(cmdtesting.Stdout(ctx), gc.Equals, "")
-	c.Assert(cmdtesting.Stderr(ctx), gc.Equals, `
+	c.Assert(cmdtesting.Stdout(ctx), tc.Equals, "")
+	c.Assert(cmdtesting.Stderr(ctx), tc.Equals, `
 importing "bar" from storage pool "foo" as storage "baz"
 imported storage baz/0
 `[1:])
 
-	s.importer.CheckCalls(c, []testing.StubCall{
+	s.importer.CheckCalls(c, []testhelpers.StubCall{
 		{"ImportStorage", []interface{}{
 			jujustorage.StorageKindFilesystem,
 			"foo", "bar", "baz", true,
@@ -131,9 +133,9 @@ imported storage baz/0
 	})
 }
 
-func (s *ImportFilesystemSuite) run(c *gc.C, args ...string) (*cmd.Context, error) {
+func (s *ImportFilesystemSuite) run(c *tc.C, args ...string) (*cmd.Context, error) {
 	return cmdtesting.RunCommand(c, storage.NewImportFilesystemCommand(
-		func(*storage.StorageCommandBase) (storage.StorageImporter, error) {
+		func(context.Context, *storage.StorageCommandBase) (storage.StorageImporter, error) {
 			return &s.importer, nil
 		},
 		s.store,
@@ -141,7 +143,7 @@ func (s *ImportFilesystemSuite) run(c *gc.C, args ...string) (*cmd.Context, erro
 }
 
 type mockStorageImporter struct {
-	testing.Stub
+	testhelpers.Stub
 }
 
 func (m *mockStorageImporter) Close() error {
@@ -150,6 +152,7 @@ func (m *mockStorageImporter) Close() error {
 }
 
 func (m *mockStorageImporter) ImportStorage(
+	ctx context.Context,
 	k jujustorage.StorageKind,
 	pool, providerId, storageName string,
 	force bool,

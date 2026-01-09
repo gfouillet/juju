@@ -4,12 +4,14 @@
 package apiserver
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/lease"
+	"github.com/juju/juju/core/unit"
 )
 
 // leadershipChecker implements leadership.Checker by wrapping a lease.Checker.
@@ -37,7 +39,7 @@ type leadershipToken struct {
 // Check is part of the leadership.Token interface.
 func (t leadershipToken) Check() error {
 	err := t.token.Check()
-	if errors.Cause(err) == lease.ErrNotHeld {
+	if errors.Is(err, lease.ErrNotHeld) {
 		return leadership.NewNotLeaderError(t.unitName, t.applicationName)
 	}
 	return errors.Trace(err)
@@ -49,18 +51,18 @@ type leadershipClaimer struct {
 }
 
 // ClaimLeadership is part of the leadership.Claimer interface.
-func (m leadershipClaimer) ClaimLeadership(applicationName, unitName string, duration time.Duration) error {
-	err := m.claimer.Claim(applicationName, unitName, duration)
-	if errors.Cause(err) == lease.ErrClaimDenied {
+func (m leadershipClaimer) ClaimLeadership(ctx context.Context, appName, unitName string, duration time.Duration) error {
+	err := m.claimer.Claim(appName, unitName, duration)
+	if errors.Is(err, lease.ErrClaimDenied) {
 		return leadership.ErrClaimDenied
 	}
 	return errors.Trace(err)
 }
 
 // BlockUntilLeadershipReleased is part of the leadership.Claimer interface.
-func (m leadershipClaimer) BlockUntilLeadershipReleased(applicationName string, cancel <-chan struct{}) error {
-	err := m.claimer.WaitUntilExpired(applicationName, cancel)
-	if errors.Cause(err) == lease.ErrWaitCancelled {
+func (m leadershipClaimer) BlockUntilLeadershipReleased(ctx context.Context, applicationName string) error {
+	err := m.claimer.WaitUntilExpired(ctx, applicationName, nil)
+	if errors.Is(err, lease.ErrWaitCancelled) {
 		return leadership.ErrBlockCancelled
 	}
 	return errors.Trace(err)
@@ -72,9 +74,9 @@ type leadershipRevoker struct {
 }
 
 // RevokeLeadership is part of the leadership.Claimer interface.
-func (m leadershipRevoker) RevokeLeadership(applicationName, unitName string) error {
-	err := m.claimer.Revoke(applicationName, unitName)
-	if errors.Cause(err) == lease.ErrNotHeld {
+func (m leadershipRevoker) RevokeLeadership(applicationName string, unitName unit.Name) error {
+	err := m.claimer.Revoke(applicationName, unitName.String())
+	if errors.Is(err, lease.ErrNotHeld) {
 		return leadership.ErrClaimNotHeld
 	}
 	return errors.Trace(err)

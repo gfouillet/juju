@@ -5,14 +5,16 @@
 package machineactions
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 	"github.com/juju/juju/core/machinelock"
 )
 
@@ -27,7 +29,7 @@ type ManifoldConfig struct {
 }
 
 // start is used by engine.AgentAPIManifold to create a StartFunc.
-func (config ManifoldConfig) start(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func (config ManifoldConfig) start(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	machineTag, ok := a.CurrentConfig().Tag().(names.MachineTag)
 	if !ok {
 		return nil, errors.Errorf("this manifold can only be used inside a machine")

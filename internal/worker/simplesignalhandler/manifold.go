@@ -4,18 +4,16 @@
 package simplesignalhandler
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-)
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
-type Logger interface {
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-}
+	"github.com/juju/juju/core/logger"
+)
 
 // ManifoldConfig is responsible for configuring this worker.
 type ManifoldConfig struct {
@@ -31,7 +29,7 @@ type ManifoldConfig struct {
 	HandlerErrors map[os.Signal]error
 
 	// Logger to use for this worker
-	Logger Logger
+	Logger logger.Logger
 }
 
 // Manifold returns the dependency manifold for this worker based on the config
@@ -45,7 +43,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 }
 
 // Start is responsible for creating a new worker for the manifold config.
-func (m ManifoldConfig) Start(context dependency.Context) (worker.Worker, error) {
+func (m ManifoldConfig) Start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}

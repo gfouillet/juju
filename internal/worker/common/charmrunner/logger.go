@@ -5,14 +5,15 @@ package charmrunner
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/juju/loggo"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.worker.common.runner")
+var logger = internallogger.GetLogger("juju.worker.common.runner")
 
 // MessageReceiver instances are fed messages written to stdout/stderr
 // when running hooks/actions.
@@ -47,7 +48,7 @@ func (l *HookLogger) Run() {
 		line, isPrefix, err := br.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				logger.Errorf("cannot read hook output: %v", err)
+				logger.Errorf(context.Background(), "cannot read hook output: %v", err)
 			}
 			break
 		}

@@ -5,31 +5,32 @@
 package machineactions
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api/agent/machineactions"
 	"github.com/juju/juju/core/machinelock"
 	"github.com/juju/juju/core/watcher"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.worker.machineactions")
+var logger = internallogger.GetLogger("juju.worker.machineactions")
 
 // Facade defines the capabilities required by the worker from the API.
 type Facade interface {
-	WatchActionNotifications(agent names.MachineTag) (watcher.StringsWatcher, error)
-	RunningActions(agent names.MachineTag) ([]params.ActionResult, error)
+	WatchActionNotifications(ctx context.Context, agent names.MachineTag) (watcher.StringsWatcher, error)
+	RunningActions(ctx context.Context, agent names.MachineTag) ([]params.ActionResult, error)
 
-	Action(names.ActionTag) (*machineactions.Action, error)
-	ActionBegin(names.ActionTag) error
-	ActionFinish(tag names.ActionTag, status string, results map[string]any, message string) error
+	Action(context.Context, names.ActionTag) (*machineactions.Action, error)
+	ActionBegin(context.Context, names.ActionTag) error
+	ActionFinish(ctx context.Context, tag names.ActionTag, status string, results map[string]any, message string) error
 }
 
 // WorkerConfig defines the worker's dependencies.
@@ -78,8 +79,8 @@ type handler struct {
 }
 
 // SetUp is part of the watcher.StringsHandler interface.
-func (h *handler) SetUp() (watcher.StringsWatcher, error) {
-	actions, err := h.config.Facade.RunningActions(h.config.MachineTag)
+func (h *handler) SetUp(ctx context.Context) (watcher.StringsWatcher, error) {
+	actions, err := h.config.Facade.RunningActions(ctx, h.config.MachineTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -89,21 +90,21 @@ func (h *handler) SetUp() (watcher.StringsWatcher, error) {
 	for _, action := range actions {
 		tag, err := names.ParseActionTag(action.Action.Tag)
 		if err != nil {
-			logger.Infof("tried to cancel action %s but failed with error %v", action.Action.Tag, err)
+			logger.Infof(ctx, "tried to cancel action %s but failed with error %v", action.Action.Tag, err)
 			continue
 		}
-		err = h.config.Facade.ActionFinish(tag, params.ActionFailed, nil, "action cancelled")
+		err = h.config.Facade.ActionFinish(ctx, tag, params.ActionFailed, nil, "action cancelled")
 		if err != nil {
-			logger.Infof("tried to cancel action %s but failed with error %v", action.Action.Tag, err)
+			logger.Infof(ctx, "tried to cancel action %s but failed with error %v", action.Action.Tag, err)
 		}
 	}
-	return h.config.Facade.WatchActionNotifications(h.config.MachineTag)
+	return h.config.Facade.WatchActionNotifications(ctx, h.config.MachineTag)
 }
 
 // Handle is part of the watcher.StringsHandler interface.
 // It should give us any actions currently enqueued for this machine.
 // We try to execute every action before returning
-func (h *handler) Handle(abort <-chan struct{}, actionsSlice []string) error {
+func (h *handler) Handle(ctx context.Context, actionsSlice []string) error {
 	for _, actionId := range actionsSlice {
 		ok := names.IsValidAction(actionId)
 		if !ok {
@@ -111,31 +112,31 @@ func (h *handler) Handle(abort <-chan struct{}, actionsSlice []string) error {
 		}
 
 		actionTag := names.NewActionTag(actionId)
-		action, err := h.config.Facade.Action(actionTag)
+		action, err := h.config.Facade.Action(ctx, actionTag)
 		if err != nil {
 			// If there is an error attempting to get the action, then don't bounce
 			// the worker. We can't remove the action notification directly, as that
 			// requires the action to exist.
 			// TODO (stickupkid) As a follow up, we should have a new method that
 			// allows the removal of a action notification without an action present.
-			logger.Infof("unable to retrieve action %s: %v", actionId, err)
+			logger.Infof(ctx, "unable to retrieve action %s: %v", actionId, err)
 			continue
 		}
 
 		// Acquire concurrency slot.
 		select {
 		case h.limiter <- struct{}{}:
-		case <-abort:
+		case <-ctx.Done():
 			// The associated strings watcher has been aborted, so there isn't
 			// anything we can do here but give up.
-			logger.Debugf("action %q aborted waiting in queue", actionTag.ID)
+			logger.Debugf(ctx, "action %q aborted waiting in queue", actionTag.ID)
 			return nil
 		}
 		h.wait.Add(1)
 		atomic.AddInt64(&h.inflight, 1)
 
 		// Run the action.
-		go h.runAction(actionTag, *action, abort)
+		go h.runAction(ctx, actionTag, *action)
 	}
 	return nil
 }
@@ -148,37 +149,37 @@ func (h *handler) TearDown() error {
 	// any outstanding actions as failed.
 	inflight := atomic.LoadInt64(&h.inflight)
 	if inflight > 0 {
-		logger.Infof("Waiting for %d running actions...", inflight)
+		logger.Infof(context.Background(), "Waiting for %d running actions...", inflight)
 	}
 	h.wait.Wait()
 	if inflight > 0 {
-		logger.Infof("Done waiting for actions.")
+		logger.Infof(context.Background(), "Done waiting for actions.")
 	}
 	return nil
 }
 
-func (h *handler) runAction(actionTag names.ActionTag, action machineactions.Action, abort <-chan struct{}) {
+func (h *handler) runAction(ctx context.Context, actionTag names.ActionTag, action machineactions.Action) {
 	var results map[string]any
 	var actionErr error
 	defer func() {
 		// The result returned from handling the action is sent through using ActionFinish.
 		var finishErr error
 		if actionErr != nil {
-			finishErr = h.config.Facade.ActionFinish(actionTag, params.ActionFailed, nil, actionErr.Error())
+			finishErr = h.config.Facade.ActionFinish(ctx, actionTag, params.ActionFailed, nil, actionErr.Error())
 		} else {
-			finishErr = h.config.Facade.ActionFinish(actionTag, params.ActionCompleted, results, "")
+			finishErr = h.config.Facade.ActionFinish(ctx, actionTag, params.ActionCompleted, results, "")
 		}
 		if finishErr != nil &&
 			!params.IsCodeAlreadyExists(finishErr) &&
 			!params.IsCodeNotFoundOrCodeUnauthorized(finishErr) {
-			logger.Errorf("could not finish action %s: %v", action.Name(), finishErr)
+			logger.Errorf(ctx, "could not finish action %s: %v", action.Name(), finishErr)
 		}
 
 		// Release concurrency slot.
 		select {
 		case <-h.limiter:
-		case <-abort:
-			logger.Debugf("action %q aborted waiting to enqueue", actionTag)
+		case <-ctx.Done():
+			logger.Debugf(ctx, "action %q aborted waiting to enqueue", actionTag)
 		}
 		atomic.AddInt64(&h.inflight, -1)
 		h.wait.Done()
@@ -192,7 +193,7 @@ func (h *handler) runAction(actionTag names.ActionTag, action machineactions.Act
 			worker = fmt.Sprintf("%s (exec group=%s)", worker, g)
 		}
 		spec := machinelock.Spec{
-			Cancel:  abort,
+			Cancel:  ctx.Done(),
 			Worker:  worker,
 			Comment: fmt.Sprintf("action %s", action.ID()),
 			Group:   group,
@@ -205,7 +206,7 @@ func (h *handler) runAction(actionTag names.ActionTag, action machineactions.Act
 		defer releaser()
 	}
 
-	if err := h.config.Facade.ActionBegin(actionTag); err != nil {
+	if err := h.config.Facade.ActionBegin(ctx, actionTag); err != nil {
 		actionErr = errors.Annotatef(err, "could not begin action %s", action.Name())
 		return
 	}

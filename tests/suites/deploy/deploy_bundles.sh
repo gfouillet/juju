@@ -9,6 +9,10 @@ run_deploy_bundle() {
 	ensure "test-bundles-deploy" "${file}"
 
 	juju deploy juju-qa-bundle-test
+	wait_for "juju-qa-test" "$(charm_channel "juju-qa-test" "2.0/stable")"
+	wait_for "juju-qa-test-focal" "$(charm_channel "juju-qa-test-focal" "latest/candidate")"
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test")"
+	wait_for "juju-qa-test-focal" "$(idle_condition "juju-qa-test-focal")"
 	wait_for "dummy-subordinate" "$(idle_subordinate_condition "dummy-subordinate" "juju-qa-test")"
 	wait_for "dummy-subordinate-focal" "$(idle_subordinate_condition "dummy-subordinate-focal" "juju-qa-test-focal")"
 
@@ -25,8 +29,8 @@ run_deploy_bundle_overlay() {
 	bundle=./tests/suites/deploy/bundles/overlay_bundle.yaml
 	juju deploy ${bundle}
 
-	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0 0)"
-	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0 1)"
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0)"
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 1)"
 
 	destroy_model "test-bundles-deploy-overlay"
 }
@@ -44,8 +48,8 @@ run_deploy_bundle_overlay_with_image_id() {
 
 	juju deploy "${TEST_DIR}/overlay_bundle_image_id.yaml"
 
-	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 0)"
-	wait_for "ubuntu" "$(idle_condition "ubuntu" 0 1)"
+	wait_for "ubuntu" "$(idle_condition "ubuntu" 0)"
+	wait_for "ubuntu" "$(idle_condition "ubuntu" 1)"
 
 	destroy_model "test-bundles-deploy-overlay-image-id"
 }
@@ -146,11 +150,13 @@ run_deploy_exported_charmhub_bundle_with_fixed_revisions() {
 	# no need to wait for the bundle to finish deploying to
 	# check the export.
 	echo "Compare export-bundle with telegraf_bundle"
-	juju export-bundle --filename "${TEST_DIR}/exported_bundle.yaml"
-	# Sort keys in both yaml files to get a fair comparison.
-	yq -i 'sort_keys(..)' "${TEST_DIR}/telegraf_bundle.yaml"
-	yq -i 'sort_keys(..)' "${TEST_DIR}/exported_bundle.yaml"
-	diff -u "${TEST_DIR}/telegraf_bundle.yaml" "${TEST_DIR}/exported_bundle.yaml"
+
+	# TODO(gfouillet) - recover from 3.6, delete whenever export bundle is restored or deleted
+	got=$(juju export-bundle 2>&1 1>/dev/null)
+	if [[ $got != *"not implemented"* ]]; then
+		echo "ERROR: export-bundle should return 'not implemented'."
+		exit 1
+	fi
 
 	destroy_model "test-export-bundles-deploy-with-fixed-revisions"
 }
@@ -221,11 +227,13 @@ run_deploy_exported_charmhub_bundle_with_float_revisions() {
 	# The model should be updated immediately, so we can export the bundle before
 	# everything is done deploying
 	echo "Compare export-bundle with telegraf_bundle_with_revisions"
-	juju export-bundle --filename "${TEST_DIR}/exported_bundle.yaml"
-	# Sort keys in both yaml files to get a fair comparison.
-	yq -i 'sort_keys(..)' "${TEST_DIR}/telegraf_bundle_with_revisions.yaml"
-	yq -i 'sort_keys(..)' "${TEST_DIR}/exported_bundle.yaml"
-	diff -u "${TEST_DIR}/telegraf_bundle_with_revisions.yaml" "${TEST_DIR}/exported_bundle.yaml"
+
+	# TODO(gfouillet) - recover from 3.6, delete whenever export bundle is restored or deleted
+	got=$(juju export-bundle 2>&1 1>/dev/null)
+	if [[ $got != *"not implemented"* ]]; then
+		echo "ERROR: export-bundle should return 'not implemented'."
+		exit 1
+	fi
 
 	destroy_model "test-export-bundles-deploy-with-float-revisions"
 }
@@ -237,6 +245,9 @@ run_deploy_trusted_bundle() {
 
 	ensure "test-trusted-bundles-deploy" "${file}"
 
+	trust_checker=$(pack_charm ./tests/suites/deploy/charms/trust-checker)
+	mv ${trust_checker} ./tests/suites/deploy/charms/trust-checker.charm
+
 	bundle=./tests/suites/deploy/bundles/trusted_bundle.yaml
 	OUT=$(juju deploy ${bundle} 2>&1 || true)
 	echo "${OUT}" | check "repeat the deploy command with the --trust argument"
@@ -246,29 +257,6 @@ run_deploy_trusted_bundle() {
 	wait_for "trust-checker" "$(idle_condition "trust-checker")"
 
 	destroy_model "test-trusted-bundles-deploy"
-}
-
-run_deploy_charmhub_bundle() {
-	echo
-
-	model_name="test-charmhub-bundle-deploy"
-	file="${TEST_DIR}/${model_name}.log"
-
-	ensure "${model_name}" "${file}"
-
-	bundle=juju-qa-bundle-test
-	juju deploy "${bundle}"
-
-	wait_for "juju-qa-test" "$(charm_channel "juju-qa-test" "2.0/stable")"
-	wait_for "juju-qa-test-focal" "$(charm_channel "juju-qa-test-focal" "latest/candidate")"
-	# Relying on hardcoded app index is fragile should a change in their order occur.
-	# We should find time to refactor this.
-	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 2)"
-	wait_for "juju-qa-test-focal" "$(idle_condition "juju-qa-test-focal" 3)"
-	wait_for "dummy-subordinate" "$(idle_subordinate_condition "dummy-subordinate" "juju-qa-test")"
-	wait_for "dummy-subordinate-focal" "$(idle_subordinate_condition "dummy-subordinate-focal" "juju-qa-test-focal")"
-
-	destroy_model "${model_name}"
 }
 
 # run_deploy_lxd_profile_bundle is to deploy multiple units of the
@@ -288,11 +276,11 @@ run_deploy_lxd_profile_bundle() {
 
 	# 8 units of lxd-profile
 	for i in 0 1 2 3 4 5 6 7; do
-		wait_for "lxd-profile" "$(idle_condition "lxd-profile" 0 "${i}")"
+		wait_for "lxd-profile" "$(idle_condition "lxd-profile" "${i}")"
 	done
 	# 4 units of ubuntu
 	for i in 0 1 2 3; do
-		wait_for "ubuntu" "$(idle_condition "ubuntu" 1 "${i}")"
+		wait_for "ubuntu" "$(idle_condition "ubuntu" "${i}")"
 	done
 
 	short_uuid=$(juju models --format json |
@@ -324,11 +312,12 @@ run_deploy_multi_app_single_charm_bundle() {
 	bundle=./tests/suites/deploy/bundles/multi-app-single-charm.yaml
 	juju deploy "${bundle}"
 
-	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test" 0)"
-	wait_for "juju-qa-test-dup" "$(idle_condition "juju-qa-test-dup" 1)"
+	wait_for "juju-qa-test" "$(idle_condition "juju-qa-test")"
+	wait_for "juju-qa-test-dup" "$(idle_condition "juju-qa-test-dup")"
 
 	# ensure juju-qa-test-dup can refresh and us it's resources.
-	juju refresh juju-qa-test-dup
+	# skip this for now, re-enable once juju refresh has been implemented.
+	# juju refresh juju-qa-test-dup
 
 	destroy_model "${model_name}"
 }
@@ -342,14 +331,17 @@ test_deploy_bundles() {
 	(
 		set_verbosity
 
+		echo "==> Checking for dependencies"
+		check_dependencies charmcraft
+
 		cd .. || exit
 
 		run "run_deploy_bundle"
 		run "run_deploy_bundle_overlay"
-		run "run_deploy_exported_charmhub_bundle_with_fixed_revisions"
-		run "run_deploy_exported_charmhub_bundle_with_float_revisions"
+		# TODO: Restore these tests once export-bundle is restored.
+		# run "run_deploy_exported_charmhub_bundle_with_fixed_revisions"
+		# run "run_deploy_exported_charmhub_bundle_with_float_revisions"
 		run "run_deploy_trusted_bundle"
-		run "run_deploy_charmhub_bundle"
 		run "run_deploy_multi_app_single_charm_bundle"
 
 		# LXD specific profile tests.
@@ -358,7 +350,10 @@ test_deploy_bundles() {
 			echo "==> TEST SKIPPED: deploy_lxd_profile_bundle - tests for non LXD only"
 			;;
 		*)
-			run "run_deploy_lxd_profile_bundle"
+			# Skip these tests for now, as they rely on lxd profiles, which
+			# have not been re-implemented yet
+			#
+			# run "run_deploy_lxd_profile_bundle"
 			;;
 		esac
 

@@ -4,6 +4,8 @@
 package common
 
 import (
+	"context"
+
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/rpc/params"
@@ -22,9 +24,9 @@ func NewControllerConfig(facade base.FacadeCaller) *ControllerConfigAPI {
 }
 
 // ControllerConfig returns the current controller configuration.
-func (e *ControllerConfigAPI) ControllerConfig() (controller.Config, error) {
+func (e *ControllerConfigAPI) ControllerConfig(ctx context.Context) (controller.Config, error) {
 	var result params.ControllerConfigResult
-	err := e.facade.FacadeCall("ControllerConfig", nil, &result)
+	err := e.facade.FacadeCall(ctx, "ControllerConfig", nil, &result)
 	if err != nil {
 		return nil, err
 	}

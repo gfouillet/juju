@@ -4,72 +4,64 @@
 package crosscontroller
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/network"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("CrossController", 1, func(ctx facade.Context) (facade.Facade, error) {
+	registry.MustRegister("CrossController", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
 		return newStateCrossControllerAPI(ctx)
 	}, reflect.TypeOf((*CrossControllerAPI)(nil)))
 }
 
 // newStateCrossControllerAPI creates a new server-side CrossModelRelations API facade
 // backed by global state.
-func newStateCrossControllerAPI(ctx facade.Context) (*CrossControllerAPI, error) {
-	st := ctx.State()
+func newStateCrossControllerAPI(ctx facade.ModelContext) (*CrossControllerAPI, error) {
+	domainServices := ctx.DomainServices()
 	return NewCrossControllerAPI(
-		ctx.Resources(),
-		func() ([]string, string, error) {
-			return controllerInfo(st)
+		ctx.WatcherRegistry(),
+		func(ctx context.Context) ([]string, string, error) {
+			controllerConfig := domainServices.ControllerConfig()
+			config, err := controllerConfig.ControllerConfig(ctx)
+			if err != nil {
+				return nil, "", errors.Trace(err)
+			}
+			return controllerInfo(ctx, domainServices.ControllerNode(), config)
 		},
-		func() (string, error) {
-			config, err := st.ControllerConfig()
+		func(ctx context.Context) (string, error) {
+			controllerConfig := domainServices.ControllerConfig()
+			config, err := controllerConfig.ControllerConfig(ctx)
 			if err != nil {
 				return "", errors.Trace(err)
 			}
 			return config.PublicDNSAddress(), nil
 		},
-		st.WatchAPIHostPortsForClients,
+		domainServices.ControllerNode().WatchControllerAPIAddresses,
 	)
 }
 
-// controllerInfoGetter indirects state for retrieving information
+// ControllerInfoGetter indirects state for retrieving information
 // required for cross-controller communication.
-type controllerInfoGetter interface {
-	APIHostPortsForClients() ([]network.SpaceHostPorts, error)
-	ControllerConfig() (controller.Config, error)
+type ControllerInfoGetter interface {
+	// GetAllAPIAddressesForClients returns a string slice of api
+	// addresses available for agents.
+	GetAllAPIAddressesForClients(ctx context.Context) ([]string, error)
 }
 
 // controllerInfo retrieves information required to communicate
 // with this controller - API addresses and the CA cert.
-func controllerInfo(st controllerInfoGetter) ([]string, string, error) {
-	apiHostPorts, err := st.APIHostPortsForClients()
+func controllerInfo(ctx context.Context, getter ControllerInfoGetter, config controller.Config) ([]string, string, error) {
+	apiAddresses, err := getter.GetAllAPIAddressesForClients(ctx)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
 
-	var addrs []string
-	for _, hostPorts := range apiHostPorts {
-		ordered := hostPorts.HostPorts().PrioritizedForScope(network.ScopeMatchPublic)
-		for _, addr := range ordered {
-			if addr != "" {
-				addrs = append(addrs, addr)
-			}
-		}
-	}
-
-	controllerConfig, err := st.ControllerConfig()
-	if err != nil {
-		return nil, "", errors.Trace(err)
-	}
-
-	caCert, _ := controllerConfig.CACert()
-	return addrs, caCert, nil
+	caCert, _ := config.CACert()
+	return apiAddresses, caCert, nil
 }

@@ -4,9 +4,10 @@
 package crossmodel
 
 import (
-	"github.com/juju/charm/v12"
 	"gopkg.in/macaroon.v2"
 
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/charm"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -29,33 +30,6 @@ type ApplicationOffer struct {
 	// Endpoints is the collection of endpoint names offered (internal->published).
 	// The map allows for advertised endpoint names to be aliased.
 	Endpoints map[string]charm.Relation
-}
-
-// AddApplicationOfferArgs contains parameters used to create an application offer.
-type AddApplicationOfferArgs struct {
-	// OfferName is the name of the offer.
-	OfferName string
-
-	// Owner is the user name who owns the offer.
-	Owner string
-
-	// HasRead are the user names who can see the offer exists.
-	HasRead []string
-
-	// ApplicationName is the name of the application to which the offer pertains.
-	ApplicationName string
-
-	// ApplicationDescription is a description of the application's functionality,
-	// typically copied from the charm metadata.
-	ApplicationDescription string
-
-	// Endpoints is the collection of endpoint names offered (internal->published).
-	// The map allows for advertised endpoint names to be aliased.
-	Endpoints map[string]string
-
-	// Icon is an icon to display when browsing the ApplicationOffers, which by default
-	// comes from the charm.
-	Icon []byte
 }
 
 // ConsumeApplicationArgs contains parameters used to consume an offer.
@@ -82,8 +56,8 @@ func (s *ApplicationOffer) String() string {
 // ApplicationOfferFilter is used to query applications offered
 // by this model.
 type ApplicationOfferFilter struct {
-	// OwnerName is the owner of the model hosting the offer.
-	OwnerName string
+	// ModelQualifier disambiguates the name of the model hosting the offer.
+	ModelQualifier model.Qualifier
 
 	// ModelName is the name of the model hosting the offer.
 	ModelName string
@@ -118,31 +92,6 @@ type EndpointFilterTerm struct {
 
 	// Role is an endpoint role.
 	Role charm.RelationRole
-}
-
-// An ApplicationOffers instance holds application offers from a model.
-type ApplicationOffers interface {
-
-	// AddOffer adds a new application offer to the directory.
-	AddOffer(offer AddApplicationOfferArgs) (*ApplicationOffer, error)
-
-	// UpdateOffer replaces an existing offer at the same URL.
-	UpdateOffer(offer AddApplicationOfferArgs) (*ApplicationOffer, error)
-
-	// ApplicationOffer returns the named application offer.
-	ApplicationOffer(offerName string) (*ApplicationOffer, error)
-
-	// ApplicationOfferForUUID returns the application offer with the UUID.
-	ApplicationOfferForUUID(offerUUID string) (*ApplicationOffer, error)
-
-	// ListOffers returns the offers satisfying the specified filter.
-	ListOffers(filter ...ApplicationOfferFilter) ([]ApplicationOffer, error)
-
-	// Remove removes the application offer at the specified URL.
-	Remove(offerName string, force bool) error
-
-	// AllApplicationOffers returns all application offers in the model.
-	AllApplicationOffers() (offers []*ApplicationOffer, _ error)
 }
 
 // RemoteApplication represents a remote application.

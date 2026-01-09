@@ -4,6 +4,7 @@
 package gce
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"path"
@@ -13,21 +14,20 @@ import (
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/providerinit"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/os/ostype"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/instances"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/providerinit"
 	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
 
 // StartInstance implements environs.InstanceBroker.
-func (env *environ) StartInstance(ctx context.ProviderCallContext, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
+func (env *environ) StartInstance(ctx context.Context, args environs.StartInstanceParams) (*environs.StartInstanceResult, error) {
 	// Start a new instance.
 
 	spec, err := env.buildInstanceSpec(ctx, args)
@@ -47,7 +47,7 @@ func (env *environ) StartInstance(ctx context.ProviderCallContext, args environs
 
 	// Build the result.
 	hwc := env.getHardwareCharacteristics(spec, envInst)
-	logger.Infof("started instance %q in zone %q", inst.GetName(), *hwc.AvailabilityZone)
+	logger.Infof(ctx, "started instance %q in zone %q", inst.GetName(), *hwc.AvailabilityZone)
 	result := environs.StartInstanceResult{
 		Instance: envInst,
 		Hardware: hwc,
@@ -67,7 +67,7 @@ func (env *environ) finishInstanceConfig(args environs.StartInstanceParams, spec
 // buildInstanceSpec builds an instance spec from the provided args
 // and returns it. This includes pulling the simplestreams data for the
 // machine type, region, and other constraints.
-func (env *environ) buildInstanceSpec(ctx context.ProviderCallContext, args environs.StartInstanceParams) (*instances.InstanceSpec, error) {
+func (env *environ) buildInstanceSpec(ctx context.Context, args environs.StartInstanceParams) (*instances.InstanceSpec, error) {
 	instTypesAndCosts, err := env.InstanceTypes(ctx, constraints.Value{})
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -149,7 +149,7 @@ func formatMachineType(zone, name string) string {
 	return fmt.Sprintf("zones/%s/machineTypes/%s", zone, name)
 }
 
-func (env *environ) serviceAccount(ctx context.ProviderCallContext, args environs.StartInstanceParams) (string, error) {
+func (env *environ) serviceAccount(ctx context.Context, args environs.StartInstanceParams) (string, error) {
 	var serviceAccount string
 
 	// For controllers, the service account can come from the credential.
@@ -157,12 +157,12 @@ func (env *environ) serviceAccount(ctx context.ProviderCallContext, args environ
 		if args.InstanceConfig.Bootstrap != nil && args.InstanceConfig.Bootstrap.BootstrapMachineConstraints.HasInstanceRole() {
 			serviceAccount = *args.InstanceConfig.Bootstrap.BootstrapMachineConstraints.InstanceRole
 			if serviceAccount != "" {
-				logger.Debugf("using bootstrap service account: %s", serviceAccount)
+				logger.Debugf(ctx, "using bootstrap service account: %s", serviceAccount)
 			}
 		} else if env.cloud.Credential.AuthType() == cloud.ServiceAccountAuthType {
 			serviceAccount = env.cloud.Credential.Attributes()[credServiceAccount]
 			if serviceAccount != "" {
-				logger.Debugf("using credential service account: %s", serviceAccount)
+				logger.Debugf(ctx, "using credential service account: %s", serviceAccount)
 			}
 		}
 	}
@@ -174,7 +174,7 @@ func (env *environ) serviceAccount(ctx context.ProviderCallContext, args environ
 	if args.Constraints.HasInstanceRole() {
 		serviceAccount = *args.Constraints.InstanceRole
 		if serviceAccount != "" {
-			logger.Debugf("using constraints service account: %s", serviceAccount)
+			logger.Debugf(ctx, "using constraints service account: %s", serviceAccount)
 		}
 	}
 	if serviceAccount != "" {
@@ -187,7 +187,7 @@ func (env *environ) serviceAccount(ctx context.ProviderCallContext, args environ
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	logger.Debugf("using project service account: %s", serviceAccount)
+	logger.Debugf(ctx, "using project service account: %s", serviceAccount)
 	return serviceAccount, nil
 }
 
@@ -195,7 +195,7 @@ func (env *environ) serviceAccount(ctx context.ProviderCallContext, args environ
 // provisioned, relative to the provided args and spec. Info for that
 // low-level instance is returned.
 func (env *environ) startInstance(
-	ctx context.ProviderCallContext, args environs.StartInstanceParams, imageID, instanceTypeName string,
+	ctx context.Context, args environs.StartInstanceParams, imageID, instanceTypeName string,
 ) (_ *computepb.Instance, err error) {
 	hostname, err := env.namespace.Hostname(args.InstanceConfig.MachineId)
 	if err != nil {
@@ -218,7 +218,7 @@ func (env *environ) startInstance(
 	}
 	imageURL := imageURLBase + imageID
 
-	disks, err := getDisks(imageURL, args.Constraints, os)
+	disks, err := getDisks(ctx, imageURL, args.Constraints, os)
 	if err != nil {
 		return nil, environs.ZoneIndependentError(err)
 	}
@@ -258,14 +258,14 @@ func (env *environ) startInstance(
 
 	serviceAccount, err := env.serviceAccount(ctx, args)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, errors.Trace(err))
 	}
 
 	hasAccelerator, err := env.hasAccelerator(ctx, args.AvailabilityZone, instanceTypeName)
 	if err != nil {
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
-	logger.Debugf("Accelerator support in zone %s for instance type %s: %t",
+	logger.Debugf(ctx, "Accelerator support in zone %s for instance type %s: %t",
 		args.AvailabilityZone, args.Constraints.InstanceType, hasAccelerator)
 
 	instArg := &computepb.Instance{
@@ -296,7 +296,7 @@ func (env *environ) startInstance(
 		// We currently treat all AddInstance failures
 		// as being zone-specific, so we'll retry in
 		// another zone.
-		return nil, google.HandleCredentialError(errors.Trace(err), ctx)
+		return nil, env.HandleCredentialError(ctx, err)
 	}
 
 	return inst, nil
@@ -309,7 +309,7 @@ func getMetadata(args environs.StartInstanceParams, os ostype.OSType) (map[strin
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot make user data")
 	}
-	logger.Debugf("GCE user data; %d bytes", len(userData))
+	logger.Debugf(context.TODO(), "GCE user data; %d bytes", len(userData))
 
 	metadata := make(map[string]string)
 	for tag, value := range args.InstanceConfig.Tags {
@@ -337,19 +337,19 @@ func getMetadata(args environs.StartInstanceParams, os ostype.OSType) (map[strin
 // the new instances and returns it. This will always include a root
 // disk with characteristics determined by the provides args and
 // constraints.
-func getDisks(imageURL string, cons constraints.Value, os ostype.OSType) ([]*computepb.AttachedDisk, error) {
+func getDisks(ctx context.Context, imageURL string, cons constraints.Value, os ostype.OSType) ([]*computepb.AttachedDisk, error) {
 	size := common.MinRootDiskSizeGiB(os)
 	if cons.RootDisk != nil && *cons.RootDisk > size {
 		size = common.MiBToGiB(*cons.RootDisk)
 		if size < google.MinDiskSizeGB {
 			msg := "Ignoring root-disk constraint of %dM because it is smaller than the GCE image size of %dG"
-			logger.Infof(msg, *cons.RootDisk, google.MinDiskSizeGB)
+			logger.Infof(ctx, msg, *cons.RootDisk, google.MinDiskSizeGB)
 		}
 	}
 	if size < google.MinDiskSizeGB {
 		size = google.MinDiskSizeGB
 	}
-	logger.Infof("fetching disk image from %v", imageURL)
+	logger.Infof(ctx, "fetching disk image from %v", imageURL)
 
 	disk := &computepb.AttachedDisk{
 		Type:       ptr(google.DiskPersistenceTypePersistent),
@@ -369,14 +369,14 @@ func getDisks(imageURL string, cons constraints.Value, os ostype.OSType) ([]*com
 }
 
 // hasAccelerator checks if the given instance type has any accelerators (e.g., GPUs).
-func (env *environ) hasAccelerator(ctx context.ProviderCallContext, zone string, instanceType string) (bool, error) {
+func (env *environ) hasAccelerator(ctx context.Context, zone string, instanceType string) (bool, error) {
 	if len(instanceType) == 0 {
 		return false, nil
 	}
 
 	mt, err := env.gce.MachineType(ctx, zone, instanceType)
 	if err != nil {
-		return false, google.HandleCredentialError(errors.Trace(err), ctx)
+		return false, env.HandleCredentialError(ctx, err)
 	}
 
 	for _, accelerator := range mt.GetAccelerators() {
@@ -408,7 +408,7 @@ func (env *environ) getHardwareCharacteristics(spec *instances.InstanceSpec, ins
 }
 
 // AllInstances implements environs.InstanceBroker.
-func (env *environ) AllInstances(ctx context.ProviderCallContext) ([]instances.Instance, error) {
+func (env *environ) AllInstances(ctx context.Context) ([]instances.Instance, error) {
 	// We want all statuses here except for "terminated" - these instances are truly dead to us.
 	// According to https://cloud.google.com/compute/docs/instances/instance-life-cycle
 	// there are now only "provisioning", "staging", "running", "stopping" and "terminated" states.
@@ -428,13 +428,13 @@ func (env *environ) AllInstances(ctx context.ProviderCallContext) ([]instances.I
 }
 
 // AllRunningInstances implements environs.InstanceBroker.
-func (env *environ) AllRunningInstances(ctx context.ProviderCallContext) ([]instances.Instance, error) {
+func (env *environ) AllRunningInstances(ctx context.Context) ([]instances.Instance, error) {
 	instances, err := env.instances(ctx)
 	return instances, errors.Trace(err)
 }
 
 // StopInstances implements environs.InstanceBroker.
-func (env *environ) StopInstances(ctx context.ProviderCallContext, instances ...instance.Id) error {
+func (env *environ) StopInstances(ctx context.Context, instances ...instance.Id) error {
 	var ids []string
 	for _, id := range instances {
 		ids = append(ids, string(id))
@@ -442,5 +442,5 @@ func (env *environ) StopInstances(ctx context.ProviderCallContext, instances ...
 
 	prefix := env.namespace.Prefix()
 	err := env.gce.RemoveInstances(ctx, prefix, ids...)
-	return google.HandleCredentialError(errors.Trace(err), ctx)
+	return env.HandleCredentialError(ctx, err)
 }

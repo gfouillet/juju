@@ -4,31 +4,27 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
 
 	"github.com/juju/juju/api/client/application"
 	apicharms "github.com/juju/juju/api/client/charms"
 	"github.com/juju/juju/api/client/client"
 	"github.com/juju/juju/api/client/sshclient"
-	commoncharm "github.com/juju/juju/api/common/charms"
 	controllerapi "github.com/juju/juju/api/controller/controller"
-	jujucloud "github.com/juju/juju/cloud"
-	"github.com/juju/juju/controller"
 	environsbootstrap "github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/environs/cloudspec"
-	k8sprovider "github.com/juju/juju/internal/provider/kubernetes"
-	provider "github.com/juju/juju/internal/provider/kubernetes"
+	jujussh "github.com/juju/juju/internal/network/ssh"
+	"github.com/juju/juju/internal/provider/kubernetes"
 	k8sexec "github.com/juju/juju/internal/provider/kubernetes/exec"
-	jujussh "github.com/juju/juju/network/ssh"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -36,8 +32,6 @@ import (
 // and DebugHooksCommand for CAAS model.
 type sshContainer struct {
 	leaderResolver
-	// remote indicates if it should target to the operator or workload pod.
-	remote         bool
 	target         string
 	container      string
 	args           []string
@@ -47,52 +41,21 @@ type sshContainer struct {
 	namespace      string
 
 	applicationAPI   ApplicationAPI
-	charmsAPI        CharmsAPI
+	charmAPI         CharmAPI
 	execClientGetter func(string, cloudspec.CloudSpec) (k8sexec.Executor, error)
 	execClient       k8sexec.Executor
 	sshClient        SSHClientAPI
 	controllerAPI    SSHControllerAPI
 }
 
-// CloudCredentialAPI defines cloud credential related APIs.
-type CloudCredentialAPI interface {
-	Cloud(tag names.CloudTag) (jujucloud.Cloud, error)
-	CredentialContents(cloud, credential string, withSecrets bool) ([]params.CredentialContentResult, error)
-	BestAPIVersion() int
-	Close() error
-}
-
-// ApplicationAPI defines application related APIs.
-type ApplicationAPI interface {
-	Leader(string) (string, error)
-	Close() error
-	UnitsInfo(units []names.UnitTag) ([]application.UnitInfo, error)
-}
-
-// SSHClientAPI defines ssh client related APIs.
-type SSHClientAPI interface {
-	Close() error
-	ModelCredentialForSSH() (cloudspec.CloudSpec, error)
-}
-
-type CharmsAPI interface {
-	Close() error
-	CharmInfo(charmURL string) (*commoncharm.CharmInfo, error)
-}
-
-type SSHControllerAPI interface {
-	ControllerConfig() (controller.Config, error)
-}
-
 // SetFlags sets up options and flags for the command.
 func (c *sshContainer) SetFlags(f *gnuflag.FlagSet) {
-	f.BoolVar(&c.remote, "remote", false, "Target on the workload or operator pod (k8s-only)")
 	f.StringVar(&c.container, "container", "", "the container name of the target pod")
 }
 
 func (c *sshContainer) setHostChecker(_ jujussh.ReachableChecker) {}
 
-func (c *sshContainer) setLeaderAPI(leaderAPI LeaderAPI) {
+func (c *sshContainer) setLeaderAPI(ctx context.Context, leaderAPI LeaderAPI) {
 	c.leaderAPI = leaderAPI
 }
 
@@ -122,13 +85,13 @@ func (c *sshContainer) setPublicKeyRetryStrategy(_ retry.CallArgs) {}
 
 // initRun initializes the API connection if required. It must be called
 // at the top of the command's Run method.
-func (c *sshContainer) initRun(mc ModelCommand) (err error) {
+func (c *sshContainer) initRun(ctx context.Context, mc ModelCommand) (err error) {
 	if c.modelName, err = mc.ModelIdentifier(); err != nil {
 		return errors.Trace(err)
 	}
 
 	if len(c.modelUUID) == 0 {
-		_, mDetails, err := mc.ModelDetails()
+		_, mDetails, err := mc.ModelDetails(ctx)
 		if err != nil {
 			return err
 		}
@@ -143,11 +106,11 @@ func (c *sshContainer) initRun(mc ModelCommand) (err error) {
 		c.controllerUUID = controllerDetails.ControllerUUID
 	}
 
-	cAPI, err := mc.NewControllerAPIRoot()
+	cAPI, err := mc.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	root, err := mc.NewAPIRoot()
+	root, err := mc.NewAPIRoot(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -165,15 +128,15 @@ func (c *sshContainer) initRun(mc ModelCommand) (err error) {
 		if c.controllerAPI == nil {
 			c.controllerAPI = controllerapi.NewClient(cAPI)
 		}
-		controllerCfg, err := c.controllerAPI.ControllerConfig()
+		controllerCfg, err := c.controllerAPI.ControllerConfig(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		c.namespace = provider.DecideControllerNamespace(controllerCfg.ControllerName())
+		c.namespace = kubernetes.DecideControllerNamespace(controllerCfg.ControllerName())
 	}
 
 	if c.execClient == nil {
-		if c.execClient, err = c.getExecClient(); err != nil {
+		if c.execClient, err = c.getExecClient(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -185,8 +148,8 @@ func (c *sshContainer) initRun(mc ModelCommand) (err error) {
 		c.applicationAPI = application.NewClient(root)
 	}
 
-	if c.charmsAPI == nil {
-		c.charmsAPI = apicharms.NewClient(root)
+	if c.charmAPI == nil {
+		c.charmAPI = apicharms.NewClient(root)
 	}
 
 	return nil
@@ -204,9 +167,9 @@ func (c *sshContainer) cleanupRun() {
 		_ = c.applicationAPI.Close()
 		c.applicationAPI = nil
 	}
-	if c.charmsAPI != nil {
-		_ = c.charmsAPI.Close()
-		c.charmsAPI = nil
+	if c.charmAPI != nil {
+		_ = c.charmAPI.Close()
+		c.charmAPI = nil
 	}
 	if c.sshClient != nil {
 		_ = c.sshClient.Close()
@@ -216,18 +179,25 @@ func (c *sshContainer) cleanupRun() {
 
 const charmContainerName = "charm"
 
-func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
+func (c *sshContainer) resolveTarget(ctx context.Context, target string) (*resolvedTarget, error) {
 	if modelNameWithoutUsername(c.modelName) == environsbootstrap.ControllerModelName && names.IsValidMachine(target) {
 		// TODO(caas): change here to controller unit tag once we refactored controller to an application.
 		if target != "0" {
 			// HA is not enabled on CaaS controller yet.
 			return nil, errors.NotFoundf("target %q", target)
 		}
+		if c.container == "" {
+			c.container = "api-server"
+		} else if c.container != "api-server" && c.container != "charm" {
+			return nil, errors.Errorf(
+				"container %q must be one of api-server, charm", c.container,
+			)
+		}
 		return &resolvedTarget{entity: fmt.Sprintf("%s-%s", environsbootstrap.ControllerModelName, target)}, nil
 	}
 	// If the user specified a leader unit, try to resolve it to the
 	// appropriate unit name and override the requested target name.
-	resolvedTargetName, err := c.maybeResolveLeaderUnit(target)
+	resolvedTargetName, err := c.maybeResolveLeaderUnit(ctx, target)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -236,12 +206,8 @@ func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
 		return nil, errors.Errorf("invalid unit name %q", resolvedTargetName)
 	}
 	unitTag := names.NewUnitTag(resolvedTargetName)
-	appName, err := names.UnitApplication(unitTag.Id())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 
-	unitInfoResults, err := c.applicationAPI.UnitsInfo([]names.UnitTag{unitTag})
+	unitInfoResults, err := c.applicationAPI.UnitsInfo(ctx, []names.UnitTag{unitTag})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -250,64 +216,34 @@ func (c *sshContainer) resolveTarget(target string) (*resolvedTarget, error) {
 		return nil, errors.Annotatef(unit.Error, "getting unit %q", resolvedTargetName)
 	}
 
-	charmInfo, err := c.charmsAPI.CharmInfo(unit.Charm)
+	charmInfo, err := c.charmAPI.CharmInfo(ctx, unit.Charm)
 	if err != nil {
 		return nil, errors.Annotatef(err, "getting charm info for %q", resolvedTargetName)
 	}
 
-	isMetaV2 := (charm.MetaFormat(charmInfo.Charm()) == charm.FormatV2)
-	var providerID string
-	if !isMetaV2 && !c.remote {
-		// We don't want to introduce CaaS broker here, but only use exec client.
-		podAPI := c.execClient.RawClient().CoreV1().Pods(c.execClient.NameSpace())
-		modelName := modelNameWithoutUsername(c.modelName)
-		// Model name should always be set, but just in case...
-		if modelName == "" {
-			modelName = c.execClient.NameSpace()
-		}
-		providerID, err = k8sprovider.GetOperatorPodName(
-			podAPI,
-			c.execClient.RawClient().CoreV1().Namespaces(),
-			appName,
-			c.execClient.NameSpace(),
-			modelName,
-			c.modelUUID,
-			c.controllerUUID,
-		)
-
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		if len(providerID) == 0 {
-			return nil, errors.New(fmt.Sprintf("operator pod for unit %q is not ready yet", unitTag.Id()))
-		}
-	} else {
-		if len(unit.ProviderId) == 0 {
-			return nil, errors.New(fmt.Sprintf("container for unit %q is not ready yet", unitTag.Id()))
-		}
-		providerID = unit.ProviderId
+	if len(unit.ProviderId) == 0 {
+		return nil, errors.New(fmt.Sprintf("container for unit %q is not ready yet", unitTag.Id()))
 	}
 
-	if isMetaV2 {
-		meta := charmInfo.Charm().Meta()
-		if c.container == "" {
-			c.container = charmContainerName
+	meta := charmInfo.Meta
+	if c.container == "" {
+		c.container = charmContainerName
+	}
+	if _, ok := meta.Containers[c.container]; !ok && c.container != charmContainerName {
+		containers := []string{charmContainerName}
+		for k := range meta.Containers {
+			containers = append(containers, k)
 		}
-		if _, ok := meta.Containers[c.container]; !ok && c.container != charmContainerName {
-			containers := []string{charmContainerName}
-			for k := range meta.Containers {
-				containers = append(containers, k)
-			}
-			return nil, errors.New(
-				fmt.Sprintf("container %q must be one of %s", c.container, strings.Join(containers, ", ")))
-		}
+		return nil, errors.New(
+			fmt.Sprintf("container %q must be one of %s", c.container, strings.Join(containers, ", ")))
 	}
 
-	return &resolvedTarget{entity: providerID}, nil
+	return &resolvedTarget{entity: unit.ProviderId}, nil
 }
 
 // Context defines methods for command context.
 type Context interface {
+	context.Context
 	InterruptNotify(c chan<- os.Signal)
 	StopInterruptNotify(c chan<- os.Signal)
 	GetStdout() io.Writer
@@ -316,19 +252,22 @@ type Context interface {
 }
 
 func (c *sshContainer) ssh(ctx Context, enablePty bool, target *resolvedTarget) (err error) {
-	args := c.args
-	if len(args) == 0 {
-		args = []string{"exec", "sh"}
-	}
 	cancel, stop := getInterruptAbortChan(ctx)
 	defer stop()
 	var env []string
+	args := c.args
 	if enablePty {
 		if term := os.Getenv("TERM"); term != "" {
 			env = append(env, "TERM="+term)
 		}
+		if len(args) == 0 {
+			args = []string{"exec", "bash", "--login"}
+		}
+	} else if len(args) == 0 {
+		args = []string{"exec", "sh"}
 	}
 	return c.execClient.Exec(
+		ctx,
 		k8sexec.ExecParams{
 			PodName:       target.entity,
 			ContainerName: c.container,
@@ -371,27 +310,27 @@ func (c *sshContainer) copy(ctx Context) error {
 		return errors.New("only one source and one destination are allowed for a k8s application")
 	}
 
-	srcSpec, err := c.expandSCPArg(args[0])
+	srcSpec, err := c.expandSCPArg(ctx, args[0])
 	if err != nil {
 		return err
 	}
-	destSpec, err := c.expandSCPArg(args[1])
+	destSpec, err := c.expandSCPArg(ctx, args[1])
 	if err != nil {
 		return err
 	}
 
 	cancel, stop := getInterruptAbortChan(ctx)
 	defer stop()
-	return c.execClient.Copy(k8sexec.CopyParams{Src: srcSpec, Dest: destSpec}, cancel)
+	return c.execClient.Copy(ctx, k8sexec.CopyParams{Src: srcSpec, Dest: destSpec}, cancel)
 }
 
-func (c *sshContainer) expandSCPArg(arg string) (o k8sexec.FileResource, err error) {
+func (c *sshContainer) expandSCPArg(ctx context.Context, arg string) (o k8sexec.FileResource, err error) {
 	if i := strings.Index(arg, ":"); i == -1 {
 		return k8sexec.FileResource{Path: arg}, nil
 	} else if i > 0 {
 		o.Path = arg[i+1:]
 
-		resolvedTarget, err := c.resolveTarget(arg[:i])
+		resolvedTarget, err := c.resolveTarget(ctx, arg[:i])
 		if err != nil {
 			return o, err
 		}
@@ -410,14 +349,14 @@ func modelNameWithoutUsername(modelName string) string {
 	return modelName
 }
 
-func (c *sshContainer) getExecClient() (k8sexec.Executor, error) {
-	cloudSpec, err := c.sshClient.ModelCredentialForSSH()
+func (c *sshContainer) getExecClient(ctx context.Context) (k8sexec.Executor, error) {
+	cloudSpec, err := c.sshClient.ModelCredentialForSSH(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return c.execClientGetter(c.namespace, cloudSpec)
 }
 
-func (c *sshContainer) maybePopulateTargetViaField(_ *resolvedTarget, _ func(*client.StatusArgs) (*params.FullStatus, error)) error {
+func (c *sshContainer) maybePopulateTargetViaField(ctx context.Context, _ *resolvedTarget, _ func(context.Context, *client.StatusArgs) (*params.FullStatus, error)) error {
 	return nil
 }

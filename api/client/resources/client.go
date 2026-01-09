@@ -4,20 +4,28 @@
 package resources
 
 import (
+	"context"
 	"io"
 	"strings"
 
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apicharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/api/http"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client is the public client for the resources API facade.
 type Client struct {
@@ -28,8 +36,8 @@ type Client struct {
 }
 
 // NewClient returns a new Client for the given raw API caller.
-func NewClient(apiCaller base.APICallCloser) (*Client, error) {
-	frontend, backend := base.NewClientFacade(apiCaller, "Resources")
+func NewClient(apiCaller base.APICallCloser, options ...Option) (*Client, error) {
+	frontend, backend := base.NewClientFacade(apiCaller, "Resources", options...)
 
 	httpClient, err := apiCaller.HTTPClient()
 	if err != nil {
@@ -44,14 +52,14 @@ func NewClient(apiCaller base.APICallCloser) (*Client, error) {
 
 // ListResources calls the ListResources API server method with
 // the given application names.
-func (c Client) ListResources(applications []string) ([]resources.ApplicationResources, error) {
-	args, err := newListResourcesArgs(applications)
+func (c Client) ListResources(ctx context.Context, applications []string) ([]resource.ApplicationResources, error) {
+	args, err := newListResourcesArgs(ctx, applications)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var apiResults params.ResourcesResults
-	if err := c.facade.FacadeCall("ListResources", &args, &apiResults); err != nil {
+	if err := c.facade.FacadeCall(ctx, "ListResources", &args, &apiResults); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -62,7 +70,7 @@ func (c Client) ListResources(applications []string) ([]resources.ApplicationRes
 	}
 
 	var errs []error
-	results := make([]resources.ApplicationResources, len(applications))
+	results := make([]resource.ApplicationResources, len(applications))
 	for i := range applications {
 		apiResult := apiResults.Results[i]
 
@@ -80,7 +88,7 @@ func (c Client) ListResources(applications []string) ([]resources.ApplicationRes
 }
 
 // newListResourcesArgs returns the arguments for the ListResources endpoint.
-func newListResourcesArgs(applications []string) (params.ListResourcesArgs, error) {
+func newListResourcesArgs(ctx context.Context, applications []string) (params.ListResourcesArgs, error) {
 	var args params.ListResourcesArgs
 	var errs []error
 	for _, application := range applications {
@@ -100,7 +108,7 @@ func newListResourcesArgs(applications []string) (params.ListResourcesArgs, erro
 }
 
 // Upload sends the provided resource blob up to Juju.
-func (c Client) Upload(application, name, filename, pendingID string, reader io.ReadSeeker) error {
+func (c Client) Upload(ctx context.Context, application, name, filename, pendingID string, reader io.ReadSeeker) error {
 	uReq, err := NewUploadRequest(application, name, filename, reader)
 	if err != nil {
 		return errors.Trace(err)
@@ -114,7 +122,7 @@ func (c Client) Upload(application, name, filename, pendingID string, reader io.
 	}
 
 	var response params.UploadResult // ignored
-	if err := c.httpClient.Do(c.facade.RawAPICaller().Context(), req, &response); err != nil {
+	if err := c.httpClient.Do(ctx, req, &response); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -150,15 +158,15 @@ type AddPendingResourcesArgs struct {
 
 // AddPendingResources sends the provided resource info up to Juju
 // without making it available yet.
-func (c Client) AddPendingResources(args AddPendingResourcesArgs) ([]string, error) {
+func (c Client) AddPendingResources(ctx context.Context, args AddPendingResourcesArgs) ([]string, error) {
 	tag := names.NewApplicationTag(args.ApplicationID)
-	apiArgs, err := newAddPendingResourcesArgsV2(tag, args.CharmID, args.Resources)
+	apiArgs, err := newAddPendingResourcesArgsV2(ctx, tag, args.CharmID, args.Resources)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var result params.AddPendingResourcesResult
-	if err := c.facade.FacadeCall("AddPendingResources", &apiArgs, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "AddPendingResources", &apiArgs, &result); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if result.Error != nil {
@@ -181,7 +189,7 @@ func (c Client) AddPendingResources(args AddPendingResourcesArgs) ([]string, err
 
 // newAddPendingResourcesArgsV2 returns the arguments for the
 // AddPendingResources APIv2 endpoint.
-func newAddPendingResourcesArgsV2(tag names.ApplicationTag, chID CharmID, resources []charmresource.Resource) (params.AddPendingResourcesArgsV2, error) {
+func newAddPendingResourcesArgsV2(ctx context.Context, tag names.ApplicationTag, chID CharmID, resources []charmresource.Resource) (params.AddPendingResourcesArgsV2, error) {
 	var args params.AddPendingResourcesArgsV2
 
 	var apiResources []params.CharmResource
@@ -208,29 +216,49 @@ func newAddPendingResourcesArgsV2(tag names.ApplicationTag, chID CharmID, resour
 	return args, nil
 }
 
+// UploadPendingResourceArgs holds the arguments for the
+// UploadPendingResources method.
+type UploadPendingResourceArgs struct {
+	// ApplicationID identifies the application being deployed.
+	ApplicationID string
+
+	// CharmID identifies the application's charm.
+	CharmID CharmID
+
+	// Resources holds the charm store info for each of the resources
+	// that should be added/updated on the controller.
+	Resource charmresource.Resource
+
+	// Filename is the name of the file provided by the user.
+	Filename string
+
+	// Reader is a ReadSeeker with the contents of the file provided
+	// by the user.
+	Reader io.ReadSeeker
+}
+
 // UploadPendingResource sends the provided resource blob up to Juju
 // and makes it available by calling AddPendingResources to compute the
 // pendingID first, then it uses the client.Upload to actually send it.
-// Pending resources IDs are required for resources uploaded before
-// AddApplication has been called.
-func (c Client) UploadPendingResource(application string, res charmresource.Resource, filename string, reader io.ReadSeeker) (pendingID string, err error) {
-	if !names.IsValidApplication(application) {
-		return "", errors.Errorf("invalid application %q", application)
+func (c Client) UploadPendingResource(ctx context.Context, args UploadPendingResourceArgs) (pendingID string, err error) {
+	if !names.IsValidApplication(args.ApplicationID) {
+		return "", errors.Errorf("invalid application %q", args.ApplicationID)
 	}
 
-	ids, err := c.AddPendingResources(AddPendingResourcesArgs{
-		ApplicationID: application,
-		Resources:     []charmresource.Resource{res},
+	ids, err := c.AddPendingResources(ctx, AddPendingResourcesArgs{
+		ApplicationID: args.ApplicationID,
+		CharmID:       args.CharmID,
+		Resources:     []charmresource.Resource{args.Resource},
 	})
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	pendingID = ids[0]
 
-	if reader == nil {
+	if args.Reader == nil {
 		return pendingID, nil
 	}
-	return pendingID, c.Upload(application, res.Name, filename, pendingID, reader)
+	return pendingID, c.Upload(ctx, args.ApplicationID, args.Resource.Name, args.Filename, pendingID, args.Reader)
 }
 
 func resolveErrors(errs []error) error {

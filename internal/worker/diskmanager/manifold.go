@@ -4,15 +4,17 @@
 package diskmanager
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	apidiskmanager "github.com/juju/juju/api/agent/diskmanager"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
 )
 
 // ManifoldConfig defines the names of the manifolds on which a Manifold will depend.
@@ -26,7 +28,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 }
 
 // newWorker trivially wraps NewWorker for use in a engine.AgentAPIManifold.
-func newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func newWorker(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	t := a.CurrentConfig().Tag()
 	tag, ok := t.(names.MachineTag)
 	if !ok {

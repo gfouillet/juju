@@ -4,10 +4,12 @@
 package context
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"context"
 
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
 )
@@ -20,11 +22,11 @@ type portRangeChangeRecorder struct {
 	modelType          model.ModelType
 	pendingOpenRanges  network.GroupedPortRanges
 	pendingCloseRanges network.GroupedPortRanges
-	logger             loggo.Logger
+	logger             logger.Logger
 }
 
 func newPortRangeChangeRecorder(
-	logger loggo.Logger, unit names.UnitTag,
+	logger logger.Logger, unit names.UnitTag,
 	modelType model.ModelType,
 	machinePortRanges, appPortRanges map[names.UnitTag]network.GroupedPortRanges,
 ) *portRangeChangeRecorder {
@@ -57,7 +59,7 @@ func (r *portRangeChangeRecorder) OpenPortRange(endpointName string, portRange n
 	// If a close request is pending for this port, remove it.
 	for i, pr := range r.pendingCloseRanges[endpointName] {
 		if pr == portRange {
-			r.logger.Tracef("open-port %q and cancel the pending close-port", portRange)
+			r.logger.Tracef(context.TODO(), "open-port %q and cancel the pending close-port", portRange)
 			r.pendingCloseRanges[endpointName] = append(r.pendingCloseRanges[endpointName][:i], r.pendingCloseRanges[endpointName][i+1:]...)
 			break
 		}
@@ -132,7 +134,7 @@ func (r *portRangeChangeRecorder) ClosePortRange(endpointName string, portRange 
 
 	// If an open request is pending for this port, remove it.
 	for i, pr := range r.pendingOpenRanges[endpointName] {
-		r.logger.Tracef("closing port %q for endpoint %q, so cancel the pending opening port", portRange, endpointName)
+		r.logger.Tracef(context.TODO(), "closing port %q for endpoint %q, so cancel the pending opening port", portRange, endpointName)
 		if pr == portRange {
 			r.pendingOpenRanges[endpointName] = append(r.pendingOpenRanges[endpointName][:i], r.pendingOpenRanges[endpointName][i+1:]...)
 			break
@@ -142,7 +144,7 @@ func (r *portRangeChangeRecorder) ClosePortRange(endpointName string, portRange 
 	// Ensure port range does not conflict with the ones already recorded
 	// for closing by this unit.
 	if err := r.checkForConflict(endpointName, portRange, r.unitTag, r.pendingCloseRanges, true); err != nil {
-		if !errors.IsAlreadyExists(err) {
+		if !errors.Is(err, errors.AlreadyExists) {
 			return errors.Annotatef(err, "cannot close %v (unit %q)", portRange, r.unitTag.Id())
 		}
 
@@ -160,7 +162,7 @@ func (r *portRangeChangeRecorder) ClosePortRange(endpointName string, portRange 
 	for otherUnitTag, otherUnitRanges := range r.machinePortRanges {
 		if err := r.checkForConflict(endpointName, portRange, otherUnitTag, otherUnitRanges, false); err != nil {
 			// Conflicts with an open port range for another unit.
-			if !errors.IsAlreadyExists(err) {
+			if !errors.Is(err, errors.AlreadyExists) {
 				return errors.Annotatef(err, "cannot close %v (unit %q)", portRange, r.unitTag.Id())
 			}
 		}

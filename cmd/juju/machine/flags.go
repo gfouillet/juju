@@ -9,19 +9,19 @@ import (
 
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/storage"
 )
 
 type disksFlag struct {
-	disks *[]storage.Constraints
+	disks *[]storage.Directive
 }
 
 // Set implements gnuflag.Value.Set.
 func (f disksFlag) Set(s string) error {
 	for _, field := range strings.Fields(s) {
-		cons, err := storage.ParseConstraints(field)
+		cons, err := storage.ParseDirective(field)
 		if err != nil {
-			return errors.Annotate(err, "cannot parse disk constraints")
+			return errors.Annotate(err, "cannot parse disk storage directives")
 		}
 		*f.disks = append(*f.disks, cons)
 	}

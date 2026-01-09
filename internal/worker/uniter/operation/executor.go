@@ -4,16 +4,20 @@
 package operation
 
 import (
+	"context"
 	"fmt"
+	"runtime/pprof"
 
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/trace"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 )
 
 type executorStep struct {
 	verb string
-	run  func(op Operation, state State) (*State, error)
+	run  func(op Operation, ctx context.Context, state State) (*State, error)
 }
 
 func (step executorStep) message(op Operation, unitName string) string {
@@ -31,7 +35,7 @@ type executor struct {
 	stateOps           *StateOps
 	state              *State
 	acquireMachineLock func(string, string) (func(), error)
-	logger             Logger
+	logger             logger.Logger
 }
 
 // ExecutorConfig defines configuration for an Executor.
@@ -39,7 +43,7 @@ type ExecutorConfig struct {
 	StateReadWriter UnitStateReadWriter
 	InitialState    State
 	AcquireLock     func(string, string) (func(), error)
-	Logger          Logger
+	Logger          logger.Logger
 }
 
 func (e ExecutorConfig) validate() error {
@@ -55,12 +59,12 @@ func (e ExecutorConfig) validate() error {
 // NewExecutor returns an Executor which takes its starting state from
 // the controller, and records state changes there. If no saved state
 // exists, the executor's starting state will be the supplied InitialState.
-func NewExecutor(unitName string, cfg ExecutorConfig) (Executor, error) {
+func NewExecutor(ctx context.Context, unitName string, cfg ExecutorConfig) (Executor, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	stateOps := NewStateOps(cfg.StateReadWriter)
-	state, err := stateOps.Read()
+	state, err := stateOps.Read(ctx)
 	if err == ErrNoSavedState {
 		state = &cfg.InitialState
 	} else if err != nil {
@@ -81,22 +85,56 @@ func (x *executor) State() State {
 }
 
 // Run is part of the Executor interface.
-func (x *executor) Run(op Operation, remoteStateChange <-chan remotestate.Snapshot) error {
-	x.logger.Debugf("running operation %v for %s", op, x.unitName)
+func (x *executor) Run(ctx context.Context, op Operation, remoteStateChange <-chan remotestate.Snapshot) (err error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc(), trace.WithAttributes(
+		trace.StringAttr("executor.state", op.String()),
+		trace.StringAttr("executor.unit", x.unitName),
+	))
+	defer func() {
+		span.RecordError(err)
+		span.End()
+	}()
+
+	pprof.Do(ctx, pprof.Labels(trace.OTELTraceID, span.Scope().TraceID()), func(ctx context.Context) {
+		err = x.run(ctx, op, remoteStateChange)
+	})
+	return
+}
+
+// Skip is part of the Executor interface.
+func (x *executor) Skip(ctx context.Context, op Operation) (err error) {
+	ctx, span := trace.Start(ctx, trace.NameFromFunc(), trace.WithAttributes(
+		trace.StringAttr("executor.state", op.String()),
+		trace.StringAttr("executor.unit", x.unitName),
+	))
+	defer func() {
+		span.RecordError(err)
+		span.End()
+	}()
+
+	pprof.Do(ctx, pprof.Labels(trace.OTELTraceID, span.Scope().TraceID()), func(ctx context.Context) {
+		x.logger.Debugf(ctx, "skipping operation %v for %s", op, x.unitName)
+		err = x.do(ctx, op, stepCommit)
+	})
+	return
+}
+
+func (x *executor) run(ctx context.Context, op Operation, remoteStateChange <-chan remotestate.Snapshot) error {
+	x.logger.Debugf(ctx, "running operation %v for %s", op, x.unitName)
 
 	if op.NeedsGlobalMachineLock() {
-		x.logger.Debugf("acquiring machine lock for %s", x.unitName)
+		x.logger.Debugf(ctx, "acquiring machine lock for %s", x.unitName)
 		releaser, err := x.acquireMachineLock(op.String(), op.ExecutionGroup())
 		if err != nil {
 			return errors.Annotatef(err, "acquiring %q lock for %s", op, x.unitName)
 		}
-		defer x.logger.Debugf("lock released for %s", x.unitName)
+		defer x.logger.Debugf(ctx, "lock released for %s", x.unitName)
 		defer releaser()
 	} else {
-		x.logger.Debugf("no machine lock needed for %s", x.unitName)
+		x.logger.Debugf(ctx, "no machine lock needed for %s", x.unitName)
 	}
 
-	switch err := x.do(op, stepPrepare); errors.Cause(err) {
+	switch err := x.do(ctx, op, stepPrepare); errors.Cause(err) {
 	case ErrSkipExecute:
 	case nil:
 		done := make(chan struct{})
@@ -113,7 +151,7 @@ func (x *executor) Run(op Operation, remoteStateChange <-chan remotestate.Snapsh
 				}
 			}
 		}()
-		if err := x.do(op, stepExecute); err != nil {
+		if err := x.do(ctx, op, stepExecute); err != nil {
 			close(done)
 			return err
 		}
@@ -121,38 +159,32 @@ func (x *executor) Run(op Operation, remoteStateChange <-chan remotestate.Snapsh
 	default:
 		return err
 	}
-	return x.do(op, stepCommit)
+	return x.do(ctx, op, stepCommit)
 }
 
-// Skip is part of the Executor interface.
-func (x *executor) Skip(op Operation) error {
-	x.logger.Debugf("skipping operation %v for %s", op, x.unitName)
-	return x.do(op, stepCommit)
-}
-
-func (x *executor) do(op Operation, step executorStep) (err error) {
+func (x *executor) do(ctx context.Context, op Operation, step executorStep) (err error) {
 	message := step.message(op, x.unitName)
-	x.logger.Debugf(message)
-	newState, firstErr := step.run(op, *x.state)
+	x.logger.Debugf(ctx, message)
+	newState, firstErr := step.run(op, ctx, *x.state)
 	if newState != nil {
-		writeErr := x.writeState(*newState)
+		writeErr := x.writeState(ctx, *newState)
 		if firstErr == nil {
 			firstErr = writeErr
 		} else if writeErr != nil {
-			x.logger.Errorf("after %s for %s: %v", message, x.unitName, writeErr)
+			x.logger.Errorf(ctx, "after %s for %s: %v", message, x.unitName, writeErr)
 		}
 	}
 	return errors.Annotate(firstErr, message)
 }
 
-func (x *executor) writeState(newState State) error {
+func (x *executor) writeState(ctx context.Context, newState State) error {
 	if err := newState.Validate(); err != nil {
 		return err
 	}
 	if x.state != nil && x.state.match(newState) {
 		return nil
 	}
-	if err := x.stateOps.Write(&newState); err != nil {
+	if err := x.stateOps.Write(ctx, &newState); err != nil {
 		return errors.Annotatef(err, "writing state")
 	}
 	x.state = &newState

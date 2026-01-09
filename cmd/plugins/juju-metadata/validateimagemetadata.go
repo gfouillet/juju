@@ -9,18 +9,18 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/core/output"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/simplestreams"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func newValidateImageMetadataCommand() cmd.Command {
@@ -34,7 +34,6 @@ type validateImageMetadataCommand struct {
 	out          cmd.Output
 	providerType string
 	metadataDir  string
-	series       string
 	base         string
 	region       string
 	endpoint     string
@@ -89,6 +88,10 @@ func (c *validateImageMetadataCommand) Info() *cmd.Info {
 		Name:    "validate-images",
 		Purpose: "validate image metadata and ensure image(s) exist for a model",
 		Doc:     validateImagesMetadataDoc,
+		SeeAlso: []string{
+			"generate-images",
+			"sign",
+		},
 	})
 }
 
@@ -96,7 +99,6 @@ func (c *validateImageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.out.AddFlags(f, "yaml", output.DefaultFormatters)
 	f.StringVar(&c.providerType, "p", "", "the provider type eg ec2, openstack")
 	f.StringVar(&c.metadataDir, "d", "", "directory where metadata files are found")
-	f.StringVar(&c.series, "s", "", "the series for which to validate (overrides model config series). DEPRECATED use --base")
 	f.StringVar(&c.base, "base", "", "the base for which to validate (overrides model config base)")
 	f.StringVar(&c.region, "r", "", "the region for which to validate (overrides model config region)")
 	f.StringVar(&c.endpoint, "u", "", "the cloud endpoint URL for which to validate (overrides model config endpoint)")
@@ -104,11 +106,8 @@ func (c *validateImageMetadataCommand) SetFlags(f *gnuflag.FlagSet) {
 }
 
 func (c *validateImageMetadataCommand) Init(args []string) error {
-	if c.base != "" && c.series != "" {
-		return errors.New("--series and --base cannot be specified together")
-	}
 	if c.providerType != "" {
-		if c.base == "" && c.series == "" {
+		if c.base == "" {
 			return errors.Errorf("base required if provider type is specified")
 		}
 		if c.region == "" {
@@ -150,16 +149,6 @@ func (c *validateImageMetadataCommand) Run(ctx *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.series != "" {
-		ctx.Warningf("series flag is deprecated, use --base instead")
-		if base, err = corebase.GetBaseFromSeries(c.series); err != nil {
-			return errors.Annotatef(err, "attempting to convert %q to a base", c.series)
-		}
-		c.base = base.String()
-		c.series = ""
-	}
 	if c.base != "" {
 		if base, err = corebase.ParseBaseFromString(c.base); err != nil {
 			return errors.Trace(err)
@@ -172,7 +161,7 @@ func (c *validateImageMetadataCommand) Run(ctx *cmd.Context) error {
 	}
 
 	fetcher := simplestreams.NewSimpleStreams(simplestreams.DefaultDataSourceFactory())
-	images, resolveInfo, err := imagemetadata.ValidateImageMetadata(fetcher, params)
+	images, resolveInfo, err := imagemetadata.ValidateImageMetadata(ctx, fetcher, params)
 	if err != nil {
 		if resolveInfo != nil {
 			metadata := map[string]interface{}{

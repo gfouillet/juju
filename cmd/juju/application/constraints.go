@@ -4,19 +4,20 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/application"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageGetConstraintsSummary = `
@@ -69,8 +70,8 @@ func NewApplicationGetConstraintsCommand() modelcmd.ModelCommand {
 
 type applicationConstraintsAPI interface {
 	Close() error
-	GetConstraints(...string) ([]constraints.Value, error)
-	SetConstraints(string, constraints.Value) error
+	GetConstraints(context.Context, ...string) ([]constraints.Value, error)
+	SetConstraints(context.Context, string, constraints.Value) error
 }
 
 type applicationConstraintsCommand struct {
@@ -80,11 +81,11 @@ type applicationConstraintsCommand struct {
 	api             applicationConstraintsAPI
 }
 
-func (c *applicationConstraintsCommand) getAPI() (applicationConstraintsAPI, error) {
+func (c *applicationConstraintsCommand) getAPI(ctx context.Context) (applicationConstraintsAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	root, err := c.NewAPIRoot()
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -137,13 +138,13 @@ func (c *applicationGetConstraintsCommand) Init(args []string) error {
 }
 
 func (c *applicationGetConstraintsCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := c.getAPI()
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer apiclient.Close()
 
-	cons, err := apiclient.GetConstraints(c.ApplicationName)
+	cons, err := apiclient.GetConstraints(ctx, c.ApplicationName)
 	if err != nil {
 		return err
 	}
@@ -189,13 +190,13 @@ func (c *applicationSetConstraintsCommand) Init(args []string) (err error) {
 	return err
 }
 
-func (c *applicationSetConstraintsCommand) Run(_ *cmd.Context) (err error) {
-	apiclient, err := c.getAPI()
+func (c *applicationSetConstraintsCommand) Run(ctx *cmd.Context) (err error) {
+	apiclient, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer apiclient.Close()
 
-	err = apiclient.SetConstraints(c.ApplicationName, c.Constraints)
+	err = apiclient.SetConstraints(ctx, c.ApplicationName, c.Constraints)
 	return block.ProcessBlockedError(err, block.BlockChange)
 }

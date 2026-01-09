@@ -4,18 +4,20 @@
 package apicaller
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/retry"
-	"github.com/juju/utils/v3"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	apiagent "github.com/juju/juju/api/agent/agent"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/password"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -47,13 +49,13 @@ var (
 )
 
 // OnlyConnect logs into the API using the supplied agent's credentials.
-func OnlyConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (api.Connection, error) {
+func OnlyConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logger logger.Logger) (api.Connection, error) {
 	agentConfig := a.CurrentConfig()
 	info, ok := agentConfig.APIInfo()
 	if !ok {
 		return nil, errors.New("API info not available")
 	}
-	conn, _, err := connectFallback(apiOpen, info, agentConfig.OldPassword(), logger)
+	conn, _, err := connectFallback(ctx, apiOpen, info, agentConfig.OldPassword(), logger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -80,7 +82,10 @@ func OnlyConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (api.Connec
 // until it's managed to log in, and any suicide-cutoff point we pick here
 // will be objectively bad in some circumstances.)
 func connectFallback(
-	apiOpen api.OpenFunc, info *api.Info, fallbackPassword string, logger Logger,
+	ctx context.Context,
+	apiOpen api.OpenFunc, info *api.Info,
+	fallbackPassword string,
+	logger logger.Logger,
 ) (
 	conn api.Connection, didFallback bool, err error,
 ) {
@@ -89,7 +94,7 @@ func connectFallback(
 	// atom in a func currently seems to be less treacherous
 	// than the alternatives.
 	var tryConnect = func() {
-		conn, err = apiOpen(info, api.DialOpts{
+		conn, err = apiOpen(ctx, info, api.DialOpts{
 			// The DialTimeout is for connecting to the underlying
 			// socket. We use three seconds because it should be fast
 			// but it is possible to add a manual machine to a distant
@@ -113,9 +118,9 @@ func connectFallback(
 	// passwords if necessary; and update info, and remember
 	// which password we used.
 	if !didFallback {
-		logger.Debugf("connecting with current password")
+		logger.Debugf(ctx, "connecting with current password")
 		tryConnect()
-		if params.IsCodeUnauthorized(err) || errors.Cause(err) == apiservererrors.ErrBadCreds {
+		if params.IsCodeUnauthorized(err) || errors.Cause(err) == apiservererrors.ErrUnauthorized {
 			didFallback = true
 
 		}
@@ -126,7 +131,7 @@ func connectFallback(
 		infoCopy := *info
 		info = &infoCopy
 		info.Password = fallbackPassword
-		logger.Debugf("connecting with old password")
+		logger.Debugf(ctx, "connecting with old password")
 		tryConnect()
 	}
 
@@ -157,10 +162,10 @@ func connectFallback(
 	// At this point we've run out of reasons to retry connecting,
 	// and just go with whatever error we last saw (if any).
 	if err != nil {
-		logger.Debugf("[%s] failed to connect", shortModelUUID(info.ModelTag))
+		logger.Debugf(ctx, "[%s] failed to connect", shortModelUUID(info.ModelTag))
 		return nil, false, errors.Trace(err)
 	}
-	logger.Infof("[%s] %q successfully connected to %q",
+	logger.Infof(ctx, "[%s] %q successfully connected to %q",
 		shortModelUUID(info.ModelTag),
 		info.Tag.String(),
 		conn.Addr())
@@ -188,7 +193,7 @@ func shortModelUUID(model names.ModelTag) string {
 // This is clearly a mess but at least now it's a documented and localized
 // mess; it should be used only when making the primary API connection for
 // a machine or unit agent running in its own process.
-func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Connection, err error) {
+func ScaryConnect(ctx context.Context, a agent.Agent, apiOpen api.OpenFunc, logger logger.Logger) (_ api.Connection, err error) {
 	agentConfig := a.CurrentConfig()
 	info, ok := agentConfig.APIInfo()
 	if !ok {
@@ -206,12 +211,12 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 		default:
 			return
 		}
-		logger.Errorf("Failed to connect to controller: %v", err)
+		logger.Errorf(ctx, "Failed to connect to controller: %v", err)
 		err = ErrConnectImpossible
 	}()
 
 	// Start connection...
-	conn, usedOldPassword, err := connectFallback(apiOpen, info, oldPassword, logger)
+	conn, usedOldPassword, err := connectFallback(ctx, apiOpen, info, oldPassword, logger)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -220,7 +225,7 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 	defer func() {
 		if err != nil {
 			if err := conn.Close(); err != nil {
-				logger.Errorf("while closing API connection: %v", err)
+				logger.Errorf(ctx, "while closing API connection: %v", err)
 			}
 		}
 	}()
@@ -235,7 +240,7 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 	// First of all, see if we're dead or removed, which will render
 	// any further work pointless.
 	entity := agentConfig.Tag()
-	life, err := facade.Life(entity)
+	life, err := facade.Life(ctx, entity)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -252,12 +257,12 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 	// for expeditious retry than it is to mess around with those
 	// responsibilities in here.
 	if usedOldPassword {
-		logger.Debugf("changing password...")
-		err := changePassword(oldPassword, a, facade)
+		logger.Debugf(ctx, "changing password...")
+		err := changePassword(ctx, oldPassword, a, facade)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		logger.Infof("[%s] password changed for %q",
+		logger.Infof(ctx, "[%s] password changed for %q",
 			shortModelUUID(agentConfig.Model()), entity.String())
 		return nil, ErrChangedPassword
 	}
@@ -270,7 +275,7 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 	// promotion work correctly in the first place.
 	//
 	// Still, can't fix everything at once.
-	if err := facade.SetPassword(entity, info.Password); err != nil {
+	if err := facade.SetPassword(ctx, entity, info.Password); err != nil {
 		return nil, errors.Annotate(err, "can't reset agent password")
 	}
 	return conn, nil
@@ -280,8 +285,8 @@ func ScaryConnect(a agent.Agent, apiOpen api.OpenFunc, logger Logger) (_ api.Con
 // local agent configuration and on the remote state server. The supplied
 // oldPassword -- which must be the current valid password -- is set as a
 // fallback in local config, in case we fail to update the remote password.
-func changePassword(oldPassword string, a agent.Agent, facade apiagent.ConnFacade) error {
-	newPassword, err := utils.RandomPassword()
+func changePassword(ctx context.Context, oldPassword string, a agent.Agent, facade apiagent.ConnFacade) error {
+	newPassword, err := password.RandomPassword()
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -295,17 +300,17 @@ func changePassword(oldPassword string, a agent.Agent, facade apiagent.ConnFacad
 	// This has to happen *after* we record the old/new passwords
 	// locally, lest we change it remotely, crash suddenly, and
 	// end up locked out forever.
-	return facade.SetPassword(a.CurrentConfig().Tag(), newPassword)
+	return facade.SetPassword(ctx, a.CurrentConfig().Tag(), newPassword)
 }
 
 // NewExternalControllerConnectionFunc returns a function returning an
 // api connection to a controller with the specified api info.
-type NewExternalControllerConnectionFunc func(*api.Info) (api.Connection, error)
+type NewExternalControllerConnectionFunc func(context.Context, *api.Info) (api.Connection, error)
 
 // NewExternalControllerConnection returns an api connection to a controller
 // with the specified api info.
-func NewExternalControllerConnection(apiInfo *api.Info) (api.Connection, error) {
-	return api.Open(apiInfo, api.DialOpts{
+func NewExternalControllerConnection(ctx context.Context, apiInfo *api.Info) (api.Connection, error) {
+	return api.Open(ctx, apiInfo, api.DialOpts{
 		Timeout:    2 * time.Second,
 		RetryDelay: 500 * time.Millisecond,
 	})

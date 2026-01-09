@@ -4,39 +4,38 @@
 package credentialvalidator_test
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/watchertest"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/credentialvalidator"
-	coretesting "github.com/juju/juju/testing"
 )
 
 // mockFacade implements credentialvalidator.Facade for use in the tests.
 type mockFacade struct {
-	*testing.Stub
+	*testhelpers.Stub
 	credential *base.StoredCredential
 	exists     bool
 
-	watcher      *watchertest.MockNotifyWatcher
 	modelWatcher *watchertest.MockNotifyWatcher
 }
 
 func (m *mockFacade) setupModelHasNoCredential() {
 	m.credential.CloudCredential = ""
 	m.exists = false
-	m.watcher = nil
 }
 
 // ModelCredential is part of the credentialvalidator.Facade interface.
-func (m *mockFacade) ModelCredential() (base.StoredCredential, bool, error) {
+func (m *mockFacade) ModelCredential(context.Context) (base.StoredCredential, bool, error) {
 	m.AddCall("ModelCredential")
 	if err := m.NextErr(); err != nil {
 		return base.StoredCredential{}, false, err
@@ -44,17 +43,8 @@ func (m *mockFacade) ModelCredential() (base.StoredCredential, bool, error) {
 	return *m.credential, m.exists, nil
 }
 
-// WatchCredential is part of the credentialvalidator.Facade interface.
-func (mock *mockFacade) WatchCredential(id string) (watcher.NotifyWatcher, error) {
-	mock.AddCall("WatchCredential", id)
-	if err := mock.NextErr(); err != nil {
-		return nil, err
-	}
-	return mock.watcher, nil
-}
-
 // WatchModelCredential is part of the credentialvalidator.Facade interface.
-func (mock *mockFacade) WatchModelCredential() (watcher.NotifyWatcher, error) {
+func (mock *mockFacade) WatchModelCredential(context.Context) (watcher.NotifyWatcher, error) {
 	mock.AddCall("WatchModelCredential")
 	if err := mock.NextErr(); err != nil {
 		return nil, err
@@ -72,52 +62,52 @@ func panicFacade(base.APICaller) (credentialvalidator.Facade, error) {
 }
 
 // panicWorker is a NewWorker that should not be called.
-func panicWorker(credentialvalidator.Config) (worker.Worker, error) {
+func panicWorker(context.Context, credentialvalidator.Config) (worker.Worker, error) {
 	panic("panicWorker")
 }
 
 // validConfig returns a minimal config stuffed with dummy objects that
 // will explode when used.
-func validConfig() credentialvalidator.Config {
+func validConfig(c *tc.C) credentialvalidator.Config {
 	return credentialvalidator.Config{
 		Facade: struct{ credentialvalidator.Facade }{},
-		Logger: loggo.GetLogger("test"),
+		Logger: loggertesting.WrapCheckLog(c),
 	}
 }
 
 // checkNotValid checks that the supplied credentialvalidator.Config fails to
 // Validate, and cannot be used to construct a credentialvalidator.Worker.
-func checkNotValid(c *gc.C, config credentialvalidator.Config, expect string) {
+func checkNotValid(c *tc.C, config credentialvalidator.Config, expect string) {
 	check := func(err error) {
-		c.Check(err, gc.ErrorMatches, expect)
-		c.Check(err, jc.Satisfies, errors.IsNotValid)
+		c.Check(err, tc.ErrorMatches, expect)
+		c.Check(err, tc.ErrorIs, errors.NotValid)
 	}
 
 	err := config.Validate()
 	check(err)
 
-	worker, err := credentialvalidator.NewWorker(config)
-	c.Check(worker, gc.IsNil)
+	worker, err := credentialvalidator.NewWorker(c.Context(), config)
+	c.Check(worker, tc.IsNil)
 	check(err)
 }
 
 // validManifoldConfig returns a minimal config stuffed with dummy objects
 // that will explode when used.
-func validManifoldConfig() credentialvalidator.ManifoldConfig {
+func validManifoldConfig(c *tc.C) credentialvalidator.ManifoldConfig {
 	return credentialvalidator.ManifoldConfig{
 		APICallerName: "api-caller",
 		NewFacade:     panicFacade,
 		NewWorker:     panicWorker,
-		Logger:        loggo.GetLogger("test"),
+		Logger:        loggertesting.WrapCheckLog(c),
 	}
 }
 
 // checkManifoldNotValid checks that the supplied ManifoldConfig creates
 // a manifold that cannot be started.
-func checkManifoldNotValid(c *gc.C, config credentialvalidator.ManifoldConfig, expect string) {
+func checkManifoldNotValid(c *tc.C, config credentialvalidator.ManifoldConfig, expect string) {
 	err := config.Validate()
-	c.Check(err, gc.ErrorMatches, expect)
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
+	c.Check(err, tc.ErrorMatches, expect)
+	c.Check(err, tc.ErrorIs, errors.NotValid)
 }
 
 // stubCaller is a base.APICaller that only implements ModelTag.

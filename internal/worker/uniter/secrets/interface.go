@@ -4,6 +4,8 @@
 package secrets
 
 import (
+	"context"
+
 	"github.com/juju/juju/internal/worker/uniter/hook"
 )
 
@@ -12,12 +14,12 @@ import (
 type SecretStateTracker interface {
 	// PrepareHook returns an error if the hook is unknown
 	// or invalid given current state.
-	PrepareHook(hook.Info) error
+	PrepareHook(context.Context, hook.Info) error
 
 	// CommitHook persists the state change encoded in the supplied secret
 	// hook, or returns an error if the hook is unknown or invalid given
 	// current secret state.
-	CommitHook(info hook.Info) error
+	CommitHook(_ context.Context, info hook.Info) error
 
 	// ConsumedSecretRevision returns the revision that
 	// is currently tracked for the given secret.
@@ -41,14 +43,8 @@ type SecretStateTracker interface {
 	// remove deleted secrets from only the obsolete secret state. Both
 	// arguments remove all revisions when the list of revisions has a length of
 	// zero.
-	SecretsRemoved(deletedRevisions, deletedObsoleteRevisions map[string][]int) error
+	SecretsRemoved(ctx context.Context, deletedRevisions, deletedObsoleteRevisions map[string][]int) error
 
 	// Report provides information for the engine report.
 	Report() map[string]interface{}
-}
-
-// Logger represents the logging methods used in this package.
-type Logger interface {
-	Warningf(string, ...interface{})
-	Debugf(string, ...interface{})
 }

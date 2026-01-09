@@ -4,72 +4,74 @@
 package applicationoffers
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/apiserver/common"
-	commoncrossmodel "github.com/juju/juju/apiserver/common/crossmodel"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/state/stateenvirons"
+	"github.com/juju/juju/core/model"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("ApplicationOffers", 4, func(ctx facade.Context) (facade.Facade, error) {
-		return newOffersAPIV4(ctx)
-	}, reflect.TypeOf((*OffersAPIv4)(nil)))
-	registry.MustRegister("ApplicationOffers", 5, func(ctx facade.Context) (facade.Facade, error) {
-		return newOffersAPI(ctx)
+	// Registering as a multi-model facade, to paper over the add-offer API.
+	// This shouldn't be required, instead we should be in the context of a
+	// model facade. Rather than rewriting this and the client for both 3.6
+	// and 4.0, we're conceding. We lost.
+	// This will have to be fixed and revisited in the future.
+	// Note: to onlookers, this doesn't mean you should use this pattern
+	// elsewhere. I've talked long and hard to myself about this, but there
+	// is no way around it.
+	registry.MustRegisterForMultiModel("ApplicationOffers", 5, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+		return makeOffersAPIV5(ctx)
 	}, reflect.TypeOf((*OffersAPIv5)(nil)))
+	// v6 handles offer URLs with a model qualifier instead of a username.
+	registry.MustRegisterForMultiModel("ApplicationOffers", 6, func(stdCtx context.Context, ctx facade.MultiModelContext) (facade.Facade, error) {
+		return makeOffersAPI(ctx)
+	}, reflect.TypeOf((*OffersAPI)(nil)))
 }
 
-// newOffersAPIV4 returns a new application offers OffersAPIV4 facade.
-func newOffersAPIV4(ctx facade.Context) (*OffersAPIv4, error) {
-	offersAPI, err := newOffersAPI(ctx)
+// makeOffersAPIv5 returns a new application offers OffersAPIv5 facade.
+func makeOffersAPIV5(facadeContext facade.MultiModelContext) (*OffersAPIv5, error) {
+	api, err := makeOffersAPI(facadeContext)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &OffersAPIv4{
-		*offersAPI,
+	return &OffersAPIv5{
+		OffersAPI: api,
 	}, nil
 }
 
-// newOffersAPI returns a new application offers OffersAPI facade.
-func newOffersAPI(ctx facade.Context) (*OffersAPIv5, error) {
-	environFromModel := func(modelUUID string) (environs.Environ, error) {
-		st, err := ctx.StatePool().Get(modelUUID)
+// makeOffersAPI returns a new application offers OffersAPI facade.
+func makeOffersAPI(ctx facade.MultiModelContext) (*OffersAPI, error) {
+	crossModelRelationServiceGetter := func(c context.Context, modelUUID model.UUID) (CrossModelRelationService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		defer st.Release()
-		model, err := st.Model()
+		return svc.CrossModelRelation(), nil
+	}
+	removalServiceGetter := func(c context.Context, modelUUID model.UUID) (RemovalService, error) {
+		svc, err := ctx.DomainServicesForModel(c, modelUUID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		g := stateenvirons.EnvironConfigGetter{Model: model}
-		env, err := environs.GetEnviron(g, environs.New)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return env, nil
+		return svc.Removal(), nil
 	}
 
-	st := ctx.State()
-	getControllerInfo := func() ([]string, string, error) {
-		return common.StateControllerInfo(st)
-	}
+	domainServices := ctx.DomainServices()
 
-	authContext := ctx.Resources().Get("offerAccessAuthContext").(common.ValueResource).Value
 	return createOffersAPI(
-		GetApplicationOffers,
-		environFromModel,
-		getControllerInfo,
-		GetStateAccess(st),
-		GetStatePool(ctx.StatePool()),
 		ctx.Auth(),
-		ctx.Resources(),
-		authContext.(*commoncrossmodel.AuthContext),
+		ctx.CrossModelAuthContext(),
+		ctx.ControllerUUID(),
+		ctx.ModelUUID(),
+		domainServices.Access(),
+		domainServices.Controller(),
+		domainServices.Model(),
+		crossModelRelationServiceGetter,
+		removalServiceGetter,
+		ctx.Logger().Child("applicationoffers"),
 	)
 }

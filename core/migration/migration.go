@@ -6,12 +6,14 @@ package migration
 import (
 	"time"
 
-	"github.com/juju/description/v9"
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/description/v11"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/core/resources"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/errors"
 )
 
 // MigrationStatus returns the details for a migration as needed by
@@ -45,30 +47,21 @@ type SerializedModel struct {
 	// Charms lists the charm URLs in use in the model.
 	Charms []string
 
-	// Tools lists the tools versions in use with the model along with
-	// their URIs. The URIs can be used to download the tools from the
-	// source controller.
-	Tools map[version.Binary]string // version -> tools URI
+	// Tools is a map of tools in use by the model keyed on the tools sha256
+	// value and associated with the version number.
+	Tools map[string]semversion.Binary
 
 	// Resources represents all the resources in use in the model.
-	Resources []SerializedModelResource
-}
-
-// SerializedModelResource defines the resource revisions for a
-// specific application and its units.
-type SerializedModelResource struct {
-	ApplicationRevision resources.Resource
-	CharmStoreRevision  resources.Resource
-	UnitRevisions       map[string]resources.Resource
+	Resources []resource.Resource
 }
 
 // ModelInfo is used to report basic details about a model.
 type ModelInfo struct {
 	UUID                   string
-	Owner                  names.UserTag
+	Qualifier              model.Qualifier
 	Name                   string
-	AgentVersion           version.Number
-	ControllerAgentVersion version.Number
+	AgentVersion           semversion.Number
+	ControllerAgentVersion semversion.Number
 	ModelDescription       description.Model
 }
 
@@ -83,16 +76,16 @@ type SourceControllerInfo struct {
 
 func (i *ModelInfo) Validate() error {
 	if i.UUID == "" {
-		return errors.NotValidf("empty UUID")
+		return errors.Errorf("empty UUID %w", coreerrors.NotValid)
 	}
-	if i.Owner.Name() == "" {
-		return errors.NotValidf("empty Owner")
+	if err := i.Qualifier.Validate(); err != nil {
+		return errors.Capture(err)
 	}
 	if i.Name == "" {
-		return errors.NotValidf("empty Name")
+		return errors.Errorf("empty Name %w", coreerrors.NotValid)
 	}
-	if i.AgentVersion.Compare(version.Number{}) == 0 {
-		return errors.NotValidf("empty Version")
+	if i.AgentVersion.Compare(semversion.Number{}) == 0 {
+		return errors.Errorf("empty Version %w", coreerrors.NotValid)
 	}
 	return nil
 }

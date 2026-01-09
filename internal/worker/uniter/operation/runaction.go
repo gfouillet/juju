@@ -4,11 +4,13 @@
 package operation
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/runner"
@@ -26,7 +28,7 @@ type runAction struct {
 
 	name   string
 	runner runner.Runner
-	logger Logger
+	logger logger.Logger
 }
 
 // String is part of the Operation interface.
@@ -48,13 +50,13 @@ func (ra *runAction) ExecutionGroup() string {
 // will return ErrSkipExecute. It preserves any hook recorded in the supplied
 // state.
 // Prepare is part of the Operation interface.
-func (ra *runAction) Prepare(state State) (*State, error) {
+func (ra *runAction) Prepare(ctx context.Context, state State) (*State, error) {
 	ra.changed = make(chan struct{}, 1)
 	ra.cancel = make(chan struct{})
 	actionID := ra.action.ID()
-	rnr, err := ra.runnerFactory.NewActionRunner(ra.action, ra.cancel)
+	rnr, err := ra.runnerFactory.NewActionRunner(ctx, ra.action, ra.cancel)
 	if cause := errors.Cause(err); charmrunner.IsBadActionError(cause) {
-		if err := ra.callbacks.FailAction(actionID, err.Error()); err != nil {
+		if err := ra.callbacks.ErrorAction(ctx, actionID, err.Error()); err != nil {
 			return nil, err
 		}
 		return nil, ErrSkipExecute
@@ -68,7 +70,7 @@ func (ra *runAction) Prepare(state State) (*State, error) {
 		// this should *really* never happen, but let's not panic
 		return nil, errors.Trace(err)
 	}
-	err = rnr.Context().Prepare()
+	err = rnr.Context().Prepare(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -84,9 +86,9 @@ func (ra *runAction) Prepare(state State) (*State, error) {
 
 // Execute runs the action, and preserves any hook recorded in the supplied state.
 // Execute is part of the Operation interface.
-func (ra *runAction) Execute(state State) (*State, error) {
+func (ra *runAction) Execute(ctx context.Context, state State) (*State, error) {
 	message := fmt.Sprintf("running action %s", ra.name)
-	if err := ra.callbacks.SetExecutingStatus(message); err != nil {
+	if err := ra.callbacks.SetExecutingStatus(ctx, message); err != nil {
 		return nil, err
 	}
 
@@ -101,20 +103,20 @@ func (ra *runAction) Execute(state State) (*State, error) {
 				return
 			case <-ra.changed:
 			}
-			status, err := ra.callbacks.ActionStatus(actionID)
+			status, err := ra.callbacks.ActionStatus(ctx, actionID)
 			if err != nil {
-				ra.logger.Warningf("unable to get action status for %q: %v", actionID, err)
+				ra.logger.Warningf(ctx, "unable to get action status for %q: %v", actionID, err)
 				continue
 			}
 			if status == params.ActionAborting {
-				ra.logger.Infof("action %s aborting", actionID)
+				ra.logger.Infof(ctx, "action %s aborting", actionID)
 				close(ra.cancel)
 				return
 			}
 		}
 	}()
 
-	handlerType, err := ra.runner.RunAction(ra.name)
+	handlerType, err := ra.runner.RunAction(ctx, ra.name)
 	close(done)
 	<-wait
 
@@ -133,7 +135,7 @@ func (ra *runAction) Execute(state State) (*State, error) {
 
 // Commit preserves the recorded hook, and returns a neutral state.
 // Commit is part of the Operation interface.
-func (ra *runAction) Commit(state State) (*State, error) {
+func (ra *runAction) Commit(ctx context.Context, state State) (*State, error) {
 	return stateChange{
 		Kind: continuationKind(state),
 		Step: Pending,
@@ -147,13 +149,13 @@ func (ra *runAction) RemoteStateChanged(snapshot remotestate.Snapshot) {
 	actionID := ra.action.ID()
 	change, ok := snapshot.ActionChanged[actionID]
 	if !ok {
-		ra.logger.Errorf("action %s missing action changed entry", actionID)
+		ra.logger.Errorf(context.Background(), "action %s missing action changed entry", actionID)
 		// Shouldn't happen.
 		return
 	}
 	if ra.change < change {
 		ra.change = change
-		ra.logger.Errorf("running action %s changed", actionID)
+		ra.logger.Errorf(context.Background(), "running action %s changed", actionID)
 		select {
 		case ra.changed <- struct{}{}:
 		default:

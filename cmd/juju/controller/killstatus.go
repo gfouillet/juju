@@ -4,16 +4,17 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type ctrData struct {
@@ -29,10 +30,10 @@ type ctrData struct {
 }
 
 type modelData struct {
-	UUID  string
-	Owner string
-	Name  string
-	Life  life.Value
+	UUID      string
+	Qualifier string
+	Name      string
+	Life      life.Value
 
 	HostedMachineCount        int
 	ApplicationCount          int
@@ -60,7 +61,7 @@ func newTimedStatusUpdater(ctx *cmd.Context, api destroyControllerAPI, controlle
 
 		// If we hit an error, status.HostedModelCount will be 0, the polling
 		// loop will stop and we'll go directly to destroying the model.
-		envStatus, err := newData(api, controllerModelUUID)
+		envStatus, err := newData(ctx.Context, api, controllerModelUUID)
 		if err != nil {
 			ctx.Infof("Unable to get the controller summary from the API: %s.", err)
 		}
@@ -69,8 +70,8 @@ func newTimedStatusUpdater(ctx *cmd.Context, api destroyControllerAPI, controlle
 	}
 }
 
-func newData(api destroyControllerAPI, controllerModelUUID string) (environmentStatus, error) {
-	models, err := api.AllModels()
+func newData(ctx context.Context, api destroyControllerAPI, controllerModelUUID string) (environmentStatus, error) {
+	models, err := api.AllModels(ctx)
 	if err != nil {
 		return environmentStatus{
 			Controller:   ctrData{},
@@ -93,7 +94,7 @@ func newData(api destroyControllerAPI, controllerModelUUID string) (environmentS
 		modelName[model.UUID] = model.Name
 	}
 
-	status, err := api.ModelStatus(modelTags...)
+	status, err := api.ModelStatus(ctx, modelTags...)
 	if err != nil {
 		return environmentStatus{
 			Controller:   ctrData{},
@@ -112,7 +113,7 @@ func newData(api destroyControllerAPI, controllerModelUUID string) (environmentS
 	var applications []base.Application
 	for _, model := range status {
 		if model.Error != nil {
-			if errors.IsNotFound(model.Error) {
+			if errors.Is(model.Error, errors.NotFound) {
 				// This most likely occurred because a model was
 				// destroyed half-way through the call.
 				// Since we filter out models with life.Dead below, it's safe
@@ -138,16 +139,16 @@ func newData(api destroyControllerAPI, controllerModelUUID string) (environmentS
 			}
 		}
 		modelData := modelData{
-			model.UUID,
-			model.Owner,
-			modelName[model.UUID],
-			model.Life,
-			model.HostedMachineCount,
-			model.ApplicationCount,
-			len(model.Volumes),
-			len(model.Filesystems),
-			persistentVolumeCount,
-			persistentFilesystemCount,
+			UUID:                      model.UUID,
+			Qualifier:                 model.Qualifier.String(),
+			Name:                      modelName[model.UUID],
+			Life:                      model.Life,
+			HostedMachineCount:        model.HostedMachineCount,
+			ApplicationCount:          model.ApplicationCount,
+			VolumeCount:               len(model.Volumes),
+			FilesystemCount:           len(model.Filesystems),
+			PersistentVolumeCount:     persistentVolumeCount,
+			PersistentFilesystemCount: persistentFilesystemCount,
 		}
 		if model.UUID == controllerModelUUID {
 			ctrModelData = modelData
@@ -167,13 +168,13 @@ func newData(api destroyControllerAPI, controllerModelUUID string) (environmentS
 	}
 
 	ctrFinalStatus := ctrData{
-		controllerModelUUID,
-		aliveModelCount,
-		hostedMachinesCount,
-		applicationsCount,
-		volumeCount,
-		filesystemCount,
-		ctrModelData,
+		UUID:                 controllerModelUUID,
+		HostedModelCount:     aliveModelCount,
+		HostedMachineCount:   hostedMachinesCount,
+		ApplicationCount:     applicationsCount,
+		TotalVolumeCount:     volumeCount,
+		TotalFilesystemCount: filesystemCount,
+		Model:                ctrModelData,
 	}
 
 	return environmentStatus{
@@ -237,7 +238,7 @@ func fmtCtrStatus(data ctrData) string {
 }
 
 func fmtModelStatus(data modelData) string {
-	out := fmt.Sprintf("\t%s/%s (%s)", data.Owner, data.Name, data.Life)
+	out := fmt.Sprintf("\t%s/%s (%s)", data.Qualifier, data.Name, data.Life)
 
 	if machineNo := data.HostedMachineCount; machineNo > 0 {
 		out += fmt.Sprintf(", %d machine%s", machineNo, s(machineNo))

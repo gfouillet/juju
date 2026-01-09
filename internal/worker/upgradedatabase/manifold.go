@@ -1,45 +1,55 @@
-// Copyright 2019 Canonical Ltd.
+// Copyright 2023 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 package upgradedatabase
 
 import (
-	"time"
+	"context"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/retry"
-	"github.com/juju/version/v2"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/core/logger"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/gate"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/upgrades"
 )
 
 // ManifoldConfig defines the configuration on which this manifold depends.
 type ManifoldConfig struct {
-	AgentName         string
-	UpgradeDBGateName string
-	Logger            Logger
-	OpenState         func() (*state.StatePool, error)
-	Clock             Clock
+	AgentName           string
+	UpgradeDBGateName   string
+	DBAccessorName      string
+	Logger              logger.Logger
+	Clock               clock.Clock
+	NewWorker           func(Config) (worker.Worker, error)
+	UpgradeServicesName string
 }
 
 // Validate returns an error if the manifold config is not valid.
 func (cfg ManifoldConfig) Validate() error {
+	if cfg.AgentName == "" {
+		return errors.NotValidf("empty AgentName")
+	}
 	if cfg.UpgradeDBGateName == "" {
 		return errors.NotValidf("empty UpgradeDBGateName")
+	}
+
+	if cfg.DBAccessorName == "" {
+		return errors.NotValidf("empty DBAccessorName")
 	}
 	if cfg.Logger == nil {
 		return errors.NotValidf("nil Logger")
 	}
-	if cfg.OpenState == nil {
-		return errors.NotValidf("nil OpenState function")
-	}
 	if cfg.Clock == nil {
 		return errors.NotValidf("nil Clock")
+	}
+	if cfg.UpgradeServicesName == "" {
+		return errors.NotValidf("empty UpgradeServicesName")
 	}
 	return nil
 }
@@ -51,47 +61,56 @@ func Manifold(cfg ManifoldConfig) dependency.Manifold {
 		Inputs: []string{
 			cfg.AgentName,
 			cfg.UpgradeDBGateName,
+			cfg.UpgradeServicesName,
+			cfg.DBAccessorName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
-			// Get the completed lock.
-			var upgradeStepsLock gate.Lock
-			if err := context.Get(cfg.UpgradeDBGateName, &upgradeStepsLock); err != nil {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
+			// Get the db completed lock.
+			var dbUpgradeCompleteLock gate.Lock
+			if err := getter.Get(cfg.UpgradeDBGateName, &dbUpgradeCompleteLock); err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			// Determine this controller's agent and tag.
+			// Determine this controller's agent.
 			var controllerAgent agent.Agent
-			if err := context.Get(cfg.AgentName, &controllerAgent); err != nil {
+			if err := getter.Get(cfg.AgentName, &controllerAgent); err != nil {
 				return nil, errors.Trace(err)
 			}
-			tag := controllerAgent.CurrentConfig().Tag()
 
-			// Wrap the state pool factory to return our implementation.
-			openState := func() (Pool, error) {
-				p, err := cfg.OpenState()
-				if err != nil {
-					return nil, errors.Trace(err)
-				}
-				return &pool{p}, nil
+			// Service factory is used to get the upgrade service and
+			// then we can locate all the model uuids.
+			var upgradeServicesGetter services.UpgradeServicesGetter
+			err := getter.Get(cfg.UpgradeServicesName, &upgradeServicesGetter)
+			if err != nil {
+				return nil, errors.Trace(err)
 			}
 
-			// Wrap the upgrade steps execution so that we can generate a context lazily.
-			performUpgrade := func(v version.Number, t []upgrades.Target, c func() upgrades.Context) error {
-				return errors.Trace(upgrades.PerformStateUpgrade(v, t, c()))
+			// DBGetter is used to get the database to run the schema against.
+			var dbGetter coredatabase.DBGetter
+			if err := getter.Get(cfg.DBAccessorName, &dbGetter); err != nil {
+				return nil, errors.Trace(err)
 			}
 
-			workerCfg := Config{
-				UpgradeComplete: upgradeStepsLock,
-				Tag:             tag,
-				Agent:           controllerAgent,
-				Logger:          cfg.Logger,
-				OpenState:       openState,
-				PerformUpgrade:  performUpgrade,
-				RetryStrategy:   retry.CallArgs{Clock: cfg.Clock, Delay: 2 * time.Minute, Attempts: 5},
-				Clock:           cfg.Clock,
-			}
-			w, err := NewWorker(workerCfg)
-			return w, errors.Annotate(err, "starting database upgrade worker")
+			currentConfig := controllerAgent.CurrentConfig()
+
+			// Work out where we're upgrading from and, where we want to upgrade to.
+			fromVersion := currentConfig.UpgradedToVersion()
+			toVersion := jujuversion.Current
+
+			return cfg.NewWorker(Config{
+				DBUpgradeCompleteLock: dbUpgradeCompleteLock,
+				Agent:                 controllerAgent,
+				ControllerNodeService: upgradeServicesGetter.
+					ServicesForController().ControllerNode(),
+				UpgradeService: upgradeServicesGetter.
+					ServicesForController().Upgrade(),
+				DBGetter:    dbGetter,
+				Tag:         currentConfig.Tag(),
+				FromVersion: fromVersion,
+				ToVersion:   toVersion,
+				Logger:      cfg.Logger,
+				Clock:       cfg.Clock,
+			})
 		},
 	}
 }

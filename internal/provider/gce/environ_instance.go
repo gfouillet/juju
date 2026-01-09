@@ -4,16 +4,16 @@
 package gce
 
 import (
+	"context"
 	"strings"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
@@ -32,7 +32,7 @@ var instStatuses = []string{
 // instances, the result at the corresponding index will be nil. In that
 // case the error will be environs.ErrPartialInstances (or
 // ErrNoInstances if none of the IDs match an instance).
-func (env *environ) Instances(ctx context.ProviderCallContext, ids []instance.Id) ([]instances.Instance, error) {
+func (env *environ) Instances(ctx context.Context, ids []instance.Id) ([]instances.Instance, error) {
 	if len(ids) == 0 {
 		return nil, environs.ErrNoInstances
 	}
@@ -43,7 +43,7 @@ func (env *environ) Instances(ctx context.ProviderCallContext, ids []instance.Id
 		// for each ID into the result. If there is a problem then we
 		// will return either ErrPartialInstances or ErrNoInstances.
 		// TODO(ericsnow) Skip returning here only for certain errors?
-		logger.Errorf("failed to get instances from GCE: %v", err)
+		logger.Errorf(ctx, "failed to get instances from GCE: %v", err)
 		err = errors.Trace(err)
 	}
 
@@ -68,13 +68,16 @@ func (env *environ) Instances(ctx context.ProviderCallContext, ids []instance.Id
 	return results, err
 }
 
-func (env *environ) gceInstances(ctx context.ProviderCallContext, statusFilters ...string) ([]*computepb.Instance, error) {
+func (env *environ) gceInstances(ctx context.Context, statusFilters ...string) ([]*computepb.Instance, error) {
 	prefix := env.namespace.Prefix()
 	if len(statusFilters) == 0 {
 		statusFilters = instStatuses
 	}
 	instances, err := env.gce.Instances(ctx, prefix, statusFilters...)
-	return instances, google.HandleCredentialError(errors.Trace(err), ctx)
+	if err != nil {
+		return instances, env.HandleCredentialError(ctx, err)
+	}
+	return instances, nil
 }
 
 // instances returns a list of all "alive" instances in the environment.
@@ -82,7 +85,7 @@ func (env *environ) gceInstances(ctx context.ProviderCallContext, statusFilters 
 // "juju-<env name>-machine-*". This is important because otherwise juju
 // will see they are not tracked in state, assume they're stale/rogue,
 // and shut them down.
-func (env *environ) instances(ctx context.ProviderCallContext, statusFilters ...string) ([]instances.Instance, error) {
+func (env *environ) instances(ctx context.Context, statusFilters ...string) ([]instances.Instance, error) {
 	gceInstances, err := env.gceInstances(ctx, statusFilters...)
 	err = errors.Trace(err)
 
@@ -120,7 +123,7 @@ func unpackMetadata(data *computepb.Metadata) map[string]string {
 
 // ControllerInstances returns the IDs of the instances corresponding
 // to juju controllers.
-func (env *environ) ControllerInstances(ctx context.ProviderCallContext, controllerUUID string) ([]instance.Id, error) {
+func (env *environ) ControllerInstances(ctx context.Context, controllerUUID string) ([]instance.Id, error) {
 	instances, err := env.gceInstances(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -144,7 +147,7 @@ func (env *environ) ControllerInstances(ctx context.ProviderCallContext, control
 }
 
 // AdoptResources is part of the Environ interface.
-func (env *environ) AdoptResources(ctx context.ProviderCallContext, controllerUUID string, fromVersion version.Number) error {
+func (env *environ) AdoptResources(ctx context.Context, controllerUUID string, fromVersion semversion.Number) error {
 	insts, err := env.AllInstances(ctx)
 	if err != nil {
 		return errors.Annotate(err, "all instances")
@@ -156,7 +159,7 @@ func (env *environ) AdoptResources(ctx context.ProviderCallContext, controllerUU
 	}
 	err = env.gce.UpdateMetadata(ctx, tags.JujuController, controllerUUID, stringIds...)
 	if err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, err)
 	}
 	return nil
 }
@@ -190,7 +193,7 @@ func (env *environ) parsePlacement(placement string) (gcePlacement, error) {
 
 // checkInstanceType is used to ensure the provided constraints
 // specify a recognized instance type.
-func (env *environ) checkInstanceType(ctx context.ProviderCallContext, cons constraints.Value) bool {
+func (env *environ) checkInstanceType(ctx context.Context, cons constraints.Value) bool {
 	if cons.InstanceType == nil || *cons.InstanceType == "" {
 		return false
 	}
@@ -200,7 +203,7 @@ func (env *environ) checkInstanceType(ctx context.ProviderCallContext, cons cons
 	// fetch all instance types and check manually.
 	instTypesAndCosts, err := env.InstanceTypes(ctx, constraints.Value{})
 	if err != nil {
-		logger.Errorf("unable to fetch GCE instance types: %v", err)
+		logger.Errorf(ctx, "unable to fetch GCE instance types: %v", err)
 		return false
 	}
 

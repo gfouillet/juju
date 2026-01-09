@@ -4,150 +4,154 @@
 package credentialvalidator_test
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dt "github.com/juju/worker/v4/dependency/testing"
+
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/credentialvalidator"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
-
-func (*ManifoldSuite) TestInputs(c *gc.C) {
-	manifold := credentialvalidator.Manifold(validManifoldConfig())
-	c.Check(manifold.Inputs, jc.DeepEquals, []string{"api-caller"})
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &ManifoldSuite{})
 }
 
-func (*ManifoldSuite) TestOutputBadWorker(c *gc.C) {
+func (*ManifoldSuite) TestInputs(c *tc.C) {
+	manifold := credentialvalidator.Manifold(validManifoldConfig(c))
+	c.Check(manifold.Inputs, tc.DeepEquals, []string{"api-caller"})
+}
+
+func (*ManifoldSuite) TestOutputBadWorker(c *tc.C) {
 	manifold := credentialvalidator.Manifold(credentialvalidator.ManifoldConfig{})
 	in := &struct{ worker.Worker }{}
 	var out engine.Flag
 	err := manifold.Output(in, &out)
-	c.Check(err, gc.ErrorMatches, "expected in to implement Flag; got a .*")
+	c.Check(err, tc.ErrorMatches, "expected in to implement Flag; got a .*")
 }
 
-func (*ManifoldSuite) TestFilterNil(c *gc.C) {
+func (*ManifoldSuite) TestFilterNil(c *tc.C) {
 	manifold := credentialvalidator.Manifold(credentialvalidator.ManifoldConfig{})
 	err := manifold.Filter(nil)
-	c.Check(err, jc.ErrorIsNil)
+	c.Check(err, tc.ErrorIsNil)
 }
 
-func (*ManifoldSuite) TestFilterErrChanged(c *gc.C) {
+func (*ManifoldSuite) TestFilterErrChanged(c *tc.C) {
 	manifold := credentialvalidator.Manifold(credentialvalidator.ManifoldConfig{})
 	err := manifold.Filter(credentialvalidator.ErrValidityChanged)
-	c.Check(err, gc.Equals, dependency.ErrBounce)
+	c.Check(err, tc.Equals, dependency.ErrBounce)
 }
 
-func (*ManifoldSuite) TestFilterErrModelCredentialChanged(c *gc.C) {
+func (*ManifoldSuite) TestFilterErrModelCredentialChanged(c *tc.C) {
 	manifold := credentialvalidator.Manifold(credentialvalidator.ManifoldConfig{})
 	err := manifold.Filter(credentialvalidator.ErrModelCredentialChanged)
-	c.Check(err, gc.Equals, dependency.ErrBounce)
+	c.Check(err, tc.Equals, dependency.ErrBounce)
 }
 
-func (*ManifoldSuite) TestFilterOther(c *gc.C) {
+func (*ManifoldSuite) TestFilterOther(c *tc.C) {
 	manifold := credentialvalidator.Manifold(credentialvalidator.ManifoldConfig{})
 	expect := errors.New("whatever")
 	actual := manifold.Filter(expect)
-	c.Check(actual, gc.Equals, expect)
+	c.Check(actual, tc.Equals, expect)
 }
 
-func (*ManifoldSuite) TestStartMissingAPICallerName(c *gc.C) {
-	config := validManifoldConfig()
+func (*ManifoldSuite) TestStartMissingAPICallerName(c *tc.C) {
+	config := validManifoldConfig(c)
 	config.APICallerName = ""
 	checkManifoldNotValid(c, config, "empty APICallerName not valid")
 }
 
-func (*ManifoldSuite) TestStartMissingNewFacade(c *gc.C) {
-	config := validManifoldConfig()
+func (*ManifoldSuite) TestStartMissingNewFacade(c *tc.C) {
+	config := validManifoldConfig(c)
 	config.NewFacade = nil
 	checkManifoldNotValid(c, config, "nil NewFacade not valid")
 }
 
-func (*ManifoldSuite) TestStartMissingNewWorker(c *gc.C) {
-	config := validManifoldConfig()
+func (*ManifoldSuite) TestStartMissingNewWorker(c *tc.C) {
+	config := validManifoldConfig(c)
 	config.NewWorker = nil
 	checkManifoldNotValid(c, config, "nil NewWorker not valid")
 }
 
-func (*ManifoldSuite) TestStartMissingLogger(c *gc.C) {
-	config := validManifoldConfig()
+func (*ManifoldSuite) TestStartMissingLogger(c *tc.C) {
+	config := validManifoldConfig(c)
 	config.Logger = nil
 	checkManifoldNotValid(c, config, "nil Logger not valid")
 }
 
-func (*ManifoldSuite) TestStartMissingAPICaller(c *gc.C) {
-	context := dt.StubContext(nil, map[string]interface{}{
+func (*ManifoldSuite) TestStartMissingAPICaller(c *tc.C) {
+	getter := dt.StubGetter(map[string]interface{}{
 		"api-caller": dependency.ErrMissing,
 	})
-	manifold := credentialvalidator.Manifold(validManifoldConfig())
+	manifold := credentialvalidator.Manifold(validManifoldConfig(c))
 
-	w, err := manifold.Start(context)
-	c.Check(w, gc.IsNil)
-	c.Check(errors.Cause(err), gc.Equals, dependency.ErrMissing)
+	w, err := manifold.Start(c.Context(), getter)
+	c.Check(w, tc.IsNil)
+	c.Check(errors.Cause(err), tc.Equals, dependency.ErrMissing)
 }
 
-func (*ManifoldSuite) TestStartNewFacadeError(c *gc.C) {
+func (*ManifoldSuite) TestStartNewFacadeError(c *tc.C) {
 	expectCaller := &stubCaller{}
-	context := dt.StubContext(nil, map[string]interface{}{
+	getter := dt.StubGetter(map[string]interface{}{
 		"api-caller": expectCaller,
 	})
-	config := validManifoldConfig()
+	config := validManifoldConfig(c)
 	config.NewFacade = func(caller base.APICaller) (credentialvalidator.Facade, error) {
-		c.Check(caller, gc.Equals, expectCaller)
+		c.Check(caller, tc.Equals, expectCaller)
 		return nil, errors.New("bort")
 	}
 	manifold := credentialvalidator.Manifold(config)
 
-	w, err := manifold.Start(context)
-	c.Check(w, gc.IsNil)
-	c.Check(err, gc.ErrorMatches, "bort")
+	w, err := manifold.Start(c.Context(), getter)
+	c.Check(w, tc.IsNil)
+	c.Check(err, tc.ErrorMatches, "bort")
 }
 
-func (*ManifoldSuite) TestStartNewWorkerError(c *gc.C) {
-	context := dt.StubContext(nil, map[string]interface{}{
+func (*ManifoldSuite) TestStartNewWorkerError(c *tc.C) {
+	getter := dt.StubGetter(map[string]interface{}{
 		"api-caller": &stubCaller{},
 	})
 	expectFacade := &struct{ credentialvalidator.Facade }{}
-	config := validManifoldConfig()
+	config := validManifoldConfig(c)
 	config.NewFacade = func(base.APICaller) (credentialvalidator.Facade, error) {
 		return expectFacade, nil
 	}
-	config.NewWorker = func(workerConfig credentialvalidator.Config) (worker.Worker, error) {
-		c.Check(workerConfig.Facade, gc.Equals, expectFacade)
+	config.NewWorker = func(_ context.Context, workerConfig credentialvalidator.Config) (worker.Worker, error) {
+		c.Check(workerConfig.Facade, tc.Equals, expectFacade)
 		return nil, errors.New("snerk")
 	}
 	manifold := credentialvalidator.Manifold(config)
 
-	w, err := manifold.Start(context)
-	c.Check(w, gc.IsNil)
-	c.Check(err, gc.ErrorMatches, "snerk")
+	w, err := manifold.Start(c.Context(), getter)
+	c.Check(w, tc.IsNil)
+	c.Check(err, tc.ErrorMatches, "snerk")
 }
 
-func (*ManifoldSuite) TestStartSuccess(c *gc.C) {
-	context := dt.StubContext(nil, map[string]interface{}{
+func (*ManifoldSuite) TestStartSuccess(c *tc.C) {
+	getter := dt.StubGetter(map[string]interface{}{
 		"api-caller": &stubCaller{},
 	})
 	expectWorker := &struct{ worker.Worker }{}
-	config := validManifoldConfig()
+	config := validManifoldConfig(c)
 	config.NewFacade = func(base.APICaller) (credentialvalidator.Facade, error) {
 		return &struct{ credentialvalidator.Facade }{}, nil
 	}
-	config.NewWorker = func(credentialvalidator.Config) (worker.Worker, error) {
+	config.NewWorker = func(context.Context, credentialvalidator.Config) (worker.Worker, error) {
 		return expectWorker, nil
 	}
 	manifold := credentialvalidator.Manifold(config)
 
-	w, err := manifold.Start(context)
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(w, gc.Equals, expectWorker)
+	w, err := manifold.Start(c.Context(), getter)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(w, tc.Equals, expectWorker)
 }

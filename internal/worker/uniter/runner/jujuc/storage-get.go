@@ -4,12 +4,14 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StorageGetCommand implements the storage-get command.
@@ -22,9 +24,9 @@ type StorageGetCommand struct {
 	out             cmd.Output
 }
 
-func NewStorageGetCommand(ctx Context) (cmd.Command, error) {
-	c := &StorageGetCommand{ctx: ctx}
-	sV, err := newStorageIdValue(ctx, &c.storageTag)
+func NewStorageGetCommand(cmdCtx Context) (cmd.Command, error) {
+	c := &StorageGetCommand{ctx: cmdCtx}
+	sV, err := newStorageIdValue(context.Background(), cmdCtx, &c.storageTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -84,7 +86,7 @@ func (c *StorageGetCommand) Init(args []string) error {
 }
 
 func (c *StorageGetCommand) Run(ctx *cmd.Context) error {
-	storage, err := c.ctx.Storage(c.storageTag)
+	storage, err := c.ctx.Storage(ctx, c.storageTag)
 	if err != nil {
 		return errors.Trace(err)
 	}

@@ -1,7 +1,8 @@
 import datetime
 import os
-import yaml
 import sys
+
+import yaml
 
 sys.path.append('./')
 sys.path.append(os.path.abspath("./scripts"))

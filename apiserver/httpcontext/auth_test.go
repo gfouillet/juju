@@ -1,7 +1,7 @@
 // Copyright 2018 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package httpcontext_test
+package httpcontext
 
 import (
 	"context"
@@ -10,36 +10,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"testing"
 
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/httpcontext"
-	jujutesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	jujutesting "github.com/juju/juju/internal/testing"
 )
 
 type BasicAuthHandlerSuite struct {
-	testing.IsolationSuite
-	stub     testing.Stub
-	handler  *httpcontext.AuthHandler
+	testhelpers.IsolationSuite
+	stub     testhelpers.Stub
+	handler  *AuthHandler
 	authInfo authentication.AuthInfo
 	server   *httptest.Server
 }
 
-var _ = gc.Suite(&BasicAuthHandlerSuite{})
+func TestBasicAuthHandlerSuite(t *testing.T) {
+	tc.Run(t, &BasicAuthHandlerSuite{})
+}
 
-func (s *BasicAuthHandlerSuite) SetUpTest(c *gc.C) {
+func (s *BasicAuthHandlerSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 	s.stub.ResetCalls()
-	s.handler = &httpcontext.AuthHandler{
+	s.handler = &AuthHandler{
 		Authenticator: s,
 		Authorizer:    s,
 		NextHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authInfo, ok := httpcontext.RequestAuthInfo(r)
-			if !ok || authInfo.Entity != s.authInfo.Entity {
+			authInfo, ok := RequestAuthInfo(r.Context())
+			if !ok || authInfo.Tag != s.authInfo.Tag {
 				w.WriteHeader(http.StatusBadRequest)
 			} else {
 				w.WriteHeader(http.StatusOK)
@@ -49,7 +50,7 @@ func (s *BasicAuthHandlerSuite) SetUpTest(c *gc.C) {
 	}
 	s.server = httptest.NewServer(s.handler)
 	s.authInfo = authentication.AuthInfo{
-		Entity:   &mockEntity{tag: names.NewUserTag("bob")},
+		Tag:      names.NewUserTag("bob"),
 		ModelTag: jujutesting.ModelTag,
 	}
 }
@@ -71,92 +72,86 @@ func (s *BasicAuthHandlerSuite) AuthenticateLoginRequest(
 	panic("should not be called")
 }
 
-func (s *BasicAuthHandlerSuite) Authorize(authInfo authentication.AuthInfo) error {
+func (s *BasicAuthHandlerSuite) Authorize(ctx context.Context, authInfo authentication.AuthInfo) error {
 	s.stub.MethodCall(s, "Authorize", authInfo)
 	return s.stub.NextErr()
 }
 
-func (s *BasicAuthHandlerSuite) TestRequestAuthInfoNoContext(c *gc.C) {
-	_, ok := httpcontext.RequestAuthInfo(&http.Request{})
-	c.Assert(ok, jc.IsFalse)
+func (s *BasicAuthHandlerSuite) TestRequestAuthInfoNoContext(c *tc.C) {
+	_, ok := RequestAuthInfo(c.Context())
+	c.Assert(ok, tc.IsFalse)
 }
 
-func (s *BasicAuthHandlerSuite) TestSuccess(c *gc.C) {
+func (s *BasicAuthHandlerSuite) TestSuccess(c *tc.C) {
 	resp, err := s.server.Client().Get(s.server.URL)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusOK)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusOK)
 	defer resp.Body.Close()
 	out, err := io.ReadAll(resp.Body)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(out), gc.Equals, "hullo!")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(out), tc.Equals, "hullo!")
 	s.stub.CheckCallNames(c, "Authenticate", "Authorize")
 }
 
-func (s *BasicAuthHandlerSuite) TestAuthenticationFailure(c *gc.C) {
+func (s *BasicAuthHandlerSuite) TestAuthenticationFailure(c *tc.C) {
 	s.stub.SetErrors(errors.New("username/password invalid"))
 
 	resp, err := s.server.Client().Get(s.server.URL)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusUnauthorized)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusUnauthorized)
 	defer resp.Body.Close()
 
 	out, err := io.ReadAll(resp.Body)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(out), gc.Equals, "authentication failed: username/password invalid\n")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(out), tc.Equals, "authentication failed: username/password invalid\n")
 	s.stub.CheckCallNames(c, "Authenticate")
 }
 
-func (s *BasicAuthHandlerSuite) TestAuthorizationFailure(c *gc.C) {
+func (s *BasicAuthHandlerSuite) TestAuthorizationFailure(c *tc.C) {
 	s.stub.SetErrors(nil, errors.New("unauthorized access for resource"))
 
 	resp, err := s.server.Client().Get(s.server.URL)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusForbidden)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusForbidden)
 	defer resp.Body.Close()
 	out, err := io.ReadAll(resp.Body)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(string(out), gc.Equals, "authorization failed: unauthorized access for resource\n")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(string(out), tc.Equals, "authorization failed: unauthorized access for resource\n")
 	s.stub.CheckCallNames(c, "Authenticate", "Authorize")
 }
 
-func (s *BasicAuthHandlerSuite) TestAuthorizationOptional(c *gc.C) {
+func (s *BasicAuthHandlerSuite) TestAuthorizationOptional(c *tc.C) {
 	s.handler.Authorizer = nil
 
 	resp, err := s.server.Client().Get(s.server.URL)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(resp.StatusCode, gc.Equals, http.StatusOK)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(resp.StatusCode, tc.Equals, http.StatusOK)
 	defer resp.Body.Close()
 }
 
-type mockEntity struct {
-	tag names.Tag
-}
-
-func (e *mockEntity) Tag() names.Tag {
-	return e.tag
-}
-
 type CompositeAuthSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&CompositeAuthSuite{})
+func TestCompositeAuthSuite(t *testing.T) {
+	tc.Run(t, &CompositeAuthSuite{})
+}
 
 type stubAuthorizer struct {
 	expected authentication.AuthInfo
 	err      error
 }
 
-func (a stubAuthorizer) Authorize(info authentication.AuthInfo) error {
+func (a stubAuthorizer) Authorize(ctx context.Context, info authentication.AuthInfo) error {
 	if !reflect.DeepEqual(a.expected, info) {
 		return errors.New("wrong auth info")
 	}
 	return a.err
 }
 
-func (s *CompositeAuthSuite) TestAuthorizeSuccess(c *gc.C) {
+func (s *CompositeAuthSuite) TestAuthorizeSuccess(c *tc.C) {
 	authInfo := authentication.AuthInfo{Controller: true}
-	var auth httpcontext.CompositeAuthorizer = []authentication.Authorizer{
+	var auth CompositeAuthorizer = []authentication.Authorizer{
 		stubAuthorizer{
 			expected: authInfo,
 			err:      errors.New("unauthorized"),
@@ -165,13 +160,13 @@ func (s *CompositeAuthSuite) TestAuthorizeSuccess(c *gc.C) {
 			expected: authInfo,
 		},
 	}
-	err := auth.Authorize(authInfo)
-	c.Assert(err, jc.ErrorIsNil)
+	err := auth.Authorize(context.Background(), authInfo)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *CompositeAuthSuite) TestAuthorizeFail(c *gc.C) {
+func (s *CompositeAuthSuite) TestAuthorizeFail(c *tc.C) {
 	authInfo := authentication.AuthInfo{Controller: true}
-	var auth httpcontext.CompositeAuthorizer = []authentication.Authorizer{
+	var auth CompositeAuthorizer = []authentication.Authorizer{
 		stubAuthorizer{
 			expected: authInfo,
 			err:      errors.New("unauthorized"),
@@ -181,6 +176,6 @@ func (s *CompositeAuthSuite) TestAuthorizeFail(c *gc.C) {
 			err:      errors.New("unauthorized"),
 		},
 	}
-	err := auth.Authorize(authInfo)
-	c.Assert(err, gc.ErrorMatches, "permission denied")
+	err := auth.Authorize(context.Background(), authInfo)
+	c.Assert(err, tc.ErrorMatches, "permission denied")
 }

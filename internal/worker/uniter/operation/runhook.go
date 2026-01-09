@@ -4,16 +4,16 @@
 package operation
 
 import (
+	stdcontext "context"
 	"fmt"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
 
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/relation"
 	"github.com/juju/juju/core/secrets"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
@@ -30,7 +30,7 @@ type runHook struct {
 
 	name   string
 	runner runner.Runner
-	logger Logger
+	logger logger.Logger
 
 	hookFound bool
 
@@ -63,12 +63,12 @@ func (rh *runHook) String() string {
 
 // Prepare ensures the hook can be executed.
 // Prepare is part of the Operation interface.
-func (rh *runHook) Prepare(state State) (*State, error) {
-	name, err := rh.callbacks.PrepareHook(rh.info)
+func (rh *runHook) Prepare(ctx stdcontext.Context, state State) (*State, error) {
+	name, err := rh.callbacks.PrepareHook(ctx, rh.info)
 	if err != nil {
 		return nil, err
 	}
-	rnr, err := rh.runnerFactory.NewHookRunner(rh.info)
+	rnr, err := rh.runnerFactory.NewHookRunner(ctx, rh.info)
 	if err != nil {
 		return nil, err
 	}
@@ -76,13 +76,13 @@ func (rh *runHook) Prepare(state State) (*State, error) {
 	kind := hooks.Kind(name)
 	leaderNeeded := kind == hooks.LeaderElected
 	if kind == hooks.SecretRotate || kind == hooks.SecretExpired || kind == hooks.SecretRemove {
-		secretMetadata, err := rnr.Context().SecretMetadata()
+		secretMetadata, err := rnr.Context().SecretMetadata(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if uri, err := secrets.ParseURI(rh.info.SecretURI); err == nil {
 			md, ok := secretMetadata[uri.ID]
-			leaderNeeded = ok && md.Owner.Kind() != names.UnitTagKind
+			leaderNeeded = ok && md.Owner.Kind != secrets.UnitOwner
 		}
 	}
 
@@ -92,7 +92,7 @@ func (rh *runHook) Prepare(state State) (*State, error) {
 		var isLeader bool
 		isLeader, err = rnr.Context().IsLeader()
 		if err == nil && !isLeader {
-			rh.logger.Infof("unit is no longer the leader; skipping %q execution", name)
+			rh.logger.Infof(ctx, "unit is no longer the leader; skipping %q execution", name)
 			return nil, ErrSkipExecute
 		}
 		if err != nil {
@@ -100,7 +100,7 @@ func (rh *runHook) Prepare(state State) (*State, error) {
 		}
 	}
 
-	err = rnr.Context().Prepare()
+	err = rnr.Context().Prepare(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -131,16 +131,16 @@ func RunningHookMessage(hookName string, info hook.Info) string {
 
 // Execute runs the hook.
 // Execute is part of the Operation interface.
-func (rh *runHook) Execute(state State) (*State, error) {
+func (rh *runHook) Execute(ctx stdcontext.Context, state State) (*State, error) {
 	message := RunningHookMessage(rh.name, rh.info)
-	if err := rh.beforeHook(state); err != nil {
+	if err := rh.beforeHook(ctx, state); err != nil {
 		return nil, err
 	}
 	// In order to reduce controller load, the uniter no longer
 	// records when it is running the update-status hook. If the
 	// hook fails, that is recorded.
 	if hooks.Kind(rh.name) != hooks.UpdateStatus {
-		if err := rh.callbacks.SetExecutingStatus(message); err != nil {
+		if err := rh.callbacks.SetExecutingStatus(ctx, message); err != nil {
 			return nil, err
 		}
 	}
@@ -151,7 +151,7 @@ func (rh *runHook) Execute(state State) (*State, error) {
 	rh.hookFound = true
 	step := Done
 
-	handlerType, err := rh.runner.RunHook(rh.name)
+	handlerType, err := rh.runner.RunHook(ctx, rh.name)
 	cause := errors.Cause(err)
 	switch {
 	case charmrunner.IsMissingHookError(cause):
@@ -167,7 +167,7 @@ func (rh *runHook) Execute(state State) (*State, error) {
 		// It is likely the whole process group was terminated as
 		// part of shutdown, but in case not, the unit agent will
 		// treat the hook as pending (not queued) and record a hook error.
-		rh.logger.Warningf("hook %q was terminated", rh.name)
+		rh.logger.Warningf(ctx, "hook %q was terminated", rh.name)
 		step = Queued
 		return stateChange{
 			Kind:     RunHook,
@@ -177,21 +177,21 @@ func (rh *runHook) Execute(state State) (*State, error) {
 		}.apply(state), runner.ErrTerminated
 	case err == nil:
 	default:
-		rh.logger.Errorf("hook %q (via %s) failed: %v", rh.name, handlerType, err)
+		rh.logger.Errorf(ctx, "hook %q (via %s) failed: %v", rh.name, handlerType, err)
 		rh.callbacks.NotifyHookFailed(rh.name, rh.runner.Context())
 		return nil, ErrHookFailed
 	}
 
 	if rh.hookFound {
-		rh.logger.Infof("ran %q hook (via %s)", rh.name, handlerType)
+		rh.logger.Infof(ctx, "ran %q hook (via %s)", rh.name, handlerType)
 		rh.callbacks.NotifyHookCompleted(rh.name, rh.runner.Context())
 	} else {
-		rh.logger.Infof("skipped %q hook (missing)", rh.name)
+		rh.logger.Infof(ctx, "skipped %q hook (missing)", rh.name)
 	}
 
 	var hasRunStatusSet bool
 	var afterHookErr error
-	if hasRunStatusSet, afterHookErr = rh.afterHook(state); afterHookErr != nil {
+	if hasRunStatusSet, afterHookErr = rh.afterHook(ctx, state); afterHookErr != nil {
 		return nil, afterHookErr
 	}
 	return stateChange{
@@ -203,36 +203,32 @@ func (rh *runHook) Execute(state State) (*State, error) {
 	}.apply(state), err
 }
 
-func (rh *runHook) beforeHook(state State) error {
+func (rh *runHook) beforeHook(ctx stdcontext.Context, state State) error {
 	var err error
 	switch rh.info.Kind {
 	case hooks.Install:
 		// If the charm has already updated the unit status in a previous hook,
 		// then don't overwrite that here.
 		if !state.StatusSet {
-			err = rh.runner.Context().SetUnitStatus(jujuc.StatusInfo{
+			err = rh.runner.Context().SetUnitStatus(ctx, jujuc.StatusInfo{
 				Status: string(status.Maintenance),
 				Info:   status.MessageInstallingCharm,
 			})
 		}
 	case hooks.Stop:
-		err = rh.runner.Context().SetUnitStatus(jujuc.StatusInfo{
+		err = rh.runner.Context().SetUnitStatus(ctx, jujuc.StatusInfo{
 			Status: string(status.Maintenance),
 			Info:   "stopping charm software",
 		})
 	case hooks.Remove:
-		err = rh.runner.Context().SetUnitStatus(jujuc.StatusInfo{
+		err = rh.runner.Context().SetUnitStatus(ctx, jujuc.StatusInfo{
 			Status: string(status.Maintenance),
 			Info:   "cleaning up prior to charm deletion",
 		})
-	case hooks.PreSeriesUpgrade:
-		err = rh.callbacks.SetUpgradeSeriesStatus(model.UpgradeSeriesPrepareRunning, "pre-series-upgrade hook running")
-	case hooks.PostSeriesUpgrade:
-		err = rh.callbacks.SetUpgradeSeriesStatus(model.UpgradeSeriesCompleteRunning, "post-series-upgrade hook running")
 	}
 
 	if err != nil {
-		rh.logger.Errorf("error updating workload status before %v hook: %v", rh.info.Kind, err)
+		rh.logger.Errorf(ctx, "error updating workload status before %v hook: %v", rh.info.Kind, err)
 		return err
 	}
 	return nil
@@ -241,10 +237,10 @@ func (rh *runHook) beforeHook(state State) error {
 // afterHook runs after a hook completes, or after a hook that is
 // not implemented by the charm is expected to have run if it were
 // implemented.
-func (rh *runHook) afterHook(state State) (_ bool, err error) {
+func (rh *runHook) afterHook(stdCtx stdcontext.Context, state State) (_ bool, err error) {
 	defer func() {
 		if err != nil {
-			rh.logger.Errorf("error updating workload status after %v hook: %v", rh.info.Kind, err)
+			rh.logger.Errorf(stdCtx, "error updating workload status after %v hook: %v", rh.info.Kind, err)
 		}
 	}()
 
@@ -252,22 +248,22 @@ func (rh *runHook) afterHook(state State) (_ bool, err error) {
 	hasRunStatusSet := ctx.HasExecutionSetUnitStatus() || state.StatusSet
 	switch rh.info.Kind {
 	case hooks.Stop:
-		err = ctx.SetUnitStatus(jujuc.StatusInfo{
+		err = ctx.SetUnitStatus(stdCtx, jujuc.StatusInfo{
 			Status: string(status.Maintenance),
 		})
 	case hooks.Remove:
 		// Charm is no longer of this world.
-		err = ctx.SetUnitStatus(jujuc.StatusInfo{
+		err = ctx.SetUnitStatus(stdCtx, jujuc.StatusInfo{
 			Status: string(status.Terminated),
 		})
 	case hooks.Start:
 		if hasRunStatusSet {
 			break
 		}
-		rh.logger.Debugf("unit %v has started but has not yet set status", ctx.UnitName())
+		rh.logger.Debugf(stdCtx, "unit %v has started but has not yet set status", ctx.UnitName())
 		// We've finished the start hook and the charm has not updated its
 		// own status so we'll set it to unknown.
-		err = ctx.SetUnitStatus(jujuc.StatusInfo{
+		err = ctx.SetUnitStatus(stdCtx, jujuc.StatusInfo{
 			Status: string(status.Unknown),
 		})
 	case hooks.RelationBroken:
@@ -278,26 +274,19 @@ func (rh *runHook) afterHook(state State) (_ bool, err error) {
 		}
 		rel, rErr := ctx.Relation(rh.info.RelationId)
 		if rErr == nil && rel.Suspended() {
-			err = rel.SetStatus(relation.Suspended)
+			err = rel.SetStatus(stdCtx, relation.Suspended)
 		}
 	}
 	return hasRunStatusSet && err == nil, err
-}
-
-func createUpgradeSeriesStatusMessage(name string, hookFound bool) string {
-	if !hookFound {
-		return fmt.Sprintf("%s hook not found, skipping", name)
-	}
-	return fmt.Sprintf("%s completed", name)
 }
 
 // Commit updates relation state to include the fact of the hook's execution,
 // records the impact of start and collect-metrics hooks, and queues follow-up
 // config-changed hooks to directly follow install and upgrade-charm hooks.
 // Commit is part of the Operation interface.
-func (rh *runHook) Commit(state State) (*State, error) {
+func (rh *runHook) Commit(ctx stdcontext.Context, state State) (*State, error) {
 	var err error
-	err = rh.callbacks.CommitHook(rh.info)
+	err = rh.callbacks.CommitHook(ctx, rh.info)
 	if err != nil {
 		return nil, errors.Annotatef(err, "committing hook %q", rh.name)
 	}
@@ -322,15 +311,9 @@ func (rh *runHook) Commit(state State) (*State, error) {
 			Step: Queued,
 			Hook: &hook.Info{Kind: hooks.ConfigChanged},
 		}
-	case hooks.PreSeriesUpgrade:
-		message := createUpgradeSeriesStatusMessage(rh.name, rh.hookFound)
-		err = rh.callbacks.SetUpgradeSeriesStatus(model.UpgradeSeriesPrepareCompleted, message)
-	case hooks.PostSeriesUpgrade:
-		message := createUpgradeSeriesStatusMessage(rh.name, rh.hookFound)
-		err = rh.callbacks.SetUpgradeSeriesStatus(model.UpgradeSeriesCompleted, message)
 	case hooks.SecretRotate:
 		var info map[string]jujuc.SecretMetadata
-		info, err = rh.runner.Context().SecretMetadata()
+		info, err = rh.runner.Context().SecretMetadata(ctx)
 		if err != nil {
 			break
 		}
@@ -339,8 +322,8 @@ func (rh *runHook) Commit(state State) (*State, error) {
 		if m, ok := info[uri.ID]; ok {
 			originalRevision = m.LatestRevision
 		}
-		rh.logger.Debugf("set secret rotated for %q, original rev %v", rh.info.SecretURI, originalRevision)
-		err = rh.callbacks.SetSecretRotated(rh.info.SecretURI, originalRevision)
+		rh.logger.Debugf(ctx, "set secret rotated for %q, original rev %v", rh.info.SecretURI, originalRevision)
+		err = rh.callbacks.SetSecretRotated(ctx, rh.info.SecretURI, originalRevision)
 	}
 	if err != nil {
 		return nil, err

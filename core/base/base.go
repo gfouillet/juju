@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/collections/set"
-	"github.com/juju/errors"
+
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Base represents an OS/Channel.
@@ -25,23 +27,22 @@ const (
 	// UbuntuOS is the special value to be places in OS field of a base to
 	// indicate an operating system is an Ubuntu distro
 	UbuntuOS = "ubuntu"
-
-	// CentosOS is the special value to be places in OS field of a base to
-	// indicate an operating system is a CentOS distro
-	CentosOS = "centos"
 )
 
 // ParseBase constructs a Base from the os and channel string.
+// This method may return the following errors:
+// - [coreerrors.NotValid] if either os or channel is empty.
+// However, a zero value Base and a nil error will be returned if both are empty.
 func ParseBase(os string, channel string) (Base, error) {
 	if os == "" && channel == "" {
 		return Base{}, nil
 	}
 	if os == "" || channel == "" {
-		return Base{}, errors.NotValidf("missing base os or channel")
+		return Base{}, errors.Errorf("missing base os or channel %w", coreerrors.NotValid)
 	}
 	ch, err := ParseChannelNormalize(channel)
 	if err != nil {
-		return Base{}, errors.Annotatef(err, "parsing base %s@%s", os, channel)
+		return Base{}, errors.Errorf("parsing base %s@%s: %w", os, channel, err)
 	}
 	return Base{OS: strings.ToLower(os), Channel: ch}, nil
 }
@@ -55,7 +56,7 @@ func ParseBaseFromString(b string) (Base, error) {
 	}
 	channel, err := ParseChannelNormalize(parts[1])
 	if err != nil {
-		return Base{}, errors.Trace(err)
+		return Base{}, errors.Capture(err)
 	}
 	return Base{OS: parts[0], Channel: channel}, nil
 }
@@ -66,7 +67,7 @@ func ParseBaseFromString(b string) (Base, error) {
 // will be returned.
 func ParseManifestBases(manifestBases []charm.Base) ([]Base, error) {
 	if len(manifestBases) == 0 {
-		return nil, errors.BadRequestf("base len zero")
+		return nil, errors.Errorf("base len zero").Add(coreerrors.BadRequest)
 	}
 	bases := make([]Base, 0)
 	unique := set.NewStrings()
@@ -148,56 +149,5 @@ func (b Base) DisplayString() string {
 	if b.Channel.Track == "" || b.OS == "" {
 		return ""
 	}
-	if b.OS == Kubernetes.String() {
-		return b.OS
-	}
 	return b.OS + "@" + b.Channel.DisplayString()
-}
-
-// GetBaseFromSeries returns the Base infor for a series.
-func GetBaseFromSeries(series string) (Base, error) {
-	var result Base
-	osName, err := GetOSFromSeries(series)
-	if err != nil {
-		return result, errors.NotValidf("series %q", series)
-	}
-	osVersion, err := SeriesVersion(series)
-	if err != nil {
-		return result, errors.NotValidf("series %q", series)
-	}
-	result.OS = strings.ToLower(osName.String())
-	result.Channel = MakeDefaultChannel(osVersion)
-	return result, nil
-}
-
-// GetSeriesFromChannel gets the series from os name and channel.
-func GetSeriesFromChannel(name string, channel string) (string, error) {
-	base, err := ParseBase(name, channel)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	return GetSeriesFromBase(base)
-}
-
-// GetSeriesFromBase returns the series name for a
-// given Base. This is needed to support legacy series.
-func GetSeriesFromBase(v Base) (string, error) {
-	var osSeries map[SeriesName]seriesVersion
-	switch strings.ToLower(v.OS) {
-	case UbuntuOS:
-		osSeries = ubuntuSeries
-	case CentosOS:
-		osSeries = centosSeries
-	}
-	for s, vers := range osSeries {
-		if vers.Version == v.Channel.Track {
-			return string(s), nil
-		}
-	}
-	return "", errors.NotFoundf("os %q version %q", v.OS, v.Channel.Track)
-}
-
-// LegacyKubernetesBase is the ubuntu base image for legacy k8s charms.
-func LegacyKubernetesBase() Base {
-	return MakeDefaultBase(UbuntuOS, "20.04")
 }

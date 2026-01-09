@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -49,8 +49,7 @@ type leadershipService struct {
 }
 
 // ClaimLeadership is part of the LeadershipService interface.
-func (m *leadershipService) ClaimLeadership(args params.ClaimLeadershipBulkParams) (params.ClaimLeadershipBulkResults, error) {
-
+func (m *leadershipService) ClaimLeadership(ctx context.Context, args params.ClaimLeadershipBulkParams) (params.ClaimLeadershipBulkResults, error) {
 	results := make([]params.ErrorResult, len(args.Params))
 	for pIdx, p := range args.Params {
 
@@ -81,7 +80,7 @@ func (m *leadershipService) ClaimLeadership(args params.ClaimLeadershipBulkParam
 			result.Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
 			continue
 		}
-		if err = m.claimer.ClaimLeadership(applicationTag.Id(), unitTag.Id(), duration); err != nil {
+		if err = m.claimer.ClaimLeadership(ctx, applicationTag.Id(), unitTag.Id(), duration); err != nil {
 			result.Error = apiservererrors.ServerError(err)
 		}
 	}
@@ -104,7 +103,7 @@ func (m *leadershipService) BlockUntilLeadershipReleased(ctx context.Context, ap
 		return params.ErrorResult{Error: apiservererrors.ServerError(apiservererrors.ErrPerm)}, nil
 	}
 
-	if err := m.claimer.BlockUntilLeadershipReleased(applicationTag.Id(), ctx.Done()); err != nil {
+	if err := m.claimer.BlockUntilLeadershipReleased(ctx, applicationTag.Id()); err != nil {
 		return params.ErrorResult{Error: apiservererrors.ServerError(err)}, nil
 	}
 	return params.ErrorResult{}, nil

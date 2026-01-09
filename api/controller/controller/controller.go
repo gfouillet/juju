@@ -4,23 +4,30 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
-	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/common"
 	"github.com/juju/juju/api/common/cloudspec"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/proxy"
+	"github.com/juju/juju/internal/proxy"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client provides methods that the Juju client command uses to interact
 // with the Juju controller.
@@ -34,39 +41,35 @@ type Client struct {
 
 // NewClient creates a new `Client` based on an existing authenticated API
 // connection.
-func NewClient(st base.APICallCloser) *Client {
-	frontend, backend := base.NewClientFacade(st, "Controller")
+func NewClient(st base.APICallCloser, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(st, "Controller", options...)
+	legacy := frontend.BestAPIVersion() < 13
 	return &Client{
 		ClientFacade:        frontend,
 		facade:              backend,
 		ControllerConfigAPI: common.NewControllerConfig(backend),
-		ModelStatusAPI:      common.NewModelStatusAPI(backend),
+		ModelStatusAPI:      common.NewModelStatusAPI(backend, legacy),
 	}
 }
 
 // AllModels allows controller administrators to get the list of all the
 // models in the controller.
-func (c *Client) AllModels() ([]base.UserModel, error) {
+func (c *Client) AllModels(ctx context.Context) ([]base.UserModel, error) {
+	if c.BestAPIVersion() < 13 {
+		return c.allModelsCompat(ctx)
+	}
 	var models params.UserModelList
-	err := c.facade.FacadeCall("AllModels", nil, &models)
+	err := c.facade.FacadeCall(ctx, "AllModels", nil, &models)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	result := make([]base.UserModel, len(models.UserModels))
 	for i, usermodel := range models.UserModels {
-		owner, err := names.ParseUserTag(usermodel.OwnerTag)
-		if err != nil {
-			return nil, errors.Annotatef(err, "OwnerTag %q at position %d", usermodel.OwnerTag, i)
-		}
-		modelType := model.ModelType(usermodel.Type)
-		if modelType == "" {
-			modelType = model.IAAS
-		}
 		result[i] = base.UserModel{
 			Name:           usermodel.Name,
 			UUID:           usermodel.UUID,
-			Type:           modelType,
-			Owner:          owner.Id(),
+			Type:           model.ModelType(usermodel.Type),
+			Qualifier:      model.Qualifier(usermodel.Qualifier),
 			LastConnection: usermodel.LastConnection,
 		}
 	}
@@ -74,16 +77,16 @@ func (c *Client) AllModels() ([]base.UserModel, error) {
 }
 
 // CloudSpec returns a CloudSpec for the specified model.
-func (c *Client) CloudSpec(modelTag names.ModelTag) (environscloudspec.CloudSpec, error) {
+func (c *Client) CloudSpec(ctx context.Context, modelTag names.ModelTag) (environscloudspec.CloudSpec, error) {
 	api := cloudspec.NewCloudSpecAPI(c.facade, modelTag)
-	return api.CloudSpec()
+	return api.CloudSpec(ctx)
 }
 
 // HostedConfig contains the model config and the cloud spec for that
 // model such that direct access to the provider can be used.
 type HostedConfig struct {
 	Name      string
-	Owner     names.UserTag
+	Qualifier string
 	Config    map[string]interface{}
 	CloudSpec environscloudspec.CloudSpec
 	Error     error
@@ -91,9 +94,12 @@ type HostedConfig struct {
 
 // HostedModelConfigs returns all model settings for the
 // models hosted on the controller.
-func (c *Client) HostedModelConfigs() ([]HostedConfig, error) {
+func (c *Client) HostedModelConfigs(ctx context.Context) ([]HostedConfig, error) {
+	if c.BestAPIVersion() < 13 {
+		return c.hostedModelConfigsCompat(ctx)
+	}
 	result := params.HostedModelConfigsResults{}
-	err := c.facade.FacadeCall("HostedModelConfigs", nil, &result)
+	err := c.facade.FacadeCall(ctx, "HostedModelConfigs", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -103,12 +109,7 @@ func (c *Client) HostedModelConfigs() ([]HostedConfig, error) {
 	hostedConfigs := make([]HostedConfig, len(result.Models))
 	for i, modelConfig := range result.Models {
 		hostedConfigs[i].Name = modelConfig.Name
-		tag, err := names.ParseUserTag(modelConfig.OwnerTag)
-		if err != nil {
-			hostedConfigs[i].Error = errors.Trace(err)
-			continue
-		}
-		hostedConfigs[i].Owner = tag
+		hostedConfigs[i].Qualifier = modelConfig.Qualifier
 		if modelConfig.Error != nil {
 			hostedConfigs[i].Error = errors.Trace(modelConfig.Error)
 			continue
@@ -154,8 +155,8 @@ type DestroyControllerParams struct {
 
 // DestroyController puts the controller model into a "dying" state,
 // and removes all non-manager machine instances.
-func (c *Client) DestroyController(args DestroyControllerParams) error {
-	return c.facade.FacadeCall("DestroyController", params.DestroyControllerArgs{
+func (c *Client) DestroyController(ctx context.Context, args DestroyControllerParams) error {
+	return c.facade.FacadeCall(ctx, "DestroyController", params.DestroyControllerArgs{
 		DestroyModels:  args.DestroyModels,
 		DestroyStorage: args.DestroyStorage,
 		Force:          args.Force,
@@ -166,33 +167,32 @@ func (c *Client) DestroyController(args DestroyControllerParams) error {
 
 // ListBlockedModels returns a list of all models within the controller
 // which have at least one block in place.
-func (c *Client) ListBlockedModels() ([]params.ModelBlockInfo, error) {
+func (c *Client) ListBlockedModels(ctx context.Context) ([]params.ModelBlockInfo, error) {
 	result := params.ModelBlockInfoList{}
-	err := c.facade.FacadeCall("ListBlockedModels", nil, &result)
-	return result.Models, err
+	err := c.facade.FacadeCall(ctx, "ListBlockedModels", nil, &result)
+	info := make([]params.ModelBlockInfo, len(result.Models))
+	for i, m := range result.Models {
+		info[i] = params.ModelBlockInfo{
+			UUID:      m.UUID,
+			Name:      m.Name,
+			Qualifier: m.Qualifier,
+			Blocks:    m.Blocks,
+		}
+	}
+	return info, err
 }
 
 // RemoveBlocks removes all the blocks in the controller.
-func (c *Client) RemoveBlocks() error {
+func (c *Client) RemoveBlocks(ctx context.Context) error {
 	args := params.RemoveBlocksArgs{All: true}
-	return c.facade.FacadeCall("RemoveBlocks", args, nil)
-}
-
-// WatchAllModels returns an AllWatcher, from which you can request
-// the Next collection of Deltas (for all models).
-func (c *Client) WatchAllModels() (*api.AllWatcher, error) {
-	var info params.AllWatcherId
-	if err := c.facade.FacadeCall("WatchAllModels", nil, &info); err != nil {
-		return nil, err
-	}
-	return api.NewAllModelWatcher(c.facade.RawAPICaller(), &info.AllWatcherId), nil
+	return c.facade.FacadeCall(ctx, "RemoveBlocks", args, nil)
 }
 
 // WatchModelSummaries returns a SummaryWatcher, from which you can request
 // the Next set of ModelAbstracts for all models the user can see.
-func (c *Client) WatchModelSummaries() (*SummaryWatcher, error) {
+func (c *Client) WatchModelSummaries(ctx context.Context) (*SummaryWatcher, error) {
 	var info params.SummaryWatcherID
-	if err := c.facade.FacadeCall("WatchModelSummaries", nil, &info); err != nil {
+	if err := c.facade.FacadeCall(ctx, "WatchModelSummaries", nil, &info); err != nil {
 		return nil, err
 	}
 	return NewSummaryWatcher(c.facade.RawAPICaller(), &info.WatcherID), nil
@@ -201,25 +201,25 @@ func (c *Client) WatchModelSummaries() (*SummaryWatcher, error) {
 // WatchAllModelSummaries returns a SummaryWatcher, from which you can request
 // the Next set of ModelAbstracts. This method is only valid for controller
 // superusers and returns abstracts for all models in the controller.
-func (c *Client) WatchAllModelSummaries() (*SummaryWatcher, error) {
+func (c *Client) WatchAllModelSummaries(ctx context.Context) (*SummaryWatcher, error) {
 	var info params.SummaryWatcherID
-	if err := c.facade.FacadeCall("WatchAllModelSummaries", nil, &info); err != nil {
+	if err := c.facade.FacadeCall(ctx, "WatchAllModelSummaries", nil, &info); err != nil {
 		return nil, err
 	}
 	return NewSummaryWatcher(c.facade.RawAPICaller(), &info.WatcherID), nil
 }
 
 // GrantController grants a user access to the controller.
-func (c *Client) GrantController(user, access string) error {
-	return c.modifyControllerUser(params.GrantControllerAccess, user, access)
+func (c *Client) GrantController(ctx context.Context, user, access string) error {
+	return c.modifyControllerUser(ctx, params.GrantControllerAccess, user, access)
 }
 
 // RevokeController revokes a user's access to the controller.
-func (c *Client) RevokeController(user, access string) error {
-	return c.modifyControllerUser(params.RevokeControllerAccess, user, access)
+func (c *Client) RevokeController(ctx context.Context, user, access string) error {
+	return c.modifyControllerUser(ctx, params.RevokeControllerAccess, user, access)
 }
 
-func (c *Client) modifyControllerUser(action params.ControllerAction, user, access string) error {
+func (c *Client) modifyControllerUser(ctx context.Context, action params.ControllerAction, user, access string) error {
 	var args params.ModifyControllerAccessRequest
 
 	if !names.IsValidUser(user) {
@@ -234,7 +234,7 @@ func (c *Client) modifyControllerUser(action params.ControllerAction, user, acce
 	}}
 
 	var result params.ErrorResults
-	err := c.facade.FacadeCall("ModifyControllerAccess", args, &result)
+	err := c.facade.FacadeCall(ctx, "ModifyControllerAccess", args, &result)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -246,13 +246,13 @@ func (c *Client) modifyControllerUser(action params.ControllerAction, user, acce
 }
 
 // GetControllerAccess returns the access level the user has on the controller.
-func (c *Client) GetControllerAccess(user string) (permission.Access, error) {
+func (c *Client) GetControllerAccess(ctx context.Context, user string) (permission.Access, error) {
 	if !names.IsValidUser(user) {
 		return "", errors.Errorf("invalid username: %q", user)
 	}
-	entities := params.Entities{Entities: []params.Entity{{names.NewUserTag(user).String()}}}
+	entities := params.Entities{Entities: []params.Entity{{Tag: names.NewUserTag(user).String()}}}
 	var results params.UserAccessResults
-	err := c.facade.FacadeCall("GetControllerAccess", entities, &results)
+	err := c.facade.FacadeCall(ctx, "GetControllerAccess", entities, &results)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -268,9 +268,9 @@ func (c *Client) GetControllerAccess(user string) (permission.Access, error) {
 // ConfigSet updates the passed controller configuration values. Any
 // settings that aren't passed will be left with their previous
 // values.
-func (c *Client) ConfigSet(values map[string]interface{}) error {
+func (c *Client) ConfigSet(ctx context.Context, values map[string]interface{}) error {
 	return errors.Trace(
-		c.facade.FacadeCall("ConfigSet", params.ControllerConfigSet{Config: values}, nil),
+		c.facade.FacadeCall(ctx, "ConfigSet", params.ControllerConfigSet{Config: values}, nil),
 	)
 }
 
@@ -316,7 +316,7 @@ func (s *MigrationSpec) Validate() error {
 // The API server supports starting multiple migrations in one request
 // but we don't need that at the client side yet (and may never) so
 // this call just supports starting one migration at a time.
-func (c *Client) InitiateMigration(spec MigrationSpec) (string, error) {
+func (c *Client) InitiateMigration(ctx context.Context, spec MigrationSpec) (string, error) {
 	if err := spec.Validate(); err != nil {
 		return "", errors.Annotatef(err, "client-side validation failed")
 	}
@@ -343,7 +343,7 @@ func (c *Client) InitiateMigration(spec MigrationSpec) (string, error) {
 		}},
 	}
 	response := params.InitiateMigrationResults{}
-	if err := c.facade.FacadeCall("InitiateMigration", args, &response); err != nil {
+	if err := c.facade.FacadeCall(ctx, "InitiateMigration", args, &response); err != nil {
 		return "", errors.Trace(err)
 	}
 	if len(response.Results) != 1 {
@@ -373,9 +373,9 @@ type ControllerVersion struct {
 }
 
 // ControllerVersion fetches the controller version information.
-func (c *Client) ControllerVersion() (ControllerVersion, error) {
+func (c *Client) ControllerVersion(ctx context.Context) (ControllerVersion, error) {
 	result := params.ControllerVersionResults{}
-	err := c.facade.FacadeCall("ControllerVersion", nil, &result)
+	err := c.facade.FacadeCall(ctx, "ControllerVersion", nil, &result)
 	out := ControllerVersion{
 		Version:   result.Version,
 		GitCommit: result.GitCommit,
@@ -404,10 +404,10 @@ type ProxierFactory interface {
 
 // DashboardConnectionInfo fetches the connection information needed for
 // connecting to the Juju Dashboard.
-func (c *Client) DashboardConnectionInfo(factory ProxierFactory) (DashboardConnectionInfo, error) {
+func (c *Client) DashboardConnectionInfo(ctx context.Context, factory ProxierFactory) (DashboardConnectionInfo, error) {
 	rval := DashboardConnectionInfo{}
 	result := params.DashboardConnectionInfo{}
-	err := c.facade.FacadeCall("DashboardConnectionInfo", nil, &result)
+	err := c.facade.FacadeCall(ctx, "DashboardConnectionInfo", nil, &result)
 	if err != nil {
 		return rval, errors.Trace(err)
 	}

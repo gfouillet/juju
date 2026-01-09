@@ -6,11 +6,11 @@ package logsink
 import (
 	"net/http"
 
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 )
 
 func NewHTTPHandlerForTest(
-	newLogWriteCloser NewLogWriteCloserFunc,
+	newLogWriter NewLogWriteFunc,
 	abort <-chan struct{},
 	ratelimit *RateLimitConfig,
 	metrics MetricsCollector,
@@ -18,18 +18,18 @@ func NewHTTPHandlerForTest(
 	makeChannel func() (chan struct{}, func()),
 ) http.Handler {
 	return &logSinkHandler{
-		newLogWriteCloser: newLogWriteCloser,
-		abort:             abort,
-		ratelimit:         ratelimit,
-		newStopChannel:    makeChannel,
-		metrics:           metrics,
-		modelUUID:         modelUUID,
+		newLogWriter:   newLogWriter,
+		abort:          abort,
+		ratelimit:      ratelimit,
+		newStopChannel: makeChannel,
+		metrics:        metrics,
+		modelUUID:      modelUUID,
 	}
 }
 
-func ReceiverStopped(c *gc.C, handler http.Handler) bool {
+func ReceiverStopped(c *tc.C, handler http.Handler) bool {
 	h, ok := handler.(*logSinkHandler)
-	c.Assert(ok, gc.Equals, true)
+	c.Assert(ok, tc.Equals, true)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.receiverStopped

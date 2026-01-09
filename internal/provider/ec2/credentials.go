@@ -4,12 +4,13 @@
 package ec2
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 	"gopkg.in/ini.v1"
 
 	"github.com/juju/juju/cloud"
@@ -34,13 +35,13 @@ func (environProviderCredentials) CredentialSchemas() map[cloud.AuthType]cloud.C
 	return map[cloud.AuthType]cloud.CredentialSchema{
 		cloud.AccessKeyAuthType: {
 			{
-				"access-key",
-				cloud.CredentialAttr{
+				Name: "access-key",
+				CredentialAttr: cloud.CredentialAttr{
 					Description: "The EC2 access key",
 				},
 			}, {
-				"secret-key",
-				cloud.CredentialAttr{
+				Name: "secret-key",
+				CredentialAttr: cloud.CredentialAttr{
 					Description: "The EC2 secret key",
 					Hidden:      true,
 				},
@@ -48,8 +49,8 @@ func (environProviderCredentials) CredentialSchemas() map[cloud.AuthType]cloud.C
 		},
 		cloud.InstanceRoleAuthType: {
 			{
-				"instance-profile-name",
-				cloud.CredentialAttr{
+				Name: "instance-profile-name",
+				CredentialAttr: cloud.CredentialAttr{
 					Description: "The AWS Instance Profile name",
 				},
 			},
@@ -91,7 +92,7 @@ func (e environProviderCredentials) DetectCredentials(cloudName string) (*cloud.
 		}
 		// Basic validation check
 		if values.AwsAccessKeyId == "" || values.AwsSecretAccessKey == "" {
-			logger.Errorf("missing aws credential attributes in credentials file section %q", credName)
+			logger.Errorf(context.TODO(), "missing aws credential attributes in credentials file section %q", credName)
 			continue
 		}
 		accessKeyCredential := cloud.NewCredential(

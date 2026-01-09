@@ -1,2002 +1,2204 @@
-// Copyright 2014 Canonical Ltd.
+// Copyright 2024 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package application_test
+package application
 
 import (
+	"context"
 	"fmt"
-	"regexp"
+	"strings"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	gomock "go.uber.org/mock/gomock"
 
-	unitassignerapi "github.com/juju/juju/api/agent/unitassigner"
-	"github.com/juju/juju/apiserver/common"
-	commontesting "github.com/juju/juju/apiserver/common/testing"
-	"github.com/juju/juju/apiserver/facades/client/application"
-	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/arch"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/application"
+	corearch "github.com/juju/juju/core/arch"
+	corecharm "github.com/juju/juju/core/charm"
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/offer"
+	"github.com/juju/juju/core/os/ostype"
+	corerelation "github.com/juju/juju/core/relation"
+	relationtesting "github.com/juju/juju/core/relation/testing"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/resource/testing"
 	"github.com/juju/juju/core/status"
-	jujutesting "github.com/juju/juju/juju/testing"
+	coreunit "github.com/juju/juju/core/unit"
+	domainapplication "github.com/juju/juju/domain/application"
+	"github.com/juju/juju/domain/application/architecture"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	applicationservice "github.com/juju/juju/domain/application/service"
+	crossmodelrelationerrors "github.com/juju/juju/domain/crossmodelrelation/errors"
+	crossmodelrelationservice "github.com/juju/juju/domain/crossmodelrelation/service"
+	domainlife "github.com/juju/juju/domain/life"
+	"github.com/juju/juju/domain/relation"
+	relationerrors "github.com/juju/juju/domain/relation/errors"
+	"github.com/juju/juju/domain/removal"
+	removalerrors "github.com/juju/juju/domain/removal/errors"
+	"github.com/juju/juju/domain/resolve"
+	resolveerrors "github.com/juju/juju/domain/resolve/errors"
+	"github.com/juju/juju/environs/bootstrap"
+	internalcharm "github.com/juju/juju/internal/charm"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/uuid"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/stateenvirons"
-	statetesting "github.com/juju/juju/state/testing"
-	"github.com/juju/juju/storage/poolmanager"
-	"github.com/juju/juju/testcharms"
-	"github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
 )
 
 type applicationSuite struct {
-	jujutesting.JujuConnSuite
-	commontesting.BlockHelper
-
-	applicationAPI *application.APIBase
-	application    *state.Application
-	authorizer     *apiservertesting.FakeAuthorizer
-	lastKnownRev   map[string]int
+	baseSuite
 }
 
-var _ = gc.Suite(&applicationSuite{})
+func (s *applicationSuite) TestStub(c *tc.C) {
+	c.Skip("Suspending relation requires CMR support, which is not yet implemented.\n" +
+		"Once it will be implemented, at minimum, the following tests should be added:\n" +
+		"- TestSetRelationsReestablished\n" +
+		"- TestSetRelationsSuspendedPermissionError\n" +
+		"- TestSetRelationsSuspendedNoOffer")
+}
 
-func (s *applicationSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
-	s.BlockHelper = commontesting.NewBlockHelper(s.APIState)
-	s.AddCleanup(func(*gc.C) { s.BlockHelper.Close() })
+func TestApplicationSuite(t *stdtesting.T) {
+	tc.Run(t, &applicationSuite{})
+}
 
-	s.application = s.Factory.MakeApplication(c, nil)
+func (s *applicationSuite) TestDeploy(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.authorizer = &apiservertesting.FakeAuthorizer{
-		Tag: s.AdminUserTag(c),
+	s.setupAPI(c)
+	s.expectCharm(c, charmParams{name: "foo"})
+	s.expectCreateApplicationForDeploy("foo", nil)
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.IsNil)
+}
+
+// TestDeployWithResources test the scenario of deploying
+// local charms, or charms via bundles that have resources.
+// Deploy rather than DeployFromRepository is called by the
+// clients. In this case PendingResources, uuids, must be
+// provided for all charm resources.
+func (s *applicationSuite) TestDeployWithPendingResources(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	resourceUUID := testing.GenResourceUUID(c)
+	s.expectCharm(c, charmParams{name: "foo", resources: map[string]charmresource.Meta{
+		"bar": {
+			Name: "bar",
+		},
+	}})
+	s.expectCreateApplicationForDeploy("foo", nil)
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+				Resources: map[string]string{"foo": resourceUUID.String()},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestDeployWithApplicationConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	s.expectCharm(c, charmParams{name: "foo"})
+	config := map[string]interface{}{"stringOption": "hey"}
+	s.expectCreateApplicationForDeployWithConfig(c, "foo", config, nil)
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+				Config: map[string]string{"stringOption": "hey"},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestDeploySubordinate(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	s.expectCharm(c, charmParams{name: "foo", subordinate: true})
+
+	s.applicationService.EXPECT().CreateIAASApplication(gomock.Any(),
+		"foo",
+		gomock.Any(),
+		gomock.Any(),
+		gomock.AssignableToTypeOf(applicationservice.AddApplicationArgs{}),
+	).DoAndReturn(func(ctx context.Context, s string, charm internalcharm.Charm, origin corecharm.Origin, args applicationservice.AddApplicationArgs, arg ...applicationservice.AddIAASUnitArg) (application.UUID, error) {
+		c.Check(args.Constraints.String(), tc.Equals, "")
+		c.Check(origin.Platform.Architecture, tc.Equals, "amd64")
+		return application.UUID("app-" + "foo"), nil
+	})
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "", // Empty arch in args should resolve to the charm's base arch.
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestDeployFailureDeletesPendingResources(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	s.expectCharm(c, charmParams{name: "foo", resources: map[string]charmresource.Meta{
+		"bar": {
+			Name: "bar",
+		},
+	}})
+	resourceUUID := testing.GenResourceUUID(c)
+	s.expectDeletePendingResources([]resource.UUID{resourceUUID})
+	s.expectCreateApplicationForDeploy("foo", errors.Errorf("fail test"))
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+				Resources: map[string]string{"bar": resourceUUID.String()},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.NotNil)
+}
+
+// TestDeployMismatchedResources validates Deploy fails if the charm resource
+// count and pending resource count do not match.
+func (s *applicationSuite) TestDeployMismatchedResources(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	s.expectCharm(c, charmParams{name: "foo", resources: map[string]charmresource.Meta{
+		"bar": {
+			Name: "bar",
+		},
+		"foo": {
+			Name: "foo",
+		},
+	}})
+	resourceUUID := testing.GenResourceUUID(c)
+	s.expectDeletePendingResources([]resource.UUID{resourceUUID})
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "local:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "local",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+				Resources: map[string]string{"bar": resourceUUID.String()},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.NotNil)
+}
+
+func (s *applicationSuite) TestDeployInvalidSource(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	errorResults, err := s.api.Deploy(c.Context(), params.ApplicationsDeploy{
+		Applications: []params.ApplicationDeploy{
+			{
+				ApplicationName: "foo",
+				CharmURL:        "bad:foo-42",
+				CharmOrigin: &params.CharmOrigin{
+					Type:   "charm",
+					Source: "bad",
+					Base: params.Base{
+						Name:    "ubuntu",
+						Channel: "24.04",
+					},
+					Architecture: "amd64",
+					Revision:     ptr(42),
+					Track:        ptr("1.0"),
+					Risk:         "stable",
+				},
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(errorResults.Results, tc.HasLen, 1)
+	c.Assert(errorResults.Results[0].Error, tc.ErrorMatches, "\"bad\" not a valid charm origin source")
+}
+
+func (s *applicationSuite) TestGetCharmURLOriginAppNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "foo").Return(applicationcharm.CharmLocator{}, applicationerrors.ApplicationNotFound)
+
+	res, err := s.api.GetCharmURLOrigin(c.Context(), params.ApplicationGet{
+		ApplicationName: "foo",
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestGetCharmURLOrigin(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "foo").Return(applicationcharm.CharmLocator{
+		Name:         "foo",
+		Revision:     42,
+		Source:       applicationcharm.CharmHubSource,
+		Architecture: architecture.ARM64,
+	}, nil)
+	s.applicationService.EXPECT().GetApplicationCharmOrigin(gomock.Any(), "foo").Return(corecharm.Origin{
+		Source:   corecharm.CharmHub,
+		Revision: ptr(42),
+		Channel: &internalcharm.Channel{
+			Track: "1.0",
+			Risk:  "stable",
+		},
+		Platform: corecharm.Platform{
+			OS:           ostype.Ubuntu.String(),
+			Channel:      "24.04",
+			Architecture: corearch.ARM64,
+		},
+	}, nil)
+
+	res, err := s.api.GetCharmURLOrigin(c.Context(), params.ApplicationGet{
+		ApplicationName: "foo",
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.URL, tc.Equals, "ch:arm64/foo-42")
+	c.Check(res.Origin, tc.DeepEquals, params.CharmOrigin{
+		Source:       "charm-hub",
+		Revision:     ptr(42),
+		Risk:         "stable",
+		Track:        ptr("1.0"),
+		Architecture: "arm64",
+		Base: params.Base{
+			Name:    "ubuntu",
+			Channel: "24.04",
+		},
+		InstanceKey: res.Origin.InstanceKey,
+	})
+}
+
+func (s *applicationSuite) TestGetCharmURLOriginNoOptionals(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	arch := corearch.DefaultArchitecture
+
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "foo").Return(applicationcharm.CharmLocator{
+		Name:     "foo",
+		Revision: 42,
+		Source:   applicationcharm.LocalSource,
+	}, nil)
+	s.applicationService.EXPECT().GetApplicationCharmOrigin(gomock.Any(), "foo").Return(corecharm.Origin{
+		Source:   corecharm.Local,
+		Revision: ptr(42),
+		Platform: corecharm.Platform{
+			OS:           ostype.Ubuntu.String(),
+			Channel:      "24.04",
+			Architecture: arch,
+		},
+	}, nil)
+
+	res, err := s.api.GetCharmURLOrigin(c.Context(), params.ApplicationGet{
+		ApplicationName: "foo",
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.URL, tc.Equals, fmt.Sprintf("local:%s/foo-42", arch))
+	c.Check(res.Origin, tc.DeepEquals, params.CharmOrigin{
+		Source:       "local",
+		Revision:     ptr(42),
+		Architecture: arch,
+		Base: params.Base{
+			Name:    "ubuntu",
+			Channel: "24.04",
+		},
+		InstanceKey: res.Origin.InstanceKey,
+	})
+}
+
+func (s *applicationSuite) TestCharmRelations(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	appID := tc.Must(c, application.NewUUID)
+	rels := []string{"foo", "bar"}
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "doink").Return(appID, nil)
+	s.applicationService.EXPECT().GetApplicationEndpointNames(gomock.Any(), appID).Return(rels, nil)
+
+	res, err := s.api.CharmRelations(c.Context(), params.ApplicationCharmRelations{
+		ApplicationName: "doink",
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.CharmRelations, tc.SameContents, rels)
+}
+
+func (s *applicationSuite) TestCharmRelationsAppNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "doink").Return("", applicationerrors.ApplicationNotFound)
+
+	_, err := s.api.CharmRelations(c.Context(), params.ApplicationCharmRelations{
+		ApplicationName: "doink",
+	})
+	c.Assert(err, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestDestroyUnitIsSubordinate(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().IsSubordinateApplicationByName(gomock.Any(), "foo").Return(true, nil)
+
+	// Act:
+	res, err := s.api.DestroyUnit(c.Context(), params.DestroyUnitsParams{
+		Units: []params.DestroyUnitParams{{
+			UnitTag: names.NewUnitTag("foo/0").String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.ErrorMatches, `.*unit "foo/0" is a subordinate.*`)
+}
+
+func (s *applicationSuite) TestDestroyUnitControllerUnit(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	charmLocator := applicationcharm.CharmLocator{
+		Name:     "ctrl",
+		Revision: 42,
+		Source:   applicationcharm.CharmHubSource,
 	}
-	s.applicationAPI = s.makeAPI(c)
-	s.lastKnownRev = make(map[string]int)
+	s.applicationService.EXPECT().IsSubordinateApplicationByName(gomock.Any(), "ctrl").Return(false, nil)
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "ctrl").Return(charmLocator, nil)
+	s.applicationService.EXPECT().GetCharmMetadataName(gomock.Any(), charmLocator).Return(bootstrap.ControllerCharmName, nil)
+
+	// Act:
+	res, err := s.api.DestroyUnit(c.Context(), params.DestroyUnitsParams{
+		Units: []params.DestroyUnitParams{{
+			UnitTag: names.NewUnitTag("ctrl/0").String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotSupported)
 }
 
-func (s *applicationSuite) makeAPI(c *gc.C) *application.APIBase {
-	resources := common.NewResources()
-	c.Assert(resources.RegisterNamed("dataDir", common.StringResource(c.MkDir())), jc.ErrorIsNil)
-	storageAccess, err := application.GetStorageState(s.State)
-	c.Assert(err, jc.ErrorIsNil)
-	model, err := s.State.Model()
-	c.Assert(err, jc.ErrorIsNil)
-	blockChecker := common.NewBlockChecker(s.State)
-	registry := stateenvirons.NewStorageProviderRegistry(s.Environ)
-	pm := poolmanager.New(state.NewStateSettings(s.State), registry)
-	api, err := application.NewAPIBase(
-		application.GetState(s.State),
-		storageAccess,
-		s.authorizer,
-		nil,
-		nil,
-		blockChecker,
-		application.GetModel(model),
-		nil, // leadership not used in these tests.
-		application.CharmToStateCharm,
-		application.DeployApplication,
-		pm,
-		registry,
-		common.NewResources(),
-		nil, // CAAS Broker not used in this suite.
-		nil, // secret backend config getter not used in this suite.
-		state.NewSecrets(s.State),
+func (s *applicationSuite) TestDestroyApplicationController(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	charmLocator := applicationcharm.CharmLocator{
+		Name:     "ctrl",
+		Revision: 42,
+		Source:   applicationcharm.CharmHubSource,
+	}
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "ctrl").Return(charmLocator, nil)
+	s.applicationService.EXPECT().GetCharmMetadataName(gomock.Any(), charmLocator).Return(bootstrap.ControllerCharmName, nil)
+
+	// Act:
+	res, err := s.api.DestroyApplication(c.Context(), params.DestroyApplicationsParams{
+		Applications: []params.DestroyApplicationParams{{
+			ApplicationTag: names.NewApplicationTag("ctrl").String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotSupported)
+}
+
+func (s *applicationSuite) TestGetApplicationConstraintsAppNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID(""), applicationerrors.ApplicationNotFound)
+
+	res, err := s.api.GetConstraints(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: "application-foo"}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results[0].Error, tc.ErrorMatches, "application foo not found")
+}
+
+func (s *applicationSuite) TestGetApplicationConstraintsError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID("app-foo"), nil)
+	s.applicationService.EXPECT().GetApplicationConstraints(gomock.Any(), application.UUID("app-foo")).Return(constraints.Value{}, errors.New("boom"))
+
+	res, err := s.api.GetConstraints(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: "application-foo"}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results[0].Error, tc.ErrorMatches, "boom")
+}
+
+func (s *applicationSuite) TestGetApplicationConstraints(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID("app-foo"), nil)
+	s.applicationService.EXPECT().GetApplicationConstraints(gomock.Any(), application.UUID("app-foo")).Return(constraints.Value{Mem: ptr(uint64(42))}, nil)
+
+	res, err := s.api.GetConstraints(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: "application-foo"}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(res.Results[0].Constraints, tc.DeepEquals, constraints.Value{Mem: ptr(uint64(42))})
+}
+
+func (s *applicationSuite) TestSetApplicationConstraintsAppNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID(""), applicationerrors.ApplicationNotFound)
+
+	err := s.api.SetConstraints(c.Context(), params.SetConstraints{
+		ApplicationName: "foo",
+		Constraints:     constraints.Value{Mem: ptr(uint64(42))},
+	})
+	c.Assert(err, tc.ErrorMatches, "application foo not found")
+}
+
+func (s *applicationSuite) TestSetApplicationConstraintsError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID("app-foo"), nil)
+	s.applicationService.EXPECT().SetApplicationConstraints(gomock.Any(), application.UUID("app-foo"), constraints.Value{Mem: ptr(uint64(42))}).Return(errors.New("boom"))
+
+	err := s.api.SetConstraints(c.Context(), params.SetConstraints{
+		ApplicationName: "foo",
+		Constraints:     constraints.Value{Mem: ptr(uint64(42))},
+	})
+	c.Assert(err, tc.ErrorMatches, "boom")
+}
+
+func (s *applicationSuite) TestSetApplicationConstraints(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(application.UUID("app-foo"), nil)
+	s.applicationService.EXPECT().SetApplicationConstraints(gomock.Any(), application.UUID("app-foo"), constraints.Value{Mem: ptr(uint64(42))}).Return(nil)
+
+	err := s.api.SetConstraints(c.Context(), params.SetConstraints{
+		ApplicationName: "foo",
+		Constraints:     constraints.Value{Mem: ptr(uint64(42))},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *applicationSuite) TestAddRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "mattermost"
+	epStr2 := "postgresql:db"
+	appName1 := "mattermost"
+	appName2 := "postgresql"
+	ep1 := relation.Endpoint{
+		ApplicationName: appName1,
+		Relation: internalcharm.Relation{
+			Name:      "relation-1",
+			Role:      internalcharm.RoleProvider,
+			Interface: "db",
+			Scope:     internalcharm.ScopeGlobal,
+		},
+	}
+	ep2 := relation.Endpoint{
+		ApplicationName: appName2,
+		Relation: internalcharm.Relation{
+			Name:      "relation-1",
+			Role:      internalcharm.RoleRequirer,
+			Interface: "db",
+			Scope:     internalcharm.ScopeGlobal,
+		},
+	}
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2).Return(
+		ep1, ep2, nil,
 	)
-	c.Assert(err, jc.ErrorIsNil)
-	return api
-}
 
-func (s *applicationSuite) setupApplicationDeploy(c *gc.C, args string) (string, charm.Charm, constraints.Value) {
-	curl, ch := s.addCharmToState(c, "ch:jammy/dummy-42", "dummy")
-	cons := constraints.MustParse(args)
-	return curl, ch, cons
-}
-
-func (s *applicationSuite) assertApplicationDeployPrincipal(c *gc.C, curl string, ch charm.Charm, mem4g constraints.Value) {
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application",
-			NumUnits:        3,
-			Constraints:     mem4g,
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-	apiservertesting.AssertPrincipalApplicationDeployed(c, s.State, "application", curl, false, ch, mem4g)
-}
-
-func (s *applicationSuite) assertApplicationDeployPrincipalBlocked(c *gc.C, msg string, curl string, mem4g constraints.Value) {
-	_, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application",
-			NumUnits:        3,
-			Constraints:     mem4g,
-		}}})
-	s.AssertBlocked(c, err, msg)
-}
-
-func (s *applicationSuite) TestBlockDestroyApplicationDeployPrincipal(c *gc.C) {
-	curl, bundle, cons := s.setupApplicationDeploy(c, "arch=amd64 mem=4G")
-	s.BlockDestroyModel(c, "TestBlockDestroyApplicationDeployPrincipal")
-	s.assertApplicationDeployPrincipal(c, curl, bundle, cons)
-}
-
-func (s *applicationSuite) TestBlockRemoveApplicationDeployPrincipal(c *gc.C) {
-	curl, bundle, cons := s.setupApplicationDeploy(c, "arch=amd64 mem=4G")
-	s.BlockRemoveObject(c, "TestBlockRemoveApplicationDeployPrincipal")
-	s.assertApplicationDeployPrincipal(c, curl, bundle, cons)
-}
-
-func (s *applicationSuite) TestBlockChangesApplicationDeployPrincipal(c *gc.C) {
-	curl, _, cons := s.setupApplicationDeploy(c, "mem=4G")
-	s.BlockAllChanges(c, "TestBlockChangesApplicationDeployPrincipal")
-	s.assertApplicationDeployPrincipalBlocked(c, "TestBlockChangesApplicationDeployPrincipal", curl, cons)
-}
-
-func (s *applicationSuite) TestApplicationDeploySubordinate(c *gc.C) {
-	curl, ch := s.addCharmToState(c, "ch:utopic/logging-47", "logging")
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-
-	app, err := s.State.Application("application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	charm, force, err := app.Charm()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(force, jc.IsFalse)
-	c.Assert(charm.URL(), gc.DeepEquals, curl)
-	c.Assert(charm.Meta(), gc.DeepEquals, ch.Meta())
-	c.Assert(charm.Config(), gc.DeepEquals, ch.Config())
-
-	units, err := app.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(units, gc.HasLen, 0)
-}
-
-func (s *applicationSuite) combinedSettings(ch *state.Charm, inSettings charm.Settings) charm.Settings {
-	result := ch.Config().DefaultSettings()
-	for name, value := range inSettings {
-		result[name] = value
-	}
-	return result
-}
-
-func (s *applicationSuite) TestApplicationDeployConfig(c *gc.C) {
-	curl, _ := s.addCharmToState(c, "ch:jammy/dummy-0", "dummy")
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-			NumUnits:        1,
-			ConfigYAML:      "application-name:\n  username: fred",
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-
-	app, err := s.State.Application("application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	settings, err := app.CharmConfig(model.GenerationMaster)
-	c.Assert(err, jc.ErrorIsNil)
-	ch, _, err := app.Charm()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(settings, gc.DeepEquals, s.combinedSettings(ch, charm.Settings{"username": "fred"}))
-}
-
-func (s *applicationSuite) TestApplicationDeployConfigError(c *gc.C) {
-	// TODO(fwereade): test Config/ConfigYAML handling directly on srvClient.
-	// Can't be done cleanly until it's extracted similarly to Machiner.
-	curl, _ := s.addCharmToState(c, "ch:jammy/dummy-0", "dummy")
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-			NumUnits:        1,
-			ConfigYAML:      "application-name:\n  skill-level: fred",
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, `option "skill-level" expected int, got "fred"`)
-	_, err = s.State.Application("application-name")
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-}
-
-func (s *applicationSuite) TestApplicationDeployToMachine(c *gc.C) {
-	curl, ch := s.addCharmToState(c, "ch:jammy/dummy-0", "dummy")
-
-	machine, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	arch := arch.DefaultArchitecture
-	hwChar := &instance.HardwareCharacteristics{
-		Arch: &arch,
-	}
-	instId := instance.Id("i-host-machine")
-	err = machine.SetProvisioned(instId, "", "fake-nonce", hwChar)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-			NumUnits:        1,
-			ConfigYAML:      "application-name:\n  username: fred",
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-
-	app, err := s.State.Application("application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	charm, force, err := app.Charm()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(force, jc.IsFalse)
-	c.Assert(charm.URL(), gc.DeepEquals, curl)
-	c.Assert(charm.Meta(), gc.DeepEquals, ch.Meta())
-	c.Assert(charm.Config(), gc.DeepEquals, ch.Config())
-
-	errs, err := unitassignerapi.New(s.APIState).AssignUnits([]names.UnitTag{names.NewUnitTag("application-name/0")})
-	c.Assert(errs, gc.DeepEquals, []error{nil})
-	c.Assert(err, jc.ErrorIsNil)
-
-	units, err := app.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(units, gc.HasLen, 1)
-
-	mid, err := units[0].AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(mid, gc.Equals, machine.Id())
-}
-
-func (s *applicationSuite) TestApplicationDeployToMachineWithLXDProfile(c *gc.C) {
-	curl, ch := s.addCharmToState(c, "ch:jammy/lxd-profile-0", "lxd-profile")
-
-	machine, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	arch := arch.DefaultArchitecture
-	hwChar := &instance.HardwareCharacteristics{
-		Arch: &arch,
-	}
-	instId := instance.Id("i-host-machine")
-	err = machine.SetProvisioned(instId, "", "fake-nonce", hwChar)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-			NumUnits:        1,
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-
-	application, err := s.State.Application("application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	expected, force, err := application.Charm()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(force, jc.IsFalse)
-	c.Assert(expected.URL(), gc.DeepEquals, curl)
-	c.Assert(expected.Meta(), gc.DeepEquals, ch.Meta())
-	c.Assert(expected.Config(), gc.DeepEquals, ch.Config())
-
-	expectedProfile := ch.(charm.LXDProfiler).LXDProfile()
-	c.Assert(expected.LXDProfile(), gc.DeepEquals, &charm.LXDProfile{
-		Description: expectedProfile.Description,
-		Config:      expectedProfile.Config,
-		Devices:     expectedProfile.Devices,
+	// Act:
+	results, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{"mattermost", "postgresql:db"},
+		ViaCIDRs:  nil,
 	})
 
-	errs, err := unitassignerapi.New(s.APIState).AssignUnits([]names.UnitTag{names.NewUnitTag("application-name/0")})
-	c.Assert(errs, gc.DeepEquals, []error{nil})
-	c.Assert(err, jc.ErrorIsNil)
-
-	units, err := application.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(units, gc.HasLen, 1)
-
-	mid, err := units[0].AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(mid, gc.Equals, machine.Id())
-}
-
-func (s *applicationSuite) TestApplicationDeployToMachineWithInvalidLXDProfileAndForceStillSucceeds(c *gc.C) {
-	curl, ch := s.addCharmToState(c, "ch:jammy/lxd-profile-fail-0", "lxd-profile-fail")
-
-	machine, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	arch := arch.DefaultArchitecture
-	hwChar := &instance.HardwareCharacteristics{
-		Arch: &arch,
-	}
-	instId := instance.Id("i-host-machine")
-	err = machine.SetProvisioned(instId, "", "fake-nonce", hwChar)
-	c.Assert(err, jc.ErrorIsNil)
-
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        curl,
-			CharmOrigin:     createCharmOriginFromURL(curl),
-			ApplicationName: "application-name",
-			NumUnits:        1,
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.IsNil)
-
-	app, err := s.State.Application("application-name")
-	c.Assert(err, jc.ErrorIsNil)
-	expected, force, err := app.Charm()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(force, jc.IsFalse)
-	c.Assert(expected.URL(), gc.DeepEquals, curl)
-	c.Assert(expected.Meta(), gc.DeepEquals, ch.Meta())
-	c.Assert(expected.Config(), gc.DeepEquals, ch.Config())
-
-	expectedProfile := ch.(charm.LXDProfiler).LXDProfile()
-	c.Assert(expected.LXDProfile(), gc.DeepEquals, &charm.LXDProfile{
-		Description: expectedProfile.Description,
-		Config:      expectedProfile.Config,
-		Devices:     expectedProfile.Devices,
-	})
-
-	errs, err := unitassignerapi.New(s.APIState).AssignUnits([]names.UnitTag{names.NewUnitTag("application-name/0")})
-	c.Assert(errs, gc.DeepEquals, []error{nil})
-	c.Assert(err, jc.ErrorIsNil)
-
-	units, err := app.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(units, gc.HasLen, 1)
-
-	mid, err := units[0].AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(mid, gc.Equals, machine.Id())
-}
-
-func (s *applicationSuite) TestApplicationDeployToMachineNotFound(c *gc.C) {
-	results, err := s.applicationAPI.Deploy(params.ApplicationsDeploy{
-		Applications: []params.ApplicationDeploy{{
-			CharmURL:        "ch:jammy/application-name-1",
-			CharmOrigin:     &params.CharmOrigin{Source: "charm-hub", Base: params.Base{Name: "ubuntu", Channel: "22.04/stable"}},
-			ApplicationName: "application-name",
-			NumUnits:        1,
-			Placement:       []*instance.Placement{instance.MustParsePlacement("42")},
-		}}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.Results, gc.HasLen, 1)
-	c.Assert(results.Results[0].Error, gc.ErrorMatches, `cannot deploy "application-name" to machine 42: machine 42 not found`)
-
-	_, err = s.State.Application("application-name")
-	c.Assert(err, gc.ErrorMatches, `application "application-name" not found`)
-}
-
-func (s *applicationSuite) TestApplicationUpdateDoesNotSetMinUnitsWithLXDProfile(c *gc.C) {
-	series := "quantal"
-	repo := testcharms.RepoForSeries(series)
-	ch := repo.CharmDir("lxd-profile-fail")
-	ident := fmt.Sprintf("%s-%d", ch.Meta().Name, ch.Revision())
-	curl := charm.MustParseURL(fmt.Sprintf("local:%s/%s", series, ident))
-	_, err := jujutesting.PutCharm(s.State, curl, ch)
-	c.Assert(err, gc.ErrorMatches, `invalid lxd-profile.yaml: contains device type "unix-disk"`)
-}
-
-var clientAddApplicationUnitsTests = []struct {
-	about       string
-	application string // if not set, defaults to 'dummy'
-	numUnits    int
-	expected    []string
-	to          string
-	err         string
-}{
-	{
-		about:    "returns unit names",
-		numUnits: 3,
-		expected: []string{"dummy/0", "dummy/1", "dummy/2"},
-	},
-	{
-		about: "fails trying to add zero units",
-		err:   "must add at least one unit",
-	},
-	{
-		// Note: chained-state, we add 1 unit here, but the 3 units
-		// from the first condition still exist
-		about:    "force the unit onto bootstrap machine",
-		numUnits: 1,
-		expected: []string{"dummy/3"},
-		to:       "0",
-	},
-	{
-		about:       "unknown application name",
-		application: "unknown-application",
-		numUnits:    1,
-		err:         `application "unknown-application" not found`,
-	},
-}
-
-func (s *applicationSuite) TestClientAddApplicationUnits(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	for i, t := range clientAddApplicationUnitsTests {
-		c.Logf("test %d. %s", i, t.about)
-		applicationName := t.application
-		if applicationName == "" {
-			applicationName = "dummy"
-		}
-		args := params.AddApplicationUnits{
-			ApplicationName: applicationName,
-			NumUnits:        t.numUnits,
-		}
-		if t.to != "" {
-			args.Placement = []*instance.Placement{instance.MustParsePlacement(t.to)}
-		}
-		result, err := s.applicationAPI.AddUnits(args)
-		if t.err != "" {
-			c.Assert(err, gc.ErrorMatches, t.err)
-			continue
-		}
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(result.Units, gc.DeepEquals, t.expected)
-	}
-	// Test that we actually assigned the unit to machine 0
-	forcedUnit, err := s.BackingState.Unit("dummy/3")
-	c.Assert(err, jc.ErrorIsNil)
-	assignedMachine, err := forcedUnit.AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(assignedMachine, gc.Equals, "0")
-}
-
-func (s *applicationSuite) TestAddApplicationUnitsToNewContainer(c *gc.C) {
-	app := s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	machine, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = s.applicationAPI.AddUnits(params.AddApplicationUnits{
-		ApplicationName: "dummy",
-		NumUnits:        1,
-		Placement:       []*instance.Placement{instance.MustParsePlacement("lxd:" + machine.Id())},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	units, err := app.AllUnits()
-	c.Assert(err, jc.ErrorIsNil)
-	mid, err := units[0].AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(mid, gc.Equals, machine.Id()+"/lxd/0")
-}
-
-var addApplicationUnitTests = []struct {
-	about       string
-	application string // if not set, defaults to 'dummy'
-	expected    []string
-	machineIds  []string
-	placement   []*instance.Placement
-	err         string
-}{
-	{
-		about:      "valid placement directives",
-		expected:   []string{"dummy/0"},
-		placement:  []*instance.Placement{{Scope: "deadbeef-0bad-400d-8000-4b1d0d06f00d", Directive: "valid"}},
-		machineIds: []string{"1"},
-	}, {
-		about:      "direct machine assignment placement directive",
-		expected:   []string{"dummy/1", "dummy/2"},
-		placement:  []*instance.Placement{{Scope: "#", Directive: "1"}, {Scope: "lxd", Directive: "1"}},
-		machineIds: []string{"1", "1/lxd/0"},
-	}, {
-		about:     "invalid placement directive",
-		err:       ".* invalid placement is invalid",
-		expected:  []string{"dummy/3"},
-		placement: []*instance.Placement{{Scope: "deadbeef-0bad-400d-8000-4b1d0d06f00d", Directive: "invalid"}},
-	},
-}
-
-func (s *applicationSuite) TestAddApplicationUnits(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	// Add a machine for the units to be placed on.
-	_, err := s.State.AddMachine(state.UbuntuBase("22.04"), state.JobHostUnits)
-	c.Assert(err, jc.ErrorIsNil)
-	for i, t := range addApplicationUnitTests {
-		c.Logf("test %d. %s", i, t.about)
-		applicationName := t.application
-		if applicationName == "" {
-			applicationName = "dummy"
-		}
-		result, err := s.applicationAPI.AddUnits(params.AddApplicationUnits{
-			ApplicationName: applicationName,
-			NumUnits:        len(t.expected),
-			Placement:       t.placement,
-		})
-		if t.err != "" {
-			c.Assert(err, gc.ErrorMatches, t.err)
-			continue
-		}
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(result.Units, gc.DeepEquals, t.expected)
-		for i, unitName := range result.Units {
-			u, err := s.BackingState.Unit(unitName)
-			c.Assert(err, jc.ErrorIsNil)
-			assignedMachine, err := u.AssignedMachineId()
-			c.Assert(err, jc.ErrorIsNil)
-			c.Assert(assignedMachine, gc.Equals, t.machineIds[i])
-		}
-	}
-}
-
-func (s *applicationSuite) assertAddApplicationUnits(c *gc.C) {
-	result, err := s.applicationAPI.AddUnits(params.AddApplicationUnits{
-		ApplicationName: "dummy",
-		NumUnits:        3,
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.Units, gc.DeepEquals, []string{"dummy/0", "dummy/1", "dummy/2"})
-
-	// Test that we actually assigned the unit to machine 0
-	forcedUnit, err := s.BackingState.Unit("dummy/0")
-	c.Assert(err, jc.ErrorIsNil)
-	assignedMachine, err := forcedUnit.AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(assignedMachine, gc.Equals, "0")
-}
-
-func (s *applicationSuite) TestApplicationCharmRelations(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = s.applicationAPI.CharmRelations(params.ApplicationCharmRelations{ApplicationName: "blah"})
-	c.Assert(err, gc.ErrorMatches, `application "blah" not found`)
-
-	result, err := s.applicationAPI.CharmRelations(params.ApplicationCharmRelations{ApplicationName: "wordpress"})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.CharmRelations, gc.DeepEquals, []string{
-		"cache", "db", "juju-info", "logging-dir", "monitoring-port", "url",
-	})
-}
-
-func (s *applicationSuite) assertAddApplicationUnitsBlocked(c *gc.C, msg string) {
-	_, err := s.applicationAPI.AddUnits(params.AddApplicationUnits{
-		ApplicationName: "dummy",
-		NumUnits:        3,
-	})
-	s.AssertBlocked(c, err, msg)
-}
-
-func (s *applicationSuite) TestBlockDestroyAddApplicationUnits(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	s.BlockDestroyModel(c, "TestBlockDestroyAddApplicationUnits")
-	s.assertAddApplicationUnits(c)
-}
-
-func (s *applicationSuite) TestBlockRemoveAddApplicationUnits(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	s.BlockRemoveObject(c, "TestBlockRemoveAddApplicationUnits")
-	s.assertAddApplicationUnits(c)
-}
-
-func (s *applicationSuite) TestBlockChangeAddApplicationUnits(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	s.BlockAllChanges(c, "TestBlockChangeAddApplicationUnits")
-	s.assertAddApplicationUnitsBlocked(c, "TestBlockChangeAddApplicationUnits")
-}
-
-func (s *applicationSuite) TestAddUnitToMachineNotFound(c *gc.C) {
-	s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	_, err := s.applicationAPI.AddUnits(params.AddApplicationUnits{
-		ApplicationName: "dummy",
-		NumUnits:        3,
-		Placement:       []*instance.Placement{instance.MustParsePlacement("42")},
-	})
-	c.Assert(err, gc.ErrorMatches, `acquiring machine to host unit "dummy/0": machine 42 not found`)
-}
-
-func (s *applicationSuite) TestApplicationExpose(c *gc.C) {
-	charm := s.AddTestingCharm(c, "dummy")
-	applicationNames := []string{"dummy-application", "exposed-application"}
-	apps := make([]*state.Application, len(applicationNames))
-	var err error
-	for i, name := range applicationNames {
-		apps[i] = s.AddTestingApplication(c, name, charm)
-		c.Assert(apps[i].IsExposed(), jc.IsFalse)
-	}
-	err = apps[1].MergeExposeSettings(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apps[1].IsExposed(), jc.IsTrue)
-
-	s.assertApplicationExpose(c)
-}
-
-func (s *applicationSuite) TestApplicationExposeEndpoints(c *gc.C) {
-	charm := s.AddTestingCharm(c, "wordpress")
-	app := s.AddTestingApplication(c, "wordpress", charm)
-	c.Assert(app.IsExposed(), jc.IsFalse)
-
-	err := s.applicationAPI.Expose(params.ApplicationExpose{
-		ApplicationName: app.Name(),
-		ExposedEndpoints: map[string]params.ExposedEndpoint{
-			// Exposing an endpoint with no expose options implies
-			// expose to 0.0.0.0/0 and ::/0.
-			"monitoring-port": {},
-		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	got, err := s.State.Application(app.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(got.IsExposed(), gc.Equals, true)
-	c.Assert(got.ExposedEndpoints(), gc.DeepEquals, map[string]state.ExposedEndpoint{
-		"monitoring-port": {
-			ExposeToCIDRs: []string{firewall.AllNetworksIPV4CIDR, firewall.AllNetworksIPV6CIDR},
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.AddRelationResults{
+		Endpoints: map[string]params.CharmRelation{
+			appName1: encodeRelation(ep1.Relation),
+			appName2: encodeRelation(ep2.Relation),
 		},
 	})
 }
 
-func (s *applicationSuite) TestApplicationExposeEndpointsWithPre29Client(c *gc.C) {
-	charm := s.AddTestingCharm(c, "wordpress")
-	app := s.AddTestingApplication(c, "wordpress", charm)
-	c.Assert(app.IsExposed(), jc.IsFalse)
+func (s *applicationSuite) TestAddRelationError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	err := s.applicationAPI.Expose(params.ApplicationExpose{
-		ApplicationName: app.Name(),
-		// If no endpoint-specific expose params are provided, the call
-		// will emulate the behavior of a pre 2.9 controller where all
-		// ports are exposed to 0.0.0.0/0 and ::/0.
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "mattermost"
+	epStr2 := "postgresql:db"
+	boom := errors.Errorf("boom")
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2).Return(
+		relation.Endpoint{}, relation.Endpoint{}, boom,
+	)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{"mattermost", "postgresql:db"},
 	})
-	c.Assert(err, jc.ErrorIsNil)
 
-	got, err := s.State.Application(app.Name())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(got.IsExposed(), gc.Equals, true)
-	c.Assert(got.ExposedEndpoints(), gc.DeepEquals, map[string]state.ExposedEndpoint{
-		"": {
-			ExposeToCIDRs: []string{firewall.AllNetworksIPV4CIDR, firewall.AllNetworksIPV6CIDR},
+	// Assert:
+	c.Assert(err, tc.ErrorIs, boom)
+}
+
+func (s *applicationSuite) TestAddRelationNoEndpointsError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+}
+
+func (s *applicationSuite) TestAddRelationOneEndpoint(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{"1"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+}
+
+func (s *applicationSuite) TestAddRelationTooManyEndpointsError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{"1", "2", "3"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+}
+
+func (s *applicationSuite) TestAddRelationWithViaCIDRsSuccess(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "local-app"
+	epStr2 := "remote-app:db"
+	appName1 := "local-app"
+	appName2 := "remote-app"
+	ep1 := relation.Endpoint{
+		ApplicationName: appName1,
+		Relation: internalcharm.Relation{
+			Name:      "db",
+			Role:      internalcharm.RoleRequirer,
+			Interface: "mysql",
+			Scope:     internalcharm.ScopeGlobal,
+		},
+	}
+	ep2 := relation.Endpoint{
+		ApplicationName: appName2,
+		Relation: internalcharm.Relation{
+			Name:      "db",
+			Role:      internalcharm.RoleProvider,
+			Interface: "mysql",
+			Scope:     internalcharm.ScopeGlobal,
+		},
+	}
+
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2, "10.0.0.0/8", "192.168.0.0/16").Return(
+		ep1, ep2, nil,
+	)
+
+	// Act:
+	results, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{epStr1, epStr2},
+		ViaCIDRs:  []string{"10.0.0.0/8", "192.168.0.0/16"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.AddRelationResults{
+		Endpoints: map[string]params.CharmRelation{
+			appName1: encodeRelation(ep1.Relation),
+			appName2: encodeRelation(ep2.Relation),
 		},
 	})
 }
 
-func (s *applicationSuite) setupApplicationExpose(c *gc.C) {
-	charm := s.AddTestingCharm(c, "dummy")
-	applicationNames := []string{"dummy-application", "exposed-application"}
-	apps := make([]*state.Application, len(applicationNames))
-	var err error
-	for i, name := range applicationNames {
-		apps[i] = s.AddTestingApplication(c, name, charm)
-		c.Assert(apps[i].IsExposed(), jc.IsFalse)
-	}
-	err = apps[1].MergeExposeSettings(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apps[1].IsExposed(), jc.IsTrue)
+func (s *applicationSuite) TestAddRelationWithViaCIDRsNotCrossModel(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "app1"
+	epStr2 := "app2:db"
+
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2, "10.0.0.0/8").Return(
+		relation.Endpoint{}, relation.Endpoint{}, errors.NotSupported,
+	)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{epStr1, epStr2},
+		ViaCIDRs:  []string{"10.0.0.0/8"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIs, errors.NotSupported)
 }
 
-var applicationExposeTests = []struct {
-	about                 string
-	application           string
-	exposedEndpointParams map[string]params.ExposedEndpoint
-	//
-	expExposed          bool
-	expExposedEndpoints map[string]state.ExposedEndpoint
-	expErr              string
-}{
-	{
-		about:       "unknown application name",
-		application: "unknown-application",
-		expErr:      `application "unknown-application" not found`,
-	},
-	{
-		about:       "expose all endpoints of an application ",
-		application: "dummy-application",
-		expExposed:  true,
-		expExposedEndpoints: map[string]state.ExposedEndpoint{
-			"": {
-				ExposeToCIDRs: []string{"0.0.0.0/0", "::/0"},
+func (s *applicationSuite) TestAddRelationWithViaCIDRsStateError(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "app1"
+	epStr2 := "app2:db"
+	boom := errors.Errorf("boom")
+
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2, "10.0.0.0/8").Return(
+		relation.Endpoint{}, relation.Endpoint{}, boom,
+	)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{epStr1, epStr2},
+		ViaCIDRs:  []string{"10.0.0.0/8"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIs, boom)
+}
+
+func (s *applicationSuite) TestAddRelationWithViaCIDRsInvalidCIDR(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Arrange:
+	s.setupAPI(c)
+	epStr1 := "local-app"
+	epStr2 := "remote-app:db"
+
+	s.relationService.EXPECT().AddRelation(gomock.Any(), epStr1, epStr2, "invalid-cidr").Return(
+		relation.Endpoint{}, relation.Endpoint{}, errors.NotValidf("CIDR \"invalid-cidr\""),
+	)
+
+	// Act:
+	_, err := s.api.AddRelation(c.Context(), params.AddRelation{
+		Endpoints: []string{epStr1, epStr2},
+		ViaCIDRs:  []string{"invalid-cidr"},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorMatches, `.*CIDR.*not valid.*`)
+}
+
+func (s *applicationSuite) TestCharmConfigApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{}, applicationerrors.ApplicationNotFound)
+
+	res, err := s.api.CharmConfig(c.Context(), params.ApplicationGetArgs{
+		Args: []params.ApplicationGet{{
+			ApplicationName: "foo",
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestCharmConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{
+		UUID:                   appID,
+		Life:                   domainlife.Alive,
+		Name:                   "foo",
+		IsApplicationSynthetic: false,
+	}, nil)
+	s.applicationService.EXPECT().GetApplicationAndCharmConfig(gomock.Any(), appID).Return(applicationservice.ApplicationConfig{
+		CharmName: "ch",
+		ApplicationConfig: internalcharm.Config{
+			"foo": "doink",
+			"bar": 18,
+		},
+		CharmConfig: internalcharm.ConfigSpec{
+			Options: map[string]internalcharm.Option{
+				"foo": {
+					Type:        "string",
+					Description: "a foo",
+				},
+				"bar": {
+					Type:        "int",
+					Description: "a bar",
+					Default:     17,
+				},
 			},
 		},
-	},
-	{
-		about:       "expose an already exposed application",
-		application: "exposed-application",
-		expExposed:  true,
-		expExposedEndpoints: map[string]state.ExposedEndpoint{
-			"": {
-				ExposeToCIDRs: []string{"0.0.0.0/0", "::/0"},
-			},
+		Trust: true,
+	}, nil)
+
+	res, err := s.api.CharmConfig(c.Context(), params.ApplicationGetArgs{
+		Args: []params.ApplicationGet{{
+			ApplicationName: "foo",
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+	c.Assert(res.Results[0].Config, tc.DeepEquals, map[string]interface{}{
+		"foo": map[string]interface{}{
+			"description": "a foo",
+			"type":        "string",
+			"value":       "doink",
+			"source":      "user",
 		},
-	},
-	{
-		about:       "unknown endpoint name in expose parameters",
-		application: "dummy-application",
-		exposedEndpointParams: map[string]params.ExposedEndpoint{
-			"bogus": {},
+		"bar": map[string]interface{}{
+			"description": "a bar",
+			"type":        "int",
+			"value":       18,
+			"source":      "user",
+			"default":     17,
 		},
-		expErr: `endpoint "bogus" not found`,
-	},
-	{
-		about:       "unknown space name in expose parameters",
-		application: "dummy-application",
-		exposedEndpointParams: map[string]params.ExposedEndpoint{
-			"": {
-				ExposeToSpaces: []string{"invaders"},
-			},
-		},
-		expErr: `space "invaders" not found`,
-	},
-	{
-		about:       "expose an application and provide expose parameters",
-		application: "exposed-application",
-		exposedEndpointParams: map[string]params.ExposedEndpoint{
-			"": {
-				ExposeToSpaces: []string{network.AlphaSpaceName},
-				ExposeToCIDRs:  []string{"13.37.0.0/16"},
-			},
-		},
-		expExposed: true,
-		expExposedEndpoints: map[string]state.ExposedEndpoint{
-			"": {
-				ExposeToSpaceIDs: []string{network.AlphaSpaceId},
-				ExposeToCIDRs:    []string{"13.37.0.0/16"},
-			},
-		},
-	},
+	})
 }
 
-func (s *applicationSuite) assertApplicationExpose(c *gc.C) {
-	for i, t := range applicationExposeTests {
-		c.Logf("test %d. %s", i, t.about)
-		err := s.applicationAPI.Expose(params.ApplicationExpose{
-			ApplicationName:  t.application,
-			ExposedEndpoints: t.exposedEndpointParams,
-		})
-		if t.expErr != "" {
-			c.Assert(err, gc.ErrorMatches, t.expErr)
-		} else {
-			c.Assert(err, jc.ErrorIsNil)
-			app, err := s.State.Application(t.application)
-			c.Assert(err, jc.ErrorIsNil)
-			c.Assert(app.IsExposed(), gc.Equals, t.expExposed)
-			c.Assert(app.ExposedEndpoints(), gc.DeepEquals, t.expExposedEndpoints)
-		}
+func (s *applicationSuite) TestCharmConfigSAASApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	appID := tc.Must(c, application.NewUUID)
+
+	// SAAS applications should be rejected with application not found error
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "saas-app").Return(domainapplication.ApplicationDetails{
+		UUID:                   appID,
+		Life:                   domainlife.Alive,
+		Name:                   "saas-app",
+		IsApplicationSynthetic: true,
+	}, nil)
+
+	res, err := s.api.CharmConfig(c.Context(), params.ApplicationGetArgs{
+		Args: []params.ApplicationGet{{
+			ApplicationName: "saas-app",
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestSetCharm(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	revisionPtr := ptr(42)
+	s.applicationService.EXPECT().SetApplicationCharm(gomock.Any(), "foo", applicationcharm.CharmLocator{
+		Name:         "foo",
+		Revision:     42,
+		Source:       applicationcharm.CharmHubSource,
+		Architecture: architecture.ARM64,
+	}, domainapplication.SetCharmParams{
+		CharmOrigin: corecharm.Origin{
+			Source: "charm-hub",
+			Type:   "charm",
+			Channel: &internalcharm.Channel{
+				Track: "1.0",
+				Risk:  "stable",
+			},
+			Revision: revisionPtr,
+			Platform: corecharm.Platform{
+				Architecture: "arm64",
+				OS:           "ubuntu",
+				Channel:      "24.04",
+			},
+		},
+		CharmUpgradeOnError: true,
+		EndpointBindings: map[string]network.SpaceName{
+			"binding-1": "endpoint-1",
+			"binding-2": "endpoint-2",
+		},
+	}).Return(nil)
+
+	err := s.api.SetCharm(c.Context(), params.ApplicationSetCharmV2{
+		ApplicationName: "foo",
+		CharmURL:        "ch:arm64/foo-42",
+		CharmOrigin: &params.CharmOrigin{
+			Type:   "charm",
+			Source: "charm-hub",
+			Base: params.Base{
+				Name:    "ubuntu",
+				Channel: "24.04",
+			},
+			Architecture: "arm64",
+			Revision:     revisionPtr,
+			Track:        ptr("1.0"),
+			Risk:         "stable",
+		},
+		Force: true,
+		EndpointBindings: map[string]string{
+			"binding-1": "endpoint-1",
+			"binding-2": "endpoint-2",
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+
+}
+
+func (s *applicationSuite) TestSetConfigsYAMLNotImplemented(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "foo",
+			ConfigYAML:      "foo: bar",
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotImplemented)
+}
+
+func (s *applicationSuite) TestSetConfigsApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{}, applicationerrors.ApplicationNotFound)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "foo",
+			Config:          map[string]string{"foo": "bar"},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestSetConfigsNotValidApplicationName(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{}, applicationerrors.ApplicationNameNotValid)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "foo",
+			Config:          map[string]string{"foo": "bar"},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotValid)
+}
+
+func (s *applicationSuite) TestSetConfigsInvalidConfig(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{
+		UUID:                   appID,
+		Life:                   domainlife.Alive,
+		Name:                   "foo",
+		IsApplicationSynthetic: false,
+	}, nil)
+	s.applicationService.EXPECT().UpdateApplicationConfig(gomock.Any(), appID, gomock.Any()).Return(applicationerrors.InvalidApplicationConfig)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "foo",
+			Config:          map[string]string{"foo": "bar"},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotValid)
+}
+
+func (s *applicationSuite) TestSetConfigs(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "foo").Return(domainapplication.ApplicationDetails{
+		UUID:                   appID,
+		Life:                   domainlife.Alive,
+		Name:                   "foo",
+		IsApplicationSynthetic: false,
+	}, nil)
+	s.applicationService.EXPECT().UpdateApplicationConfig(gomock.Any(), appID, map[string]string{"foo": "bar"}).Return(nil)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "foo",
+			Config:          map[string]string{"foo": "bar"},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestSetConfigsSAASApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	appID := tc.Must(c, application.NewUUID)
+
+	// SAAS applications should be rejected with application not found error
+	s.applicationService.EXPECT().GetApplicationDetailsByName(gomock.Any(), "saas-app").Return(domainapplication.ApplicationDetails{
+		UUID:                   appID,
+		Life:                   domainlife.Alive,
+		Name:                   "saas-app",
+		IsApplicationSynthetic: true,
+	}, nil)
+
+	res, err := s.api.SetConfigs(c.Context(), params.ConfigSetArgs{
+		Args: []params.ConfigSet{{
+			ApplicationName: "saas-app",
+			Config:          map[string]string{"foo": "bar"},
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsAllAndEntitesMutuallyExclusive(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	_, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		Tags: params.Entities{
+			Entities: []params.Entity{{Tag: "unit-1"}},
+		},
+		All: true,
+	})
+	c.Assert(err, tc.ErrorIs, errors.BadRequest)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsAllNoRetry(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.resolveService.EXPECT().ResolveAllUnits(gomock.Any(), resolve.ResolveModeNoHooks).Return(nil)
+
+	res, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		All: true,
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 0)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsAllRetryHooks(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	s.resolveService.EXPECT().ResolveAllUnits(gomock.Any(), resolve.ResolveModeRetryHooks).Return(nil)
+
+	res, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		All:   true,
+		Retry: true,
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 0)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsSpecificNoRetry(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	unitName := coreunit.Name("foo/1")
+	s.resolveService.EXPECT().ResolveUnit(gomock.Any(), unitName, resolve.ResolveModeNoHooks).Return(nil)
+
+	res, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		Tags: params.Entities{
+			Entities: []params.Entity{{Tag: names.NewUnitTag(unitName.String()).String()}},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsSpecificRetryHooks(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	unitName := coreunit.Name("foo/1")
+	s.resolveService.EXPECT().ResolveUnit(gomock.Any(), unitName, resolve.ResolveModeRetryHooks).Return(nil)
+
+	res, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		Tags: params.Entities{
+			Entities: []params.Entity{{Tag: names.NewUnitTag(unitName.String()).String()}},
+		},
+		Retry: true,
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestResolveUnitErrorsUnitNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	unitName := coreunit.Name("foo/1")
+	s.resolveService.EXPECT().ResolveUnit(gomock.Any(), unitName, resolve.ResolveModeNoHooks).Return(resolveerrors.UnitNotFound)
+
+	res, err := s.api.ResolveUnitErrors(c.Context(), params.UnitsResolved{
+		Tags: params.Entities{
+			Entities: []params.Entity{{Tag: names.NewUnitTag(unitName.String()).String()}},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestMergeBindings(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	appName := "doink"
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), appName).Return(appID, nil)
+	s.applicationService.EXPECT().MergeApplicationEndpointBindings(gomock.Any(), appID, map[string]network.SpaceName{
+		"foo": "alpha",
+		"bar": "beta",
+	}, false).Return(nil)
+
+	ret, err := s.api.MergeBindings(c.Context(), params.ApplicationMergeBindingsArgs{
+		Args: []params.ApplicationMergeBindings{{
+			ApplicationTag: names.NewApplicationTag(appName).String(),
+			Bindings: map[string]string{
+				"foo": "alpha",
+				"bar": "beta",
+			},
+			Force: false,
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(ret.Results, tc.HasLen, 1)
+	c.Assert(ret.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestMergeBindingsForce(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	appName := "doink"
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), appName).Return(appID, nil)
+	s.applicationService.EXPECT().MergeApplicationEndpointBindings(gomock.Any(), appID, map[string]network.SpaceName{
+		"foo": "alpha",
+		"bar": "beta",
+	}, true).Return(nil)
+
+	ret, err := s.api.MergeBindings(c.Context(), params.ApplicationMergeBindingsArgs{
+		Args: []params.ApplicationMergeBindings{{
+			ApplicationTag: names.NewApplicationTag(appName).String(),
+			Bindings: map[string]string{
+				"foo": "alpha",
+				"bar": "beta",
+			},
+			Force: true,
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(ret.Results, tc.HasLen, 1)
+	c.Assert(ret.Results[0].Error, tc.IsNil)
+}
+
+func (s *applicationSuite) TestMergeBindingsNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	appName := "doink"
+
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), appName).Return("", applicationerrors.ApplicationNotFound)
+
+	ret, err := s.api.MergeBindings(c.Context(), params.ApplicationMergeBindingsArgs{
+		Args: []params.ApplicationMergeBindings{{
+			ApplicationTag: names.NewApplicationTag(appName).String(),
+			Bindings: map[string]string{
+				"foo": "alpha",
+				"bar": "beta",
+			},
+			Force: false,
+		}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(ret.Results, tc.HasLen, 1)
+	c.Assert(ret.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestDestroyRelationByEndpoints(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	getUUIDArgs := relation.GetRelationUUIDForRemovalArgs{
+		Endpoints: []string{"foo:require", "bar:provide"},
 	}
-}
+	relUUID := s.expectGetRelationUUIDForRemoval(c, getUUIDArgs, nil)
+	s.expectRemoveRelation(c, relUUID, false, 0, nil)
 
-func (s *applicationSuite) assertApplicationExposeBlocked(c *gc.C, msg string) {
-	for i, t := range applicationExposeTests {
-		c.Logf("test %d. %s", i, t.about)
-		err := s.applicationAPI.Expose(params.ApplicationExpose{
-			ApplicationName:  t.application,
-			ExposedEndpoints: t.exposedEndpointParams,
-		})
-		s.AssertBlocked(c, err, msg)
+	arg := params.DestroyRelation{
+		Endpoints: []string{"foo:require", "bar:provide"},
 	}
+
+	// Act
+	err := s.api.DestroyRelation(c.Context(), arg)
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *applicationSuite) TestBlockDestroyApplicationExpose(c *gc.C) {
-	s.setupApplicationExpose(c)
-	s.BlockDestroyModel(c, "TestBlockDestroyApplicationExpose")
-	s.assertApplicationExpose(c)
-}
+func (s *applicationSuite) TestDestroyRelationRelationNotFound(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
 
-func (s *applicationSuite) TestBlockRemoveApplicationExpose(c *gc.C) {
-	s.setupApplicationExpose(c)
-	s.BlockRemoveObject(c, "TestBlockRemoveApplicationExpose")
-	s.assertApplicationExpose(c)
-}
-
-func (s *applicationSuite) TestBlockChangesApplicationExpose(c *gc.C) {
-	s.setupApplicationExpose(c)
-	s.BlockAllChanges(c, "TestBlockChangesApplicationExpose")
-	s.assertApplicationExposeBlocked(c, "TestBlockChangesApplicationExpose")
-}
-
-var applicationUnexposeTests = []struct {
-	about               string
-	application         string
-	err                 string
-	initial             map[string]state.ExposedEndpoint
-	unexposeEndpoints   []string
-	expExposed          bool
-	expExposedEndpoints map[string]state.ExposedEndpoint
-}{
-	{
-		about:       "unknown application name",
-		application: "unknown-application",
-		err:         `application "unknown-application" not found`,
-	},
-	{
-		about:       "unexpose a application without specifying any endpoints",
-		application: "dummy-application",
-		initial: map[string]state.ExposedEndpoint{
-			"": {},
-		},
-		expExposed: false,
-	},
-	{
-		about:       "unexpose specific application endpoint",
-		application: "dummy-application",
-		initial: map[string]state.ExposedEndpoint{
-			"server":       {},
-			"server-admin": {},
-		},
-		unexposeEndpoints: []string{"server"},
-		// The server-admin (and hence the app) should remain exposed
-		expExposed: true,
-		expExposedEndpoints: map[string]state.ExposedEndpoint{
-			"server-admin": {ExposeToCIDRs: []string{"0.0.0.0/0", "::/0"}},
-		},
-	},
-	{
-		about:       "unexpose all currently exposed application endpoints",
-		application: "dummy-application",
-		initial: map[string]state.ExposedEndpoint{
-			"server":       {},
-			"server-admin": {},
-		},
-		unexposeEndpoints: []string{"server", "server-admin"},
-		// Application should now be unexposed as all its endpoints have
-		// been unexposed.
-		expExposed: false,
-	},
-	{
-		about:       "unexpose an already unexposed application",
-		application: "dummy-application",
-		initial:     nil,
-		expExposed:  false,
-	},
-}
-
-func (s *applicationSuite) TestApplicationUnexpose(c *gc.C) {
-	charm := s.AddTestingCharm(c, "mysql")
-	for i, t := range applicationUnexposeTests {
-		c.Logf("test %d. %s", i, t.about)
-		app := s.AddTestingApplication(c, "dummy-application", charm)
-		if len(t.initial) != 0 {
-			err := app.MergeExposeSettings(t.initial)
-			c.Assert(err, jc.ErrorIsNil)
-		}
-		c.Assert(app.IsExposed(), gc.Equals, len(t.initial) != 0)
-		err := s.applicationAPI.Unexpose(params.ApplicationUnexpose{
-			ApplicationName:  t.application,
-			ExposedEndpoints: t.unexposeEndpoints,
-		})
-		if t.err == "" {
-			c.Assert(err, jc.ErrorIsNil)
-			app.Refresh()
-			c.Assert(app.IsExposed(), gc.Equals, t.expExposed)
-			c.Assert(app.ExposedEndpoints(), gc.DeepEquals, t.expExposedEndpoints)
-		} else {
-			c.Assert(err, gc.ErrorMatches, t.err)
-		}
-		err = app.Destroy()
-		c.Assert(err, jc.ErrorIsNil)
+	s.setupAPI(c)
+	getUUIDArgs := relation.GetRelationUUIDForRemovalArgs{
+		Endpoints: []string{"foo:require", "bar:provide"},
 	}
+	_ = s.expectGetRelationUUIDForRemoval(c, getUUIDArgs, relationerrors.RelationNotFound)
+	arg := params.DestroyRelation{
+		Endpoints: []string{"foo:require", "bar:provide"},
+	}
+
+	// Act
+	err := s.api.DestroyRelation(c.Context(), arg)
+
+	// Assert
+	c.Assert(err, tc.ErrorIs, relationerrors.RelationNotFound)
 }
 
-func (s *applicationSuite) setupApplicationUnexpose(c *gc.C) *state.Application {
-	charm := s.AddTestingCharm(c, "dummy")
-	app := s.AddTestingApplication(c, "dummy-application", charm)
-	app.MergeExposeSettings(nil)
-	c.Assert(app.IsExposed(), gc.Equals, true)
-	return app
+func (s *applicationSuite) TestDestroyRelationByID(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	getUUIDArgs := relation.GetRelationUUIDForRemovalArgs{
+		RelationID: 7,
+	}
+	relUUID := s.expectGetRelationUUIDForRemoval(c, getUUIDArgs, nil)
+
+	s.expectRemoveRelation(c, relUUID, false, 0, nil)
+
+	arg := params.DestroyRelation{
+		RelationId: getUUIDArgs.RelationID,
+	}
+
+	// Act
+	err := s.api.DestroyRelation(c.Context(), arg)
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *applicationSuite) assertApplicationUnexpose(c *gc.C, app *state.Application) {
-	err := s.applicationAPI.Unexpose(params.ApplicationUnexpose{ApplicationName: "dummy-application"})
-	c.Assert(err, jc.ErrorIsNil)
-	app.Refresh()
-	c.Assert(app.IsExposed(), gc.Equals, false)
-	err = app.Destroy()
-	c.Assert(err, jc.ErrorIsNil)
+func (s *applicationSuite) TestDestroyRelationWithForceMaxWait(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	getUUIDArgs := relation.GetRelationUUIDForRemovalArgs{
+		RelationID: 7,
+	}
+	relUUID := s.expectGetRelationUUIDForRemoval(c, getUUIDArgs, nil)
+	maxWait := time.Second
+	s.expectRemoveRelation(c, relUUID, true, maxWait, nil)
+
+	arg := params.DestroyRelation{
+		RelationId: getUUIDArgs.RelationID,
+		Force:      ptr(true),
+		MaxWait:    &maxWait,
+	}
+
+	// Act
+	err := s.api.DestroyRelation(c.Context(), arg)
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *applicationSuite) assertApplicationUnexposeBlocked(c *gc.C, app *state.Application, msg string) {
-	err := s.applicationAPI.Unexpose(params.ApplicationUnexpose{ApplicationName: "dummy-application"})
-	s.AssertBlocked(c, err, msg)
-	err = app.Destroy()
-	c.Assert(err, jc.ErrorIsNil)
+func (s *applicationSuite) TestDestroyRelationCrossModel(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+	getUUIDArgs := relation.GetRelationUUIDForRemovalArgs{
+		RelationID: 7,
+	}
+	relUUID := s.expectGetRelationUUIDForRemoval(c, getUUIDArgs, nil)
+	removalUUID := tc.Must(c, removal.NewUUID)
+
+	s.removalService.EXPECT().RemoveRelation(gomock.Any(), relUUID, false, time.Duration(0)).Return("", removalerrors.RelationIsCrossModel)
+	s.removalService.EXPECT().RemoveRelationWithRemoteOfferer(gomock.Any(), relUUID, false, time.Duration(0)).Return(removalUUID, nil)
+
+	arg := params.DestroyRelation{
+		RelationId: getUUIDArgs.RelationID,
+	}
+
+	// Act
+	err := s.api.DestroyRelation(c.Context(), arg)
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *applicationSuite) TestBlockDestroyApplicationUnexpose(c *gc.C) {
-	app := s.setupApplicationUnexpose(c)
-	s.BlockDestroyModel(c, "TestBlockDestroyApplicationUnexpose")
-	s.assertApplicationUnexpose(c, app)
+func (s *applicationSuite) TestUnitsInfoCAASUnitTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.testUnitsInfoCAAS(c, names.NewUnitTag("foo/666"), coreunit.Name("foo/666"))
 }
 
-func (s *applicationSuite) TestBlockRemoveApplicationUnexpose(c *gc.C) {
-	app := s.setupApplicationUnexpose(c)
-	s.BlockRemoveObject(c, "TestBlockRemoveApplicationUnexpose")
-	s.assertApplicationUnexpose(c, app)
+func (s *applicationSuite) TestUnitsInfoCAASApplicationTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "foo").Return([]coreunit.Name{"foo/666"}, nil)
+
+	s.testUnitsInfoCAAS(c, names.NewApplicationTag("foo"), coreunit.Name("foo/666"))
 }
 
-func (s *applicationSuite) TestBlockChangesApplicationUnexpose(c *gc.C) {
-	app := s.setupApplicationUnexpose(c)
-	s.BlockAllChanges(c, "TestBlockChangesApplicationUnexpose")
-	s.assertApplicationUnexposeBlocked(c, app, "TestBlockChangesApplicationUnexpose")
-}
+func (s *applicationSuite) testUnitsInfoCAAS(c *tc.C, inputTag names.Tag, resultingUnitName coreunit.Name) {
+	// Arrange
+	s.setupAPI(c)
 
-var applicationDestroyTests = []struct {
-	about       string
-	application string
-	err         string
-}{
-	{
-		about:       "unknown application name",
-		application: "unknown-application",
-		err:         `application "unknown-application" not found`,
-	},
-	{
-		about:       "destroy an application",
-		application: "dummy-application",
-	},
-	{
-		about:       "destroy an already destroyed application",
-		application: "dummy-application",
-		err:         `application "dummy-application" not found`,
-	},
-}
+	s.leadershipReader.EXPECT().Leaders().Return(map[string]string{
+		resultingUnitName.Application(): resultingUnitName.String(),
+	}, nil)
 
-func (s *applicationSuite) apiv16() *application.APIv16 {
-	return &application.APIv16{
-		APIv17: &application.APIv17{
-			APIv18: &application.APIv18{
-				APIv19: &application.APIv19{
-					APIv20: &application.APIv20{
-						APIv21: &application.APIv21{
-							APIv22: &application.APIv22{
-								APIBase: s.applicationAPI,
-							},
+	appID := tc.Must(c, application.NewUUID)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "foo").Return(appID, nil).AnyTimes()
+
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), resultingUnitName).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitWorkloadVersion(gomock.Any(), resultingUnitName).Return("1.0.0", nil)
+	s.applicationService.EXPECT().GetCharmLocatorByApplicationName(gomock.Any(), "foo").Return(applicationcharm.CharmLocator{
+		Name:     "foo",
+		Revision: 42,
+		Source:   applicationcharm.LocalSource,
+	}, nil)
+
+	s.relationService.EXPECT().ApplicationRelationsInfo(gomock.Any(), appID).Return([]relation.EndpointRelationData{{
+		RelationID:      3,
+		Endpoint:        "relation",
+		RelatedEndpoint: "fake-provides",
+		ApplicationData: map[string]string{},
+		UnitRelationData: map[string]relation.RelationData{
+			"foo/0": {
+				InScope:  true,
+				UnitData: map[string]string{"foo": "bar"},
+			},
+			"foo/1": {
+				InScope:  true,
+				UnitData: map[string]string{"foo": "baz"},
+			},
+		},
+	}}, nil)
+
+	s.applicationService.EXPECT().GetUnitMachineName(gomock.Any(), resultingUnitName).Return("", applicationerrors.UnitMachineNotAssigned)
+
+	s.applicationService.EXPECT().GetUnitK8sPodInfo(gomock.Any(), resultingUnitName).Return(domainapplication.K8sPodInfo{
+		ProviderID: "provider-id",
+		Address:    "10.0.0.0",
+		Ports:      []string{"666", "667"},
+	}, nil)
+
+	// Act
+	result, err := s.api.UnitsInfo(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: inputTag.String()}},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.UnitInfoResults{
+		Results: []params.UnitInfoResult{{
+			Result: &params.UnitResult{
+				Tag:             names.NewUnitTag(resultingUnitName.String()).String(),
+				Charm:           "local:amd64/foo-42",
+				Leader:          true,
+				WorkloadVersion: "1.0.0",
+				OpenedPorts:     []string{"666", "667"},
+				Address:         "10.0.0.0",
+				ProviderId:      "provider-id",
+				Life:            "alive",
+				RelationData: []params.EndpointRelationData{{
+					RelationId:      3,
+					Endpoint:        "relation",
+					RelatedEndpoint: "fake-provides",
+					ApplicationData: map[string]interface{}{},
+					UnitRelationData: map[string]params.RelationData{
+						"foo/0": {
+							InScope:  true,
+							UnitData: map[string]interface{}{"foo": "bar"},
+						},
+						"foo/1": {
+							InScope:  true,
+							UnitData: map[string]interface{}{"foo": "baz"},
 						},
 					},
-				},
+				}},
 			},
-		},
+		}},
+	})
+}
+
+func (s *applicationSuite) TestUnitsInfoUnitNotFound(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.leadershipReader.EXPECT().Leaders().Return(map[string]string{}, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), coreunit.Name("foo/666")).Return("", applicationerrors.UnitNotFound)
+
+	s.setupAPI(c)
+
+	// Act
+	res, err := s.api.UnitsInfo(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: names.NewUnitTag("foo/666").String()}},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestUnitsInfoApplicationNotFound(c *tc.C) {
+	// Arrange
+	defer s.setupMocks(c).Finish()
+
+	s.leadershipReader.EXPECT().Leaders().Return(map[string]string{}, nil)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "foo").Return(nil, applicationerrors.ApplicationNotFound)
+
+	s.setupAPI(c)
+
+	// Act
+	res, err := s.api.UnitsInfo(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: names.NewApplicationTag("foo").String()}},
+	})
+
+	// Assert
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Check(res.Results[0].Error, tc.Satisfies, params.IsCodeNotFound)
+}
+
+func (s *applicationSuite) TestConsumeWithNoArgs(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.setupAPI(c)
+
+	_, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{})
+	c.Assert(err, tc.ErrorIsNil)
+}
+
+func (s *applicationSuite) TestConsumeNotAllowed(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.expectAuthClient()
+	s.expectHasIncorrectPermission()
+
+	s.newIAASAPI(c)
+
+	_, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{})
+	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
+}
+
+func (s *applicationSuite) TestConsumeCheckBlocked(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.expectAuthClient()
+	s.expectAnyPermissions()
+	s.expectDisallowBlockChange()
+
+	s.newIAASAPI(c)
+
+	_, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{})
+	c.Assert(err, tc.ErrorMatches, "blocked")
+}
+
+func (s *applicationSuite) TestConsume(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	controllerUUID := tc.Must(c, uuid.NewUUID).String()
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+	macaroon := newMacaroon(c, "test")
+
+	controllerInfo := crossmodel.ControllerInfo{
+		ControllerUUID: controllerUUID,
+		Alias:          "alias",
+		Addrs:          []string{"10.0.0.1"},
+		CACert:         "cert",
+		ModelUUIDs:     []string{modelUUID},
 	}
-}
+	s.externalControllerService.EXPECT().UpdateExternalController(gomock.Any(), controllerInfo).Return(nil)
+	s.crossModelRelationService.EXPECT().AddRemoteApplicationOfferer(gomock.Any(), "my-offer", crossmodelrelationservice.AddRemoteApplicationOffererArgs{
+		OfferUUID:             offerUUID,
+		OfferURL:              tc.Must1(c, crossmodel.ParseOfferURL, "controller:qualifier/model.my-offer"),
+		OffererControllerUUID: ptr(controllerUUID),
+		OffererModelUUID:      modelUUID,
+		Endpoints: []applicationcharm.Relation{{
+			Name:      "db",
+			Role:      applicationcharm.RoleRequirer,
+			Interface: "db",
+			Limit:     1,
+		}},
+		Macaroon: macaroon,
+	}).Return(nil)
 
-func (s *applicationSuite) TestApplicationDestroy(c *gc.C) {
-	apiv16 := s.apiv16()
-	s.AddTestingApplication(c, "dummy-application", s.AddTestingCharm(c, "dummy"))
-	_, err := s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
-		Name:        "remote-application",
-		SourceModel: s.Model.ModelTag(),
-		Token:       "t0",
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			ControllerInfo: &params.ExternalControllerInfo{
+				ControllerTag: names.NewControllerTag(controllerUUID).String(),
+				Alias:         "alias",
+				Addrs:         []string{"10.0.0.1"},
+				CACert:        "cert",
+			},
+			Macaroon: macaroon,
+		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	for i, t := range applicationDestroyTests {
-		c.Logf("test %d. %s", i, t.about)
-		err := apiv16.Destroy(params.ApplicationDestroy{ApplicationName: t.application})
-		if t.err != "" {
-			c.Assert(err, gc.ErrorMatches, t.err)
-		} else {
-			c.Assert(err, jc.ErrorIsNil)
-		}
-	}
-
-	// Now do Destroy on an application with units. Destroy will
-	// cause the application to be not-Alive, but will not remove its
-	// document.
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	applicationName := "wordpress"
-	app, err := s.State.Application(applicationName)
-	c.Assert(err, jc.ErrorIsNil)
-	err = apiv16.Destroy(params.ApplicationDestroy{ApplicationName: applicationName})
-	c.Assert(err, jc.ErrorIsNil)
-	err = app.Refresh()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-}
-
-func assertLife(c *gc.C, entity state.Living, life state.Life) {
-	err := entity.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(entity.Life(), gc.Equals, life)
-}
-
-func (s *applicationSuite) TestBlockApplicationDestroy(c *gc.C) {
-	apiv16 := s.apiv16()
-	s.AddTestingApplication(c, "dummy-application", s.AddTestingCharm(c, "dummy"))
-
-	// block remove-objects
-	s.BlockRemoveObject(c, "TestBlockApplicationDestroy")
-	err := apiv16.Destroy(params.ApplicationDestroy{ApplicationName: "dummy-application"})
-	s.AssertBlocked(c, err, "TestBlockApplicationDestroy")
-	// Tests may have invalid application names.
-	app, err := s.State.Application("dummy-application")
-	if err == nil {
-		// For valid application names, check that application is alive :-)
-		assertLife(c, app, state.Alive)
-	}
-}
-
-func (s *applicationSuite) TestDestroyControllerApplicationNotAllowed(c *gc.C) {
-	apiv16 := s.apiv16()
-	s.AddTestingApplication(c, "controller-application", s.AddTestingCharm(c, "juju-controller"))
-
-	err := apiv16.Destroy(params.ApplicationDestroy{"controller-application"})
-	c.Assert(err, gc.ErrorMatches, "removing the controller application not supported")
-}
-
-func (s *applicationSuite) TestDestroyPrincipalUnits(c *gc.C) {
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	units := make([]*state.Unit, 5)
-	for i := range units {
-		unit, err := wordpress.AddUnit(state.AddUnitParams{})
-		c.Assert(err, jc.ErrorIsNil)
-		unit.AssignToNewMachine()
-		c.Assert(err, jc.ErrorIsNil)
-		now := time.Now()
-		sInfo := status.StatusInfo{
-			Status:  status.Idle,
-			Message: "",
-			Since:   &now,
-		}
-		err = unit.SetAgentStatus(sInfo)
-		c.Assert(err, jc.ErrorIsNil)
-		units[i] = unit
-	}
-	s.assertDestroyPrincipalUnits(c, units)
-}
-
-func (s *applicationSuite) TestDestroySubordinateUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wordpress0, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	ru, err := rel.Unit(wordpress0)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	logging0, err := s.State.Unit("logging/0")
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Try to destroy the subordinate alone; check it fails.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"logging/0"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	c.Assert(err, gc.ErrorMatches, `no units were destroyed: unit "logging/0" is a subordinate, .*`)
-	assertLife(c, logging0, state.Alive)
-
-	s.assertDestroySubordinateUnits(c, wordpress0, logging0)
 }
 
-func (s *applicationSuite) assertDestroyPrincipalUnits(c *gc.C, units []*state.Unit) {
-	apiv16 := s.apiv16()
-	// Destroy 2 of them; check they become Dying.
-	err := apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "wordpress/1"},
+func (s *applicationSuite) TestConsumeNoExternalController(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+	macaroon := newMacaroon(c, "test")
+
+	s.crossModelRelationService.EXPECT().AddRemoteApplicationOfferer(gomock.Any(), "my-offer", crossmodelrelationservice.AddRemoteApplicationOffererArgs{
+		OfferUUID:        offerUUID,
+		OfferURL:         tc.Must1(c, crossmodel.ParseOfferURL, "controller:qualifier/model.my-offer"),
+		OffererModelUUID: modelUUID,
+		Endpoints: []applicationcharm.Relation{{
+			Name:      "db",
+			Role:      applicationcharm.RoleRequirer,
+			Interface: "db",
+			Limit:     1,
+		}},
+		Macaroon: macaroon,
+	}).Return(nil)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			Macaroon: macaroon,
+		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	assertLife(c, units[0], state.Dying)
-	assertLife(c, units[1], state.Dying)
-
-	// Try to destroy an Alive one and a Dying one; check
-	// it destroys the Alive one and ignores the Dying one.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/2", "wordpress/0"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	assertLife(c, units[2], state.Dying)
+}
 
-	// Try to destroy an Alive one along with a nonexistent one; check that
-	// the valid instruction is followed but the invalid one is warned about.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"boojum/123", "wordpress/3"},
+func (s *applicationSuite) TestConsumeSameController(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	// Even if the controller UUID is the same, we don't touch the external
+	// controller record. The data could be old, so leave it alone.
+
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+	macaroon := newMacaroon(c, "test")
+
+	s.crossModelRelationService.EXPECT().AddRemoteApplicationOfferer(gomock.Any(), "my-offer", crossmodelrelationservice.AddRemoteApplicationOffererArgs{
+		OfferUUID:        offerUUID,
+		OfferURL:         tc.Must1(c, crossmodel.ParseOfferURL, "controller:qualifier/model.my-offer"),
+		OffererModelUUID: modelUUID,
+		Endpoints: []applicationcharm.Relation{{
+			Name:      "db",
+			Role:      applicationcharm.RoleRequirer,
+			Interface: "db",
+			Limit:     1,
+		}},
+		Macaroon: macaroon,
+	}).Return(nil)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			Macaroon: macaroon,
+		}},
 	})
-	c.Assert(err, gc.ErrorMatches, `some units were not destroyed: unit "boojum/123" does not exist`)
-	assertLife(c, units[3], state.Dying)
-
-	// Make one Dead, and destroy an Alive one alongside it; check no errors.
-	wp0, err := s.State.Unit("wordpress/0")
-	c.Assert(err, jc.ErrorIsNil)
-	err = wp0.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "wordpress/4"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	assertLife(c, units[0], state.Dead)
-	assertLife(c, units[4], state.Dying)
 }
 
-func (s *applicationSuite) setupDestroyPrincipalUnits(c *gc.C) []*state.Unit {
-	units := make([]*state.Unit, 5)
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	for i := range units {
-		unit, err := wordpress.AddUnit(state.AddUnitParams{})
-		c.Assert(err, jc.ErrorIsNil)
-		err = unit.AssignToNewMachine()
-		c.Assert(err, jc.ErrorIsNil)
-		now := time.Now()
-		sInfo := status.StatusInfo{
-			Status:  status.Idle,
-			Message: "",
-			Since:   &now,
-		}
-		err = unit.SetAgentStatus(sInfo)
-		c.Assert(err, jc.ErrorIsNil)
-		units[i] = unit
-	}
-	return units
-}
+func (s *applicationSuite) TestConsumeSameControllerSameOfferUUID(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *applicationSuite) assertBlockedErrorAndLiveliness(
-	c *gc.C,
-	err error,
-	msg string,
-	living1 state.Living,
-	living2 state.Living,
-	living3 state.Living,
-	living4 state.Living,
-) {
-	s.AssertBlocked(c, err, msg)
-	assertLife(c, living1, state.Alive)
-	assertLife(c, living2, state.Alive)
-	assertLife(c, living3, state.Alive)
-	assertLife(c, living4, state.Alive)
-}
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+	macaroon := newMacaroon(c, "test")
 
-func (s *applicationSuite) TestBlockChangesDestroyPrincipalUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	units := s.setupDestroyPrincipalUnits(c)
-	s.BlockAllChanges(c, "TestBlockChangesDestroyPrincipalUnits")
-	err := apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "wordpress/1"},
+	s.crossModelRelationService.EXPECT().AddRemoteApplicationOfferer(gomock.Any(), "my-offer", crossmodelrelationservice.AddRemoteApplicationOffererArgs{
+		OfferUUID:        offerUUID,
+		OfferURL:         tc.Must1(c, crossmodel.ParseOfferURL, "controller:qualifier/model.my-offer"),
+		OffererModelUUID: modelUUID,
+		Endpoints: []applicationcharm.Relation{{
+			Name:      "db",
+			Role:      applicationcharm.RoleRequirer,
+			Interface: "db",
+			Limit:     1,
+		}},
+		Macaroon: macaroon,
+	}).Return(crossmodelrelationerrors.OfferAlreadyConsumed)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			Macaroon: macaroon,
+		}},
 	})
-	s.assertBlockedErrorAndLiveliness(c, err, "TestBlockChangesDestroyPrincipalUnits", units[0], units[1], units[2], units[3])
-}
-
-func (s *applicationSuite) TestBlockRemoveDestroyPrincipalUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	units := s.setupDestroyPrincipalUnits(c)
-	s.BlockRemoveObject(c, "TestBlockRemoveDestroyPrincipalUnits")
-	err := apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "wordpress/1"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	s.assertBlockedErrorAndLiveliness(c, err, "TestBlockRemoveDestroyPrincipalUnits", units[0], units[1], units[2], units[3])
 }
 
-func (s *applicationSuite) TestBlockDestroyDestroyPrincipalUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	units := s.setupDestroyPrincipalUnits(c)
-	s.BlockDestroyModel(c, "TestBlockDestroyDestroyPrincipalUnits")
-	err := apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "wordpress/1"},
+func (s *applicationSuite) TestConsumeInvalidSourceModelTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	modelUUID := "bad"
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+			},
+		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	assertLife(c, units[0], state.Dying)
-	assertLife(c, units[1], state.Dying)
-}
-
-func (s *applicationSuite) assertDestroySubordinateUnits(c *gc.C, wordpress0, logging0 *state.Unit) {
-	apiv16 := s.apiv16()
-	// Try to destroy the principal and the subordinate together; check it warns
-	// about the subordinate, but destroys the one it can. (The principal unit
-	// agent will be responsible for destroying the subordinate.)
-	err := apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "logging/0"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{
+			Error: &params.Error{
+				Code:    params.CodeBadRequest,
+				Message: `parsing source model tag: "model-bad" is not a valid model tag`,
+			},
+		}},
 	})
-	c.Assert(err, gc.ErrorMatches, `some units were not destroyed: unit "logging/0" is a subordinate, .*`)
-	assertLife(c, wordpress0, state.Dying)
-	assertLife(c, logging0, state.Alive)
 }
 
-func (s *applicationSuite) TestBlockRemoveDestroySubordinateUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wordpress0, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	ru, err := rel.Unit(wordpress0)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	logging0, err := s.State.Unit("logging/0")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *applicationSuite) TestConsumeInvalidEndpointRole(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.BlockRemoveObject(c, "TestBlockRemoveDestroySubordinateUnits")
-	// Try to destroy the subordinate alone; check it fails.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"logging/0"},
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "require",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+		}},
 	})
-	s.AssertBlocked(c, err, "TestBlockRemoveDestroySubordinateUnits")
-	assertLife(c, rel, state.Alive)
-	assertLife(c, wordpress0, state.Alive)
-	assertLife(c, logging0, state.Alive)
-
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "logging/0"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{
+			Error: &params.Error{
+				Code:    params.CodeBadRequest,
+				Message: `parsing role for endpoint "db": endpoint role must be "provider" or "requirer", got "require"`,
+			},
+		}},
 	})
-	s.AssertBlocked(c, err, "TestBlockRemoveDestroySubordinateUnits")
-	assertLife(c, wordpress0, state.Alive)
-	assertLife(c, logging0, state.Alive)
-	assertLife(c, rel, state.Alive)
 }
 
-func (s *applicationSuite) TestBlockChangesDestroySubordinateUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wordpress0, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	ru, err := rel.Unit(wordpress0)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	logging0, err := s.State.Unit("logging/0")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *applicationSuite) TestConsumeWithEmptyApplicationAlias(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.BlockAllChanges(c, "TestBlockChangesDestroySubordinateUnits")
-	// Try to destroy the subordinate alone; check it fails.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"logging/0"},
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+	macaroon := newMacaroon(c, "test")
+
+	// When ApplicationAlias is empty, the application name should be parsed from the offer URL
+	s.crossModelRelationService.EXPECT().AddRemoteApplicationOfferer(gomock.Any(), "my-offer", crossmodelrelationservice.AddRemoteApplicationOffererArgs{
+		OfferUUID:        offerUUID,
+		OfferURL:         tc.Must1(c, crossmodel.ParseOfferURL, "controller:qualifier/model.my-offer"),
+		OffererModelUUID: modelUUID,
+		Endpoints: []applicationcharm.Relation{{
+			Name:      "db",
+			Role:      applicationcharm.RoleRequirer,
+			Interface: "db",
+			Limit:     1,
+		}},
+		Macaroon: macaroon,
+	}).Return(nil)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "controller:qualifier/model.my-offer",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			// ApplicationAlias is empty, should default to name from offer URL
+			ApplicationAlias: "",
+			Macaroon:         macaroon,
+		}},
 	})
-	s.AssertBlocked(c, err, "TestBlockChangesDestroySubordinateUnits")
-	assertLife(c, rel, state.Alive)
-	assertLife(c, wordpress0, state.Alive)
-	assertLife(c, logging0, state.Alive)
-
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"wordpress/0", "logging/0"},
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	s.AssertBlocked(c, err, "TestBlockChangesDestroySubordinateUnits")
-	assertLife(c, wordpress0, state.Alive)
-	assertLife(c, logging0, state.Alive)
-	assertLife(c, rel, state.Alive)
 }
 
-func (s *applicationSuite) TestBlockDestroyDestroySubordinateUnits(c *gc.C) {
-	apiv16 := s.apiv16()
-	wordpress := s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	wordpress0, err := wordpress.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	ru, err := rel.Unit(wordpress0)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	logging0, err := s.State.Unit("logging/0")
-	c.Assert(err, jc.ErrorIsNil)
+func (s *applicationSuite) TestConsumeWithInvalidOfferURL(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	s.BlockDestroyModel(c, "TestBlockDestroyDestroySubordinateUnits")
-	// Try to destroy the subordinate alone; check it fails.
-	err = apiv16.DestroyUnits(params.DestroyApplicationUnits{
-		UnitNames: []string{"logging/0"},
+	modelUUID := tc.Must(c, uuid.NewUUID).String()
+	offerUUID := tc.Must(c, offer.NewUUID)
+
+	s.setupAPI(c)
+
+	results, err := s.api.Consume(c.Context(), params.ConsumeApplicationArgsV5{
+		Args: []params.ConsumeApplicationArgV5{{
+			ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
+				OfferUUID:      offerUUID.String(),
+				OfferName:      "my-offer",
+				OfferURL:       "invalid-offer-url",
+				SourceModelTag: names.NewModelTag(modelUUID).String(),
+				Endpoints: []params.RemoteEndpoint{{
+					Name:      "db",
+					Role:      "requirer",
+					Interface: "db",
+					Limit:     1,
+				}},
+			},
+			// ApplicationAlias is empty, will try to parse offer URL.
+			ApplicationAlias: "",
+		}},
 	})
-	c.Assert(err, gc.ErrorMatches, `no units were destroyed: unit "logging/0" is a subordinate, .*`)
-	assertLife(c, logging0, state.Alive)
-
-	s.assertDestroySubordinateUnits(c, wordpress0, logging0)
-}
-
-func (s *applicationSuite) TestClientSetApplicationConstraints(c *gc.C) {
-	app := s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-
-	// Update constraints for the application.
-	cons, err := constraints.Parse("mem=4096", "cores=2")
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.applicationAPI.SetConstraints(params.SetConstraints{ApplicationName: "dummy", Constraints: cons})
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Ensure the constraints have been correctly updated.
-	obtained, err := app.Constraints()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, cons)
-}
-
-func (s *applicationSuite) setupSetApplicationConstraints(c *gc.C) (*state.Application, constraints.Value) {
-	app := s.AddTestingApplication(c, "dummy", s.AddTestingCharm(c, "dummy"))
-	// Update constraints for the application.
-	cons, err := constraints.Parse("mem=4096", "cores=2")
-	c.Assert(err, jc.ErrorIsNil)
-	return app, cons
-}
-
-func (s *applicationSuite) assertSetApplicationConstraints(c *gc.C, application *state.Application, cons constraints.Value) {
-	err := s.applicationAPI.SetConstraints(params.SetConstraints{ApplicationName: "dummy", Constraints: cons})
-	c.Assert(err, jc.ErrorIsNil)
-	// Ensure the constraints have been correctly updated.
-	obtained, err := application.Constraints()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(obtained, gc.DeepEquals, cons)
-}
-
-func (s *applicationSuite) assertSetApplicationConstraintsBlocked(c *gc.C, msg string, application *state.Application, cons constraints.Value) {
-	err := s.applicationAPI.SetConstraints(params.SetConstraints{ApplicationName: "dummy", Constraints: cons})
-	s.AssertBlocked(c, err, msg)
-}
-
-func (s *applicationSuite) TestBlockDestroySetApplicationConstraints(c *gc.C) {
-	app, cons := s.setupSetApplicationConstraints(c)
-	s.BlockDestroyModel(c, "TestBlockDestroySetApplicationConstraints")
-	s.assertSetApplicationConstraints(c, app, cons)
-}
-
-func (s *applicationSuite) TestBlockRemoveSetApplicationConstraints(c *gc.C) {
-	app, cons := s.setupSetApplicationConstraints(c)
-	s.BlockRemoveObject(c, "TestBlockRemoveSetApplicationConstraints")
-	s.assertSetApplicationConstraints(c, app, cons)
-}
-
-func (s *applicationSuite) TestBlockChangesSetApplicationConstraints(c *gc.C) {
-	app, cons := s.setupSetApplicationConstraints(c)
-	s.BlockAllChanges(c, "TestBlockChangesSetApplicationConstraints")
-	s.assertSetApplicationConstraintsBlocked(c, "TestBlockChangesSetApplicationConstraints", app, cons)
-}
-
-func (s *applicationSuite) TestClientGetApplicationConstraints(c *gc.C) {
-	fooConstraints := constraints.MustParse("arch=amd64", "mem=4G")
-	s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:        "foo",
-		Constraints: fooConstraints,
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{
+			Error: &params.Error{
+				Code:    params.CodeBadRequest,
+				Message: `parsing offer URL: offer URL is missing the name`,
+			},
+		}},
 	})
-	barConstraints := constraints.MustParse("arch=amd64", "mem=128G", "cores=64")
-	s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:        "bar",
-		Constraints: barConstraints,
-	})
+}
 
-	results, err := s.applicationAPI.GetConstraints(params.Entities{
-		Entities: []params.Entity{
-			{Tag: "wat"}, {Tag: "machine-0"}, {Tag: "user-foo"},
-			{Tag: "application-foo"}, {Tag: "application-bar"}, {Tag: "application-wat"},
-		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results, jc.DeepEquals, params.ApplicationGetConstraintsResults{
-		Results: []params.ApplicationConstraint{
+func (s *applicationSuite) TestSetRelationsSuspended(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	relationUUID := tc.Must(c, corerelation.NewUUID)
+
+	s.relationService.EXPECT().GetRelationUUIDByID(gomock.Any(), 42).Return(relationUUID, nil)
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relationUUID).Return(relation.RelationDetails{
+		UUID:      relationUUID,
+		Suspended: false,
+	}, nil)
+	s.relationService.EXPECT().SetRemoteRelationSuspendedState(gomock.Any(), relationUUID, true, "front fell off").Return(nil)
+	s.statusService.EXPECT().SetRemoteRelationStatus(gomock.Any(), relationUUID, status.StatusInfo{
+		Status:  status.Suspending,
+		Message: "front fell off",
+	}).Return(nil)
+
+	s.setupAPI(c)
+
+	results, err := s.api.SetRelationsSuspended(c.Context(), params.RelationSuspendedArgs{
+		Args: []params.RelationSuspendedArg{
 			{
-				Error: &params.Error{Message: `"wat" is not a valid tag`},
-			}, {
-				Error: &params.Error{Message: `unexpected tag type, expected application, got machine`},
-			}, {
-				Error: &params.Error{Message: `unexpected tag type, expected application, got user`},
-			}, {
-				Constraints: fooConstraints,
-			}, {
-				Constraints: barConstraints,
-			}, {
-				Error: &params.Error{Message: `application "wat" not found`, Code: "not found"},
+				RelationId: 42,
+				Suspended:  true,
+				Message:    "front fell off",
 			},
-		}})
-}
-
-func (s *applicationSuite) checkEndpoints(c *gc.C, mysqlAppName string, endpoints map[string]params.CharmRelation) {
-	c.Assert(endpoints["wordpress"], gc.DeepEquals, params.CharmRelation{
-		Name:      "db",
-		Role:      "requirer",
-		Interface: "mysql",
-		Optional:  false,
-		Limit:     1,
-		Scope:     "global",
-	})
-	ep := params.CharmRelation{
-		Name:      "server",
-		Role:      "provider",
-		Interface: "mysql",
-		Scope:     "global",
-	}
-	// Remote applications don't use scope.
-	if mysqlAppName == "hosted-mysql" {
-		ep.Scope = ""
-	}
-	c.Assert(endpoints[mysqlAppName], gc.DeepEquals, ep)
-}
-
-func (s *applicationSuite) setupRelationScenario(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	eps, err := s.State.InferEndpoints("logging", "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *applicationSuite) assertAddRelation(c *gc.C, endpoints, viaCIDRs []string) {
-	s.setupRelationScenario(c)
-
-	res, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints, ViaCIDRs: viaCIDRs})
-	c.Assert(err, jc.ErrorIsNil)
-	// Show that the relation was added.
-	wpApp, err := s.State.Application("wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-	rels, err := wpApp.Relations()
-	c.Assert(err, jc.ErrorIsNil)
-	// There are 2 relations - the logging-wordpress one set up in the
-	// scenario and the one created in this test.
-	c.Assert(len(rels), gc.Equals, 2)
-
-	// We may be related to a local application or a remote offer
-	// or an application in another model.
-	var mySqlApplication state.ApplicationEntity
-	mySqlApplication, err = s.State.RemoteApplication("hosted-mysql")
-	if errors.IsNotFound(err) {
-		mySqlApplication, err = s.State.RemoteApplication("othermysql")
-		if errors.IsNotFound(err) {
-			mySqlApplication, err = s.State.Application("mysql")
-			c.Assert(err, jc.ErrorIsNil)
-			s.checkEndpoints(c, "mysql", res.Endpoints)
-		} else {
-			c.Assert(err, jc.ErrorIsNil)
-			s.checkEndpoints(c, "othermysql", res.Endpoints)
-		}
-	} else {
-		c.Assert(err, jc.ErrorIsNil)
-		s.checkEndpoints(c, "hosted-mysql", res.Endpoints)
-	}
-	c.Assert(err, jc.ErrorIsNil)
-	rels, err = mySqlApplication.Relations()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(rels), gc.Equals, 1)
-}
-
-func (s *applicationSuite) TestSuccessfullyAddRelation(c *gc.C) {
-	endpoints := []string{"wordpress", "mysql"}
-	s.assertAddRelation(c, endpoints, nil)
-}
-
-func (s *applicationSuite) TestBlockDestroyAddRelation(c *gc.C) {
-	s.BlockDestroyModel(c, "TestBlockDestroyAddRelation")
-	s.assertAddRelation(c, []string{"wordpress", "mysql"}, nil)
-}
-func (s *applicationSuite) TestBlockRemoveAddRelation(c *gc.C) {
-	s.BlockRemoveObject(c, "TestBlockRemoveAddRelation")
-	s.assertAddRelation(c, []string{"wordpress", "mysql"}, nil)
-}
-
-func (s *applicationSuite) TestBlockChangesAddRelation(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	s.BlockAllChanges(c, "TestBlockChangesAddRelation")
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: []string{"wordpress", "mysql"}})
-	s.AssertBlocked(c, err, "TestBlockChangesAddRelation")
-}
-
-func (s *applicationSuite) TestSuccessfullyAddRelationSwapped(c *gc.C) {
-	// Show that the order of the applications listed in the AddRelation call
-	// does not matter.  This is a repeat of the previous test with the application
-	// names swapped.
-	endpoints := []string{"mysql", "wordpress"}
-	s.assertAddRelation(c, endpoints, nil)
-}
-
-func (s *applicationSuite) TestCallWithOnlyOneEndpoint(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	endpoints := []string{"wordpress"}
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, "no relations found")
-}
-
-func (s *applicationSuite) TestCallWithOneEndpointTooMany(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	s.AddTestingApplication(c, "logging", s.AddTestingCharm(c, "logging"))
-	endpoints := []string{"wordpress", "mysql", "logging"}
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, "cannot relate 3 endpoints")
-}
-
-func (s *applicationSuite) TestAddAlreadyAddedRelation(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	// Add a relation between wordpress and mysql.
-	endpoints := []string{"wordpress", "mysql"}
-	eps, err := s.State.InferEndpoints(endpoints...)
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	// And try to add it again.
-	_, err = s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, `cannot add relation "wordpress:db mysql:server": relation wordpress:db mysql:server`)
-}
-
-func (s *applicationSuite) setupRemoteApplication(c *gc.C) {
-	results, err := s.applicationAPI.Consume(params.ConsumeApplicationArgsV5{
-		Args: []params.ConsumeApplicationArgV5{
-			{ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
-				SourceModelTag:         testing.ModelTag.String(),
-				OfferName:              "hosted-mysql",
-				OfferUUID:              "hosted-mysql-uuid",
-				ApplicationDescription: "A pretty popular database",
-				Endpoints: []params.RemoteEndpoint{
-					{Name: "server", Interface: "mysql", Role: "provider"},
-				},
-			}},
 		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.OneError(), gc.IsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	})
 }
 
-func (s *applicationSuite) TestAddRemoteRelation(c *gc.C) {
-	s.setupRemoteApplication(c)
-	// There's already a wordpress in the scenario this assertion sets up.
-	s.assertAddRelation(c, []string{"wordpress", "hosted-mysql"}, nil)
-}
+func (s *applicationSuite) TestSetRelationsSuspendedUnsuspending(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *applicationSuite) TestAddRemoteRelationWithRelName(c *gc.C) {
-	s.setupRemoteApplication(c)
-	s.assertAddRelation(c, []string{"wordpress", "hosted-mysql:server"}, nil)
-}
+	relationUUID := tc.Must(c, corerelation.NewUUID)
 
-func (s *applicationSuite) TestAddRemoteRelationVia(c *gc.C) {
-	s.setupRemoteApplication(c)
-	s.assertAddRelation(c, []string{"wordpress", "hosted-mysql:server"}, []string{"192.168.0.0/16"})
+	s.relationService.EXPECT().GetRelationUUIDByID(gomock.Any(), 42).Return(relationUUID, nil)
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relationUUID).Return(relation.RelationDetails{
+		UUID:      relationUUID,
+		Suspended: true,
+	}, nil)
+	s.relationService.EXPECT().SetRemoteRelationSuspendedState(gomock.Any(), relationUUID, false, "ignore me").Return(nil)
+	s.statusService.EXPECT().SetRemoteRelationStatus(gomock.Any(), relationUUID, status.StatusInfo{
+		Status:  status.Joining,
+		Message: "",
+	}).Return(nil)
 
-	rel, err := s.State.KeyRelation("wordpress:db hosted-mysql:server")
-	c.Assert(err, jc.ErrorIsNil)
-	w := rel.WatchRelationEgressNetworks()
-	defer statetesting.AssertStop(c, w)
-	wc := statetesting.NewStringsWatcherC(c, w)
-	wc.AssertChange("192.168.0.0/16")
-	wc.AssertNoChange()
-}
+	s.setupAPI(c)
 
-func (s *applicationSuite) TestAddRemoteRelationOnlyOneEndpoint(c *gc.C) {
-	s.setupRemoteApplication(c)
-	endpoints := []string{"hosted-mysql"}
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, "no relations found")
-}
-
-func (s *applicationSuite) TestAlreadyAddedRemoteRelation(c *gc.C) {
-	s.setupRemoteApplication(c)
-	endpoints := []string{"wordpress", "hosted-mysql"}
-	s.assertAddRelation(c, endpoints, nil)
-
-	// And try to add it again.
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, regexp.QuoteMeta(`cannot add relation "wordpress:db hosted-mysql:server": relation wordpress:db hosted-mysql:server`))
-}
-
-func (s *applicationSuite) TestRemoteRelationInvalidEndpoint(c *gc.C) {
-	s.setupRemoteApplication(c)
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-
-	endpoints := []string{"wordpress", "hosted-mysql:nope"}
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, `saas application "hosted-mysql" has no "nope" relation`)
-}
-
-func (s *applicationSuite) TestRemoteRelationNoMatchingEndpoint(c *gc.C) {
-	results, err := s.applicationAPI.Consume(params.ConsumeApplicationArgsV5{
-		Args: []params.ConsumeApplicationArgV5{
-			{ApplicationOfferDetailsV5: params.ApplicationOfferDetailsV5{
-				SourceModelTag: testing.ModelTag.String(),
-				OfferName:      "hosted-db2",
-				OfferUUID:      "hosted-db2-uuid",
-				Endpoints: []params.RemoteEndpoint{
-					{Name: "database", Interface: "db2", Role: "provider"},
-				},
-			}},
+	results, err := s.api.SetRelationsSuspended(c.Context(), params.RelationSuspendedArgs{
+		Args: []params.RelationSuspendedArg{
+			{
+				RelationId: 42,
+				Suspended:  false,
+				Message:    "ignore me",
+			},
 		},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(results.OneError(), gc.IsNil)
-
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	endpoints := []string{"wordpress", "hosted-db2"}
-	_, err = s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, "no relations found")
-}
-
-func (s *applicationSuite) TestRemoteRelationApplicationNotFound(c *gc.C) {
-	s.AddTestingApplication(c, "wordpress", s.AddTestingCharm(c, "wordpress"))
-	endpoints := []string{"wordpress", "unknown"}
-	_, err := s.applicationAPI.AddRelation(params.AddRelation{Endpoints: endpoints})
-	c.Assert(err, gc.ErrorMatches, `application "unknown" not found`)
-}
-
-// addCharmToState emulates the side-effects of an AddCharm call so that the
-// deploy tests in the suite can still work even though the AddCharmX calls
-// have been updated to return NotSupported errors for Juju 3.
-func (s *applicationSuite) addCharmToState(c *gc.C, charmURL string, name string) (string, charm.Charm) {
-	curl := charm.MustParseURL(charmURL)
-
-	if curl.Revision < 0 {
-		base := curl.String()
-
-		if rev, found := s.lastKnownRev[base]; found {
-			curl.Revision = rev + 1
-		} else {
-			curl.Revision = 0
-		}
-
-		s.lastKnownRev[base] = curl.Revision
-	}
-
-	_, err := s.State.PrepareCharmUpload(charmURL)
-	c.Assert(err, jc.ErrorIsNil)
-
-	ch, err := charm.ReadCharmArchive(
-		testcharms.RepoWithSeries("quantal").CharmArchivePath(c.MkDir(), name))
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = s.State.UpdateUploadedCharm(state.CharmInfo{
-		Charm:       ch,
-		ID:          charmURL,
-		StoragePath: fmt.Sprintf("charms/%s", name),
-		SHA256:      "1234",
-		Version:     ch.Version(),
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	return charmURL, ch
 }
 
-func (s *applicationSuite) TestValidateSecretConfig(c *gc.C) {
-	chCfg := &charm.Config{
-		Options: map[string]charm.Option{
-			"foo": {Type: "secret"},
-		},
-	}
-	cfg := charm.Settings{
-		"foo": "bar",
-	}
-	err := application.ValidateSecretConfig(chCfg, cfg)
-	c.Assert(err, gc.ErrorMatches, `invalid secret URI for option "foo": secret URI "bar" not valid`)
+func (s *applicationSuite) TestSetRelationsSuspendedAlreadySuspended(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	cfg = charm.Settings{"foo": "secret:cj4v5vm78ohs79o84r4g"}
-	err = application.ValidateSecretConfig(chCfg, cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	relationUUID := tc.Must(c, corerelation.NewUUID)
+
+	s.relationService.EXPECT().GetRelationUUIDByID(gomock.Any(), 42).Return(relationUUID, nil)
+	s.relationService.EXPECT().GetRelationDetails(gomock.Any(), relationUUID).Return(relation.RelationDetails{
+		UUID:      relationUUID,
+		Suspended: true,
+	}, nil)
+
+	s.setupAPI(c)
+
+	results, err := s.api.SetRelationsSuspended(c.Context(), params.RelationSuspendedArgs{
+		Args: []params.RelationSuspendedArg{
+			{
+				RelationId: 42,
+				Suspended:  true,
+				Message:    "front fell off",
+			},
+		},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{}},
+	})
 }
 
-func (s *applicationSuite) TestGetOneApplicationStorageSuccess(c *gc.C) {
-	ch := s.AddTestingCharm(c, "storage-block")
-	charmStore := "data"
+func (s *applicationSuite) TestSetRelationsSuspendedNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	// Creates an application with storage constraints.
-	sc := map[string]state.StorageConstraints{
-		charmStore: {Pool: "loop", Size: 2048, Count: 1},
-	}
-	application := s.AddTestingApplicationWithStorage(c, "storage-block", ch, sc)
-	c.Assert(application, gc.NotNil)
-	c.Assert(application.Name(), gc.Equals, "storage-block")
+	relationUUID := tc.Must(c, corerelation.NewUUID)
 
-	// Asserts that the application has defined resp constraints.
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application.Tag().String(),
+	s.relationService.EXPECT().GetRelationUUIDByID(gomock.Any(), 42).Return(relationUUID, relationerrors.RelationNotFound)
+
+	s.setupAPI(c)
+
+	results, err := s.api.SetRelationsSuspended(c.Context(), params.RelationSuspendedArgs{
+		Args: []params.RelationSuspendedArg{
+			{
+				RelationId: 42,
+				Suspended:  true,
+				Message:    "front fell off",
+			},
 		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 1)
-	resultSC := resp.Results[0].StorageConstraints[charmStore]
-	c.Assert(resultSC, gc.NotNil)
-	c.Assert(resultSC.Pool, gc.Equals, sc[charmStore].Pool)
-	c.Assert(*resultSC.Count, gc.Equals, sc[charmStore].Count)
-	c.Assert(*resultSC.Size, gc.Equals, sc[charmStore].Size)
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ErrorResults{
+		Results: []params.ErrorResult{{
+			Error: &params.Error{
+				Code:    params.CodeNotFound,
+				Message: "relation 42 not found",
+			},
+		}},
+	})
 }
 
-func (s *applicationSuite) TestGetMultipleApplicationStorageSuccess(c *gc.C) {
-	// Creates a storage-block application with storage constraints.
-	ch1 := s.AddTestingCharm(c, "storage-block")
-	charmStore1 := "data"
-	sc1 := map[string]state.StorageConstraints{
-		charmStore1: {Pool: "loop", Size: 2048, Count: 1},
-	}
-	application1 := s.AddTestingApplicationWithStorage(c, "storage-block", ch1, sc1)
-	c.Assert(application1, gc.NotNil)
-	c.Assert(application1.Name(), gc.Equals, "storage-block")
+func (s *applicationSuite) TestGetApplicationStorageDirectivesInfo(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	// Creates a cockroachdb application with storage constraints.
-	ch2 := s.AddTestingCharm(c, "cockroachdb")
-	charmStore2 := "database"
-	sc2 := map[string]state.StorageConstraints{
-		charmStore2: {Pool: "loop", Size: 4096, Count: 1},
-	}
-	application2 := s.AddTestingApplicationWithStorage(c, "cockroachdb", ch2, sc2)
-	c.Assert(application2, gc.NotNil)
-	c.Assert(application2.Name(), gc.Equals, "cockroachdb")
+	s.setupAPI(c)
 
-	// Retrieves info for both applications
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application1.Tag().String(),
-		},
-		{
-			Tag: application2.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 2)
+	appUUID := tc.Must(c, application.NewUUID)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(
+		gomock.Any(),
+		"kafka",
+	).Return(
+		appUUID,
+		nil,
+	)
 
-	// Asserts that the storage-block application has defined resp constraints.
-	resultSC1 := resp.Results[0].StorageConstraints[charmStore1]
-	c.Assert(resultSC1, gc.NotNil)
-	c.Assert(resultSC1.Pool, gc.Equals, sc1[charmStore1].Pool)
-	c.Assert(*resultSC1.Count, gc.Equals, sc1[charmStore1].Count)
-	c.Assert(*resultSC1.Size, gc.Equals, sc1[charmStore1].Size)
-
-	// Asserts that the cockroachdb application has defined resp constraints.
-	resultSC2 := resp.Results[1].StorageConstraints[charmStore2]
-	c.Assert(resultSC2, gc.NotNil)
-	c.Assert(resultSC2.Pool, gc.Equals, sc2[charmStore2].Pool)
-	c.Assert(*resultSC2.Count, gc.Equals, sc2[charmStore2].Count)
-	c.Assert(*resultSC2.Size, gc.Equals, sc2[charmStore2].Size)
-}
-
-func (s *applicationSuite) TestGetApplicationStorageDefaultExists(c *gc.C) {
-	ch := s.AddTestingCharm(c, "storage-block")
-
-	// Creates an application with no storage constraints.
-	application := s.AddTestingApplication(c, "storage-block", ch)
-	c.Assert(application, gc.NotNil)
-	c.Assert(application.Name(), gc.Equals, "storage-block")
-
-	// Asserts that the application has default storage constraints.
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results[0].StorageConstraints), jc.GreaterThan, 0)
-}
-
-func (s *applicationSuite) TestUpdateOneApplicationStorageSuccess(c *gc.C) {
-	ch := s.AddTestingCharm(c, "storage-block")
-	charmStore := "data"
-
-	// Creates an application with storage constraints.
-	sc := map[string]state.StorageConstraints{
-		charmStore: {Pool: "loop", Size: 2048, Count: 1},
-	}
-	application := s.AddTestingApplicationWithStorage(c, "storage-block", ch, sc)
-	c.Assert(application, gc.NotNil)
-	c.Assert(application.Name(), gc.Equals, "storage-block")
-
-	// Asserts that the application has defined resp constraints.
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 1)
-	resultSC := resp.Results[0].StorageConstraints[charmStore]
-	c.Assert(resultSC, gc.NotNil)
-	c.Assert(resultSC.Pool, gc.Equals, sc[charmStore].Pool)
-	c.Assert(*resultSC.Count, gc.Equals, sc[charmStore].Count)
-	c.Assert(*resultSC.Size, gc.Equals, sc[charmStore].Size)
-
-	// Updates the application with newly defined storage constraints.
-	size := uint64(4096)
+	poolName := "my-loop"
+	size := uint64(20)
 	count := uint64(1)
-	newSC := map[string]params.StorageConstraints{
-		charmStore: {
-			Pool:  "loop",
-			Size:  &size,
-			Count: &count,
-		},
-	}
-	_, err = s.applicationAPI.UpdateApplicationStorage(params.ApplicationStorageUpdateRequest{
-		ApplicationStorageUpdates: []params.ApplicationStorageUpdate{
-			{
-				ApplicationTag:     application.Tag().String(),
-				StorageConstraints: newSC,
+	s.applicationService.EXPECT().GetApplicationStorageDirectivesInfo(
+		gomock.Any(),
+		appUUID,
+	).Return(
+		map[string]domainapplication.ApplicationStorageInfo{
+			"logs": {
+				StoragePoolName: poolName,
+				SizeMiB:         size,
+				Count:           count,
 			},
 		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
+		nil,
+	)
 
-	// Asserts that the application has newly defined storage constraints.
-	resp, err = s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application.Tag().String(),
+	res, err := s.api.GetApplicationStorage(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: "application-kafka"}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(res.Results, tc.HasLen, 1)
+	c.Assert(res.Results[0].Error, tc.IsNil)
+
+	sc := res.Results[0].StorageConstraints
+	c.Check(sc, tc.DeepEquals, map[string]params.StorageDirectives{
+		"logs": {
+			Pool:    poolName,
+			SizeMiB: &size,
+			Count:   &count,
 		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 1)
-	newResultSC := resp.Results[0].StorageConstraints[charmStore]
-	c.Assert(newResultSC, gc.NotNil)
-	c.Assert(newResultSC.Pool, gc.Equals, newSC[charmStore].Pool)
-	c.Assert(*newResultSC.Count, gc.Equals, *newSC[charmStore].Count)
-	c.Assert(*newResultSC.Size, gc.Equals, *newSC[charmStore].Size)
+	})
 }
 
-func (s *applicationSuite) TestUpdateMultipleApplicationStorageSuccess(c *gc.C) {
-	// Creates a storage-block application with storage constraints.
-	ch1 := s.AddTestingCharm(c, "storage-block")
-	charmStore1 := "data"
-	sc1 := map[string]state.StorageConstraints{
-		charmStore1: {Pool: "loop", Size: 2048, Count: 1},
-	}
-	application1 := s.AddTestingApplicationWithStorage(c, "storage-block", ch1, sc1)
-	c.Assert(application1, gc.NotNil)
-	c.Assert(application1.Name(), gc.Equals, "storage-block")
+func (s *applicationSuite) setupAPI(c *tc.C) {
+	s.expectAuthClient()
+	s.expectAnyPermissions()
+	s.expectAnyChangeOrRemoval()
 
-	// Creates a cockroachdb application with storage constraints.
-	ch2 := s.AddTestingCharm(c, "cockroachdb")
-	charmStore2 := "database"
-	sc2 := map[string]state.StorageConstraints{
-		charmStore2: {Pool: "loop", Size: 4096, Count: 1},
-	}
-	application2 := s.AddTestingApplicationWithStorage(c, "cockroachdb", ch2, sc2)
-	c.Assert(application2, gc.NotNil)
-	c.Assert(application2.Name(), gc.Equals, "cockroachdb")
-
-	// Asserts that both the applications have defined resp constraints.
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application1.Tag().String(),
-		},
-		{
-			Tag: application2.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 2)
-
-	// Asserts that the storage-block application has defined resp constraints.
-	resultSC1 := resp.Results[0].StorageConstraints[charmStore1]
-	c.Assert(resultSC1, gc.NotNil)
-	c.Assert(resultSC1.Pool, gc.Equals, sc1[charmStore1].Pool)
-	c.Assert(*resultSC1.Count, gc.Equals, sc1[charmStore1].Count)
-	c.Assert(*resultSC1.Size, gc.Equals, sc1[charmStore1].Size)
-
-	// Asserts that the cockroachdb application has defined resp constraints.
-	resultSC2 := resp.Results[1].StorageConstraints[charmStore2]
-	c.Assert(resultSC2, gc.NotNil)
-	c.Assert(resultSC2.Pool, gc.Equals, sc2[charmStore2].Pool)
-	c.Assert(*resultSC2.Count, gc.Equals, sc2[charmStore2].Count)
-	c.Assert(*resultSC2.Size, gc.Equals, sc2[charmStore2].Size)
-
-	// Updates the applications with newly defined storage constraints.
-	size := uint64(8012)
-	count := uint64(3)
-	newSC1 := map[string]params.StorageConstraints{
-		charmStore1: {
-			Pool:  "loop",
-			Size:  &size,
-			Count: &count,
-		},
-	}
-
-	size = uint64(16042)
-	count = uint64(1)
-	newSC2 := map[string]params.StorageConstraints{
-		charmStore2: {
-			Pool:  "loop",
-			Size:  &size,
-			Count: &count,
-		},
-	}
-	_, err = s.applicationAPI.UpdateApplicationStorage(params.ApplicationStorageUpdateRequest{
-		ApplicationStorageUpdates: []params.ApplicationStorageUpdate{
-			{
-				ApplicationTag:     application1.Tag().String(),
-				StorageConstraints: newSC1,
-			},
-			{
-				ApplicationTag:     application2.Tag().String(),
-				StorageConstraints: newSC2,
-			},
-		},
-	})
-	c.Assert(err, jc.ErrorIsNil)
-
-	// Asserts that the applications have newly defined storage constraints.
-	resp, err = s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application1.Tag().String(),
-		},
-		{
-			Tag: application2.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 2)
-
-	// Asserts that the storage-block application has newly-defined resp constraints.
-	newResultSC1 := resp.Results[0].StorageConstraints[charmStore1]
-	c.Assert(newResultSC1, gc.NotNil)
-	c.Assert(newResultSC1.Pool, gc.Equals, newSC1[charmStore1].Pool)
-	c.Assert(*newResultSC1.Count, gc.Equals, *newSC1[charmStore1].Count)
-	c.Assert(*newResultSC1.Size, gc.Equals, *newSC1[charmStore1].Size)
-
-	// Asserts that the cockroachdb application has newly-defined resp constraints.
-	newResultSC2 := resp.Results[1].StorageConstraints[charmStore2]
-	c.Assert(newResultSC2, gc.NotNil)
-	c.Assert(newResultSC2.Pool, gc.Equals, newSC2[charmStore2].Pool)
-	c.Assert(*newResultSC2.Count, gc.Equals, *newSC2[charmStore2].Count)
-	c.Assert(*newResultSC2.Size, gc.Equals, *newSC2[charmStore2].Size)
+	s.newIAASAPI(c)
 }
 
-func (s *applicationSuite) TestUpdateApplicationStorageNameServerError(c *gc.C) {
-	ch := s.AddTestingCharm(c, "storage-block")
-	charmStore := "data"
+// expectCreateApplicationForDeploy should only be used when calling
+// api.Deploy(). DO NOT use for DeployFromRepository(), the expectations
+// are different.
+func (s *applicationSuite) expectCreateApplicationForDeploy(name string, retErr error) {
+	s.applicationService.EXPECT().CreateIAASApplication(gomock.Any(),
+		name,
+		gomock.Any(),
+		gomock.Any(),
+		gomock.AssignableToTypeOf(applicationservice.AddApplicationArgs{}),
+	).Return(application.UUID("app-"+name), retErr)
+}
 
-	// Creates an application with storage constraints.
-	sc := state.StorageConstraints{Pool: "loop", Size: 2048, Count: 1}
-	sCons := map[string]state.StorageConstraints{
-		charmStore: sc,
-	}
-	application := s.AddTestingApplicationWithStorage(c, "storage-block", ch, sCons)
-	c.Assert(application, gc.NotNil)
-	c.Assert(application.Name(), gc.Equals, "storage-block")
-
-	// Asserts that the application has defined resp constraints.
-	resp, err := s.applicationAPI.GetApplicationStorage(params.Entities{Entities: []params.Entity{
-		{
-			Tag: application.Tag().String(),
-		},
-	}})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(resp.Results), gc.Equals, 1)
-	resultSC := resp.Results[0].StorageConstraints[charmStore]
-	c.Assert(resultSC, gc.NotNil)
-	c.Assert(resultSC.Pool, gc.Equals, sCons[charmStore].Pool)
-	c.Assert(*resultSC.Count, gc.Equals, sCons[charmStore].Count)
-	c.Assert(*resultSC.Size, gc.Equals, sCons[charmStore].Size)
-
-	// Updates the application with newly defined storage constraints that contains 2 unsupported storage names.
-	size := uint64(4096)
-	count := uint64(2)
-	res, err := s.applicationAPI.UpdateApplicationStorage(params.ApplicationStorageUpdateRequest{
-		ApplicationStorageUpdates: []params.ApplicationStorageUpdate{
-			{
-				ApplicationTag: application.Tag().String(),
-				StorageConstraints: map[string]params.StorageConstraints{
-					charmStore: {
-						Pool:  "loop",
-						Size:  &size,
-						Count: &count,
-					},
-					"not-a-charmstore1": {
-						Pool:  "loop",
-						Size:  &size,
-						Count: &count,
-					},
-					"not-a-charmstore2": {
-						Pool:  "loop",
-						Size:  &size,
-						Count: &count,
-					},
-				},
-			},
-		},
+// expectCreateApplicationForDeploy should only be used when calling
+// api.Deploy(). DO NOT use for DeployFromRepository(), the expectations
+// are different.
+func (s *applicationSuite) expectCreateApplicationForDeployWithConfig(c *tc.C, name string, appConfig internalcharm.Config, retErr error) {
+	s.applicationService.EXPECT().CreateIAASApplication(gomock.Any(),
+		name,
+		gomock.Any(),
+		gomock.Any(),
+		gomock.AssignableToTypeOf(applicationservice.AddApplicationArgs{}),
+	).DoAndReturn(func(ctx context.Context, s string, charm internalcharm.Charm, origin corecharm.Origin, args applicationservice.AddApplicationArgs, arg ...applicationservice.AddIAASUnitArg) (application.UUID, error) {
+		c.Check(args.ApplicationConfig, tc.DeepEquals, appConfig)
+		return application.UUID("app-" + name), retErr
 	})
+}
 
-	// Asserts that the application has 1 unsupported api server error.
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(res.Results), gc.Equals, 1)
-	c.Assert(res.Results[0].Error, gc.NotNil)
+func (s *applicationSuite) expectDeletePendingResources(resSlice []resource.UUID) {
+	s.resourceService.EXPECT().DeleteResourcesAddedBeforeApplication(gomock.Any(), resSlice).Return(nil)
+}
+
+type charmParams struct {
+	name        string
+	resources   map[string]charmresource.Meta
+	subordinate bool
+}
+
+func (s *applicationSuite) expectCharm(c *tc.C, params charmParams) {
+	locator := applicationcharm.CharmLocator{
+		Name:     params.name,
+		Revision: 42,
+		Source:   applicationcharm.LocalSource,
+	}
+
+	cfg, err := internalcharm.ReadConfig(strings.NewReader(`
+options:
+    stringOption:
+        default: bar
+        description: string option
+        type: string
+`))
+	c.Assert(err, tc.ErrorIsNil)
+	metadata := &internalcharm.Meta{
+		Name:        "foo",
+		Resources:   params.resources,
+		Subordinate: params.subordinate,
+	}
+	b, err := internalcharm.ParseBase("ubuntu@20.04", corearch.DefaultArchitecture)
+	c.Assert(err, tc.ErrorIsNil)
+	manifest := &internalcharm.Manifest{
+		Bases: []internalcharm.Base{b},
+	}
+	charm := internalcharm.NewCharmBase(metadata, manifest, cfg, nil, nil)
+	s.applicationService.EXPECT().GetCharm(gomock.Any(), locator).Return(charm, locator, true, nil)
+
+	s.applicationService.EXPECT().IsCharmAvailable(gomock.Any(), locator).Return(true, nil)
+}
+
+func (s *applicationSuite) expectGetRelationUUIDForRemoval(c *tc.C, args relation.GetRelationUUIDForRemovalArgs, err error) corerelation.UUID {
+	relUUID := relationtesting.GenRelationUUID(c)
+	s.relationService.EXPECT().GetRelationUUIDForRemoval(gomock.Any(), args).Return(relUUID, err)
+	return relUUID
+}
+
+func (s *applicationSuite) expectRemoveRelation(c *tc.C, uuid corerelation.UUID, force bool, maxWait time.Duration, err error) {
+	rUUID, _ := removal.NewUUID()
+	s.removalService.EXPECT().RemoveRelation(gomock.Any(), uuid, force, maxWait).Return(rUUID, err)
 }

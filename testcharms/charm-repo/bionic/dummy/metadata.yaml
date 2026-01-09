@@ -4,8 +4,3 @@ description: |
     This is a longer description which
     potentially contains multiple lines.
 minjujuversion: "1.0.0"
-series:
-  - noble
-  - jammy
-  - focal
-  - bionic

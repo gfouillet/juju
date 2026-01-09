@@ -4,12 +4,14 @@
 package uniter
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/api/common"
+	apiwatcher "github.com/juju/juju/api/watcher"
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/status"
 	"github.com/juju/juju/core/watcher"
@@ -21,9 +23,9 @@ import (
 
 // Application represents the state of an application.
 type Application struct {
-	st   *State
-	tag  names.ApplicationTag
-	life life.Value
+	client *Client
+	tag    names.ApplicationTag
+	life   life.Value
 }
 
 // Tag returns the application's tag.
@@ -42,8 +44,19 @@ func (s *Application) String() string {
 }
 
 // Watch returns a watcher for observing changes to an application.
-func (s *Application) Watch() (watcher.NotifyWatcher, error) {
-	return common.Watch(s.st.facade, "Watch", s.tag)
+func (s *Application) Watch(ctx context.Context) (watcher.NotifyWatcher, error) {
+	arg := params.Entity{Tag: s.tag.String()}
+	var result params.NotifyWatchResult
+
+	err := s.client.facade.FacadeCall(ctx, "WatchApplication", arg, &result)
+	if err != nil {
+		return nil, errors.Trace(apiservererrors.RestoreError(err))
+	}
+
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return apiwatcher.NewNotifyWatcher(s.client.facade.RawAPICaller(), result), nil
 }
 
 // Life returns the application's current life state.
@@ -53,8 +66,8 @@ func (s *Application) Life() life.Value {
 
 // Refresh refreshes the contents of the application from the underlying
 // state.
-func (s *Application) Refresh() error {
-	life, err := s.st.life(s.tag)
+func (s *Application) Refresh(ctx context.Context) error {
+	life, err := s.client.life(ctx, s.tag)
 	if err != nil {
 		return err
 	}
@@ -64,12 +77,12 @@ func (s *Application) Refresh() error {
 
 // CharmModifiedVersion increments every time the charm, or any part of it, is
 // changed in some way.
-func (s *Application) CharmModifiedVersion() (int, error) {
+func (s *Application) CharmModifiedVersion(ctx context.Context) (int, error) {
 	var results params.IntResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: s.tag.String()}},
 	}
-	err := s.st.facade.FacadeCall("CharmModifiedVersion", args, &results)
+	err := s.client.facade.FacadeCall(ctx, "CharmModifiedVersion", args, &results)
 	if err != nil {
 		return -1, err
 	}
@@ -91,12 +104,12 @@ func (s *Application) CharmModifiedVersion() (int, error) {
 //
 // NOTE: This differs from state.Application.CharmURL() by returning
 // an error instead as well, because it needs to make an API call.
-func (s *Application) CharmURL() (string, bool, error) {
+func (s *Application) CharmURL(ctx context.Context) (string, bool, error) {
 	var results params.StringBoolResults
 	args := params.Entities{
 		Entities: []params.Entity{{Tag: s.tag.String()}},
 	}
-	err := s.st.facade.FacadeCall("CharmURL", args, &results)
+	err := s.client.facade.FacadeCall(ctx, "CharmURL", args, &results)
 	if err != nil {
 		return "", false, err
 	}
@@ -115,7 +128,7 @@ func (s *Application) CharmURL() (string, bool, error) {
 
 // SetStatus sets the status of the application if the passed unitName,
 // corresponding to the calling unit, is of the leader.
-func (s *Application) SetStatus(unitName string, appStatus status.Status, info string, data map[string]interface{}) error {
+func (s *Application) SetStatus(ctx context.Context, unitName string, appStatus status.Status, info string, data map[string]interface{}) error {
 	tag := names.NewUnitTag(unitName)
 	var result params.ErrorResults
 	args := params.SetStatus{
@@ -128,7 +141,7 @@ func (s *Application) SetStatus(unitName string, appStatus status.Status, info s
 			},
 		},
 	}
-	err := s.st.facade.FacadeCall("SetApplicationStatus", args, &result)
+	err := s.client.facade.FacadeCall(ctx, "SetApplicationStatus", args, &result)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -137,7 +150,7 @@ func (s *Application) SetStatus(unitName string, appStatus status.Status, info s
 
 // Status returns the status of the application if the passed unitName,
 // corresponding to the calling unit, is of the leader.
-func (s *Application) Status(unitName string) (params.ApplicationStatusResult, error) {
+func (s *Application) Status(ctx context.Context, unitName string) (params.ApplicationStatusResult, error) {
 	tag := names.NewUnitTag(unitName)
 	var results params.ApplicationStatusResults
 	args := params.Entities{
@@ -147,7 +160,7 @@ func (s *Application) Status(unitName string) (params.ApplicationStatusResult, e
 			},
 		},
 	}
-	err := s.st.facade.FacadeCall("ApplicationStatus", args, &results)
+	err := s.client.facade.FacadeCall(ctx, "ApplicationStatus", args, &results)
 	if err != nil {
 		return params.ApplicationStatusResult{}, errors.Trace(err)
 	}
@@ -156,10 +169,4 @@ func (s *Application) Status(unitName string) (params.ApplicationStatusResult, e
 		return params.ApplicationStatusResult{}, result.Error
 	}
 	return result, nil
-}
-
-// WatchLeadershipSettings returns a watcher which can be used to wait
-// for leadership settings changes to be made for the application.
-func (s *Application) WatchLeadershipSettings() (watcher.NotifyWatcher, error) {
-	return s.st.LeadershipSettings.WatchLeadershipSettings(s.tag.Id())
 }

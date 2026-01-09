@@ -4,6 +4,7 @@
 package ec2
 
 import (
+	"context"
 	stderrors "errors"
 	"fmt"
 	"regexp"
@@ -17,17 +18,16 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/os/ostype"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
 
 const (
@@ -160,17 +160,42 @@ const (
 
 var deviceInUseRegexp = regexp.MustCompile(".*Attachment point .* is already in use")
 
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned. The
+// EC2 provider recommends that for block and filesystem storage the "ebs" pool
+// is used.
+//
+// Implements [storage.ProviderRegistry] interface.
+func (*environ) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	switch kind {
+	case storage.StorageKindBlock, storage.StorageKindFilesystem:
+		defaultPool, _ := storage.NewConfig(
+			EBS_ProviderType.String(), EBS_ProviderType, storage.Attrs{},
+		)
+		return defaultPool
+	default:
+		return common.GetCommonRecommendedIAASPoolForKind(kind)
+	}
+}
+
 // StorageProviderTypes implements storage.ProviderRegistry.
-func (e *environ) StorageProviderTypes() ([]storage.ProviderType, error) {
-	return []storage.ProviderType{EBS_ProviderType}, nil
+func (*environ) StorageProviderTypes() ([]storage.ProviderType, error) {
+	return append(
+		common.CommonIAASStorageProviderTypes(),
+		EBS_ProviderType,
+	), nil
 }
 
 // StorageProvider implements storage.ProviderRegistry.
 func (e *environ) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	if t == EBS_ProviderType {
+	switch t {
+	case EBS_ProviderType:
 		return &ebsProvider{e}, nil
+	default:
+		return common.GetCommonIAASStorageProvider(t)
 	}
-	return nil, errors.NotFoundf("storage provider %q", t)
 }
 
 // ebsProvider creates volume sources which use AWS EBS volumes.
@@ -304,12 +329,20 @@ func (*ebsProvider) Releasable() bool {
 	return true
 }
 
-// DefaultPools is defined on the Provider interface.
+// DefaultPools returns the default pools available through the ec2 provider.
+// By default a pool by the same name as the provider is offered in addition to
+// a fast ssd backed storage pool.
+//
+// Implements [storage.Provider] interface.
 func (e *ebsProvider) DefaultPools() []*storage.Config {
-	ssdPool, _ := storage.NewConfig("ebs-ssd", EBS_ProviderType, map[string]interface{}{
+	defaultPool, _ := storage.NewConfig(
+		EBS_ProviderType.String(), EBS_ProviderType, storage.Attrs{},
+	)
+	ssdPool, _ := storage.NewConfig("ebs-ssd", EBS_ProviderType, storage.Attrs{
 		EBS_VolumeType: volumeAliasSSD,
 	})
-	return []*storage.Config{ssdPool}
+
+	return []*storage.Config{defaultPool, ssdPool}
 }
 
 // VolumeSource is defined on the Provider interface.
@@ -373,7 +406,7 @@ func parseVolumeOptions(size uint64, attrs map[string]interface{}) (_ ec2.Create
 }
 
 // CreateVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) CreateVolumes(ctx context.ProviderCallContext, params []storage.VolumeParams) (_ []storage.CreateVolumesResult, err error) {
+func (v *ebsVolumeSource) CreateVolumes(ctx context.Context, params []storage.VolumeParams) (_ []storage.CreateVolumesResult, err error) {
 	// First, validate the params before we use them.
 	results := make([]storage.CreateVolumesResult, len(params))
 	instanceIds := set.NewStrings()
@@ -387,9 +420,9 @@ func (v *ebsVolumeSource) CreateVolumes(ctx context.ProviderCallContext, params 
 
 	instances := make(instanceCache)
 	if instanceIds.Size() > 1 {
-		if err := instances.update(v.env.ec2Client, ctx, instanceIds.Values()...); err != nil {
-			err := maybeConvertCredentialError(err, ctx)
-			logger.Debugf("querying running instances: %v", err)
+		if err := instances.update(ctx, v.env.ec2Client, instanceIds.Values()...); err != nil {
+			err := v.env.HandleCredentialError(ctx, err)
+			logger.Debugf(ctx, "querying running instances: %v", err)
 			// We ignore the error, because we don't want an invalid
 			// InstanceId reference from one VolumeParams to prevent
 			// the creation of another volume.
@@ -415,7 +448,7 @@ func (v *ebsVolumeSource) CreateVolumes(ctx context.ProviderCallContext, params 
 	return results, nil
 }
 
-func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storage.VolumeParams, instances instanceCache) (_ *storage.Volume, _ *storage.VolumeAttachment, err error) {
+func (v *ebsVolumeSource) createVolume(ctx context.Context, p storage.VolumeParams, instances instanceCache) (_ *storage.Volume, _ *storage.VolumeAttachment, err error) {
 	var volumeId *string
 	defer func() {
 		if err == nil || volumeId == nil {
@@ -424,7 +457,7 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 		if _, err := v.env.ec2Client.DeleteVolume(ctx, &ec2.DeleteVolumeInput{
 			VolumeId: volumeId,
 		}); err != nil {
-			logger.Errorf("error cleaning up volume %v: %v", *volumeId, maybeConvertCredentialError(err, ctx))
+			logger.Errorf(ctx, "error cleaning up volume %v: %v", *volumeId, v.env.HandleCredentialError(ctx, err))
 		}
 	}()
 
@@ -435,14 +468,14 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 
 	// Create.
 	instId := string(p.Attachment.InstanceId)
-	if err := instances.update(v.env.ec2Client, ctx, instId); err != nil {
-		return nil, nil, errors.Trace(maybeConvertCredentialError(err, ctx))
+	if err := instances.update(ctx, v.env.ec2Client, instId); err != nil {
+		return nil, nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
 	}
 	inst, err := instances.get(instId)
 	if err != nil {
 		// Can't create the volume without the instance,
 		// because we need to know what its AZ is.
-		return nil, nil, errors.Trace(maybeConvertCredentialError(err, ctx))
+		return nil, nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
 	}
 	vol, _ := parseVolumeOptions(p.Size, p.Attributes)
 	if inst.Placement != nil {
@@ -461,7 +494,7 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 
 	resp, err := v.env.ec2Client.CreateVolume(ctx, &vol)
 	if err != nil {
-		return nil, nil, errors.Trace(maybeConvertCredentialError(err, ctx))
+		return nil, nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
 	}
 	volumeId = resp.VolumeId
 
@@ -477,17 +510,21 @@ func (v *ebsVolumeSource) createVolume(ctx context.ProviderCallContext, p storag
 }
 
 // ListVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) ListVolumes(ctx context.ProviderCallContext) ([]string, error) {
+func (v *ebsVolumeSource) ListVolumes(ctx context.Context) ([]string, error) {
 	filter := makeFilter("tag:"+tags.JujuModel, v.modelUUID)
-	return listVolumes(v.env.ec2Client, ctx, false, filter)
+	volumes, err := listVolumes(ctx, v.env.ec2Client, false, filter)
+	if err != nil {
+		return nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
+	}
+	return volumes, nil
 }
 
-func listVolumes(client Client, ctx context.ProviderCallContext, includeRootDisks bool, filters ...types.Filter) ([]string, error) {
+func listVolumes(ctx context.Context, client Client, includeRootDisks bool, filters ...types.Filter) ([]string, error) {
 	resp, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
 		Filters: filters,
 	})
 	if err != nil {
-		return nil, maybeConvertCredentialError(err, ctx)
+		return nil, err
 	}
 	volumeIds := make([]string, 0, len(resp.Volumes))
 	for _, vol := range resp.Volumes {
@@ -511,7 +548,7 @@ func listVolumes(client Client, ctx context.ProviderCallContext, includeRootDisk
 }
 
 // DescribeVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) DescribeVolumes(ctx context.ProviderCallContext, volIds []string) ([]storage.DescribeVolumesResult, error) {
+func (v *ebsVolumeSource) DescribeVolumes(ctx context.Context, volIds []string) ([]storage.DescribeVolumesResult, error) {
 	// TODO(axw) invalid volIds here should not cause the whole
 	// operation to fail. If we get an invalid volume ID response,
 	// fall back to querying each volume individually. That should
@@ -520,7 +557,7 @@ func (v *ebsVolumeSource) DescribeVolumes(ctx context.ProviderCallContext, volId
 		VolumeIds: volIds,
 	})
 	if err != nil {
-		return nil, maybeConvertCredentialError(err, ctx)
+		return nil, v.env.HandleCredentialError(ctx, err)
 	}
 	byId := make(map[string]types.Volume)
 	for _, vol := range resp.Volumes {
@@ -549,23 +586,35 @@ func (v *ebsVolumeSource) DescribeVolumes(ctx context.ProviderCallContext, volId
 }
 
 // DestroyVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) DestroyVolumes(ctx context.ProviderCallContext, volIds []string) ([]error, error) {
-	return foreachVolume(v.env.ec2Client, ctx, volIds, destroyVolume), nil
+func (v *ebsVolumeSource) DestroyVolumes(ctx context.Context, volIds []string) ([]error, error) {
+	errs := foreachVolume(ctx, v.env.ec2Client, volIds, destroyVolume)
+	for i, err := range errs {
+		if err != nil {
+			errs[i] = errors.Trace(v.env.HandleCredentialError(ctx, err))
+		}
+	}
+	return errs, nil
 }
 
 // ReleaseVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) ReleaseVolumes(ctx context.ProviderCallContext, volIds []string) ([]error, error) {
-	return foreachVolume(v.env.ec2Client, ctx, volIds, releaseVolume), nil
+func (v *ebsVolumeSource) ReleaseVolumes(ctx context.Context, volIds []string) ([]error, error) {
+	errs := foreachVolume(ctx, v.env.ec2Client, volIds, releaseVolume)
+	for i, err := range errs {
+		if err != nil {
+			errs[i] = errors.Trace(v.env.HandleCredentialError(ctx, err))
+		}
+	}
+	return errs, nil
 }
 
-func foreachVolume(client Client, ctx context.ProviderCallContext, volIds []string, f func(Client, context.ProviderCallContext, string) error) []error {
+func foreachVolume(ctx context.Context, client Client, volIds []string, f func(context.Context, Client, string) error) []error {
 	var wg sync.WaitGroup
 	wg.Add(len(volIds))
 	results := make([]error, len(volIds))
 	for i, volumeId := range volIds {
 		go func(i int, volumeId string) {
 			defer wg.Done()
-			results[i] = f(client, ctx, volumeId)
+			results[i] = f(ctx, client, volumeId)
 		}(i, volumeId)
 	}
 	wg.Wait()
@@ -577,28 +626,26 @@ var destroyVolumeAttempt = utils.AttemptStrategy{
 	Delay: 5 * time.Second,
 }
 
-func destroyVolume(client Client, ctx context.ProviderCallContext, volumeId string) (err error) {
+func destroyVolume(ctx context.Context, client Client, volumeId string) (err error) {
 	defer func() {
 		if err != nil {
-			if ec2ErrCode(err) == volumeNotFound || errors.IsNotFound(err) {
+			if ec2ErrCode(err) == volumeNotFound || errors.Is(err, errors.NotFound) {
 				// Either the volume isn't found, or we queried the
 				// instance corresponding to a DeleteOnTermination
 				// attachment; in either case, the volume is or will
 				// be destroyed.
-				logger.Tracef("Ignoring error destroying volume %q: %v", volumeId, err)
+				logger.Tracef(ctx, "Ignoring error destroying volume %q: %v", volumeId, err)
 				err = nil
-			} else {
-				err = maybeConvertCredentialError(err, ctx)
 			}
 		}
 	}()
 
-	logger.Debugf("destroying %q", volumeId)
+	logger.Debugf(ctx, "destroying %q", volumeId)
 
 	// Volumes must not be in-use when destroying. A volume may
 	// still be in-use when the instance it is attached to is
 	// in the process of being terminated.
-	volume, err := waitVolume(client, ctx, volumeId, destroyVolumeAttempt, func(volume *types.Volume) (bool, error) {
+	volume, err := waitVolume(ctx, client, volumeId, destroyVolumeAttempt, func(volume *types.Volume) (bool, error) {
 		if volume.State != volumeStatusInUse {
 			// Volume is not in use, it should be OK to destroy now.
 			return true, nil
@@ -662,7 +709,7 @@ func destroyVolume(client Client, ctx context.ProviderCallContext, volumeId stri
 		if len(args) == 0 {
 			return false, nil
 		}
-		results, err := detachVolumes(client, ctx, args)
+		results, err := detachVolumes(ctx, client, args)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -688,12 +735,12 @@ func destroyVolume(client Client, ctx context.ProviderCallContext, volumeId stri
 	_, err = client.DeleteVolume(ctx, &ec2.DeleteVolumeInput{
 		VolumeId: aws.String(volumeId),
 	})
-	return errors.Annotatef(maybeConvertCredentialError(err, ctx), "destroying %q", volumeId)
+	return errors.Annotatef(err, "destroying %q", volumeId)
 }
 
-func releaseVolume(client Client, ctx context.ProviderCallContext, volumeId string) error {
-	logger.Debugf("releasing %q", volumeId)
-	_, err := waitVolume(client, ctx, volumeId, destroyVolumeAttempt, func(volume *types.Volume) (bool, error) {
+func releaseVolume(ctx context.Context, client Client, volumeId string) error {
+	logger.Debugf(ctx, "releasing %q", volumeId)
+	_, err := waitVolume(ctx, client, volumeId, destroyVolumeAttempt, func(volume *types.Volume) (bool, error) {
 		if volume.State == volumeStatusAvailable {
 			return true, nil
 		}
@@ -712,7 +759,7 @@ func releaseVolume(client Client, ctx context.ProviderCallContext, volumeId stri
 		if err == errWaitVolumeTimeout {
 			return errors.Errorf("timed out waiting for volume %v to become available", volumeId)
 		}
-		return errors.Annotatef(maybeConvertCredentialError(err, ctx), "cannot release volume %q", volumeId)
+		return errors.Annotatef(err, "cannot release volume %q", volumeId)
 	}
 	// Releasing the volume just means dropping the
 	// tags that associate it with the model and
@@ -721,7 +768,7 @@ func releaseVolume(client Client, ctx context.ProviderCallContext, volumeId stri
 		tags.JujuModel:      "",
 		tags.JujuController: "",
 	}
-	return errors.Annotate(tagResources(client, ctx, tags, volumeId), "tagging volume")
+	return errors.Annotate(tagResources(ctx, client, tags, volumeId), "tagging volume")
 }
 
 // ValidateVolumeParams is specified on the storage.VolumeSource interface.
@@ -766,7 +813,7 @@ func (v *ebsVolumeSource) ValidateVolumeParams(params storage.VolumeParams) erro
 }
 
 // AttachVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) AttachVolumes(ctx context.ProviderCallContext, attachParams []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
+func (v *ebsVolumeSource) AttachVolumes(ctx context.Context, attachParams []storage.VolumeAttachmentParams) ([]storage.AttachVolumesResult, error) {
 	// We need the instance type for each instance we are
 	// attaching to so we can determine how to identify the
 	// volume attachment
@@ -775,9 +822,9 @@ func (v *ebsVolumeSource) AttachVolumes(ctx context.ProviderCallContext, attachP
 		instIds.Add(string(p.InstanceId))
 	}
 	instances := make(instanceCache)
-	if err := instances.update(v.env.ec2Client, ctx, instIds.Values()...); err != nil {
-		err := maybeConvertCredentialError(err, ctx)
-		logger.Debugf("querying running instances: %v", err)
+	if err := instances.update(ctx, v.env.ec2Client, instIds.Values()...); err != nil {
+		err := v.env.HandleCredentialError(ctx, err)
+		logger.Debugf(ctx, "querying running instances: %v", err)
 		// We ignore the error, because we don't want an invalid
 		// InstanceId reference from one VolumeParams to prevent
 		// the creation of another volume.
@@ -803,7 +850,7 @@ func (v *ebsVolumeSource) AttachVolumes(ctx context.ProviderCallContext, attachP
 		nextDeviceName := blockDeviceNamer(numbers)
 		_, deviceName, err := v.attachOneVolume(ctx, nextDeviceName, params.VolumeId, instId)
 		if err != nil {
-			results[i].Error = maybeConvertCredentialError(err, ctx)
+			results[i].Error = v.env.HandleCredentialError(ctx, err)
 			continue
 		}
 
@@ -838,14 +885,14 @@ func (v *ebsVolumeSource) AttachVolumes(ctx context.ProviderCallContext, attachP
 }
 
 func (v *ebsVolumeSource) attachOneVolume(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	nextDeviceName func() (string, string, error),
 	volumeId, instId string,
 ) (string, string, error) {
 	// Wait for the volume to move out of "creating".
 	volume, err := v.waitVolumeCreated(ctx, volumeId)
 	if err != nil {
-		return "", "", errors.Trace(maybeConvertCredentialError(err, ctx))
+		return "", "", errors.Trace(v.env.HandleCredentialError(ctx, err))
 	}
 
 	// Possible statuses:
@@ -903,19 +950,19 @@ func (v *ebsVolumeSource) attachOneVolume(
 			}
 		}
 		if err != nil {
-			return "", "", errors.Annotate(maybeConvertCredentialError(err, ctx), "attaching volume")
+			return "", "", errors.Annotate(v.env.HandleCredentialError(ctx, err), "attaching volume")
 		}
 		return requestDeviceName, actualDeviceName, nil
 	}
 }
 
-func (v *ebsVolumeSource) waitVolumeCreated(ctx context.ProviderCallContext, volumeId string) (*types.Volume, error) {
+func (v *ebsVolumeSource) waitVolumeCreated(ctx context.Context, volumeId string) (*types.Volume, error) {
 	var attempt = utils.AttemptStrategy{
 		Total: 5 * time.Second,
 		Delay: 200 * time.Millisecond,
 	}
 	var lastStatus types.VolumeState
-	volume, err := waitVolume(v.env.ec2Client, ctx, volumeId, attempt, func(volume *types.Volume) (bool, error) {
+	volume, err := waitVolume(ctx, v.env.ec2Client, volumeId, attempt, func(volume *types.Volume) (bool, error) {
 		state := volume.State
 		lastStatus = state
 		return lastStatus != volumeStatusCreating, nil
@@ -926,7 +973,7 @@ func (v *ebsVolumeSource) waitVolumeCreated(ctx context.ProviderCallContext, vol
 			volumeId, lastStatus,
 		)
 	} else if err != nil {
-		return nil, errors.Trace(maybeConvertCredentialError(err, ctx))
+		return nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
 	}
 	return volume, nil
 }
@@ -934,14 +981,14 @@ func (v *ebsVolumeSource) waitVolumeCreated(ctx context.ProviderCallContext, vol
 var errWaitVolumeTimeout = errors.New("timed out")
 
 func waitVolume(
+	ctx context.Context,
 	client Client,
-	ctx context.ProviderCallContext,
 	volumeId string,
 	attempt utils.AttemptStrategy,
 	pred func(v *types.Volume) (bool, error),
 ) (*types.Volume, error) {
 	for a := attempt.Start(); a.Next(); {
-		volume, err := describeVolume(client, ctx, volumeId)
+		volume, err := describeVolume(ctx, client, volumeId)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -956,12 +1003,12 @@ func waitVolume(
 	return nil, errWaitVolumeTimeout
 }
 
-func describeVolume(client Client, ctx context.ProviderCallContext, volumeId string) (*types.Volume, error) {
+func describeVolume(ctx context.Context, client Client, volumeId string) (*types.Volume, error) {
 	resp, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
 		VolumeIds: []string{volumeId},
 	})
 	if err != nil {
-		return nil, errors.Annotate(maybeConvertCredentialError(err, ctx), "querying volume")
+		return nil, errors.Annotate(err, "querying volume")
 	}
 	if len(resp.Volumes) == 0 {
 		return nil, errors.NotFoundf("%v", volumeId)
@@ -973,7 +1020,7 @@ func describeVolume(client Client, ctx context.ProviderCallContext, volumeId str
 
 type instanceCache map[string]types.Instance
 
-func (c instanceCache) update(ec2client Client, ctx context.ProviderCallContext, ids ...string) error {
+func (c instanceCache) update(ctx context.Context, ec2client Client, ids ...string) error {
 	if len(ids) == 1 {
 		if _, ok := c[ids[0]]; ok {
 			return nil
@@ -987,7 +1034,7 @@ func (c instanceCache) update(ec2client Client, ctx context.ProviderCallContext,
 		Filters:     []types.Filter{stateFilter, idFilter},
 	})
 	if err != nil {
-		return errors.Annotate(maybeConvertCredentialError(err, ctx), "querying instance details")
+		return errors.Annotate(err, "querying instance details")
 	}
 	for j := range resp.Reservations {
 		r := resp.Reservations[j]
@@ -1007,11 +1054,20 @@ func (c instanceCache) get(id string) (types.Instance, error) {
 }
 
 // DetachVolumes is specified on the storage.VolumeSource interface.
-func (v *ebsVolumeSource) DetachVolumes(ctx context.ProviderCallContext, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
-	return detachVolumes(v.env.ec2Client, ctx, attachParams)
+func (v *ebsVolumeSource) DetachVolumes(ctx context.Context, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
+	errs, err := detachVolumes(ctx, v.env.ec2Client, attachParams)
+	if err != nil {
+		return nil, errors.Trace(v.env.HandleCredentialError(ctx, err))
+	}
+	for i, err := range errs {
+		if err != nil {
+			errs[i] = errors.Trace(v.env.HandleCredentialError(ctx, err))
+		}
+	}
+	return errs, nil
 }
 
-func detachVolumes(client Client, ctx context.ProviderCallContext, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
+func detachVolumes(ctx context.Context, client Client, attachParams []storage.VolumeAttachmentParams) ([]error, error) {
 	results := make([]error, len(attachParams))
 	for i, params := range attachParams {
 		_, err := client.DetachVolume(ctx, &ec2.DetachVolumeInput{
@@ -1030,7 +1086,7 @@ func detachVolumes(client Client, ctx context.ProviderCallContext, attachParams 
 		}
 		if err != nil {
 			results[i] = errors.Annotatef(
-				maybeConvertCredentialError(err, ctx), "detaching %s from %s",
+				err, "detaching %s from %s",
 				names.ReadableString(params.Volume),
 				names.ReadableString(params.Machine),
 			)
@@ -1040,13 +1096,13 @@ func detachVolumes(client Client, ctx context.ProviderCallContext, attachParams 
 }
 
 // ImportVolume is specified on the storage.VolumeImporter interface.
-func (v *ebsVolumeSource) ImportVolume(ctx context.ProviderCallContext, volumeId string, storageName string, tags map[string]string, force bool) (storage.VolumeInfo, error) {
+func (v *ebsVolumeSource) ImportVolume(ctx context.Context, volumeId string, storageName string, tags map[string]string, force bool) (storage.VolumeInfo, error) {
 	resp, err := v.env.ec2Client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
 		VolumeIds: []string{volumeId},
 	})
 	if err != nil {
 		// TODO(axw) check for "not found" response, massage error message?
-		return storage.VolumeInfo{}, maybeConvertCredentialError(err, ctx)
+		return storage.VolumeInfo{}, v.env.HandleCredentialError(ctx, err)
 	}
 	if len(resp.Volumes) != 1 {
 		return storage.VolumeInfo{}, errors.Errorf("expected 1 volume result, got %d", len(resp.Volumes))
@@ -1056,8 +1112,8 @@ func (v *ebsVolumeSource) ImportVolume(ctx context.ProviderCallContext, volumeId
 	if volState != volumeStatusAvailable {
 		return storage.VolumeInfo{}, errors.Errorf("cannot import volume with status %q", volState)
 	}
-	if err := tagResources(v.env.ec2Client, ctx, tags, volumeId); err != nil {
-		return storage.VolumeInfo{}, errors.Annotate(err, "tagging volume")
+	if err := tagResources(ctx, v.env.ec2Client, tags, volumeId); err != nil {
+		return storage.VolumeInfo{}, errors.Annotate(v.env.HandleCredentialError(ctx, err), "tagging volume")
 	}
 	return storage.VolumeInfo{
 		VolumeId:   volumeId,
@@ -1128,7 +1184,7 @@ func getBlockDeviceMappings(
 		if *cons.RootDisk >= minRootDiskSizeMiB {
 			rootDiskSizeMiB = *cons.RootDisk
 		} else {
-			logger.Infof(
+			logger.Infof(context.TODO(),
 				"Ignoring root-disk constraint of %dM because it is smaller than the minimum size %dM",
 				*cons.RootDisk,
 				minRootDiskSizeMiB,

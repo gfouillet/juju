@@ -4,13 +4,13 @@
 package instancemutater_test
 
 import (
+	"testing"
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/agent/instancemutater"
 	"github.com/juju/juju/api/agent/instancemutater/mocks"
@@ -18,8 +18,8 @@ import (
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/lxdprofile"
 	"github.com/juju/juju/core/status"
+	jujutesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	jujutesting "github.com/juju/juju/testing"
 )
 
 type instanceMutaterMachineSuite struct {
@@ -35,9 +35,10 @@ type instanceMutaterMachineSuite struct {
 	apiCaller *mocks.MockAPICaller
 }
 
-var _ = gc.Suite(&instanceMutaterMachineSuite{})
-
-func (s *instanceMutaterMachineSuite) SetUpTest(c *gc.C) {
+func TestInstanceMutaterMachineSuite(t *testing.T) {
+	tc.Run(t, &instanceMutaterMachineSuite{})
+}
+func (s *instanceMutaterMachineSuite) SetUpTest(c *tc.C) {
 	s.tag = names.NewMachineTag("0")
 	s.args = params.Entities{Entities: []params.Entity{{Tag: s.tag.String()}}}
 	s.unitName = "lxd-profile/0"
@@ -46,37 +47,37 @@ func (s *instanceMutaterMachineSuite) SetUpTest(c *gc.C) {
 	s.BaseSuite.SetUpTest(c)
 }
 
-func (s *instanceMutaterMachineSuite) TestSetCharmProfiles(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestSetCharmProfiles(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	m := s.machineForScenario(c,
 		s.expectSetCharmProfilesFacadeCall,
 	)
 
-	err := m.SetCharmProfiles(s.profiles)
-	c.Assert(err, jc.ErrorIsNil)
+	err := m.SetCharmProfiles(c.Context(), s.profiles)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *instanceMutaterMachineSuite) TestSetCharmProfilesError(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestSetCharmProfilesError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	m := s.machineForScenario(c,
 		s.expectSetCharmProfilesFacadeCallReturnsError(errors.New("failed")),
 	)
 
-	err := m.SetCharmProfiles(s.profiles)
-	c.Assert(err, gc.ErrorMatches, "failed")
+	err := m.SetCharmProfiles(c.Context(), s.profiles)
+	c.Assert(err, tc.ErrorMatches, "failed")
 }
 
-func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeeded(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeeded(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.machineForScenario(c,
 		s.expectWatchLXDProfileVerificationNeeded,
 		s.expectNotifyWatcher,
 	)
-	ch, err := api.WatchLXDProfileVerificationNeeded()
-	c.Assert(err, jc.ErrorIsNil)
+	ch, err := api.WatchLXDProfileVerificationNeeded(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// watch for the changes
 	for i := 0; i < 2; i++ {
@@ -88,35 +89,35 @@ func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeeded(c *g
 	}
 }
 
-func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeededServerError(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeededServerError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.machineForScenario(c,
 		s.expectWatchLXDProfileVerificationNeededWithError("", "failed"),
 	)
-	_, err := api.WatchLXDProfileVerificationNeeded()
-	c.Assert(err, gc.ErrorMatches, "failed")
+	_, err := api.WatchLXDProfileVerificationNeeded(c.Context())
+	c.Assert(err, tc.ErrorMatches, "failed")
 }
 
-func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeededNotSupported(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestWatchLXDProfileVerificationNeededNotSupported(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.machineForScenario(c,
 		s.expectWatchLXDProfileVerificationNeededWithError("not supported", "failed"),
 	)
-	_, err := api.WatchLXDProfileVerificationNeeded()
-	c.Assert(err, jc.Satisfies, errors.IsNotSupported)
+	_, err := api.WatchLXDProfileVerificationNeeded(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotSupported)
 }
 
-func (s *instanceMutaterMachineSuite) TestWatchContainers(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestWatchContainers(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.machineForScenario(c,
 		s.expectWatchContainers,
 		s.expectStringsWatcher,
 	)
-	ch, err := api.WatchContainers()
-	c.Assert(err, jc.ErrorIsNil)
+	ch, err := api.WatchContainers(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// watch for the changes
 	for i := 0; i < 2; i++ {
@@ -128,21 +129,21 @@ func (s *instanceMutaterMachineSuite) TestWatchContainers(c *gc.C) {
 	}
 }
 
-func (s *instanceMutaterMachineSuite) TestWatchContainersServerError(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestWatchContainersServerError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	api := s.machineForScenario(c,
 		s.expectWatchContainersWithErrors(errors.New("failed")),
 	)
-	_, err := api.WatchContainers()
-	c.Assert(err, gc.ErrorMatches, "failed")
+	_, err := api.WatchContainers(c.Context())
+	c.Assert(err, tc.ErrorMatches, "failed")
 }
 
-func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChanges(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChanges(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	args := params.Entity{Tag: s.tag.String()}
-	results := params.CharmProfilingInfoResultV4{
+	results := params.CharmProfilingInfoResult{
 		InstanceId:      instance.Id("juju-gd4c23-0"),
 		ModelName:       "default",
 		CurrentProfiles: []string{"juju-default-neutron-ovswitch-255"},
@@ -155,21 +156,21 @@ func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChanges(c *gc
 	}
 
 	fExp := s.fCaller.EXPECT()
-	fExp.FacadeCall("CharmProfilingInfo", args, gomock.Any()).SetArg(2, results).Return(nil)
+	fExp.FacadeCall(gomock.Any(), "CharmProfilingInfo", args, gomock.Any()).SetArg(3, results).Return(nil)
 
-	info, err := s.setupMachine().CharmProfilingInfo()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(info.InstanceId, gc.Equals, results.InstanceId)
-	c.Assert(info.ModelName, gc.Equals, results.ModelName)
-	c.Assert(info.CurrentProfiles, gc.DeepEquals, results.CurrentProfiles)
-	c.Assert(info.ProfileChanges[0].Profile.Description, gc.Equals, "Test Profile")
+	info, err := s.setupMachine().CharmProfilingInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(info.InstanceId, tc.Equals, results.InstanceId)
+	c.Assert(info.ModelName, tc.Equals, results.ModelName)
+	c.Assert(info.CurrentProfiles, tc.DeepEquals, results.CurrentProfiles)
+	c.Assert(info.ProfileChanges[0].Profile.Description, tc.Equals, "Test Profile")
 }
 
-func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChangesWithNoProfile(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChangesWithNoProfile(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	args := params.Entity{Tag: s.tag.String()}
-	results := params.CharmProfilingInfoResultV4{
+	results := params.CharmProfilingInfoResult{
 		InstanceId:      instance.Id("juju-gd4c23-0"),
 		ModelName:       "default",
 		CurrentProfiles: []string{"juju-default-neutron-ovswitch-255"},
@@ -180,39 +181,39 @@ func (s *instanceMutaterMachineSuite) TestCharmProfilingInfoSuccessChangesWithNo
 	}
 
 	fExp := s.fCaller.EXPECT()
-	fExp.FacadeCall("CharmProfilingInfo", args, gomock.Any()).SetArg(2, results).Return(nil)
+	fExp.FacadeCall(gomock.Any(), "CharmProfilingInfo", args, gomock.Any()).SetArg(3, results).Return(nil)
 
-	info, err := s.setupMachine().CharmProfilingInfo()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(info.InstanceId, gc.Equals, results.InstanceId)
-	c.Assert(info.ModelName, gc.Equals, results.ModelName)
-	c.Assert(info.CurrentProfiles, gc.DeepEquals, results.CurrentProfiles)
-	c.Assert(info.ProfileChanges[0].Profile.Description, gc.Equals, "")
+	info, err := s.setupMachine().CharmProfilingInfo(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(info.InstanceId, tc.Equals, results.InstanceId)
+	c.Assert(info.ModelName, tc.Equals, results.ModelName)
+	c.Assert(info.CurrentProfiles, tc.DeepEquals, results.CurrentProfiles)
+	c.Assert(info.ProfileChanges[0].Profile.Description, tc.Equals, "")
 }
 
-func (s *instanceMutaterMachineSuite) TestSetModificationStatus(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestSetModificationStatus(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	m := s.machineForScenario(c,
 		s.expectSetModificationFacadeCall(status.Applied, "applied", nil),
 	)
 
-	err := m.SetModificationStatus(status.Applied, "applied", nil)
-	c.Assert(err, jc.ErrorIsNil)
+	err := m.SetModificationStatus(c.Context(), status.Applied, "applied", nil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *instanceMutaterMachineSuite) TestSetModificationStatusReturnsError(c *gc.C) {
+func (s *instanceMutaterMachineSuite) TestSetModificationStatusReturnsError(c *tc.C) {
 	defer s.setup(c).Finish()
 
 	m := s.machineForScenario(c,
 		s.expectSetModificationFacadeCallReturnsError(errors.New("bad")),
 	)
 
-	err := m.SetModificationStatus(status.Applied, "applied", nil)
-	c.Assert(err, gc.ErrorMatches, "bad")
+	err := m.SetModificationStatus(c.Context(), status.Applied, "applied", nil)
+	c.Assert(err, tc.ErrorMatches, "bad")
 }
 
-func (s *instanceMutaterMachineSuite) setup(c *gc.C) *gomock.Controller {
+func (s *instanceMutaterMachineSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.fCaller = mocks.NewMockFacadeCaller(ctrl)
@@ -236,7 +237,7 @@ func (s *instanceMutaterMachineSuite) setupMachine() *instancemutater.Machine {
 	return instancemutater.NewMachine(s.fCaller, s.tag, life.Alive)
 }
 
-func (s *instanceMutaterMachineSuite) machineForScenario(c *gc.C, behaviours ...func()) *instancemutater.Machine {
+func (s *instanceMutaterMachineSuite) machineForScenario(c *tc.C, behaviours ...func()) *instancemutater.Machine {
 	for _, b := range behaviours {
 		b()
 	}
@@ -249,7 +250,7 @@ func (s *instanceMutaterMachineSuite) expectSetCharmProfilesFacadeCall() {
 	args := s.setUpSetCharmProfilesArgs()
 
 	fExp := s.fCaller.EXPECT()
-	fExp.FacadeCall("SetCharmProfiles", args, gomock.Any()).SetArg(2, results).Return(nil)
+	fExp.FacadeCall(gomock.Any(), "SetCharmProfiles", args, gomock.Any()).SetArg(3, results).Return(nil)
 }
 
 func (s *instanceMutaterMachineSuite) expectSetCharmProfilesFacadeCallReturnsError(err error) func() {
@@ -262,7 +263,7 @@ func (s *instanceMutaterMachineSuite) expectSetCharmProfilesFacadeCallReturnsErr
 		args := s.setUpSetCharmProfilesArgs()
 
 		fExp := s.fCaller.EXPECT()
-		fExp.FacadeCall("SetCharmProfiles", args, gomock.Any()).SetArg(2, results).Return(nil)
+		fExp.FacadeCall(gomock.Any(), "SetCharmProfiles", args, gomock.Any()).SetArg(3, results).Return(nil)
 	}
 }
 
@@ -280,7 +281,7 @@ func (s *instanceMutaterMachineSuite) expectSetModificationFacadeCall(status sta
 		}
 
 		fExp := s.fCaller.EXPECT()
-		fExp.FacadeCall("SetModificationStatus", args, gomock.Any()).SetArg(2, results).Return(nil)
+		fExp.FacadeCall(gomock.Any(), "SetModificationStatus", args, gomock.Any()).SetArg(3, results).Return(nil)
 	}
 }
 
@@ -302,7 +303,7 @@ func (s *instanceMutaterMachineSuite) expectSetModificationFacadeCallReturnsErro
 		}
 
 		fExp := s.fCaller.EXPECT()
-		fExp.FacadeCall("SetModificationStatus", args, gomock.Any()).SetArg(2, results).Return(nil)
+		fExp.FacadeCall(gomock.Any(), "SetModificationStatus", args, gomock.Any()).SetArg(3, results).Return(nil)
 	}
 }
 
@@ -320,7 +321,7 @@ func (s *instanceMutaterMachineSuite) expectWatchLXDProfileVerificationNeeded() 
 		},
 	}
 	fExp := s.fCaller.EXPECT()
-	fExp.FacadeCall("WatchLXDProfileVerificationNeeded", args, gomock.Any()).SetArg(2, results).Return(nil)
+	fExp.FacadeCall(gomock.Any(), "WatchLXDProfileVerificationNeeded", args, gomock.Any()).SetArg(3, results).Return(nil)
 	fExp.RawAPICaller().Return(s.apiCaller)
 }
 
@@ -342,7 +343,7 @@ func (s *instanceMutaterMachineSuite) expectWatchLXDProfileVerificationNeededWit
 			},
 		}
 		aExp := s.fCaller.EXPECT()
-		aExp.FacadeCall("WatchLXDProfileVerificationNeeded", args, gomock.Any()).SetArg(2, results).Return(nil)
+		aExp.FacadeCall(gomock.Any(), "WatchLXDProfileVerificationNeeded", args, gomock.Any()).SetArg(3, results).Return(nil)
 	}
 }
 
@@ -353,7 +354,7 @@ func (s *instanceMutaterMachineSuite) expectWatchContainers() {
 		Changes:          []string{"0/lxd/0"},
 	}
 	fExp := s.fCaller.EXPECT()
-	fExp.FacadeCall("WatchContainers", arg, gomock.Any()).SetArg(2, result).Return(nil)
+	fExp.FacadeCall(gomock.Any(), "WatchContainers", arg, gomock.Any()).SetArg(3, result).Return(nil)
 	fExp.RawAPICaller().Return(s.apiCaller)
 }
 
@@ -366,18 +367,18 @@ func (s *instanceMutaterMachineSuite) expectWatchContainersWithErrors(err error)
 			},
 		}
 		aExp := s.fCaller.EXPECT()
-		aExp.FacadeCall("WatchContainers", arg, gomock.Any()).SetArg(2, result).Return(nil)
+		aExp.FacadeCall(gomock.Any(), "WatchContainers", arg, gomock.Any()).SetArg(3, result).Return(nil)
 	}
 }
 
 func (s *instanceMutaterMachineSuite) expectNotifyWatcher() {
 	aExp := s.apiCaller.EXPECT()
 	aExp.BestFacadeVersion("NotifyWatcher").Return(1)
-	aExp.APICall("NotifyWatcher", 1, "1", "Next", nil, gomock.Any()).Return(nil).MinTimes(1)
+	aExp.APICall(gomock.Any(), "NotifyWatcher", 1, "1", "Next", nil, gomock.Any()).Return(nil).MinTimes(1)
 }
 
 func (s *instanceMutaterMachineSuite) expectStringsWatcher() {
 	aExp := s.apiCaller.EXPECT()
 	aExp.BestFacadeVersion("StringsWatcher").Return(1)
-	aExp.APICall("StringsWatcher", 1, "1", "Next", nil, gomock.Any()).Return(nil).MinTimes(1)
+	aExp.APICall(gomock.Any(), "StringsWatcher", 1, "1", "Next", nil, gomock.Any()).Return(nil).MinTimes(1)
 }

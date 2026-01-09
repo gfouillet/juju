@@ -3,9 +3,6 @@
         "Name": "Action",
         "Description": "",
         "Version": 7,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -487,9 +484,6 @@
                             "items": {
                                 "type": "string"
                             }
-                        },
-                        "workload-context": {
-                            "type": "boolean"
                         }
                     },
                     "additionalProperties": false,
@@ -541,13 +535,6 @@
         "Name": "Admin",
         "Description": "",
         "Version": 3,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -821,128 +808,9 @@
         }
     },
     {
-        "Name": "AllModelWatcher",
-        "Description": "",
-        "Version": 4,
-        "AvailableTo": [
-            "controller-user"
-        ],
-        "Schema": {
-            "type": "object",
-            "properties": {
-                "Next": {
-                    "type": "object",
-                    "properties": {
-                        "Result": {
-                            "$ref": "#/definitions/AllWatcherNextResults"
-                        }
-                    }
-                },
-                "Stop": {
-                    "type": "object"
-                }
-            },
-            "definitions": {
-                "AllWatcherNextResults": {
-                    "type": "object",
-                    "properties": {
-                        "deltas": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Delta"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "deltas"
-                    ]
-                },
-                "Delta": {
-                    "type": "object",
-                    "properties": {
-                        "entity": {
-                            "type": "object",
-                            "additionalProperties": true
-                        },
-                        "removed": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "removed",
-                        "entity"
-                    ]
-                }
-            }
-        }
-    },
-    {
-        "Name": "AllWatcher",
-        "Description": "",
-        "Version": 3,
-        "AvailableTo": [
-            "model-user"
-        ],
-        "Schema": {
-            "type": "object",
-            "properties": {
-                "Next": {
-                    "type": "object",
-                    "properties": {
-                        "Result": {
-                            "$ref": "#/definitions/AllWatcherNextResults"
-                        }
-                    }
-                },
-                "Stop": {
-                    "type": "object"
-                }
-            },
-            "definitions": {
-                "AllWatcherNextResults": {
-                    "type": "object",
-                    "properties": {
-                        "deltas": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Delta"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "deltas"
-                    ]
-                },
-                "Delta": {
-                    "type": "object",
-                    "properties": {
-                        "entity": {
-                            "type": "object",
-                            "additionalProperties": true
-                        },
-                        "removed": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "removed",
-                        "entity"
-                    ]
-                }
-            }
-        }
-    },
-    {
         "Name": "Annotations",
         "Description": "",
         "Version": 2,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -1128,12 +996,6 @@
         "Name": "Application",
         "Description": "",
         "Version": 22,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -1377,7 +1239,7 @@
                     "type": "object",
                     "properties": {
                         "Params": {
-                            "$ref": "#/definitions/ApplicationSetCharm"
+                            "$ref": "#/definitions/ApplicationSetCharmV2"
                         }
                     }
                 },
@@ -1397,17 +1259,6 @@
                     "properties": {
                         "Params": {
                             "$ref": "#/definitions/SetConstraints"
-                        }
-                    }
-                },
-                "SetMetricCredentials": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/ApplicationMetricCredentials"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResults"
                         }
                     }
                 },
@@ -1446,17 +1297,6 @@
                     "properties": {
                         "Params": {
                             "$ref": "#/definitions/ApplicationConfigUnsetArgs"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResults"
-                        }
-                    }
-                },
-                "UpdateApplicationBase": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/UpdateChannelArgs"
                         },
                         "Result": {
                             "$ref": "#/definitions/ErrorResults"
@@ -1696,7 +1536,7 @@
                             "type": "object",
                             "patternProperties": {
                                 ".*": {
-                                    "$ref": "#/definitions/Constraints"
+                                    "$ref": "#/definitions/Directive"
                                 }
                             }
                         }
@@ -1915,40 +1755,6 @@
                         "args"
                     ]
                 },
-                "ApplicationMetricCredential": {
-                    "type": "object",
-                    "properties": {
-                        "application": {
-                            "type": "string"
-                        },
-                        "metrics-credentials": {
-                            "type": "array",
-                            "items": {
-                                "type": "integer"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "application",
-                        "metrics-credentials"
-                    ]
-                },
-                "ApplicationMetricCredentials": {
-                    "type": "object",
-                    "properties": {
-                        "creds": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/ApplicationMetricCredential"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "creds"
-                    ]
-                },
                 "ApplicationOfferDetailsV5": {
                     "type": "object",
                     "properties": {
@@ -2045,7 +1851,7 @@
                         "life"
                     ]
                 },
-                "ApplicationSetCharm": {
+                "ApplicationSetCharmV2": {
                     "type": "object",
                     "properties": {
                         "application": {
@@ -2099,11 +1905,11 @@
                                 }
                             }
                         },
-                        "storage-constraints": {
+                        "storage-directives": {
                             "type": "object",
                             "patternProperties": {
                                 ".*": {
-                                    "$ref": "#/definitions/StorageConstraints"
+                                    "$ref": "#/definitions/StorageDirectives"
                                 }
                             }
                         }
@@ -2129,7 +1935,7 @@
                             "type": "object",
                             "patternProperties": {
                                 ".*": {
-                                    "$ref": "#/definitions/StorageConstraints"
+                                    "$ref": "#/definitions/StorageDirectives"
                                 }
                             }
                         }
@@ -2165,7 +1971,7 @@
                             "type": "object",
                             "patternProperties": {
                                 ".*": {
-                                    "$ref": "#/definitions/StorageConstraints"
+                                    "$ref": "#/definitions/StorageDirectives"
                                 }
                             }
                         }
@@ -2427,21 +2233,26 @@
                 "Constraints": {
                     "type": "object",
                     "properties": {
+                        "Attributes": {
+                            "type": "object",
+                            "patternProperties": {
+                                ".*": {
+                                    "type": "string"
+                                }
+                            }
+                        },
                         "Count": {
                             "type": "integer"
                         },
-                        "Pool": {
+                        "Type": {
                             "type": "string"
-                        },
-                        "Size": {
-                            "type": "integer"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
-                        "Pool",
-                        "Size",
-                        "Count"
+                        "Type",
+                        "Count",
+                        "Attributes"
                     ]
                 },
                 "ConsumeApplicationArgV5": {
@@ -2547,14 +2358,6 @@
                                 "$ref": "#/definitions/Placement"
                             }
                         },
-                        "Storage": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "$ref": "#/definitions/Constraints"
-                                }
-                            }
-                        },
                         "Trust": {
                             "type": "boolean"
                         },
@@ -2588,6 +2391,14 @@
                         },
                         "revision": {
                             "type": "integer"
+                        },
+                        "storage": {
+                            "type": "object",
+                            "patternProperties": {
+                                ".*": {
+                                    "$ref": "#/definitions/Directive"
+                                }
+                            }
                         }
                     },
                     "additionalProperties": false,
@@ -2600,7 +2411,7 @@
                         "Devices",
                         "DryRun",
                         "Placement",
-                        "Storage",
+                        "storage",
                         "Trust"
                     ]
                 },
@@ -2914,6 +2725,26 @@
                     "additionalProperties": false,
                     "required": [
                         "units"
+                    ]
+                },
+                "Directive": {
+                    "type": "object",
+                    "properties": {
+                        "Count": {
+                            "type": "integer"
+                        },
+                        "Pool": {
+                            "type": "string"
+                        },
+                        "Size": {
+                            "type": "integer"
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "Pool",
+                        "Size",
+                        "Count"
                     ]
                 },
                 "EndpointRelationData": {
@@ -3317,7 +3148,7 @@
                         "constraints"
                     ]
                 },
-                "StorageConstraints": {
+                "StorageDirectives": {
                     "type": "object",
                     "properties": {
                         "count": {
@@ -3440,41 +3271,6 @@
                     },
                     "additionalProperties": false
                 },
-                "UpdateChannelArg": {
-                    "type": "object",
-                    "properties": {
-                        "channel": {
-                            "type": "string"
-                        },
-                        "force": {
-                            "type": "boolean"
-                        },
-                        "tag": {
-                            "$ref": "#/definitions/Entity"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "tag",
-                        "force",
-                        "channel"
-                    ]
-                },
-                "UpdateChannelArgs": {
-                    "type": "object",
-                    "properties": {
-                        "args": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/UpdateChannelArg"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "args"
-                    ]
-                },
                 "Value": {
                     "type": "object",
                     "properties": {
@@ -3541,13 +3337,7 @@
     {
         "Name": "ApplicationOffers",
         "Description": "",
-        "Version": 5,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user"
-        ],
+        "Version": 6,
         "Schema": {
             "type": "object",
             "properties": {
@@ -4135,16 +3925,16 @@
                         "model-name": {
                             "type": "string"
                         },
-                        "offer-name": {
+                        "model-qualifier": {
                             "type": "string"
                         },
-                        "owner-name": {
+                        "offer-name": {
                             "type": "string"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
-                        "owner-name",
+                        "model-qualifier",
                         "model-name",
                         "offer-name",
                         "application-name",
@@ -4316,12 +4106,6 @@
         "Name": "Backups",
         "Description": "",
         "Version": 3,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -4476,9 +4260,6 @@
         "Name": "Block",
         "Description": "",
         "Version": 2,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -4619,11 +4400,7 @@
     {
         "Name": "Bundle",
         "Description": "",
-        "Version": 6,
-        "AvailableTo": [
-            "controller-user",
-            "model-user"
-        ],
+        "Version": 8,
         "Schema": {
             "type": "object",
             "properties": {
@@ -4635,17 +4412,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/StringResult"
-                        }
-                    }
-                },
-                "GetChanges": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BundleChangesParams"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/BundleChangesResults"
                         }
                     }
                 },
@@ -4662,37 +4428,6 @@
                 }
             },
             "definitions": {
-                "BundleChange": {
-                    "type": "object",
-                    "properties": {
-                        "args": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": true
-                            }
-                        },
-                        "id": {
-                            "type": "string"
-                        },
-                        "method": {
-                            "type": "string"
-                        },
-                        "requires": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "id",
-                        "method",
-                        "args",
-                        "requires"
-                    ]
-                },
                 "BundleChangesMapArgs": {
                     "type": "object",
                     "properties": {
@@ -4760,24 +4495,6 @@
                         "bundleURL"
                     ]
                 },
-                "BundleChangesResults": {
-                    "type": "object",
-                    "properties": {
-                        "changes": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/BundleChange"
-                            }
-                        },
-                        "errors": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false
-                },
                 "Error": {
                     "type": "object",
                     "properties": {
@@ -4808,9 +4525,6 @@
                     "properties": {
                         "include-charm-defaults": {
                             "type": "boolean"
-                        },
-                        "include-series": {
-                            "type": "boolean"
                         }
                     },
                     "additionalProperties": false
@@ -4837,9 +4551,6 @@
         "Name": "Charms",
         "Description": "",
         "Version": 7,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -4884,17 +4595,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/DownloadInfoResults"
-                        }
-                    }
-                },
-                "IsMetered": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/CharmURL"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/IsMeteredResult"
                         }
                     }
                 },
@@ -5023,13 +4723,13 @@
                         "meta": {
                             "$ref": "#/definitions/CharmMeta"
                         },
-                        "metrics": {
-                            "$ref": "#/definitions/CharmMetrics"
-                        },
                         "revision": {
                             "type": "integer"
                         },
                         "url": {
+                            "type": "string"
+                        },
+                        "version": {
                             "type": "string"
                         }
                     },
@@ -5045,6 +4745,12 @@
                     "properties": {
                         "description": {
                             "type": "string"
+                        },
+                        "execution-group": {
+                            "type": "string"
+                        },
+                        "parallel": {
+                            "type": "boolean"
                         },
                         "params": {
                             "type": "object",
@@ -5114,30 +4820,6 @@
                         }
                     },
                     "additionalProperties": false
-                },
-                "CharmDeployment": {
-                    "type": "object",
-                    "properties": {
-                        "min-version": {
-                            "type": "string"
-                        },
-                        "mode": {
-                            "type": "string"
-                        },
-                        "service": {
-                            "type": "string"
-                        },
-                        "type": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "type",
-                        "mode",
-                        "service",
-                        "min-version"
-                    ]
                 },
                 "CharmDevice": {
                     "type": "object",
@@ -5237,9 +4919,6 @@
                                 }
                             }
                         },
-                        "deployment": {
-                            "$ref": "#/definitions/CharmDeployment"
-                        },
                         "description": {
                             "type": "string"
                         },
@@ -5264,14 +4943,6 @@
                         },
                         "name": {
                             "type": "string"
-                        },
-                        "payload-classes": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "$ref": "#/definitions/CharmPayloadClass"
-                                }
-                            }
                         },
                         "peers": {
                             "type": "object",
@@ -5303,12 +4974,6 @@
                                 ".*": {
                                     "$ref": "#/definitions/CharmResourceMeta"
                                 }
-                            }
-                        },
-                        "series": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
                             }
                         },
                         "storage": {
@@ -5344,43 +5009,6 @@
                         "summary",
                         "description",
                         "subordinate"
-                    ]
-                },
-                "CharmMetric": {
-                    "type": "object",
-                    "properties": {
-                        "description": {
-                            "type": "string"
-                        },
-                        "type": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "type",
-                        "description"
-                    ]
-                },
-                "CharmMetrics": {
-                    "type": "object",
-                    "properties": {
-                        "metrics": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "$ref": "#/definitions/CharmMetric"
-                                }
-                            }
-                        },
-                        "plan": {
-                            "$ref": "#/definitions/CharmPlan"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "metrics",
-                        "plan"
                     ]
                 },
                 "CharmMount": {
@@ -5471,34 +5099,6 @@
                     "additionalProperties": false,
                     "required": [
                         "charm-origin"
-                    ]
-                },
-                "CharmPayloadClass": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string"
-                        },
-                        "type": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "name",
-                        "type"
-                    ]
-                },
-                "CharmPlan": {
-                    "type": "object",
-                    "properties": {
-                        "required": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "required"
                     ]
                 },
                 "CharmRelation": {
@@ -5888,18 +5488,6 @@
                         "Expression"
                     ]
                 },
-                "IsMeteredResult": {
-                    "type": "object",
-                    "properties": {
-                        "metered": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "metered"
-                    ]
-                },
                 "Macaroon": {
                     "type": "object",
                     "additionalProperties": false
@@ -5989,9 +5577,6 @@
         "Name": "Client",
         "Description": "",
         "Version": 8,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -6131,14 +5716,6 @@
                         "life": {
                             "type": "string"
                         },
-                        "meter-statuses": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "$ref": "#/definitions/MeterStatus"
-                                }
-                            }
-                        },
                         "provider-id": {
                             "type": "string"
                         },
@@ -6189,7 +5766,6 @@
                         "can-upgrade-to",
                         "subordinate-to",
                         "units",
-                        "meter-statuses",
                         "status",
                         "workload-version",
                         "endpoint-bindings",
@@ -6630,6 +6206,9 @@
                         "base": {
                             "$ref": "#/definitions/Base"
                         },
+                        "cluster-role": {
+                            "type": "string"
+                        },
                         "constraints": {
                             "type": "string"
                         },
@@ -6721,22 +6300,6 @@
                         "wants-vote"
                     ]
                 },
-                "MeterStatus": {
-                    "type": "object",
-                    "properties": {
-                        "color": {
-                            "type": "string"
-                        },
-                        "message": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "color",
-                        "message"
-                    ]
-                },
                 "ModelStatusInfo": {
                     "type": "object",
                     "properties": {
@@ -6746,9 +6309,6 @@
                         "cloud-tag": {
                             "type": "string"
                         },
-                        "meter-status": {
-                            "$ref": "#/definitions/MeterStatus"
-                        },
                         "model-status": {
                             "$ref": "#/definitions/DetailedStatus"
                         },
@@ -6756,9 +6316,6 @@
                             "type": "string"
                         },
                         "region": {
-                            "type": "string"
-                        },
-                        "sla": {
                             "type": "string"
                         },
                         "type": {
@@ -6775,9 +6332,7 @@
                         "cloud-tag",
                         "version",
                         "available-version",
-                        "model-status",
-                        "meter-status",
-                        "sla"
+                        "model-status"
                     ]
                 },
                 "NetworkInterface": {
@@ -7303,12 +6858,6 @@
         "Name": "Cloud",
         "Description": "",
         "Version": 7,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -7328,17 +6877,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/ErrorResults"
-                        }
-                    }
-                },
-                "CheckCredentialsModels": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/TaggedCredentials"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/UpdateCredentialResults"
                         }
                     }
                 },
@@ -7391,17 +6929,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/CredentialContentResults"
-                        }
-                    }
-                },
-                "InstanceTypes": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/CloudInstanceTypesConstraints"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/InstanceTypesResults"
                         }
                     }
                 },
@@ -7737,40 +7264,6 @@
                         "results"
                     ]
                 },
-                "CloudInstanceTypesConstraint": {
-                    "type": "object",
-                    "properties": {
-                        "cloud-tag": {
-                            "type": "string"
-                        },
-                        "constraints": {
-                            "$ref": "#/definitions/Value"
-                        },
-                        "region": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "cloud-tag",
-                        "region"
-                    ]
-                },
-                "CloudInstanceTypesConstraints": {
-                    "type": "object",
-                    "properties": {
-                        "constraints": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/CloudInstanceTypesConstraint"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "constraints"
-                    ]
-                },
                 "CloudRegion": {
                     "type": "object",
                     "properties": {
@@ -7988,80 +7481,6 @@
                             "type": "array",
                             "items": {
                                 "$ref": "#/definitions/ErrorResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
-                    ]
-                },
-                "InstanceType": {
-                    "type": "object",
-                    "properties": {
-                        "arches": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "cost": {
-                            "type": "integer"
-                        },
-                        "cpu-cores": {
-                            "type": "integer"
-                        },
-                        "memory": {
-                            "type": "integer"
-                        },
-                        "name": {
-                            "type": "string"
-                        },
-                        "root-disk": {
-                            "type": "integer"
-                        },
-                        "virt-type": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "arches",
-                        "cpu-cores",
-                        "memory"
-                    ]
-                },
-                "InstanceTypesResult": {
-                    "type": "object",
-                    "properties": {
-                        "cost-currency": {
-                            "type": "string"
-                        },
-                        "cost-divisor": {
-                            "type": "integer"
-                        },
-                        "cost-unit": {
-                            "type": "string"
-                        },
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "instance-types": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/InstanceType"
-                            }
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "InstanceTypesResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/InstanceTypesResult"
                             }
                         }
                     },
@@ -8384,66 +7803,6 @@
                         }
                     },
                     "additionalProperties": false
-                },
-                "Value": {
-                    "type": "object",
-                    "properties": {
-                        "allocate-public-ip": {
-                            "type": "boolean"
-                        },
-                        "arch": {
-                            "type": "string"
-                        },
-                        "container": {
-                            "type": "string"
-                        },
-                        "cores": {
-                            "type": "integer"
-                        },
-                        "cpu-power": {
-                            "type": "integer"
-                        },
-                        "image-id": {
-                            "type": "string"
-                        },
-                        "instance-role": {
-                            "type": "string"
-                        },
-                        "instance-type": {
-                            "type": "string"
-                        },
-                        "mem": {
-                            "type": "integer"
-                        },
-                        "root-disk": {
-                            "type": "integer"
-                        },
-                        "root-disk-source": {
-                            "type": "string"
-                        },
-                        "spaces": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "virt-type": {
-                            "type": "string"
-                        },
-                        "zones": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false
                 }
             }
         }
@@ -8451,13 +7810,7 @@
     {
         "Name": "Controller",
         "Description": "",
-        "Version": 12,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user"
-        ],
+        "Version": 13,
         "Schema": {
             "type": "object",
             "properties": {
@@ -8466,17 +7819,6 @@
                     "properties": {
                         "Result": {
                             "$ref": "#/definitions/UserModelList"
-                        }
-                    }
-                },
-                "CloudSpec": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/Entities"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/CloudSpecResults"
                         }
                     }
                 },
@@ -8528,17 +7870,6 @@
                     "properties": {
                         "Params": {
                             "$ref": "#/definitions/DestroyControllerArgs"
-                        }
-                    }
-                },
-                "GetCloudSpec": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/ModelTag"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/CloudSpecResult"
                         }
                     }
                 },
@@ -8642,17 +7973,6 @@
                         }
                     }
                 },
-                "WatchCloudSpecsChanges": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/Entities"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/NotifyWatchResults"
-                        }
-                    }
-                },
                 "WatchModelSummaries": {
                     "type": "object",
                     "properties": {
@@ -8743,30 +8063,6 @@
                         "type",
                         "name"
                     ]
-                },
-                "CloudSpecResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "result": {
-                            "$ref": "#/definitions/CloudSpec"
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "CloudSpecResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/CloudSpecResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false
                 },
                 "ControllerAPIInfoResult": {
                     "type": "object",
@@ -9019,14 +8315,14 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner": {
+                        "qualifier": {
                             "type": "string"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
                         "name",
-                        "owner"
+                        "qualifier"
                     ]
                 },
                 "HostedModelConfigsResults": {
@@ -9190,7 +8486,7 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "type": {
@@ -9203,9 +8499,9 @@
                     "additionalProperties": false,
                     "required": [
                         "name",
+                        "qualifier",
                         "uuid",
-                        "type",
-                        "owner-tag"
+                        "type"
                     ]
                 },
                 "ModelApplicationInfo": {
@@ -9235,15 +8531,15 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
-                        "name",
                         "model-uuid",
-                        "owner-tag",
+                        "name",
+                        "qualifier",
                         "blocks"
                     ]
                 },
@@ -9289,14 +8585,8 @@
                         "display-name": {
                             "type": "string"
                         },
-                        "ha-primary": {
-                            "type": "boolean"
-                        },
                         "hardware": {
                             "$ref": "#/definitions/MachineHardware"
-                        },
-                        "has-vote": {
-                            "type": "boolean"
                         },
                         "id": {
                             "type": "string"
@@ -9309,9 +8599,6 @@
                         },
                         "status": {
                             "type": "string"
-                        },
-                        "wants-vote": {
-                            "type": "boolean"
                         }
                     },
                     "additionalProperties": false,
@@ -9355,7 +8642,7 @@
                         "model-tag": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "type": {
@@ -9374,12 +8661,12 @@
                     "additionalProperties": false,
                     "required": [
                         "model-tag",
+                        "qualifier",
                         "life",
                         "type",
                         "hosted-machine-count",
                         "application-count",
-                        "unit-count",
-                        "owner-tag"
+                        "unit-count"
                     ]
                 },
                 "ModelStatusResults": {
@@ -9396,10 +8683,6 @@
                     "required": [
                         "models"
                     ]
-                },
-                "ModelTag": {
-                    "type": "object",
-                    "additionalProperties": false
                 },
                 "ModelVolumeInfo": {
                     "type": "object",
@@ -9458,36 +8741,6 @@
                     "additionalProperties": false,
                     "required": [
                         "changes"
-                    ]
-                },
-                "NotifyWatchResult": {
-                    "type": "object",
-                    "properties": {
-                        "NotifyWatcherId": {
-                            "type": "string"
-                        },
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "NotifyWatcherId"
-                    ]
-                },
-                "NotifyWatchResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/NotifyWatchResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
                     ]
                 },
                 "Proxy": {
@@ -9630,82 +8883,25 @@
         "Name": "CredentialManager",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
-            "type": "object",
-            "properties": {
-                "InvalidateModelCredential": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/InvalidateCredentialArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResult"
-                        }
-                    }
-                }
-            },
-            "definitions": {
-                "Error": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string"
-                        },
-                        "info": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        },
-                        "message": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "message",
-                        "code"
-                    ]
-                },
-                "ErrorResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "InvalidateCredentialArg": {
-                    "type": "object",
-                    "properties": {
-                        "reason": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            }
+            "type": "object"
         }
     },
     {
         "Name": "HighAvailability",
         "Description": "",
-        "Version": 2,
-        "AvailableTo": [
-            "controller-user",
-            "model-user"
-        ],
+        "Version": 3,
         "Schema": {
             "type": "object",
             "properties": {
+                "ControllerDetails": {
+                    "type": "object",
+                    "properties": {
+                        "Result": {
+                            "$ref": "#/definitions/ControllerDetailsResults"
+                        }
+                    }
+                },
                 "EnableHA": {
                     "type": "object",
                     "properties": {
@@ -9719,6 +8915,43 @@
                 }
             },
             "definitions": {
+                "ControllerDetails": {
+                    "type": "object",
+                    "properties": {
+                        "api-addresses": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        "controller-id": {
+                            "type": "string"
+                        },
+                        "error": {
+                            "$ref": "#/definitions/Error"
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "controller-id",
+                        "api-addresses"
+                    ]
+                },
+                "ControllerDetailsResults": {
+                    "type": "object",
+                    "properties": {
+                        "results": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/ControllerDetails"
+                            }
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "results"
+                    ]
+                },
                 "ControllersChangeResult": {
                     "type": "object",
                     "properties": {
@@ -9907,12 +9140,6 @@
         "Name": "ImageMetadataManager",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -10135,9 +9362,6 @@
         "Name": "KeyManager",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -10334,13 +9558,7 @@
     {
         "Name": "MachineManager",
         "Description": "",
-        "Version": 10,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
+        "Version": 11,
         "Schema": {
             "type": "object",
             "properties": {
@@ -10363,17 +9581,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/DestroyMachineResults"
-                        }
-                    }
-                },
-                "GetUpgradeSeriesMessages": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/UpgradeSeriesNotificationParams"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/StringsResults"
                         }
                     }
                 },
@@ -10409,50 +9616,6 @@
                             "$ref": "#/definitions/ErrorResults"
                         }
                     }
-                },
-                "UpgradeSeriesComplete": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/UpdateChannelArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResult"
-                        }
-                    }
-                },
-                "UpgradeSeriesPrepare": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/UpdateChannelArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResult"
-                        }
-                    }
-                },
-                "UpgradeSeriesValidate": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/UpdateChannelArgs"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/UpgradeSeriesUnitsResults"
-                        }
-                    }
-                },
-                "WatchUpgradeSeriesNotifications": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/Entities"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/NotifyWatchResults"
-                        }
-                    }
                 }
             },
             "definitions": {
@@ -10477,7 +9640,7 @@
                         "disks": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/Constraints"
+                                "$ref": "#/definitions/Directive"
                             }
                         },
                         "hardware-characteristics": {
@@ -10610,26 +9773,6 @@
                         "channel"
                     ]
                 },
-                "Constraints": {
-                    "type": "object",
-                    "properties": {
-                        "Count": {
-                            "type": "integer"
-                        },
-                        "Pool": {
-                            "type": "string"
-                        },
-                        "Size": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "Pool",
-                        "Size",
-                        "Count"
-                    ]
-                },
                 "DestroyMachineInfo": {
                     "type": "object",
                     "properties": {
@@ -10717,19 +9860,24 @@
                         "machine-tags"
                     ]
                 },
-                "Entities": {
+                "Directive": {
                     "type": "object",
                     "properties": {
-                        "entities": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Entity"
-                            }
+                        "Count": {
+                            "type": "integer"
+                        },
+                        "Pool": {
+                            "type": "string"
+                        },
+                        "Size": {
+                            "type": "integer"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
-                        "entities"
+                        "Pool",
+                        "Size",
+                        "Count"
                     ]
                 },
                 "Entity": {
@@ -10927,36 +10075,6 @@
                         "constraints"
                     ]
                 },
-                "NotifyWatchResult": {
-                    "type": "object",
-                    "properties": {
-                        "NotifyWatcherId": {
-                            "type": "string"
-                        },
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "NotifyWatcherId"
-                    ]
-                },
-                "NotifyWatchResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/NotifyWatchResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
-                    ]
-                },
                 "Placement": {
                     "type": "object",
                     "properties": {
@@ -11027,135 +10145,6 @@
                         "all"
                     ]
                 },
-                "StringsResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "result": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "StringsResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/StringsResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
-                    ]
-                },
-                "UpdateChannelArg": {
-                    "type": "object",
-                    "properties": {
-                        "channel": {
-                            "type": "string"
-                        },
-                        "force": {
-                            "type": "boolean"
-                        },
-                        "tag": {
-                            "$ref": "#/definitions/Entity"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "tag",
-                        "force",
-                        "channel"
-                    ]
-                },
-                "UpdateChannelArgs": {
-                    "type": "object",
-                    "properties": {
-                        "args": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/UpdateChannelArg"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "args"
-                    ]
-                },
-                "UpgradeSeriesNotificationParam": {
-                    "type": "object",
-                    "properties": {
-                        "entity": {
-                            "$ref": "#/definitions/Entity"
-                        },
-                        "watcher-id": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "entity",
-                        "watcher-id"
-                    ]
-                },
-                "UpgradeSeriesNotificationParams": {
-                    "type": "object",
-                    "properties": {
-                        "params": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/UpgradeSeriesNotificationParam"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "params"
-                    ]
-                },
-                "UpgradeSeriesUnitsResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "unit-names": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "unit-names"
-                    ]
-                },
-                "UpgradeSeriesUnitsResults": {
-                    "type": "object",
-                    "properties": {
-                        "Results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/UpgradeSeriesUnitsResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "Results"
-                    ]
-                },
                 "Value": {
                     "type": "object",
                     "properties": {
@@ -11222,14 +10211,7 @@
     {
         "Name": "ModelConfig",
         "Description": "",
-        "Version": 3,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user",
-            "model-user"
-        ],
+        "Version": 4,
         "Schema": {
             "type": "object",
             "properties": {
@@ -11238,6 +10220,14 @@
                     "properties": {
                         "Result": {
                             "$ref": "#/definitions/GetConstraintsResults"
+                        }
+                    }
+                },
+                "GetModelSecretBackend": {
+                    "type": "object",
+                    "properties": {
+                        "Result": {
+                            "$ref": "#/definitions/StringResult"
                         }
                     }
                 },
@@ -11265,14 +10255,6 @@
                         }
                     }
                 },
-                "SLALevel": {
-                    "type": "object",
-                    "properties": {
-                        "Result": {
-                            "$ref": "#/definitions/StringResult"
-                        }
-                    }
-                },
                 "Sequences": {
                     "type": "object",
                     "properties": {
@@ -11289,11 +10271,14 @@
                         }
                     }
                 },
-                "SetSLALevel": {
+                "SetModelSecretBackend": {
                     "type": "object",
                     "properties": {
                         "Params": {
-                            "$ref": "#/definitions/ModelSLA"
+                            "$ref": "#/definitions/SetModelSecretBackendArg"
+                        },
+                        "Result": {
+                            "$ref": "#/definitions/ErrorResult"
                         }
                     }
                 }
@@ -11341,6 +10326,15 @@
                         "code"
                     ]
                 },
+                "ErrorResult": {
+                    "type": "object",
+                    "properties": {
+                        "error": {
+                            "$ref": "#/definitions/Error"
+                        }
+                    },
+                    "additionalProperties": false
+                },
                 "GetConstraintsResults": {
                     "type": "object",
                     "properties": {
@@ -11368,49 +10362,6 @@
                     "additionalProperties": false,
                     "required": [
                         "config"
-                    ]
-                },
-                "ModelSLA": {
-                    "type": "object",
-                    "properties": {
-                        "ModelSLAInfo": {
-                            "$ref": "#/definitions/ModelSLAInfo"
-                        },
-                        "creds": {
-                            "type": "array",
-                            "items": {
-                                "type": "integer"
-                            }
-                        },
-                        "level": {
-                            "type": "string"
-                        },
-                        "owner": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "level",
-                        "owner",
-                        "ModelSLAInfo",
-                        "creds"
-                    ]
-                },
-                "ModelSLAInfo": {
-                    "type": "object",
-                    "properties": {
-                        "level": {
-                            "type": "string"
-                        },
-                        "owner": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "level",
-                        "owner"
                     ]
                 },
                 "ModelSequencesResult": {
@@ -11477,6 +10428,18 @@
                     "required": [
                         "application",
                         "constraints"
+                    ]
+                },
+                "SetModelSecretBackendArg": {
+                    "type": "object",
+                    "properties": {
+                        "secret-backend-name": {
+                            "type": "string"
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "secret-backend-name"
                     ]
                 },
                 "StringResult": {
@@ -11558,381 +10521,9 @@
         }
     },
     {
-        "Name": "ModelGeneration",
-        "Description": "",
-        "Version": 4,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
-        "Schema": {
-            "type": "object",
-            "properties": {
-                "AbortBranch": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResult"
-                        }
-                    }
-                },
-                "AddBranch": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResult"
-                        }
-                    }
-                },
-                "BranchInfo": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchInfoArgs"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/BranchResults"
-                        }
-                    }
-                },
-                "CommitBranch": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/IntResult"
-                        }
-                    }
-                },
-                "HasActiveBranch": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/BoolResult"
-                        }
-                    }
-                },
-                "ListCommits": {
-                    "type": "object",
-                    "properties": {
-                        "Result": {
-                            "$ref": "#/definitions/BranchResults"
-                        }
-                    }
-                },
-                "ShowCommit": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/GenerationId"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/GenerationResult"
-                        }
-                    }
-                },
-                "TrackBranch": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/BranchTrackArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/ErrorResults"
-                        }
-                    }
-                }
-            },
-            "definitions": {
-                "BoolResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "result": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "result"
-                    ]
-                },
-                "BranchArg": {
-                    "type": "object",
-                    "properties": {
-                        "branch": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "branch"
-                    ]
-                },
-                "BranchInfoArgs": {
-                    "type": "object",
-                    "properties": {
-                        "branches": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "detailed": {
-                            "type": "boolean"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "branches",
-                        "detailed"
-                    ]
-                },
-                "BranchResults": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "generations": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Generation"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "generations"
-                    ]
-                },
-                "BranchTrackArg": {
-                    "type": "object",
-                    "properties": {
-                        "branch": {
-                            "type": "string"
-                        },
-                        "entities": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Entity"
-                            }
-                        },
-                        "num-units": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "branch",
-                        "entities"
-                    ]
-                },
-                "Entity": {
-                    "type": "object",
-                    "properties": {
-                        "tag": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "tag"
-                    ]
-                },
-                "Error": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string"
-                        },
-                        "info": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        },
-                        "message": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "message",
-                        "code"
-                    ]
-                },
-                "ErrorResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "ErrorResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/ErrorResult"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
-                    ]
-                },
-                "Generation": {
-                    "type": "object",
-                    "properties": {
-                        "applications": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/GenerationApplication"
-                            }
-                        },
-                        "branch": {
-                            "type": "string"
-                        },
-                        "completed": {
-                            "type": "integer"
-                        },
-                        "completed-by": {
-                            "type": "string"
-                        },
-                        "created": {
-                            "type": "integer"
-                        },
-                        "created-by": {
-                            "type": "string"
-                        },
-                        "generation-id": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "branch",
-                        "created",
-                        "created-by",
-                        "applications"
-                    ]
-                },
-                "GenerationApplication": {
-                    "type": "object",
-                    "properties": {
-                        "application": {
-                            "type": "string"
-                        },
-                        "config": {
-                            "type": "object",
-                            "patternProperties": {
-                                ".*": {
-                                    "type": "object",
-                                    "additionalProperties": true
-                                }
-                            }
-                        },
-                        "pending": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "progress": {
-                            "type": "string"
-                        },
-                        "tracking": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "application",
-                        "progress",
-                        "config"
-                    ]
-                },
-                "GenerationId": {
-                    "type": "object",
-                    "properties": {
-                        "generation-id": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "generation-id"
-                    ]
-                },
-                "GenerationResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "generation": {
-                            "$ref": "#/definitions/Generation"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "generation"
-                    ]
-                },
-                "IntResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "result": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "result"
-                    ]
-                }
-            }
-        }
-    },
-    {
         "Name": "ModelManager",
         "Description": "",
-        "Version": 10,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user"
-        ],
+        "Version": 11,
         "Schema": {
             "type": "object",
             "properties": {
@@ -12351,7 +10942,7 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "type": {
@@ -12364,9 +10955,9 @@
                     "additionalProperties": false,
                     "required": [
                         "name",
+                        "qualifier",
                         "uuid",
-                        "type",
-                        "owner-tag"
+                        "type"
                     ]
                 },
                 "ModelApplicationInfo": {
@@ -12402,17 +10993,20 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "region": {
+                            "type": "string"
+                        },
+                        "target-controller": {
                             "type": "string"
                         }
                     },
                     "additionalProperties": false,
                     "required": [
                         "name",
-                        "owner-tag"
+                        "qualifier"
                     ]
                 },
                 "ModelDefaultValues": {
@@ -12555,12 +11149,6 @@
                         "controller-uuid": {
                             "type": "string"
                         },
-                        "default-base": {
-                            "type": "string"
-                        },
-                        "default-series": {
-                            "type": "string"
-                        },
                         "is-controller": {
                             "type": "boolean"
                         },
@@ -12579,10 +11167,10 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "provider-type": {
                             "type": "string"
                         },
-                        "provider-type": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "secret-backends": {
@@ -12590,9 +11178,6 @@
                             "items": {
                                 "$ref": "#/definitions/SecretBackendResult"
                             }
-                        },
-                        "sla": {
-                            "$ref": "#/definitions/ModelSLAInfo"
                         },
                         "status": {
                             "$ref": "#/definitions/EntityStatus"
@@ -12602,6 +11187,9 @@
                             "items": {
                                 "$ref": "#/definitions/SupportedFeature"
                             }
+                        },
+                        "target-controller": {
+                            "type": "string"
                         },
                         "type": {
                             "type": "string"
@@ -12624,12 +11212,11 @@
                         "controller-uuid",
                         "is-controller",
                         "cloud-tag",
-                        "owner-tag",
+                        "qualifier",
                         "life",
                         "users",
                         "machines",
                         "secret-backends",
-                        "sla",
                         "agent-version"
                     ]
                 },
@@ -12666,14 +11253,8 @@
                         "display-name": {
                             "type": "string"
                         },
-                        "ha-primary": {
-                            "type": "boolean"
-                        },
                         "hardware": {
                             "$ref": "#/definitions/MachineHardware"
-                        },
-                        "has-vote": {
-                            "type": "boolean"
                         },
                         "id": {
                             "type": "string"
@@ -12686,9 +11267,6 @@
                         },
                         "status": {
                             "type": "string"
-                        },
-                        "wants-vote": {
-                            "type": "boolean"
                         }
                     },
                     "additionalProperties": false,
@@ -12715,22 +11293,6 @@
                     "required": [
                         "status",
                         "start"
-                    ]
-                },
-                "ModelSLAInfo": {
-                    "type": "object",
-                    "properties": {
-                        "level": {
-                            "type": "string"
-                        },
-                        "owner": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "level",
-                        "owner"
                     ]
                 },
                 "ModelStatus": {
@@ -12769,7 +11331,7 @@
                         "model-tag": {
                             "type": "string"
                         },
-                        "owner-tag": {
+                        "qualifier": {
                             "type": "string"
                         },
                         "type": {
@@ -12788,12 +11350,12 @@
                     "additionalProperties": false,
                     "required": [
                         "model-tag",
+                        "qualifier",
                         "life",
                         "type",
                         "hosted-machine-count",
                         "application-count",
-                        "unit-count",
-                        "owner-tag"
+                        "unit-count"
                     ]
                 },
                 "ModelStatusResults": {
@@ -12850,9 +11412,6 @@
                                 "$ref": "#/definitions/ModelEntityCount"
                             }
                         },
-                        "default-series": {
-                            "type": "string"
-                        },
                         "is-controller": {
                             "type": "boolean"
                         },
@@ -12869,14 +11428,11 @@
                         "name": {
                             "type": "string"
                         },
-                        "owner-tag": {
-                            "type": "string"
-                        },
                         "provider-type": {
                             "type": "string"
                         },
-                        "sla": {
-                            "$ref": "#/definitions/ModelSLAInfo"
+                        "qualifier": {
+                            "type": "string"
                         },
                         "status": {
                             "$ref": "#/definitions/EntityStatus"
@@ -12894,17 +11450,16 @@
                     "additionalProperties": false,
                     "required": [
                         "name",
+                        "qualifier",
                         "uuid",
                         "type",
                         "controller-uuid",
                         "is-controller",
                         "cloud-tag",
-                        "owner-tag",
                         "life",
                         "user-access",
                         "last-connection",
                         "counts",
-                        "sla",
                         "agent-version"
                     ]
                 },
@@ -13270,12 +11825,6 @@
         "Name": "ModelUpgrader",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -13409,111 +11958,9 @@
         }
     },
     {
-        "Name": "Payloads",
-        "Description": "",
-        "Version": 1,
-        "AvailableTo": [
-            "model-user"
-        ],
-        "Schema": {
-            "type": "object",
-            "properties": {
-                "List": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/PayloadListArgs"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/PayloadListResults"
-                        }
-                    }
-                }
-            },
-            "definitions": {
-                "Payload": {
-                    "type": "object",
-                    "properties": {
-                        "class": {
-                            "type": "string"
-                        },
-                        "id": {
-                            "type": "string"
-                        },
-                        "labels": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        "machine": {
-                            "type": "string"
-                        },
-                        "status": {
-                            "type": "string"
-                        },
-                        "type": {
-                            "type": "string"
-                        },
-                        "unit": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "class",
-                        "type",
-                        "id",
-                        "status",
-                        "labels",
-                        "unit",
-                        "machine"
-                    ]
-                },
-                "PayloadListArgs": {
-                    "type": "object",
-                    "properties": {
-                        "patterns": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "patterns"
-                    ]
-                },
-                "PayloadListResults": {
-                    "type": "object",
-                    "properties": {
-                        "results": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/Payload"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "results"
-                    ]
-                }
-            }
-        }
-    },
-    {
         "Name": "Pinger",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "controller-user",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -13530,9 +11977,6 @@
         "Name": "Resources",
         "Description": "",
         "Version": 3,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -13941,12 +12385,6 @@
         "Name": "SSHClient",
         "Description": "",
         "Version": 5,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -13996,17 +12434,6 @@
                         },
                         "Result": {
                             "$ref": "#/definitions/SSHAddressResults"
-                        }
-                    }
-                },
-                "PublicHostKeyForTarget": {
-                    "type": "object",
-                    "properties": {
-                        "Params": {
-                            "$ref": "#/definitions/SSHVirtualHostKeyRequestArg"
-                        },
-                        "Result": {
-                            "$ref": "#/definitions/PublicSSHHostKeyResult"
                         }
                     }
                 },
@@ -14167,31 +12594,6 @@
                         "code"
                     ]
                 },
-                "PublicSSHHostKeyResult": {
-                    "type": "object",
-                    "properties": {
-                        "error": {
-                            "$ref": "#/definitions/Error"
-                        },
-                        "jump-server-public-key": {
-                            "type": "array",
-                            "items": {
-                                "type": "integer"
-                            }
-                        },
-                        "public-key": {
-                            "type": "array",
-                            "items": {
-                                "type": "integer"
-                            }
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "public-key",
-                        "jump-server-public-key"
-                    ]
-                },
                 "SSHAddressResult": {
                     "type": "object",
                     "properties": {
@@ -14294,18 +12696,6 @@
                         "results"
                     ]
                 },
-                "SSHVirtualHostKeyRequestArg": {
-                    "type": "object",
-                    "properties": {
-                        "hostname": {
-                            "type": "string"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                        "hostname"
-                    ]
-                },
                 "VirtualHostnameTargetArg": {
                     "type": "object",
                     "properties": {
@@ -14328,9 +12718,6 @@
         "Name": "SecretBackends",
         "Description": "",
         "Version": 1,
-        "AvailableTo": [
-            "controller-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -14664,9 +13051,6 @@
         "Name": "Secrets",
         "Description": "",
         "Version": 2,
-        "AvailableTo": [
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -15260,12 +13644,6 @@
         "Name": "Spaces",
         "Description": "",
         "Version": 6,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -15757,9 +14135,6 @@
                         "space-tag": {
                             "type": "string"
                         },
-                        "status": {
-                            "type": "string"
-                        },
                         "vlan-tag": {
                             "type": "integer"
                         },
@@ -15786,12 +14161,6 @@
         "Name": "Storage",
         "Description": "",
         "Version": 7,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -16364,7 +14733,7 @@
                             "type": "string"
                         },
                         "storage": {
-                            "$ref": "#/definitions/StorageConstraints"
+                            "$ref": "#/definitions/StorageDirectives"
                         },
                         "unit": {
                             "type": "string"
@@ -16433,21 +14802,6 @@
                     "required": [
                         "ids"
                     ]
-                },
-                "StorageConstraints": {
-                    "type": "object",
-                    "properties": {
-                        "count": {
-                            "type": "integer"
-                        },
-                        "pool": {
-                            "type": "string"
-                        },
-                        "size": {
-                            "type": "integer"
-                        }
-                    },
-                    "additionalProperties": false
                 },
                 "StorageDetachmentParams": {
                     "type": "object",
@@ -16553,6 +14907,21 @@
                             "items": {
                                 "$ref": "#/definitions/StorageDetailsResult"
                             }
+                        }
+                    },
+                    "additionalProperties": false
+                },
+                "StorageDirectives": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer"
+                        },
+                        "pool": {
+                            "type": "string"
+                        },
+                        "size": {
+                            "type": "integer"
                         }
                     },
                     "additionalProperties": false
@@ -16910,12 +15279,6 @@
         "Name": "Subnets",
         "Description": "",
         "Version": 5,
-        "AvailableTo": [
-            "controller-machine-agent",
-            "machine-agent",
-            "unit-agent",
-            "model-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {
@@ -17027,9 +15390,6 @@
                         "space-tag": {
                             "type": "string"
                         },
-                        "status": {
-                            "type": "string"
-                        },
                         "vlan-tag": {
                             "type": "integer"
                         },
@@ -17074,9 +15434,6 @@
                             "type": "string"
                         },
                         "space-tag": {
-                            "type": "string"
-                        },
-                        "status": {
                             "type": "string"
                         },
                         "vlan-tag": {
@@ -17182,9 +15539,6 @@
         "Name": "UserManager",
         "Description": "",
         "Version": 3,
-        "AvailableTo": [
-            "controller-user"
-        ],
         "Schema": {
             "type": "object",
             "properties": {

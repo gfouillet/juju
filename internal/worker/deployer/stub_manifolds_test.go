@@ -4,15 +4,16 @@
 package deployer_test
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/deployer"
-	"github.com/juju/juju/testing"
 )
 
 func (s *unitWorkersStub) Manifolds(config deployer.UnitManifoldsConfig) dependency.Manifolds {
@@ -24,11 +25,11 @@ func (s *unitWorkersStub) Manifolds(config deployer.UnitManifoldsConfig) depende
 func (s *unitWorkersStub) Manifold(unitName string) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if s.startError != nil {
 				return nil, s.startError
 			}
-			s.logger.Infof("manifold start called for %q", unitName)
+			s.logger.Infof(context.TODO(), "manifold start called for %q", unitName)
 			w := &unitWorker{
 				logger:  s.logger,
 				stop:    make(chan struct{}),
@@ -46,7 +47,7 @@ func (s *unitWorkersStub) Manifold(unitName string) dependency.Manifold {
 type unitWorkersStub struct {
 	started chan string
 	stopped chan string
-	logger  loggo.Logger
+	logger  logger.Logger
 
 	// If startError is non-nil, it is returned from the manifold Start func.
 	startError error
@@ -54,7 +55,7 @@ type unitWorkersStub struct {
 	workerError error
 }
 
-func (s *unitWorkersStub) waitForStart(c *gc.C, unitName string) {
+func (s *unitWorkersStub) waitForStart(c *tc.C, unitName string) {
 	for {
 		select {
 		case unit := <-s.started:
@@ -69,7 +70,7 @@ func (s *unitWorkersStub) waitForStart(c *gc.C, unitName string) {
 }
 
 type unitWorker struct {
-	logger  loggo.Logger
+	logger  logger.Logger
 	stop    chan struct{}
 	name    string
 	started chan<- string
@@ -78,12 +79,12 @@ type unitWorker struct {
 }
 
 func (w *unitWorker) start() {
-	w.logger.Infof("%q start", w.name)
+	w.logger.Infof(context.TODO(), "%q start", w.name)
 	w.started <- w.name
 }
 
 func (w *unitWorker) Kill() {
-	w.logger.Infof("%q kill", w.name)
+	w.logger.Infof(context.TODO(), "%q kill", w.name)
 	select {
 	case <-w.stop:
 	default:

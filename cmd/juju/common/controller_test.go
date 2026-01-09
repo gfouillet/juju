@@ -6,156 +6,122 @@ package common
 import (
 	"context"
 	"io"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/api"
+	"github.com/juju/juju/api/jujuclient/jujuclienttesting"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient/jujuclienttesting"
+	"github.com/juju/juju/core/version"
+	environscmd "github.com/juju/juju/environs/cmd"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
-	"github.com/juju/juju/version"
 )
 
-var _ = gc.Suite(&controllerSuite{})
+func TestControllerSuite(t *stdtesting.T) {
+	tc.Run(t, &controllerSuite{})
+}
 
 type controllerSuite struct {
 	testing.BaseSuite
-	mockBlockClient *mockBlockClient
 }
 
-func (s *controllerSuite) SetUpTest(c *gc.C) {
-	s.mockBlockClient = &mockBlockClient{}
-	s.PatchValue(&blockAPI, func(*modelcmd.ModelCommandBase) (listBlocksAPI, error) {
-		err := s.mockBlockClient.loginError
-		if err != nil {
-			s.mockBlockClient.loginError = nil
-			return nil, err
-		}
-		return s.mockBlockClient, nil
-	})
-}
-
-type mockBlockClient struct {
-	retryCount int
-	numRetries int
-	loginError error
-}
-
-var errOther = errors.New("other error")
-
-func (c *mockBlockClient) List() ([]params.Block, error) {
-	c.retryCount += 1
-	if c.retryCount == 5 {
-		return nil, &rpc.RequestError{Message: params.CodeUpgradeInProgress, Code: params.CodeUpgradeInProgress}
-	}
-	if c.numRetries < 0 {
-		return nil, errOther
-	}
-	if c.retryCount < c.numRetries {
-		return nil, &rpc.RequestError{Message: params.CodeUpgradeInProgress, Code: params.CodeUpgradeInProgress}
-	}
-	return []params.Block{}, nil
-}
-
-func (c *mockBlockClient) Close() error {
-	return nil
-}
-
-func (s *controllerSuite) TestWaitForAgentAPIReadyRetries(c *gc.C) {
+func (s *controllerSuite) TestWaitForAgentAPIReadyRetries(c *tc.C) {
 	s.PatchValue(&bootstrapReadyPollDelay, 1*time.Millisecond)
-	s.PatchValue(&bootstrapReadyPollCount, 5)
 	defaultSeriesVersion := version.Current
 	// Force a dev version by having a non zero build number.
 	// This is because we have not uploaded any tools and auto
 	// upload is only enabled for dev versions.
 	defaultSeriesVersion.Build = 1234
 	s.PatchValue(&version.Current, defaultSeriesVersion)
-	for _, t := range []struct {
-		numRetries int
-		err        error
-	}{
-		{0, nil}, // agent ready immediately
-		{2, nil}, // agent ready after 2 polls
-		{6, &rpc.RequestError{
-			Message: params.CodeUpgradeInProgress,
-			Code:    params.CodeUpgradeInProgress,
-		}}, // agent ready after 6 polls but that's too long
-		{-1, errOther}, // another error is returned
-	} {
-		s.mockBlockClient.numRetries = t.numRetries
-		s.mockBlockClient.retryCount = 0
-		runInCommand(c, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
-			bootstrapCtx := modelcmd.BootstrapContext(context.Background(), ctx)
-			err := WaitForAgentInitialisation(bootstrapCtx, base, false, "controller")
-			c.Check(errors.Cause(err), gc.DeepEquals, t.err)
+
+	c.Run("Immediate", func(c *stdtesting.T) {
+		count := 0
+		tryAPI := func(ctx context.Context, c *modelcmd.ModelCommandBase) error {
+			count++
+			return nil
+		}
+		runInCommand(&tc.TBC{TB: c}, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
+			bootstrapCtx := environscmd.BootstrapContext(c.Context(), ctx)
+			err := WaitForAgentInitialisation(bootstrapCtx, base, false, "arthur", tryAPI)
+			tc.Assert(c, err, tc.ErrorIsNil)
 		})
-		expectedRetries := t.numRetries
-		if t.numRetries <= 0 {
-			expectedRetries = 1
+	})
+
+	c.Run("AllErrors", func(c *stdtesting.T) {
+		count := 0
+		tryAPI := func(ctx context.Context, c *modelcmd.ModelCommandBase) error {
+			count++
+			switch count {
+			case 1:
+				return io.EOF
+			case 2:
+				return api.ConnectionOpenTimedOut
+			case 3:
+				return api.ConnectionDialTimedOut
+			case 4:
+				return rpc.ErrShutdown
+			case 5:
+				return &rpc.RequestError{
+					Message: params.CodeUpgradeInProgress,
+					Code:    params.CodeUpgradeInProgress,
+				}
+			}
+			return nil
 		}
-		// Only retry maximum of bootstrapReadyPollCount times.
-		if expectedRetries > 5 {
-			expectedRetries = 5
+		runInCommand(&tc.TBC{TB: c}, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
+			bootstrapCtx := environscmd.BootstrapContext(c.Context(), ctx)
+			err := WaitForAgentInitialisation(bootstrapCtx, base, false, "arthur", tryAPI)
+			tc.Assert(c, err, tc.ErrorIsNil)
+		})
+	})
+
+	c.Run("UnknownError", func(c *stdtesting.T) {
+		count := 0
+		tryAPI := func(ctx context.Context, c *modelcmd.ModelCommandBase) error {
+			count++
+			return errors.New("foobar")
 		}
-		c.Check(s.mockBlockClient.retryCount, gc.Equals, expectedRetries)
-	}
-}
-
-func (s *controllerSuite) TestWaitForAgentAPIReadyRetriesWithOpenEOFErr(c *gc.C) {
-	s.mockBlockClient.numRetries = 0
-	s.mockBlockClient.retryCount = 0
-	s.mockBlockClient.loginError = io.EOF
-
-	runInCommand(c, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
-		bootstrapCtx := modelcmd.BootstrapContext(context.Background(), ctx)
-		err := WaitForAgentInitialisation(bootstrapCtx, base, false, "controller")
-		c.Check(err, jc.ErrorIsNil)
+		runInCommand(&tc.TBC{TB: c}, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
+			bootstrapCtx := environscmd.BootstrapContext(c.Context(), ctx)
+			err := WaitForAgentInitialisation(bootstrapCtx, base, false, "arthur", tryAPI)
+			tc.Assert(c, err, tc.ErrorIs, unknownError)
+			tc.Assert(c, err, tc.ErrorMatches, `.*foobar`)
+		})
 	})
-	c.Check(s.mockBlockClient.retryCount, gc.Equals, 1)
-}
 
-func (s *controllerSuite) TestWaitForAgentAPIReadyStopsRetriesWithOpenErr(c *gc.C) {
-	s.mockBlockClient.numRetries = 0
-	s.mockBlockClient.retryCount = 0
-	s.mockBlockClient.loginError = errors.NewUnauthorized(nil, "")
-	runInCommand(c, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
-		bootstrapCtx := modelcmd.BootstrapContext(context.Background(), ctx)
-		err := WaitForAgentInitialisation(bootstrapCtx, base, false, "controller")
-		c.Check(err, jc.Satisfies, errors.IsUnauthorized)
-	})
-	c.Check(s.mockBlockClient.retryCount, gc.Equals, 0)
-}
-
-func (s *controllerSuite) TestWaitForAgentCancelled(c *gc.C) {
-	s.mockBlockClient.numRetries = 2
-	runInCommand(c, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
-		stdCtx, cancel := context.WithCancel(context.Background())
-		cancel()
-		bootstrapCtx := modelcmd.BootstrapContext(stdCtx, ctx)
-		err := WaitForAgentInitialisation(bootstrapCtx, base, false, "controller")
-		c.Check(err, gc.ErrorMatches, `unable to contact api server: .*`)
+	c.Run("ExhaustedRetries", func(c *stdtesting.T) {
+		count := 0
+		tryAPI := func(ctx context.Context, c *modelcmd.ModelCommandBase) error {
+			count++
+			return api.ConnectionOpenTimedOut
+		}
+		runInCommand(&tc.TBC{TB: c}, func(ctx *cmd.Context, base *modelcmd.ModelCommandBase) {
+			bootstrapCtx := environscmd.BootstrapContext(c.Context(), ctx)
+			err := WaitForAgentInitialisation(bootstrapCtx, base, false, "arthur", tryAPI)
+			tc.Assert(c, err, tc.ErrorMatches, `unable to contact api server after.*`)
+		})
 	})
 }
 
-func runInCommand(c *gc.C, run func(ctx *cmd.Context, base *modelcmd.ModelCommandBase)) {
+func runInCommand(c tc.LikeC, run func(ctx *cmd.Context, base *modelcmd.ModelCommandBase)) {
 	cmd := &testCommand{
 		run: run,
 	}
 	cmd.SetClientStore(jujuclienttesting.MinimalStore())
-	cmd.SetAPIOpen(func(*api.Info, api.DialOpts) (api.Connection, error) {
+	cmd.SetAPIOpen(func(context.Context, *api.Info, api.DialOpts) (api.Connection, error) {
 		return nil, errors.New("no API available")
 	})
 
 	_, err := cmdtesting.RunCommand(c, modelcmd.Wrap(cmd))
-	c.Assert(err, jc.ErrorIsNil)
+	tc.Assert(c, err, tc.ErrorIsNil)
 }
 
 type testCommand struct {

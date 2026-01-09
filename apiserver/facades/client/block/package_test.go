@@ -1,14 +1,6 @@
 // Copyright 2015 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package block_test
+package block
 
-import (
-	stdtesting "testing"
-
-	"github.com/juju/juju/testing"
-)
-
-func TestAll(t *stdtesting.T) {
-	testing.MgoTestPackage(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package block -destination service_mock_test.go github.com/juju/juju/apiserver/facades/client/block BlockCommandService,Authorizer

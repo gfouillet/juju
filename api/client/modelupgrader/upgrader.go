@@ -4,19 +4,27 @@
 package modelupgrader
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/tools"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Client provides methods that the Juju client command uses to upgrade models.
 type Client struct {
@@ -28,8 +36,8 @@ type Client struct {
 
 // NewClient creates a new `Client` based on an existing authenticated API
 // connection.
-func NewClient(st base.APICallCloser) *Client {
-	frontend, backend := base.NewClientFacade(st, "ModelUpgrader")
+func NewClient(st base.APICallCloser, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(st, "ModelUpgrader", options...)
 	return &Client{
 		ClientFacade: frontend,
 		facade:       backend,
@@ -39,11 +47,11 @@ func NewClient(st base.APICallCloser) *Client {
 
 // AbortModelUpgrade aborts and archives the model upgrade
 // synchronisation record, if any.
-func (c *Client) AbortModelUpgrade(modelUUID string) error {
+func (c *Client) AbortModelUpgrade(ctx context.Context, modelUUID string) error {
 	args := params.ModelParam{
 		ModelTag: names.NewModelTag(modelUUID).String(),
 	}
-	return c.facade.FacadeCall("AbortModelUpgrade", args, nil)
+	return c.facade.FacadeCall(ctx, "AbortModelUpgrade", args, nil)
 }
 
 // UpgradeModel upgrades the model to the provided agent version.
@@ -51,8 +59,9 @@ func (c *Client) AbortModelUpgrade(modelUUID string) error {
 // the best version is selected by the controller and returned as
 // ChosenVersion in the result.
 func (c *Client) UpgradeModel(
-	modelUUID string, targetVersion version.Number, stream string, ignoreAgentVersions, druRun bool,
-) (version.Number, error) {
+	ctx context.Context,
+	modelUUID string, targetVersion semversion.Number, stream string, ignoreAgentVersions, druRun bool,
+) (semversion.Number, error) {
 	args := params.UpgradeModelParams{
 		ModelTag:            names.NewModelTag(modelUUID).String(),
 		TargetVersion:       targetVersion,
@@ -61,7 +70,7 @@ func (c *Client) UpgradeModel(
 		DryRun:              druRun,
 	}
 	var result params.UpgradeModelResult
-	err := c.facade.FacadeCall("UpgradeModel", args, &result)
+	err := c.facade.FacadeCall(ctx, "UpgradeModel", args, &result)
 	if err != nil {
 		return result.ChosenVersion, errors.Trace(err)
 	}
@@ -72,7 +81,7 @@ func (c *Client) UpgradeModel(
 }
 
 // UploadTools uploads tools at the specified location to the API server over HTTPS.
-func (c *Client) UploadTools(r io.ReadSeeker, vers version.Binary) (tools.List, error) {
+func (c *Client) UploadTools(ctx context.Context, r io.Reader, vers semversion.Binary) (tools.List, error) {
 	req, err := http.NewRequest("POST", fmt.Sprintf("/tools?binaryVersion=%s", vers), r)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot create upload request")
@@ -86,7 +95,7 @@ func (c *Client) UploadTools(r io.ReadSeeker, vers version.Binary) (tools.List, 
 		return nil, errors.Trace(err)
 	}
 
-	if err := httpClient.Do(c.facade.RawAPICaller().Context(), req, &resp); err != nil {
+	if err := httpClient.Do(ctx, req, &resp); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return resp.ToolsList, nil

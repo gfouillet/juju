@@ -16,13 +16,13 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/proxy"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/proxy"
 	"github.com/juju/juju/rpc/jsoncodec"
 	"github.com/juju/juju/rpc/params"
 )
@@ -143,7 +143,7 @@ type LoginResultParams struct {
 	servers          []network.MachineHostPorts
 	facades          []params.FacadeVersions
 	publicDNSName    string
-	serverVersion    version.Number
+	serverVersion    semversion.Number
 }
 
 // EnsureTag should be used when a login provider needs to ensure
@@ -170,7 +170,7 @@ func NewLoginResultParams(result params.LoginResult) (*LoginResultParams, error)
 		modelAccess = result.UserInfo.ModelAccess
 	}
 	servers := params.ToMachineHostsPorts(result.Servers)
-	serverVersion, err := version.Parse(result.ServerVersion)
+	serverVersion, err := semversion.Parse(result.ServerVersion)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -265,6 +265,14 @@ type DialOpts struct {
 	// automatically verified. If the callback returns a non-nil error then
 	// the connection attempt will be aborted.
 	VerifyCA func(host, endpoint string, caCert *x509.Certificate) error
+
+	// PingPeriod is the period between API pings used to detect broken
+	// connections. If nil, a default value is used.
+	PingPeriod *time.Duration
+
+	// PingTimeout is the timeout for each API ping. If nil, a default value is
+	// used.
+	PingTimeout *time.Duration
 }
 
 // IPAddrResolver implements a resolved from host name to the
@@ -313,10 +321,10 @@ func WithLoginProvider(lp LoginProvider) DialOption {
 }
 
 // OpenFunc is the usual form of a function that opens an API connection.
-type OpenFunc func(*Info, DialOpts) (Connection, error)
+type OpenFunc func(context.Context, *Info, DialOpts) (Connection, error)
 
 // Connection exists purely to make api-opening funcs mockable. It's just a
-// dumb copy of all the methods on api.state; we can and should be extracting
+// dumb copy of all the methods on api.conn; we can and should be extracting
 // smaller and more relevant interfaces (and dropping some of them too).
 
 // Connection represents a connection to a Juju API server.
@@ -356,7 +364,7 @@ type Connection interface {
 	// IsBroken returns whether the connection is broken. It checks
 	// the Broken channel and if that is open, attempts a connection
 	// ping.
-	IsBroken() bool
+	IsBroken(ctx context.Context) bool
 
 	// IsProxied returns weather the connection is proxied.
 	IsProxied() bool
@@ -374,8 +382,8 @@ type Connection interface {
 
 	// These are a bit off -- ServerVersion is apparently not known until after
 	// Login()? Maybe evidence of need for a separate AuthenticatedConnection..?
-	Login(name names.Tag, password, nonce string, ms []macaroon.Slice) error
-	ServerVersion() (version.Number, bool)
+	Login(ctx context.Context, name names.Tag, password, nonce string, ms []macaroon.Slice) error
+	ServerVersion() (semversion.Number, bool)
 
 	// APICaller provides the facility to make API calls directly.
 	// This should not be used outside the api/* packages or tests.
@@ -388,7 +396,7 @@ type Connection interface {
 	// All the rest are strange and questionable and deserve extra attention
 	// and/or discussion.
 
-	// AuthTag returns the tag of the authorized user of the state API
+	// AuthTag returns the tag of the authorized user of the conn API
 	// connection.
 	AuthTag() names.Tag
 

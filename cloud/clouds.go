@@ -12,7 +12,7 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/juju/schema"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/juju/osenv"
@@ -38,6 +38,11 @@ func (a AuthTypes) Contains(t AuthType) bool {
 		}
 	}
 	return false
+}
+
+// String implements the Stringer interface for AuthType.
+func (a AuthType) String() string {
+	return string(a)
 }
 
 const (
@@ -88,7 +93,7 @@ const (
 	InteractiveAuthType = "interactive"
 
 	// EmptyAuthType is the authentication type used for providers
-	// that require no credentials, e.g. "lxd", and "manual".
+	// that require no credentials, e.g. "lxd", and "unmanaged".
 	EmptyAuthType AuthType = "empty"
 
 	// AuthTypesKey is the name of the key in a cloud config or cloud schema

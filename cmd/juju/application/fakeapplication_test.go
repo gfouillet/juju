@@ -4,6 +4,7 @@
 package application_test
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/collections/set"
@@ -15,7 +16,6 @@ import (
 // fakeApplicationAPI is the fake application API for testing the application
 // update command.
 type fakeApplicationAPI struct {
-	branchName  string
 	name        string
 	charmName   string
 	charmValues map[string]interface{}
@@ -28,11 +28,7 @@ func (f *fakeApplicationAPI) Close() error {
 	return nil
 }
 
-func (f *fakeApplicationAPI) Get(branchName, application string) (*params.ApplicationGetResults, error) {
-	if branchName != f.branchName {
-		return nil, errors.Errorf("expected branch %q, got %q", f.branchName, branchName)
-	}
-
+func (f *fakeApplicationAPI) Get(ctx context.Context, application string) (*params.ApplicationGetResults, error) {
 	if application != f.name {
 		return nil, errors.NotFoundf("application %q", application)
 	}
@@ -62,10 +58,7 @@ func (f *fakeApplicationAPI) Get(branchName, application string) (*params.Applic
 	}, nil
 }
 
-func (f *fakeApplicationAPI) SetConfig(branchName, application, configYAML string, config map[string]string) error {
-	if branchName != f.branchName {
-		return errors.Errorf("expected branch %q, got %q", f.branchName, branchName)
-	}
+func (f *fakeApplicationAPI) SetConfig(ctx context.Context, application, configYAML string, config map[string]string) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -98,11 +91,7 @@ func (f *fakeApplicationAPI) SetConfig(branchName, application, configYAML strin
 	return nil
 }
 
-func (f *fakeApplicationAPI) UnsetApplicationConfig(branchName, application string, options []string) error {
-	if branchName != f.branchName {
-		return errors.Errorf("expected branch %q, got %q", f.branchName, branchName)
-	}
-
+func (f *fakeApplicationAPI) UnsetApplicationConfig(ctx context.Context, application string, options []string) error {
 	if f.err != nil {
 		return f.err
 	}

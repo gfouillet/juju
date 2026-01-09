@@ -7,15 +7,15 @@ import (
 	"net"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewListCommand returns a cammin used to list all subnets
@@ -110,7 +110,7 @@ func (c *ListCommand) Run(ctx *cmd.Context) error {
 		// Validate space and/or zone, if given to display a nicer error
 		// message.
 		// Get the list of subnets, filtering them as requested.
-		subnets, err := api.ListSubnets(c.spaceTag, c.ZoneName)
+		subnets, err := api.ListSubnets(ctx, c.spaceTag, c.ZoneName)
 		if err != nil {
 			return errors.Annotate(err, "cannot list subnets")
 		}

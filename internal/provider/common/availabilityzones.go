@@ -4,27 +4,25 @@
 package common
 
 import (
+	"context"
 	"sort"
 
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 )
 
 // ZonedEnviron is an environs.Environ that has support for availability zones.
-//
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/zoned_environ.go github.com/juju/juju/internal/provider/common ZonedEnviron
 type ZonedEnviron interface {
 	environs.Environ
 
 	// AvailabilityZones returns all availability zones in the environment.
-	AvailabilityZones(ctx context.ProviderCallContext) (network.AvailabilityZones, error)
+	AvailabilityZones(ctx context.Context) (network.AvailabilityZones, error)
 
 	// InstanceAvailabilityZoneNames returns the names of the availability
 	// zones for the specified instances. The error returned follows the same
 	// rules as Environ.Instances.
-	InstanceAvailabilityZoneNames(ctx context.ProviderCallContext, ids []instance.Id) (map[instance.Id]string, error)
+	InstanceAvailabilityZoneNames(ctx context.Context, ids []instance.Id) (map[instance.Id]string, error)
 
 	// DeriveAvailabilityZones attempts to derive availability zones from
 	// the specified StartInstanceParams.
@@ -35,7 +33,7 @@ type ZonedEnviron interface {
 	// there is no such restriction, then DeriveAvailabilityZones should
 	// return an empty string slice to indicate that the caller should
 	// choose an availability zone.
-	DeriveAvailabilityZones(ctx context.ProviderCallContext, args environs.StartInstanceParams) ([]string, error)
+	DeriveAvailabilityZones(ctx context.Context, args environs.StartInstanceParams) ([]string, error)
 }
 
 // AvailabilityZoneInstances describes an availability zone and
@@ -76,7 +74,7 @@ func (b byPopulationThenName) Swap(i, j int) {
 // If the specified group is empty, then it will behave as if the result of
 // AllRunningInstances were provided.
 func AvailabilityZoneAllocations(
-	env ZonedEnviron, ctx context.ProviderCallContext, group []instance.Id,
+	env ZonedEnviron, ctx context.Context, group []instance.Id,
 ) ([]AvailabilityZoneInstances, error) {
 	if len(group) == 0 {
 		instances, err := env.AllRunningInstances(ctx)
@@ -136,60 +134,4 @@ func AvailabilityZoneAllocations(
 	}
 	sort.Sort(byPopulationThenName(zoneInstances))
 	return zoneInstances, nil
-}
-
-var internalAvailabilityZoneAllocations = AvailabilityZoneAllocations
-
-// DistributeInstances is a common function for implement the
-// state.InstanceDistributor policy based on availability zone spread.
-// TODO (manadart 2018-11-27) This method signature has grown to the point
-// where the argument list should be replaced with a struct.
-// At that time limitZones could be transformed to a map so that lookups in the
-// filtering below are more efficient.
-func DistributeInstances(
-	env ZonedEnviron, ctx context.ProviderCallContext, candidates, group []instance.Id, limitZones []string,
-) ([]instance.Id, error) {
-	// Determine availability zone distribution for the group.
-	zoneInstances, err := internalAvailabilityZoneAllocations(env, ctx, group)
-	if err != nil || len(zoneInstances) == 0 {
-		return nil, err
-	}
-
-	// If there are any zones supplied for limitation,
-	// filter to distribution data so that only those zones are considered.
-	filteredZoneInstances := zoneInstances[:0]
-	if len(limitZones) > 0 {
-		for _, zi := range zoneInstances {
-			for _, zone := range limitZones {
-				if zi.ZoneName == zone {
-					filteredZoneInstances = append(filteredZoneInstances, zi)
-					break
-				}
-			}
-		}
-	} else {
-		filteredZoneInstances = zoneInstances
-	}
-
-	// Determine which of the candidates are eligible based on whether
-	// they are allocated in one of the least-populated availability zones.
-	var allEligible []string
-	for i := range filteredZoneInstances {
-		if i > 0 && len(filteredZoneInstances[i].Instances) > len(filteredZoneInstances[i-1].Instances) {
-			break
-		}
-		for _, id := range filteredZoneInstances[i].Instances {
-			allEligible = append(allEligible, string(id))
-		}
-	}
-	sort.Strings(allEligible)
-
-	eligible := make([]instance.Id, 0, len(candidates))
-	for _, candidate := range candidates {
-		n := sort.SearchStrings(allEligible, string(candidate))
-		if n >= 0 && n < len(allEligible) {
-			eligible = append(eligible, candidate)
-		}
-	}
-	return eligible, nil
 }

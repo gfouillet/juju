@@ -4,7 +4,8 @@
 package ssh
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 	"github.com/juju/retry"
@@ -12,7 +13,8 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
-	jujussh "github.com/juju/juju/network/ssh"
+	"github.com/juju/juju/internal/cmd"
+	jujussh "github.com/juju/juju/internal/network/ssh"
 )
 
 var usageSCPSummary = `
@@ -166,7 +168,7 @@ func (c *scpCommand) Init(args []string) (err error) {
 	if len(args) < 2 {
 		return errors.Errorf("at least two arguments required")
 	}
-	if c.modelType, err = c.ModelType(); err != nil {
+	if c.modelType, err = c.ModelType(context.TODO()); err != nil {
 		return err
 	}
 	if c.modelType == model.CAAS {
@@ -185,7 +187,7 @@ func (c *scpCommand) Init(args []string) (err error) {
 // Run resolves c.Target to a machine, or host of a unit and
 // forks ssh with c.Args, if provided.
 func (c *scpCommand) Run(ctx *cmd.Context) error {
-	if err := c.provider.initRun(&c.ModelCommandBase); err != nil {
+	if err := c.provider.initRun(ctx.Context, &c.ModelCommandBase); err != nil {
 		return errors.Trace(err)
 	}
 	defer c.provider.cleanupRun()

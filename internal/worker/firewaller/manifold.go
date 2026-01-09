@@ -4,50 +4,40 @@
 package firewaller
 
 import (
-	stdcontext "context"
+	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/api/controller/remoterelations"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/models"
+	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/apicaller"
-	"github.com/juju/juju/internal/worker/common"
 )
 
-// logger is here to stop the desire of creating a package level logger.
-// Don't do this, instead use the one passed as manifold config.
-type logger interface{}
-
-var _ logger = struct{}{}
-
-// Logger represents the methods used by the worker to log details.
-type Logger interface {
-	Tracef(string, ...interface{})
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Infof(string, ...interface{})
-	Errorf(string, ...interface{})
-}
-
 // ManifoldConfig describes the resources used by the firewaller worker.
+//
+// TODO(jack-w-shaw): This is a model worker, so domain services can be accessed
+// directly instead of going via an API. However, not all dependencies are
+// available as domain services, so we still need to use the API for some things.
+// Once all dependencies are available as domain services, we can remove the
+// APICaller.
 type ManifoldConfig struct {
-	AgentName     string
-	APICallerName string
-	EnvironName   string
-	Logger        Logger
+	AgentName          string
+	APICallerName      string
+	DomainServicesName string
+	EnvironName        string
+	Logger             logger.Logger
 
-	NewControllerConnection      apicaller.NewExternalControllerConnectionFunc
-	NewRemoteRelationsFacade     func(base.APICaller) *remoterelations.Client
-	NewFirewallerFacade          func(base.APICaller) (FirewallerAPI, error)
-	NewFirewallerWorker          func(Config) (worker.Worker, error)
-	NewCredentialValidatorFacade func(base.APICaller) (common.CredentialAPI, error)
+	NewControllerConnection apicaller.NewExternalControllerConnectionFunc
+	NewFirewallerFacade     func(base.APICaller) (FirewallerAPI, error)
+	NewFirewallerWorker     func(Config) (worker.Worker, error)
 }
 
 // Manifold returns a Manifold that encapsulates the firewaller worker.
@@ -57,6 +47,7 @@ func Manifold(cfg ManifoldConfig) dependency.Manifold {
 			cfg.AgentName,
 			cfg.APICallerName,
 			cfg.EnvironName,
+			cfg.DomainServicesName,
 		},
 		Start: cfg.start,
 	}
@@ -70,6 +61,9 @@ func (cfg ManifoldConfig) Validate() error {
 	if cfg.APICallerName == "" {
 		return errors.NotValidf("empty APICallerName")
 	}
+	if cfg.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
+	}
 	if cfg.EnvironName == "" {
 		return errors.NotValidf("empty EnvironName")
 	}
@@ -79,38 +73,37 @@ func (cfg ManifoldConfig) Validate() error {
 	if cfg.NewControllerConnection == nil {
 		return errors.NotValidf("nil NewControllerConnection")
 	}
-	if cfg.NewRemoteRelationsFacade == nil {
-		return errors.NotValidf("nil NewRemoteRelationsFacade")
-	}
 	if cfg.NewFirewallerFacade == nil {
 		return errors.NotValidf("nil NewFirewallerFacade")
 	}
 	if cfg.NewFirewallerWorker == nil {
 		return errors.NotValidf("nil NewFirewallerWorker")
 	}
-	if cfg.NewCredentialValidatorFacade == nil {
-		return errors.NotValidf("nil NewCredentialValidatorFacade")
-	}
 	return nil
 }
 
 // start is a StartFunc for a Worker manifold.
-func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, error) {
+func (cfg ManifoldConfig) start(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var agent agent.Agent
-	if err := context.Get(cfg.AgentName, &agent); err != nil {
+	if err := getter.Get(cfg.AgentName, &agent); err != nil {
 		return nil, errors.Trace(err)
 	}
 	var apiConn api.Connection
-	if err := context.Get(cfg.APICallerName, &apiConn); err != nil {
+	if err := getter.Get(cfg.APICallerName, &apiConn); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var environ environs.Environ
-	if err := context.Get(cfg.EnvironName, &environ); err != nil {
+	if err := getter.Get(cfg.EnvironName, &environ); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	var domainServices services.DomainServices
+	if err := getter.Get(cfg.DomainServicesName, &domainServices); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -123,11 +116,11 @@ func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, erro
 
 	mode := environ.Config().FirewallMode()
 	if mode == config.FwNone {
-		cfg.Logger.Infof("stopping firewaller (not required)")
+		cfg.Logger.Infof(ctx, "stopping firewaller (not required)")
 		return nil, dependency.ErrUninstall
 	} else if mode == config.FwGlobal {
 		if !fwEnvOK {
-			cfg.Logger.Infof("Firewall global mode set on provider with no support. stopping firewaller")
+			cfg.Logger.Infof(ctx, "Firewall global mode set on provider with no support. stopping firewaller")
 			return nil, dependency.ErrUninstall
 		}
 	}
@@ -137,33 +130,29 @@ func (cfg ManifoldConfig) start(context dependency.Context) (worker.Worker, erro
 		return nil, errors.Trace(err)
 	}
 
-	credentialAPI, err := cfg.NewCredentialValidatorFacade(apiConn)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	// Check if the env supports IPV6 CIDRs for firewall ingress rules.
 	var envIPV6CIDRSupport bool
 	if featQuerier, ok := environ.(environs.FirewallFeatureQuerier); ok {
 		var err error
-		cloudCtx := common.NewCloudCallContextFunc(credentialAPI)(stdcontext.Background())
-		if envIPV6CIDRSupport, err = featQuerier.SupportsRulesWithIPV6CIDRs(cloudCtx); err != nil {
+		if envIPV6CIDRSupport, err = featQuerier.SupportsRulesWithIPV6CIDRs(ctx); err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
 
 	w, err := cfg.NewFirewallerWorker(Config{
-		ModelUUID:               agent.CurrentConfig().Model().Id(),
-		RemoteRelationsApi:      cfg.NewRemoteRelationsFacade(apiConn),
-		FirewallerAPI:           firewallerAPI,
-		EnvironFirewaller:       fwEnv,
-		EnvironModelFirewaller:  modelFw,
-		EnvironInstances:        environ,
-		EnvironIPV6CIDRSupport:  envIPV6CIDRSupport,
-		Mode:                    mode,
-		NewCrossModelFacadeFunc: crossmodelFirewallerFacadeFunc(cfg.NewControllerConnection),
-		CredentialAPI:           credentialAPI,
-		Logger:                  cfg.Logger,
+		ModelUUID:                 agent.CurrentConfig().Model().Id(),
+		CrossModelRelationService: domainServices.CrossModelRelation(),
+		FirewallerAPI:             firewallerAPI,
+		PortsService:              domainServices.Port(),
+		ApplicationService:        domainServices.Application(),
+		RelationService:           domainServices.Relation(),
+		EnvironFirewaller:         fwEnv,
+		EnvironModelFirewaller:    modelFw,
+		EnvironInstances:          environ,
+		EnvironIPV6CIDRSupport:    envIPV6CIDRSupport,
+		Mode:                      mode,
+		NewCrossModelFacadeFunc:   crossmodelFirewallerFacadeFunc(cfg.NewControllerConnection),
+		Logger:                    cfg.Logger,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)

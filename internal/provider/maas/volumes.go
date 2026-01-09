@@ -4,6 +4,7 @@
 package maas
 
 import (
+	"context"
 	"strings"
 	"unicode"
 
@@ -11,12 +12,12 @@ import (
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gomaasapi/v2"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/schema"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/storage"
 )
 
 const (
@@ -33,17 +34,42 @@ const (
 	tagsAttribute = "tags"
 )
 
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// the given storage kind. If no pool can be recommended nil is returned. For
+// the MAAS provider the "maas" pool is returned for both filesystems and block
+// devices.
+//
+// Implements [storage.ProviderRegistry] interface.
+func (*maasEnviron) RecommendedPoolForKind(
+	kind storage.StorageKind,
+) *storage.Config {
+	switch kind {
+	case storage.StorageKindBlock, storage.StorageKindFilesystem:
+		defaultPool, _ := storage.NewConfig(
+			maasStorageProviderType.String(), maasStorageProviderType, storage.Attrs{},
+		)
+		return defaultPool
+	default:
+		return common.GetCommonRecommendedIAASPoolForKind(kind)
+	}
+}
+
 // StorageProviderTypes implements storage.ProviderRegistry.
 func (*maasEnviron) StorageProviderTypes() ([]storage.ProviderType, error) {
-	return []storage.ProviderType{maasStorageProviderType}, nil
+	return append(
+		common.CommonIAASStorageProviderTypes(),
+		maasStorageProviderType,
+	), nil
 }
 
 // StorageProvider implements storage.ProviderRegistry.
 func (*maasEnviron) StorageProvider(t storage.ProviderType) (storage.Provider, error) {
-	if t == maasStorageProviderType {
+	switch t {
+	case maasStorageProviderType:
 		return maasStorageProvider{}, nil
+	default:
+		return common.GetCommonIAASStorageProvider(t)
 	}
-	return nil, errors.NotFoundf("storage provider %q", t)
 }
 
 // maasStorageProvider allows volumes to be specified when a node is acquired.
@@ -124,9 +150,16 @@ func (maasStorageProvider) Releasable() bool {
 	return false
 }
 
-// DefaultPools is defined on the Provider interface.
+// DefaultPools returns the default pools available through the maas provider.
+// By default a pool by the same name as the provider is offered.
+//
+// Implements [storage.Provider] interface.
 func (maasStorageProvider) DefaultPools() []*storage.Config {
-	return nil
+	defaultPool, _ := storage.NewConfig(
+		maasStorageProviderType.String(), maasStorageProviderType, storage.Attrs{},
+	)
+
+	return []*storage.Config{defaultPool}
 }
 
 // VolumeSource is defined on the Provider interface.
@@ -180,6 +213,7 @@ func buildMAASVolumeParameters(args []storage.VolumeParams, cons constraints.Val
 }
 
 func (mi *maasInstance) volumes(
+	ctx context.Context,
 	mTag names.MachineTag, requestedVolumes []names.VolumeTag,
 ) (
 	[]storage.Volume, []storage.VolumeAttachment, error,
@@ -216,7 +250,7 @@ func (mi *maasInstance) volumes(
 			// This should never happen, as we only request one block
 			// device per label. If it does happen, we'll just report
 			// the first block device and log this warning.
-			logger.Warningf(
+			logger.Warningf(ctx,
 				"expected 1 block device for label %s, received %d",
 				label, len(devices),
 			)

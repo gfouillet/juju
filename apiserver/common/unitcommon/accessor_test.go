@@ -1,71 +1,91 @@
 // Copyright 2020 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package unitcommon_test
+package unitcommon
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
-	"github.com/juju/juju/apiserver/common/unitcommon"
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
 	apiservertesting "github.com/juju/juju/apiserver/testing"
+	"github.com/juju/juju/core/application"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	"github.com/juju/juju/internal/testhelpers"
 )
 
 type UnitAccessorSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
+
+	applicationService *MockApplicationService
 }
 
-var _ = gc.Suite(&UnitAccessorSuite{})
-
-type appGetter struct {
-	exits bool
+func TestUnitAccessorSuite(t *testing.T) {
+	tc.Run(t, &UnitAccessorSuite{})
 }
 
-func (a appGetter) ApplicationExists(name string) error {
-	if a.exits {
-		return nil
-	}
-	return errors.NotFoundf("application %q", name)
-}
+func (s *UnitAccessorSuite) TestApplicationAgent(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-func (s *UnitAccessorSuite) TestApplicationAgent(c *gc.C) {
+	s.applicationService.EXPECT().
+		GetApplicationUUIDByName(gomock.Any(), "gitlab").
+		Return(application.UUID("1"), nil)
+
 	auth := apiservertesting.FakeAuthorizer{
 		Tag: names.NewApplicationTag("gitlab"),
 	}
-	getAuthFunc := unitcommon.UnitAccessor(auth, appGetter{true})
-	authFunc, err := getAuthFunc()
-	c.Assert(err, jc.ErrorIsNil)
+
+	getAuthFunc := UnitAccessor(auth, s.applicationService)
+	authFunc, err := getAuthFunc(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 	ok := authFunc(names.NewUnitTag("gitlab/0"))
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 	ok = authFunc(names.NewUnitTag("mysql/0"))
-	c.Assert(ok, jc.IsFalse)
+	c.Assert(ok, tc.IsFalse)
 }
 
-func (s *UnitAccessorSuite) TestApplicationNotFound(c *gc.C) {
+func (s *UnitAccessorSuite) TestApplicationNotFound(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().
+		GetApplicationUUIDByName(gomock.Any(), "gitlab").
+		Return(application.UUID("1"), applicationerrors.ApplicationNotFound)
+
 	auth := apiservertesting.FakeAuthorizer{
 		Tag: names.NewApplicationTag("gitlab"),
 	}
-	getAuthFunc := unitcommon.UnitAccessor(auth, appGetter{false})
-	_, err := getAuthFunc()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	getAuthFunc := UnitAccessor(auth, s.applicationService)
+	_, err := getAuthFunc(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 }
 
-func (s *UnitAccessorSuite) TestUnitAgent(c *gc.C) {
+func (s *UnitAccessorSuite) TestUnitAgent(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
 	auth := apiservertesting.FakeAuthorizer{
 		Tag: names.NewUnitTag("gitlab/0"),
 	}
-	getAuthFunc := unitcommon.UnitAccessor(auth, appGetter{true})
-	authFunc, err := getAuthFunc()
-	c.Assert(err, jc.ErrorIsNil)
+	getAuthFunc := UnitAccessor(auth, s.applicationService)
+	authFunc, err := getAuthFunc(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 	ok := authFunc(names.NewUnitTag("gitlab/0"))
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 	ok = authFunc(names.NewApplicationTag("gitlab"))
-	c.Assert(ok, jc.IsTrue)
+	c.Assert(ok, tc.IsTrue)
 	ok = authFunc(names.NewUnitTag("gitlab/1"))
-	c.Assert(ok, jc.IsFalse)
+	c.Assert(ok, tc.IsFalse)
 	ok = authFunc(names.NewUnitTag("mysql/0"))
-	c.Assert(ok, jc.IsFalse)
+	c.Assert(ok, tc.IsFalse)
+}
+
+func (s *UnitAccessorSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.applicationService = NewMockApplicationService(ctrl)
+
+	return ctrl
+
 }

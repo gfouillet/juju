@@ -4,26 +4,29 @@
 package externalcontrollerupdater
 
 import (
+	"context"
+	"testing"
 	"time"
 
 	"github.com/juju/clock/testclock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3/workertest"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/controller/crosscontroller"
 	"github.com/juju/juju/core/crossmodel"
 	corewatcher "github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/core/watcher/watchertest"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	coretesting "github.com/juju/juju/testing"
 )
 
-var _ = gc.Suite(&ExternalControllerUpdaterSuite{})
+func TestExternalControllerUpdaterSuite(t *testing.T) {
+	tc.Run(t, &ExternalControllerUpdaterSuite{})
+}
 
 type ExternalControllerUpdaterSuite struct {
 	coretesting.BaseSuite
@@ -33,7 +36,7 @@ type ExternalControllerUpdaterSuite struct {
 	client  *MockExternalControllerUpdaterClient
 }
 
-func (s *ExternalControllerUpdaterSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *ExternalControllerUpdaterSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 
 	s.watcher = NewMockExternalControllerWatcherClientCloser(ctrl)
@@ -44,159 +47,182 @@ func (s *ExternalControllerUpdaterSuite) setupMocks(c *gc.C) *gomock.Controller 
 	return ctrl
 }
 
-func (s *ExternalControllerUpdaterSuite) TestStartStop(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestStartStop(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
 
-	w, err := New(s.client, func(*api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(context.Context, *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	workertest.CleanKill(c, w)
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersStartStop(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersStartStop(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
 	info := &crossmodel.ControllerInfo{
-		ControllerTag: coretesting.ControllerTag,
-		Alias:         "alias",
-		Addrs:         []string{"10.6.6.6"},
-		CACert:        coretesting.CACert,
+		ControllerUUID: coretesting.ControllerTag.Id(),
+		Alias:          "alias",
+		Addrs:          []string{"10.6.6.6"},
+		CACert:         coretesting.CACert,
 	}
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(info, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(info, nil)
 
 	started := make(chan struct{})
 
 	infoWatcher := watchertest.NewMockNotifyWatcher(make(chan struct{}))
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(context.Context) (corewatcher.NotifyWatcher, error) {
 		return infoWatcher, nil
 	})
-	s.watcher.EXPECT().Close()
 
-	w, err := New(s.client, func(gotInfo *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	finalise := make(chan struct{})
+	s.watcher.EXPECT().Close().DoAndReturn(func() error {
+		close(finalise)
+		return nil
+	})
+
+	w, err := New(s.client, func(_ context.Context, gotInfo *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		defer close(started)
-		c.Assert(gotInfo, jc.DeepEquals, &api.Info{
+		c.Assert(gotInfo, tc.DeepEquals, &api.Info{
 			Addrs:  info.Addrs,
 			Tag:    names.NewUserTag("jujuanonymous"),
 			CACert: info.CACert,
 		})
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	select {
 	case <-started:
-	case <-time.After(coretesting.LongWait):
+	case <-c.Context().Done():
 		c.Fatal("timed out waiting for watcher to start")
 	}
 
 	workertest.CleanKill(c, w)
+
+	select {
+	case <-finalise:
+	case <-c.Context().Done():
+		c.Fatal("timed out waiting for final call")
+	}
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersError(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersError(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
 
 	done := make(chan struct{})
 
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(context.Context) (corewatcher.NotifyWatcher, error) {
 		return nil, errors.New("watcher error")
 	})
 	// Close should be called on error.
-	s.watcher.EXPECT().Close().Do(func() {
+	s.watcher.EXPECT().Close().DoAndReturn(func() error {
 		close(done)
+		return nil
 	})
 
-	w, err := New(s.client, func(*api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(context.Context, *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	select {
 	case <-done:
-	case <-time.After(coretesting.LongWait):
+	case <-c.Context().Done():
 		c.Fatal("timed out waiting for watcher client to close")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersErrorRestarts(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersErrorRestarts(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
 
 	done := make(chan struct{})
 
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(context.Context) (corewatcher.NotifyWatcher, error) {
 		return nil, errors.New("watcher error")
 	})
 	s.watcher.EXPECT().Close()
 
-	w, err := New(s.client, func(*api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(context.Context, *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	s.clock.Advance(time.Minute)
 	// After an error and a delay, restart the watcher.
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(&crossmodel.ControllerInfo{}, nil)
 	infoWatcher := watchertest.NewMockNotifyWatcher(make(chan struct{}))
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(context.Context) (corewatcher.NotifyWatcher, error) {
 		defer close(done)
 		return infoWatcher, nil
 	})
-	s.watcher.EXPECT().Close()
+
+	finalise := make(chan struct{})
+	s.watcher.EXPECT().Close().DoAndReturn(func() error {
+		close(finalise)
+		return nil
+	})
 
 	select {
 	case <-done:
-	case <-time.After(coretesting.LongWait):
+	case <-c.Context().Done():
 		c.Fatal("timed out waiting for watcher to restart")
 	}
 
 	workertest.CleanKill(c, w)
+
+	select {
+	case <-finalise:
+	case <-c.Context().Done():
+		c.Fatal("timed out waiting for final call")
+	}
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNotSupported(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNotSupported(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
 	info := &crossmodel.ControllerInfo{}
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(info, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(info, nil)
 
 	notSupportedErr := &params.Error{Code: params.CodeNotSupported}
 	watcherReady := make(chan struct{})
 	watcherFetched := make(chan struct{})
 
-	w, err := New(s.client, func(*api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(context.Context, *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		close(watcherReady)
 		select {
 		case <-watcherFetched:
@@ -205,7 +231,7 @@ func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNotSupporte
 		}
 		return nil, "", notSupportedErr
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	// Here we synchronise access to the controllerWatcher worker started
@@ -218,65 +244,65 @@ func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNotSupporte
 		c.Fatal("timed out waiting for watcher to be ready")
 	}
 	updater, _ := w.(*updaterWorker)
-	c.Assert(updater, gc.NotNil)
+	c.Assert(updater, tc.NotNil)
 	runner := updater.runner
 	names := runner.WorkerNames()
-	c.Assert(names, gc.HasLen, 1)
+	c.Assert(names, tc.HasLen, 1)
 	controllerWatcher, err := runner.Worker(names[0], nil)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 	close(watcherFetched)
 
 	err = workertest.CheckKilled(c, controllerWatcher)
-	c.Assert(err, gc.IsNil)
+	c.Assert(err, tc.IsNil)
 
 	workertest.CheckAlive(c, w)
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersChange(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersChange(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
 	info := crossmodel.ControllerInfo{
-		ControllerTag: coretesting.ControllerTag,
-		Alias:         "alias",
-		Addrs:         []string{"10.6.6.6"},
-		CACert:        coretesting.CACert,
+		ControllerUUID: coretesting.ControllerTag.Id(),
+		Alias:          "alias",
+		Addrs:          []string{"10.6.6.6"},
+		CACert:         coretesting.CACert,
 	}
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(&info, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(&info, nil)
 
 	change := make(chan struct{}, 1)
 	infoWatcher := watchertest.NewMockNotifyWatcher(change)
 
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(ctx context.Context) (corewatcher.NotifyWatcher, error) {
 		return infoWatcher, nil
 	})
 	s.watcher.EXPECT().Close()
 
-	w, err := New(s.client, func(gotInfo *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(context.Context, *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer workertest.CleanKill(c, w)
 
 	newInfo := &crosscontroller.ControllerInfo{
 		Addrs:  []string{"10.6.6.7"},
 		CACert: coretesting.CACert,
 	}
-	s.watcher.EXPECT().ControllerInfo().Return(newInfo, nil)
+	s.watcher.EXPECT().ControllerInfo(gomock.Any()).Return(newInfo, nil)
 
 	done := make(chan struct{})
 
 	updatedInfo := info
 	updatedInfo.Addrs = newInfo.Addrs
-	s.client.EXPECT().SetExternalControllerInfo(updatedInfo)
+	s.client.EXPECT().SetExternalControllerInfo(gomock.Any(), updatedInfo)
 
 	// After processing the event, the watcher is closed and re-opened.
 	s.watcher.EXPECT().Close()
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(context.Context) (corewatcher.NotifyWatcher, error) {
 		defer close(done)
 		return infoWatcher, nil
 	})
@@ -285,44 +311,44 @@ func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersChange(c *g
 
 	select {
 	case <-done:
-	case <-time.After(coretesting.LongWait):
+	case <-c.Context().Done():
 		c.Fatal("timed out waiting for controller update")
 	}
 
 	workertest.CleanKill(c, w)
 }
 
-func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNoChange(c *gc.C) {
+func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNoChange(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
 	ch := make(chan []string, 1)
 	extCtrlWatcher := watchertest.NewMockStringsWatcher(ch)
 	ch <- []string{coretesting.ControllerTag.Id()}
 
-	s.client.EXPECT().WatchExternalControllers().Return(extCtrlWatcher, nil)
+	s.client.EXPECT().WatchExternalControllers(gomock.Any()).Return(extCtrlWatcher, nil)
 	info := crossmodel.ControllerInfo{
-		ControllerTag: coretesting.ControllerTag,
-		Alias:         "alias",
-		Addrs:         []string{"10.6.6.6", "10.6.6.7"},
-		CACert:        coretesting.CACert,
+		ControllerUUID: coretesting.ControllerTag.Id(),
+		Alias:          "alias",
+		Addrs:          []string{"10.6.6.6", "10.6.6.7"},
+		CACert:         coretesting.CACert,
 	}
-	s.client.EXPECT().ExternalControllerInfo(coretesting.ControllerTag.Id()).Return(&info, nil)
+	s.client.EXPECT().ExternalControllerInfo(gomock.Any(), coretesting.ControllerTag.Id()).Return(&info, nil)
 
 	change := make(chan struct{}, 1)
 	infoWatcher := watchertest.NewMockNotifyWatcher(change)
 
-	s.watcher.EXPECT().WatchControllerInfo().DoAndReturn(func() (corewatcher.NotifyWatcher, error) {
+	s.watcher.EXPECT().WatchControllerInfo(gomock.Any()).DoAndReturn(func(ctx context.Context) (corewatcher.NotifyWatcher, error) {
 		return infoWatcher, nil
 	})
 	s.watcher.EXPECT().Close()
 
 	done := make(chan struct{})
-	w, err := New(s.client, func(gotInfo *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
+	w, err := New(s.client, func(ctx context.Context, gotInfo *api.Info) (ExternalControllerWatcherClientCloser, string, error) {
 		return s.watcher, "10.0.0.1", nil
 	}, s.clock, func() {
 		close(done)
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	defer workertest.CleanKill(c, w)
 
@@ -331,7 +357,7 @@ func (s *ExternalControllerUpdaterSuite) TestWatchExternalControllersNoChange(c 
 		Addrs:  []string{"10.6.6.7", "10.6.6.6"},
 		CACert: coretesting.CACert,
 	}
-	s.watcher.EXPECT().ControllerInfo().Return(newInfo, nil)
+	s.watcher.EXPECT().ControllerInfo(gomock.Any()).Return(newInfo, nil)
 
 	change <- struct{}{}
 

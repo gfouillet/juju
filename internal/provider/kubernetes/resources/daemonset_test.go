@@ -5,11 +5,10 @@ package resources_test
 
 import (
 	"context"
+	"testing"
 
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	appsv1 "k8s.io/api/apps/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +17,7 @@ import (
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	providerutils "github.com/juju/juju/internal/provider/kubernetes/utils"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type daemonsetSuite struct {
@@ -26,15 +26,17 @@ type daemonsetSuite struct {
 	daemonsetClient v1.DaemonSetInterface
 }
 
-var _ = gc.Suite(&daemonsetSuite{})
+func TestDaemonsetSuite(t *testing.T) {
+	tc.Run(t, &daemonsetSuite{})
+}
 
-func (s *daemonsetSuite) SetUpTest(c *gc.C) {
+func (s *daemonsetSuite) SetUpTest(c *tc.C) {
 	s.resourceSuite.SetUpTest(c)
 	s.namespace = "ns1"
 	s.daemonsetClient = s.client.AppsV1().DaemonSets(s.namespace)
 }
 
-func (s *daemonsetSuite) TestApply(c *gc.C) {
+func (s *daemonsetSuite) TestApply(c *tc.C) {
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ds1",
@@ -43,24 +45,24 @@ func (s *daemonsetSuite) TestApply(c *gc.C) {
 	}
 	// Create.
 	dsResource := resources.NewDaemonSet(s.client.AppsV1().DaemonSets(ds.Namespace), "test", "ds1", ds)
-	c.Assert(dsResource.Apply(context.TODO()), jc.ErrorIsNil)
-	result, err := s.client.AppsV1().DaemonSets("test").Get(context.TODO(), "ds1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(result.GetAnnotations()), gc.Equals, 0)
+	c.Assert(dsResource.Apply(c.Context()), tc.ErrorIsNil)
+	result, err := s.client.AppsV1().DaemonSets("test").Get(c.Context(), "ds1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(result.GetAnnotations()), tc.Equals, 0)
 
 	// Update.
 	ds.SetAnnotations(map[string]string{"a": "b"})
 	dsResource = resources.NewDaemonSet(s.client.AppsV1().DaemonSets(ds.Namespace), "test", "ds1", ds)
-	c.Assert(dsResource.Apply(context.TODO()), jc.ErrorIsNil)
+	c.Assert(dsResource.Apply(c.Context()), tc.ErrorIsNil)
 
-	result, err = s.client.AppsV1().DaemonSets("test").Get(context.TODO(), "ds1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `ds1`)
-	c.Assert(result.GetNamespace(), gc.Equals, `test`)
-	c.Assert(result.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	result, err = s.client.AppsV1().DaemonSets("test").Get(c.Context(), "ds1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `ds1`)
+	c.Assert(result.GetNamespace(), tc.Equals, `test`)
+	c.Assert(result.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *daemonsetSuite) TestGet(c *gc.C) {
+func (s *daemonsetSuite) TestGet(c *tc.C) {
 	template := appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ds1",
@@ -69,53 +71,53 @@ func (s *daemonsetSuite) TestGet(c *gc.C) {
 	}
 	ds1 := template
 	ds1.SetAnnotations(map[string]string{"a": "b"})
-	_, err := s.client.AppsV1().DaemonSets("test").Create(context.TODO(), &ds1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.AppsV1().DaemonSets("test").Create(c.Context(), &ds1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	dsResource := resources.NewDaemonSet(s.client.AppsV1().DaemonSets(ds1.Namespace), "test", "ds1", &template)
-	c.Assert(len(dsResource.GetAnnotations()), gc.Equals, 0)
-	err = dsResource.Get(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(dsResource.GetName(), gc.Equals, `ds1`)
-	c.Assert(dsResource.GetNamespace(), gc.Equals, `test`)
-	c.Assert(dsResource.GetAnnotations(), gc.DeepEquals, map[string]string{"a": "b"})
+	c.Assert(len(dsResource.GetAnnotations()), tc.Equals, 0)
+	err = dsResource.Get(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(dsResource.GetName(), tc.Equals, `ds1`)
+	c.Assert(dsResource.GetNamespace(), tc.Equals, `test`)
+	c.Assert(dsResource.GetAnnotations(), tc.DeepEquals, map[string]string{"a": "b"})
 }
 
-func (s *daemonsetSuite) TestDelete(c *gc.C) {
+func (s *daemonsetSuite) TestDelete(c *tc.C) {
 	ds := appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ds1",
 			Namespace: "test",
 		},
 	}
-	_, err := s.client.AppsV1().DaemonSets("test").Create(context.TODO(), &ds, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err := s.client.AppsV1().DaemonSets("test").Create(c.Context(), &ds, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	result, err := s.client.AppsV1().DaemonSets("test").Get(context.TODO(), "ds1", metav1.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result.GetName(), gc.Equals, `ds1`)
+	result, err := s.client.AppsV1().DaemonSets("test").Get(c.Context(), "ds1", metav1.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.GetName(), tc.Equals, `ds1`)
 
 	dsResource := resources.NewDaemonSet(s.client.AppsV1().DaemonSets(ds.Namespace), "test", "ds1", &ds)
-	err = dsResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIsNil)
+	err = dsResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
-	err = dsResource.Delete(context.TODO())
-	c.Assert(err, jc.ErrorIs, errors.NotFound)
+	err = dsResource.Delete(c.Context())
+	c.Assert(err, tc.ErrorIs, errors.NotFound)
 
-	err = dsResource.Get(context.TODO())
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
+	err = dsResource.Get(c.Context())
+	c.Assert(err, tc.Satisfies, errors.IsNotFound)
 
-	_, err = s.client.AppsV1().DaemonSets("test").Get(context.TODO(), "ds1", metav1.GetOptions{})
-	c.Assert(err, jc.Satisfies, k8serrors.IsNotFound)
+	_, err = s.client.AppsV1().DaemonSets("test").Get(c.Context(), "ds1", metav1.GetOptions{})
+	c.Assert(err, tc.Satisfies, k8serrors.IsNotFound)
 }
 
-func (s *daemonsetSuite) TestListDaemonSets(c *gc.C) {
+func (s *daemonsetSuite) TestListDaemonSets(c *tc.C) {
 	// Set up labels for model and app to list resource.
-	controllerUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	controllerUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
-	modelUUID, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	modelUUID, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	modelName := "testmodel"
 
@@ -133,8 +135,8 @@ func (s *daemonsetSuite) TestListDaemonSets(c *gc.C) {
 			Labels: labelSet,
 		},
 	}
-	_, err = s.daemonsetClient.Create(context.TODO(), ds1, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.daemonsetClient.Create(c.Context(), ds1, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Create ds2.
 	ds2Name := "ds2"
@@ -144,27 +146,27 @@ func (s *daemonsetSuite) TestListDaemonSets(c *gc.C) {
 			Labels: labelSet,
 		},
 	}
-	_, err = s.daemonsetClient.Create(context.TODO(), ds2, metav1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+	_, err = s.daemonsetClient.Create(c.Context(), ds2, metav1.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
 	// List resources with correct labels.
 	daemonsets, err := resources.ListDaemonSets(context.Background(), s.daemonsetClient, s.namespace, metav1.ListOptions{
 		LabelSelector: labelSet.String(),
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(daemonsets), gc.Equals, 2)
-	c.Assert(daemonsets[0].GetName(), gc.Equals, ds1Name)
-	c.Assert(daemonsets[1].GetName(), gc.Equals, ds2Name)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(daemonsets), tc.Equals, 2)
+	c.Assert(daemonsets[0].GetName(), tc.Equals, ds1Name)
+	c.Assert(daemonsets[1].GetName(), tc.Equals, ds2Name)
 
 	// List resources with no labels.
 	daemonsets, err = resources.ListDaemonSets(context.Background(), s.daemonsetClient, s.namespace, metav1.ListOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(daemonsets), gc.Equals, 2)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(daemonsets), tc.Equals, 2)
 
 	// List resources with wrong labels.
 	daemonsets, err = resources.ListDaemonSets(context.Background(), s.daemonsetClient, s.namespace, metav1.ListOptions{
 		LabelSelector: "foo=bar",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(len(daemonsets), gc.Equals, 0)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(len(daemonsets), tc.Equals, 0)
 }

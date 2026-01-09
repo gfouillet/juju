@@ -4,12 +4,21 @@
 package diskmanager
 
 import (
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/blockdevice"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 const diskManagerFacade = "DiskManager"
 
@@ -20,26 +29,50 @@ type State struct {
 }
 
 // NewState creates a new client-side DiskManager facade.
-func NewState(caller base.APICaller, authTag names.MachineTag) *State {
+func NewState(caller base.APICaller, authTag names.MachineTag, options ...Option) *State {
 	return &State{
-		base.NewFacadeCaller(caller, diskManagerFacade),
+		base.NewFacadeCaller(caller, diskManagerFacade, options...),
 		authTag,
 	}
 }
 
 // SetMachineBlockDevices sets the block devices attached to the machine
 // identified by the authenticated machine tag.
-func (st *State) SetMachineBlockDevices(devices []storage.BlockDevice) error {
+func (st *State) SetMachineBlockDevices(ctx context.Context, devices []blockdevice.BlockDevice) error {
 	args := params.SetMachineBlockDevices{
 		MachineBlockDevices: []params.MachineBlockDevices{{
 			Machine:      st.tag.String(),
-			BlockDevices: devices,
+			BlockDevices: blockDevicesToParams(devices),
 		}},
 	}
 	var results params.ErrorResults
-	err := st.facade.FacadeCall("SetMachineBlockDevices", args, &results)
+	err := st.facade.FacadeCall(ctx, "SetMachineBlockDevices", args, &results)
 	if err != nil {
 		return err
 	}
 	return results.OneError()
+}
+
+func blockDevicesToParams(in []blockdevice.BlockDevice) []params.BlockDevice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]params.BlockDevice, len(in))
+	for i, d := range in {
+		out[i] = params.BlockDevice{
+			DeviceName:     d.DeviceName,
+			DeviceLinks:    d.DeviceLinks,
+			Label:          d.FilesystemLabel,
+			UUID:           d.FilesystemUUID,
+			HardwareId:     d.HardwareId,
+			WWN:            d.WWN,
+			BusAddress:     d.BusAddress,
+			SizeMiB:        d.SizeMiB,
+			FilesystemType: d.FilesystemType,
+			InUse:          d.InUse,
+			MountPoint:     d.MountPoint,
+			SerialId:       d.SerialId,
+		}
+	}
+	return out
 }

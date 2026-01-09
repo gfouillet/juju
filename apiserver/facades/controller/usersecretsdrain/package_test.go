@@ -4,35 +4,27 @@
 package usersecretsdrain
 
 import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-
-	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/core/model"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/state_mock.go github.com/juju/juju/apiserver/facades/controller/usersecretsdrain SecretsState
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/service_mock.go github.com/juju/juju/apiserver/facades/controller/usersecretsdrain SecretService,SecretBackendService
 
 var NewUserSecretsDrainAPI = newUserSecretsDrainAPI
 
 func NewTestAPI(
 	authorizer facade.Authorizer,
-	secretsState SecretsState,
-	backendConfigGetter commonsecrets.BackendConfigGetter,
-	drainConfigGetter commonsecrets.BackendDrainConfigGetter,
+	secretService SecretService,
+	secretBackendService SecretBackendService,
 ) (*SecretsDrainAPI, error) {
 	if !authorizer.AuthController() {
 		return nil, apiservererrors.ErrPerm
 	}
 	return &SecretsDrainAPI{
-		secretsState:        secretsState,
-		backendConfigGetter: backendConfigGetter,
-		drainConfigGetter:   drainConfigGetter,
+		modelUUID:            model.UUID(coretesting.ModelTag.Id()),
+		secretService:        secretService,
+		secretBackendService: secretBackendService,
 	}, nil
 }

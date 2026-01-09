@@ -4,25 +4,21 @@
 package apicaller
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/logger"
 )
-
-// Logger represents the methods used by the worker to log details.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Infof(string, ...interface{})
-	Errorf(string, ...interface{})
-}
 
 // ConnectFunc is responsible for making and validating an API connection
 // on behalf of an agent.
-type ConnectFunc func(agent.Agent, api.OpenFunc, Logger) (api.Connection, error)
+type ConnectFunc func(context.Context, agent.Agent, api.OpenFunc, logger.Logger) (api.Connection, error)
 
 // ManifoldConfig defines a Manifold's dependencies.
 type ManifoldConfig struct {
@@ -59,7 +55,7 @@ type ManifoldConfig struct {
 	Filter dependency.FilterFunc
 
 	// Logger is used to write logging statements for the worker.
-	Logger Logger
+	Logger logger.Logger
 }
 
 // Manifold returns a manifold whose worker wraps an API connection
@@ -83,13 +79,13 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 // startFunc returns a StartFunc that creates a connection based on the
 // supplied manifold config and wraps it in a worker.
 func (config ManifoldConfig) startFunc() dependency.StartFunc {
-	return func(context dependency.Context) (worker.Worker, error) {
+	return func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 		var agent agent.Agent
-		if err := context.Get(config.AgentName, &agent); err != nil {
+		if err := getter.Get(config.AgentName, &agent); err != nil {
 			return nil, err
 		}
 
-		conn, err := config.NewConnection(agent, config.APIOpen, config.Logger)
+		conn, err := config.NewConnection(ctx, agent, config.APIOpen, config.Logger)
 		if errors.Cause(err) == ErrChangedPassword {
 			return nil, dependency.ErrBounce
 		} else if err != nil {

@@ -4,49 +4,46 @@
 package firewaller_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+
+	basetesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/api/controller/firewaller"
 	"github.com/juju/juju/core/life"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
 )
 
 type relationSuite struct {
-	firewallerSuite
-
-	apiRelation *firewaller.Relation
+	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&relationSuite{})
-
-func (s *relationSuite) SetUpTest(c *gc.C) {
-	s.firewallerSuite.SetUpTest(c)
-
-	var err error
-	s.apiRelation, err = s.firewaller.Relation(s.relations[0].Tag().(names.RelationTag))
-	c.Assert(err, jc.ErrorIsNil)
+func TestRelationSuite(t *testing.T) {
+	tc.Run(t, &relationSuite{})
 }
 
-func (s *relationSuite) TearDownTest(c *gc.C) {
-	s.firewallerSuite.TearDownTest(c)
-}
-
-func (s *relationSuite) TestRelation(c *gc.C) {
-	_, err := s.firewaller.Relation(names.NewRelationTag("foo:db bar:db"))
-	c.Assert(err, gc.ErrorMatches, `relation "foo:db bar:db" not found`)
-	c.Assert(err, jc.Satisfies, params.IsCodeNotFound)
-
-	apiRelation0, err := s.firewaller.Relation(s.relations[0].Tag().(names.RelationTag))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apiRelation0, gc.NotNil)
-}
-
-func (s *relationSuite) TestTag(c *gc.C) {
-	c.Assert(s.apiRelation.Tag(), gc.Equals, names.NewRelationTag(s.relations[0].String()))
-}
-
-func (s *relationSuite) TestLife(c *gc.C) {
-	c.Assert(s.apiRelation.Life(), gc.Equals, life.Alive)
+func (s *relationSuite) TestRelation(c *tc.C) {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "relation-mysql.db#wordpress.db"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: "alive"}},
+		}
+		return nil
+	})
+	tag := names.NewRelationTag("mysql:db wordpress:db")
+	client, err := firewaller.NewClient(apiCaller)
+	c.Assert(err, tc.ErrorIsNil)
+	r, err := client.Relation(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(r.Life(), tc.Equals, life.Alive)
+	c.Assert(r.Tag(), tc.DeepEquals, tag)
 }

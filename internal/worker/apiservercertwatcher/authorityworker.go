@@ -5,10 +5,10 @@ package apiservercertwatcher
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/agent"
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/internal/pki"
 )
 
 // OperatorWatcher is responsible for creating a new PKI certificate chain to
@@ -45,6 +45,7 @@ func newPKIAuthorityWorker() (*PKIAuthorityWorker, error) {
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "pki-authority",
 		Site: &agentWatcher.catacomb,
 		Work: agentWatcher.loop,
 	}); err != nil {

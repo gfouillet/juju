@@ -5,16 +5,18 @@ package relation_test
 
 import (
 	"fmt"
+	"testing"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	apiuniter "github.com/juju/juju/api/agent/uniter"
+	corerelation "github.com/juju/juju/core/relation"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/hooks"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/relation"
 	"github.com/juju/juju/internal/worker/uniter/relation/mocks"
@@ -23,161 +25,163 @@ import (
 
 type relationerSuite struct {
 	stateManager *mocks.MockStateManager
-	relationUnit *mocks.MockRelationUnit
-	relation     *mocks.MockRelation
+	relationUnit *api.MockRelationUnit
+	relation     *api.MockRelation
 	unitGetter   *mocks.MockUnitGetter
 }
 
-var _ = gc.Suite(&relationerSuite{})
+func TestRelationerSuite(t *testing.T) {
+	tc.Run(t, &relationerSuite{})
+}
 
-func (s *relationerSuite) TestImplicitRelationerPrepareHook(c *gc.C) {
+func (s *relationerSuite) TestImplicitRelationerPrepareHook(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(implicitRelationEndpoint())
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// Hooks are not allowed.
 	_, err := r.PrepareHook(hook.Info{})
-	c.Assert(err, gc.ErrorMatches, `restart immediately`)
+	c.Assert(err, tc.ErrorMatches, `restart immediately`)
 }
 
-func (s *relationerSuite) TestImplicitRelationerCommitHook(c *gc.C) {
+func (s *relationerSuite) TestImplicitRelationerCommitHook(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(implicitRelationEndpoint())
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// Hooks are not allowed.
-	err := r.CommitHook(hook.Info{})
-	c.Assert(err, gc.ErrorMatches, `restart immediately`)
+	err := r.CommitHook(c.Context(), hook.Info{})
+	c.Assert(err, tc.ErrorMatches, `restart immediately`)
 }
 
-func (s *relationerSuite) TestImplicitRelationerSetDying(c *gc.C) {
+func (s *relationerSuite) TestImplicitRelationerSetDying(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(implicitRelationEndpoint())
 	s.expectLeaveScope()
 	s.expectRemoveRelation()
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// Set it to Dying
-	c.Assert(r.IsDying(), jc.IsFalse)
-	err := r.SetDying()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(r.IsDying(), jc.IsTrue)
+	c.Assert(r.IsDying(), tc.IsFalse)
+	err := r.SetDying(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(r.IsDying(), tc.IsTrue)
 }
 
-func (s *relationerSuite) TestSetDying(c *gc.C) {
+func (s *relationerSuite) TestSetDying(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// Set it to Dying
-	c.Assert(r.IsDying(), jc.IsFalse)
-	err := r.SetDying()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(r.IsDying(), jc.IsTrue)
+	c.Assert(r.IsDying(), tc.IsFalse)
+	err := r.SetDying(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(r.IsDying(), tc.IsTrue)
 }
 
-func (s *relationerSuite) TestIfDyingFailJoin(c *gc.C) {
+func (s *relationerSuite) TestIfDyingFailJoin(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// Set it to Dying
-	err := r.SetDying()
-	c.Assert(err, jc.ErrorIsNil)
+	err := r.SetDying(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 
 	// Try to Join
-	err = r.Join()
-	c.Assert(err, gc.ErrorMatches, `dying relationer must not join!`)
+	err = r.Join(c.Context())
+	c.Assert(err, tc.ErrorMatches, `dying relationer must not join!`)
 }
 
-func (s *relationerSuite) TestCommitHookRelationBrokenDies(c *gc.C) {
+func (s *relationerSuite) TestCommitHookRelationBrokenDies(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 	s.expectLeaveScope()
 	s.expectRemoveRelation()
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
-	err := r.CommitHook(hook.Info{Kind: hooks.RelationBroken})
-	c.Assert(err, jc.ErrorIsNil)
+	err := r.CommitHook(c.Context(), hook.Info{Kind: hooks.RelationBroken})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *relationerSuite) TestCommitHookRelationRemoved(c *gc.C) {
+func (s *relationerSuite) TestCommitHookRelationRemoved(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
-	s.relationUnit.EXPECT().LeaveScope().Return(&params.Error{Code: "not found"})
+	s.relationUnit.EXPECT().LeaveScope(gomock.Any()).Return(&params.Error{Code: "not found"})
 	s.expectRemoveRelation()
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
-	err := r.CommitHook(hook.Info{Kind: hooks.RelationBroken})
-	c.Assert(err, jc.ErrorIsNil)
+	err := r.CommitHook(c.Context(), hook.Info{Kind: hooks.RelationBroken})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *relationerSuite) TestCommitHook(c *gc.C) {
+func (s *relationerSuite) TestCommitHook(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 	s.expectStateManagerRelation(nil)
 	s.expectSetRelation()
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
-	err := r.CommitHook(hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
-	c.Assert(err, jc.ErrorIsNil)
+	err := r.CommitHook(c.Context(), hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *relationerSuite) TestCommitHookRelationFail(c *gc.C) {
+func (s *relationerSuite) TestCommitHookRelationFail(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 	s.expectStateManagerRelation(errors.NotImplementedf("testing"))
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
-	err := r.CommitHook(hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
-	c.Assert(err, jc.Satisfies, errors.IsNotImplemented)
+	err := r.CommitHook(c.Context(), hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
+	c.Assert(err, tc.ErrorIs, errors.NotImplemented)
 }
 
-func (s *relationerSuite) TestPrepareHookRelationFail(c *gc.C) {
+func (s *relationerSuite) TestPrepareHookRelationFail(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 	s.expectStateManagerRelation(errors.NotImplementedf("testing"))
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	_, err := r.PrepareHook(hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
-	c.Assert(err, jc.Satisfies, errors.IsNotImplemented)
+	c.Assert(err, tc.ErrorIs, errors.NotImplemented)
 }
 
-func (s *relationerSuite) TestPrepareHookValidateFail(c *gc.C) {
+func (s *relationerSuite) TestPrepareHookValidateFail(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEndpoint(endpoint())
 	s.expectStateManagerRelationFailValidate()
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	// relationID and state id being different will fail validation.
 	name, err := r.PrepareHook(hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
-	c.Assert(err, gc.NotNil)
-	c.Assert(name, gc.Equals, "")
+	c.Assert(err, tc.NotNil)
+	c.Assert(name, tc.Equals, "")
 }
 
-func (s *relationerSuite) TestPrepareHook(c *gc.C) {
+func (s *relationerSuite) TestPrepareHook(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	ep := endpoint()
@@ -185,47 +189,47 @@ func (s *relationerSuite) TestPrepareHook(c *gc.C) {
 	s.expectEndpoint(ep)
 	s.expectStateManagerRelation(nil)
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
 	name, err := r.PrepareHook(hook.Info{Kind: hooks.RelationJoined, RelationId: 1})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(name, gc.Equals, fmt.Sprintf("%s-%s", ep.Name, hooks.RelationJoined))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(name, tc.Equals, fmt.Sprintf("%s-%s", ep.Name, hooks.RelationJoined))
 }
 
-func (s *relationerSuite) TestJoinRelation(c *gc.C) {
+func (s *relationerSuite) TestJoinRelation(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEnterScope()
 	s.expectRelationFound(true)
 
-	r := s.newRelationer()
+	r := s.newRelationer(c)
 
-	err := r.Join()
-	c.Assert(err, jc.ErrorIsNil)
+	err := r.Join(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *relationerSuite) TestJoinRelationNotFound(c *gc.C) {
+func (s *relationerSuite) TestJoinRelationNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	// Setup for test
 	s.expectEnterScope()
 	s.expectRelationFound(false)
 	s.expectSetRelation()
 
-	r := s.newRelationer()
-	err := r.Join()
-	c.Assert(err, jc.ErrorIsNil)
+	r := s.newRelationer(c)
+	err := r.Join(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *relationerSuite) newRelationer() relation.Relationer {
-	logger := loggo.GetLogger("test")
+func (s *relationerSuite) newRelationer(c *tc.C) relation.Relationer {
+	logger := loggertesting.WrapCheckLog(c)
 	return relation.NewRelationer(s.relationUnit, s.stateManager, s.unitGetter, logger)
 }
 
-func (s *relationerSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *relationerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.stateManager = mocks.NewMockStateManager(ctrl)
-	s.relationUnit = mocks.NewMockRelationUnit(ctrl)
-	s.relation = mocks.NewMockRelation(ctrl)
+	s.relationUnit = api.NewMockRelationUnit(ctrl)
+	s.relation = api.NewMockRelation(ctrl)
 	s.unitGetter = mocks.NewMockUnitGetter(ctrl)
 	// Setup for NewRelationer
 	s.expectRelationUnitRelation()
@@ -235,16 +239,16 @@ func (s *relationerSuite) setupMocks(c *gc.C) *gomock.Controller {
 
 func implicitRelationEndpoint() apiuniter.Endpoint {
 	return apiuniter.Endpoint{
-		charm.Relation{
+		Relation: charm.Relation{
 			Role:      charm.RoleProvider,
-			Name:      "juju-info",
-			Interface: "juju-info",
+			Name:      corerelation.JujuInfo,
+			Interface: corerelation.JujuInfo,
 		}}
 }
 
 func endpoint() apiuniter.Endpoint {
 	return apiuniter.Endpoint{
-		charm.Relation{
+		Relation: charm.Relation{
 			Role:      charm.RoleRequirer,
 			Name:      "mysql",
 			Interface: "db",
@@ -258,11 +262,11 @@ func (s *relationerSuite) expectEndpoint(ep apiuniter.Endpoint) {
 }
 
 func (s *relationerSuite) expectLeaveScope() {
-	s.relationUnit.EXPECT().LeaveScope().Return(nil)
+	s.relationUnit.EXPECT().LeaveScope(gomock.Any()).Return(nil)
 }
 
 func (s *relationerSuite) expectEnterScope() {
-	s.relationUnit.EXPECT().EnterScope().Return(nil)
+	s.relationUnit.EXPECT().EnterScope(gomock.Any()).Return(nil)
 }
 
 func (s *relationerSuite) expectRelationUnitRelation() {
@@ -276,7 +280,7 @@ func (s *relationerSuite) expectRelationId() {
 
 // StateManager
 func (s *relationerSuite) expectRemoveRelation() {
-	s.stateManager.EXPECT().RemoveRelation(1, s.unitGetter, map[string]bool{}).Return(nil)
+	s.stateManager.EXPECT().RemoveRelation(gomock.Any(), 1, s.unitGetter, map[string]bool{}).Return(nil)
 }
 
 func (s *relationerSuite) expectRelationFound(found bool) {
@@ -284,7 +288,7 @@ func (s *relationerSuite) expectRelationFound(found bool) {
 }
 
 func (s *relationerSuite) expectSetRelation() {
-	s.stateManager.EXPECT().SetRelation(gomock.Any()).Return(nil)
+	s.stateManager.EXPECT().SetRelation(gomock.Any(), gomock.Any()).Return(nil)
 }
 
 func (s *relationerSuite) expectStateManagerRelation(err error) {

@@ -4,6 +4,7 @@
 package lxd
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
@@ -15,16 +16,16 @@ import (
 
 	"github.com/canonical/lxd/shared/api"
 	"github.com/juju/errors"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/container/lxd"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
+	"github.com/juju/juju/internal/container/lxd"
+	"github.com/juju/juju/internal/pki"
+	pkiassertion "github.com/juju/juju/internal/pki/assertion"
 	"github.com/juju/juju/internal/provider/lxd/lxdnames"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/pki"
-	pkiassertion "github.com/juju/juju/pki/assertion"
 )
 
 const (
@@ -156,7 +157,7 @@ func (p environProviderCredentials) DetectCredentials(cloudName string) (*cloud.
 
 	remoteCertCredentials, err := p.detectRemoteCredentials()
 	if err != nil {
-		logger.Debugf("unable to detect remote LXC credentials: %s", err)
+		logger.Debugf(context.TODO(), "unable to detect remote LXC credentials: %s", err)
 	}
 
 	// If the cloud is built-in, we can start a local server to
@@ -164,7 +165,7 @@ func (p environProviderCredentials) DetectCredentials(cloudName string) (*cloud.
 	var localCertCredentials *cloud.Credential
 	if cloudName == "" || lxdnames.IsDefaultCloud(cloudName) {
 		if localCertCredentials, err = p.detectLocalCredentials(certPEM, keyPEM); err != nil {
-			logger.Debugf("unable to detect local LXC credentials: %s", err)
+			logger.Debugf(context.TODO(), "unable to detect local LXC credentials: %s", err)
 		}
 	}
 
@@ -236,7 +237,7 @@ func (p environProviderCredentials) detectRemoteCredentials() (map[string]cloud.
 			serverCert, err := p.lxcConfigReader.ReadCert(certPath)
 			if err != nil {
 				if !os.IsNotExist(errors.Cause(err)) {
-					logger.Errorf("unable to read certificate from %s with error %s", certPath, err)
+					logger.Errorf(context.TODO(), "unable to read certificate from %s with error %s", certPath, err)
 					continue
 				}
 			} else {

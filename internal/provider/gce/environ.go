@@ -4,14 +4,13 @@
 package gce
 
 import (
-	stdcontext "context"
+	"context"
 	"strings"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
 
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/instance"
@@ -19,9 +18,9 @@ import (
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/simplestreams"
+	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/provider/gce/internal/google"
 )
@@ -29,70 +28,70 @@ import (
 // ComputeService defines a client used to interact with the Google Cloud API.
 type ComputeService interface {
 	// VerifyCredentials returns an error if the credential used is invalid.
-	VerifyCredentials(ctx stdcontext.Context) error
+	VerifyCredentials(ctx context.Context) error
 	// DefaultServiceAccount returns the service account for the project.
-	DefaultServiceAccount(ctx stdcontext.Context) (string, error)
+	DefaultServiceAccount(ctx context.Context) (string, error)
 
 	// Instance gets the up-to-date info about the given instance.
-	Instance(ctx stdcontext.Context, id, zone string) (*computepb.Instance, error)
+	Instance(ctx context.Context, id, zone string) (*computepb.Instance, error)
 	// Instances returns the instances with the given name prefix and statuses.
-	Instances(ctx stdcontext.Context, prefix string, statuses ...string) ([]*computepb.Instance, error)
+	Instances(ctx context.Context, prefix string, statuses ...string) ([]*computepb.Instance, error)
 	// AddInstance creates a new instance.
-	AddInstance(ctx stdcontext.Context, inst *computepb.Instance) (*computepb.Instance, error)
+	AddInstance(ctx context.Context, inst *computepb.Instance) (*computepb.Instance, error)
 	// RemoveInstances removes instances with the given ids.
-	RemoveInstances(ctx stdcontext.Context, prefix string, ids ...string) error
+	RemoveInstances(ctx context.Context, prefix string, ids ...string) error
 	// UpdateMetadata updates the metadata for the given instance ids.
-	UpdateMetadata(ctx stdcontext.Context, key, value string, ids ...string) error
+	UpdateMetadata(ctx context.Context, key, value string, ids ...string) error
 	// ListMachineTypes returns a list of machines available in the project and zone provided.
-	ListMachineTypes(ctx stdcontext.Context, zone string) ([]*computepb.MachineType, error)
+	ListMachineTypes(ctx context.Context, zone string) ([]*computepb.MachineType, error)
 	// MachineType retrieves the machine type definition for the specified instance type.
-	MachineType(ctx stdcontext.Context, zone, instanceType string) (*computepb.MachineType, error)
+	MachineType(ctx context.Context, zone, instanceType string) (*computepb.MachineType, error)
 
 	// Firewalls returns the firewalls with the given prefix.
-	Firewalls(ctx stdcontext.Context, prefix string) ([]*computepb.Firewall, error)
+	Firewalls(ctx context.Context, prefix string) ([]*computepb.Firewall, error)
 	// NetworkFirewalls returns the firewalls associated with the specified network.
-	NetworkFirewalls(ctx stdcontext.Context, networkURL string) ([]*computepb.Firewall, error)
+	NetworkFirewalls(ctx context.Context, networkURL string) ([]*computepb.Firewall, error)
 	// AddFirewall creates a new firewall.
-	AddFirewall(ctx stdcontext.Context, firewall *computepb.Firewall) error
+	AddFirewall(ctx context.Context, firewall *computepb.Firewall) error
 	// UpdateFirewall updates the firewall with the given name.
-	UpdateFirewall(ctx stdcontext.Context, name string, firewall *computepb.Firewall) error
+	UpdateFirewall(ctx context.Context, name string, firewall *computepb.Firewall) error
 	// RemoveFirewall removes the firewall with the given name.
-	RemoveFirewall(ctx stdcontext.Context, fwname string) error
+	RemoveFirewall(ctx context.Context, fwname string) error
 
 	// AvailabilityZones returns the availability zones for the region.
-	AvailabilityZones(ctx stdcontext.Context, region string) ([]*computepb.Zone, error)
+	AvailabilityZones(ctx context.Context, region string) ([]*computepb.Zone, error)
 	// Subnetworks returns the subnetworks that machines can be
 	// assigned to in the given region.
-	Subnetworks(ctx stdcontext.Context, region string, urls ...string) ([]*computepb.Subnetwork, error)
+	Subnetworks(ctx context.Context, region string, urls ...string) ([]*computepb.Subnetwork, error)
 	// NetworkSubnetworks returns the subnets in the specified network.
-	NetworkSubnetworks(ctx stdcontext.Context, region string, networkURL string) ([]*computepb.Subnetwork, error)
+	NetworkSubnetworks(ctx context.Context, region string, networkURL string) ([]*computepb.Subnetwork, error)
 	// Networks returns the available networks that exist across
 	// regions.
-	Networks(ctx stdcontext.Context) ([]*computepb.Network, error)
+	Networks(ctx context.Context) ([]*computepb.Network, error)
 	// Network returns the network with the given id.
-	Network(ctx stdcontext.Context, id string) (*computepb.Network, error)
+	Network(ctx context.Context, id string) (*computepb.Network, error)
 
 	// CreateDisks will attempt to create the disks described by <disks> spec and
 	// return a slice of Disk representing the created disks or error if one of them failed.
-	CreateDisks(ctx stdcontext.Context, zone string, disks []*computepb.Disk) error
+	CreateDisks(ctx context.Context, zone string, disks []*computepb.Disk) error
 	// Disks will return a list of all Disks found in the project.
-	Disks(ctx stdcontext.Context) ([]*computepb.Disk, error)
+	Disks(ctx context.Context) ([]*computepb.Disk, error)
 	// Disk will return a Disk representing the disk identified by the
 	// passed <name> or error.
-	Disk(ctx stdcontext.Context, zone, id string) (*computepb.Disk, error)
+	Disk(ctx context.Context, zone, id string) (*computepb.Disk, error)
 	// RemoveDisk will destroy the disk identified by <name> in <zone>.
-	RemoveDisk(ctx stdcontext.Context, zone, id string) error
+	RemoveDisk(ctx context.Context, zone, id string) error
 	// SetDiskLabels sets the labels on a disk, ensuring that the disk's
 	// label fingerprint matches the one supplied.
-	SetDiskLabels(ctx stdcontext.Context, zone, id, labelFingerprint string, labels map[string]string) error
+	SetDiskLabels(ctx context.Context, zone, id, labelFingerprint string, labels map[string]string) error
 	// AttachDisk will attach the volume identified by <volumeName> into the instance
 	// <instanceId> and return an AttachedDisk representing it or error.
-	AttachDisk(ctx stdcontext.Context, zone, volumeName, instanceId string, mode google.DiskMode) (*computepb.AttachedDisk, error)
+	AttachDisk(ctx context.Context, zone, volumeName, instanceId string, mode google.DiskMode) (*computepb.AttachedDisk, error)
 	// DetachDisk will detach <volumeName> disk from <instanceId> if possible
 	// and return error.
-	DetachDisk(ctx stdcontext.Context, zone, instanceId, volumeName string) error
+	DetachDisk(ctx context.Context, zone, instanceId, volumeName string) error
 	// InstanceDisks returns a list of the disks attached to the passed instance.
-	InstanceDisks(ctx stdcontext.Context, zone, instanceId string) ([]*computepb.AttachedDisk, error)
+	InstanceDisks(ctx context.Context, zone, instanceId string) ([]*computepb.AttachedDisk, error)
 }
 
 func ptr[T any](v T) *T {
@@ -100,6 +99,7 @@ func ptr[T any](v T) *T {
 }
 
 type environ struct {
+	common.CredentialInvalidator
 	environs.NoSpaceDiscoveryEnviron
 	environs.NoContainerAddressesEnviron
 
@@ -130,15 +130,15 @@ var _ environs.NetworkingEnviron = (*environ)(nil)
 // Function entry points defined as variables so they can be overridden
 // for testing purposes.
 var (
-	newConnection = func(ctx stdcontext.Context, conn google.ConnectionConfig, creds *google.Credentials) (ComputeService, error) {
+	newConnection = func(ctx context.Context, conn google.ConnectionConfig, creds *google.Credentials) (ComputeService, error) {
 		return google.Connect(ctx, conn, creds)
 	}
 	destroyEnv = common.Destroy
 	bootstrap  = common.Bootstrap
 )
 
-func newEnviron(cloud environscloudspec.CloudSpec, cfg *config.Config) (*environ, error) {
-	ecfg, err := newConfig(cfg, nil)
+func newEnviron(ctx context.Context, cloud environscloudspec.CloudSpec, cfg *config.Config, invalidator environs.CredentialInvalidator) (*environ, error) {
+	ecfg, err := newConfig(ctx, cfg, nil)
 	if err != nil {
 		return nil, errors.Annotate(err, "invalid config")
 	}
@@ -149,22 +149,23 @@ func newEnviron(cloud environscloudspec.CloudSpec, cfg *config.Config) (*environ
 	}
 
 	e := &environ{
-		name:      ecfg.config.Name(),
-		uuid:      ecfg.config.UUID(),
-		ecfg:      ecfg,
-		namespace: namespace,
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, google.IsAuthorisationFailure),
+		name:                  ecfg.config.Name(),
+		uuid:                  ecfg.config.UUID(),
+		ecfg:                  ecfg,
+		namespace:             namespace,
 	}
-	if err = e.SetCloudSpec(stdcontext.TODO(), cloud); err != nil {
+	if err = e.SetCloudSpec(ctx, cloud); err != nil {
 		return nil, err
 	}
-	if err := e.SetConfig(cfg); err != nil {
+	if err := e.SetConfig(ctx, cfg); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return e, nil
 }
 
 // SetCloudSpec is specified in the environs.Environ interface.
-func (env *environ) SetCloudSpec(ctx stdcontext.Context, spec environscloudspec.CloudSpec) error {
+func (env *environ) SetCloudSpec(ctx context.Context, spec environscloudspec.CloudSpec) error {
 	env.lock.Lock()
 	defer env.lock.Unlock()
 
@@ -199,7 +200,7 @@ func (env *environ) SetCloudSpec(ctx stdcontext.Context, spec environscloudspec.
 		// of the environ.
 		HTTPClient: jujuhttp.NewClient(
 			jujuhttp.WithSkipHostnameVerification(spec.SkipTLSVerify),
-			jujuhttp.WithLogger(logger.ChildWithLabels("http", corelogger.HTTP)),
+			jujuhttp.WithLogger(logger.Child("http", corelogger.HTTP)),
 		),
 	}
 
@@ -231,11 +232,11 @@ func (env *environ) Region() (simplestreams.CloudSpec, error) {
 }
 
 // SetConfig updates the env's configuration.
-func (env *environ) SetConfig(cfg *config.Config) error {
+func (env *environ) SetConfig(ctx context.Context, cfg *config.Config) error {
 	env.lock.Lock()
 	defer env.lock.Unlock()
 
-	ecfg, err := newConfig(cfg, env.ecfg.config)
+	ecfg, err := newConfig(ctx, cfg, env.ecfg.config)
 	if err != nil {
 		return errors.Annotate(err, "invalid config change")
 	}
@@ -244,7 +245,7 @@ func (env *environ) SetConfig(cfg *config.Config) error {
 }
 
 // getVpcInfo returns the VPC URL (if set) and whether it auto creates subnets.
-func (env *environ) getVpcInfo(ctx stdcontext.Context) (*string, bool, error) {
+func (env *environ) getVpcInfo(ctx context.Context) (*string, bool, error) {
 	env.lock.Lock()
 	defer env.lock.Unlock()
 
@@ -282,7 +283,7 @@ func (env *environ) vpcID() (string, bool) {
 // PrepareForBootstrap implements environs.Environ.
 func (env *environ) PrepareForBootstrap(ctx environs.BootstrapContext, controllerName string) error {
 	if ctx.ShouldVerifyCredentials() {
-		if err := env.gce.VerifyCredentials(ctx.Context()); err != nil {
+		if err := env.gce.VerifyCredentials(ctx); err != nil {
 			return errors.Trace(err)
 		}
 	}
@@ -290,27 +291,27 @@ func (env *environ) PrepareForBootstrap(ctx environs.BootstrapContext, controlle
 	if !ok {
 		return nil
 	}
-	callCtx := context.NewCloudCallContext(ctx.Context())
 	if err := validateBootstrapVPC(ctx, env.gce, env.cloud.Region, vpcID, env.ecfg.forceVPCID()); err != nil {
-		return google.HandleCredentialError(errors.Trace(err), callCtx)
+		return env.HandleCredentialError(ctx, errors.Trace(err))
 	}
 
 	return nil
 }
 
-// Create implements environs.Environ.
-func (env *environ) Create(ctx context.ProviderCallContext, p environs.CreateParams) error {
-	if err := env.gce.VerifyCredentials(ctx); err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
-	}
+// ValidateProviderForNewModel is part of the [environs.ModelResources] interface.
+func (env *environ) ValidateProviderForNewModel(ctx context.Context) error {
 	vpcID, ok := env.vpcID()
 	if !ok {
 		return nil
 	}
 	if err := validateModelVPC(ctx, env.gce, env.cloud.Region, env.name, vpcID); err != nil {
-		return google.HandleCredentialError(errors.Trace(err), ctx)
+		return env.HandleCredentialError(ctx, errors.Trace(err))
 	}
+	return nil
+}
 
+// CreateModelResources is part of the [environs.ModelResources] interface.
+func (e *environ) CreateModelResources(ctx context.Context, args environs.CreateParams) error {
 	return nil
 }
 
@@ -318,13 +319,13 @@ func (env *environ) Create(ctx context.ProviderCallContext, p environs.CreatePar
 // available tools. The series and arch are returned along with a func
 // that must be called to finalize the bootstrap process by transferring
 // the tools and installing the initial juju controller.
-func (env *environ) Bootstrap(ctx environs.BootstrapContext, callCtx context.ProviderCallContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
-	return bootstrap(ctx, env, callCtx, params)
+func (env *environ) Bootstrap(ctx environs.BootstrapContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
+	return bootstrap(ctx, env, params)
 }
 
 // Destroy shuts down all known machines and destroys the rest of the
 // known environment.
-func (env *environ) Destroy(ctx context.ProviderCallContext) error {
+func (env *environ) Destroy(ctx context.Context) error {
 	err := destroyEnv(env, ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -337,7 +338,7 @@ func (env *environ) Destroy(ctx context.ProviderCallContext) error {
 }
 
 // DestroyController implements the Environ interface.
-func (env *environ) DestroyController(ctx context.ProviderCallContext, controllerUUID string) error {
+func (env *environ) DestroyController(ctx context.Context, controllerUUID string) error {
 	// TODO(wallyworld): destroy hosted model resources
 	return env.Destroy(ctx)
 }

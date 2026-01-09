@@ -4,12 +4,21 @@
 package subnets
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 const subnetsFacade = "Subnets"
 
@@ -20,11 +29,11 @@ type API struct {
 }
 
 // NewAPI creates a new client-side Subnets facade.
-func NewAPI(caller base.APICallCloser) *API {
+func NewAPI(caller base.APICallCloser, options ...Option) *API {
 	if caller == nil {
 		panic("caller is nil")
 	}
-	clientFacade, facadeCaller := base.NewClientFacade(caller, subnetsFacade)
+	clientFacade, facadeCaller := base.NewClientFacade(caller, subnetsFacade, options...)
 	return &API{
 		ClientFacade: clientFacade,
 		facade:       facadeCaller,
@@ -32,7 +41,7 @@ func NewAPI(caller base.APICallCloser) *API {
 }
 
 // ListSubnets fetches all the subnets known by the model.
-func (api *API) ListSubnets(spaceTag *names.SpaceTag, zone string) ([]params.Subnet, error) {
+func (api *API) ListSubnets(ctx context.Context, spaceTag *names.SpaceTag, zone string) ([]params.Subnet, error) {
 	var response params.ListSubnetsResults
 	var space string
 	if spaceTag != nil {
@@ -42,7 +51,7 @@ func (api *API) ListSubnets(spaceTag *names.SpaceTag, zone string) ([]params.Sub
 		SpaceTag: space,
 		Zone:     zone,
 	}
-	err := api.facade.FacadeCall("ListSubnets", args, &response)
+	err := api.facade.FacadeCall(ctx, "ListSubnets", args, &response)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -51,11 +60,11 @@ func (api *API) ListSubnets(spaceTag *names.SpaceTag, zone string) ([]params.Sub
 
 // SubnetsByCIDR returns the collection of subnets matching each CIDR in the
 // input.
-func (api *API) SubnetsByCIDR(cidrs []string) ([]params.SubnetsResult, error) {
+func (api *API) SubnetsByCIDR(ctx context.Context, cidrs []string) ([]params.SubnetsResult, error) {
 	args := params.CIDRParams{CIDRS: cidrs}
 
 	var result params.SubnetsResults
-	if err := api.facade.FacadeCall("SubnetsByCIDR", args, &result); err != nil {
+	if err := api.facade.FacadeCall(ctx, "SubnetsByCIDR", args, &result); err != nil {
 		if params.IsCodeNotSupported(err) {
 			return nil, errors.NewNotSupported(nil, err.Error())
 		}

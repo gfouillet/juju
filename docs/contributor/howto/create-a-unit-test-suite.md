@@ -14,7 +14,9 @@ dataDir string
 
 }
 
-var _ = gc.Suite(&ToolsSuite{})
+func TestToolsSuite(t *stdtesting.T) {
+tc.Run(t, &ToolsSuite{})
+}
 
 ```
 
@@ -25,7 +27,7 @@ If you did want to do something, say, create a directory and save it in the data
 
 ```go
 
-func (t *ToolsSuite) SetUpTest(c *gc.C) {
+func (t *ToolsSuite) SetUpTest(c *tc.C) {
 
 t.BaseSuite.SetUpTest(c)
 

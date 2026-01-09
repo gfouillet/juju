@@ -4,10 +4,10 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type applicationVersionSetCommand struct {
@@ -56,5 +56,5 @@ func (c *applicationVersionSetCommand) Init(args []string) error {
 
 // Run is part of the cmd.Command interface.
 func (c *applicationVersionSetCommand) Run(ctx *cmd.Context) error {
-	return c.ctx.SetUnitWorkloadVersion(c.version)
+	return c.ctx.SetUnitWorkloadVersion(ctx, c.version)
 }

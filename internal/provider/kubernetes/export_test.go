@@ -7,84 +7,62 @@ import (
 	"context"
 	"sync"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/juju/juju/caas"
-	"github.com/juju/juju/caas/specs"
 	jujucloud "github.com/juju/juju/cloud"
-	"github.com/juju/juju/cloudconfig/podcfg"
 	"github.com/juju/juju/environs"
-	k8sspecs "github.com/juju/juju/internal/provider/kubernetes/specs"
-	"github.com/juju/juju/mongo"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
+	"github.com/juju/juju/internal/storage"
 )
 
 var (
-	PrepareWorkloadSpec     = prepareWorkloadSpec
-	OperatorPod             = operatorPod
 	FindControllerNamespace = findControllerNamespace
 	GetLocalMicroK8sConfig  = getLocalMicroK8sConfig
 	AttemptMicroK8sCloud    = attemptMicroK8sCloud
 	EnsureMicroK8sSuitable  = ensureMicroK8sSuitable
 	NewK8sBroker            = newK8sBroker
-	ToYaml                  = toYaml
-	Indent                  = indent
 	ProcessSecretData       = processSecretData
 
-	CompileK8sCloudCheckers                    = compileK8sCloudCheckers
-	CompileLifecycleApplicationRemovalSelector = compileLifecycleApplicationRemovalSelector
-	CompileLifecycleModelTeardownSelector      = compileLifecycleModelTeardownSelector
+	CompileK8sCloudCheckers               = compileK8sCloudCheckers
+	CompileLifecycleModelTeardownSelector = compileLifecycleModelTeardownSelector
 
-	UpdateStrategyForDeployment  = updateStrategyForDeployment
 	UpdateStrategyForStatefulSet = updateStrategyForStatefulSet
-	UpdateStrategyForDaemonSet   = updateStrategyForDaemonSet
 	DecideKubeConfigDir          = decideKubeConfigDir
 )
 
 type (
 	KubernetesClient      = kubernetesClient
 	ControllerServiceSpec = controllerServiceSpec
-	CRDGetter             = crdGetter
 )
 
 type ControllerStackerForTest interface {
 	controllerStacker
-	GetControllerAgentConfigContent(*gc.C) string
-	GetControllerUnitAgentConfigContent(*gc.C) string
+	GetControllerAgentConfigContent(*tc.C) string
+	GetControllerUnitAgentConfigContent(*tc.C) string
 	GetControllerUnitAgentPassword() string
-	GetSharedSecretAndSSLKey(*gc.C) (string, string)
 	GetStorageSize() resource.Quantity
 	GetControllerSvcSpec(string, *podcfg.BootstrapConfig) (*controllerServiceSpec, error)
-	SetContext(ctx environs.BootstrapContext)
 }
 
-func (cs *controllerStack) GetControllerAgentConfigContent(c *gc.C) string {
+func (cs *controllerStack) GetControllerAgentConfigContent(c *tc.C) string {
 	agentCfg, err := cs.agentConfig.Render()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return string(agentCfg)
 }
 
-func (cs *controllerStack) GetControllerUnitAgentConfigContent(c *gc.C) string {
+func (cs *controllerStack) GetControllerUnitAgentConfigContent(c *tc.C) string {
 	agentCfg, err := cs.unitAgentConfig.Render()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return string(agentCfg)
 }
 
 func (cs *controllerStack) GetControllerUnitAgentPassword() string {
 	return cs.unitAgentConfig.OldPassword()
-}
-
-func (cs *controllerStack) GetSharedSecretAndSSLKey(c *gc.C) (string, string) {
-	si, ok := cs.agentConfig.StateServingInfo()
-	c.Assert(ok, jc.IsTrue)
-	return si.SharedSecret, mongo.GenerateSSLKey(si.Cert, si.PrivateKey)
 }
 
 func (cs *controllerStack) GetStorageSize() resource.Quantity {
@@ -95,10 +73,6 @@ func (cs *controllerStack) GetControllerSvcSpec(cloudType string, cfg *podcfg.Bo
 	return cs.getControllerSvcSpec(cloudType, cfg)
 }
 
-func (cs *controllerStack) SetContext(ctx environs.BootstrapContext) {
-	cs.ctx = ctx
-}
-
 func NewcontrollerStackForTest(
 	ctx environs.BootstrapContext,
 	stackName,
@@ -106,15 +80,11 @@ func NewcontrollerStackForTest(
 	broker *kubernetesClient,
 	pcfg *podcfg.ControllerPodConfig,
 ) (ControllerStackerForTest, error) {
-	cs, err := newcontrollerStack(ctx, stackName, storageClass, broker, pcfg)
+	cs, err := newControllerStack(ctx, stackName, storageClass, broker, pcfg)
 	if err != nil {
 		return nil, err
 	}
 	return cs.(*controllerStack), nil
-}
-
-func Pod(u *workloadSpec) k8sspecs.PodSpecWithAnnotations {
-	return u.Pod
 }
 
 func NewProvider() caas.ContainerEnvironProvider {
@@ -123,9 +93,9 @@ func NewProvider() caas.ContainerEnvironProvider {
 
 func NewProviderWithFakes(
 	runner CommandRunner,
-	credentialGetter func(CommandRunner) (jujucloud.Credential, error),
+	credentialGetter func(context.Context, CommandRunner) (jujucloud.Credential, error),
 	getter func(CommandRunner) (jujucloud.Cloud, error),
-	brokerGetter func(environs.OpenParams) (ClusterMetadataStorageChecker, error)) caas.ContainerEnvironProvider {
+	brokerGetter func(context.Context, environs.OpenParams, environs.CredentialInvalidator) (ClusterMetadataStorageChecker, error)) caas.ContainerEnvironProvider {
 	return kubernetesEnvironProvider{
 		environProviderCredentials: environProviderCredentials{
 			cmdRunner:               runner,
@@ -138,35 +108,11 @@ func NewProviderWithFakes(
 }
 
 func NewProviderCredentials(
-	getter func(CommandRunner) (jujucloud.Credential, error),
+	getter func(context.Context, CommandRunner) (jujucloud.Credential, error),
 ) environProviderCredentials {
 	return environProviderCredentials{
 		builtinCredentialGetter: getter,
 	}
-}
-
-func (k *kubernetesClient) GetCRDsForCRs(crs map[string][]unstructured.Unstructured, getter CRDGetterInterface) (out map[string]*apiextensionsv1.CustomResourceDefinition, err error) {
-	return k.getCRDsForCRs(crs, getter)
-}
-
-func (k *kubernetesClient) FileSetToVolume(
-	appName string,
-	annotations map[string]string,
-	workloadSpec *workloadSpec,
-	fileSet specs.FileSet,
-	cfgMapName configMapNameFunc,
-) (core.Volume, error) {
-	return k.fileSetToVolume(appName, annotations, workloadSpec, fileSet, cfgMapName)
-}
-
-func (k *kubernetesClient) ConfigurePodFiles(
-	appName string,
-	annotations map[string]string,
-	workloadSpec *workloadSpec,
-	containers []specs.ContainerSpec,
-	cfgMapName configMapNameFunc,
-) error {
-	return k.configurePodFiles(appName, annotations, workloadSpec, containers, cfgMapName)
 }
 
 func (k *kubernetesClient) DeleteClusterScopeResourcesModelTeardown(ctx context.Context, wg *sync.WaitGroup, errChan chan<- error) {
@@ -185,10 +131,10 @@ func GetCloudProviderFromNodeMeta(node core.Node) (string, string) {
 	return getCloudRegionFromNodeMeta(node)
 }
 
-func (k *kubernetesClient) GetPod(podName string) (*core.Pod, error) {
-	return k.getPod(podName)
+func (k *kubernetesClient) GetPod(ctx context.Context, podName string) (*core.Pod, error) {
+	return k.getPod(ctx, podName)
 }
 
-func (k *kubernetesClient) GetStatefulSet(name string) (*apps.StatefulSet, error) {
-	return k.getStatefulSet(name)
+func (k *kubernetesClient) GetStatefulSet(ctx context.Context, name string) (*apps.StatefulSet, error) {
+	return k.getStatefulSet(ctx, name)
 }

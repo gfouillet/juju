@@ -4,16 +4,15 @@
 package application
 
 import (
+	"context"
 	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apicharm "github.com/juju/juju/api/common/charm"
@@ -23,11 +22,20 @@ import (
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
 	"github.com/juju/juju/core/instance"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/charm"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
-var logger = loggo.GetLogger("juju.api.application")
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
+var logger = internallogger.GetLogger("juju.api.application")
 
 // Client allows access to the application API end point.
 type Client struct {
@@ -37,8 +45,8 @@ type Client struct {
 }
 
 // NewClient creates a new client for accessing the application api.
-func NewClient(st base.APICallCloser) *Client {
-	frontend, backend := base.NewClientFacade(st, "Application")
+func NewClient(st base.APICallCloser, options ...Option) *Client {
+	frontend, backend := base.NewClientFacade(st, "Application", options...)
 	return &Client{ClientFacade: frontend, st: st, facade: backend}
 }
 
@@ -46,7 +54,7 @@ func NewClient(st base.APICallCloser) *Client {
 func (c *Client) ModelUUID() string {
 	tag, ok := c.st.ModelTag()
 	if !ok {
-		logger.Warningf("controller-only API connection has no model tag")
+		logger.Warningf(context.TODO(), "controller-only API connection has no model tag")
 	}
 	return tag.Id()
 }
@@ -81,9 +89,9 @@ type DeployArgs struct {
 	// created.
 	Placement []*instance.Placement
 
-	// Storage contains Constraints specifying how storage should be
+	// Storage contains Directives specifying how storage should be
 	// handled.
-	Storage map[string]storage.Constraints
+	Storage map[string]storage.Directive
 
 	// Devices contains Constraints specifying how devices should be
 	// handled.
@@ -108,11 +116,11 @@ type DeployArgs struct {
 }
 
 // Leader returns the unit name for the leader of the provided application.
-func (c *Client) Leader(app string) (string, error) {
+func (c *Client) Leader(ctx context.Context, app string) (string, error) {
 	var result params.StringResult
 	p := params.Entity{Tag: names.NewApplicationTag(app).String()}
 
-	if err := c.facade.FacadeCall("Leader", p, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "Leader", p, &result); err != nil {
 		return "", errors.Trace(err)
 	}
 	if result.Error != nil {
@@ -124,7 +132,7 @@ func (c *Client) Leader(app string) (string, error) {
 // Deploy obtains the charm, either locally or from the charm store, and deploys
 // it. Placement directives, if provided, specify the machine on which the charm
 // is deployed.
-func (c *Client) Deploy(args DeployArgs) error {
+func (c *Client) Deploy(ctx context.Context, args DeployArgs) error {
 	if len(args.AttachStorage) > 0 {
 		if args.NumUnits != 1 {
 			return errors.New("cannot attach existing storage when more than one unit is requested")
@@ -159,7 +167,7 @@ func (c *Client) Deploy(args DeployArgs) error {
 	}
 	var results params.ErrorResults
 	var err error
-	err = c.facade.FacadeCall("Deploy", deployArgs, &results)
+	err = c.facade.FacadeCall(ctx, "Deploy", deployArgs, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -183,14 +191,13 @@ func (c *Client) Deploy(args DeployArgs) error {
 // given application is running at present.
 // The charm origin gives more information about the location of the charm and
 // what revision/channel it came from.
-func (c *Client) GetCharmURLOrigin(branchName, applicationName string) (*charm.URL, apicharm.Origin, error) {
+func (c *Client) GetCharmURLOrigin(ctx context.Context, applicationName string) (*charm.URL, apicharm.Origin, error) {
 	args := params.ApplicationGet{
 		ApplicationName: applicationName,
-		BranchName:      branchName,
 	}
 
 	var result params.CharmURLOriginResult
-	err := c.facade.FacadeCall("GetCharmURLOrigin", args, &result)
+	err := c.facade.FacadeCall(ctx, "GetCharmURLOrigin", args, &result)
 	if err != nil {
 		return nil, apicharm.Origin{}, errors.Trace(err)
 	}
@@ -208,14 +215,14 @@ func (c *Client) GetCharmURLOrigin(branchName, applicationName string) (*charm.U
 // GetConfig returns the charm configuration settings for each of the
 // applications. If any of the applications are not found, an error is
 // returned.
-func (c *Client) GetConfig(branchName string, appNames ...string) ([]map[string]interface{}, error) {
+func (c *Client) GetConfig(ctx context.Context, appNames ...string) ([]map[string]interface{}, error) {
 	arg := params.ApplicationGetArgs{Args: make([]params.ApplicationGet, len(appNames))}
 	for i, appName := range appNames {
-		arg.Args[i] = params.ApplicationGet{ApplicationName: appName, BranchName: branchName}
+		arg.Args[i] = params.ApplicationGet{ApplicationName: appName}
 	}
 
 	var results params.ApplicationGetConfigResults
-	err := c.facade.FacadeCall("CharmConfig", arg, &results)
+	err := c.facade.FacadeCall(ctx, "CharmConfig", arg, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -255,13 +262,13 @@ type SetCharmConfig struct {
 	// ConfigSettings is the charm settings to set during the upgrade.
 	// This field is only understood by Application facade version 2
 	// and greater.
-	ConfigSettings map[string]string `json:"config-settings,omitempty"`
+	ConfigSettings map[string]string
 
 	// ConfigSettingsYAML is the charm settings in YAML format to set
 	// during the upgrade. If this is non-empty, it will take precedence
 	// over ConfigSettings. This field is only understood by Application
 	// facade version 2
-	ConfigSettingsYAML string `json:"config-settings-yaml,omitempty"`
+	ConfigSettingsYAML string
 
 	// Force forces the use of the charm in the following scenarios:
 	// overriding a lxd profile upgrade.
@@ -282,10 +289,10 @@ type SetCharmConfig struct {
 	// the upgrade.
 	ResourceIDs map[string]string
 
-	// StorageConstraints is a map of storage names to storage constraints to
+	// StorageDirectives is a map of storage names to storage directives to
 	// update during the upgrade. This field is only understood by Application
 	// facade version 2 and greater.
-	StorageConstraints map[string]storage.Constraints `json:"storage-constraints,omitempty"`
+	StorageDirectives map[string]storage.Directive
 
 	// EndpointBindings is a map of operator-defined endpoint names to
 	// space names to be merged with any existing endpoint bindings.
@@ -293,12 +300,12 @@ type SetCharmConfig struct {
 }
 
 // SetCharm sets the charm for a given application.
-func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
-	var storageConstraints map[string]params.StorageConstraints
-	if len(cfg.StorageConstraints) > 0 {
-		storageConstraints = make(map[string]params.StorageConstraints)
-		for name, cons := range cfg.StorageConstraints {
-			size, count := cons.Size, cons.Count
+func (c *Client) SetCharm(ctx context.Context, cfg SetCharmConfig) error {
+	var storageDirectives map[string]params.StorageDirectives
+	if len(cfg.StorageDirectives) > 0 {
+		storageDirectives = make(map[string]params.StorageDirectives)
+		for name, directive := range cfg.StorageDirectives {
+			size, count := directive.Size, directive.Count
 			var sizePtr, countPtr *uint64
 			if size > 0 {
 				sizePtr = &size
@@ -306,10 +313,10 @@ func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
 			if count > 0 {
 				countPtr = &count
 			}
-			storageConstraints[name] = params.StorageConstraints{
-				Pool:  cons.Pool,
-				Size:  sizePtr,
-				Count: countPtr,
+			storageDirectives[name] = params.StorageDirectives{
+				Pool:    directive.Pool,
+				SizeMiB: sizePtr,
+				Count:   countPtr,
 			}
 		}
 	}
@@ -317,7 +324,7 @@ func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
 	origin := cfg.CharmID.Origin
 	paramsCharmOrigin := origin.ParamsCharmOrigin()
 
-	args := params.ApplicationSetCharm{
+	args := params.ApplicationSetCharmV2{
 		ApplicationName:    cfg.ApplicationName,
 		CharmURL:           cfg.CharmID.URL,
 		CharmOrigin:        &paramsCharmOrigin,
@@ -328,27 +335,10 @@ func (c *Client) SetCharm(branchName string, cfg SetCharmConfig) error {
 		ForceBase:          cfg.ForceBase,
 		ForceUnits:         cfg.ForceUnits,
 		ResourceIDs:        cfg.ResourceIDs,
-		StorageConstraints: storageConstraints,
+		StorageDirectives:  storageDirectives,
 		EndpointBindings:   cfg.EndpointBindings,
-		Generation:         branchName,
 	}
-	return c.facade.FacadeCall("SetCharm", args, nil)
-}
-
-// UpdateApplicationBase updates the application base in the db.
-func (c *Client) UpdateApplicationBase(appName string, base corebase.Base, force bool) error {
-	args := params.UpdateChannelArgs{
-		Args: []params.UpdateChannelArg{{
-			Entity:  params.Entity{Tag: names.NewApplicationTag(appName).String()},
-			Force:   force,
-			Channel: base.Channel.Track,
-		}},
-	}
-	results := new(params.ErrorResults)
-	if err := c.facade.FacadeCall("UpdateApplicationBase", args, results); err != nil {
-		return errors.Trace(err)
-	}
-	return results.OneError()
+	return c.facade.FacadeCall(ctx, "SetCharm", args, nil)
 }
 
 // AddUnitsParams contains parameters for the AddUnits API method.
@@ -376,7 +366,7 @@ type AddUnitsParams struct {
 
 // AddUnits adds a given number of units to an application using the specified
 // placement directives to assign units to machines.
-func (c *Client) AddUnits(args AddUnitsParams) ([]string, error) {
+func (c *Client) AddUnits(ctx context.Context, args AddUnitsParams) ([]string, error) {
 	if len(args.AttachStorage) > 0 {
 		if args.NumUnits != 1 {
 			return nil, errors.New("cannot attach existing storage when more than one unit is requested")
@@ -390,7 +380,7 @@ func (c *Client) AddUnits(args AddUnitsParams) ([]string, error) {
 		attachStorage[i] = names.NewStorageTag(id).String()
 	}
 	results := new(params.AddApplicationUnitsResults)
-	err := c.facade.FacadeCall("AddUnits", params.AddApplicationUnits{
+	err := c.facade.FacadeCall(ctx, "AddUnits", params.AddApplicationUnits{
 		ApplicationName: args.ApplicationName,
 		NumUnits:        args.NumUnits,
 		Placement:       args.Placement,
@@ -425,7 +415,7 @@ type DestroyUnitsParams struct {
 
 // DestroyUnits decreases the number of units dedicated to one or more
 // applications.
-func (c *Client) DestroyUnits(in DestroyUnitsParams) ([]params.DestroyUnitResult, error) {
+func (c *Client) DestroyUnits(ctx context.Context, in DestroyUnitsParams) ([]params.DestroyUnitResult, error) {
 	args := params.DestroyUnitsParams{
 		Units: make([]params.DestroyUnitParams, 0, len(in.Units)),
 	}
@@ -452,7 +442,7 @@ func (c *Client) DestroyUnits(in DestroyUnitsParams) ([]params.DestroyUnitResult
 	}
 
 	var result params.DestroyUnitResults
-	if err := c.facade.FacadeCall("DestroyUnit", args, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "DestroyUnit", args, &result); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if n := len(result.Results); n != len(args.Units) {
@@ -489,7 +479,7 @@ type DestroyApplicationsParams struct {
 }
 
 // DestroyApplications destroys the given applications.
-func (c *Client) DestroyApplications(in DestroyApplicationsParams) ([]params.DestroyApplicationResult, error) {
+func (c *Client) DestroyApplications(ctx context.Context, in DestroyApplicationsParams) ([]params.DestroyApplicationResult, error) {
 	args := params.DestroyApplicationsParams{
 		Applications: make([]params.DestroyApplicationParams, 0, len(in.Applications)),
 	}
@@ -516,7 +506,7 @@ func (c *Client) DestroyApplications(in DestroyApplicationsParams) ([]params.Des
 	}
 
 	var result params.DestroyApplicationResults
-	if err := c.facade.FacadeCall("DestroyApplication", args, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "DestroyApplication", args, &result); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if n := len(result.Results); n != len(args.Applications) {
@@ -544,7 +534,7 @@ type DestroyConsumedApplicationParams struct {
 }
 
 // DestroyConsumedApplication destroys the given consumed (remote) applications.
-func (c *Client) DestroyConsumedApplication(in DestroyConsumedApplicationParams) ([]params.ErrorResult, error) {
+func (c *Client) DestroyConsumedApplication(ctx context.Context, in DestroyConsumedApplicationParams) ([]params.ErrorResult, error) {
 	args := params.DestroyConsumedApplicationsParams{
 		Applications: make([]params.DestroyConsumedApplicationParams, 0, len(in.SaasNames)),
 	}
@@ -572,7 +562,7 @@ func (c *Client) DestroyConsumedApplication(in DestroyConsumedApplicationParams)
 	}
 
 	var result params.ErrorResults
-	if err := c.facade.FacadeCall("DestroyConsumedApplications", args, &result); err != nil {
+	if err := c.facade.FacadeCall(ctx, "DestroyConsumedApplications", args, &result); err != nil {
 		return nil, errors.Trace(err)
 	}
 	if n := len(result.Results); n != len(args.Applications) {
@@ -606,7 +596,7 @@ type ScaleApplicationParams struct {
 }
 
 // ScaleApplication sets the desired unit count for one or more applications.
-func (c *Client) ScaleApplication(in ScaleApplicationParams) (params.ScaleApplicationResult, error) {
+func (c *Client) ScaleApplication(ctx context.Context, in ScaleApplicationParams) (params.ScaleApplicationResult, error) {
 	if len(in.AttachStorage) > 0 && c.BestAPIVersion() < 21 {
 		// ScaleApplication with attach storage was introduced in ApplicationAPIV21.
 		return params.ScaleApplicationResult{}, errors.NotImplementedf("scale application with attach storage on this version of Juju")
@@ -633,7 +623,7 @@ func (c *Client) ScaleApplication(in ScaleApplicationParams) (params.ScaleApplic
 				Force:          in.Force,
 			}},
 		}
-		if err := c.facade.FacadeCall("ScaleApplications", args, &results); err != nil {
+		if err := c.facade.FacadeCall(ctx, "ScaleApplications", args, &results); err != nil {
 			return params.ScaleApplicationResult{}, errors.Trace(err)
 		}
 	} else {
@@ -646,7 +636,7 @@ func (c *Client) ScaleApplication(in ScaleApplicationParams) (params.ScaleApplic
 				AttachStorage:  in.AttachStorage,
 			}},
 		}
-		if err := c.facade.FacadeCall("ScaleApplications", args, &results); err != nil {
+		if err := c.facade.FacadeCall(ctx, "ScaleApplications", args, &results); err != nil {
 			return params.ScaleApplicationResult{}, errors.Trace(err)
 		}
 	}
@@ -662,7 +652,7 @@ func (c *Client) ScaleApplication(in ScaleApplicationParams) (params.ScaleApplic
 }
 
 // GetConstraints returns the constraints for the given applications.
-func (c *Client) GetConstraints(applications ...string) ([]constraints.Value, error) {
+func (c *Client) GetConstraints(ctx context.Context, applications ...string) ([]constraints.Value, error) {
 	var allConstraints []constraints.Value
 
 	// Make a single call to get all the constraints.
@@ -672,7 +662,7 @@ func (c *Client) GetConstraints(applications ...string) ([]constraints.Value, er
 		args.Entities = append(args.Entities,
 			params.Entity{Tag: names.NewApplicationTag(application).String()})
 	}
-	err := c.facade.FacadeCall("GetConstraints", args, &results)
+	err := c.facade.FacadeCall(ctx, "GetConstraints", args, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -686,12 +676,12 @@ func (c *Client) GetConstraints(applications ...string) ([]constraints.Value, er
 }
 
 // SetConstraints specifies the constraints for the given application.
-func (c *Client) SetConstraints(application string, constraints constraints.Value) error {
+func (c *Client) SetConstraints(ctx context.Context, application string, constraints constraints.Value) error {
 	args := params.SetConstraints{
 		ApplicationName: application,
 		Constraints:     constraints,
 	}
-	return c.facade.FacadeCall("SetConstraints", args, nil)
+	return c.facade.FacadeCall(ctx, "SetConstraints", args, nil)
 }
 
 // Expose changes the juju-managed firewall to expose any ports that
@@ -703,73 +693,72 @@ func (c *Client) SetConstraints(application string, constraints constraints.Valu
 // If the exposedEndpoints parameter is empty, the controller will expose *all*
 // open ports of the application to 0.0.0.0/0. This matches the behavior of
 // pre-2.9 juju controllers.
-func (c *Client) Expose(application string, exposedEndpoints map[string]params.ExposedEndpoint) error {
+func (c *Client) Expose(ctx context.Context, application string, exposedEndpoints map[string]params.ExposedEndpoint) error {
 	args := params.ApplicationExpose{
 		ApplicationName:  application,
 		ExposedEndpoints: exposedEndpoints,
 	}
-	return c.facade.FacadeCall("Expose", args, nil)
+	return c.facade.FacadeCall(ctx, "Expose", args, nil)
 }
 
 // Unexpose changes the juju-managed firewall to unexpose any ports that
 // were also explicitly marked by units as open.
-func (c *Client) Unexpose(application string, endpoints []string) error {
+func (c *Client) Unexpose(ctx context.Context, application string, endpoints []string) error {
 	args := params.ApplicationUnexpose{
 		ApplicationName:  application,
 		ExposedEndpoints: endpoints,
 	}
-	return c.facade.FacadeCall("Unexpose", args, nil)
+	return c.facade.FacadeCall(ctx, "Unexpose", args, nil)
 }
 
 // Get returns the configuration for the named application.
-func (c *Client) Get(branchName, application string) (*params.ApplicationGetResults, error) {
+func (c *Client) Get(ctx context.Context, application string) (*params.ApplicationGetResults, error) {
 	var results params.ApplicationGetResults
 	args := params.ApplicationGet{
 		ApplicationName: application,
-		BranchName:      branchName,
 	}
-	err := c.facade.FacadeCall("Get", args, &results)
+	err := c.facade.FacadeCall(ctx, "Get", args, &results)
 	return &results, err
 }
 
 // CharmRelations returns the application's charms relation names.
-func (c *Client) CharmRelations(application string) ([]string, error) {
+func (c *Client) CharmRelations(ctx context.Context, application string) ([]string, error) {
 	var results params.ApplicationCharmRelationsResults
 	args := params.ApplicationCharmRelations{ApplicationName: application}
-	err := c.facade.FacadeCall("CharmRelations", args, &results)
+	err := c.facade.FacadeCall(ctx, "CharmRelations", args, &results)
 	return results.CharmRelations, err
 }
 
 // AddRelation adds a relation between the specified endpoints and returns the relation info.
-func (c *Client) AddRelation(endpoints, viaCIDRs []string) (*params.AddRelationResults, error) {
+func (c *Client) AddRelation(ctx context.Context, endpoints, viaCIDRs []string) (*params.AddRelationResults, error) {
 	var addRelRes params.AddRelationResults
 	args := params.AddRelation{Endpoints: endpoints, ViaCIDRs: viaCIDRs}
-	err := c.facade.FacadeCall("AddRelation", args, &addRelRes)
+	err := c.facade.FacadeCall(ctx, "AddRelation", args, &addRelRes)
 	return &addRelRes, err
 }
 
 // DestroyRelation removes the relation between the specified endpoints.
-func (c *Client) DestroyRelation(force *bool, maxWait *time.Duration, endpoints ...string) error {
+func (c *Client) DestroyRelation(ctx context.Context, force *bool, maxWait *time.Duration, endpoints ...string) error {
 	args := params.DestroyRelation{
 		Endpoints: endpoints,
 		Force:     force,
 		MaxWait:   maxWait,
 	}
-	return c.facade.FacadeCall("DestroyRelation", args, nil)
+	return c.facade.FacadeCall(ctx, "DestroyRelation", args, nil)
 }
 
 // DestroyRelationId removes the relation with the specified id.
-func (c *Client) DestroyRelationId(relationId int, force *bool, maxWait *time.Duration) error {
+func (c *Client) DestroyRelationId(ctx context.Context, relationId int, force *bool, maxWait *time.Duration) error {
 	args := params.DestroyRelation{
 		RelationId: relationId,
 		Force:      force,
 		MaxWait:    maxWait,
 	}
-	return c.facade.FacadeCall("DestroyRelation", args, nil)
+	return c.facade.FacadeCall(ctx, "DestroyRelation", args, nil)
 }
 
 // SetRelationSuspended updates the suspended status of the relation with the specified id.
-func (c *Client) SetRelationSuspended(relationIds []int, suspended bool, message string) error {
+func (c *Client) SetRelationSuspended(ctx context.Context, relationIds []int, suspended bool, message string) error {
 	var args params.RelationSuspendedArgs
 	for _, relId := range relationIds {
 		args.Args = append(args.Args, params.RelationSuspendedArg{
@@ -779,7 +768,7 @@ func (c *Client) SetRelationSuspended(relationIds []int, suspended bool, message
 		})
 	}
 	var results params.ErrorResults
-	if err := c.facade.FacadeCall("SetRelationsSuspended", args, &results); err != nil {
+	if err := c.facade.FacadeCall(ctx, "SetRelationsSuspended", args, &results); err != nil {
 		return errors.Trace(err)
 	}
 	if len(results.Results) != len(args.Args) {
@@ -802,7 +791,7 @@ func (c *Client) SetRelationSuspended(relationIds []int, suspended bool, message
 }
 
 // Consume adds a remote application to the model.
-func (c *Client) Consume(arg crossmodel.ConsumeApplicationArgs) (string, error) {
+func (c *Client) Consume(ctx context.Context, arg crossmodel.ConsumeApplicationArgs) (string, error) {
 	var consumeRes params.ErrorResults
 	args := params.ConsumeApplicationArgsV5{
 		Args: []params.ConsumeApplicationArgV5{{
@@ -813,13 +802,13 @@ func (c *Client) Consume(arg crossmodel.ConsumeApplicationArgs) (string, error) 
 	}
 	if arg.ControllerInfo != nil {
 		args.Args[0].ControllerInfo = &params.ExternalControllerInfo{
-			ControllerTag: arg.ControllerInfo.ControllerTag.String(),
+			ControllerTag: names.NewControllerTag(arg.ControllerInfo.ControllerUUID).String(),
 			Alias:         arg.ControllerInfo.Alias,
 			Addrs:         arg.ControllerInfo.Addrs,
 			CACert:        arg.ControllerInfo.CACert,
 		}
 	}
-	err := c.facade.FacadeCall("Consume", args, &consumeRes)
+	err := c.facade.FacadeCall(ctx, "Consume", args, &consumeRes)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -837,17 +826,16 @@ func (c *Client) Consume(arg crossmodel.ConsumeApplicationArgs) (string, error) 
 }
 
 // SetConfig sets configuration options on an application and the charm.
-func (c *Client) SetConfig(branchName, application, configYAML string, config map[string]string) error {
+func (c *Client) SetConfig(ctx context.Context, application, configYAML string, config map[string]string) error {
 	args := params.ConfigSetArgs{
 		Args: []params.ConfigSet{{
 			ApplicationName: application,
-			Generation:      branchName,
 			Config:          config,
 			ConfigYAML:      configYAML,
 		}},
 	}
 	var results params.ErrorResults
-	err := c.facade.FacadeCall("SetConfigs", args, &results)
+	err := c.facade.FacadeCall(ctx, "SetConfigs", args, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -855,16 +843,15 @@ func (c *Client) SetConfig(branchName, application, configYAML string, config ma
 }
 
 // UnsetApplicationConfig resets configuration options on an application.
-func (c *Client) UnsetApplicationConfig(branchName, application string, options []string) error {
+func (c *Client) UnsetApplicationConfig(ctx context.Context, application string, options []string) error {
 	args := params.ApplicationConfigUnsetArgs{
 		Args: []params.ApplicationUnset{{
 			ApplicationName: application,
-			BranchName:      branchName,
 			Options:         options,
 		}},
 	}
 	var results params.ErrorResults
-	err := c.facade.FacadeCall("UnsetApplicationsConfig", args, &results)
+	err := c.facade.FacadeCall(ctx, "UnsetApplicationsConfig", args, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -873,7 +860,7 @@ func (c *Client) UnsetApplicationConfig(branchName, application string, options 
 
 // ResolveUnitErrors clears errors on one or more units.
 // Either specify one or more units, or all.
-func (c *Client) ResolveUnitErrors(units []string, all, retry bool) error {
+func (c *Client) ResolveUnitErrors(ctx context.Context, units []string, all, retry bool) error {
 	if len(units) > 0 && all {
 		return errors.NotSupportedf("specifying units with all=true")
 	}
@@ -896,7 +883,7 @@ func (c *Client) ResolveUnitErrors(units []string, all, retry bool) error {
 	}
 
 	results := new(params.ErrorResults)
-	err := c.facade.FacadeCall("ResolveUnitErrors", args, results)
+	err := c.facade.FacadeCall(ctx, "ResolveUnitErrors", args, results)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -913,14 +900,14 @@ func validateApplicationScale(scale, scaleChange int) error {
 }
 
 // ApplicationsInfo retrieves applications information.
-func (c *Client) ApplicationsInfo(applications []names.ApplicationTag) ([]params.ApplicationInfoResult, error) {
+func (c *Client) ApplicationsInfo(ctx context.Context, applications []names.ApplicationTag) ([]params.ApplicationInfoResult, error) {
 	all := make([]params.Entity, len(applications))
 	for i, one := range applications {
 		all[i] = params.Entity{Tag: one.String()}
 	}
 	in := params.Entities{Entities: all}
 	var out params.ApplicationInfoResults
-	err := c.facade.FacadeCall("ApplicationsInfo", in, &out)
+	err := c.facade.FacadeCall(ctx, "ApplicationsInfo", in, &out)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -932,9 +919,9 @@ func (c *Client) ApplicationsInfo(applications []names.ApplicationTag) ([]params
 
 // MergeBindings merges an operator-defined bindings list with the existing
 // application bindings.
-func (c *Client) MergeBindings(req params.ApplicationMergeBindingsArgs) error {
+func (c *Client) MergeBindings(ctx context.Context, req params.ApplicationMergeBindingsArgs) error {
 	var results params.ErrorResults
-	err := c.facade.FacadeCall("MergeBindings", req, &results)
+	err := c.facade.FacadeCall(ctx, "MergeBindings", req, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -977,14 +964,14 @@ type EndpointRelationData struct {
 }
 
 // UnitsInfo retrieves units information.
-func (c *Client) UnitsInfo(units []names.UnitTag) ([]UnitInfo, error) {
+func (c *Client) UnitsInfo(ctx context.Context, units []names.UnitTag) ([]UnitInfo, error) {
 	all := make([]params.Entity, len(units))
 	for i, one := range units {
 		all[i] = params.Entity{Tag: one.String()}
 	}
 	in := params.Entities{Entities: all}
 	var out params.UnitInfoResults
-	err := c.facade.FacadeCall("UnitsInfo", in, &out)
+	err := c.facade.FacadeCall(ctx, "UnitsInfo", in, &out)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1051,21 +1038,21 @@ func unitInfoFromParams(in params.UnitInfoResult) UnitInfo {
 
 type DeployInfo struct {
 	// Architecture is the architecture used to deploy the charm.
-	Architecture string `json:"architecture"`
+	Architecture string
 	// Base is the base used to deploy the charm.
-	Base corebase.Base `json:"base,omitempty"`
+	Base corebase.Base
 	// Channel is a string representation of the channel used to
 	// deploy the charm.
-	Channel string `json:"channel"`
+	Channel string
 	// EffectiveChannel is the channel actually deployed from as determined
 	// by the charmhub response.
-	EffectiveChannel *string `json:"effective-channel,omitempty"`
+	EffectiveChannel *string
 	// Is the name of the application deployed. This may vary from
 	// the charm name provided if differs in the metadata.yaml and
 	// no provided on the cli.
-	Name string `json:"name"`
+	Name string
 	// Revision is the revision of the charm deployed.
-	Revision int `json:"revision"`
+	Revision int
 }
 
 type PendingResourceUpload struct {
@@ -1090,11 +1077,11 @@ type DeployFromRepositoryArg struct {
 	// may be non-empty only if NumUnits is 1.
 	AttachStorage []string
 	// Base describes the OS base intended to be used by the charm.
-	Base *corebase.Base `json:"base,omitempty"`
+	Base *corebase.Base
 	// Channel is the channel in the repository to deploy from.
 	// This is an optional value. Required if revision is provided.
 	// Defaults to “stable” if not defined nor required.
-	Channel *string `json:"channel,omitempty"`
+	Channel *string
 	// ConfigYAML is a string that overrides the default config.yml.
 	ConfigYAML string
 	// Cons contains constraints on where units of this application
@@ -1108,27 +1095,27 @@ type DeployFromRepositoryArg struct {
 	// of the config. Does not actually download or deploy the charm.
 	DryRun bool
 	// EndpointBindings
-	EndpointBindings map[string]string `json:"endpoint-bindings,omitempty"`
+	EndpointBindings map[string]string
 	// Force can be set to true to bypass any checks for charm-specific
 	// requirements ("assumes" sections in charm metadata, supported series,
 	// LXD profile allow list)
-	Force bool `json:"force,omitempty"`
+	Force bool
 	// NumUnits is the number of units to deploy. Defaults to 1 if no
 	// value provided. Synonymous with scale for kubernetes charms.
-	NumUnits *int `json:"num-units,omitempty"`
+	NumUnits *int
 	// Placement directives define on which machines the unit(s) must be
 	// created.
 	Placement []*instance.Placement
 	// Revision is the charm revision number. Requires the channel
 	// be explicitly set.
-	Revision *int `json:"revision,omitempty"`
+	Revision *int
 	// Resources is a collection of resource names for the
 	// application, with the value being the revision of the
 	// resource to use if default revision is not desired.
-	Resources map[string]string `json:"resources,omitempty"`
-	// Storage contains Constraints specifying how storage should be
+	Resources map[string]string
+	// Storage contains Directives specifying how storage should be
 	// handled.
-	Storage map[string]storage.Constraints
+	Storage map[string]storage.Directive
 	//  Trust allows charm to run hooks that require access credentials
 	Trust bool
 }
@@ -1138,12 +1125,12 @@ type DeployFromRepositoryArg struct {
 // data required to upload any local resources and errors returned.
 // Where possible, more than all errors regarding argument validation
 // are returned.
-func (c *Client) DeployFromRepository(arg DeployFromRepositoryArg) (DeployInfo, []PendingResourceUpload, []error) {
+func (c *Client) DeployFromRepository(ctx context.Context, arg DeployFromRepositoryArg) (DeployInfo, []PendingResourceUpload, []error) {
 	var result params.DeployFromRepositoryResults
 	args := params.DeployFromRepositoryArgs{
 		Args: []params.DeployFromRepositoryArg{paramsFromDeployFromRepositoryArg(arg)},
 	}
-	err := c.facade.FacadeCall("DeployFromRepository", args, &result)
+	err := c.facade.FacadeCall(ctx, "DeployFromRepository", args, &result)
 	if err != nil {
 		return DeployInfo{}, nil, []error{err}
 	}
@@ -1227,7 +1214,7 @@ type ApplicationStorageInfo struct {
 	// StorageConstraints is a map of storage names to storage constraints to
 	// update during the upgrade. This field is only understood by Application
 	// facade version 2 and greater.
-	StorageConstraints map[string]storage.Constraints `json:"storage-constraints,omitempty"`
+	StorageConstraints map[string]storage.Directive `json:"storage-constraints,omitempty"`
 }
 
 // GetApplicationStorage retrieves storage information for the specified applications.
@@ -1235,7 +1222,7 @@ func (c *Client) GetApplicationStorage(applicationName string) (ApplicationStora
 	application := names.NewApplicationTag(applicationName)
 	in := params.Entities{Entities: []params.Entity{{Tag: application.String()}}}
 	var out params.ApplicationStorageGetResults
-	err := c.facade.FacadeCall("GetApplicationStorage", in, &out)
+	err := c.facade.FacadeCall(context.Background(), "GetApplicationStorage", in, &out)
 	if err != nil {
 		return ApplicationStorageInfo{}, errors.Trace(err)
 	}
@@ -1251,13 +1238,13 @@ func applicationInfoFromParams(param params.ApplicationStorageGetResult) Applica
 			Error: apiservererrors.RestoreError(param.Error),
 		}
 	}
-	sc := make(map[string]storage.Constraints)
+	sc := make(map[string]storage.Directive)
 	for k, v := range param.StorageConstraints {
-		con := storage.Constraints{
+		con := storage.Directive{
 			Pool: v.Pool,
 		}
-		if v.Size != nil {
-			con.Size = *v.Size
+		if v.SizeMiB != nil {
+			con.Size = *v.SizeMiB
 		}
 		if v.Count != nil {
 			con.Count = *v.Count
@@ -1277,17 +1264,17 @@ type ApplicationStorageUpdate struct {
 	// StorageConstraints is a map of storage names to storage constraints to
 	// update during the upgrade. This field is only understood by Application
 	// facade version 2 and greater.
-	StorageConstraints map[string]storage.Constraints `json:"storage-constraints,omitempty"`
+	StorageConstraints map[string]storage.Directive `json:"storage-constraints,omitempty"`
 }
 
 // UpdateApplicationStorage updates the storage constraints for multiple existing applications in bulk.
 func (c *Client) UpdateApplicationStorage(applicationStorageUpdate ApplicationStorageUpdate) error {
-	sc := make(map[string]params.StorageConstraints)
+	sc := make(map[string]params.StorageDirectives)
 	for k, v := range applicationStorageUpdate.StorageConstraints {
-		sc[k] = params.StorageConstraints{
-			Pool:  v.Pool,
-			Size:  &v.Size,
-			Count: &v.Count,
+		sc[k] = params.StorageDirectives{
+			Pool:    v.Pool,
+			SizeMiB: &v.Size,
+			Count:   &v.Count,
 		}
 	}
 	in := params.ApplicationStorageUpdateRequest{
@@ -1300,7 +1287,7 @@ func (c *Client) UpdateApplicationStorage(applicationStorageUpdate ApplicationSt
 	}
 
 	var out params.ErrorResults
-	err := c.facade.FacadeCall("UpdateApplicationStorage", in, &out)
+	err := c.facade.FacadeCall(context.Background(), "UpdateApplicationStorage", in, &out)
 	if err != nil {
 		return errors.Trace(err)
 	}

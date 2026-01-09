@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
-	"github.com/juju/juju/charmhub"
 	jujucmd "github.com/juju/juju/cmd"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const (
@@ -30,11 +30,11 @@ separated by ` + "`@`" + `.
 For example: ` + "`--base ubuntu@22.04`" + `.
 
 Use ` + "`--revision`" + ` to display information about a specific revision of the charm,
-which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + `, ` + "`--channel`" + ` or ` + "`--series`" + `.
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
 For example: ` + "`--revision 42`" + `.
 
 Use ` + "`--track `" + ` to display information about a specific track of the charm,
-which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + `, ` + "`--channel`" + ` or ` + "`--series`" + `.
+which cannot be used together with ` + "`--arch`" + `, ` + "`--base`" + ` or ` + "`--channel`" + `.
 For example: ` + "`--track 14`" + `.
 `
 	infoExamples = `
@@ -89,7 +89,6 @@ func (c *infoCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.charmHubCommand.SetFlags(f)
 
 	f.StringVar(&c.arch, "arch", ArchAll, fmt.Sprintf("Specify an arch <%s>", c.archArgumentList()))
-	f.StringVar(&c.series, "series", SeriesAll, "Specify a series. DEPRECATED use `--base`")
 	f.StringVar(&c.base, "base", "", "Specify a base")
 	f.StringVar(&c.channel, "channel", "", "Specify a channel to use instead of the default release")
 	f.BoolVar(&c.config, "config", false, "Display config for this charm")
@@ -106,20 +105,15 @@ func (c *infoCommand) SetFlags(f *gnuflag.FlagSet) {
 // Init initializes the info command, including validating the provided
 // flags. It implements part of the cmd.Command interface.
 func (c *infoCommand) Init(args []string) error {
-	if c.base != "" && (c.series != "" && c.series != SeriesAll) {
-		return errors.New("--series and --base cannot be specified together")
-	}
-
 	hasArch := c.arch != ArchAll && c.arch != ""
 	hasBase := c.base != ""
 	hasChannel := c.channel != ""
-	hasSeries := c.series != SeriesAll && c.series != ""
-	if c.revision != -1 && (hasArch || hasBase || hasChannel || hasSeries) {
-		return errors.New("--revision cannot be specified together with --arch, --base, --channel or --series")
+	if c.revision != -1 && (hasArch || hasBase || hasChannel) {
+		return errors.New("--revision cannot be specified together with --arch, --base or --channel")
 	}
 
-	if c.track != "" && (hasArch || hasBase || hasChannel || hasSeries) {
-		return errors.New("--track cannot be specified together with --arch, --base, --channel or --series")
+	if c.track != "" && (hasArch || hasBase || hasChannel) {
+		return errors.New("--track cannot be specified together with --arch, --base or --channel")
 	}
 
 	if err := c.charmHubCommand.Init(args); err != nil {
@@ -148,7 +142,7 @@ func (c *infoCommand) Init(args []string) error {
 func (c *infoCommand) validateCharmOrBundle(charmOrBundle string) error {
 	curl, err := charm.ParseURL(charmOrBundle)
 	if err != nil {
-		logger.Debugf("%s", err)
+		logger.Debugf(context.TODO(), "%s", err)
 		return errors.NotValidf("charm or bundle name, %q, is", charmOrBundle)
 	}
 	if !charm.CharmHub.Matches(curl.Schema) {
@@ -164,18 +158,6 @@ func (c *infoCommand) Run(cmdContext *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.series == SeriesAll {
-		c.series = ""
-	} else if c.series != "" {
-		cmdContext.Warningf("series flag is deprecated, use --base instead")
-		if base, err = corebase.GetBaseFromSeries(c.series); err != nil {
-			return errors.Annotatef(err, "attempting to convert %q to a base", c.series)
-		}
-		c.base = base.String()
-		c.series = ""
-	}
 	if c.base != "" {
 		if base, err = corebase.ParseBaseFromString(c.base); err != nil {
 			return errors.Trace(err)
@@ -207,7 +189,7 @@ func (c *infoCommand) Run(cmdContext *cmd.Context) error {
 	}
 
 	info, err := client.Info(ctx, c.charmOrBundle, options...)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		return errors.Wrap(err, errors.Errorf("No information found for charm or bundle with the name %q", c.charmOrBundle))
 	} else if err != nil {
 		return errors.Trace(err)

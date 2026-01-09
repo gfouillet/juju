@@ -10,48 +10,51 @@ package agent
 
 import (
 	"path/filepath"
+	stdtesting "testing"
 	"time"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"github.com/juju/utils/v4"
 
 	agentconstants "github.com/juju/juju/agent/constants"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/testing"
 )
 
 type format_2_0Suite struct {
 	testing.BaseSuite
 }
 
-var _ = gc.Suite(&format_2_0Suite{})
+func TestFormat_2_0Suite(t *stdtesting.T) {
+	tc.Run(t, &format_2_0Suite{})
+}
 
-func (s *format_2_0Suite) TestStatePortNotParsedWithoutSecret(c *gc.C) {
+func (s *format_2_0Suite) TestStatePortNotParsedWithoutSecret(c *tc.C) {
 	dataDir := c.MkDir()
 	configPath := filepath.Join(dataDir, agentconstants.AgentConfigFilename)
 	err := utils.AtomicWriteFile(configPath, []byte(agentConfig2_0NotStateMachine), 0600)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	readConfig, err := ReadConfig(configPath)
-	c.Assert(err, jc.ErrorIsNil)
-	_, available := readConfig.StateServingInfo()
-	c.Assert(available, jc.IsFalse)
+	c.Assert(err, tc.ErrorIsNil)
+	_, available := readConfig.ControllerAgentInfo()
+	c.Assert(available, tc.IsFalse)
 }
 
-func (*format_2_0Suite) TestReadConfWithExisting2_0ConfigFileContents(c *gc.C) {
+func (*format_2_0Suite) TestReadConfWithExisting2_0ConfigFileContents(c *tc.C) {
 	dataDir := c.MkDir()
 	configPath := filepath.Join(dataDir, agentconstants.AgentConfigFilename)
 	err := utils.AtomicWriteFile(configPath, []byte(agentConfig2_0Contents), 0600)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	config, err := ReadConfig(configPath)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(config.UpgradedToVersion(), jc.DeepEquals, version.MustParse("1.17.5.1"))
-	c.Assert(config.Jobs(), jc.DeepEquals, []model.MachineJob{model.JobManageModel})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(config.UpgradedToVersion(), tc.DeepEquals, semversion.MustParse("1.17.5.1"))
+	c.Assert(config.Jobs(), tc.DeepEquals, []model.MachineJob{model.JobManageModel})
 }
 
-func (*format_2_0Suite) TestMarshalUnmarshal(c *gc.C) {
+func (*format_2_0Suite) TestMarshalUnmarshal(c *tc.C) {
 	loggingConfig := "juju=INFO;unit=INFO"
 	config := newTestConfig(c)
 	// configFilePath is not serialized as it is the location of the file.
@@ -60,15 +63,15 @@ func (*format_2_0Suite) TestMarshalUnmarshal(c *gc.C) {
 	config.SetLoggingConfig(loggingConfig)
 
 	data, err := format_2_0.marshal(config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	newConfig, err := format_2_0.unmarshal(data)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(newConfig, gc.DeepEquals, config)
-	c.Check(newConfig.LoggingConfig(), gc.Equals, loggingConfig)
+	c.Check(newConfig, tc.DeepEquals, config)
+	c.Check(newConfig.LoggingConfig(), tc.Equals, loggingConfig)
 }
 
-func (*format_2_0Suite) TestQueryTracing(c *gc.C) {
+func (*format_2_0Suite) TestQueryTracing(c *tc.C) {
 	config := newTestConfig(c)
 	// configFilePath is not serialized as it is the location of the file.
 	config.configFilePath = ""
@@ -77,13 +80,55 @@ func (*format_2_0Suite) TestQueryTracing(c *gc.C) {
 	config.SetQueryTracingThreshold(time.Second)
 
 	data, err := format_2_0.marshal(config)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	newConfig, err := format_2_0.unmarshal(data)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Check(newConfig, gc.DeepEquals, config)
-	c.Check(newConfig.QueryTracingEnabled(), jc.IsTrue)
-	c.Check(newConfig.QueryTracingThreshold(), gc.Equals, time.Second)
+	c.Check(newConfig, tc.DeepEquals, config)
+	c.Check(newConfig.QueryTracingEnabled(), tc.IsTrue)
+	c.Check(newConfig.QueryTracingThreshold(), tc.Equals, time.Second)
+}
+
+func (*format_2_0Suite) TestOpenTelemetry(c *tc.C) {
+	config := newTestConfig(c)
+	// configFilePath is not serialized as it is the location of the file.
+	config.configFilePath = ""
+
+	config.SetOpenTelemetryEnabled(true)
+	config.SetOpenTelemetryEndpoint("http://foo.bar")
+	config.SetOpenTelemetryInsecure(true)
+	config.SetOpenTelemetryStackTraces(true)
+	config.SetOpenTelemetrySampleRatio(0.5)
+	config.SetOpenTelemetryTailSamplingThreshold(time.Second)
+
+	data, err := format_2_0.marshal(config)
+	c.Assert(err, tc.ErrorIsNil)
+	newConfig, err := format_2_0.unmarshal(data)
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Check(newConfig, tc.DeepEquals, config)
+	c.Check(newConfig.OpenTelemetryEnabled(), tc.IsTrue)
+	c.Check(newConfig.OpenTelemetryEndpoint(), tc.Equals, "http://foo.bar")
+	c.Check(newConfig.OpenTelemetryInsecure(), tc.IsTrue)
+	c.Check(newConfig.OpenTelemetryStackTraces(), tc.IsTrue)
+	c.Check(newConfig.OpenTelemetrySampleRatio(), tc.Equals, 0.5)
+	c.Check(newConfig.OpenTelemetryTailSamplingThreshold(), tc.Equals, time.Second)
+}
+
+func (*format_2_0Suite) TestObjectStore(c *tc.C) {
+	config := newTestConfig(c)
+	// configFilePath is not serialized as it is the location of the file.
+	config.configFilePath = ""
+
+	config.SetObjectStoreType(objectstore.FileBackend)
+
+	data, err := format_2_0.marshal(config)
+	c.Assert(err, tc.ErrorIsNil)
+	newConfig, err := format_2_0.unmarshal(data)
+	c.Assert(err, tc.ErrorIsNil)
+
+	c.Check(newConfig, tc.DeepEquals, config)
+	c.Check(newConfig.ObjectStoreType(), tc.Equals, objectstore.FileBackend)
 }
 
 var agentConfig2_0Contents = `
@@ -289,7 +334,6 @@ oldpassword: oBlMbFUGvCb2PMFgYVzjS6GD
 values:
   AGENT_SERVICE_NAME: juju-agent-user-local
   CONTAINER_TYPE: ""
-  MONGO_SERVICE_NAME: juju-db-user-local
   NAMESPACE: user-local
   PROVIDER_TYPE: local
   STORAGE_ADDR: 10.0.3.1:8040

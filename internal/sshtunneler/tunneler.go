@@ -17,8 +17,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/pki/ssh"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/internal/pki/ssh"
 )
 
 var (
@@ -33,9 +32,22 @@ const (
 	defaultUser       = "ubuntu"
 )
 
+type sshRequestArgs struct {
+	TunnelID            string
+	ModelUUID           string
+	MachineId           string
+	Expires             time.Time
+	Username            string
+	Password            string
+	ControllerAddresses network.SpaceAddresses
+	UnitPort            int
+	EphemeralPublicKey  []byte
+}
+
 // State defines an interface to write requests for tunnels to state.
 type State interface {
-	InsertSSHConnRequest(arg state.SSHConnRequestArg) error
+	// TODO(JUJU-7916) - Create adapter to convert sshRequestArgs to state type.
+	InsertSSHConnRequest(args sshRequestArgs) error
 	MachineHostKeys(modelUUID, machineID string) ([]string, error)
 }
 
@@ -190,7 +202,7 @@ func (tt *Tracker) RequestTunnel(ctx context.Context, req RequestArgs) (*gossh.C
 	tt.add(tunnelID.String(), connRecv)
 	defer tt.delete(tunnelID.String())
 
-	args := state.SSHConnRequestArg{
+	args := sshRequestArgs{
 		TunnelID:            tunnelID.String(),
 		ModelUUID:           req.ModelUUID,
 		MachineId:           req.MachineID,

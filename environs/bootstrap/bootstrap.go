@@ -4,41 +4,39 @@
 package bootstrap
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/ssh"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/podcfg"
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
 	corecontext "github.com/juju/juju/core/context"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/imagemetadata"
 	"github.com/juju/juju/environs/simplestreams"
 	"github.com/juju/juju/environs/storage"
 	"github.com/juju/juju/environs/sync"
 	"github.com/juju/juju/environs/tools"
-	"github.com/juju/juju/pki"
-	corestorage "github.com/juju/juju/storage"
-	coretools "github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/pki"
+	corestorage "github.com/juju/juju/internal/storage"
+	coretools "github.com/juju/juju/internal/tools"
 )
 
 const (
@@ -52,7 +50,7 @@ You may want to use the 'agent-metadata-url' configuration setting to specify th
 `
 
 var (
-	logger = loggo.GetLogger("juju.environs.bootstrap")
+	logger = internallogger.GetLogger("juju.environs.bootstrap")
 
 	errCancelled = errors.New("cancelled")
 )
@@ -100,15 +98,14 @@ type BootstrapParams struct {
 	// across all models in the same controller.
 	ControllerInheritedConfig map[string]interface{}
 
+	// ControllerModelAuthorizedKeys is a set of pre-allowed authorized keys
+	// for the initial controller model.
+	ControllerModelAuthorizedKeys []string
+
 	// RegionInheritedConfig holds region specific configuration attributes to
 	// be shared across all models in the same controller on a particular
 	// cloud.
 	RegionInheritedConfig cloud.RegionConfig
-
-	// InitialModelConfig is the set of config attributes to be overlaid
-	// on the controller config to construct the initial hosted model
-	// config.
-	InitialModelConfig map[string]interface{}
 
 	// Placement, if non-empty, holds an environment-specific placement
 	// directive used to choose the initial instance.
@@ -130,7 +127,7 @@ type BootstrapParams struct {
 
 	// AgentVersion, if set, determines the exact tools version that
 	// will be used to start the Juju agents.
-	AgentVersion *version.Number
+	AgentVersion *semversion.Number
 
 	// AdminSecret contains the administrator password.
 	AdminSecret string
@@ -152,14 +149,6 @@ type BootstrapParams struct {
 
 	// DialOpts contains the bootstrap dial options.
 	DialOpts environs.BootstrapDialOpts
-
-	// JujuDbSnapPath is the path to a local .snap file that will be used
-	// to run the juju-db service.
-	JujuDbSnapPath string
-
-	// JujuDbSnapAssertionsPath is the path to a local .assertfile that
-	// will be used to test the contents of the .snap at JujuDbSnap.
-	JujuDbSnapAssertionsPath string
 
 	// StoragePools is one or more named storage pools to create
 	// in the controller model.
@@ -200,7 +189,7 @@ func (p BootstrapParams) Validate() error {
 	if p.CAPrivateKey == "" {
 		return errors.New("empty ca-private-key")
 	}
-	if p.SupportedBootstrapBases == nil || len(p.SupportedBootstrapBases) == 0 {
+	if len(p.SupportedBootstrapBases) == 0 {
 		return errors.NotValidf("supported bootstrap bases")
 	}
 
@@ -248,7 +237,6 @@ func withDefaultCAASControllerConstraints(cons constraints.Value) constraints.Va
 func bootstrapCAAS(
 	ctx environs.BootstrapContext,
 	environ environs.BootstrapEnviron,
-	callCtx context.ProviderCallContext,
 	args BootstrapParams,
 	bootstrapParams environs.BootstrapParams,
 ) error {
@@ -262,7 +250,7 @@ func bootstrapCAAS(
 		return errors.NotSupportedf("--bootstrap-series or --bootstrap-base when bootstrapping a k8s controller")
 	}
 
-	constraintsValidator, err := environ.ConstraintsValidator(callCtx)
+	constraintsValidator, err := environ.ConstraintsValidator(ctx)
 	if err != nil {
 		return err
 	}
@@ -275,7 +263,7 @@ func bootstrapCAAS(
 	bootstrapConstraints = withDefaultCAASControllerConstraints(bootstrapConstraints)
 	bootstrapParams.BootstrapConstraints = bootstrapConstraints
 
-	result, err := environ.Bootstrap(ctx, callCtx, bootstrapParams)
+	result, err := environ.Bootstrap(ctx, bootstrapParams)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -295,7 +283,7 @@ func bootstrapCAAS(
 		jujuVersion = *args.AgentVersion
 	}
 	// set agent version before finalizing bootstrap config
-	if err := setBootstrapAgentVersion(environ, jujuVersion); err != nil {
+	if err := setBootstrapAgentVersion(ctx, environ, jujuVersion); err != nil {
 		return errors.Trace(err)
 	}
 	podConfig.JujuVersion = jujuVersion
@@ -311,27 +299,18 @@ func bootstrapCAAS(
 func bootstrapIAAS(
 	ctx environs.BootstrapContext,
 	environ environs.BootstrapEnviron,
-	callCtx context.ProviderCallContext,
 	args BootstrapParams,
 	bootstrapParams environs.BootstrapParams,
 ) error {
 	cfg := environ.Config()
-	if authKeys := ssh.SplitAuthorisedKeys(cfg.AuthorizedKeys()); len(authKeys) == 0 {
-		// Apparently this can never happen, so it's not tested. But, one day,
-		// Config will act differently (it's pretty crazy that, AFAICT, the
-		// authorized-keys are optional config settings... but it's impossible
-		// to actually *create* a config without them)... and when it does,
-		// we'll be here to catch this problem early.
-		return errors.Errorf("model configuration has no authorized-keys")
-	}
 
 	_, supportsNetworking := environs.SupportsNetworking(environ)
-	logger.Debugf("model %q supports application/machine networks: %v", cfg.Name(), supportsNetworking)
+	logger.Debugf(ctx, "model %q supports application/machine networks: %v", cfg.Name(), supportsNetworking)
 	disableNetworkManagement, _ := cfg.DisableNetworkManagement()
-	logger.Debugf("network management by juju enabled: %v", !disableNetworkManagement)
+	logger.Debugf(ctx, "network management by juju enabled: %v", !disableNetworkManagement)
 
 	var ss *simplestreams.Simplestreams
-	if value := ctx.Context().Value(SimplestreamsFetcherContextKey); value == nil {
+	if value := ctx.Value(SimplestreamsFetcherContextKey); value == nil {
 		ss = simplestreams.NewSimpleStreams(simplestreams.DefaultDataSourceFactory())
 	} else if s, ok := value.(*simplestreams.Simplestreams); ok {
 		ss = s
@@ -345,7 +324,7 @@ func bootstrapIAAS(
 	var customImageMetadata []*imagemetadata.ImageMetadata
 	if args.MetadataDir != "" {
 		var err error
-		customImageMetadata, err = setPrivateMetadataSources(ss, args.MetadataDir)
+		customImageMetadata, err = setPrivateMetadataSources(ctx, ss, args.MetadataDir)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -366,7 +345,7 @@ func bootstrapIAAS(
 
 		if args.BootstrapBase.Empty() && !detectedBase.Empty() {
 			args.BootstrapBase = detectedBase
-			logger.Debugf("auto-selecting bootstrap series %q", args.BootstrapBase.String())
+			logger.Debugf(ctx, "auto-selecting bootstrap series %q", args.BootstrapBase.String())
 		}
 		if args.BootstrapConstraints.Arch == nil &&
 			args.ModelConstraints.Arch == nil &&
@@ -377,7 +356,7 @@ func bootstrapIAAS(
 			if detector.UpdateModelConstraints() {
 				args.ModelConstraints.Arch = &arch
 			}
-			logger.Debugf("auto-selecting bootstrap arch %q", arch)
+			logger.Debugf(ctx, "auto-selecting bootstrap arch %q", arch)
 		}
 	}
 
@@ -406,7 +385,7 @@ func bootstrapIAAS(
 	}
 
 	ctx.Verbosef("Loading image metadata")
-	imageMetadata, err := bootstrapImageMetadata(environ,
+	imageMetadata, err := bootstrapImageMetadata(ctx, environ,
 		ss,
 		&bootstrapBase,
 		bootstrapArchForImageSearch,
@@ -432,7 +411,7 @@ func bootstrapIAAS(
 	}
 	bootstrapParams.ImageMetadata = imageMetadata
 
-	constraintsValidator, err := environ.ConstraintsValidator(callCtx)
+	constraintsValidator, err := environ.ConstraintsValidator(ctx)
 	if err != nil {
 		return err
 	}
@@ -473,8 +452,8 @@ func bootstrapIAAS(
 		}
 		ctx.Infof("Looking for %vpackaged Juju agent version %s for %s", latestPatchTxt, versionTxt, bootstrapArch)
 
-		availableTools, err = findPackagedTools(environ, ss, args.AgentVersion, &bootstrapArch, &bootstrapBase)
-		if err != nil && !errors.IsNotFound(err) {
+		availableTools, err = findPackagedTools(ctx, environ, ss, args.AgentVersion, &bootstrapArch, &bootstrapBase)
+		if err != nil && !errors.Is(err, errors.NotFound) {
 			return err
 		}
 		if len(availableTools) != 0 {
@@ -503,14 +482,14 @@ func bootstrapIAAS(
 		} else {
 			ctx.Infof("No packaged binary found, preparing local Juju agent binary")
 		}
-		var forceVersion version.Number
+		var forceVersion semversion.Number
 		availableTools, forceVersion, err = locallyBuildableTools()
 		if err != nil {
 			return errors.Annotate(err, "cannot package bootstrap agent binary")
 		}
 		builtTools, err = args.BuildAgentTarball(
-			args.BuildAgent, cfg.AgentStream(),
-			func(version.Number) version.Number { return forceVersion },
+			args.BuildAgent, "bootstrap",
+			func(semversion.Number) semversion.Number { return forceVersion },
 		)
 		if err != nil {
 			return errors.Annotate(err, "cannot package bootstrap agent binary")
@@ -566,7 +545,7 @@ func bootstrapIAAS(
 	}); err != nil {
 		return errors.Trace(err)
 	}
-	if err = environ.SetConfig(cfg); err != nil {
+	if err = environ.SetConfig(ctx, cfg); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -583,11 +562,11 @@ func bootstrapIAAS(
 			}
 		}
 		instanceRoleEnviron, ok := environ.(environs.InstanceRole)
-		if !ok || !instanceRoleEnviron.SupportsInstanceRoles(callCtx) {
+		if !ok || !instanceRoleEnviron.SupportsInstanceRoles(ctx) {
 			return errors.NewNotSupported(nil, "instance role constraint for provider")
 		}
 
-		bootstrapParams, err = finaliseInstanceRole(callCtx, instanceRoleEnviron, bootstrapParams)
+		bootstrapParams, err = finaliseInstanceRole(ctx, instanceRoleEnviron, bootstrapParams)
 		if err != nil {
 			return errors.Annotate(err, "finalising instance role for provider")
 		}
@@ -595,7 +574,7 @@ func bootstrapIAAS(
 
 	ctx.Verbosef("Starting new instance for initial controller")
 
-	result, err := environ.Bootstrap(ctx, callCtx, bootstrapParams)
+	result, err := environ.Bootstrap(ctx, bootstrapParams)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -626,7 +605,7 @@ func bootstrapIAAS(
 	if err != nil {
 		return errors.Annotatef(err, "expected tools for %q", result.Base.OS)
 	}
-	selectedToolsList, err := getBootstrapToolsVersion(matchingTools)
+	selectedToolsList, err := getBootstrapToolsVersion(ctx, matchingTools)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -635,16 +614,12 @@ func bootstrapIAAS(
 	// in that case the specific version will be the only version available.
 	newestToolVersion, _ := matchingTools.Newest()
 	// set agent version before finalizing bootstrap config
-	if err := setBootstrapAgentVersion(environ, newestToolVersion); err != nil {
+	if err := setBootstrapAgentVersion(ctx, environ, newestToolVersion); err != nil {
 		return errors.Trace(err)
 	}
 
 	ctx.Infof("Installing Juju agent on bootstrap instance")
 	if err := instanceConfig.SetTools(selectedToolsList); err != nil {
-		return errors.Trace(err)
-	}
-
-	if err := instanceConfig.SetSnapSource(args.JujuDbSnapPath, args.JujuDbSnapAssertionsPath); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -685,7 +660,7 @@ func bootstrapIAAS(
 }
 
 func finaliseInstanceRole(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	ir environs.InstanceRole,
 	args environs.BootstrapParams,
 ) (environs.BootstrapParams, error) {
@@ -704,7 +679,6 @@ func finaliseInstanceRole(
 func Bootstrap(
 	ctx environs.BootstrapContext,
 	environ environs.BootstrapEnviron,
-	callCtx context.ProviderCallContext,
 	args BootstrapParams,
 ) error {
 	if err := args.Validate(); err != nil {
@@ -712,6 +686,9 @@ func Bootstrap(
 	}
 
 	bootstrapParams := environs.BootstrapParams{
+		// We set the authorized keys that are allowed to ssh to the controller
+		// instance during bootstrap.
+		AuthorizedKeys:             args.ControllerModelAuthorizedKeys,
 		CloudName:                  args.Cloud.Name,
 		CloudRegion:                args.CloudRegion,
 		ControllerConfig:           args.ControllerConfig,
@@ -728,10 +705,10 @@ func Bootstrap(
 		doBootstrap = bootstrapCAAS
 	}
 
-	if err := doBootstrap(ctx, environ, callCtx, args, bootstrapParams); err != nil {
+	if err := doBootstrap(ctx, environ, args, bootstrapParams); err != nil {
 		return errors.Trace(err)
 	}
-	if IsContextDone(ctx.Context()) {
+	if IsContextDone(ctx) {
 		ctx.Infof("Bootstrap cancelled, you may need to manually remove the bootstrap instance")
 		return Cancelled()
 	}
@@ -781,13 +758,19 @@ func finalizeInstanceBootstrapConfig(
 		return errors.Annotate(err, "encoding default controller cert to pem")
 	}
 
-	icfg.Bootstrap.StateServingInfo = controller.StateServingInfo{
-		StatePort:    controllerCfg.StatePort(),
+	agentVersion, has := cfg.AgentVersion()
+	if !has {
+		return errors.New("finalising instance bootstrap config, agent version not set on model config")
+	}
+
+	icfg.Bootstrap.ControllerAgentInfo = controller.ControllerAgentInfo{
 		APIPort:      controllerCfg.APIPort(),
 		Cert:         string(cert),
 		PrivateKey:   string(key),
 		CAPrivateKey: args.CAPrivateKey,
 	}
+	icfg.Bootstrap.StateInitializationParams.AgentVersion = agentVersion
+	icfg.Bootstrap.StateInitializationParams.ControllerModelAuthorizedKeys = args.ControllerModelAuthorizedKeys
 	icfg.Bootstrap.ControllerModelConfig = cfg
 	icfg.Bootstrap.ControllerModelEnvironVersion = environVersion
 	icfg.Bootstrap.CustomImageMetadata = customImageMetadata
@@ -798,11 +781,8 @@ func finalizeInstanceBootstrapConfig(
 	icfg.Bootstrap.ControllerConfig = args.ControllerConfig
 	icfg.Bootstrap.ControllerInheritedConfig = args.ControllerInheritedConfig
 	icfg.Bootstrap.RegionInheritedConfig = args.Cloud.RegionConfig
-	icfg.Bootstrap.InitialModelConfig = args.InitialModelConfig
 	icfg.Bootstrap.StoragePools = args.StoragePools
 	icfg.Bootstrap.Timeout = args.DialOpts.Timeout
-	icfg.Bootstrap.JujuDbSnapPath = args.JujuDbSnapPath
-	icfg.Bootstrap.JujuDbSnapAssertionsPath = args.JujuDbSnapAssertionsPath
 	icfg.Bootstrap.ControllerCharm = args.ControllerCharmPath
 	icfg.Bootstrap.ControllerCharmChannel = args.ControllerCharmChannel
 	return nil
@@ -851,8 +831,7 @@ func finalizePodBootstrapConfig(
 		return errors.Annotate(err, "encoding default controller cert to pem")
 	}
 
-	pcfg.Bootstrap.StateServingInfo = controller.StateServingInfo{
-		StatePort:    controllerCfg.StatePort(),
+	pcfg.Bootstrap.ControllerAgentInfo = controller.ControllerAgentInfo{
 		APIPort:      controllerCfg.APIPort(),
 		Cert:         string(cert),
 		PrivateKey:   string(key),
@@ -867,6 +846,7 @@ func finalizePodBootstrapConfig(
 		pcfg.AgentEnvironment[k] = v
 	}
 
+	pcfg.Bootstrap.ControllerModelAuthorizedKeys = args.ControllerModelAuthorizedKeys
 	pcfg.Bootstrap.ControllerModelConfig = cfg
 	pcfg.Bootstrap.ControllerCloud = args.Cloud
 	pcfg.Bootstrap.ControllerCloudRegion = args.CloudRegion
@@ -874,7 +854,6 @@ func finalizePodBootstrapConfig(
 	pcfg.Bootstrap.ControllerCloudCredentialName = args.CloudCredentialName
 	pcfg.Bootstrap.ControllerConfig = args.ControllerConfig
 	pcfg.Bootstrap.ControllerInheritedConfig = args.ControllerInheritedConfig
-	pcfg.Bootstrap.InitialModelConfig = args.InitialModelConfig
 	pcfg.Bootstrap.StoragePools = args.StoragePools
 	pcfg.Bootstrap.Timeout = args.DialOpts.Timeout
 	pcfg.Bootstrap.ControllerServiceType = args.ControllerServiceType
@@ -912,6 +891,7 @@ func userPublicSigningKey() (string, error) {
 // initiator. In addition, the custom image metadata that is saved into the
 // state database will have the synthesised image metadata added to it.
 func bootstrapImageMetadata(
+	ctx context.Context,
 	environ environs.BootstrapEnviron,
 	fetcher imagemetadata.SimplestreamsFetcher,
 	bootstrapBase *corebase.Base,
@@ -972,44 +952,44 @@ func bootstrapImageMetadata(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	logger.Debugf("constraints for image metadata lookup %v", imageConstraint)
+	logger.Debugf(ctx, "constraints for image metadata lookup %v", imageConstraint)
 
 	// Get image metadata from all data sources.
 	// Since order of data source matters, order of image metadata matters too. Append is important here.
 	var publicImageMetadata []*imagemetadata.ImageMetadata
 	for _, source := range sources {
-		sourceMetadata, _, err := imagemetadata.Fetch(fetcher, []simplestreams.DataSource{source}, imageConstraint)
+		sourceMetadata, _, err := imagemetadata.Fetch(ctx, fetcher, []simplestreams.DataSource{source}, imageConstraint)
 		if errors.Is(err, errors.NotFound) || errors.Is(err, errors.Unauthorized) {
-			logger.Debugf("ignoring image metadata in %s: %v", source.Description(), err)
+			logger.Debugf(ctx, "ignoring image metadata in %s: %v", source.Description(), err)
 			// Just keep looking...
 			continue
 		} else if err != nil {
 			// When we get an actual protocol/unexpected error, we need to stop.
 			return nil, errors.Annotatef(err, "failed looking for image metadata in %s", source.Description())
 		}
-		logger.Debugf("found %d image metadata in %s", len(sourceMetadata), source.Description())
+		logger.Debugf(ctx, "found %d image metadata in %s", len(sourceMetadata), source.Description())
 		publicImageMetadata = append(publicImageMetadata, sourceMetadata...)
 	}
 
-	logger.Debugf("found %d image metadata from all image data sources", len(publicImageMetadata))
+	logger.Debugf(ctx, "found %d image metadata from all image data sources", len(publicImageMetadata))
 	return publicImageMetadata, nil
 }
 
 // getBootstrapToolsVersion returns the newest tools from the given tools list.
-func getBootstrapToolsVersion(possibleTools coretools.List) (coretools.List, error) {
+func getBootstrapToolsVersion(ctx context.Context, possibleTools coretools.List) (coretools.List, error) {
 	if len(possibleTools) == 0 {
 		return nil, errors.New("no bootstrap agent binaries available")
 	}
-	var newVersion version.Number
+	var newVersion semversion.Number
 	newVersion, toolsList := possibleTools.Newest()
-	logger.Infof("newest version: %s", newVersion)
+	logger.Infof(ctx, "newest version: %s", newVersion)
 	bootstrapVersion := newVersion
 	// We should only ever bootstrap the exact same version as the client,
 	// or we risk bootstrap incompatibility.
 	if !isCompatibleVersion(newVersion, jujuversion.Current) {
 		compatibleVersion, compatibleTools := findCompatibleTools(possibleTools, jujuversion.Current)
 		if len(compatibleTools) == 0 {
-			logger.Infof(
+			logger.Infof(ctx,
 				"failed to find %s agent binaries, will attempt to use %s",
 				jujuversion.Current, newVersion,
 			)
@@ -1017,19 +997,19 @@ func getBootstrapToolsVersion(possibleTools coretools.List) (coretools.List, err
 			bootstrapVersion, toolsList = compatibleVersion, compatibleTools
 		}
 	}
-	logger.Infof("picked bootstrap agent binary version: %s", bootstrapVersion)
+	logger.Infof(ctx, "picked bootstrap agent binary version: %s", bootstrapVersion)
 	return toolsList, nil
 }
 
 // setBootstrapAgentVersion updates the agent-version configuration attribute.
-func setBootstrapAgentVersion(environ environs.Configer, toolsVersion version.Number) error {
+func setBootstrapAgentVersion(ctx context.Context, environ environs.Configer, toolsVersion semversion.Number) error {
 	cfg := environ.Config()
 	if agentVersion, _ := cfg.AgentVersion(); agentVersion != toolsVersion {
 		cfg, err := cfg.Apply(map[string]interface{}{
 			"agent-version": toolsVersion.String(),
 		})
 		if err == nil {
-			err = environ.SetConfig(cfg)
+			err = environ.SetConfig(ctx, cfg)
 		}
 		if err != nil {
 			return errors.Errorf("failed to update model configuration: %v", err)
@@ -1043,7 +1023,7 @@ func setBootstrapAgentVersion(environ environs.Configer, toolsVersion version.Nu
 //
 // Build number is not important to match; uploaded tools will have
 // incremented build number, and we want to match them.
-func findCompatibleTools(possibleTools coretools.List, version version.Number) (version.Number, coretools.List) {
+func findCompatibleTools(possibleTools coretools.List, version semversion.Number) (semversion.Number, coretools.List) {
 	var compatibleTools coretools.List
 	for _, tools := range possibleTools {
 		if isCompatibleVersion(tools.Version.Number, version) {
@@ -1053,7 +1033,7 @@ func findCompatibleTools(possibleTools coretools.List, version version.Number) (
 	return compatibleTools.Newest()
 }
 
-func isCompatibleVersion(v1, v2 version.Number) bool {
+func isCompatibleVersion(v1, v2 semversion.Number) bool {
 	x := v1.ToPatch()
 	y := v2.ToPatch()
 	return x.Compare(y) == 0
@@ -1064,7 +1044,7 @@ func isCompatibleVersion(v1, v2 version.Number) bool {
 // and adds an image metadata source after verifying the contents. If the
 // directory ends in tools, only the default tools metadata source will be
 // set. Same for images.
-func setPrivateMetadataSources(fetcher imagemetadata.SimplestreamsFetcher, metadataDir string) ([]*imagemetadata.ImageMetadata, error) {
+func setPrivateMetadataSources(ctx context.Context, fetcher imagemetadata.SimplestreamsFetcher, metadataDir string) ([]*imagemetadata.ImageMetadata, error) {
 	if _, err := os.Stat(metadataDir); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, errors.Annotate(err, "cannot access simplestreams metadata directory")
@@ -1081,17 +1061,17 @@ func setPrivateMetadataSources(fetcher imagemetadata.SimplestreamsFetcher, metad
 		if !os.IsNotExist(err) {
 			return nil, errors.Annotate(err, "cannot access agent metadata")
 		}
-		logger.Debugf("no agent directory found, using default agent metadata source: %s", tools.DefaultBaseURL)
+		logger.Debugf(ctx, "no agent directory found, using default agent metadata source: %s", tools.DefaultBaseURL)
 	} else {
 		if ending == storage.BaseToolsPath {
 			// As the specified metadataDir ended in 'tools'
 			// assume that is the only metadata to find and return.
 			tools.DefaultBaseURL = filepath.Dir(metadataDir)
-			logger.Debugf("setting default agent metadata source: %s", tools.DefaultBaseURL)
+			logger.Debugf(ctx, "setting default agent metadata source: %s", tools.DefaultBaseURL)
 			return nil, nil
 		} else {
 			tools.DefaultBaseURL = metadataDir
-			logger.Debugf("setting default agent metadata source: %s", tools.DefaultBaseURL)
+			logger.Debugf(ctx, "setting default agent metadata source: %s", tools.DefaultBaseURL)
 		}
 	}
 
@@ -1106,7 +1086,7 @@ func setPrivateMetadataSources(fetcher imagemetadata.SimplestreamsFetcher, metad
 		}
 		return nil, nil
 	} else {
-		logger.Debugf("setting default image metadata source: %s", imageMetadataDir)
+		logger.Debugf(ctx, "setting default image metadata source: %s", imageMetadataDir)
 	}
 
 	baseURL := fmt.Sprintf("file://%s", filepath.ToSlash(imageMetadataDir))
@@ -1134,8 +1114,8 @@ func setPrivateMetadataSources(fetcher imagemetadata.SimplestreamsFetcher, metad
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	existingMetadata, _, err := imagemetadata.Fetch(fetcher, []simplestreams.DataSource{dataSource}, imageConstraint)
-	if err != nil && !errors.IsNotFound(err) {
+	existingMetadata, _, err := imagemetadata.Fetch(ctx, fetcher, []simplestreams.DataSource{dataSource}, imageConstraint)
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return nil, errors.Annotatef(err, "cannot read image metadata in %s", dataSource.Description())
 	}
 
@@ -1143,7 +1123,7 @@ func setPrivateMetadataSources(fetcher imagemetadata.SimplestreamsFetcher, metad
 	environs.RegisterUserImageDataSourceFunc("bootstrap metadata", func(environs.Environ) (simplestreams.DataSource, error) {
 		return dataSource, nil
 	})
-	logger.Infof("custom image metadata added to search path")
+	logger.Infof(ctx, "custom image metadata added to search path")
 	return existingMetadata, nil
 }
 
@@ -1153,6 +1133,6 @@ func Cancelled() error {
 }
 
 // IsContextDone returns true if the context is done.
-func IsContextDone(ctx stdcontext.Context) bool {
+func IsContextDone(ctx context.Context) bool {
 	return ctx.Err() != nil
 }

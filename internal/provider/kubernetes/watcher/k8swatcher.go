@@ -4,24 +4,22 @@
 package watcher
 
 import (
+	"context"
 	"time"
 
 	jujuclock "github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/juju/juju/core/watcher"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.kubernetes.provider.watcher")
+var logger = internallogger.GetLogger("juju.kubernetes.provider.watcher")
 
-type KubernetesNotifyWatcher interface {
-	watcher.CoreWatcher
-	Changes() watcher.NotifyChannel
-}
+type KubernetesNotifyWatcher = watcher.NotifyWatcher
 
 // kubernetesNotifyWatcher reports changes to kubernetes
 // resources. A native kubernetes watcher is passed
@@ -59,6 +57,7 @@ func NewKubernetesNotifyWatcher(informer cache.SharedIndexInformer, name string,
 		out:      make(chan struct{}),
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "kubernetes-notify-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -75,9 +74,9 @@ func (w *kubernetesNotifyWatcher) loop() error {
 		return func(obj interface{}) {
 			meta, err := meta.Accessor(obj)
 			if err != nil {
-				logger.Errorf("getting kubernetes watcher event meta: %v", err)
+				logger.Errorf(context.TODO(), "getting kubernetes watcher event meta: %v", err)
 			} else {
-				logger.Tracef("kubernetes watch event %s %v(%v) = %v", evt,
+				logger.Tracef(context.TODO(), "kubernetes watch event %s %v(%v) = %v", evt,
 					meta.GetName(), meta.GetUID(), meta.GetLabels())
 			}
 
@@ -115,7 +114,7 @@ func (w *kubernetesNotifyWatcher) loop() error {
 		case <-delayCh:
 			out = w.out
 		case out <- struct{}{}:
-			logger.Debugf("fire notify watcher for %v", w.name)
+			logger.Debugf(context.TODO(), "fire notify watcher for %v", w.name)
 			out = nil
 			delayCh = nil
 		}
@@ -123,7 +122,7 @@ func (w *kubernetesNotifyWatcher) loop() error {
 }
 
 // Changes returns the event channel for this watcher.
-func (w *kubernetesNotifyWatcher) Changes() watcher.NotifyChannel {
+func (w *kubernetesNotifyWatcher) Changes() <-chan struct{} {
 	return w.out
 }
 
@@ -138,10 +137,7 @@ func (w *kubernetesNotifyWatcher) Wait() error {
 	return w.catacomb.Wait()
 }
 
-type KubernetesStringsWatcher interface {
-	watcher.CoreWatcher
-	Changes() watcher.StringsChannel
-}
+type KubernetesStringsWatcher = watcher.StringsWatcher
 
 type kubernetesStringsWatcher struct {
 	clock    jujuclock.Clock
@@ -175,6 +171,7 @@ func NewKubernetesStringsWatcher(informer cache.SharedIndexInformer, name string
 		filterFunc:    filterFunc,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "kubernetes-strings-watcher",
 		Site: &w.catacomb,
 		Work: w.loop,
 	})
@@ -196,9 +193,9 @@ func (w *kubernetesStringsWatcher) loop() error {
 		return func(obj interface{}) {
 			meta, err := meta.Accessor(obj)
 			if err != nil {
-				logger.Errorf("getting kubernetes watcher event meta: %v", err)
+				logger.Errorf(context.TODO(), "getting kubernetes watcher event meta: %v", err)
 			} else {
-				logger.Tracef("kubernetes watch event %s %v(%v) = %v", evt,
+				logger.Tracef(context.TODO(), "kubernetes watch event %s %v(%v) = %v", evt,
 					meta.GetName(), meta.GetUID(), meta.GetLabels())
 			}
 
@@ -248,7 +245,7 @@ func (w *kubernetesStringsWatcher) loop() error {
 }
 
 // Changes returns the event channel for this watcher.
-func (w *kubernetesStringsWatcher) Changes() watcher.StringsChannel {
+func (w *kubernetesStringsWatcher) Changes() <-chan []string {
 	return w.out
 }
 

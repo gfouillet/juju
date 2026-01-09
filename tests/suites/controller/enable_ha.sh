@@ -1,46 +1,11 @@
-wait_for_controller_machines_tear_down() {
-	amount=${1}
-
-	attempt=0
+wait_for_controller_no_leader() {
+	# We need to wait for the Dqlite cluster to be broken (loss of quorum),
+	# before we start waiting for the backstop behaviour to be pending
+	# (see wait_for_controller_leader below).
 	# shellcheck disable=SC2143
-	until [[ "$(juju machines -m controller --format=json | jq -r '.machines | .[] | .["juju-status"] | select(.current == "started") | .current' | wc -l | grep "${amount}")" ]]; do
-		echo "[+] (attempt ${attempt}) polling started machines during ha tear down"
-		juju machines -m controller 2>&1 | sed 's/^/    | /g' || true
-		sleep "${SHORT_TIMEOUT}"
-		attempt=$((attempt + 1))
-
-		if [[ ${attempt} -gt 25 ]]; then
-			echo "enable-ha failed waiting for only 1 started machine"
-			exit 1
-		fi
+	until ! [[ "$(juju exec -m controller --unit controller/leader uptime | grep load)" ]]; do
+		echo "[+] waiting for no controller leadership"
 	done
-
-	attempt=0
-	# shellcheck disable=SC2143
-	until [[ "$(juju machines -m controller --format=json | jq -r '.machines | .[] | .["juju-status"] | select(.current == "stopped") | .current' | wc -l | grep 0)" ]]; do
-		echo "[+] (attempt ${attempt}) polling stopped machines during ha tear down"
-		juju machines -m controller 2>&1 | sed 's/^/    | /g' || true
-		sleep "${SHORT_TIMEOUT}"
-		attempt=$((attempt + 1))
-
-		if [[ ${attempt} -gt 25 ]]; then
-			echo "enable-ha failed waiting for machines to tear down"
-			exit 1
-		fi
-	done
-
-	if [[ "$(juju machines -m controller --format=json | jq -r '.machines | .[] | .["juju-status"] | select(.current == "error") | .current' | wc -l)" -gt 0 ]]; then
-		echo "machine in controller model with error during ha tear down"
-		juju machines -m controller 2>&1 | sed 's/^/    | /g' || true
-		exit 1
-	fi
-
-	if [[ ${attempt} -gt 0 ]]; then
-		echo "[+] $(green 'Completed polling machines')"
-		juju machines -m controller 2>&1 | sed 's/^/    | /g'
-
-		sleep "${SHORT_TIMEOUT}"
-	fi
 }
 
 wait_for_controller_leader() {
@@ -64,9 +29,11 @@ run_enable_ha() {
 
 	ensure "enable-ha" "${file}"
 
-	juju deploy jameinel-ubuntu-lite
+	juju deploy ubuntu-lite
 
-	juju enable-ha
+	enable_microceph_backed_storage
+
+	juju add-unit -m controller controller -n 2
 
 	wait_for_controller_machines 3
 	wait_for_ha 3
@@ -77,20 +44,21 @@ run_enable_ha() {
 	# remove-machine will fail. Wait for the config to be
 	# settled before trying to tear down.
 	juju switch controller
-	wait_for "controller" "$(idle_condition "controller" 0 0)"
-	wait_for "controller" "$(idle_condition "controller" 0 1)"
-	wait_for "controller" "$(idle_condition "controller" 0 2)"
+	wait_for "controller" "$(idle_condition "controller" 0)"
+	wait_for "controller" "$(idle_condition "controller" 1)"
+	wait_for "controller" "$(idle_condition "controller" 2)"
 
 	juju switch enable-ha
-	juju remove-machine -m controller 1 --force
-	juju remove-machine -m controller 2 --force
+	controller_1=$(juju status -m controller --format json | jq -r '.applications.controller.units["controller/1"].machine')
+	juju remove-machine -m controller "${controller_1}" --force
+	controller_2=$(juju status -m controller --format json | jq -r '.applications.controller.units["controller/2"].machine')
+	juju remove-machine -m controller "${controller_2}" --force
 
-	wait_for_controller_machines_tear_down 1
+	wait_for_controller_no_leader
+	wait_for_controller_leader
 
 	# Ensure that we have no ha enabled machines.
 	juju show-controller --format=json | jq -r '.[] | .["controller-machines"] |  reduce(.[] | select(.["instance-id"] == null)) as $i (0;.+=1)' | grep 0
-
-	wait_for_controller_leader
 
 	destroy_model "enable-ha"
 }

@@ -10,22 +10,24 @@ import (
 	"os"
 	"time"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/agent"
+	agenterrors "github.com/juju/juju/agent/errors"
 	agenttools "github.com/juju/juju/agent/tools"
-	"github.com/juju/juju/api/agent/upgrader"
-	agenterrors "github.com/juju/juju/cmd/jujud/agent/errors"
 	"github.com/juju/juju/core/arch"
+	"github.com/juju/juju/core/logger"
 	coreos "github.com/juju/juju/core/os"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/core/watcher"
+	jujuhttp "github.com/juju/juju/internal/http"
+	coretools "github.com/juju/juju/internal/tools"
+	"github.com/juju/juju/internal/upgrades"
 	"github.com/juju/juju/internal/worker/gate"
-	coretools "github.com/juju/juju/tools"
-	"github.com/juju/juju/upgrades"
-	jujuversion "github.com/juju/juju/version"
 )
 
 const (
@@ -42,17 +44,19 @@ const (
 	notEnoughSpaceDelay = time.Minute
 )
 
-// logger is here to stop the desire of creating a package level logger.
-// Don't do this, instead pass one through as config to the worker.
-type logger interface{}
-
-var _ logger = struct{}{}
+// UpgraderClient provides the facade methods used by the worker.
+type UpgraderClient interface {
+	DesiredVersion(ctx context.Context, tag string) (semversion.Number, error)
+	SetVersion(ctx context.Context, tag string, v semversion.Binary) error
+	WatchAPIVersion(ctx context.Context, agentTag string) (watcher.NotifyWatcher, error)
+	Tools(ctx context.Context, tag string) (coretools.List, error)
+}
 
 // Upgrader represents a worker that watches the state for upgrade
 // requests.
 type Upgrader struct {
 	catacomb catacomb.Catacomb
-	st       *upgrader.State
+	client   UpgraderClient
 	dataDir  string
 	tag      names.Tag
 	config   Config
@@ -60,11 +64,11 @@ type Upgrader struct {
 
 // Config contains the items the worker needs to start.
 type Config struct {
-	Clock                       Clock
-	Logger                      Logger
-	State                       *upgrader.State
+	Clock                       clock.Clock
+	Logger                      logger.Logger
+	Client                      UpgraderClient
 	AgentConfig                 agent.Config
-	OrigAgentVersion            version.Number
+	OrigAgentVersion            semversion.Number
 	UpgradeStepsWaiter          gate.Waiter
 	InitialUpgradeCheckComplete gate.Unlocker
 	CheckDiskSpace              func(string, uint64) error
@@ -78,12 +82,13 @@ type Config struct {
 // downloaded and unpacked.
 func NewAgentUpgrader(config Config) (*Upgrader, error) {
 	u := &Upgrader{
-		st:      config.State,
+		client:  config.Client,
 		dataDir: config.AgentConfig.DataDir(),
 		tag:     config.AgentConfig.Tag(),
 		config:  config,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "agent-upgrader",
 		Site: &u.catacomb,
 		Work: u.loop,
 	})
@@ -106,8 +111,8 @@ func (u *Upgrader) Wait() error {
 // AllowedTargetVersion checks if targetVersion is too different from
 // curVersion to allow a downgrade.
 func AllowedTargetVersion(
-	curVersion version.Number,
-	targetVersion version.Number,
+	curVersion semversion.Number,
+	targetVersion semversion.Number,
 ) bool {
 	// Don't allow downgrading from higher versions to version 1.x
 	if curVersion.Major >= 2 && targetVersion.Major == 1 {
@@ -118,12 +123,15 @@ func AllowedTargetVersion(
 }
 
 func (u *Upgrader) loop() error {
+	ctx, cancel := u.scopedContext()
+	defer cancel()
+
 	logger := u.config.Logger
 	// Start by reporting current tools (which includes arch/os type, and is
 	// used by the controller in communicating the desired version below).
 	hostOSType := coreos.HostOSTypeName()
-	if err := u.st.SetVersion(u.tag.String(), toBinaryVersion(jujuversion.Current, hostOSType)); err != nil {
-		return errors.Annotatef(err, "cannot set agent version for %q", u.tag.String())
+	if err := u.client.SetVersion(ctx, u.tag.String(), toBinaryVersion(jujuversion.Current, hostOSType)); err != nil {
+		return errors.Annotatef(err, "setting agent version for %q", u.tag.String())
 	}
 
 	// We do not commence any actions until the upgrade-steps worker has
@@ -138,11 +146,11 @@ func (u *Upgrader) loop() error {
 	}
 
 	if u.config.UpgradeStepsWaiter == nil {
-		u.config.Logger.Infof("no waiter, upgrader is done")
+		u.config.Logger.Infof(ctx, "no waiter, upgrader is done")
 		return nil
 	}
 
-	versionWatcher, err := u.st.WatchAPIVersion(u.tag.String())
+	versionWatcher, err := u.client.WatchAPIVersion(ctx, u.tag.String())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -159,11 +167,11 @@ func (u *Upgrader) loop() error {
 			}
 		}
 
-		wantVersion, err := u.st.DesiredVersion(u.tag.String())
+		wantVersion, err := u.client.DesiredVersion(ctx, u.tag.String())
 		if err != nil {
 			return err
 		}
-		logger.Infof("desired agent binary version: %v", wantVersion)
+		logger.Infof(ctx, "desired agent binary version: %v", wantVersion)
 
 		// If we have a desired version of Juju without the build number,
 		// i.e. it is not a user compiled version, reset the build number of
@@ -178,7 +186,7 @@ func (u *Upgrader) loop() error {
 			u.config.InitialUpgradeCheckComplete.Unlock()
 			continue
 		} else if !AllowedTargetVersion(haveVersion, wantVersion) {
-			logger.Infof("downgrade from %v to %v is not possible", haveVersion, wantVersion)
+			logger.Infof(ctx, "downgrade from %v to %v is not possible", haveVersion, wantVersion)
 			u.config.InitialUpgradeCheckComplete.Unlock()
 			continue
 		}
@@ -186,7 +194,7 @@ func (u *Upgrader) loop() error {
 		if wantVersion.Compare(haveVersion) == -1 {
 			direction = "downgrade"
 		}
-		logger.Infof("%s requested from %v to %v", direction, haveVersion, wantVersion)
+		logger.Infof(ctx, "%s requested from %v to %v", direction, haveVersion, wantVersion)
 
 		// Check if tools have already been downloaded.
 		wantVersionBinary := toBinaryVersion(wantVersion, hostOSType)
@@ -195,7 +203,7 @@ func (u *Upgrader) loop() error {
 		}
 
 		// Check if tools are available for download.
-		wantToolsList, err := u.st.Tools(u.tag.String())
+		wantToolsList, err := u.client.Tools(ctx, u.tag.String())
 		if err != nil {
 			// Not being able to lookup Tools is considered fatal
 			return err
@@ -207,23 +215,23 @@ func (u *Upgrader) loop() error {
 		// upgrade the agent.
 		delay := shortDelay
 		for _, wantTools := range wantToolsList {
-			if err := u.checkForSpace(); err != nil {
-				logger.Errorf("%s", err.Error())
+			if err := u.checkForSpace(ctx); err != nil {
+				logger.Errorf(ctx, "%s", err.Error())
 				delay = notEnoughSpaceDelay
 				break
 			}
-			err = u.ensureTools(wantTools)
+			err = u.ensureTools(ctx, wantTools)
 			if err == nil {
 				return u.newUpgradeReadyError(haveVersion, wantTools.Version, hostOSType)
 			}
-			logger.Errorf("failed to fetch agent binaries from %q: %v", wantTools.URL, err)
+			logger.Errorf(ctx, "failed to fetch agent binaries from %q: %v", wantTools.URL, err)
 		}
 		retry = u.config.Clock.After(delay)
 	}
 }
 
-func toBinaryVersion(vers version.Number, osType string) version.Binary {
-	outVers := version.Binary{
+func toBinaryVersion(vers semversion.Number, osType string) semversion.Binary {
+	outVers := semversion.Binary{
 		Number:  vers,
 		Arch:    arch.HostArch(),
 		Release: osType,
@@ -231,12 +239,12 @@ func toBinaryVersion(vers version.Number, osType string) version.Binary {
 	return outVers
 }
 
-func (u *Upgrader) toolsAlreadyDownloaded(wantVersion version.Binary) bool {
+func (u *Upgrader) toolsAlreadyDownloaded(wantVersion semversion.Binary) bool {
 	_, err := agenttools.ReadTools(u.dataDir, wantVersion)
 	return err == nil
 }
 
-func (u *Upgrader) newUpgradeReadyError(haveVersion version.Number, newVersion version.Binary, osType string) *agenterrors.UpgradeReadyError {
+func (u *Upgrader) newUpgradeReadyError(haveVersion semversion.Number, newVersion semversion.Binary, osType string) *agenterrors.UpgradeReadyError {
 	return &agenterrors.UpgradeReadyError{
 		OldTools:  toBinaryVersion(haveVersion, osType),
 		NewTools:  newVersion,
@@ -245,12 +253,12 @@ func (u *Upgrader) newUpgradeReadyError(haveVersion version.Number, newVersion v
 	}
 }
 
-func (u *Upgrader) ensureTools(agentTools *coretools.Tools) error {
-	u.config.Logger.Infof("fetching agent binaries from %q", agentTools.URL)
+func (u *Upgrader) ensureTools(ctx context.Context, agentTools *coretools.Tools) error {
+	u.config.Logger.Infof(ctx, "fetching agent binaries from %q", agentTools.URL)
 	// The reader MUST verify the tools' hash, so there is no
 	// need to validate the peer. We cannot anyway: see http://pad.lv/1261780.
 	client := jujuhttp.NewClient(jujuhttp.WithSkipHostnameVerification(true))
-	resp, err := client.Get(context.TODO(), agentTools.URL)
+	resp, err := client.Get(ctx, agentTools.URL)
 	if err != nil {
 		return err
 	}
@@ -262,12 +270,12 @@ func (u *Upgrader) ensureTools(agentTools *coretools.Tools) error {
 	if err != nil {
 		return fmt.Errorf("cannot unpack agent binaries: %v", err)
 	}
-	u.config.Logger.Infof("unpacked agent binaries %s to %s", agentTools.Version, u.dataDir)
+	u.config.Logger.Infof(ctx, "unpacked agent binaries %s to %s", agentTools.Version, u.dataDir)
 	return nil
 }
 
-func (u *Upgrader) checkForSpace() error {
-	u.config.Logger.Debugf("checking available space before downloading")
+func (u *Upgrader) checkForSpace(ctx context.Context) error {
+	u.config.Logger.Debugf(ctx, "checking available space before downloading")
 	err := u.config.CheckDiskSpace(u.dataDir, upgrades.MinDiskSpaceMib)
 	if err != nil {
 		return errors.Trace(err)
@@ -277,4 +285,8 @@ func (u *Upgrader) checkForSpace() error {
 		return errors.Trace(err)
 	}
 	return nil
+}
+
+func (u *Upgrader) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(u.catacomb.Context(context.Background()))
 }

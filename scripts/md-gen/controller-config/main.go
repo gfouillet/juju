@@ -17,7 +17,7 @@ import (
 	"github.com/juju/collections/set"
 
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 // bidirectional mapping between key and constant name
@@ -282,7 +282,6 @@ func fillFromConfigType(data map[string]*keyInfo) {
 	skipMethods := set.NewStrings(
 		"CAASImageRepo",
 		"CAASOperatorImagePath",
-		"ControllerAPIPort",
 		"Features",
 		"IdentityPublicKey",
 		"Validate", // not a config key

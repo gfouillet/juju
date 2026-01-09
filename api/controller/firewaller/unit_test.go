@@ -4,79 +4,103 @@
 package firewaller_test
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"testing"
 
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+
+	basetesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/api/controller/firewaller"
 	"github.com/juju/juju/core/life"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
 )
 
 type unitSuite struct {
-	firewallerSuite
-
-	apiUnit *firewaller.Unit
+	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&unitSuite{})
-
-func (s *unitSuite) SetUpTest(c *gc.C) {
-	s.firewallerSuite.SetUpTest(c)
-
-	var err error
-	s.apiUnit, err = s.firewaller.Unit(s.units[0].Tag().(names.UnitTag))
-	c.Assert(err, jc.ErrorIsNil)
+func TestUnitSuite(t *testing.T) {
+	tc.Run(t, &unitSuite{})
 }
 
-func (s *unitSuite) TearDownTest(c *gc.C) {
-	s.firewallerSuite.TearDownTest(c)
+func (s *unitSuite) TestUnit(c *tc.C) {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "unit-mysql-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: "alive"}},
+		}
+		return nil
+	})
+	tag := names.NewUnitTag("mysql/666")
+	client, err := firewaller.NewClient(apiCaller)
+	c.Assert(err, tc.ErrorIsNil)
+	u, err := client.Unit(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(u.Life(), tc.Equals, life.Alive)
+	c.Assert(u.Name(), tc.DeepEquals, "mysql/666")
 }
 
-func (s *unitSuite) TestUnit(c *gc.C) {
-	apiUnitFoo, err := s.firewaller.Unit(names.NewUnitTag("foo/42"))
-	c.Assert(err, gc.ErrorMatches, `unit "foo/42" not found`)
-	c.Assert(err, jc.Satisfies, params.IsCodeNotFound)
-	c.Assert(apiUnitFoo, gc.IsNil)
-
-	apiUnit0, err := s.firewaller.Unit(s.units[0].Tag().(names.UnitTag))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(apiUnit0, gc.NotNil)
-	c.Assert(apiUnit0.Name(), gc.Equals, s.units[0].Name())
-	c.Assert(apiUnit0.Tag(), gc.Equals, names.NewUnitTag(s.units[0].Name()))
+func (s *unitSuite) TestRefresh(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "unit-mysql-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		lifeVal := life.Alive
+		if calls > 0 {
+			lifeVal = life.Dead
+		}
+		calls++
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: lifeVal}},
+		}
+		return nil
+	})
+	tag := names.NewUnitTag("mysql/666")
+	client, err := firewaller.NewClient(apiCaller)
+	c.Assert(err, tc.ErrorIsNil)
+	u, err := client.Unit(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = u.Refresh(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(u.Life(), tc.Equals, life.Dead)
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *unitSuite) TestRefresh(c *gc.C) {
-	c.Assert(s.apiUnit.Life(), gc.Equals, life.Alive)
-
-	err := s.units[0].EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.apiUnit.Life(), gc.Equals, life.Alive)
-
-	err = s.apiUnit.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.apiUnit.Life(), gc.Equals, life.Dead)
-}
-
-func (s *unitSuite) TestAssignedMachine(c *gc.C) {
-	machineTag, err := s.apiUnit.AssignedMachine()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machineTag, gc.Equals, names.NewMachineTag(s.machines[0].Id()))
-
-	// Unassign now and check CodeNotAssigned is reported.
-	err = s.units[0].UnassignFromMachine()
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.apiUnit.AssignedMachine()
-	c.Assert(err, gc.ErrorMatches, `unit "wordpress/0" is not assigned to a machine`)
-	c.Assert(err, jc.Satisfies, params.IsCodeNotAssigned)
-}
-
-func (s *unitSuite) TestApplication(c *gc.C) {
-	application, err := s.apiUnit.Application()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(application.Name(), gc.Equals, s.application.Name())
-}
-
-func (s *unitSuite) TestName(c *gc.C) {
-	c.Assert(s.apiUnit.Name(), gc.Equals, s.units[0].Name())
+func (s *unitSuite) TestApplication(c *tc.C) {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Firewaller")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "unit-mysql-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		c.Check(request, tc.Equals, "Life")
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: life.Alive}},
+		}
+		return nil
+	})
+	tag := names.NewUnitTag("mysql/666")
+	client, err := firewaller.NewClient(apiCaller)
+	c.Assert(err, tc.ErrorIsNil)
+	u, err := client.Unit(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	app, err := u.Application()
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(app.Name(), tc.Equals, "mysql")
 }

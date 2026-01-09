@@ -4,17 +4,12 @@
 package charm
 
 import (
+	"context"
 	"errors"
 
 	"github.com/juju/collections/set"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 )
-
-// Logger is here to stop the desire of creating a package level Logger.
-// Don't do this, instead pass one in as needed.
-type logger interface{}
-
-var _ logger = struct{}{}
 
 // CharmURLPath is the path within a charm directory to which Deployers
 // commonly write the charm URL of the latest deployed charm.
@@ -41,41 +36,31 @@ type BundleInfo interface {
 	URL() string
 
 	// ArchiveSha256 returns the hex-encoded SHA-256 digest of the bundle data.
-	ArchiveSha256() (string, error)
+	ArchiveSha256(context.Context) (string, error)
 }
 
 // BundleReader provides a mechanism for getting a Bundle from a BundleInfo.
 type BundleReader interface {
-
 	// Read returns the bundle identified by the supplied info. The abort chan
 	// can be used to notify an implementation that it need not complete the
 	// operation, and can immediately error out if it is convenient to do so.
-	Read(bi BundleInfo, abort <-chan struct{}) (Bundle, error)
+	Read(ctx context.Context, bi BundleInfo) (Bundle, error)
 }
 
 // Deployer is responsible for installing and upgrading charms.
 type Deployer interface {
-
 	// Stage must be called to prime the Deployer to install or upgrade the
 	// bundle identified by the supplied info. The abort chan can be used to
 	// notify an implementation that it need not complete the operation, and
 	// can immediately error out if it convenient to do so. It must always
 	// be safe to restage the same bundle, or to stage a new bundle.
-	Stage(info BundleInfo, abort <-chan struct{}) error
+	Stage(ctx context.Context, info BundleInfo) error
 
 	// Deploy will install or upgrade the most recently staged bundle.
 	// Behaviour is undefined if Stage has not been called. Failures that
 	// can be resolved by user intervention will be signalled by returning
 	// ErrConflict.
 	Deploy() error
-}
-
-// Logger represents the logging functions used by the charm package.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
 }
 
 // ErrConflict indicates that an upgrade failed and cannot be resolved

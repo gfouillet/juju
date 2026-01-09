@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/rpc/params"
 )
@@ -96,10 +96,6 @@ type RunParams struct {
 	Units          []string
 	Parallel       *bool
 	ExecutionGroup *string
-
-	// WorkloadContext for CAAS is true when the Commands should be run on
-	// the workload not the operator.
-	WorkloadContext bool
 }
 
 func unmarshallEnqueuedActions(in params.EnqueuedActions) (EnqueuedActions, error) {

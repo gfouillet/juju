@@ -4,37 +4,40 @@
 package common_test
 
 import (
+	"context"
 	"fmt"
+	"testing"
 
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/apiserver/common"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type commonSuite struct{}
 
-var _ = gc.Suite(&commonSuite{})
+func TestCommonSuite(t *testing.T) {
+	tc.Run(t, &commonSuite{})
+}
 
-func errorAuth() (common.AuthFunc, error) {
+func errorAuth(context.Context) (common.AuthFunc, error) {
 	return nil, fmt.Errorf("pow")
 }
 
-func fooAuth() (common.AuthFunc, error) {
+func fooAuth(context.Context) (common.AuthFunc, error) {
 	return func(tag names.Tag) bool {
 		return tag == names.NewUserTag("foo")
 	}, nil
 }
 
-func barAuth() (common.AuthFunc, error) {
+func barAuth(context.Context) (common.AuthFunc, error) {
 	return func(tag names.Tag) bool {
 		return tag == names.NewUserTag("bar")
 	}, nil
 }
 
-func bazAuth() (common.AuthFunc, error) {
+func bazAuth(context.Context) (common.AuthFunc, error) {
 	return func(tag names.Tag) bool {
 		return tag == names.NewUserTag("baz")
 	}, nil
@@ -42,7 +45,7 @@ func bazAuth() (common.AuthFunc, error) {
 
 var authEitherTests = []struct {
 	about  string
-	a, b   func() (common.AuthFunc, error)
+	a, b   func(context.Context) (common.AuthFunc, error)
 	tag    names.Tag
 	expect bool
 	err    string
@@ -99,51 +102,50 @@ var authEitherTests = []struct {
 	expect: false,
 }}
 
-func (s *commonSuite) TestAuthAnyCoversEither(c *gc.C) {
+func (s *commonSuite) TestAuthAnyCoversEither(c *tc.C) {
 	for i, test := range authEitherTests {
 		c.Logf("test %d: %s", i, test.about)
 		authAny := common.AuthAny(test.a, test.b)
-		any, err := authAny()
+		any, err := authAny(c.Context())
 		if test.err == "" {
-			c.Assert(err, jc.ErrorIsNil)
+			c.Assert(err, tc.ErrorIsNil)
 			ok := any(test.tag)
-			c.Assert(ok, gc.Equals, test.expect)
+			c.Assert(ok, tc.Equals, test.expect)
 		} else {
-			c.Assert(err, gc.ErrorMatches, test.err)
-			c.Assert(any, gc.IsNil)
+			c.Assert(err, tc.ErrorMatches, test.err)
+			c.Assert(any, tc.IsNil)
 		}
 	}
 }
 
-func (s *commonSuite) TestAuthAnyAlwaysFalseWithNoFuncs(c *gc.C) {
+func (s *commonSuite) TestAuthAnyAlwaysFalseWithNoFuncs(c *tc.C) {
 	getAuth := common.AuthAny()
-	auth, err := getAuth()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(auth(names.NewUserTag("foo")), jc.IsFalse)
+	auth, err := getAuth(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(auth(names.NewUserTag("foo")), tc.IsFalse)
 }
 
-func (s *commonSuite) TestAuthAnyWith3(c *gc.C) {
+func (s *commonSuite) TestAuthAnyWith3(c *tc.C) {
 	getAuth := common.AuthAny(fooAuth, barAuth, bazAuth)
-	auth, err := getAuth()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(auth(names.NewUserTag("foo")), jc.IsTrue)
-	c.Check(auth(names.NewUserTag("bar")), jc.IsTrue)
-	c.Check(auth(names.NewUserTag("baz")), jc.IsTrue)
-	c.Check(auth(names.NewUserTag("quux")), jc.IsFalse)
+	auth, err := getAuth(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(auth(names.NewUserTag("foo")), tc.IsTrue)
+	c.Check(auth(names.NewUserTag("bar")), tc.IsTrue)
+	c.Check(auth(names.NewUserTag("baz")), tc.IsTrue)
+	c.Check(auth(names.NewUserTag("quux")), tc.IsFalse)
 }
 
 func u(unit string) names.Tag { return names.NewUnitTag(unit) }
 
-func (s *commonSuite) TestAuthFuncForTagKind(c *gc.C) {
+func (s *commonSuite) TestAuthFuncForTagKind(c *tc.C) {
 	// TODO(dimitern): This list of all supported tags and kinds needs
 	// to live in juju/names.
-	uuid, err := utils.NewUUID()
-	c.Assert(err, jc.ErrorIsNil)
+	uuid, err := uuid.NewUUID()
+	c.Assert(err, tc.ErrorIsNil)
 
 	allTags := []names.Tag{
 		nil, // invalid tag
 		names.NewActionTag(uuid.String()),
-		names.NewCharmTag("local:missing"),
 		names.NewModelTag(uuid.String()),
 		names.NewFilesystemTag("20/20"),
 		names.NewLocalUserTag("user"),
@@ -165,12 +167,12 @@ func (s *commonSuite) TestAuthFuncForTagKind(c *gc.C) {
 		}
 		getAuthFunc := common.AuthFuncForTagKind(allowedKind)
 
-		authFunc, err := getAuthFunc()
+		authFunc, err := getAuthFunc(c.Context())
 		if allowedKind == "" {
-			c.Check(err, gc.ErrorMatches, "tag kind cannot be empty")
-			c.Check(authFunc, gc.IsNil)
+			c.Check(err, tc.ErrorMatches, "tag kind cannot be empty")
+			c.Check(authFunc, tc.IsNil)
 			continue
-		} else if !c.Check(err, jc.ErrorIsNil) {
+		} else if !c.Check(err, tc.ErrorIsNil) {
 			continue
 		}
 
@@ -182,9 +184,9 @@ func (s *commonSuite) TestAuthFuncForTagKind(c *gc.C) {
 				givenKind = givenTag.Kind()
 			}
 			if allowedKind == givenKind {
-				c.Check(authFunc(givenTag), jc.IsTrue)
+				c.Check(authFunc(givenTag), tc.IsTrue)
 			} else {
-				c.Check(authFunc(givenTag), jc.IsFalse)
+				c.Check(authFunc(givenTag), tc.IsFalse)
 			}
 		}
 	}

@@ -4,21 +4,22 @@
 package sshserver
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"net"
 	"strconv"
 	"sync/atomic"
 	"time"
 
-	"github.com/canonical/lxd/shared/logger"
 	"github.com/gliderlabs/ssh"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
+	"github.com/juju/worker/v4"
 	gossh "golang.org/x/crypto/ssh"
 	"gopkg.in/tomb.v2"
 
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/virtualhostname"
-	jujussh "github.com/juju/juju/pki/ssh"
-	"github.com/juju/juju/rpc/params"
 )
 
 type authenticatedViaPublicKey struct{}
@@ -31,8 +32,7 @@ type SessionHandler interface {
 // ServerWorkerConfig holds the configuration required by the server worker.
 type ServerWorkerConfig struct {
 	// Logger holds the logger for the server.
-	Logger Logger
-
+	Logger logger.Logger
 	// Listener holds a listener to provide the server. Should you wish to run
 	// the server on a pre-existing listener, you can provide it here.
 	// Otherwise, leave this value nil and a listener will be spawned.
@@ -49,9 +49,6 @@ type ServerWorkerConfig struct {
 	// we accept for our ssh server.
 	MaxConcurrentConnections int
 
-	// FacadeClient holds the SSH server's facade client.
-	FacadeClient FacadeClient
-
 	// disableAuth is a test-only flag that disables authentication.
 	disableAuth bool
 
@@ -66,9 +63,6 @@ func (c ServerWorkerConfig) Validate() error {
 	}
 	if c.JumpHostKey == "" {
 		return errors.NotValidf("empty JumpHostKey")
-	}
-	if c.FacadeClient == nil {
-		return errors.NotValidf("missing FacadeClient")
 	}
 	if c.SessionHandler == nil {
 		return errors.NotValidf("missing SessionHandler")
@@ -118,17 +112,17 @@ func NewServerWorker(config ServerWorkerConfig) (worker.Worker, error) {
 	// lands and we upgrade to the latest gliderlabs/ssh.
 	closeAllowed, listener := newSyncSSHServerListener(s.config.Listener)
 
-	// Start server.
 	s.tomb.Go(func() error {
-		err := s.Server.Serve(listener)
-		if errors.Is(err, ssh.ErrServerClosed) {
-			return nil
-		}
-		return errors.Trace(err)
-	})
+		// Start server.
+		s.tomb.Go(func() error {
+			err := s.Server.Serve(listener)
+			if errors.Is(err, ssh.ErrServerClosed) {
+				return nil
+			}
+			return errors.Trace(err)
+		})
 
-	// Handle server cleanup.
-	s.tomb.Go(func() error {
+		// Handle server cleanup.
 		// Keep the listener and the server alive until the tomb is killed.
 		<-s.tomb.Dying()
 
@@ -143,7 +137,7 @@ func NewServerWorker(config ServerWorkerConfig) (worker.Worker, error) {
 		if err := s.Server.Close(); err != nil {
 			// There's really not a lot we can do if the shutdown fails,
 			// either due to a timeout or another reason. So we simply log it.
-			s.config.Logger.Errorf("failed to shutdown server: %v", err)
+			s.config.Logger.Errorf(context.TODO(), "failed to shutdown server: %v", err)
 			return errors.Trace(err)
 		}
 
@@ -207,25 +201,18 @@ func (s *ServerWorker) directTCPIPHandler(srv *ssh.Server, conn *gossh.ServerCon
 	if err := gossh.Unmarshal(newChan.ExtraData(), &d); err != nil {
 		err := newChan.Reject(gossh.ConnectionFailed, "Failed to parse channel data")
 		if err != nil {
-			s.config.Logger.Errorf("failed to reject channel: %v", err)
+			s.config.Logger.Errorf(ctx, "failed to reject channel: %v", err)
 		}
 		return
 	}
 	info, err := virtualhostname.Parse(d.DestAddr)
 	if err != nil {
-		s.rejectChannel(newChan, "Failed to parse destination address")
-		return
-	}
-	signer, err := s.hostKeySignerForTarget(info.String())
-	if err != nil {
-		s.rejectChannel(newChan, "Failed to get host key")
+		s.rejectChannel(ctx, newChan, "Failed to parse destination address")
 		return
 	}
 
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
-		ch.Close()
-		s.config.Logger.Errorf("failed to accept channel: %v", err)
 		return
 	}
 
@@ -235,32 +222,25 @@ func (s *ServerWorker) directTCPIPHandler(srv *ssh.Server, conn *gossh.ServerCon
 
 	server, err := s.newEmbeddedSSHServer(ctx, info)
 	if err != nil {
-		s.config.Logger.Errorf("failed to create embedded server: %v", err)
+		s.config.Logger.Errorf(ctx, "failed to create embedded server: %v", err)
 		ch.Close()
+		return
+	}
+
+	// TODO(ale8k): Update later to generate host keys per unit.
+	terminatingHostKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		s.config.Logger.Errorf(ctx, "failed to generate host key: %v", err)
+		return
+	}
+	signer, err := gossh.NewSignerFromKey(terminatingHostKey)
+	if err != nil {
+		s.config.Logger.Errorf(ctx, "failed to create signer: %v", err)
 		return
 	}
 
 	server.AddHostKey(signer)
 	server.HandleConn(newChannelConn(ch))
-}
-
-// hostKeySignerForTarget returns a signer for the target hostname, by calling the facade client.
-func (s *ServerWorker) hostKeySignerForTarget(hostname string) (gossh.Signer, error) {
-	key, err := s.config.FacadeClient.VirtualHostKey(params.SSHVirtualHostKeyRequestArg{Hostname: hostname})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	privateKey, err := jujussh.UnmarshalPrivateKey(key)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	signer, err := gossh.NewSignerFromKey(privateKey)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	return signer, nil
 }
 
 // connCallback returns a connCallback function that limits the number of concurrent connections.
@@ -271,11 +251,11 @@ func (s *ServerWorker) connCallback() ssh.ConnCallback {
 			// set the deadline because we don't want to block the connection to write an error.
 			err := conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 			if err != nil {
-				logger.Errorf("failed to set write deadline: %v", err)
+				s.config.Logger.Errorf(context.TODO(), "failed to set write deadline: %v", err)
 			}
 			_, err = conn.Write([]byte("too many connections.\n"))
 			if err != nil {
-				logger.Errorf("failed to write to connection: %v", err)
+				s.config.Logger.Errorf(context.TODO(), "failed to write to connection: %v", err)
 			}
 			// The connection is close before returning, otherwise
 			// the context is not cancelled and the counter is not decremented.
@@ -293,33 +273,11 @@ func (s *ServerWorker) connCallback() ssh.ConnCallback {
 
 // newEmbeddedSSHServer creates a new embedded SSH server for the given context and model info.
 func (s *ServerWorker) newEmbeddedSSHServer(ctx ssh.Context, info virtualhostname.Info) (*ssh.Server, error) {
-	authenticatedViaPublicKey, _ := ctx.Value(authenticatedViaPublicKey{}).(bool)
-	var keysToVerify []gossh.PublicKey
-	var err error
-	// if the user is authenticated via public key, we need to verify the key
-	// against the model's authorized keys.
-	// if the user is not authenticated via public key, we need to verify the
-	// key against the public keys in the jwt claims.
-	if authenticatedViaPublicKey {
-		sshPkiAuthArgs := params.ListAuthorizedKeysArgs{
-			ModelUUID: info.ModelUUID(),
-		}
-		keysToVerify, err = s.config.FacadeClient.ListPublicKeysForModel(sshPkiAuthArgs)
-		if err != nil {
-			s.config.Logger.Errorf("failed to fetch public keys for model: %v", err)
-			return nil, errors.Trace(err)
-		}
-	}
 
 	forwardHandler := &ssh.ForwardedTCPHandler{}
 	server := &ssh.Server{
 		PublicKeyHandler: func(ctx ssh.Context, keyPresented ssh.PublicKey) bool {
-			for _, key := range keysToVerify {
-				if ssh.KeysEqual(key, keyPresented) {
-					return true
-				}
-			}
-			return false
+			return true
 		},
 		LocalPortForwardingCallback: ssh.LocalPortForwardingCallback(func(ctx ssh.Context, dhost string, dport uint32) bool {
 			return true
@@ -356,9 +314,9 @@ func (s *ServerWorker) Report() map[string]any {
 	}
 }
 
-func (s *ServerWorker) rejectChannel(newChan gossh.NewChannel, reason string) {
+func (s *ServerWorker) rejectChannel(ctx context.Context, newChan gossh.NewChannel, reason string) {
 	err := newChan.Reject(gossh.ConnectionFailed, reason)
 	if err != nil {
-		s.config.Logger.Errorf("failed to reject channel: %v", err)
+		s.config.Logger.Errorf(ctx, "failed to reject channel: %v", err)
 	}
 }

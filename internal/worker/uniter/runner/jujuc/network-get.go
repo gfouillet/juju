@@ -6,11 +6,11 @@ package jujuc
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -117,7 +117,7 @@ func (c *NetworkGetCommand) Init(args []string) error {
 }
 
 func (c *NetworkGetCommand) Run(ctx *cmd.Context) error {
-	netInfo, err := c.ctx.NetworkInfo([]string{c.bindingName}, c.RelationId)
+	netInfo, err := c.ctx.NetworkInfo(ctx, []string{c.bindingName}, c.RelationId)
 	if err != nil {
 		return errors.Trace(err)
 	}

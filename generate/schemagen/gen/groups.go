@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/rpcreflect"
 
 	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/internal/rpcreflect"
 )
 
 // FacadeGroup defines the grouping you want to export.

@@ -4,6 +4,7 @@
 package secretsdrain
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
@@ -11,37 +12,37 @@ import (
 	commonsecrets "github.com/juju/juju/apiserver/common/secrets"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/state"
 )
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("SecretsDrain", 1, func(ctx facade.Context) (facade.Facade, error) {
-		return newSecretsDrainAPI(ctx)
+	registry.MustRegister("SecretsDrain", 1, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newSecretsDrainAPI(stdCtx, ctx)
 	}, reflect.TypeOf((*commonsecrets.SecretsDrainAPI)(nil)))
 }
 
 // newSecretsDrainAPI creates a SecretsDrainAPI.
-func newSecretsDrainAPI(context facade.Context) (*commonsecrets.SecretsDrainAPI, error) {
-	if !context.Auth().AuthUnitAgent() && !context.Auth().AuthApplicationAgent() {
+func newSecretsDrainAPI(stdCtx context.Context, ctx facade.ModelContext) (*commonsecrets.SecretsDrainAPI, error) {
+	if !ctx.Auth().AuthUnitAgent() {
 		return nil, apiservererrors.ErrPerm
 	}
-	leadershipChecker, err := context.LeadershipChecker()
+	leadershipChecker, err := ctx.LeadershipChecker()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	model, err := context.State().Model()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	authTag := context.Auth().GetAuthTag()
+	domainServices := ctx.DomainServices()
+	backendService := domainServices.SecretBackend()
+
+	authTag := ctx.Auth().GetAuthTag()
+
 	return commonsecrets.NewSecretsDrainAPI(
 		authTag,
-		context.Auth(),
-		context.Resources(),
+		ctx.Auth(),
+		ctx.Logger().Child("secretsdrain"),
 		leadershipChecker,
-		commonsecrets.SecretsModel(model),
-		state.NewSecrets(context.State()),
-		context.State(),
+		ctx.ModelUUID(),
+		domainServices.Secret(),
+		backendService,
+		ctx.WatcherRegistry(),
 	)
 }

@@ -3,19 +3,23 @@
 
 package httpserver
 
-import "github.com/juju/loggo"
+import (
+	"context"
 
-// loggoWrapper is an io.Writer() that forwards the messages to a loggo.Logger.
-// Unfortunately http takes a concrete stdlib log.Logger struct, and not an
-// interface, so we can't just proxy all of the log levels without inspecting
-// the string content. For now, we just want to get the messages into the log
-// file.
-type loggoWrapper struct {
-	logger Logger
-	level  loggo.Level
+	"github.com/juju/juju/core/logger"
+)
+
+// loggerWrapper is an io.Writer() that forwards the messages to a
+// logger.Logger. Unfortunately http takes a concrete stdlib log.Logger struct,
+// and not an  interface, so we can't just proxy all of the log levels without
+// inspecting the string content. For now, we just want to get the messages
+// into the logs.
+type loggerWrapper struct {
+	logger logger.Logger
+	level  logger.Level
 }
 
-func (w *loggoWrapper) Write(content []byte) (int, error) {
-	w.logger.Logf(w.level, "%s", string(content))
+func (w *loggerWrapper) Write(content []byte) (int, error) {
+	w.logger.Logf(context.Background(), w.level, logger.Labels{}, "%s", string(content))
 	return len(content), nil
 }

@@ -4,11 +4,20 @@
 package hostkeyreporter
 
 import (
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // Facade provides access to the HostKeyReporter API facade.
 type Facade struct {
@@ -16,22 +25,22 @@ type Facade struct {
 }
 
 // NewFacade creates a new client-side HostKeyReporter facade.
-func NewFacade(caller base.APICaller) *Facade {
+func NewFacade(caller base.APICaller, options ...Option) *Facade {
 	return &Facade{
-		caller: base.NewFacadeCaller(caller, "HostKeyReporter"),
+		caller: base.NewFacadeCaller(caller, "HostKeyReporter", options...),
 	}
 }
 
 // ReportKeys reports the public SSH host keys for a machine to the
 // controller. The keys should be in the same format as the sshd host
 // key files, one entry per key.
-func (f *Facade) ReportKeys(machineId string, publicKeys []string) error {
+func (f *Facade) ReportKeys(ctx context.Context, machineId string, publicKeys []string) error {
 	args := params.SSHHostKeySet{EntityKeys: []params.SSHHostKeys{{
 		Tag:        names.NewMachineTag(machineId).String(),
 		PublicKeys: publicKeys,
 	}}}
 	var result params.ErrorResults
-	err := f.caller.FacadeCall("ReportKeys", args, &result)
+	err := f.caller.FacadeCall(ctx, "ReportKeys", args, &result)
 	if err != nil {
 		return err
 	}

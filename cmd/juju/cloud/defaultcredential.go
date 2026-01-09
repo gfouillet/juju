@@ -6,14 +6,14 @@ package cloud
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageSetDefaultCredentialSummary = `
@@ -106,7 +106,7 @@ func (c *setDefaultCredentialCommand) Run(ctxt *cmd.Context) error {
 		return err
 	}
 	cred, err := c.store.CredentialForCloud(c.cloud)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		cred = &jujucloud.CloudCredential{}
 	} else if err != nil {
 		return err

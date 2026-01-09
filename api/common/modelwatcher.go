@@ -4,6 +4,7 @@
 package common
 
 import (
+	"context"
 	"time"
 
 	"github.com/juju/errors"
@@ -12,27 +13,26 @@ import (
 	apiwatcher "github.com/juju/juju/api/watcher"
 	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/logfwd/syslog"
 	"github.com/juju/juju/rpc/params"
 )
 
-// ModelWatcher provides common client-side API functions
-// to call into apiserver.common.ModelWatcher.
-type ModelWatcher struct {
+// ModelConfigWatcher provides common client-side API functions
+// to call into apiserver.common.ModelConfigWatcher.
+type ModelConfigWatcher struct {
 	facade base.FacadeCaller
 }
 
-// NewModelWatcher creates a ModelWatcher on the specified facade,
+// NewModelConfigWatcher creates a ModelConfigWatcher on the specified facade,
 // and uses this name when calling through the caller.
-func NewModelWatcher(facade base.FacadeCaller) *ModelWatcher {
-	return &ModelWatcher{facade}
+func NewModelConfigWatcher(facade base.FacadeCaller) *ModelConfigWatcher {
+	return &ModelConfigWatcher{facade}
 }
 
 // WatchForModelConfigChanges return a NotifyWatcher waiting for the
 // model configuration to change.
-func (e *ModelWatcher) WatchForModelConfigChanges() (watcher.NotifyWatcher, error) {
+func (e *ModelConfigWatcher) WatchForModelConfigChanges(ctx context.Context) (watcher.NotifyWatcher, error) {
 	var result params.NotifyWatchResult
-	err := e.facade.FacadeCall("WatchForModelConfigChanges", nil, &result)
+	err := e.facade.FacadeCall(ctx, "WatchForModelConfigChanges", nil, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -40,9 +40,9 @@ func (e *ModelWatcher) WatchForModelConfigChanges() (watcher.NotifyWatcher, erro
 }
 
 // ModelConfig returns the current model configuration.
-func (e *ModelWatcher) ModelConfig() (*config.Config, error) {
+func (e *ModelConfigWatcher) ModelConfig(ctx context.Context) (*config.Config, error) {
 	var result params.ModelConfigResult
-	err := e.facade.FacadeCall("ModelConfig", nil, &result)
+	err := e.facade.FacadeCall(ctx, "ModelConfig", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -53,31 +53,11 @@ func (e *ModelWatcher) ModelConfig() (*config.Config, error) {
 	return conf, nil
 }
 
-// WatchForLogForwardConfigChanges return a NotifyWatcher waiting for the
-// log forward syslog configuration to change.
-func (e *ModelWatcher) WatchForLogForwardConfigChanges() (watcher.NotifyWatcher, error) {
-	// TODO(wallyworld) - lp:1602237 - this needs to have it's own backend implementation.
-	// For now, we'll piggyback off the ModelConfig API.
-	return e.WatchForModelConfigChanges()
-}
-
-// LogForwardConfig returns the current log forward syslog configuration.
-func (e *ModelWatcher) LogForwardConfig() (*syslog.RawConfig, bool, error) {
-	// TODO(wallyworld) - lp:1602237 - this needs to have it's own backend implementation.
-	// For now, we'll piggyback off the ModelConfig API.
-	modelConfig, err := e.ModelConfig()
-	if err != nil {
-		return nil, false, err
-	}
-	cfg, ok := modelConfig.LogFwdSyslog()
-	return cfg, ok, nil
-}
-
 // UpdateStatusHookInterval returns the current update status hook interval.
-func (e *ModelWatcher) UpdateStatusHookInterval() (time.Duration, error) {
+func (e *ModelConfigWatcher) UpdateStatusHookInterval(ctx context.Context) (time.Duration, error) {
 	// TODO(wallyworld) - lp:1602237 - this needs to have it's own backend implementation.
 	// For now, we'll piggyback off the ModelConfig API.
-	modelConfig, err := e.ModelConfig()
+	modelConfig, err := e.ModelConfig(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -86,8 +66,8 @@ func (e *ModelWatcher) UpdateStatusHookInterval() (time.Duration, error) {
 
 // WatchUpdateStatusHookInterval returns a NotifyWatcher that fires when the
 // update status hook interval changes.
-func (e *ModelWatcher) WatchUpdateStatusHookInterval() (watcher.NotifyWatcher, error) {
+func (e *ModelConfigWatcher) WatchUpdateStatusHookInterval(ctx context.Context) (watcher.NotifyWatcher, error) {
 	// TODO(wallyworld) - lp:1602237 - this needs to have it's own backend implementation.
 	// For now, we'll piggyback off the ModelConfig API.
-	return e.WatchForModelConfigChanges()
+	return e.WatchForModelConfigChanges(ctx)
 }

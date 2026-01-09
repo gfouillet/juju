@@ -19,7 +19,6 @@ Compares a bundle with a model and reports any differences.
 | `-m`, `--model` |  | Model to operate in. Accepts [&lt;controller name&gt;:]&lt;model name&gt;&#x7c;&lt;model UUID&gt; |
 | `--map-machines` |  | Indicates how existing machines correspond to bundle machines |
 | `--overlay` |  | Bundles to overlay on the primary bundle, applied in order |
-| `--series` |  | Specify a series. DEPRECATED: use `--base` |
 
 ## Examples
 
@@ -40,8 +39,7 @@ same way as the deploy command) before comparing with the model.
 The `map-machines` option works similarly as for the `deploy` command, but
 existing is always assumed, so it doesn't need to be specified.
 
-Config values for comparison are always sourced from the current model
-generation.
+Config values for comparison are always sourced from the current model.
 
 Specifying a base will retrieve the bundle for the relevant store for
 the given base.

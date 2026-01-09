@@ -12,16 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
-	"github.com/juju/juju/core/actions"
+	coreoperation "github.com/juju/juju/core/operation"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -157,7 +157,7 @@ const defaultMaxOperationsLimit = 50
 
 // Run implements Command.
 func (c *listOperationsCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func (c *listOperationsCommand) Run(ctx *cmd.Context) error {
 		limit := int(c.limit)
 		args.Limit = &limit
 	}
-	results, err := api.ListOperations(args)
+	results, err := api.ListOperations(ctx, args)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -372,7 +372,7 @@ func formatOperationResult(operation actionapi.Operation, utc bool) operationInf
 		if len(task.Log) > 0 {
 			logs := make([]string, len(task.Log))
 			for i, msg := range task.Log {
-				logs[i] = formatLogMessage(actions.ActionMessage{
+				logs[i] = formatLogMessage(coreoperation.TaskLogMessage{
 					Timestamp: msg.Timestamp,
 					Message:   msg.Message,
 				}, false, utc, false)

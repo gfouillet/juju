@@ -13,10 +13,8 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
 	"github.com/juju/retry"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
@@ -27,14 +25,16 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/constants"
 	"github.com/juju/juju/cmd/containeragent/utils"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
+	pebbleidentity "github.com/juju/juju/internal/service/pebble/identity"
+	pebbleplan "github.com/juju/juju/internal/service/pebble/plan"
 	"github.com/juju/juju/internal/worker/apicaller"
 	"github.com/juju/juju/internal/worker/introspection"
-	pebbleidentity "github.com/juju/juju/service/pebble/identity"
-	pebbleplan "github.com/juju/juju/service/pebble/plan"
 )
 
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/application_mock.go github.com/juju/juju/cmd/containeragent/initialize ApplicationAPI
+//go:generate go run go.uber.org/mock/mockgen -typed -package mocks -destination mocks/application_mock.go github.com/juju/juju/cmd/containeragent/initialize ApplicationAPI
 type initCommand struct {
 	cmd.CommandBase
 
@@ -68,7 +68,7 @@ type initCommand struct {
 
 // ApplicationAPI provides methods for unit introduction.
 type ApplicationAPI interface {
-	UnitIntroduction(podName string, podUUID string) (*caasapplication.UnitConfig, error)
+	UnitIntroduction(ctx context.Context, podName string, podUUID string) (*caasapplication.UnitConfig, error)
 	Close() error
 }
 
@@ -103,9 +103,9 @@ func (c *initCommand) Info() *cmd.Info {
 	})
 }
 
-func (c *initCommand) getApplicationAPI() (ApplicationAPI, error) {
+func (c *initCommand) getApplicationAPI(ctx context.Context) (ApplicationAPI, error) {
 	if c.applicationAPI == nil {
-		connection, err := apicaller.OnlyConnect(c, api.Open, loggo.GetLogger("juju.containeragent"))
+		connection, err := apicaller.OnlyConnect(ctx, c, api.Open, internallogger.GetLogger("juju.containeragent"))
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -150,7 +150,7 @@ func (c *initCommand) Run(ctx *cmd.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	applicationAPI, err := c.getApplicationAPI()
+	applicationAPI, err := c.getApplicationAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -164,7 +164,7 @@ func (c *initCommand) Run(ctx *cmd.Context) (err error) {
 	var unitConfig *caasapplication.UnitConfig
 	err = retry.Call(retry.CallArgs{
 		Func: func() error {
-			unitConfig, err = applicationAPI.UnitIntroduction(identity.PodName, identity.PodUUID)
+			unitConfig, err = applicationAPI.UnitIntroduction(ctx, identity.PodName, identity.PodUUID)
 			return errors.Trace(err)
 		},
 		IsFatalError: func(err error) bool {
@@ -212,7 +212,7 @@ func (c *initCommand) copyBinaries() error {
 			}
 			defer dstStream.Close()
 			_, err = io.Copy(dstStream, srcStream)
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil
 			} else if err != nil {
 				return errors.Annotatef(err, "copying %q to %q", src, dst)

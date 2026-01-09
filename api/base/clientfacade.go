@@ -17,8 +17,6 @@ type APICallCloser interface {
 // They provide two common methods for writing the client side code.
 // BestAPIVersion() is used to allow for compatibility testing, and Close() is
 // used to indicate when we are done with the connection.
-//
-//go:generate go run go.uber.org/mock/mockgen -package mocks -destination mocks/clientfacade_mock.go github.com/juju/juju/api/base APICallCloser,ClientFacade
 type ClientFacade interface {
 	// BestAPIVersion returns the API version that we were able to
 	// determine is supported by both the client and the API Server
@@ -42,13 +40,19 @@ var _ ClientFacade = (*clientFacade)(nil)
 // NewClientFacade prepares a client-facing facade for work against the API.
 // It is expected that most client-facing facades will embed a ClientFacade and
 // will use a FacadeCaller so this function returns both.
-func NewClientFacade(caller APICallCloser, facadeName string) (ClientFacade, FacadeCaller) {
+func NewClientFacade(caller APICallCloser, facadeName string, options ...Option) (ClientFacade, FacadeCaller) {
+	fc := facadeCaller{
+		facadeName:  facadeName,
+		bestVersion: caller.BestFacadeVersion(facadeName),
+		caller:      caller,
+	}
+	for _, option := range options {
+		fc = option(fc)
+	}
+
 	clientFacade := clientFacade{
-		facadeCaller: facadeCaller{
-			facadeName:  facadeName,
-			bestVersion: caller.BestFacadeVersion(facadeName),
-			caller:      caller,
-		}, closer: caller,
+		facadeCaller: fc,
+		closer:       caller,
 	}
 	return clientFacade, clientFacade
 }

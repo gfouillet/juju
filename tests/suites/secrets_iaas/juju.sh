@@ -6,6 +6,8 @@ check_secrets() {
 
 	wait_for "active" '.applications["dummy-source"] | ."application-status".current'
 	wait_for "active" '.applications["dummy-sink"] | ."application-status".current' 900
+	wait_for "dummy-source" "$(idle_condition "dummy-source" 0)"
+	wait_for "dummy-sink" "$(idle_condition "dummy-sink" 0)"
 	wait_for "active" "$(workload_status "dummy-source" 0).current"
 	wait_for "active" "$(workload_status "dummy-sink" 0).current"
 
@@ -72,11 +74,11 @@ check_secrets() {
 
 	echo "Checking: secret-revoke by relation ID"
 	juju exec --unit dummy-source/0 -- secret-revoke "$secret_owned_by_dummy_source" --relation "$relation_id"
-	check_contains "$(juju exec --unit dummy-sink/0 -- secret-get "$secret_owned_by_dummy_source" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit dummy-sink/0 -- secret-get "$secret_owned_by_dummy_source" 2>&1)" 'is not allowed to read this secret'
 
 	echo "Checking: secret-revoke by app name"
 	juju exec --unit dummy-source/0 -- secret-revoke "$secret_owned_by_dummy_source_0" --app dummy-sink
-	check_contains "$(juju exec --unit dummy-sink/0 -- secret-get "$secret_owned_by_dummy_source_0" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit dummy-sink/0 -- secret-get "$secret_owned_by_dummy_source_0" 2>&1)" 'is not allowed to read this secret'
 
 	echo "Checking secret rotate"
 	juju exec --unit dummy-source/0 -- secret-set "$secret_owned_by_dummy_source_0" --rotate daily
@@ -143,7 +145,7 @@ run_user_secrets() {
 	check_contains "$(juju --show-log show-secret "$secret_uri" --revisions | yq ".${secret_short_uri}.description")" 'info'
 
 	# grant secret to the app, and now the application can access the revision 2.
-	check_contains "$(juju exec --unit "$app_name"/0 -- secret-get "$secret_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit "$app_name"/0 -- secret-get "$secret_uri" 2>&1)" 'is not allowed to read this secret'
 	juju --show-log grant-secret mysecret "$app_name"
 	check_contains "$(juju exec --unit "$app_name/0" -- secret-get $secret_short_uri)" "owned-by: $model_name-2"
 
@@ -179,7 +181,7 @@ run_user_secrets() {
 	check_contains "$(juju --show-log show-secret $secret_uri --reveal --revision 3 | yq .${secret_short_uri}.content)" "owned-by: $model_name-3"
 
 	juju --show-log revoke-secret mysecret "$app_name"
-	check_contains "$(juju exec --unit "$app_name"/0 -- secret-get "$secret_uri" 2>&1)" 'permission denied'
+	check_contains "$(juju exec --unit "$app_name"/0 -- secret-get "$secret_uri" 2>&1)" 'is not allowed to read this secret'
 
 	juju --show-log remove-secret mysecret
 	check_contains "$(juju --show-log secrets --format yaml | yq length)" '0'
@@ -211,17 +213,17 @@ test_secrets_juju() {
 }
 
 obsolete_secret_revisions() {
-	local secret_short_uri
-	secret_short_uri=${1}
+	local secret_id
+	secret_id=${1}
 
 	yaml_out=$(
-		juju ssh juju-qa-test/0 sh <<EOF
+juju ssh juju-qa-test/0 sh <<EOF
 . /etc/profile.d/juju-introspection.sh
 juju_engine_report
 EOF
 	)
-	out=$(echo "${yaml_out}" | sed 1d | yq "..style=\"flow\" | .manifolds.deployer.report.units.workers.juju-qa-test/0.report.manifolds.uniter.report.secrets.obsolete-revisions.\"${secret_short_uri}\"")
-	echo "${out}"
+	 out=$(echo "${yaml_out}" | sed 1d | yq "..style=\"flow\" | .manifolds.deployer.report.handler.units.workers.juju-qa-test/0.report.manifolds.uniter.report.secrets.obsolete-revisions.\"${secret_id}\"")
+	 echo "${out}"
 }
 
 run_obsolete_revisions() {
@@ -260,7 +262,7 @@ run_obsolete_revisions() {
 	echo "Checking initial obsolete revisions 1..10"
 	attempt=0
 	while true; do
-		obsolete=$(obsolete_secret_revisions "${secret_short_uri}")
+		obsolete=$(obsolete_secret_revisions "${secret_id}")
 		if [ "$obsolete" == "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]" ]; then
 			break
 		fi
@@ -280,7 +282,7 @@ run_obsolete_revisions() {
 	echo "Checking revision 6 has been removed from the obsolete revisions"
 	attempt=0
 	while true; do
-		obsolete=$(obsolete_secret_revisions "${secret_short_uri}")
+		obsolete=$(obsolete_secret_revisions "${secret_id}")
 		if [ "$obsolete" == "[1, 2, 3, 4, 5, 7, 8, 9, 10]" ]; then
 			break
 		fi
@@ -300,8 +302,8 @@ run_obsolete_revisions() {
 	echo "Checking all obsolete revision are removed when the secret is deleted"
 	attempt=0
 	while true; do
-		obsolete=$(obsolete_secret_revisions "${secret_short_uri}")
-		if [ $obsolete == null ]; then
+		obsolete=$(obsolete_secret_revisions "${secret_id}")
+		if [ "$obsolete" == null ]; then
 			break
 		fi
 		attempt=$((attempt + 1))

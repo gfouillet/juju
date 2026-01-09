@@ -3,12 +3,4 @@
 
 package caasapplicationprovisioner_test
 
-import (
-	"testing"
-
-	gc "gopkg.in/check.v1"
-)
-
-func TestAll(t *testing.T) {
-	gc.TestingT(t)
-}
+//go:generate go run go.uber.org/mock/mockgen -typed -package caasapplicationprovisioner_test -destination service_mock_test.go github.com/juju/juju/apiserver/facades/controller/caasapplicationprovisioner ControllerConfigService,ModelConfigService,ModelInfoService,ApplicationService,StatusService,ControllerNodeService,RemovalService

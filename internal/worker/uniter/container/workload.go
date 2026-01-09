@@ -4,25 +4,19 @@
 package container
 
 import (
+	"context"
 	"strconv"
 	"sync"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
 
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
 )
-
-// Logger defines the logging methods that the package uses.
-type Logger interface {
-	Tracef(string, ...interface{})
-	Debugf(string, ...interface{})
-	Errorf(string, ...interface{})
-	Warningf(string, ...interface{})
-}
 
 // WorkloadEventType is used to distinguish between each event type triggered
 // by the workload.
@@ -135,14 +129,14 @@ func (c *workloadEvents) EventIDs() []string {
 }
 
 type workloadHookResolver struct {
-	logger         Logger
+	logger         logger.Logger
 	events         WorkloadEvents
 	eventCompleted func(id string)
 }
 
 // NewWorkloadHookResolver returns a new resolver with determines which workload related operation
 // should be run based on local and remote uniter states.
-func NewWorkloadHookResolver(logger Logger, events WorkloadEvents, eventCompleted func(string)) resolver.Resolver {
+func NewWorkloadHookResolver(logger logger.Logger, events WorkloadEvents, eventCompleted func(string)) resolver.Resolver {
 	return &workloadHookResolver{
 		logger:         logger,
 		events:         events,
@@ -152,6 +146,7 @@ func NewWorkloadHookResolver(logger Logger, events WorkloadEvents, eventComplete
 
 // NextOp implements the resolver.Resolver interface.
 func (r *workloadHookResolver) NextOp(
+	ctx context.Context,
 	localState resolver.LocalState,
 	remoteState remotestate.Snapshot,
 	opFactory operation.Factory,
@@ -176,7 +171,7 @@ func (r *workloadHookResolver) NextOp(
 	case operation.Continue:
 		for _, id := range remoteState.WorkloadEvents {
 			evt, cb, err := r.events.GetWorkloadEvent(id)
-			if errors.IsNotFound(err) {
+			if errors.Is(err, errors.NotFound) {
 				continue
 			} else if err != nil {
 				return nil, errors.Trace(err)
@@ -248,8 +243,8 @@ type errorWrappedOp struct {
 }
 
 // Prepare is part of the Operation interface.
-func (op *errorWrappedOp) Prepare(state operation.State) (*operation.State, error) {
-	newState, err := op.Operation.Prepare(state)
+func (op *errorWrappedOp) Prepare(ctx context.Context, state operation.State) (*operation.State, error) {
+	newState, err := op.Operation.Prepare(ctx, state)
 	if err != nil && err != operation.ErrSkipExecute {
 		op.handler(err)
 	}
@@ -257,8 +252,8 @@ func (op *errorWrappedOp) Prepare(state operation.State) (*operation.State, erro
 }
 
 // Execute is part of the Operation interface.
-func (op *errorWrappedOp) Execute(state operation.State) (*operation.State, error) {
-	newState, err := op.Operation.Execute(state)
+func (op *errorWrappedOp) Execute(ctx context.Context, state operation.State) (*operation.State, error) {
+	newState, err := op.Operation.Execute(ctx, state)
 	if err != nil {
 		op.handler(err)
 	}
@@ -267,8 +262,8 @@ func (op *errorWrappedOp) Execute(state operation.State) (*operation.State, erro
 
 // Commit preserves the recorded hook, and returns a neutral state.
 // Commit is part of the Operation interface.
-func (op *errorWrappedOp) Commit(state operation.State) (*operation.State, error) {
-	newState, err := op.Operation.Commit(state)
+func (op *errorWrappedOp) Commit(ctx context.Context, state operation.State) (*operation.State, error) {
+	newState, err := op.Operation.Commit(ctx, state)
 	op.handler(err)
 	return newState, err
 }

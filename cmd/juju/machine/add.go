@@ -4,14 +4,14 @@
 package machine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/client/machinemanager"
 	"github.com/juju/juju/api/client/modelconfig"
@@ -23,11 +23,12 @@ import (
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/storage"
 	"github.com/juju/juju/environs/config"
 	"github.com/juju/juju/environs/manual"
 	"github.com/juju/juju/environs/manual/sshprovisioner"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
 var addMachineDoc = `
@@ -37,17 +38,16 @@ The command operates in three modes, depending on the options provided:
 
   - provision a new machine from the cloud (default, see "Provisioning
     a new machine")
+  - connect to a live computer and allocate it as a machine (see "Adding
+    a pre-existing machine")
   - create an operating system container (see "Container creation")
-  - connect to a live computer and allocate it as a machine (see "Manual
-    provisioning")
 
 The ` + "`add-machine` " + `command is unavailable in Kubernetes clouds. Provisioning
-a new machine is unavailable on the manual cloud provider.
+a new machine is unavailable on the unmanaged cloud provider.
 
 Once the` + "` add-machine` " + `command has finished, the machine's ID can be
 used as a placement directive for deploying applications. Machine IDs
 are also accessible via ` + "`juju status` " + `and ` + "`juju machines`" + `.
-
 
 ### Provisioning a new machine
 
@@ -60,32 +60,30 @@ To control which instance type is provisioned, use the ` + "`--constraints` " + 
 the OS, separated by ` + "`@`" + `. For example, ` + "`--base ubuntu@22.04`" + `.
 
 To add storage volumes to the instance, provide a whitespace-delimited
-list of storage constraints to the ` + "`--disks` " + `option.
+list of storage directives to the ` + "`--disks` " + `option.
 
 Add placement directives as an argument to ` + "`--to` " + `to give Juju additional information
 about how to allocate the machine in the cloud. For example, one can direct
 the MAAS provider to acquire a particular node by specifying its hostname.
 
 
-### Manual provisioning
+### Adding a pre-existing machine
 
 Call ` + "`add-machine` " + ` with the address of a network-accessible computer to
 allocate that machine to the model.
 
-Manual provisioning is the process of installing Juju on an existing machine
+This is the process of installing Juju on an existing machine
 and bringing it under Juju's management. The Juju controller must be able to
 access the new machine over the network.
 
-
 ### Container creation
 
-If a operating system container type is specified (e.g., ` + "`lxd`" + ` or ` + "`kvm`" + `),
-then ` + "`add-machine` " + `will allocate a container of that type on a new machine
-instance. Both the new instance, and the new container will be available
-as machines in the model.
+If ` + "`lxd`" + ` is specified, ` + "`add-machine` " + `will allocate a container of that type on a new machine
+instance. If this is used in conjunction with ` + "`--constraints virt-type=virtual-machine`" + `,
+a virtual machine will be allocated.
 
 It is also possible to add containers to existing machines using the format
-` + "`<container-type>:<machine-id>`" + `. Constraints cannot be combined this mode.
+` + "`lxd:<machine-id>`" + `. Constraints cannot be combined in this mode.
 
 `
 
@@ -128,15 +126,15 @@ Allocate a machine to the model via SSH:
 
 Allocate a machine specifying the private key to use during the connection:
 
-	juju add-machine ssh:user@10.10.0.3 --private-key /tmp/id_rsa
+	juju add-machine ssh:user@10.10.0.3 --private-key /tmp/id_ed25519
 
 Allocate a machine specifying a public key to set in the list of authorized keys in the machine:
 
-	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub
+	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_ed25519.pub
 
 Allocate a machine specifying a public key to set in the list of authorized keys and the private key to used during the connection:
 
-	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_rsa.pub --private-key /tmp/id_rsa
+	juju add-machine ssh:user@10.10.0.3 --public-key /tmp/id_ed25519.pub --private-key /tmp/id_ed25519
 
 Allocate a machine to the model. Note: specific to MAAS.
 
@@ -153,10 +151,7 @@ type addCommand struct {
 	baseMachinesCommand
 	modelConfigAPI    ModelConfigAPI
 	machineManagerAPI MachineManagerAPI
-	// Series defines the series the machine should use instead of the
-	// default-series. DEPRECATED use --base
-	Series string
-	// Base defines the series the machine should use instead of the
+	// Base defines the base the machine should use instead of the
 	// default-base.
 	Base string
 	// If specified, these constraints are merged with those already in the model.
@@ -168,7 +163,7 @@ type addCommand struct {
 	// NumMachines is the number of machines to add.
 	NumMachines int
 	// Disks describes disks that are to be attached to the machine.
-	Disks []storage.Constraints
+	Disks []storage.Directive
 	// PrivateKey is the path for a file containing the private key required
 	// by the server
 	PrivateKey string
@@ -180,7 +175,7 @@ type addCommand struct {
 func (c *addCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
 		Name:     "add-machine",
-		Args:     "[<container-type>[:<machine-id>] | ssh:[<user>@]<host> | <placement>] | <private-key> | <public-key>",
+		Args:     "[lxd[:<machine-id>] | ssh:[<user>@]<host> | <placement>] | <private-key> | <public-key>",
 		Purpose:  "Provision a new machine or assign one to the model.",
 		Doc:      addMachineDoc,
 		Examples: addMachineExamples,
@@ -194,19 +189,15 @@ func (c *addCommand) Info() *cmd.Info {
 
 func (c *addCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
-	f.StringVar(&c.Series, "series", "", "Specify the operating system series to install on the new machine(s). DEPRECATED use --base")
 	f.StringVar(&c.Base, "base", "", "Specify the operating system base to install on the new machine(s)")
 	f.IntVar(&c.NumMachines, "n", 1, "Specify the number of machines to add")
 	f.Var(&c.ConstraintsStr, "constraints", "Specify the machine constraints to overwrite those available from `juju model-constraints` and provider's defaults")
-	f.Var(disksFlag{&c.Disks}, "disks", "Specify the storage constraints for disks to attach to the machine(s)")
+	f.Var(disksFlag{&c.Disks}, "disks", "Specify the storage directives for disks to attach to the machine(s)")
 	f.StringVar(&c.PrivateKey, "private-key", "", "Specify the path to the private key to use during the connection")
 	f.StringVar(&c.PublicKey, "public-key", "", "Specify the path to the public key to add to the remote authorized keys")
 }
 
 func (c *addCommand) Init(args []string) error {
-	if c.Base != "" && c.Series != "" {
-		return errors.New("--series and --base cannot be specified together")
-	}
 	if c.Constraints.Container != nil {
 		return errors.Errorf("container constraint %q not allowed when adding a machine", *c.Constraints.Container)
 	}
@@ -229,15 +220,15 @@ func (c *addCommand) Init(args []string) error {
 }
 
 type ModelConfigAPI interface {
-	ModelGet() (map[string]interface{}, error)
+	ModelGet(ctx context.Context) (map[string]interface{}, error)
 	Close() error
 }
 
 type MachineManagerAPI interface {
-	AddMachines([]params.AddMachineParams) ([]params.AddMachinesResult, error)
-	DestroyMachinesWithParams(force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
+	AddMachines(context.Context, []params.AddMachineParams) ([]params.AddMachinesResult, error)
+	DestroyMachinesWithParams(ctx context.Context, force, keep, dryRun bool, maxWait *time.Duration, machines ...string) ([]params.DestroyMachineResult, error)
 	ModelUUID() (string, bool)
-	ProvisioningScript(params.ProvisioningScriptParams) (script string, err error)
+	ProvisioningScript(context.Context, params.ProvisioningScriptParams) (script string, err error)
 	Close() error
 }
 
@@ -250,11 +241,11 @@ func splitUserHost(host string) (string, string) {
 	return "", host
 }
 
-func (c *addCommand) getModelConfigAPI() (ModelConfigAPI, error) {
+func (c *addCommand) getModelConfigAPI(ctx context.Context) (ModelConfigAPI, error) {
 	if c.modelConfigAPI != nil {
 		return c.modelConfigAPI, nil
 	}
-	api, err := c.NewAPIRoot()
+	api, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Annotate(err, "opening API connection")
 	}
@@ -262,19 +253,19 @@ func (c *addCommand) getModelConfigAPI() (ModelConfigAPI, error) {
 
 }
 
-func (c *addCommand) newMachineManagerClient() (*machinemanager.Client, error) {
-	root, err := c.NewAPIRoot()
+func (c *addCommand) newMachineManagerClient(ctx context.Context) (*machinemanager.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return machinemanager.NewClient(root), nil
 }
 
-func (c *addCommand) getMachineManagerAPI() (MachineManagerAPI, error) {
+func (c *addCommand) getMachineManagerAPI(ctx context.Context) (MachineManagerAPI, error) {
 	if c.machineManagerAPI != nil {
 		return c.machineManagerAPI, nil
 	}
-	return c.newMachineManagerClient()
+	return c.newMachineManagerClient(ctx)
 }
 
 func (c *addCommand) Run(ctx *cmd.Context) error {
@@ -282,20 +273,6 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 		base corebase.Base
 		err  error
 	)
-	// Note: we validated that both series and base cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if c.Series != "" {
-		if c.Series == "kubernetes" {
-			return fmt.Errorf(`command "add-machine" does not support container models`)
-		} else {
-			ctx.Warningf("series flag is deprecated, use --base instead")
-			if base, err = corebase.GetBaseFromSeries(c.Series); err != nil {
-				return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
-			}
-		}
-		c.Base = base.String()
-		c.Series = ""
-	}
 	if c.Base != "" {
 		if base, err = corebase.ParseBaseFromString(c.Base); err != nil {
 			return errors.Trace(err)
@@ -306,19 +283,19 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 	if err != nil {
 		return err
 	}
-	machineManager, err := c.getMachineManagerAPI()
+	machineManager, err := c.getMachineManagerAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer machineManager.Close()
 
-	logger.Infof("load config")
-	modelConfigClient, err := c.getModelConfigAPI()
+	logger.Infof(context.TODO(), "load config")
+	modelConfigClient, err := c.getModelConfigAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer modelConfigClient.Close()
-	configAttrs, err := modelConfigClient.ModelGet()
+	configAttrs, err := modelConfigClient.ModelGet(ctx)
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "add a machine to this model")
@@ -331,13 +308,13 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if c.Placement != nil {
-		err := c.tryManualProvision(machineManager, cfg, ctx)
+		err := c.tryManualProvision(ctx, machineManager, cfg)
 		if err != errNonManualScope {
 			return err
 		}
 	}
 
-	logger.Infof("model provisioning")
+	logger.Infof(context.TODO(), "model provisioning")
 	if c.Placement != nil && c.Placement.Scope == "model-uuid" {
 		uuid, ok := machineManager.ModelUUID()
 		if !ok {
@@ -373,7 +350,7 @@ func (c *addCommand) Run(ctx *cmd.Context) error {
 		machines[i] = machineParams
 	}
 
-	results, err := machineManager.AddMachines(machines)
+	results, err := machineManager.AddMachines(ctx, machines)
 	if params.IsCodeOperationBlocked(err) {
 		return block.ProcessBlockedError(err, block.BlockChange)
 	}
@@ -416,8 +393,7 @@ var (
 	sshScope          = "ssh"
 )
 
-func (c *addCommand) tryManualProvision(client manual.ProvisioningClientAPI, config *config.Config, ctx *cmd.Context) error {
-
+func (c *addCommand) tryManualProvision(ctx *cmd.Context, client manual.ProvisioningClientAPI, config *config.Config) error {
 	var provisionMachine manual.ProvisionMachineFunc
 	switch c.Placement.Scope {
 	case sshScope:
@@ -447,7 +423,7 @@ func (c *addCommand) tryManualProvision(client manual.ProvisioningClientAPI, con
 		},
 	}
 
-	machineId, err := provisionMachine(args)
+	machineId, err := provisionMachine(ctx, args)
 	if err != nil {
 		return errors.Trace(err)
 	}

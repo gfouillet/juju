@@ -5,57 +5,45 @@ package dbaccessor
 
 import (
 	"context"
+	"path"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/juju/juju/agent"
 	coredatabase "github.com/juju/juju/core/database"
-	"github.com/juju/juju/database"
-	"github.com/juju/juju/database/app"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/database"
+	"github.com/juju/juju/internal/database/app"
+	"github.com/juju/juju/internal/database/dqlite"
 	"github.com/juju/juju/internal/worker/common"
+	"github.com/juju/juju/internal/worker/controlleragentconfig"
 )
 
-// Logger represents the logging methods called.
-type Logger interface {
-	Errorf(message string, args ...interface{})
-	Warningf(message string, args ...interface{})
-	Infof(message string, args ...interface{})
-	Debugf(message string, args ...interface{})
-	Tracef(message string, args ...interface{})
+// NewDBWorkerFunc creates a tracked db worker.
+type NewDBWorkerFunc func(context.Context, DBApp, string, ...TrackedDBWorkerOption) (TrackedDB, error)
 
-	// Logf is used to proxy Dqlite logs via this logger.
-	Logf(level loggo.Level, msg string, args ...interface{})
-
-	IsTraceEnabled() bool
-}
-
-// Hub defines the methods of the API server central hub
-// that the DB accessor requires.
-type Hub interface {
-	Subscribe(topic string, handler interface{}) (func(), error)
-	Publish(topic string, data interface{}) (func(), error)
-}
+// NewNodeManagerFunc creates a NodeManager
+type NewNodeManagerFunc func(agent.Config, logger.Logger, coredatabase.SlowQueryLogger) NodeManager
 
 // ManifoldConfig contains:
 // - The names of other manifolds on which the DB accessor depends.
 // - Other dependencies from ManifoldsConfig required by the worker.
 type ManifoldConfig struct {
-	AgentName            string
-	QueryLoggerName      string
-	Clock                clock.Clock
-	Hub                  Hub
-	Logger               Logger
-	LogDir               string
-	PrometheusRegisterer prometheus.Registerer
-	NewApp               func(string, ...app.Option) (DBApp, error)
-	NewDBWorker          func(context.Context, DBApp, string, ...TrackedDBWorkerOption) (TrackedDB, error)
-	NewNodeManager       func(agent.Config, Logger, coredatabase.SlowQueryLogger) NodeManager
-	NewMetricsCollector  func() *Collector
+	AgentName                 string
+	QueryLoggerName           string
+	ControllerAgentConfigName string
+	Clock                     clock.Clock
+	Logger                    logger.Logger
+	LogDir                    string
+	PrometheusRegisterer      prometheus.Registerer
+	NewApp                    func(string, ...app.Option) (DBApp, error)
+	NewDBWorker               NewDBWorkerFunc
+	NewNodeManager            NewNodeManagerFunc
+	NewMetricsCollector       func() *Collector
 }
 
 func (cfg ManifoldConfig) Validate() error {
@@ -65,11 +53,11 @@ func (cfg ManifoldConfig) Validate() error {
 	if cfg.QueryLoggerName == "" {
 		return errors.NotValidf("empty QueryLoggerName")
 	}
+	if cfg.ControllerAgentConfigName == "" {
+		return errors.NotValidf("empty ControllerAgentConfigName")
+	}
 	if cfg.Clock == nil {
 		return errors.NotValidf("nil Clock")
-	}
-	if cfg.Hub == nil {
-		return errors.NotValidf("nil Hub")
 	}
 	if cfg.Logger == nil {
 		return errors.NotValidf("nil Logger")
@@ -102,18 +90,27 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 		Inputs: []string{
 			config.AgentName,
 			config.QueryLoggerName,
+			config.ControllerAgentConfigName,
 		},
 		Output: dbAccessorOutput,
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
 			}
 
-			var agent agent.Agent
-			if err := context.Get(config.AgentName, &agent); err != nil {
+			var thisAgent agent.Agent
+			if err := getter.Get(config.AgentName, &thisAgent); err != nil {
 				return nil, err
 			}
-			agentConfig := agent.CurrentConfig()
+			agentConfig := thisAgent.CurrentConfig()
+			controllerID := agentConfig.Tag().Id()
+			configPath := path.Join(agentConfig.DataDir(), "agents", "controller-"+controllerID, "controller.conf")
+			controllerConf := controllerConfigReader{configPath: configPath}
+
+			var controllerConfigWatcher controlleragentconfig.ConfigWatcher
+			if err := getter.Get(config.ControllerAgentConfigName, &controllerConfigWatcher); err != nil {
+				return nil, err
+			}
 
 			// Register the metrics collector against the prometheus register.
 			metricsCollector := config.NewMetricsCollector()
@@ -122,31 +119,34 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			}
 
 			var slowQueryLogger coredatabase.SlowQueryLogger
-			if err := context.Get(config.QueryLoggerName, &slowQueryLogger); err != nil {
+			if err := getter.Get(config.QueryLoggerName, &slowQueryLogger); err != nil {
 				config.PrometheusRegisterer.Unregister(metricsCollector)
 				return nil, err
 			}
 
 			cfg := WorkerConfig{
-				NodeManager:      config.NewNodeManager(agentConfig, config.Logger, slowQueryLogger),
-				Clock:            config.Clock,
-				Hub:              config.Hub,
-				ControllerID:     agentConfig.Tag().Id(),
-				MetricsCollector: metricsCollector,
-				Logger:           config.Logger,
-				NewApp:           config.NewApp,
-				NewDBWorker:      config.NewDBWorker,
+				NodeManager:             config.NewNodeManager(agentConfig, config.Logger, slowQueryLogger),
+				Clock:                   config.Clock,
+				ControllerID:            controllerID,
+				MetricsCollector:        metricsCollector,
+				Logger:                  config.Logger,
+				NewApp:                  config.NewApp,
+				NewDBWorker:             config.NewDBWorker,
+				ControllerConfigWatcher: controllerConfigWatcher,
+				ClusterConfig:           controllerConf,
 			}
 
-			w, err := newWorker(cfg)
+			w, err := NewWorker(cfg)
 			if err != nil {
 				config.PrometheusRegisterer.Unregister(metricsCollector)
+				controllerConfigWatcher.Unsubscribe()
 				return nil, errors.Trace(err)
 			}
 			return common.NewCleanupWorker(w, func() {
 				// Clean up the metrics for the worker, so the next time a
 				// worker is created we can safely register the metrics again.
 				config.PrometheusRegisterer.Unregister(metricsCollector)
+				controllerConfigWatcher.Unsubscribe()
 			}), nil
 		},
 	}
@@ -165,20 +165,65 @@ func dbAccessorOutput(in worker.Worker, out interface{}) error {
 	case *coredatabase.DBGetter:
 		var target coredatabase.DBGetter = w
 		*out = target
+	case *coredatabase.DBDeleter:
+		var target coredatabase.DBDeleter = w
+		*out = target
+	case *coredatabase.ClusterDescriber:
+		var target coredatabase.ClusterDescriber = &clusterDetailer{
+			nodeManager: w.cfg.NodeManager,
+		}
+		*out = target
 	default:
-		return errors.Errorf("expected output of *database.DBGetter, got %T", out)
+		return errors.Errorf("expected output of *database.DBGetter or *database.DBDeleter, got %T", out)
 	}
 	return nil
 }
 
 // IAASNodeManager returns a NodeManager that is configured to use
 // the cloud-local TLS terminated address for Dqlite.
-func IAASNodeManager(cfg agent.Config, logger Logger, slowQueryLogger coredatabase.SlowQueryLogger) NodeManager {
+func IAASNodeManager(cfg agent.Config, logger logger.Logger, slowQueryLogger coredatabase.SlowQueryLogger) NodeManager {
 	return database.NewNodeManager(cfg, false, logger, slowQueryLogger)
 }
 
 // CAASNodeManager returns a NodeManager that is configured to use
 // the loopback address for Dqlite.
-func CAASNodeManager(cfg agent.Config, logger Logger, slowQueryLogger coredatabase.SlowQueryLogger) NodeManager {
+func CAASNodeManager(cfg agent.Config, logger logger.Logger, slowQueryLogger coredatabase.SlowQueryLogger) NodeManager {
 	return database.NewNodeManager(cfg, true, logger, slowQueryLogger)
+}
+
+type clusterDetailer struct {
+	nodeManager NodeManager
+}
+
+// ClusterDetails returns the node information for Dqlite nodes configured to be
+// in the cluster.
+func (c *clusterDetailer) ClusterDetails(ctx context.Context) ([]coredatabase.ClusterNodeInfo, error) {
+	// TODO (stickupkid): We probably want to cache this result, as it could
+	// be expensive to fetch repeatedly from the underlying YAML store.
+	clusterNodes, err := c.nodeManager.ClusterServers(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	result := make([]coredatabase.ClusterNodeInfo, len(clusterNodes))
+	for i, node := range clusterNodes {
+		result[i] = coredatabase.ClusterNodeInfo{
+			ID:   node.ID,
+			Role: convertNodeRole(node.Role),
+		}
+	}
+	return result, nil
+}
+
+func convertNodeRole(role dqlite.NodeRole) coredatabase.NodeRole {
+	switch role {
+	case dqlite.Voter:
+		return coredatabase.Voter
+	case dqlite.StandBy:
+		return coredatabase.Standby
+	case dqlite.Spare:
+		return coredatabase.Spare
+	default:
+		return coredatabase.NodeRole("unknown")
+	}
 }

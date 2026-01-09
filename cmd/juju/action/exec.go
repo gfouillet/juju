@@ -10,19 +10,19 @@ import (
 	"time"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
-	"github.com/juju/utils/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/utils/v4"
 
 	actionapi "github.com/juju/juju/api/client/action"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/block"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/internal/naturalsort"
-	"github.com/juju/juju/jujuclient"
 )
 
 // NewExecCommand returns an exec command.
@@ -50,7 +50,6 @@ func newExecCommand(store jujuclient.ClientStore, logMessageHandler func(*cmd.Co
 type execCommand struct {
 	runCommandBase
 	all            bool
-	operator       bool
 	machines       []string
 	applications   []string
 	units          []string
@@ -93,10 +92,7 @@ application. For example, if there was an application ` + "`mysql`" + ` and that
 had two units, ` + "`mysql/0`" + ` and ` + "`mysql/1`" + `, then ` + "`--application mysql`" + `
 is equivalent to ` + "`--unit mysql/0,mysql/1`" + `.
 
-If ` + "`--operator`" + ` is provided on Kubernetes models, commands are executed on the operator
-instead of the workload. On machine models, ` + "`--operator`" + ` has no effect.
-
-Commands run for applications or units are executed in a hook context for
+Commands run for applications or units are executed in a 'hook context' for
 the unit.
 
 Commands run on machines via the -` + "`-machine`" + ` argument are run in parallel
@@ -163,7 +159,6 @@ func (c *execCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 
 	f.BoolVar(&c.all, "all", false, "Run the commands on all the machines")
-	f.BoolVar(&c.operator, "operator", false, "Run the commands on the operator (k8s-only)")
 	f.BoolVar(&c.parallel, "parallel", true, "Run the commands in parallel without first acquiring a lock")
 	f.StringVar(&c.executionGroup, "execution-group", "", "Commands in the same execution group are run sequentially")
 	f.Var(cmd.NewStringsValue(nil, &c.machines), "machine", "One or more machine ids")
@@ -239,12 +234,12 @@ func (c *execCommand) Init(args []string) error {
 
 // Run implements Command.Run.
 func (c *execCommand) Run(ctx *cmd.Context) error {
-	if err := c.ensureAPI(); err != nil {
+	if err := c.ensureAPI(ctx); err != nil {
 		return errors.Trace(err)
 	}
 	defer c.api.Close()
 
-	modelType, err := c.ModelType()
+	modelType, err := c.ModelType(ctx)
 	if err != nil {
 		return errors.Annotatef(err, "unable to get model type")
 	}
@@ -257,7 +252,7 @@ func (c *execCommand) Run(ctx *cmd.Context) error {
 
 	var runResults actionapi.EnqueuedActions
 	if c.all {
-		runResults, err = c.api.RunOnAllMachines(c.commands, c.wait)
+		runResults, err = c.api.RunOnAllMachines(ctx, c.commands, c.wait)
 	} else {
 		runParams := actionapi.RunParams{
 			Commands:       c.commands,
@@ -268,15 +263,7 @@ func (c *execCommand) Run(ctx *cmd.Context) error {
 			Parallel:       &c.parallel,
 			ExecutionGroup: &c.executionGroup,
 		}
-		if c.operator {
-			if modelType != model.CAAS {
-				return errors.Errorf("only k8s models support the --operator flag")
-			}
-		}
-		if modelType == model.CAAS {
-			runParams.WorkloadContext = !c.operator
-		}
-		runResults, err = c.api.Run(runParams)
+		runResults, err = c.api.Run(ctx, runParams)
 	}
 
 	if err != nil {

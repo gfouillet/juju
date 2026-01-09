@@ -4,21 +4,22 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	apicloud "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	jujucloud "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -68,7 +69,7 @@ const usageUpdateCredentialExamples = `
 type updateCredentialCommand struct {
 	modelcmd.OptionalControllerCommand
 
-	updateCredentialAPIFunc func() (CredentialAPI, error)
+	updateCredentialAPIFunc func(ctx context.Context) (CredentialAPI, error)
 
 	cloud      string
 	credential string
@@ -145,14 +146,14 @@ func (c *updateCredentialCommand) SetFlags(f *gnuflag.FlagSet) {
 }
 
 type CredentialAPI interface {
-	Clouds() (map[names.CloudTag]jujucloud.Cloud, error)
-	AddCloudsCredentials(cloudCredentials map[string]jujucloud.Credential) ([]params.UpdateCredentialResult, error)
-	UpdateCloudsCredentials(cloudCredentials map[string]jujucloud.Credential, force bool) ([]params.UpdateCredentialResult, error)
+	Clouds(ctx context.Context) (map[names.CloudTag]jujucloud.Cloud, error)
+	AddCloudsCredentials(ctx context.Context, cloudCredentials map[string]jujucloud.Credential) ([]params.UpdateCredentialResult, error)
+	UpdateCloudsCredentials(ctx context.Context, cloudCredentials map[string]jujucloud.Credential, force bool) ([]params.UpdateCredentialResult, error)
 	Close() error
 }
 
-func (c *updateCredentialCommand) getAPI() (CredentialAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *updateCredentialCommand) getAPI(ctx context.Context) (CredentialAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -280,24 +281,24 @@ func (c *updateCredentialCommand) updateLocalCredentials(ctx *cmd.Context, updat
 	erred := false
 	for cloudName, cloudCredentials := range update {
 		aCloud, err := common.CloudByName(cloudName)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			ctx.Infof("Cloud %q not found.", cloudName)
 			erred = true
 			continue
 		} else if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not verify cloud %v.", cloudName)
 			erred = true
 			continue
 		}
 		storedCredentials, err := c.Store.CredentialForCloud(cloudName)
-		if errors.IsNotFound(err) {
+		if errors.Is(err, errors.NotFound) {
 			ctx.Warningf("Could not find credentials for cloud %v on this client.", cloudName)
 			ctx.Infof("Use `juju add-credential` to add a credential to this client.")
 			erred = true
 			continue
 		} else if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not get credentials for cloud %v from this client.", cloudName)
 			erred = true
 			continue
@@ -305,7 +306,7 @@ func (c *updateCredentialCommand) updateLocalCredentials(ctx *cmd.Context, updat
 
 		if c.Region != "" {
 			if err := validCloudRegion(aCloud, c.Region); err != nil {
-				logger.Errorf("%v", err)
+				logger.Errorf(context.TODO(), "%v", err)
 				ctx.Warningf("Region %q is not valid for cloud %v.", c.Region, cloudName)
 				erred = true
 				continue
@@ -319,8 +320,8 @@ func (c *updateCredentialCommand) updateLocalCredentials(ctx *cmd.Context, updat
 			if shouldFinalizeCredential(provider, credential) {
 				newCredential, err := finalizeProvider(ctx, aCloud, c.Region, cloudCredentials.DefaultRegion, credential.AuthType(), credential.Attributes())
 				if err != nil {
-					logger.Errorf("%v", err)
-					logger.Warningf("Could not verify credential %v for cloud %v on this client", credentialName, aCloud.Name)
+					logger.Errorf(context.TODO(), "%v", err)
+					logger.Warningf(context.TODO(), "Could not verify credential %v for cloud %v on this client", credentialName, aCloud.Name)
 					erred = true
 					continue
 				}
@@ -330,7 +331,7 @@ func (c *updateCredentialCommand) updateLocalCredentials(ctx *cmd.Context, updat
 		}
 		err = c.Store.UpdateCredential(cloudName, *storedCredentials)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not update this client with credentials for cloud %v", cloudName)
 			erred = true
 		}
@@ -347,14 +348,14 @@ func (c *updateCredentialCommand) updateRemoteCredentials(ctx *cmd.Context, upda
 	if err != nil {
 		return err
 	}
-	client, err := c.updateCredentialAPIFunc()
+	client, err := c.updateCredentialAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
 	// Get user clouds from the controller
-	remoteUserClouds, err := client.Clouds()
+	remoteUserClouds, err := client.Clouds(ctx)
 	if err != nil {
 		return err
 	}
@@ -387,9 +388,9 @@ func (c *updateCredentialCommand) updateRemoteCredentials(ctx *cmd.Context, upda
 	if len(verified) == 0 {
 		return erred
 	}
-	results, err := client.UpdateCloudsCredentials(verified, c.Force)
+	results, err := client.UpdateCloudsCredentials(ctx, verified, c.Force)
 	if err != nil {
-		logger.Errorf("%v", err)
+		logger.Errorf(context.TODO(), "%v", err)
 		ctx.Warningf("Could not update credentials remotely, on controller %q", c.ControllerName)
 		erred = cmd.ErrSilent
 	}
@@ -408,7 +409,7 @@ func verifyCredentialsForUpload(ctx *cmd.Context, accountDetails *jujuclient.Acc
 		}
 		verifiedCredential, err := modelcmd.VerifyCredentials(ctx, aCloud, &aCredential, credentialName, region)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not verify credential %v for cloud %v on this client", credentialName, aCloud.Name)
 			erred = cmd.ErrSilent
 			continue
@@ -422,7 +423,7 @@ func processUpdateCredentialResult(ctx *cmd.Context, accountDetails *jujuclient.
 	for _, result := range results {
 		tag, err := names.ParseCloudCredentialTag(result.CredentialTag)
 		if err != nil {
-			logger.Errorf("%v", err)
+			logger.Errorf(context.TODO(), "%v", err)
 			ctx.Warningf("Could not parse credential tag %q", result.CredentialTag)
 			localError = cmd.ErrSilent
 		}

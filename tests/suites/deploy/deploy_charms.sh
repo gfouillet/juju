@@ -8,7 +8,7 @@ run_deploy_charm() {
 
 	ensure "test-deploy-charm" "${file}"
 
-	juju deploy jameinel-ubuntu-lite
+	juju deploy ubuntu-lite
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	destroy_model "test-deploy-charm"
@@ -36,7 +36,7 @@ run_deploy_charm_placement_directive() {
 	# If 0/lxd/0 is started, so must machine 0 be.
 	wait_for_container_agent_status "0/lxd/0" "started"
 
-	juju deploy jameinel-ubuntu-lite -n 2 --to 0,0/lxd/0
+	juju deploy ubuntu-lite -n 2 --to 0,0/lxd/0
 	wait_for "ubuntu-lite" "$(idle_condition "ubuntu-lite")"
 
 	# Verify based used to create the machines was used during
@@ -60,7 +60,7 @@ run_deploy_charm_unsupported_series() {
 
 	# The charm in 3.0/stable only supports jammy and only
 	# one charm has been released to that channel.
-	juju deploy juju-qa-test --channel 3.0/stable --series focal | grep -q 'charm or bundle not found for channel' || true
+	juju deploy juju-qa-test --channel 3.0/stable --base ubuntu@20.04 | grep -q 'charm or bundle not found for channel' || true
 
 	destroy_model "${testname}"
 }
@@ -101,7 +101,7 @@ run_deploy_lxd_profile_charm() {
 	# This charm deploys to Xenial by default, which doesn't
 	# always result in a machine which becomes fully deployed
 	# with the lxd provider.
-	juju deploy juju-qa-lxd-profile-without-devices --series jammy
+	juju deploy juju-qa-lxd-profile-without-devices --base ubuntu@22.04
 	wait_for "lxd-profile-without-devices" "$(idle_condition "lxd-profile-without-devices")"
 
 	short_uuid=$(juju models --format json |
@@ -124,7 +124,7 @@ run_deploy_lxd_profile_charm_container() {
 	# This charm deploys to Xenial by default, which doesn't
 	# always result in a machine which becomes fully deployed
 	# with the lxd provider.
-	juju deploy juju-qa-lxd-profile-without-devices --to lxd --series jammy
+	juju deploy juju-qa-lxd-profile-without-devices --to lxd --base ubuntu@22.04
 	wait_for "lxd-profile-without-devices" "$(idle_condition "lxd-profile-without-devices")"
 
 	short_uuid=$(juju models --format json |
@@ -145,12 +145,13 @@ run_deploy_local_predeployed_charm() {
 
 	ensure "${model_name}" "${file}"
 
-	juju deploy ./testcharms/charms/lxd-profile --base ubuntu@22.04
-	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/ubuntu-plus) --base ubuntu@24.04
+	wait_for "ubuntu-plus" "$(idle_condition "ubuntu-plus")"
 
-	juju deploy local:lxd-profile-0 another-lxd-profile-app
-	wait_for "another-lxd-profile-app" "$(idle_condition "another-lxd-profile-app")"
-	wait_for "active" '.applications["another-lxd-profile-app"] | ."application-status".current'
+	juju deploy local:ubuntu-plus-0 another-ubuntu-plus-app
+	wait_for "another-ubuntu-plus-app" "$(idle_condition "another-ubuntu-plus-app")"
+	wait_for "active" '.applications["another-ubuntu-plus-app"] | ."application-status".current'
 
 	destroy_model "${model_name}"
 }
@@ -163,8 +164,10 @@ run_deploy_local_lxd_profile_charm() {
 
 	ensure "${model_name}" "${file}"
 
-	juju deploy ./testcharms/charms/lxd-profile
-	juju deploy ./testcharms/charms/lxd-profile-subordinate
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/lxd-profile)
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/lxd-profile-subordinate)
 	juju integrate lxd-profile-subordinate lxd-profile
 
 	wait_for "lxd-profile" "$(idle_condition "lxd-profile")"
@@ -202,10 +205,10 @@ run_deploy_lxd_to_machine() {
 
 	ensure "${model_name}" "${file}"
 
-	juju add-machine -n 2 --series=jammy
+	juju add-machine -n 2 --base ubuntu@24.04
 
-	charm=./tests/suites/deploy/charms/lxd-profile-alt
-	juju deploy "${charm}" --to 0 --base ubuntu@22.04
+	charm=$(pack_charm ./tests/suites/deploy/charms/lxd-profile-alt)
+	juju deploy ${charm} --to 0 --base ubuntu@24.04
 
 	# Test the case where we wait for the machine to start
 	# before deploying the unit.
@@ -225,7 +228,7 @@ run_deploy_lxd_to_machine() {
 	lxc profile show "${lxd_profile_0}" |
 		grep -E "linux.kernel_modules: ([a-zA-Z0-9\_,]+)?ip_tables,ip6_tables([a-zA-Z0-9\_,]+)?"
 
-	juju refresh "lxd-profile-alt" --path "${charm}"
+	juju refresh "lxd-profile-alt" --path ${charm}
 
 	# Ensure that an upgrade will be kicked off. This doesn't mean an upgrade
 	# has finished though, just started.
@@ -277,10 +280,11 @@ run_deploy_lxd_to_container() {
 
 	ensure "${model_name}" "${file}"
 
-	charm=./tests/suites/deploy/charms/lxd-profile-alt
-	juju deploy "${charm}" --to lxd
+	charm=$(pack_charm ./tests/suites/deploy/charms/lxd-profile-alt)
+	juju deploy ${charm} --to lxd
 
-	juju deploy ./testcharms/charms/lxd-profile-subordinate
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/lxd-profile-subordinate)
 	juju integrate lxd-profile-subordinate lxd-profile-alt
 
 	wait_for "lxd-profile-alt" "$(idle_condition "lxd-profile-alt")"
@@ -304,7 +308,7 @@ run_deploy_lxd_to_container() {
 	OUT=$(juju exec --machine 0 -- sh -c "sudo lxc profile show \"${lxd_profile_0}\"")
 	echo "${OUT}" | grep -E "linux.kernel_modules: ([a-zA-Z0-9\_,]+)?ip_tables,ip6_tables([a-zA-Z0-9\_,]+)?"
 
-	juju refresh "lxd-profile-alt" --path "${charm}"
+	juju refresh "lxd-profile-alt" --path ${charm}
 
 	# Ensure that an upgrade will be kicked off. This doesn't mean an upgrade
 	# has finished though, just started.
@@ -354,8 +358,8 @@ run_resolve_charm() {
 
 	ensure "${model_name}" "${file}"
 
-	charm=./testcharms/charms/simple-resolve
-	juju deploy "${charm}"
+	charm=$(pack_charm ./testcharms/charms/simple-resolve)
+	juju deploy ${charm}
 
 	wait_for "error" '.applications["simple-resolve"] | ."application-status".current'
 
@@ -376,6 +380,9 @@ test_deploy_charms() {
 	(
 		set_verbosity
 
+		echo "==> Checking for dependencies"
+		check_dependencies charmcraft
+
 		cd .. || exit
 
 		run "run_deploy_charm"
@@ -385,15 +392,18 @@ test_deploy_charms() {
 
 		case "${BOOTSTRAP_PROVIDER:-}" in
 		"lxd")
-			if stat /dev/kvm; then
+			if kvm-ok; then
 				run "run_deploy_charm_placement_directive"
 			else
 				echo "==> TEST SKIPPED: deploy_charm_placement_directive - lxd without kvm is not supported"
 			fi
-			run "run_deploy_lxd_to_machine"
-			run "run_deploy_lxd_profile_charm"
+			# Skip these tests for now, as they rely on lxd profiles, which
+			# have not been re-implemented yet
+			#
+			# run "run_deploy_lxd_to_machine"
+			# run "run_deploy_lxd_profile_charm"
 			run "run_deploy_local_predeployed_charm"
-			run "run_deploy_local_lxd_profile_charm"
+			# run "run_deploy_local_lxd_profile_charm"
 			echo "==> TEST SKIPPED: deploy_lxd_to_container - tests for non LXD only"
 			echo "==> TEST SKIPPED: deploy_lxd_profile_charm_container - tests for non LXD only"
 			;;

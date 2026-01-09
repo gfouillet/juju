@@ -4,15 +4,16 @@
 package storage
 
 import (
+	"context"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -20,8 +21,8 @@ import (
 // used to detach storage from application units.
 func NewDetachStorageCommandWithAPI() cmd.Command {
 	command := &detachStorageCommand{}
-	command.newEntityDetacherCloser = func() (EntityDetacherCloser, error) {
-		return command.NewStorageAPI()
+	command.newEntityDetacherCloser = func(ctx context.Context) (EntityDetacherCloser, error) {
+		return command.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(command)
 }
@@ -36,12 +37,16 @@ func NewDetachStorageCommand(new NewEntityDetacherCloserFunc) cmd.Command {
 
 const (
 	detachStorageCommandDoc = `
-Detaches storage from units. Specify one or more unit/application storage IDs,
-as output by ` + "`juju storage`" + `. The storage will remain in the model until it is
-removed by an operator.
+Detaches storage from units. Specify one or more storage IDs (storage_name/id),
+as output by ` + "`juju storage`" + `. The storage will remain in the model
+until it is removed by an operator. The storage being detached will be removed
+from all units that are using it.
 
 Detaching storage may fail but under some circumstances, Juju user may need
-to force storage detachment despite operational errors.
+to force storage detachment despite operational errors. Storage detachments are
+not performed as a single operation, so when detaching multiple storage IDs it
+may be that some detachments succeed while others fail. In this case the command
+can be executed again to retry the failed detachments.
 `
 
 	detachStorageCommandExamples = `
@@ -118,13 +123,13 @@ func (c *detachStorageCommand) Run(ctx *cmd.Context) error {
 		}
 	}
 
-	detacher, err := c.newEntityDetacherCloser()
+	detacher, err := c.newEntityDetacherCloser(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer detacher.Close()
 
-	results, err := detacher.Detach(c.storageIds, &c.Force, maxWait)
+	results, err := detacher.Detach(ctx, c.storageIds, &c.Force, maxWait)
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "detach storage")
@@ -151,7 +156,7 @@ func (c *detachStorageCommand) Run(ctx *cmd.Context) error {
 
 // NewEntityDetacherCloser is the type of a function that returns an
 // EntityDetacherCloser.
-type NewEntityDetacherCloserFunc func() (EntityDetacherCloser, error)
+type NewEntityDetacherCloserFunc func(ctx context.Context) (EntityDetacherCloser, error)
 
 // EntityDetacherCloser extends EntityDetacher with a Closer method.
 type EntityDetacherCloser interface {
@@ -162,5 +167,5 @@ type EntityDetacherCloser interface {
 // EntityDetacher defines an interface for detaching storage with the
 // specified IDs.
 type EntityDetacher interface {
-	Detach([]string, *bool, *time.Duration) ([]params.ErrorResult, error)
+	Detach(context.Context, []string, *bool, *time.Duration) ([]params.ErrorResult, error)
 }

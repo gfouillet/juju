@@ -4,35 +4,32 @@
 package deployer
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	apideployer "github.com/juju/juju/api/agent/deployer"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
+	"github.com/juju/juju/core/flightrecorder"
+	"github.com/juju/juju/core/logger"
 )
-
-// Hub is a pubsub hub used for internal messaging.
-type Hub interface {
-	Publish(topic string, data interface{}) func()
-	Subscribe(topic string, handler func(string, interface{})) func()
-}
 
 // ManifoldConfig defines the names of the manifolds on which a Manifold will depend.
 type ManifoldConfig struct {
-	AgentName     string
-	APICallerName string
-	Clock         clock.Clock
-	Hub           Hub
-	Logger        Logger
+	AgentName      string
+	APICallerName  string
+	FlightRecorder flightrecorder.FlightRecorder
+	Clock          clock.Clock
+	Logger         logger.Logger
 
 	UnitEngineConfig func() dependency.EngineConfig
-	SetupLogging     func(*loggo.Context, agent.Config)
+	SetupLogging     func(logger.LoggerContext, agent.Config)
 	NewDeployContext func(ContextConfig) (Context, error)
 }
 
@@ -52,18 +49,19 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 //
 // It's not tested at the moment, because the scaffolding
 // necessary is too unwieldy/distracting to introduce at this point.
-func (config ManifoldConfig) newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func (config ManifoldConfig) newWorker(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	// TODO: run config.Validate()
 	cfg := a.CurrentConfig()
 	// Grab the tag and ensure that it's for a machine.
 	if cfg.Tag().Kind() != names.MachineTagKind {
 		return nil, errors.New("agent's tag is not a machine tag")
 	}
-	deployerFacade := apideployer.NewState(apiCaller)
+
+	deployerFacade := apideployer.NewClient(apiCaller)
 	contextConfig := ContextConfig{
 		Agent:            a,
+		FlightRecorder:   config.FlightRecorder,
 		Clock:            config.Clock,
-		Hub:              config.Hub,
 		Logger:           config.Logger,
 		UnitEngineConfig: config.UnitEngineConfig,
 		SetupLogging:     config.SetupLogging,
@@ -74,7 +72,7 @@ func (config ManifoldConfig) newWorker(a agent.Agent, apiCaller base.APICaller) 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	shim := &apiShim{deployerFacade}
+	shim := &facadeShim{st: deployerFacade}
 	w, err := NewDeployer(shim, config.Logger, context)
 	if err != nil {
 		return nil, errors.Annotate(err, "cannot start unit agent deployer worker")
@@ -82,11 +80,11 @@ func (config ManifoldConfig) newWorker(a agent.Agent, apiCaller base.APICaller) 
 	return w, nil
 }
 
-type apiShim struct {
-	st *apideployer.State
+type facadeShim struct {
+	st *apideployer.Client
 }
 
-func (s *apiShim) Machine(tag names.MachineTag) (Machine, error) {
+func (s *facadeShim) Machine(tag names.MachineTag) (Machine, error) {
 	// Need to deal with typed nils.
 	machine, err := s.st.Machine(tag)
 	if err != nil {
@@ -95,8 +93,8 @@ func (s *apiShim) Machine(tag names.MachineTag) (Machine, error) {
 	return machine, nil
 }
 
-func (s *apiShim) Unit(tag names.UnitTag) (Unit, error) {
-	unit, err := s.st.Unit(tag)
+func (s *facadeShim) Unit(ctx context.Context, tag names.UnitTag) (Unit, error) {
+	unit, err := s.st.Unit(ctx, tag)
 	if err != nil {
 		return nil, err
 	}

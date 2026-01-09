@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	jujuerrors "github.com/juju/errors"
+	"github.com/juju/worker/v4/catacomb"
 
+	"github.com/juju/juju/internal/observability/probe"
 	k8sconstants "github.com/juju/juju/internal/provider/kubernetes/constants"
-	"github.com/juju/juju/observability/probe"
 )
 
 type Mux interface {
@@ -45,10 +45,11 @@ func NewController(probes *CAASProbes, mux Mux) (*Controller, error) {
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-prober",
 		Site: &c.catacomb,
 		Work: c.loop,
 	}); err != nil {
-		return c, errors.Trace(err)
+		return c, jujuerrors.Trace(err)
 	}
 
 	return c, nil
@@ -64,7 +65,7 @@ func (c *Controller) loop() error {
 		http.MethodGet,
 		k8sconstants.AgentHTTPPathLiveness,
 		ProbeHandler(probe.ProbeLiveness, c.probes)); err != nil {
-		return errors.Trace(err)
+		return jujuerrors.Trace(err)
 	}
 	defer c.mux.RemoveHandler(http.MethodGet, PathLivenessProbe)
 
@@ -72,7 +73,7 @@ func (c *Controller) loop() error {
 		http.MethodGet,
 		k8sconstants.AgentHTTPPathReadiness,
 		ProbeHandler(probe.ProbeReadiness, c.probes)); err != nil {
-		return errors.Trace(err)
+		return jujuerrors.Trace(err)
 	}
 	defer c.mux.RemoveHandler(http.MethodGet, PathReadinessProbe)
 
@@ -80,7 +81,7 @@ func (c *Controller) loop() error {
 		http.MethodGet,
 		k8sconstants.AgentHTTPPathStartup,
 		ProbeHandler(probe.ProbeStartup, c.probes)); err != nil {
-		return errors.Trace(err)
+		return jujuerrors.Trace(err)
 	}
 	defer c.mux.RemoveHandler(http.MethodGet, PathStartupProbe)
 
@@ -144,7 +145,8 @@ func ProbeHandler(name probe.ProbeType, probes *CAASProbes) http.Handler {
 				detail.WriteString("\n")
 			}),
 		)
-		if errors.Is(err, errors.NotImplemented) {
+
+		if jujuerrors.Is(err, jujuerrors.NotImplemented) {
 			http.Error(res, fmt.Sprintf("%s: probe %s",
 				http.StatusText(http.StatusNotImplemented), name),
 				http.StatusNotImplemented)

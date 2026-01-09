@@ -4,7 +4,7 @@
 package azure
 
 import (
-	stdcontext "context"
+	"context"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azurecloud "github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
@@ -12,15 +12,14 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
-	"github.com/juju/loggo"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
+	"github.com/juju/juju/internal/provider/common"
 )
 
 const (
@@ -33,7 +32,7 @@ const (
 )
 
 // Logger for the Azure provider.
-var logger = loggo.GetLogger("juju.provider.azure")
+var logger = internallogger.GetLogger("juju.provider.azure")
 
 // ProviderConfig contains configuration for the Azure providers.
 type ProviderConfig struct {
@@ -119,20 +118,21 @@ func (prov *azureEnvironProvider) Version() int {
 }
 
 // Open is part of the EnvironProvider interface.
-func (prov *azureEnvironProvider) Open(ctx stdcontext.Context, args environs.OpenParams) (environs.Environ, error) {
-	logger.Debugf("opening model %q", args.Config.Name())
+func (prov *azureEnvironProvider) Open(ctx context.Context, args environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+	logger.Debugf(ctx, "opening model %q", args.Config.Name())
 
 	namespace, err := instance.NewNamespace(args.Config.UUID())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	environ := &azureEnviron{
-		provider:  prov,
-		namespace: namespace,
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, errorutils.IsAuthorisationFailure),
+		provider:              prov,
+		namespace:             namespace,
 	}
 
 	// Config is needed before cloud spec.
-	if err := environ.SetConfig(args.Config); err != nil {
+	if err := environ.SetConfig(ctx, args.Config); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -149,24 +149,13 @@ func (p azureEnvironProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping tests the connection to the cloud, to verify the endpoint is valid.
-func (p azureEnvironProvider) Ping(ctx context.ProviderCallContext, endpoint string) error {
+func (p azureEnvironProvider) Ping(_ context.Context, _ string) error {
 	return errors.NotImplementedf("Ping")
 }
 
-// PrepareConfig is part of the EnvironProvider interface.
-func (prov *azureEnvironProvider) PrepareConfig(args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	// Set the default block-storage source.
-	attrs := make(map[string]interface{})
-	if _, ok := args.Config.StorageDefaultBlockSource(); !ok {
-		attrs[config.StorageDefaultBlockSourceKey] = azureStorageProviderType
-	}
-	if len(attrs) == 0 {
-		return args.Config, nil
-	}
-	return args.Config.Apply(attrs)
+// ValidateCloud is specified in the EnvironProvider interface.
+func (azureEnvironProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 func validateCloudSpec(spec environscloudspec.CloudSpec) error {
@@ -186,11 +175,11 @@ func validateCloudSpec(spec environscloudspec.CloudSpec) error {
 // verify the configured credentials. If verification fails, a user-friendly
 // error will be returned, and the original error will be logged at debug
 // level.
-var verifyCredentials = func(e *azureEnviron, ctx context.ProviderCallContext) error {
+var verifyCredentials = func(ctx context.Context, e *azureEnviron) error {
 	// This is used at bootstrap - the ctx invalid credential callback will log
 	// a suitable message.
 	_, err := e.credential.GetToken(ctx, policy.TokenRequestOptions{
 		Scopes: []string{e.clientOptions.Cloud.Services[azurecloud.ResourceManager].Audience + "/.default"},
 	})
-	return errorutils.HandleCredentialError(err, ctx)
+	return e.HandleCredentialError(ctx, err)
 }

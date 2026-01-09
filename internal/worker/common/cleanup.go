@@ -6,7 +6,7 @@ package common
 import (
 	"sync"
 
-	"github.com/juju/worker/v3"
+	"github.com/juju/worker/v4"
 )
 
 // NewCleanupWorker returns a worker that ensures a cleanup function
@@ -25,6 +25,11 @@ type CleanupWorker struct {
 	worker.Worker
 	cleanupOnce sync.Once
 	cleanup     func()
+}
+
+// Unwrap exposes the wrapped worker.
+func (c *CleanupWorker) Unwrap() worker.Worker {
+	return c.Worker
 }
 
 // Wait ensures the cleanup func is run after the worker finishes.

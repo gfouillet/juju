@@ -4,9 +4,8 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
-
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StateDeleteCommand implements the state-delete command.
@@ -53,7 +52,7 @@ func (c *StateDeleteCommand) Run(ctx *cmd.Context) error {
 	if c.Key == "" {
 		return nil
 	}
-	err := c.ctx.DeleteCharmStateValue(c.Key)
+	err := c.ctx.DeleteCharmStateValue(ctx, c.Key)
 	if err != nil {
 		return err
 	}

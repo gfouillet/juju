@@ -5,26 +5,26 @@
 package reboot
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/agent"
-	"github.com/juju/juju/container"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs/instances"
+	"github.com/juju/juju/internal/container"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.cmd.jujud.reboot")
-
+var logger = internallogger.GetLogger("juju.cmd.jujud.reboot")
 var timeout = 10 * time.Minute
-
 var rebootAfter = 15
 
 func runCommand(args []string) error {
@@ -42,8 +42,11 @@ var tmpFile = func() (*os.File, error) {
 type Reboot struct {
 	acfg   AgentConfig
 	reboot RebootWaiter
+	clock  clock.Clock
 }
 
+// NewRebootWaiter creates a new Reboot command that waits for all containers
+// to shut down before executing a reboot.
 func NewRebootWaiter(acfg agent.Config) (*Reboot, error) {
 	// ensure we're only running on a machine agent.
 	if _, ok := acfg.Tag().(names.MachineTag); !ok {
@@ -52,6 +55,7 @@ func NewRebootWaiter(acfg agent.Config) (*Reboot, error) {
 	return &Reboot{
 		acfg:   &agentConfigShim{aCfg: acfg},
 		reboot: rebootWaiterShim{},
+		clock:  clock.WallClock,
 	}, nil
 }
 
@@ -91,7 +95,7 @@ func (r *Reboot) stopDeployedUnits() error {
 			if err != nil {
 				return err
 			}
-			logger.Debugf("Stopping unit agent: %q", svcName)
+			logger.Debugf(context.TODO(), "Stopping unit agent: %q", svcName)
 			if err = svc.Stop(); err != nil {
 				return err
 			}
@@ -113,7 +117,7 @@ func (r *Reboot) runningContainers() ([]instances.Instance, error) {
 			return nil, errors.Annotatef(err, "failed to get manager for container type %v", val)
 		}
 		if !manager.IsInitialized() {
-			logger.Infof("container type %q not supported", val)
+			logger.Infof(context.TODO(), "container type %q not supported", val)
 			continue
 		}
 		containers, err := manager.ListContainers()
@@ -144,14 +148,19 @@ func (r *Reboot) waitForContainersOrTimeout() error {
 					c <- nil
 					return
 				}
-				logger.Warningf("Waiting for containers to shutdown: %v", containers)
-				time.Sleep(1 * time.Second)
+				logger.Warningf(context.TODO(), "Waiting for containers to shutdown: %v", containers)
+				select {
+				case <-quit:
+					c <- nil
+					return
+				case <-r.clock.After(time.Second):
+				}
 			}
 		}
 	}()
 
 	select {
-	case <-time.After(timeout):
+	case <-r.clock.After(timeout):
 		// TODO(fwereade): 2016-03-17 lp:1558657
 		// Containers are still up after timeout. C'est la vie
 		quit <- true

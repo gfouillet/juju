@@ -1,22 +1,31 @@
-// Copyright 2018 Canonical Ltd.
+// Copyright 2020 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 package uniter_test
 
 import (
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
+	"context"
+	stdtesting "testing"
+
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/apiserver/common"
+	facademocks "github.com/juju/juju/apiserver/facade/mocks"
 	"github.com/juju/juju/apiserver/facades/agent/uniter"
-	"github.com/juju/juju/apiserver/facades/agent/uniter/mocks"
 	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/lxdprofile"
+	"github.com/juju/juju/core/instance"
+	coremachine "github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/model"
+	coreunit "github.com/juju/juju/core/unit"
+	applicationcharm "github.com/juju/juju/domain/application/charm"
+	"github.com/juju/juju/internal/charm"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/testing"
 )
 
 type lxdProfileSuite struct {
@@ -24,86 +33,32 @@ type lxdProfileSuite struct {
 
 	machineTag1 names.MachineTag
 	unitTag1    names.UnitTag
+
+	watcherRegistry    *facademocks.MockWatcherRegistry
+	machineService     *MockMachineService
+	modelInfoService   *MockModelInfoService
+	applicationService *uniter.MockApplicationService
 }
 
-var _ = gc.Suite(&lxdProfileSuite{})
+func TestLxdProfileSuite(t *stdtesting.T) {
+	tc.Run(t, &lxdProfileSuite{})
+}
 
-func (s *lxdProfileSuite) SetUpTest(c *gc.C) {
+func (s *lxdProfileSuite) SetUpTest(c *tc.C) {
 	s.machineTag1 = names.NewMachineTag("1")
 	s.unitTag1 = names.NewUnitTag("mysql/1")
 }
 
-func (s *lxdProfileSuite) assertBackendAPI(c *gc.C, tag names.Tag) (*uniter.LXDProfileAPI, *gomock.Controller, *mocks.MockLXDProfileBackend) {
-	resources := common.NewResources()
-	authorizer := apiservertesting.FakeAuthorizer{
-		Tag: tag,
+func (s *lxdProfileSuite) TestWatchInstanceData(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	watcher := &mockNotifyWatcher{
+		changes: make(chan struct{}, 1),
 	}
-
-	ctrl := gomock.NewController(c)
-	mockBackend := mocks.NewMockLXDProfileBackend(ctrl)
-
-	unitAuthFunc := func() (common.AuthFunc, error) {
-		return func(tag names.Tag) bool {
-			if tag.Id() == s.unitTag1.Id() {
-				return true
-			}
-			return false
-		}, nil
-	}
-
-	api := uniter.NewLXDProfileAPI(
-		mockBackend, resources, authorizer, unitAuthFunc, loggo.GetLogger("juju.apiserver.facades.agent.uniter"))
-	return api, ctrl, mockBackend
-}
-
-func (s *lxdProfileSuite) TestWatchLXDProfileUpgradeNotifications(c *gc.C) {
-	api, ctrl, mockBackend := s.assertBackendAPI(c, s.unitTag1)
-	defer ctrl.Finish()
-
-	lxdProfileWatcher := &mockStringsWatcher{
-		changes: make(chan []string, 1),
-	}
-	lxdProfileWatcher.changes <- []string{lxdprofile.EmptyStatus}
-
-	mockMachine1 := mocks.NewMockLXDProfileMachine(ctrl)
-	mockUnit1 := mocks.NewMockLXDProfileUnit(ctrl)
-
-	mockBackend.EXPECT().Machine(s.machineTag1.Id()).Return(mockMachine1, nil)
-	mockBackend.EXPECT().Unit(s.unitTag1.Id()).Return(mockUnit1, nil)
-	mockMachine1.EXPECT().WatchLXDProfileUpgradeNotifications("foo-bar").Return(lxdProfileWatcher, nil)
-	mockUnit1.EXPECT().AssignedMachineId().Return(s.machineTag1.Id(), nil)
-
-	args := params.LXDProfileUpgrade{
-		Entities: []params.Entity{
-			{Tag: names.NewUnitTag("mysql/2").String()},
-			{Tag: s.unitTag1.String()},
-			{Tag: names.NewMachineTag("2").String()},
-		},
-		ApplicationName: "foo-bar",
-	}
-	watches, err := api.WatchLXDProfileUpgradeNotifications(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(watches, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{StringsWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
-			{StringsWatcherId: "1", Changes: []string{""}, Error: nil},
-			{StringsWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
-		},
-	})
-}
-
-func (s *lxdProfileSuite) TestWatchUnitLXDProfileUpgradeNotifications(c *gc.C) {
-	api, ctrl, mockBackend := s.assertBackendAPI(c, s.unitTag1)
-	defer ctrl.Finish()
-
-	lxdProfileWatcher := &mockStringsWatcher{
-		changes: make(chan []string, 1),
-	}
-	lxdProfileWatcher.changes <- []string{lxdprofile.EmptyStatus}
-
-	mockUnit1 := mocks.NewMockLXDProfileUnit(ctrl)
-	mockBackend.EXPECT().Unit(s.unitTag1.Id()).Return(mockUnit1, nil)
-	mockUnit1.EXPECT().WatchLXDProfileUpgradeNotifications().Return(lxdProfileWatcher, nil)
+	watcher.changes <- struct{}{}
+	s.machineService.EXPECT().WatchLXDProfiles(gomock.Any(), coremachine.UUID("uuid0")).Return(watcher, nil)
+	s.applicationService.EXPECT().GetUnitMachineUUID(gomock.Any(), coreunit.Name(s.unitTag1.Id())).Return("uuid0", nil)
+	s.watcherRegistry.EXPECT().Register(gomock.Any(), gomock.Any()).Return("w-1", nil)
 
 	args := params.Entities{
 		Entities: []params.Entity{
@@ -112,13 +67,256 @@ func (s *lxdProfileSuite) TestWatchUnitLXDProfileUpgradeNotifications(c *gc.C) {
 			{Tag: names.NewMachineTag("2").String()},
 		},
 	}
-	watches, err := api.WatchUnitLXDProfileUpgradeNotifications(args)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(watches, gc.DeepEquals, params.StringsWatchResults{
-		Results: []params.StringsWatchResult{
-			{StringsWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
-			{StringsWatcherId: "1", Changes: []string{""}, Error: nil},
-			{StringsWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+
+	api := s.newAPI(c)
+	results, err := api.WatchInstanceData(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.NotifyWatchResults{
+		Results: []params.NotifyWatchResult{
+			{NotifyWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+			{NotifyWatcherId: "w-1", Error: nil},
+			{NotifyWatcherId: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
 		},
 	})
+}
+
+func (s *lxdProfileSuite) TestLXDProfileName(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().GetUnitMachineUUID(gomock.Any(), coreunit.Name("mysql/1")).Return("uuid0", nil)
+	s.machineService.EXPECT().AppliedLXDProfileNames(gomock.Any(), coremachine.UUID("uuid0")).
+		Return([]string{"juju-model-mysql-1"}, nil)
+
+	args := params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewUnitTag("mysql/2").String()},
+			{Tag: s.unitTag1.String()},
+			{Tag: names.NewMachineTag("2").String()},
+		},
+	}
+
+	api := s.newAPI(c)
+	results, err := api.LXDProfileName(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.StringResults{
+		Results: []params.StringResult{
+			{Result: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+			{Result: "juju-model-mysql-1", Error: nil},
+			{Result: "", Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+		},
+	})
+}
+
+func (s *lxdProfileSuite) TestLXDProfileRequired(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.applicationService.EXPECT().GetCharmLXDProfile(gomock.Any(), applicationcharm.CharmLocator{
+		Source:   applicationcharm.CharmHubSource,
+		Name:     "mysql",
+		Revision: 1,
+	}).
+		Return(charm.LXDProfile{
+			Config: map[string]string{"one": "two"},
+		}, 1, nil)
+
+	s.applicationService.EXPECT().GetCharmLXDProfile(gomock.Any(), applicationcharm.CharmLocator{
+		Source:   applicationcharm.CharmHubSource,
+		Name:     "testme",
+		Revision: 3,
+	}).Return(charm.LXDProfile{}, 0, errors.NotFoundf("ch:testme-3"))
+
+	args := params.CharmURLs{
+		URLs: []params.CharmURL{
+			{URL: "ch:mysql-1"},
+			{URL: "ch:testme-3"},
+		},
+	}
+
+	api := s.newAPI(c)
+	results, err := api.LXDProfileRequired(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.BoolResults{
+		Results: []params.BoolResult{
+			{Result: true, Error: nil},
+			{Result: false, Error: &params.Error{Message: "ch:testme-3 not found", Code: "not found"}},
+		},
+	})
+}
+
+func (s *lxdProfileSuite) TestCanApplyLXDProfileUnauthorized(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	s.modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(model.ModelInfo{
+		Type:      model.IAAS,
+		CloudType: "lxd",
+	}, nil)
+
+	args := params.Entities{
+		Entities: []params.Entity{
+			{Tag: names.NewUnitTag("mysql/2").String()},
+			{Tag: names.NewMachineTag("2").String()},
+		},
+	}
+	api := s.newAPI(c)
+	results, err := api.CanApplyLXDProfile(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.BoolResults{
+		Results: []params.BoolResult{
+			{Result: false, Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+			{Result: false, Error: &params.Error{Message: "permission denied", Code: "unauthorized access"}},
+		},
+	})
+}
+
+func (s *lxdProfileSuite) TestCanApplyLXDProfileIAASLXDNotManual(c *tc.C) {
+	// model type: IAAS
+	// provider type: lxd
+	// manual: false
+	defer s.setupMocks(c).Finish()
+
+	s.modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(model.ModelInfo{
+		Type:      model.IAAS,
+		CloudType: "lxd",
+	}, nil)
+
+	machineName := coremachine.Name("0")
+	s.applicationService.EXPECT().GetUnitMachineName(gomock.Any(), coreunit.Name("mysql/1")).Return(machineName, nil)
+	s.machineService.EXPECT().IsMachineManuallyProvisioned(gomock.Any(), machineName).Return(false, nil)
+
+	s.testCanApplyLXDProfile(c, true)
+}
+
+func (s *lxdProfileSuite) TestCanApplyLXDProfileIAASLXDManual(c *tc.C) {
+	// model type: IAAS
+	// provider type: lxd
+	// manual: true
+	defer s.setupMocks(c).Finish()
+
+	s.modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(model.ModelInfo{
+		Type:      model.IAAS,
+		CloudType: "lxd",
+	}, nil)
+
+	s.applicationService.EXPECT().GetUnitMachineName(gomock.Any(), coreunit.Name("mysql/1")).Return("0", nil)
+	s.machineService.EXPECT().IsMachineManuallyProvisioned(gomock.Any(), gomock.Any()).Return(true, nil)
+
+	s.testCanApplyLXDProfile(c, false)
+}
+
+func (s *lxdProfileSuite) TestCanApplyLXDProfileCAAS(c *tc.C) {
+	// model type: CAAS
+	// provider type: k8s
+	defer s.setupMocks(c).Finish()
+	s.modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(model.ModelInfo{
+		Type:      model.CAAS,
+		CloudType: "k8s",
+	}, nil)
+
+	s.testCanApplyLXDProfile(c, false)
+}
+
+func (s *lxdProfileSuite) TestCanApplyLXDProfileIAASMAASNotManualLXD(c *tc.C) {
+	// model type: IAAS
+	// provider type: maas
+	// manual: false
+	// container: LXD
+	defer s.setupMocks(c).Finish()
+
+	s.modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(model.ModelInfo{
+		Type:      model.IAAS,
+		CloudType: "maas",
+	}, nil)
+
+	machineName := coremachine.Name("0")
+	s.applicationService.EXPECT().GetUnitMachineName(gomock.Any(), coreunit.Name("mysql/1")).Return(machineName, nil)
+	s.machineService.EXPECT().IsMachineManuallyProvisioned(gomock.Any(), machineName).Return(false, nil)
+
+	s.expectContainerType(instance.LXD)
+
+	s.testCanApplyLXDProfile(c, true)
+}
+
+func (s *lxdProfileSuite) testCanApplyLXDProfile(c *tc.C, result bool) {
+	args := params.Entities{
+		Entities: []params.Entity{
+			{Tag: s.unitTag1.String()},
+		},
+	}
+	api := s.newAPI(c)
+	results, err := api.CanApplyLXDProfile(c.Context(), args)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results, tc.DeepEquals, params.BoolResults{
+		Results: []params.BoolResult{{Result: result, Error: nil}},
+	})
+}
+
+func (s *lxdProfileSuite) newAPI(c *tc.C) *uniter.LXDProfileAPI {
+	authorizer := apiservertesting.FakeAuthorizer{
+		Tag: s.unitTag1,
+	}
+	unitAuthFunc := func(_ context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			return tag.Id() == s.unitTag1.Id()
+		}, nil
+	}
+
+	api := uniter.NewLXDProfileAPI(
+		s.machineService,
+		s.watcherRegistry,
+		authorizer,
+		unitAuthFunc,
+		loggertesting.WrapCheckLog(c),
+		s.modelInfoService,
+		s.applicationService,
+	)
+	return api
+}
+
+func (s *lxdProfileSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+	s.modelInfoService = NewMockModelInfoService(ctrl)
+	s.applicationService = uniter.NewMockApplicationService(ctrl)
+	s.machineService = NewMockMachineService(ctrl)
+	s.watcherRegistry = facademocks.NewMockWatcherRegistry(ctrl)
+
+	c.Cleanup(func() {
+		s.modelInfoService = nil
+		s.applicationService = nil
+		s.machineService = nil
+		s.watcherRegistry = nil
+	})
+
+	return ctrl
+}
+
+func (s *lxdProfileSuite) expectContainerType(cType instance.ContainerType) {
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), gomock.Any()).
+		Return(coremachine.UUID("uuid0"), nil).AnyTimes()
+	s.machineService.EXPECT().GetSupportedContainersTypes(gomock.Any(), gomock.Any()).
+		Return([]instance.ContainerType{cType}, nil).AnyTimes()
+}
+
+type mockNotifyWatcher struct {
+	tomb    tomb.Tomb
+	changes chan struct{}
+}
+
+func (m *mockNotifyWatcher) Stop() error {
+	m.Kill()
+	return m.Wait()
+}
+
+func (m *mockNotifyWatcher) Kill() {
+	m.tomb.Kill(nil)
+}
+
+func (m *mockNotifyWatcher) Wait() error {
+	return m.tomb.Wait()
+}
+
+func (m *mockNotifyWatcher) Err() error {
+	return m.tomb.Err()
+}
+
+func (m *mockNotifyWatcher) Changes() <-chan struct{} {
+	return m.changes
 }

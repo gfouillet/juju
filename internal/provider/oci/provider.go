@@ -4,7 +4,7 @@
 package oci
 
 import (
-	stdcontext "context"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -13,25 +13,27 @@ import (
 	"github.com/juju/clock"
 	"github.com/juju/errors"
 	"github.com/juju/jsonschema"
-	"github.com/juju/loggo"
 	"github.com/juju/schema"
 	ociIdentity "github.com/oracle/oci-go-sdk/v65/identity"
 	"gopkg.in/ini.v1"
-	"gopkg.in/juju/environschema.v1"
 
 	"github.com/juju/juju/cloud"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
+	"github.com/juju/juju/internal/configschema"
+	internallogger "github.com/juju/juju/internal/logger"
+	providercommon "github.com/juju/juju/internal/provider/common"
 	"github.com/juju/juju/internal/provider/oci/common"
 )
 
-var logger = loggo.GetLogger("juju.provider.oci")
+var logger = internallogger.GetLogger("juju.provider.oci")
 
 // EnvironProvider type implements environs.EnvironProvider interface
-type EnvironProvider struct{}
+type EnvironProvider struct {
+	ControllerUUID string
+}
 
 type environConfig struct {
 	*config.Config
@@ -41,14 +43,14 @@ type environConfig struct {
 var _ config.ConfigSchemaSource = (*EnvironProvider)(nil)
 var _ environs.ProviderSchema = (*EnvironProvider)(nil)
 
-var configSchema = environschema.Fields{
+var configSchema = configschema.Fields{
 	"compartment-id": {
 		Description: "The OCID of the compartment in which juju has access to create resources.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 	"address-space": {
 		Description: "The CIDR block to use when creating default subnets. The subnet must have at least a /16 size.",
-		Type:        environschema.Tstring,
+		Type:        configschema.Tstring,
 	},
 }
 
@@ -113,12 +115,12 @@ var credentialSchema = map[cloud.AuthType]cloud.CredentialSchema{
 	},
 }
 
-func (p EnvironProvider) newConfig(cfg *config.Config) (*environConfig, error) {
+func (p EnvironProvider) newConfig(ctx context.Context, cfg *config.Config) (*environConfig, error) {
 	if cfg == nil {
 		return nil, errors.New("cannot set config on uninitialized env")
 	}
 
-	valid, err := p.Validate(cfg, nil)
+	valid, err := p.Validate(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +144,7 @@ func (c *environConfig) addressSpace() *string {
 }
 
 // Schema implements environs.ProviderSchema
-func (o *EnvironProvider) Schema() environschema.Fields {
+func (o *EnvironProvider) Schema() configschema.Fields {
 	fields, err := config.Schema(configSchema)
 	if err != nil {
 		panic(err)
@@ -171,7 +173,7 @@ func (e EnvironProvider) CloudSchema() *jsonschema.Schema {
 }
 
 // Ping implements environs.EnvironProvider.
-func (e *EnvironProvider) Ping(ctx context.ProviderCallContext, endpoint string) error {
+func (e *EnvironProvider) Ping(_ context.Context, _ string) error {
 	return errors.NotImplementedf("Ping")
 }
 
@@ -188,18 +190,20 @@ func validateCloudSpec(c environscloudspec.CloudSpec) error {
 	return nil
 }
 
-// PrepareConfig implements environs.EnvironProvider.
-func (e EnvironProvider) PrepareConfig(args environs.PrepareConfigParams) (*config.Config, error) {
-	if err := validateCloudSpec(args.Cloud); err != nil {
-		return nil, errors.Annotate(err, "validating cloud spec")
-	}
-	// TODO(gsamfira): Set default block storage backend
-	return args.Config, nil
+// ModelConfigDefaults provides a set of default model config attributes that
+// should be set on a models config if they have not been specified by the user.
+func (e EnvironProvider) ModelConfigDefaults(_ context.Context) (map[string]any, error) {
+	return nil, nil
+}
+
+// ValidateCloud is specified in the EnvironProvider interface.
+func (e EnvironProvider) ValidateCloud(ctx context.Context, spec environscloudspec.CloudSpec) error {
+	return errors.Annotate(validateCloudSpec(spec), "validating cloud spec")
 }
 
 // Open implements environs.EnvironProvider.
-func (e *EnvironProvider) Open(_ stdcontext.Context, params environs.OpenParams) (environs.Environ, error) {
-	logger.Infof("opening model %q", params.Config.Name())
+func (e *EnvironProvider) Open(ctx context.Context, params environs.OpenParams, invalidator environs.CredentialInvalidator) (environs.Environ, error) {
+	logger.Infof(ctx, "opening model %q", params.Config.Name())
 
 	if err := validateCloudSpec(params.Cloud); err != nil {
 		return nil, errors.Trace(err)
@@ -217,7 +221,7 @@ func (e *EnvironProvider) Open(_ stdcontext.Context, params environs.OpenParams)
 	// We don't support setting a default region in the credentials anymore. Because, such approach conflicts with the
 	// way we handle regions in Juju.
 	if creds["region"] != "" {
-		logger.Warningf("Setting a default region in Oracle Cloud credentials is not supported.")
+		logger.Warningf(ctx, "Setting a default region in Oracle Cloud credentials is not supported.")
 	}
 	err := providerConfig.Validate()
 	if err != nil {
@@ -244,17 +248,19 @@ func (e *EnvironProvider) Open(_ stdcontext.Context, params environs.OpenParams)
 	}
 
 	env := &Environ{
-		Compute:    compute,
-		Networking: networking,
-		Storage:    storage,
-		Firewall:   networking,
-		Identity:   identity,
-		ociConfig:  providerConfig,
-		clock:      clock.WallClock,
-		p:          e,
+		CredentialInvalidator: providercommon.NewCredentialInvalidator(invalidator, common.IsAuthorisationFailure),
+		Compute:               compute,
+		Networking:            networking,
+		Storage:               storage,
+		Firewall:              networking,
+		Identity:              identity,
+		ociConfig:             providerConfig,
+		clock:                 clock.WallClock,
+		controllerUUID:        params.ControllerUUID,
+		p:                     e,
 	}
 
-	if err := env.SetConfig(params.Config); err != nil {
+	if err := env.SetConfig(ctx, params.Config); err != nil {
 		return nil, err
 	}
 
@@ -310,7 +316,7 @@ func (e EnvironProvider) DetectCredentials(cloudName string) (*cloud.CloudCreden
 	for _, val := range cfg.SectionStrings() {
 		values := new(credentialSection)
 		if err := cfg.Section(val).MapTo(values); err != nil {
-			logger.Warningf("invalid value in section %s: %s", val, err)
+			logger.Warningf(context.TODO(), "invalid value in section %s: %s", val, err)
 			continue
 		}
 		missingFields := []string{}
@@ -331,7 +337,7 @@ func (e EnvironProvider) DetectCredentials(cloudName string) (*cloud.CloudCreden
 		}
 
 		if len(missingFields) > 0 {
-			logger.Warningf("missing required field(s) in section %s: %s", val, strings.Join(missingFields, ", "))
+			logger.Warningf(context.TODO(), "missing required field(s) in section %s: %s", val, strings.Join(missingFields, ", "))
 			continue
 		}
 
@@ -340,7 +346,7 @@ func (e EnvironProvider) DetectCredentials(cloudName string) (*cloud.CloudCreden
 			return nil, errors.Trace(err)
 		}
 		if err := common.ValidateKey(pemFileContent, values.PassPhrase); err != nil {
-			logger.Warningf("failed to decrypt PEM %s using the configured pass phrase", values.KeyFile)
+			logger.Warningf(context.TODO(), "failed to decrypt PEM %s using the configured pass phrase", values.KeyFile)
 			continue
 		}
 
@@ -372,8 +378,8 @@ func (e EnvironProvider) FinalizeCredential(
 }
 
 // Validate implements config.Validator.
-func (e EnvironProvider) Validate(cfg, old *config.Config) (valid *config.Config, err error) {
-	if err := config.Validate(cfg, old); err != nil {
+func (e EnvironProvider) Validate(ctx context.Context, cfg, old *config.Config) (valid *config.Config, err error) {
+	if err := config.Validate(ctx, cfg, old); err != nil {
 		return nil, err
 	}
 	newAttrs, err := cfg.ValidateUnknownAttrs(

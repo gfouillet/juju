@@ -4,7 +4,9 @@
 package worker
 
 import (
-	"github.com/juju/worker/v3"
+	"context"
+
+	"github.com/juju/worker/v4"
 	"gopkg.in/tomb.v2"
 )
 
@@ -16,10 +18,13 @@ type simpleWorker struct {
 // NewSimpleWorker returns a worker that runs the given function.  The
 // stopCh argument will be closed when the worker is killed. The error returned
 // by the doWork function will be returned by the worker's Wait function.
-func NewSimpleWorker(doWork func(stopCh <-chan struct{}) error) worker.Worker {
+func NewSimpleWorker(doWork func(context.Context) error) worker.Worker {
 	w := &simpleWorker{}
 	w.tomb.Go(func() error {
-		return doWork(w.tomb.Dying())
+		ctx, cancel := context.WithCancel(w.tomb.Context(context.Background()))
+		defer cancel()
+
+		return doWork(ctx)
 	})
 	return w
 }

@@ -4,19 +4,21 @@
 package block
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewEnableCommand returns a new command that eanbles previously disabled
 // command sets.
 func NewEnableCommand() cmd.Command {
 	return modelcmd.Wrap(&enableCommand{
-		apiFunc: func(c newAPIRoot) (unblockClientAPI, error) {
-			return getBlockAPI(c)
+		apiFunc: func(ctx context.Context, c newAPIRoot) (unblockClientAPI, error) {
+			return getBlockAPI(ctx, c)
 		},
 	})
 }
@@ -24,7 +26,7 @@ func NewEnableCommand() cmd.Command {
 // enableCommand removes the block from desired operation.
 type enableCommand struct {
 	modelcmd.ModelCommandBase
-	apiFunc func(newAPIRoot) (unblockClientAPI, error)
+	apiFunc func(context.Context, newAPIRoot) (unblockClientAPI, error)
 	target  string
 }
 
@@ -60,18 +62,18 @@ func (c *enableCommand) Info() *cmd.Info {
 // unblockClientAPI defines the client API methods that unblock command uses.
 type unblockClientAPI interface {
 	Close() error
-	SwitchBlockOff(blockType string) error
+	SwitchBlockOff(ctx context.Context, blockType string) error
 }
 
 // Run implements Command.
-func (c *enableCommand) Run(_ *cmd.Context) error {
-	api, err := c.apiFunc(c)
+func (c *enableCommand) Run(ctx *cmd.Context) error {
+	api, err := c.apiFunc(ctx, c)
 	if err != nil {
 		return errors.Annotate(err, "cannot connect to the API")
 	}
 	defer api.Close()
 
-	return api.SwitchBlockOff(c.target)
+	return api.SwitchBlockOff(ctx, c.target)
 }
 
 const enableDoc = `

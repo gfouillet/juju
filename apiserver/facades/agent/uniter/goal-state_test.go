@@ -1,491 +1,666 @@
 // Copyright 2018 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package uniter_test
+package uniter
 
 import (
+	"context"
+	"testing"
 	"time"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	gomock "go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/facades/agent/uniter"
-	apiservertesting "github.com/juju/juju/apiserver/testing"
-	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/core/application"
+	"github.com/juju/juju/core/life"
+	corerelation "github.com/juju/juju/core/relation"
+	corestatus "github.com/juju/juju/core/status"
+	coreunit "github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/relation"
+	"github.com/juju/juju/internal/charm"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
-	"github.com/juju/juju/testing/factory"
 )
 
 // uniterSuite implements common testing suite for all API
 // versions. It's not intended to be used directly or registered as a
 // suite, but embedded.
 type uniterGoalStateSuite struct {
-	uniterSuiteBase
+	testhelpers.IsolationSuite
 
-	machine2 *state.Machine
-	logging  *state.Application
+	applicationService        *MockApplicationService
+	relationService           *MockRelationService
+	statusService             *MockStatusService
+	crossModelRelationService *MockCrossModelRelationService
+
+	uniter *UniterAPI
 }
 
-var _ = gc.Suite(&uniterGoalStateSuite{})
-
-func (s *uniterGoalStateSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
-
-	s.setupState(c)
-
-	s.machine2 = s.Factory.MakeMachine(c, &factory.MachineParams{
-		Base: state.UbuntuBase("12.10"),
-		Jobs: []state.MachineJob{state.JobHostUnits},
-	})
-
-	loggingCharm := s.Factory.MakeCharm(c, &factory.CharmParams{
-		Name: "logging",
-	})
-	s.logging = s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "logging",
-		Charm: loggingCharm,
-	})
-
-	// Create a FakeAuthorizer so we can check permissions,
-	// set up assuming the MySQL unit has logged in.
-	s.authorizer = apiservertesting.FakeAuthorizer{
-		Tag: s.mysqlUnit.Tag(),
-	}
-
-	// Create the resource registry separately to track invocations to
-	// Register.
-	s.resources = common.NewResources()
-	s.AddCleanup(func(_ *gc.C) { s.resources.StopAll() })
-
-	s.uniter = s.newUniterAPI(c, s.State, s.authorizer)
-	s.WaitForModelWatchersIdle(c, s.State.ModelUUID())
+func TestUniterGoalStateSuite(t *testing.T) {
+	tc.Run(t, &uniterGoalStateSuite{})
 }
 
-var (
-	timestamp          = time.Date(2200, time.November, 5, 0, 0, 0, 0, time.UTC)
-	expectedUnitStatus = params.GoalStateStatus{
-		Status: "waiting",
-		Since:  &timestamp,
-	}
-	expectedRelationStatus = params.GoalStateStatus{
-		Status: "joining",
-		Since:  &timestamp,
-	}
-	expected2UnitsMysql = params.UnitsGoalState{
-		"mysql/0": expectedUnitStatus,
-		"mysql/1": expectedUnitStatus,
-	}
-	expectedUnitMysql = params.UnitsGoalState{
-		"mysql/0": expectedUnitStatus,
-	}
-)
+func (s *uniterGoalStateSuite) TestStub(c *tc.C) {
+	c.Skip(`
+Given the initial state where:
+- 3 machines exist
+- A wordpress charm is deployed with a single unit to machine 0, with an unset status
+- A mysql charm is deployed with a single unit to machine 1, with an unset status
+- A logging charm is deployed with a single unit to machine 2, with an unset status
+- An authoriser is congured to mock a logged in mysql unit
 
-// TestGoalStatesNoRelation tests single application with single unit.
-func (s *uniterGoalStateSuite) TestGoalStatesNoRelation(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-	}}
-	expected := params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: expectedUnitMysql,
-				},
-			}, {
-				Error: apiservertesting.ErrUnauthorized,
-			},
-		},
-	}
-	testGoalStates(c, s.uniter, args, expected)
+This suite is missing tests for the following scenarios:
+- TestGoalStatesCrossModelRelation: when a relation is added between the mysql unit and a cross-model
+  relation is established, but relations are included in the GoalStates result with the URL as the key
+  for the cmr relation (where previously the application name was used)
+`)
 }
 
-// TestGoalStatesNoRelationTwoUnits adds a new unit to wordpress application.
-func (s *uniterGoalStateSuite) TestPeerUnitsNoRelation(c *gc.C) {
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-	}}
-
-	s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.mysql,
-		Machine:     s.machine1,
-	})
-
-	expected := params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: expected2UnitsMysql,
-				},
-			}, {
-				Error: apiservertesting.ErrUnauthorized,
-			},
-		},
-	}
-	testGoalStates(c, s.uniter, args, expected)
-}
-
-// TestGoalStatesSingleRelation tests structure with two different
-// application units and one relation between the units.
-func (s *uniterGoalStateSuite) TestGoalStatesSingleRelation(c *gc.C) {
-
-	err := s.addRelationEnterScope(c, s.mysqlUnit, "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-	}}
-	expected := params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: expectedUnitMysql,
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":   expectedRelationStatus,
-							"wordpress/0": expectedUnitStatus,
-						},
-					},
-				},
-			}, {
-				Error: apiservertesting.ErrUnauthorized,
-			},
-		},
-	}
-	testGoalStates(c, s.uniter, args, expected)
-}
-
-// TestGoalStatesDeadUnitsExcluded tests dead units should not show in the GoalState result.
-func (s *uniterGoalStateSuite) TestGoalStatesDeadUnitsExcluded(c *gc.C) {
-
-	err := s.addRelationEnterScope(c, s.wordpressUnit, "mysql")
-	c.Assert(err, jc.ErrorIsNil)
-
-	newMysqlUnit := s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.mysql,
-		Machine:     s.machine1,
-	})
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-	}}
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: expected2UnitsMysql,
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":   expectedRelationStatus,
-							"wordpress/0": expectedUnitStatus,
-						},
-					},
-				},
-			},
-		},
-	})
-
-	err = newMysqlUnit.Destroy()
-	c.Assert(err, jc.ErrorIsNil)
-
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: params.UnitsGoalState{
-						"mysql/0": expectedUnitStatus,
-					},
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":   expectedRelationStatus,
-							"wordpress/0": expectedUnitStatus,
-						},
-					},
-				},
-			},
-		},
-	})
-}
-
-// preventUnitDestroyRemove sets a non-allocating status on the unit, and hence
-// prevents it from being unceremoniously removed from state on Destroy. This
-// is useful because several tests go through a unit's lifecycle step by step,
-// asserting the behaviour of a given method in each state, and the unit quick-
-// remove change caused many of these to fail.
-func preventUnitDestroyRemove(c *gc.C, u *state.Unit) {
-	// To have a non-allocating status, a unit needs to
-	// be assigned to a machine.
-	_, err := u.AssignedMachineId()
-	if errors.IsNotAssigned(err) {
-		err = u.AssignToNewMachine()
-	}
-	c.Assert(err, jc.ErrorIsNil)
+func (s *uniterGoalStateSuite) TestGoalStatesNoRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 	now := time.Now()
-	sInfo := status.StatusInfo{
-		Status:  status.Idle,
-		Message: "",
-		Since:   &now,
-	}
-	err = u.SetAgentStatus(sInfo)
-	c.Assert(err, jc.ErrorIsNil)
-}
 
-// TestGoalStatesSingleRelationDyingUnits tests dying units showing dying status in the GoalState result.
-func (s *uniterGoalStateSuite) TestGoalStatesSingleRelationDyingUnits(c *gc.C) {
-	mysqlUnit := s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.mysql,
-		Machine:     s.machine1,
-	})
+	// arrange: an applications with a principal units in 'waiting' workload status
+	unitName := coreunit.Name("wordpress/0")
+	appID := tc.Must(c, application.NewUUID)
 
-	err := s.addRelationEnterScope(c, mysqlUnit, "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
-
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-	}}
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: expected2UnitsMysql,
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":   expectedRelationStatus,
-							"wordpress/0": expectedUnitStatus,
-						},
-					},
-				},
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(appID, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), appID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			unitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
 			},
-		},
-	})
-	preventUnitDestroyRemove(c, mysqlUnit)
-	err = mysqlUnit.Destroy()
-	c.Assert(err, jc.ErrorIsNil)
+		}, nil)
 
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{
-		Results: []params.GoalStateResult{
-			{
-				Result: &params.GoalState{
-					Units: params.UnitsGoalState{
-						"mysql/0": expectedUnitStatus,
-						"mysql/1": params.GoalStateStatus{
-							Status: "dying",
-							Since:  &timestamp,
-						},
-					},
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":   expectedRelationStatus,
-							"wordpress/0": expectedUnitStatus,
-						},
-					},
-				},
-			},
-		},
-	})
-}
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{unitName}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), unitName).Return(life.Alive, nil)
 
-// TestGoalStatesCrossModelRelation tests remote relation application shows URL as key.
-func (s *uniterGoalStateSuite) TestGoalStatesCrossModelRelation(c *gc.C) {
-	err := s.addRelationEnterScope(c, s.mysqlUnit, "wordpress")
-	c.Assert(err, jc.ErrorIsNil)
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), appID).
+		Return([]relation.GoalStateRelationData{}, nil)
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-	}}
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{Results: []params.GoalStateResult{
-		{
-			Result: &params.GoalState{
-				Units: params.UnitsGoalState{
-					"mysql/0": expectedUnitStatus,
-				},
-				Relations: map[string]params.UnitsGoalState{
-					"server": {
-						"wordpress":   expectedRelationStatus,
-						"wordpress/0": expectedUnitStatus,
-					},
-				},
-			},
-		},
-	}})
-	_, err = s.State.AddRemoteApplication(state.AddRemoteApplicationParams{
-		Name:        "metrics-remote",
-		URL:         "ctrl1:admin/default.metrics",
-		SourceModel: coretesting.ModelTag,
-		Endpoints: []charm.Relation{{
-			Interface: "metrics",
-			Name:      "metrics",
-			Role:      charm.RoleProvider,
-			Scope:     charm.ScopeGlobal,
+	// act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
 		}},
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	eps, err := s.State.InferEndpoints("mysql", "metrics-remote")
-	c.Assert(err, jc.ErrorIsNil)
-	_, err = s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	testGoalStates(c, s.uniter, args, params.GoalStateResults{Results: []params.GoalStateResult{
-		{
+
+	// assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
 			Result: &params.GoalState{
 				Units: params.UnitsGoalState{
-					"mysql/0": expectedUnitStatus,
+					unitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+				},
+				Relations: map[string]params.UnitsGoalState{},
+			},
+		}},
+	})
+}
+
+func (s *uniterGoalStateSuite) TestGoalStatesPeerUnitsNotRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	now := time.Now()
+
+	// arrange: an application with two principal units in 'waiting' workload status
+	// with a peer relation between them
+	unitName := coreunit.Name("wordpress/0")
+	otherUnitName := coreunit.Name("wordpress/1")
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(appID, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), appID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			unitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+			otherUnitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{unitName, otherUnitName}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), otherUnitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), unitName).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), otherUnitName).Return(life.Alive, nil)
+
+	// arrange the peer relation
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), appID).
+		Return([]relation.GoalStateRelationData{{
+			EndpointIdentifiers: []corerelation.EndpointIdentifier{
+				{
+					ApplicationName: "wordpress",
+					EndpointName:    "wordpress-peer",
+					Role:            charm.RolePeer,
+				},
+			},
+			Status: corestatus.Joining,
+			Since:  &now,
+		}}, nil)
+
+	// act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	// assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
+			Result: &params.GoalState{
+				Units: params.UnitsGoalState{
+					unitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+					otherUnitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+				},
+				Relations: map[string]params.UnitsGoalState{},
+			},
+		}},
+	})
+}
+
+func (s *uniterGoalStateSuite) TestGoalStatesSingleRelation(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	now := time.Now()
+
+	// arrange: an application with a single principal unit in 'waiting' workload status
+	// with a 'joining' relation to another unit in 'waiting' workload status
+
+	unitName := coreunit.Name("wordpress/0")
+	otherUnitName := coreunit.Name("mysql/0")
+	appID := tc.Must(c, application.NewUUID)
+	otherAppID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(appID, nil)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "wordpress").Return(otherAppID, nil)
+	s.crossModelRelationService.EXPECT().IsRemoteApplicationConsumer(gomock.Any(), otherAppID).Return(false, nil)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "mysql").Return(otherAppID, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), appID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			unitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), otherAppID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			otherUnitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{unitName}, nil)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "mysql").
+		Return([]coreunit.Name{otherUnitName}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), otherUnitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), unitName).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), otherUnitName).Return(life.Alive, nil)
+
+	// arrange the relation
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), appID).
+		Return([]relation.GoalStateRelationData{{
+			EndpointIdentifiers: []corerelation.EndpointIdentifier{
+				{
+					ApplicationName: "wordpress",
+					EndpointName:    "db",
+					Role:            charm.RoleRequirer,
+				},
+				{
+					ApplicationName: "mysql",
+					EndpointName:    "db",
+					Role:            charm.RoleProvider,
+				},
+			},
+			Status: corestatus.Joining,
+			Since:  &now,
+		}}, nil)
+
+	// act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
+	})
+
+	// assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
+			Result: &params.GoalState{
+				Units: params.UnitsGoalState{
+					unitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
 				},
 				Relations: map[string]params.UnitsGoalState{
-					"server": {
-						"wordpress":   expectedRelationStatus,
-						"wordpress/0": expectedUnitStatus,
-					},
-					"metrics-client": {
-						"ctrl1:admin/default.metrics": expectedRelationStatus,
+					"db": {
+						"mysql": {
+							Status: corestatus.Joining.String(),
+							Since:  &now,
+						},
+						"mysql/0": {
+							Status: corestatus.Waiting.String(),
+							Since:  &now,
+						},
 					},
 				},
 			},
-		},
-	}})
+		}},
+	})
 }
 
-// TestGoalStatesMultipleRelations tests GoalStates with three
-// applications one application has two units and each unit is related
-// to a different application unit.
-func (s *uniterGoalStateSuite) TestGoalStatesMultipleRelations(c *gc.C) {
+func (s *uniterGoalStateSuite) TestGoalStatesDeadUnitsExcluded(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	now := time.Now()
 
-	// Add another wordpress unit on machine 1.
-	s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: s.wordpress,
-		Machine:     s.machine1,
+	// arrange: an application with a principal unit in 'waiting' workload status
+	// and a dead unit
+
+	unitName := coreunit.Name("wordpress/0")
+	deadUnitName := coreunit.Name("wordpress/1")
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(appID, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), appID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			unitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+			deadUnitName: {
+				Status: corestatus.Unknown,
+				Since:  &now,
+			},
+		}, nil)
+
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{unitName, deadUnitName}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), deadUnitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), unitName).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), deadUnitName).Return(life.Dead, nil)
+
+	// arrange the peer relation
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), appID).
+		Return([]relation.GoalStateRelationData{{
+			EndpointIdentifiers: []corerelation.EndpointIdentifier{
+				{
+					ApplicationName: "wordpress",
+					EndpointName:    "wordpress-peer",
+					Role:            charm.RolePeer,
+				},
+			},
+			Status: corestatus.Waiting,
+			Since:  &now,
+		}}, nil)
+
+	// act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
 	})
 
-	// And add another wordpress.
-	wordpress2 := s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "wordpress2",
-		Charm: s.wpCharm,
+	// assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
+			Result: &params.GoalState{
+				Units: params.UnitsGoalState{
+					unitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+				},
+				Relations: map[string]params.UnitsGoalState{},
+			},
+		}},
 	})
-	wordpressUnit2 := s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: wordpress2,
-		Machine:     s.machine1,
+}
+
+func (s *uniterGoalStateSuite) TestGoalStatesSingleRelationDyingUnits(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+	now := time.Now()
+
+	// arrange: an application with a principal unit in 'waiting' workload status
+	// and a dying unit
+
+	unitName := coreunit.Name("wordpress/0")
+	dyingUnitName := coreunit.Name("wordpress/1")
+	appID := tc.Must(c, application.NewUUID)
+
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), unitName).Return(appID, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), appID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			unitName: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+			dyingUnitName: {
+				Status: corestatus.Unknown,
+				Since:  &now,
+			},
+		}, nil)
+
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{unitName, dyingUnitName}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), unitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), dyingUnitName).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), unitName).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), dyingUnitName).Return(life.Dying, nil)
+
+	// arrange the peer relation
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), appID).
+		Return([]relation.GoalStateRelationData{{
+			EndpointIdentifiers: []corerelation.EndpointIdentifier{
+				{
+					ApplicationName: "wordpress",
+					EndpointName:    "wordpress-peer",
+					Role:            charm.RolePeer,
+				},
+			},
+			Status: corestatus.Waiting,
+			Since:  &now,
+		}}, nil)
+
+	// act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(unitName.String()).String(),
+		}},
 	})
 
-	mysqlCharm1 := s.Factory.MakeCharm(c, &factory.CharmParams{
-		Name: "mysql",
+	// assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
+			Result: &params.GoalState{
+				Units: params.UnitsGoalState{
+					unitName.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+					dyingUnitName.String(): params.GoalStateStatus{
+						Status: "dying",
+						Since:  &now,
+					},
+				},
+				Relations: map[string]params.UnitsGoalState{},
+			},
+		}},
 	})
-	mysql1 := s.Factory.MakeApplication(c, &factory.ApplicationParams{
-		Name:  "mysql1",
-		Charm: mysqlCharm1,
-	})
+}
 
-	mysqlUnit1 := s.Factory.MakeUnit(c, &factory.UnitParams{
-		Application: mysql1,
-		Machine:     s.machine2,
-	})
+func (s *uniterGoalStateSuite) TestGoalStatesMultipleRelations(c *tc.C) {
+	c.Skipf("goal states with multiple relations test not yet implemented")
 
-	err := s.addRelationEnterScope(c, s.wordpressUnit, "mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	defer s.setupMocks(c).Finish()
+	now := time.Now()
 
-	err = s.addRelationEnterScope(c, wordpressUnit2, "mysql")
-	c.Assert(err, jc.ErrorIsNil)
+	// arrange:
+	// - A 'wordpress' applications with two units
+	//   - So the wordpress application has a peer relation
+	// - Two 'mysql' applications, one with two units, and one with one unit
+	// - A 'logging' application with a single unit
+	// - Our wordpress application is related to both mysql applications
+	// - Our wordpress application is related to the logging application
 
-	err = s.addRelationEnterScope(c, s.mysqlUnit, "logging")
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.addRelationEnterScope(c, mysqlUnit1, "logging")
-	c.Assert(err, jc.ErrorIsNil)
+	wpUnit := coreunit.Name("wordpress/0")
+	otherWpUnit := coreunit.Name("wordpress/1")
+	wpAppID := tc.Must(c, application.NewUUID)
+	s.applicationService.EXPECT().GetApplicationUUIDByUnitName(gomock.Any(), wpUnit).Return(wpAppID, nil)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "wordpress").Return(wpAppID, nil).MinTimes(1)
+	s.crossModelRelationService.EXPECT().IsRemoteApplicationConsumer(gomock.Any(), wpAppID).Return(false, nil).MinTimes(1)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "wordpress").
+		Return([]coreunit.Name{wpUnit, otherWpUnit}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), wpUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), otherWpUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), wpUnit).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), otherWpUnit).Return(life.Alive, nil)
 
-	args := params.Entities{Entities: []params.Entity{
-		{Tag: "unit-mysql-0"},
-		{Tag: "unit-wordpress-0"},
-	}}
+	mysqlUnit := coreunit.Name("mysql/0")
+	otherMysqlUnit := coreunit.Name("mysql/1")
+	mysqlAppID := tc.Must(c, application.NewUUID)
+	otherAppMysqlUnit := coreunit.Name("other-mysql/0")
+	otherMysqlAppID := tc.Must(c, application.NewUUID)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "mysql").Return(mysqlAppID, nil)
+	//s.crossModelRelationService.EXPECT().IsRemoteApplicationConsumer(gomock.Any(), mysqlAppID).Return(false, nil)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "other-mysql").Return(otherMysqlAppID, nil)
+	//s.crossModelRelationService.EXPECT().IsRemoteApplicationConsumer(gomock.Any(), otherMysqlAppID).Return(false, nil)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "mysql").
+		Return([]coreunit.Name{mysqlUnit, otherMysqlUnit}, nil)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "other-mysql").
+		Return([]coreunit.Name{otherAppMysqlUnit}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), mysqlUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), otherMysqlUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), otherAppMysqlUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), mysqlUnit).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), otherMysqlUnit).Return(life.Alive, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), otherAppMysqlUnit).Return(life.Alive, nil)
 
-	expected := params.GoalStateResults{
-		Results: []params.GoalStateResult{
+	loggingUnit := coreunit.Name("logging/0")
+	loggingAppID := tc.Must(c, application.NewUUID)
+	s.applicationService.EXPECT().GetApplicationUUIDByName(gomock.Any(), "logging").Return(loggingAppID, nil)
+	//s.crossModelRelationService.EXPECT().IsRemoteApplicationConsumer(gomock.Any(), otherMysqlAppID).Return(false, nil)
+	s.applicationService.EXPECT().GetUnitNamesForApplication(gomock.Any(), "logging").
+		Return([]coreunit.Name{loggingUnit}, nil)
+	s.applicationService.EXPECT().GetUnitPrincipal(gomock.Any(), loggingUnit).Return("", false, nil)
+	s.applicationService.EXPECT().GetUnitLife(gomock.Any(), loggingUnit).Return(life.Alive, nil)
+
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), wpAppID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			wpUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+			otherWpUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), mysqlAppID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			mysqlUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+			otherMysqlUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), otherMysqlAppID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			otherAppMysqlUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+	s.statusService.EXPECT().GetUnitWorkloadStatusesForApplication(gomock.Any(), loggingAppID).
+		Return(map[coreunit.Name]corestatus.StatusInfo{
+			loggingUnit: {
+				Status: corestatus.Waiting,
+				Since:  &now,
+			},
+		}, nil)
+
+	// Arrange the relations
+	s.relationService.EXPECT().GetGoalStateRelationDataForApplication(gomock.Any(), wpAppID).
+		Return([]relation.GoalStateRelationData{
 			{
-				Result: &params.GoalState{
-					Units: expectedUnitMysql,
-					Relations: map[string]params.UnitsGoalState{
-						"server": {
-							"wordpress":    expectedRelationStatus,
-							"wordpress/0":  expectedUnitStatus,
-							"wordpress/1":  expectedUnitStatus,
-							"wordpress2":   expectedRelationStatus,
-							"wordpress2/0": expectedUnitStatus,
+				EndpointIdentifiers: []corerelation.EndpointIdentifier{
+					{
+						ApplicationName: "wordpress",
+						EndpointName:    "wordpress-peer",
+						Role:            charm.RolePeer,
+					},
+				},
+				Status: corestatus.Joining,
+				Since:  &now,
+			},
+			{
+				EndpointIdentifiers: []corerelation.EndpointIdentifier{
+					{
+						ApplicationName: "wordpress",
+						EndpointName:    "db",
+						Role:            charm.RoleRequirer,
+					},
+					{
+						ApplicationName: "mysql",
+						EndpointName:    "db",
+						Role:            charm.RoleProvider,
+					},
+				},
+				Status: corestatus.Joining,
+				Since:  &now,
+			}, {
+				EndpointIdentifiers: []corerelation.EndpointIdentifier{
+					{
+						ApplicationName: "wordpress",
+						EndpointName:    "db",
+						Role:            charm.RoleRequirer,
+					}, {
+						ApplicationName: "other-mysql",
+						EndpointName:    "db",
+						Role:            charm.RoleProvider,
+					},
+				},
+				Status: corestatus.Joining,
+				Since:  &now,
+			}, {
+				EndpointIdentifiers: []corerelation.EndpointIdentifier{
+					{
+						ApplicationName: "wordpress",
+						EndpointName:    "logging",
+						Role:            charm.RoleRequirer,
+					}, {
+						ApplicationName: "logging",
+						EndpointName:    "logging",
+						Role:            charm.RoleProvider,
+					},
+				},
+				Status: corestatus.Joining,
+				Since:  &now,
+			},
+		}, nil)
+
+	// Act:
+	result, err := s.uniter.GoalStates(c.Context(), params.Entities{
+		Entities: []params.Entity{{
+			Tag: names.NewUnitTag(wpUnit.String()).String(),
+		}},
+	})
+
+	// Assert:
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result, tc.DeepEquals, params.GoalStateResults{
+		Results: []params.GoalStateResult{{
+			Result: &params.GoalState{
+				Units: params.UnitsGoalState{
+					wpUnit.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+					otherWpUnit.String(): params.GoalStateStatus{
+						Status: corestatus.Waiting.String(),
+						Since:  &now,
+					},
+				},
+				Relations: map[string]params.UnitsGoalState{
+					"db": {
+						"mysql": params.GoalStateStatus{
+							Status: corestatus.Joining.String(),
+							Since:  &now,
 						},
-						"juju-info": {
-							"logging":   expectedRelationStatus,
-							"logging/0": expectedUnitStatus,
+						"mysql/0": params.GoalStateStatus{
+							Status: corestatus.Waiting.String(),
+							Since:  &now,
+						},
+						"mysql/1": params.GoalStateStatus{
+							Status: corestatus.Waiting.String(),
+							Since:  &now,
+						},
+						"other-mysql": params.GoalStateStatus{
+							Status: corestatus.Joining.String(),
+							Since:  &now,
+						},
+						"other-mysql/0": params.GoalStateStatus{
+							Status: corestatus.Waiting.String(),
+							Since:  &now,
+						},
+					},
+					"logging": {
+						"logging": params.GoalStateStatus{
+							Status: corestatus.Joining.String(),
+							Since:  &now,
+						},
+						"logging/0": params.GoalStateStatus{
+							Status: corestatus.Waiting.String(),
+							Since:  &now,
 						},
 					},
 				},
-			}, {
-				Error: apiservertesting.ErrUnauthorized,
 			},
-		},
+		}},
+	})
+}
+
+func (s *uniterGoalStateSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.applicationService = NewMockApplicationService(ctrl)
+	s.relationService = NewMockRelationService(ctrl)
+	s.statusService = NewMockStatusService(ctrl)
+	s.crossModelRelationService = NewMockCrossModelRelationService(ctrl)
+
+	authFunc := func(ctx context.Context) (common.AuthFunc, error) {
+		return func(tag names.Tag) bool {
+			return true
+		}, nil
 	}
 
-	testGoalStates(c, s.uniter, args, expected)
-}
-
-func (s *uniterGoalStateSuite) addRelationEnterScope(c *gc.C, unit1 *state.Unit, app2 string) error {
-	app1, err := unit1.Application()
-	c.Assert(err, jc.ErrorIsNil)
-
-	relation := s.addRelation(c, app1.Name(), app2)
-	relationUnit, err := relation.Unit(unit1)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = relationUnit.EnterScope(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	s.assertInScope(c, relationUnit, true)
-	return err
-}
-
-func (s *uniterGoalStateSuite) addRelation(c *gc.C, first, second string) *state.Relation {
-	eps, err := s.State.InferEndpoints(first, second)
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	return rel
-}
-
-func (s *uniterGoalStateSuite) assertInScope(c *gc.C, relUnit *state.RelationUnit, inScope bool) {
-	ok, err := relUnit.InScope()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(ok, gc.Equals, inScope)
-}
-
-// goalStates call uniter.GoalStates API and compares the output with the
-// expected result.
-func testGoalStates(c *gc.C, thisUniter *uniter.UniterAPI, args params.Entities, expected params.GoalStateResults) {
-	result, err := thisUniter.GoalStates(args)
-	c.Assert(err, jc.ErrorIsNil)
-	for i := range result.Results {
-		if result.Results[i].Error != nil {
-			break
-		}
-		setSinceToNil(c, result.Results[i].Result)
+	s.uniter = &UniterAPI{
+		applicationService:        s.applicationService,
+		relationService:           s.relationService,
+		statusService:             s.statusService,
+		crossModelRelationService: s.crossModelRelationService,
+		accessApplication:         authFunc,
+		accessUnit:                authFunc,
+		logger:                    loggertesting.WrapCheckLog(c),
 	}
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(result, jc.DeepEquals, expected)
-}
 
-// setSinceToNil will set the field `since` to nil in order to
-// avoid a time check which otherwise would be impossible to pass.
-func setSinceToNil(c *gc.C, goalState *params.GoalState) {
+	c.Cleanup(func() {
+		s.applicationService = nil
+		s.relationService = nil
+		s.statusService = nil
+		s.crossModelRelationService = nil
+		s.uniter = nil
+	})
 
-	for i, u := range goalState.Units {
-		c.Assert(u.Since, gc.NotNil)
-		u.Since = &timestamp
-		goalState.Units[i] = u
-	}
-	for endPoint, gs := range goalState.Relations {
-		for key, m := range gs {
-			c.Assert(m.Since, gc.NotNil)
-			m.Since = &timestamp
-			gs[key] = m
-		}
-		goalState.Relations[endPoint] = gs
-	}
+	return ctrl
 }

@@ -4,7 +4,7 @@
 package user
 
 import (
-	"github.com/juju/loggo"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.user")
+var logger = internallogger.GetLogger("juju.cmd.juju.user")

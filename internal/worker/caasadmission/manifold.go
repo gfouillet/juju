@@ -4,17 +4,21 @@
 package caasadmission
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 	admission "k8s.io/api/admissionregistration/v1"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/apiserver/apiserverhttp"
+	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/pki"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/worker/caasrbacmapper"
 	"github.com/juju/juju/internal/worker/muxhttpserver"
-	"github.com/juju/juju/pki"
 )
 
 // K8sBroker describes a Kubernetes broker interface this worker needs to
@@ -38,18 +42,11 @@ type K8sBroker interface {
 	// cleanup function that will destroy the webhook configuration from k8s
 	// when called and a subsequent error if there was a problem. If error is
 	// not nil then no other return values should be considered valid.
-	EnsureMutatingWebhookConfiguration(*admission.MutatingWebhookConfiguration) (func(), error)
+	EnsureMutatingWebhookConfiguration(context.Context, *admission.MutatingWebhookConfiguration) (func(), error)
 
 	// LabelVersion reports if the k8s broker requires legacy labels to be
 	// used for the broker model/namespace
 	LabelVersion() constants.LabelVersion
-}
-
-// Logger represents the methods used by the worker to log details
-type Logger interface {
-	Debugf(string, ...interface{})
-	Errorf(string, ...interface{})
-	Infof(string, ...interface{})
 }
 
 // ManifoldConfig describes the resources used by the admission worker
@@ -58,7 +55,7 @@ type ManifoldConfig struct {
 	AuthorityName    string
 	Authority        pki.Authority
 	BrokerName       string
-	Logger           Logger
+	Logger           logger.Logger
 	MuxName          string
 	RBACMapperName   string
 	ServerInfoName   string
@@ -90,38 +87,42 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 
 // Start is used to start the manifold an extract a worker from the supplied
 // configuration.
-func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error) {
+func (c ManifoldConfig) Start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := c.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var agent agent.Agent
-	if err := context.Get(c.AgentName, &agent); err != nil {
+	if err := getter.Get(c.AgentName, &agent); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var authority pki.Authority
-	if err := context.Get(c.AuthorityName, &authority); err != nil {
+	if err := getter.Get(c.AuthorityName, &authority); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var broker K8sBroker
-	if err := context.Get(c.BrokerName, &broker); err != nil {
+	var broker caas.Broker
+	if err := getter.Get(c.BrokerName, &broker); err != nil {
 		return nil, errors.Trace(err)
+	}
+	k8sBroker, ok := broker.(K8sBroker)
+	if !ok {
+		return nil, errors.Errorf("broker does not implement K8sBroker")
 	}
 
 	var rbacMapper caasrbacmapper.Mapper
-	if err := context.Get(c.RBACMapperName, &rbacMapper); err != nil {
+	if err := getter.Get(c.RBACMapperName, &rbacMapper); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var mux *apiserverhttp.Mux
-	if err := context.Get(c.MuxName, &mux); err != nil {
+	if err := getter.Get(c.MuxName, &mux); err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	var serverInfo muxhttpserver.ServerInfo
-	if err := context.Get(c.ServerInfoName, &serverInfo); err != nil {
+	if err := getter.Get(c.ServerInfoName, &serverInfo); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -134,10 +135,10 @@ func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error)
 	currentConfig := agent.CurrentConfig()
 	admissionPath := AdmissionPathForModel(currentConfig.Model().Id())
 	admissionCreator, err := NewAdmissionCreator(authority,
-		broker.Namespace(), broker.ModelName(),
-		broker.ModelUUID(), broker.ControllerUUID(),
-		broker.LabelVersion(),
-		broker.EnsureMutatingWebhookConfiguration,
+		k8sBroker.Namespace(), k8sBroker.ModelName(),
+		k8sBroker.ModelUUID(), k8sBroker.ControllerUUID(),
+		k8sBroker.LabelVersion(),
+		k8sBroker.EnsureMutatingWebhookConfiguration,
 		&admission.ServiceReference{
 			Name:      c.ServiceName,
 			Namespace: c.ServiceNamespace,
@@ -153,12 +154,12 @@ func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error)
 		c.Logger,
 		mux,
 		AdmissionPathForModel(currentConfig.Model().Id()),
-		broker.LabelVersion(),
+		k8sBroker.LabelVersion(),
 		admissionCreator,
 		rbacMapper,
 		currentConfig.Controller().Id(),
-		broker.ModelUUID(),
-		broker.ModelName(),
+		k8sBroker.ModelUUID(),
+		k8sBroker.ModelName(),
 	)
 }
 

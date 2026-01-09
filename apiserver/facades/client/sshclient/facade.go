@@ -4,39 +4,36 @@
 package sshclient
 
 import (
-	stdcontext "context"
+	"context"
 	"sort"
-	"strconv"
 
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/authentication"
+	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	k8scloud "github.com/juju/juju/caas/kubernetes/cloud"
-	"github.com/juju/juju/core/leadership"
+	"github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/permission"
+	"github.com/juju/juju/core/unit"
 	"github.com/juju/juju/core/virtualhostname"
-	"github.com/juju/juju/environs"
-	environscloudspec "github.com/juju/juju/environs/cloudspec"
-	"github.com/juju/juju/environs/context"
-	k8sprovider "github.com/juju/juju/internal/provider/kubernetes"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
-
-type newCaasBrokerFunc func(_ stdcontext.Context, args environs.OpenParams) (Broker, error)
 
 // Facade implements the API required by the sshclient worker.
 type Facade struct {
-	backend     Backend
-	authorizer  facade.Authorizer
-	callContext context.ProviderCallContext
+	authorizer facade.Authorizer
 
-	leadershipReader leadership.Reader
-	getBroker        newCaasBrokerFunc
+	applicationService   ApplicationService
+	machineService       MachineService
+	networkService       NetworkService
+	modelConfigService   ModelConfigService
+	modelProviderService ModelProviderService
+	modelTag             names.ModelTag
+	controllerTag        names.ControllerTag
 }
 
 // FacadeV5 provides the SSH Client API facade version 5
@@ -51,24 +48,33 @@ type FacadeV4 struct {
 }
 
 func internalFacade(
-	backend Backend, leadershipReader leadership.Reader, auth facade.Authorizer, callCtx context.ProviderCallContext,
-	getBroker newCaasBrokerFunc,
+	controllerTag names.ControllerTag,
+	modelTag names.ModelTag,
+	applicationService ApplicationService,
+	machineService MachineService,
+	networkService NetworkService,
+	modelConfigService ModelConfigService,
+	modelProviderService ModelProviderService,
+	auth facade.Authorizer,
 ) (*Facade, error) {
 	if !auth.AuthClient() {
 		return nil, apiservererrors.ErrPerm
 	}
 
 	return &Facade{
-		backend:          backend,
-		authorizer:       auth,
-		callContext:      callCtx,
-		leadershipReader: leadershipReader,
-		getBroker:        getBroker,
+		applicationService:   applicationService,
+		modelConfigService:   modelConfigService,
+		modelProviderService: modelProviderService,
+		machineService:       machineService,
+		networkService:       networkService,
+		controllerTag:        controllerTag,
+		modelTag:             modelTag,
+		authorizer:           auth,
 	}, nil
 }
 
-func (facade *Facade) checkIsModelAdmin() error {
-	err := facade.authorizer.HasPermission(permission.SuperuserAccess, facade.backend.ControllerTag())
+func (facade *Facade) checkIsModelAdmin(ctx context.Context) error {
+	err := facade.authorizer.HasPermission(ctx, permission.SuperuserAccess, facade.controllerTag)
 	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
 		return errors.Trace(err)
 	}
@@ -77,33 +83,18 @@ func (facade *Facade) checkIsModelAdmin() error {
 		return nil
 	}
 
-	return facade.authorizer.HasPermission(permission.AdminAccess, facade.backend.ModelTag())
-}
-
-func (facade *Facade) checkIsModelReader() error {
-	// Check if superuser, if it's not a missing perm error, the user may have
-	// a lower level of permission (Write, Read) for the model.
-	err := facade.authorizer.HasPermission(permission.SuperuserAccess, facade.backend.ControllerTag())
-	if err != nil && !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-		return errors.Trace(err)
-	}
-
-	if err == nil {
-		return nil
-	}
-
-	return facade.authorizer.HasPermission(permission.ReadAccess, facade.backend.ModelTag())
+	return facade.authorizer.HasPermission(ctx, permission.AdminAccess, facade.modelTag)
 }
 
 // VirtualHostname is not implemented in v4.
 func (f *FacadeV4) VirtualHostname(_, _, _ struct{}) {}
 
 // VirtualHostname returns the virtual hostname for the given entity.
-func (facade *Facade) VirtualHostname(arg params.VirtualHostnameTargetArg) (params.SSHAddressResult, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) VirtualHostname(ctx context.Context, arg params.VirtualHostnameTargetArg) (params.SSHAddressResult, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHAddressResult{}, errors.Trace(err)
 	}
-	modelUUID := facade.backend.ModelTag().Id()
+	modelUUID := facade.modelTag.Id()
 	virtualHostname, err := getVirtualHostnameForEntity(modelUUID, arg.Tag, arg.Container)
 	if err != nil {
 		return params.SSHAddressResult{
@@ -117,41 +108,43 @@ func (facade *Facade) VirtualHostname(arg params.VirtualHostnameTargetArg) (para
 
 // PublicAddress reports the preferred public network address for one
 // or more entities. Machines and units are supported.
-func (facade *Facade) PublicAddress(args params.Entities) (params.SSHAddressResults, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) PublicAddress(ctx context.Context, args params.Entities) (params.SSHAddressResults, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHAddressResults{}, errors.Trace(err)
 	}
 
-	getter := func(m SSHMachine) (network.SpaceAddress, error) { return m.PublicAddress() }
-	return facade.getAddressPerEntity(args, getter)
+	getter := func(ctx context.Context, machineUUID machine.UUID) (network.SpaceAddress, error) {
+		return facade.networkService.GetMachinePublicAddress(ctx, machineUUID)
+	}
+	return facade.getAddressPerEntity(ctx, args, getter)
 }
 
 // PrivateAddress reports the preferred private network address for one or
 // more entities. Machines and units are supported.
-func (facade *Facade) PrivateAddress(args params.Entities) (params.SSHAddressResults, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) PrivateAddress(ctx context.Context, args params.Entities) (params.SSHAddressResults, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHAddressResults{}, errors.Trace(err)
 	}
 
-	getter := func(m SSHMachine) (network.SpaceAddress, error) { return m.PrivateAddress() }
-	return facade.getAddressPerEntity(args, getter)
+	getter := func(ctx context.Context, machineUUID machine.UUID) (network.SpaceAddress, error) {
+		return facade.networkService.GetMachinePrivateAddress(ctx, machineUUID)
+	}
+	return facade.getAddressPerEntity(ctx, args, getter)
 }
 
 // AllAddresses reports all addresses that might have SSH listening for each
 // entity in args. The result is sorted with public addresses first.
 // Machines and units are supported as entity types.
-func (facade *Facade) AllAddresses(args params.Entities) (params.SSHAddressesResults, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) AllAddresses(ctx context.Context, args params.Entities) (params.SSHAddressesResults, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHAddressesResults{}, errors.Trace(err)
 	}
 
-	getter := func(m SSHMachine) ([]network.SpaceAddress, error) {
-		devicesAddresses, err := m.AllDeviceSpaceAddresses()
+	getter := func(ctx context.Context, machineUUID machine.UUID) ([]network.SpaceAddress, error) {
+		devicesAddresses, err := facade.networkService.GetMachineAddresses(ctx, machineUUID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		legacyAddresses := m.Addresses()
-		devicesAddresses = append(devicesAddresses, legacyAddresses...)
 
 		// Make the list unique
 		addressMap := make(map[string]bool)
@@ -167,51 +160,54 @@ func (facade *Facade) AllAddresses(args params.Entities) (params.SSHAddressesRes
 		return uniqueAddresses, nil
 	}
 
-	return facade.getAllEntityAddresses(args, getter)
+	return facade.getAllEntityAddresses(ctx, args, getter)
 }
 
-func (facade *Facade) getAllEntityAddresses(args params.Entities, getter func(SSHMachine) ([]network.SpaceAddress, error)) (
+func (facade *Facade) getAllEntityAddresses(ctx context.Context, args params.Entities,
+	getter func(context.Context, machine.UUID) ([]network.SpaceAddress, error)) (
 	params.SSHAddressesResults, error,
 ) {
 	out := params.SSHAddressesResults{
 		Results: make([]params.SSHAddressesResult, len(args.Entities)),
 	}
 	for i, entity := range args.Entities {
-		machine, err := facade.backend.GetMachineForEntity(entity.Tag)
+		machineUUID, err := facade.getMachineForEntity(ctx, entity.Tag)
 		if err != nil {
 			out.Results[i].Error = apiservererrors.ServerError(err)
-		} else {
-			addresses, err := getter(machine)
-			if err != nil {
-				out.Results[i].Error = apiservererrors.ServerError(err)
-				continue
-			}
+			continue
+		}
 
-			out.Results[i].Addresses = make([]string, len(addresses))
-			for j := range addresses {
-				out.Results[i].Addresses[j] = addresses[j].Value
-			}
+		addresses, err := getter(ctx, machineUUID)
+		if err != nil {
+			out.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		out.Results[i].Addresses = make([]string, len(addresses))
+		for j := range addresses {
+			out.Results[i].Addresses[j] = addresses[j].Value
 		}
 	}
 	return out, nil
 }
 
-func (facade *Facade) getAddressPerEntity(args params.Entities, addressGetter func(SSHMachine) (network.SpaceAddress, error)) (
+func (facade *Facade) getAddressPerEntity(ctx context.Context, args params.Entities,
+	addressGetter func(context.Context, machine.UUID) (network.SpaceAddress, error)) (
 	params.SSHAddressResults, error,
 ) {
 	out := params.SSHAddressResults{
 		Results: make([]params.SSHAddressResult, len(args.Entities)),
 	}
 
-	getter := func(m SSHMachine) ([]network.SpaceAddress, error) {
-		address, err := addressGetter(m)
+	getter := func(ctx context.Context, m machine.UUID) ([]network.SpaceAddress, error) {
+		address, err := addressGetter(ctx, m)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		return []network.SpaceAddress{address}, nil
 	}
 
-	fullResults, err := facade.getAllEntityAddresses(args, getter)
+	fullResults, err := facade.getAllEntityAddresses(ctx, args, getter)
 	if err != nil {
 		return params.SSHAddressResults{}, errors.Trace(err)
 	}
@@ -219,9 +215,12 @@ func (facade *Facade) getAddressPerEntity(args params.Entities, addressGetter fu
 	for i, result := range fullResults.Results {
 		if result.Error != nil {
 			out.Results[i].Error = result.Error
-		} else {
-			out.Results[i].Address = result.Addresses[0]
+			continue
+		} else if len(result.Addresses) == 0 {
+			continue
 		}
+
+		out.Results[i].Address = result.Addresses[0]
 	}
 
 	return out, nil
@@ -229,8 +228,8 @@ func (facade *Facade) getAddressPerEntity(args params.Entities, addressGetter fu
 
 // PublicKeys returns the public SSH hosts for one or more
 // entities. Machines and units are supported.
-func (facade *Facade) PublicKeys(args params.Entities) (params.SSHPublicKeysResults, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) PublicKeys(ctx context.Context, args params.Entities) (params.SSHPublicKeysResults, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHPublicKeysResults{}, errors.Trace(err)
 	}
 
@@ -238,28 +237,30 @@ func (facade *Facade) PublicKeys(args params.Entities) (params.SSHPublicKeysResu
 		Results: make([]params.SSHPublicKeysResult, len(args.Entities)),
 	}
 	for i, entity := range args.Entities {
-		machine, err := facade.backend.GetMachineForEntity(entity.Tag)
+		machineUUID, err := facade.getMachineForEntity(ctx, entity.Tag)
 		if err != nil {
 			out.Results[i].Error = apiservererrors.ServerError(err)
-		} else {
-			keys, err := facade.backend.GetSSHHostKeys(machine.MachineTag())
-			if err != nil {
-				out.Results[i].Error = apiservererrors.ServerError(err)
-			} else {
-				out.Results[i].PublicKeys = []string(keys)
-			}
+			continue
 		}
+
+		keys, err := facade.machineService.GetSSHHostKeys(ctx, machineUUID)
+		if err != nil {
+			out.Results[i].Error = apiservererrors.ServerError(err)
+			continue
+		}
+
+		out.Results[i].PublicKeys = keys
 	}
 	return out, nil
 }
 
 // Proxy returns whether SSH connections should be proxied through the
 // controller hosts for the model associated with the API connection.
-func (facade *Facade) Proxy() (params.SSHProxyResult, error) {
-	if err := facade.checkIsModelAdmin(); err != nil {
+func (facade *Facade) Proxy(ctx context.Context) (params.SSHProxyResult, error) {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return params.SSHProxyResult{}, errors.Trace(err)
 	}
-	config, err := facade.backend.ModelConfig()
+	config, err := facade.modelConfigService.ModelConfig(ctx)
 	if err != nil {
 		return params.SSHProxyResult{}, err
 	}
@@ -268,24 +269,14 @@ func (facade *Facade) Proxy() (params.SSHProxyResult, error) {
 
 // ModelCredentialForSSH returns a cloud spec for ssh purpose.
 // This facade call is only used for k8s model.
-func (facade *Facade) ModelCredentialForSSH() (params.CloudSpecResult, error) {
+func (facade *Facade) ModelCredentialForSSH(ctx context.Context) (params.CloudSpecResult, error) {
 	var result params.CloudSpecResult
 
-	if err := facade.checkIsModelAdmin(); err != nil {
+	if err := facade.checkIsModelAdmin(ctx); err != nil {
 		return result, err
 	}
 
-	model, err := facade.backend.Model()
-	if err != nil {
-		result.Error = apiservererrors.ServerError(err)
-		return result, nil
-	}
-	if model.Type() != state.ModelTypeCAAS {
-		result.Error = apiservererrors.ServerError(errors.NotSupportedf("facade ModelCredentialForSSH for non %q model", state.ModelTypeCAAS))
-		return result, nil
-	}
-
-	spec, err := facade.backend.CloudSpec()
+	spec, err := facade.modelProviderService.GetCloudSpecForSSH(ctx)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result, nil
@@ -294,102 +285,35 @@ func (facade *Facade) ModelCredentialForSSH() (params.CloudSpecResult, error) {
 		result.Error = apiservererrors.ServerError(errors.NotValidf("cloud spec %q has empty credential", spec.Name))
 		return result, nil
 	}
-
-	token, err := facade.getExecSecretToken(spec, model)
-	if err != nil {
-		result.Error = apiservererrors.ServerError(err)
-		return result, nil
-	}
-
-	cred, err := k8scloud.UpdateCredentialWithToken(*spec.Credential, token)
-	if err != nil {
-		result.Error = apiservererrors.ServerError(err)
-		return result, nil
-	}
-	result.Result = &params.CloudSpec{
-		Type:             spec.Type,
-		Name:             spec.Name,
-		Region:           spec.Region,
-		Endpoint:         spec.Endpoint,
-		IdentityEndpoint: spec.IdentityEndpoint,
-		StorageEndpoint:  spec.StorageEndpoint,
-		Credential: &params.CloudCredential{
-			AuthType:   string(cred.AuthType()),
-			Attributes: cred.Attributes(),
-		},
-		CACertificates:    spec.CACertificates,
-		SkipTLSVerify:     spec.SkipTLSVerify,
-		IsControllerCloud: spec.IsControllerCloud,
-	}
+	result.Result = common.CloudSpecToParams(spec)
 	return result, nil
 }
 
-func (facade *Facade) getExecSecretToken(cloudSpec environscloudspec.CloudSpec, model Model) (string, error) {
-	cfg, err := model.Config()
+func (facade *Facade) getMachineForEntity(ctx context.Context, tagString string) (machine.UUID, error) {
+	tag, err := names.ParseTag(tagString)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 
-	broker, err := facade.getBroker(stdcontext.TODO(), environs.OpenParams{
-		ControllerUUID: model.ControllerUUID(),
-		Cloud:          cloudSpec,
-		Config:         cfg,
-	})
-	if err != nil {
-		return "", errors.Annotate(err, "failed to open kubernetes client")
-	}
-	return broker.GetSecretToken(k8sprovider.ExecRBACResourceName)
-}
+	switch tag := tag.(type) {
+	case names.MachineTag:
+		machineName := machine.Name(tag.Id())
+		machineUUID, err := facade.machineService.GetMachineUUID(ctx, machineName)
+		return machineUUID, errors.Trace(err)
 
-// PublicHostKeyForTarget returns the virtual host key for the target host. In addition, it also returns
-// the jump server's host key.
-func (facade *Facade) PublicHostKeyForTarget(arg params.SSHVirtualHostKeyRequestArg) params.PublicSSHHostKeyResult {
-	var res params.PublicSSHHostKeyResult
-
-	// Check if superuser or at least model reader
-	if err := facade.checkIsModelReader(); err != nil {
-		res.Error = apiservererrors.ServerError(err)
-		return res
-	}
-
-	info, err := virtualhostname.Parse(arg.Hostname)
-	if err != nil {
-		res.Error = apiservererrors.ServerError(errors.Annotate(err, "failed to parse hostname"))
-		return res
-	}
-
-	var pubKey []byte
-	switch info.Target() {
-	case virtualhostname.MachineTarget:
-		machineId, _ := info.Machine()
-		pubKey, err = facade.backend.MachineVirtualPublicKey(strconv.Itoa(machineId))
-		if err != nil {
-			res.Error = apiservererrors.ServerError(errors.Annotate(err, "failed to get machine host key"))
-			return res
+	case names.UnitTag:
+		machineName, err := facade.applicationService.GetUnitMachineName(ctx, unit.Name(tag.Id()))
+		if errors.Is(err, applicationerrors.UnitNotFound) {
+			return "", errors.NotFoundf("unit %q", tag.Id())
+		} else if err != nil {
+			return "", errors.Trace(err)
 		}
-	case virtualhostname.ContainerTarget, virtualhostname.UnitTarget:
-		unitName, _ := info.Unit()
-		pubKey, err = facade.backend.UnitVirtualPublicKey(unitName)
-		if err != nil {
-			res.Error = apiservererrors.ServerError(errors.Annotate(err, "failed to get unit host key"))
-			return res
-		}
+		machineUUID, err := facade.machineService.GetMachineUUID(ctx, machineName)
+		return machineUUID, errors.Trace(err)
+
 	default:
-		res.Error = apiservererrors.ServerError(errors.NotValidf("unsupported target: %v", info.Target()))
-		return res
+		return "", errors.Errorf("unsupported entity: %q", tagString)
 	}
-
-	res.PublicKey = pubKey
-
-	jumpServerPubKey, err := facade.backend.JumpServerVirtualPublicKey()
-	if err != nil {
-		res.Error = apiservererrors.ServerError(errors.Annotate(err, "failed to get controller jumpserver host key"))
-		return res
-	}
-
-	res.JumpServerPublicKey = jumpServerPubKey
-
-	return res
 }
 
 // getVirtualHostnameForEntity returns the virtual hostname for the given entity. It parses the tag string to

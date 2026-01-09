@@ -4,26 +4,29 @@
 package block_test
 
 import (
+	"testing"
+
 	"github.com/juju/errors"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	basemocks "github.com/juju/juju/api/base/mocks"
 	"github.com/juju/juju/api/client/block"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
 )
 
 type blockMockSuite struct{}
 
-var _ = gc.Suite(&blockMockSuite{})
+func TestBlockMockSuite(t *testing.T) {
+	tc.Run(t, &blockMockSuite{})
+}
 
-func (s *blockMockSuite) TestSwitchBlockOn(c *gc.C) {
+func (s *blockMockSuite) TestSwitchBlockOn(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	blockType := state.DestroyBlock.String()
+	blockType := params.BlockDestroy
 	msg := "for test switch block on"
 
 	args := params.BlockSwitchParams{
@@ -33,14 +36,14 @@ func (s *blockMockSuite) TestSwitchBlockOn(c *gc.C) {
 	result := new(params.ErrorResult)
 	results := params.ErrorResult{Error: nil}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("SwitchBlockOn", args, result).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "SwitchBlockOn", args, result).SetArg(3, results).Return(nil)
 
 	blockClient := block.NewClientFromCaller(mockFacadeCaller)
-	err := blockClient.SwitchBlockOn(blockType, msg)
-	c.Assert(err, gc.IsNil)
+	err := blockClient.SwitchBlockOn(c.Context(), blockType, msg)
+	c.Assert(err, tc.IsNil)
 }
 
-func (s *blockMockSuite) TestSwitchBlockOnError(c *gc.C) {
+func (s *blockMockSuite) TestSwitchBlockOnError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -56,18 +59,18 @@ func (s *blockMockSuite) TestSwitchBlockOnError(c *gc.C) {
 	}
 
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("SwitchBlockOn", args, result).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "SwitchBlockOn", args, result).SetArg(3, results).Return(nil)
 
 	blockClient := block.NewClientFromCaller(mockFacadeCaller)
-	err := blockClient.SwitchBlockOn("", "")
-	c.Assert(errors.Cause(err), gc.ErrorMatches, errmsg)
+	err := blockClient.SwitchBlockOn(c.Context(), "", "")
+	c.Assert(errors.Cause(err), tc.ErrorMatches, errmsg)
 }
 
-func (s *blockMockSuite) TestSwitchBlockOff(c *gc.C) {
+func (s *blockMockSuite) TestSwitchBlockOff(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
-	blockType := state.DestroyBlock.String()
+	blockType := params.BlockDestroy
 
 	args := params.BlockSwitchParams{
 		Type:    blockType,
@@ -77,14 +80,14 @@ func (s *blockMockSuite) TestSwitchBlockOff(c *gc.C) {
 	results := params.ErrorResult{Error: nil}
 
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("SwitchBlockOff", args, result).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "SwitchBlockOff", args, result).SetArg(3, results).Return(nil)
 
 	blockClient := block.NewClientFromCaller(mockFacadeCaller)
-	err := blockClient.SwitchBlockOff(blockType)
-	c.Assert(err, gc.IsNil)
+	err := blockClient.SwitchBlockOff(c.Context(), blockType)
+	c.Assert(err, tc.IsNil)
 }
 
-func (s *blockMockSuite) TestSwitchBlockOffError(c *gc.C) {
+func (s *blockMockSuite) TestSwitchBlockOffError(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -99,21 +102,21 @@ func (s *blockMockSuite) TestSwitchBlockOffError(c *gc.C) {
 	}
 
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("SwitchBlockOff", args, result).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "SwitchBlockOff", args, result).SetArg(3, results).Return(nil)
 
 	blockClient := block.NewClientFromCaller(mockFacadeCaller)
-	err := blockClient.SwitchBlockOff("")
-	c.Assert(errors.Cause(err), gc.ErrorMatches, errmsg)
+	err := blockClient.SwitchBlockOff(c.Context(), "")
+	c.Assert(errors.Cause(err), tc.ErrorMatches, errmsg)
 }
 
-func (s *blockMockSuite) TestList(c *gc.C) {
+func (s *blockMockSuite) TestList(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	one := params.BlockResult{
 		Result: params.Block{
 			Id:      "-42",
-			Type:    state.DestroyBlock.String(),
+			Type:    params.BlockDestroy,
 			Message: "for test switch on",
 			Tag:     "some valid tag, right?",
 		},
@@ -128,9 +131,9 @@ func (s *blockMockSuite) TestList(c *gc.C) {
 		Results: []params.BlockResult{one, two},
 	}
 	mockFacadeCaller := basemocks.NewMockFacadeCaller(ctrl)
-	mockFacadeCaller.EXPECT().FacadeCall("List", nil, result).SetArg(2, results).Return(nil)
+	mockFacadeCaller.EXPECT().FacadeCall(gomock.Any(), "List", nil, result).SetArg(3, results).Return(nil)
 	blockClient := block.NewClientFromCaller(mockFacadeCaller)
-	found, err := blockClient.List()
-	c.Assert(errors.Cause(err), gc.ErrorMatches, errmsg)
-	c.Assert(found, gc.HasLen, 1)
+	found, err := blockClient.List(c.Context())
+	c.Assert(errors.Cause(err), tc.ErrorMatches, errmsg)
+	c.Assert(found, tc.HasLen, 1)
 }

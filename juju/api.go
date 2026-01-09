@@ -4,6 +4,7 @@
 package juju
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,16 +13,16 @@ import (
 	"strings"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/proxy"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/proxy"
 )
 
-var logger = loggo.GetLogger("juju.juju")
+var logger = internallogger.GetLogger("juju.juju")
 
 // NewAPIConnectionParams contains the parameters for creating a new Juju API
 // connection.
@@ -50,27 +51,30 @@ type NewAPIConnectionParams struct {
 	// will be scoped to the model with that UUID; otherwise it will be
 	// scoped to the controller.
 	ModelUUID string
+
+	// APIEndpoints, if set, override any other api endpoints.
+	APIEndpoints []string
 }
 
-var errNoAddresses = errors.New("no API addresses")
+var errNoAddresses = errors.ConstError("no API addresses")
 
 // IsNoAddressesError reports whether the error (from NewAPIConnection) is an
 // error due to the controller having no API addresses yet (likely because a
 // bootstrap is still in progress).
 func IsNoAddressesError(err error) bool {
-	return errors.Cause(err) == errNoAddresses
+	return errors.Is(err, errNoAddresses)
 }
 
 // NewAPIConnection returns an api.Connection to the specified Juju controller,
 // with specified account credentials, optionally scoped to the specified model
 // name.
-func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error) {
+func NewAPIConnection(ctx context.Context, args NewAPIConnectionParams) (_ api.Connection, err error) {
 	if args.OpenAPI == nil {
 		args.OpenAPI = api.Open
 	}
 	apiInfo, controller, err := connectionInfo(args)
 	if err != nil {
-		if errors.Is(errors.Cause(err), errors.NotValid) {
+		if errors.Is(err, errors.NotValid) {
 			err = errors.NewNotValid(nil, fmt.Sprintf("%v\n"+
 				"A user name may contain any case alpha-numeric characters, '+', '.', and '-'; \n"+
 				"'@' to specify an optional domain. The user name and domain must begin and end \n"+
@@ -87,11 +91,11 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 	// we'll update the entry correctly.
 	dnsCache := dnsCacheMap(controller.DNSCache).copy()
 	args.DialOpts.DNSCache = dnsCache
-	logger.Infof("connecting to API addresses: %v", apiInfo.Addrs)
-	st, err := args.OpenAPI(apiInfo, args.DialOpts)
+	logger.Infof(ctx, "connecting to API addresses: %v", apiInfo.Addrs)
+	st, err := args.OpenAPI(ctx, apiInfo, args.DialOpts)
 	if err != nil {
-		redirErr, ok := errors.Cause(err).(*api.RedirectError)
-		if !ok || !redirErr.FollowRedirect {
+		var redirErr *api.RedirectError
+		if !errors.As(err, &redirErr) || !redirErr.FollowRedirect {
 			return nil, errors.Trace(err)
 		}
 		// We've been told to connect to a different API server,
@@ -107,7 +111,7 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 			CACert:         redirErr.CACert,
 			ControllerUUID: apiInfo.ControllerUUID,
 		}
-		st, err = args.OpenAPI(apiInfo, args.DialOpts)
+		st, err = args.OpenAPI(ctx, apiInfo, args.DialOpts)
 		if err != nil {
 			return nil, errors.Annotatef(err, "cannot connect to redirected address")
 		}
@@ -160,7 +164,7 @@ func NewAPIConnection(args NewAPIConnectionParams) (_ api.Connection, err error)
 	}
 	err = updateControllerDetailsFromLogin(args.ControllerStore, args.ControllerName, controller, params)
 	if err != nil {
-		logger.Errorf("cannot cache API addresses: %v", err)
+		logger.Errorf(ctx, "cannot cache API addresses: %v", err)
 	}
 
 	return st, nil
@@ -183,6 +187,9 @@ func connectionInfo(args NewAPIConnectionParams) (*api.Info, *jujuclient.Control
 		Addrs:          controller.APIEndpoints,
 		CACert:         controller.CACert,
 		ControllerUUID: controller.ControllerUUID,
+	}
+	if len(args.APIEndpoints) > 0 {
+		apiInfo.Addrs = args.APIEndpoints
 	}
 	if controller.Proxy != nil {
 		apiInfo.Proxier = controller.Proxy.Proxier
@@ -341,9 +348,9 @@ func updateControllerDetailsFromLogin(
 	}
 	reordered, diffContents := addrsChanged(newDetails.APIEndpoints, details.APIEndpoints)
 	if diffContents {
-		logger.Infof("API endpoints changed from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
+		logger.Infof(context.TODO(), "API endpoints changed from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
 	} else if reordered {
-		logger.Tracef("API endpoints reordered from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
+		logger.Tracef(context.TODO(), "API endpoints reordered from %v to %v", details.APIEndpoints, newDetails.APIEndpoints)
 	}
 	err := store.UpdateController(controllerName, *newDetails)
 	return errors.Trace(err)

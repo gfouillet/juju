@@ -7,11 +7,11 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/version/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/environs/bootstrap"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/resources"
@@ -51,31 +51,30 @@ func (u *upgradeCAASControllerBridge) Namespace() string {
 	return u.namespaceFn()
 }
 
-func controllerUpgrade(appName string, vers version.Number, broker UpgradeCAASControllerBroker) error {
+func controllerUpgrade(ctx context.Context, appName string, vers semversion.Number, broker UpgradeCAASControllerBroker) error {
 	return upgradeOperatorOrControllerStatefulSet(
+		ctx,
 		appName,
-		appName,
-		false,
-		"",
 		"",
 		vers,
 		broker.LabelVersion(),
 		broker.Client().AppsV1().StatefulSets(broker.Namespace()))
 }
 
-func (k *kubernetesClient) upgradeController(vers version.Number) error {
+func (k *kubernetesClient) upgradeController(ctx context.Context, vers semversion.Number) error {
 	broker := &upgradeCAASControllerBridge{
 		clientFn:       k.client,
 		namespaceFn:    k.Namespace,
 		labelVersionFn: k.LabelVersion,
 	}
-	return controllerUpgrade(bootstrap.ControllerModelName, vers, broker)
+	return controllerUpgrade(ctx, bootstrap.ControllerModelName, vers, broker)
 }
 
 // InClusterCredentialUpgrade implements upgrades.upgradeKubernetesClusterCredential
 // used in the Juju 2.9.6 upgrade step
-func (k *kubernetesClient) InClusterCredentialUpgrade() error {
+func (k *kubernetesClient) InClusterCredentialUpgrade(ctx context.Context) error {
 	return inClusterCredentialUpgrade(
+		ctx,
 		k.client(),
 		k.extendedClient(),
 		k.LabelVersion(),
@@ -85,13 +84,13 @@ func (k *kubernetesClient) InClusterCredentialUpgrade() error {
 }
 
 func inClusterCredentialUpgrade(
+	ctx context.Context,
 	client kubernetes.Interface,
 	extendedClient clientset.Interface,
 	labelVersion constants.LabelVersion,
 	namespace string,
 	controllerUUID string,
 ) error {
-	ctx := context.TODO()
 	labels := providerutils.LabelsForApp("controller", labelVersion)
 
 	saName, cleanUps, err := ensureControllerServiceAccount(

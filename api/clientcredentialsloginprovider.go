@@ -9,15 +9,15 @@ import (
 	"os"
 
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
 
 	"github.com/juju/juju/api/base"
+	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/rpc/params"
 )
 
 var (
-	loginWithClientCredentialsAPICall = func(caller base.APICaller, request interface{}, response interface{}) error {
-		return caller.APICall("Admin", 4, "", "LoginWithClientCredentials", request, response)
+	loginWithClientCredentialsAPICall = func(ctx context.Context, caller base.APICaller, request interface{}, response interface{}) error {
+		return caller.APICall(ctx, "Admin", 4, "", "LoginWithClientCredentials", request, response)
 	}
 )
 
@@ -85,7 +85,7 @@ func (p *clientCredentialsLoginProvider) Login(ctx context.Context, caller base.
 		ClientSecret: p.clientSecret,
 	}
 
-	err := loginWithClientCredentialsAPICall(caller, request, &result)
+	err := loginWithClientCredentialsAPICall(ctx, caller, request, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

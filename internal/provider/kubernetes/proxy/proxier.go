@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"net/url"
 
@@ -12,7 +13,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/juju/juju/caas/kubernetes"
-	proxyerrors "github.com/juju/juju/proxy/errors"
+	proxyerrors "github.com/juju/juju/internal/proxy/errors"
 )
 
 type Proxier struct {
@@ -99,7 +100,7 @@ func (p *Proxier) Port() string {
 	return p.tunnel.LocalPort
 }
 
-func (p *Proxier) Start() (err error) {
+func (p *Proxier) Start(ctx context.Context) (err error) {
 	tunnel, err := kubernetes.NewTunnelForConfig(
 		&p.restConfig,
 		kubernetes.TunnelKindServices,
@@ -116,7 +117,7 @@ func (p *Proxier) Start() (err error) {
 	defer func() {
 		err = errors.Annotate(err, "connecting k8s proxy")
 	}()
-	err = p.tunnel.ForwardPort()
+	err = p.tunnel.ForwardPort(ctx)
 	urlErr, ok := errors.Cause(err).(*url.Error)
 	if !ok {
 		return errors.Trace(err)

@@ -10,21 +10,21 @@ import (
 	"net/http"
 
 	"github.com/juju/errors"
-	jujuhttp "github.com/juju/http/v2"
 
 	"github.com/juju/juju/api/base"
+	jujuhttp "github.com/juju/juju/internal/http"
 	"github.com/juju/juju/rpc/params"
 )
 
 var (
-	loginDeviceAPICall = func(caller base.APICaller, request interface{}, response interface{}) error {
-		return caller.APICall("Admin", 4, "", "LoginDevice", request, response)
+	loginDeviceAPICall = func(ctx context.Context, caller base.APICaller, request interface{}, response interface{}) error {
+		return caller.APICall(ctx, "Admin", 4, "", "LoginDevice", request, response)
 	}
-	getDeviceSessionTokenAPICall = func(caller base.APICaller, request interface{}, response interface{}) error {
-		return caller.APICall("Admin", 4, "", "GetDeviceSessionToken", request, response)
+	getDeviceSessionTokenAPICall = func(ctx context.Context, caller base.APICaller, request interface{}, response interface{}) error {
+		return caller.APICall(ctx, "Admin", 4, "", "GetDeviceSessionToken", request, response)
 	}
-	loginWithSessionTokenAPICall = func(caller base.APICaller, request interface{}, response interface{}) error {
-		return caller.APICall("Admin", 4, "", "LoginWithSessionToken", request, response)
+	loginWithSessionTokenAPICall = func(ctx context.Context, caller base.APICaller, request interface{}, response interface{}) error {
+		return caller.APICall(ctx, "Admin", 4, "", "LoginWithSessionToken", request, response)
 	}
 )
 
@@ -115,7 +115,7 @@ func (p *sessionTokenLoginProvider) initiateDeviceLogin(ctx context.Context, cal
 	// return a user code and the verification URL - verification URL will point to the
 	// configured IdP. These two will be presented to the user. User will have to
 	// open a browser, visit the verification URL, enter the user code and log in.
-	err := loginDeviceAPICall(caller, &loginRequest{}, &deviceResult)
+	err := loginDeviceAPICall(ctx, caller, &loginRequest{}, &deviceResult)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -131,7 +131,7 @@ func (p *sessionTokenLoginProvider) initiateDeviceLogin(ctx context.Context, cal
 	}
 	var sessionTokenResult loginResponse
 	// Then we make a blocking call to get the session token.
-	err = getDeviceSessionTokenAPICall(caller, &loginRequest{}, &sessionTokenResult)
+	err = getDeviceSessionTokenAPICall(ctx, caller, &loginRequest{}, &sessionTokenResult)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -150,7 +150,7 @@ func (p *sessionTokenLoginProvider) login(ctx context.Context, caller base.APICa
 		SessionToken: p.sessionToken,
 	}
 
-	err := loginWithSessionTokenAPICall(caller, request, &result)
+	err := loginWithSessionTokenAPICall(ctx, caller, request, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

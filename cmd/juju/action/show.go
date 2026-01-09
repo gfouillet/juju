@@ -6,13 +6,13 @@ package action
 import (
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type showCommand struct {
@@ -70,13 +70,13 @@ func (c *showCommand) Info() *cmd.Info {
 }
 
 func (c *showCommand) Run(ctx *cmd.Context) error {
-	api, err := c.NewActionAPIClient()
+	api, err := c.NewActionAPIClient(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
-	actions, err := api.ApplicationCharmActions(c.appName)
+	actions, err := api.ApplicationCharmActions(ctx, c.appName)
 	if err != nil {
 		return err
 	}

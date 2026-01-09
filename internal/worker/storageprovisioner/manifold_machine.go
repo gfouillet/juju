@@ -4,32 +4,33 @@
 package storageprovisioner
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/agent"
+	"github.com/juju/juju/agent/engine"
 	"github.com/juju/juju/api/agent/storageprovisioner"
 	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
-	"github.com/juju/juju/internal/worker/common"
-	"github.com/juju/juju/storage/provider"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/storage/provider"
 )
 
 // MachineManifoldConfig defines a storage provisioner's configuration and dependencies.
 type MachineManifoldConfig struct {
-	AgentName                    string
-	APICallerName                string
-	Clock                        clock.Clock
-	Logger                       Logger
-	NewCredentialValidatorFacade func(base.APICaller) (common.CredentialAPI, error)
+	AgentName     string
+	APICallerName string
+	Clock         clock.Clock
+	Logger        logger.Logger
 }
 
-func (config MachineManifoldConfig) newWorker(a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
+func (config MachineManifoldConfig) newWorker(_ context.Context, a agent.Agent, apiCaller base.APICaller) (worker.Worker, error) {
 	if config.Clock == nil {
 		return nil, errors.NotValidf("missing Clock")
 	}
@@ -37,7 +38,7 @@ func (config MachineManifoldConfig) newWorker(a agent.Agent, apiCaller base.APIC
 		return nil, errors.NotValidf("missing Logger")
 	}
 	cfg := a.CurrentConfig()
-	api, err := storageprovisioner.NewState(apiCaller)
+	api, err := storageprovisioner.NewClient(apiCaller)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -47,24 +48,24 @@ func (config MachineManifoldConfig) newWorker(a agent.Agent, apiCaller base.APIC
 		return nil, errors.Errorf("this manifold may only be used inside a machine agent")
 	}
 
-	credentialAPI, err := config.NewCredentialValidatorFacade(apiCaller)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	storageDir := filepath.Join(cfg.DataDir(), "storage")
 	w, err := NewStorageProvisioner(Config{
-		Scope:                tag,
-		StorageDir:           storageDir,
-		Volumes:              api,
-		Filesystems:          api,
-		Life:                 api,
-		Registry:             provider.CommonStorageProviders(),
-		Machines:             api,
-		Status:               api,
-		Clock:                config.Clock,
-		Logger:               config.Logger,
-		CloudCallContextFunc: common.NewCloudCallContextFunc(credentialAPI),
+		Scope:       tag,
+		StorageDir:  storageDir,
+		Volumes:     api,
+		Filesystems: api,
+		Life:        api,
+		Registry: storage.StaticProviderRegistry{
+			Providers: map[storage.ProviderType]storage.Provider{
+				provider.LoopProviderType:   provider.NewLoopProvider(provider.LogAndExec),
+				provider.RootfsProviderType: provider.NewRootfsProvider(provider.LogAndExec),
+				provider.TmpfsProviderType:  provider.NewTmpfsProvider(provider.LogAndExec),
+			},
+		},
+		Machines: api,
+		Status:   api,
+		Clock:    config.Clock,
+		Logger:   config.Logger,
 	})
 	if err != nil {
 		return nil, errors.Trace(err)

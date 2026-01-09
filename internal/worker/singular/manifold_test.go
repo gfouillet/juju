@@ -1,227 +1,166 @@
 // Copyright 2016 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package singular_test
+package singular
 
 import (
+	"context"
+	"testing"
 	"time"
 
-	"github.com/juju/clock/testclock"
+	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	dt "github.com/juju/worker/v3/dependency/testing"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+	dependencytesting "github.com/juju/worker/v4/dependency/testing"
+	"github.com/juju/worker/v4/workertest"
+	"go.uber.org/goleak"
+	gomock "go.uber.org/mock/gomock"
+	"gopkg.in/tomb.v2"
 
-	"github.com/juju/juju/api/base"
-	"github.com/juju/juju/cmd/jujud/agent/engine"
-	"github.com/juju/juju/internal/worker/singular"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type ManifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 
-	config singular.ManifoldConfig
+	agent       *MockAgent
+	agentConfig *MockConfig
+	manager     *MockManager
+
+	modelTag names.ModelTag
 }
 
-var _ = gc.Suite(&ManifoldSuite{})
+func TestManifoldSuite(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	tc.Run(t, &ManifoldSuite{})
+}
 
-func (s *ManifoldSuite) SetUpTest(c *gc.C) {
+func (s *ManifoldSuite) SetUpTest(c *tc.C) {
 	s.IsolationSuite.SetUpTest(c)
 
-	s.config = singular.ManifoldConfig{
-		Clock:         testclock.NewClock(time.Now()),
-		APICallerName: "api-caller",
-		Duration:      time.Minute,
-		NewFacade: func(base.APICaller, names.Tag, names.Tag) (singular.Facade, error) {
-			return nil, errors.NotImplementedf("NewFacade")
+	s.modelTag = names.NewModelTag(uuid.MustNewUUID().String())
+}
+
+func (s *ManifoldSuite) TestValidate(c *tc.C) {
+	config := s.newConfig()
+	c.Assert(config.Validate(), tc.ErrorIsNil)
+
+	config = s.newConfig()
+	config.AgentName = ""
+	c.Assert(config.Validate(), tc.ErrorIs, errors.NotValid)
+
+	config = s.newConfig()
+	config.LeaseManagerName = ""
+	c.Assert(config.Validate(), tc.ErrorIs, errors.NotValid)
+
+	config = s.newConfig()
+	config.Clock = nil
+	c.Assert(config.Validate(), tc.ErrorIs, errors.NotValid)
+
+	config = s.newConfig()
+	config.NewWorker = nil
+	c.Assert(config.Validate(), tc.ErrorIs, errors.NotValid)
+
+	config = s.newConfig()
+	config.Claimant = names.NewUserTag("bob")
+	c.Assert(config.Validate(), tc.ErrorIs, errors.NotValid)
+}
+
+func (s *ManifoldSuite) newConfig() ManifoldConfig {
+	return ManifoldConfig{
+		AgentName:        "agent",
+		LeaseManagerName: "lease-manager",
+		Clock:            clock.WallClock,
+		Duration:         time.Minute,
+		Entity:           names.NewModelTag("model-123"),
+		Claimant:         names.NewMachineTag("123"),
+		NewWorker: func(ctx context.Context, config FlagConfig) (worker.Worker, error) {
+			return newStubWorker(), nil
 		},
-		NewWorker: func(config singular.FlagConfig) (worker.Worker, error) {
-			return nil, errors.NotImplementedf("NewWorker")
+	}
+}
+
+func (s *ManifoldSuite) newGetter() dependency.Getter {
+	resources := map[string]any{
+		"agent":         s.agent,
+		"lease-manager": s.manager,
+	}
+	return dependencytesting.StubGetter(resources)
+}
+
+var expectedInputs = []string{"agent", "lease-manager"}
+
+func (s *ManifoldSuite) TestInputs(c *tc.C) {
+	c.Assert(Manifold(s.newConfig()).Inputs, tc.SameContents, expectedInputs)
+}
+
+func (s *ManifoldSuite) TestStart(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.expectAgentConfig(c)
+
+	w, err := Manifold(s.newConfig()).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIsNil)
+	workertest.CleanKill(c, w)
+}
+
+func (s *ManifoldSuite) TestWorkerBounceOnStart(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.expectAgentConfig(c)
+
+	config := ManifoldConfig{
+		AgentName:        "agent",
+		LeaseManagerName: "lease-manager",
+		Clock:            clock.WallClock,
+		Duration:         time.Minute,
+		Entity:           names.NewModelTag("model-123"),
+		Claimant:         names.NewMachineTag("123"),
+		NewWorker: func(ctx context.Context, config FlagConfig) (worker.Worker, error) {
+			return nil, ErrRefresh
 		},
 	}
+
+	_, err := Manifold(config).Start(c.Context(), s.newGetter())
+	c.Assert(err, tc.ErrorIs, dependency.ErrBounce)
 }
 
-func (s *ManifoldSuite) TestValidate(c *gc.C) {
-	c.Check(s.config.Validate(), jc.ErrorIsNil)
+func (s *ManifoldSuite) expectAgentConfig(c *tc.C) {
+	s.agentConfig.EXPECT().Model().Return(s.modelTag)
+	s.agent.EXPECT().CurrentConfig().Return(s.agentConfig)
 }
 
-func (s *ManifoldSuite) TestValidateMissingClock(c *gc.C) {
-	s.config.Clock = nil
-	err := s.config.Validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err.Error(), gc.Equals, "nil Clock not valid")
+func (s *ManifoldSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.agent = NewMockAgent(ctrl)
+	s.agentConfig = NewMockConfig(ctrl)
+	s.manager = NewMockManager(ctrl)
+
+	return ctrl
 }
 
-func (s *ManifoldSuite) TestValidateMissingAPICallerName(c *gc.C) {
-	s.config.APICallerName = ""
-	err := s.config.Validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err.Error(), gc.Equals, "missing APICallerName not valid")
+type stubWorker struct {
+	tomb.Tomb
 }
 
-func (s *ManifoldSuite) TestValidateMissingNewFacade(c *gc.C) {
-	s.config.NewFacade = nil
-	err := s.config.Validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err.Error(), gc.Equals, "nil NewFacade not valid")
-}
-
-func (s *ManifoldSuite) TestValidateMissingNewWorker(c *gc.C) {
-	s.config.NewWorker = nil
-	err := s.config.Validate()
-	c.Check(err, jc.Satisfies, errors.IsNotValid)
-	c.Check(err.Error(), gc.Equals, "nil NewWorker not valid")
-}
-
-func (s *ManifoldSuite) TestInputs(c *gc.C) {
-	manifold := singular.Manifold(singular.ManifoldConfig{
-		APICallerName: "kim",
+func newStubWorker() *stubWorker {
+	w := &stubWorker{}
+	w.Tomb.Go(func() error {
+		<-w.Tomb.Dying()
+		return tomb.ErrDying
 	})
-	expectInputs := []string{"kim"}
-	c.Check(manifold.Inputs, jc.DeepEquals, expectInputs)
+	return w
 }
 
-func (s *ManifoldSuite) TestOutputBadWorker(c *gc.C) {
-	manifold := singular.Manifold(singular.ManifoldConfig{})
-	var out engine.Flag
-	err := manifold.Output(&fakeWorker{}, &out)
-	c.Check(err, gc.ErrorMatches, `expected in to implement Flag; got a .*`)
-	c.Check(out, gc.IsNil)
+func (w *stubWorker) Kill() {
+	w.Tomb.Kill(nil)
 }
 
-func (s *ManifoldSuite) TestOutputBadResult(c *gc.C) {
-	manifold := singular.Manifold(singular.ManifoldConfig{})
-	fix := newFixture(c)
-	fix.Run(c, func(flag *singular.FlagWorker, _ *testclock.Clock, _ func()) {
-		var out interface{}
-		err := manifold.Output(flag, &out)
-		c.Check(err, gc.ErrorMatches, `expected out to be a \*Flag; got a .*`)
-		c.Check(out, gc.IsNil)
-	})
-}
-
-func (s *ManifoldSuite) TestOutputSuccess(c *gc.C) {
-	manifold := singular.Manifold(singular.ManifoldConfig{})
-	fix := newFixture(c)
-	fix.Run(c, func(flag *singular.FlagWorker, _ *testclock.Clock, _ func()) {
-		var out engine.Flag
-		err := manifold.Output(flag, &out)
-		c.Check(err, jc.ErrorIsNil)
-		c.Check(out, gc.Equals, flag)
-	})
-}
-
-func (s *ManifoldSuite) TestStartMissingClock(c *gc.C) {
-	manifold := singular.Manifold(singular.ManifoldConfig{
-		APICallerName: "api-caller",
-	})
-	context := dt.StubContext(nil, map[string]interface{}{})
-
-	worker, err := manifold.Start(context)
-	c.Check(errors.Cause(err), gc.ErrorMatches, `nil Clock not valid`)
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *ManifoldSuite) TestStartMissingAPICaller(c *gc.C) {
-	manifold := singular.Manifold(s.config)
-	context := dt.StubContext(nil, map[string]interface{}{
-		"api-caller": dependency.ErrMissing,
-	})
-
-	worker, err := manifold.Start(context)
-	c.Check(errors.Cause(err), gc.Equals, dependency.ErrMissing)
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *ManifoldSuite) TestStartNewFacadeError(c *gc.C) {
-	expectAPICaller := &fakeAPICaller{}
-	s.config.Claimant = names.NewMachineTag("123")
-	s.config.Entity = coretesting.ModelTag
-	s.config.NewFacade = func(apiCaller base.APICaller, claimant names.Tag, entity names.Tag) (singular.Facade, error) {
-		c.Check(apiCaller, gc.Equals, expectAPICaller)
-		c.Check(claimant.String(), gc.Equals, "machine-123")
-		c.Check(entity, gc.Equals, coretesting.ModelTag)
-		return nil, errors.New("grark plop")
-	}
-	manifold := singular.Manifold(s.config)
-	context := dt.StubContext(nil, map[string]interface{}{
-		"api-caller": expectAPICaller,
-	})
-
-	worker, err := manifold.Start(context)
-	c.Check(err, gc.ErrorMatches, "grark plop")
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *ManifoldSuite) TestStartNewWorkerError(c *gc.C) {
-	expectFacade := &fakeFacade{}
-	s.config.NewFacade = func(base.APICaller, names.Tag, names.Tag) (singular.Facade, error) {
-		return expectFacade, nil
-	}
-	s.config.NewWorker = func(config singular.FlagConfig) (worker.Worker, error) {
-		c.Check(config.Facade, gc.Equals, expectFacade)
-		err := config.Validate()
-		c.Check(err, jc.ErrorIsNil)
-		return nil, errors.New("blomp tik")
-	}
-	manifold := singular.Manifold(s.config)
-	context := dt.StubContext(nil, map[string]interface{}{
-		"api-caller": &fakeAPICaller{},
-	})
-
-	worker, err := manifold.Start(context)
-	c.Check(err, gc.ErrorMatches, "blomp tik")
-	c.Check(worker, gc.IsNil)
-}
-
-func (s *ManifoldSuite) TestStartSuccess(c *gc.C) {
-	var stub testing.Stub
-	expectWorker := newStubWorker(&stub)
-	s.config.NewFacade = func(base.APICaller, names.Tag, names.Tag) (singular.Facade, error) {
-		return &fakeFacade{}, nil
-	}
-	s.config.NewWorker = func(_ singular.FlagConfig) (worker.Worker, error) {
-		return expectWorker, nil
-	}
-	manifold := singular.Manifold(s.config)
-	context := dt.StubContext(nil, map[string]interface{}{
-		"api-caller": &fakeAPICaller{},
-	})
-
-	worker, err := manifold.Start(context)
-	c.Check(err, jc.ErrorIsNil)
-
-	var out engine.Flag
-	err = manifold.Output(worker, &out)
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(out.Check(), jc.IsTrue)
-
-	c.Check(worker.Wait(), jc.ErrorIsNil)
-	stub.CheckCallNames(c, "Check", "Wait")
-}
-
-func (s *ManifoldSuite) TestWorkerBouncesOnRefresh(c *gc.C) {
-	var stub testing.Stub
-	stub.SetErrors(singular.ErrRefresh)
-	errWorker := newStubWorker(&stub)
-	s.config.NewFacade = func(base.APICaller, names.Tag, names.Tag) (singular.Facade, error) {
-		return &fakeFacade{}, nil
-	}
-	s.config.NewWorker = func(_ singular.FlagConfig) (worker.Worker, error) {
-		return errWorker, nil
-	}
-
-	manifold := singular.Manifold(s.config)
-	context := dt.StubContext(nil, map[string]interface{}{
-		"api-caller": &fakeAPICaller{},
-	})
-
-	worker, err := manifold.Start(context)
-	c.Check(err, jc.ErrorIsNil)
-	c.Check(worker.Wait(), gc.Equals, dependency.ErrBounce)
+func (w *stubWorker) Wait() error {
+	return w.Tomb.Wait()
 }

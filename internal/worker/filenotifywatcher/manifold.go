@@ -4,23 +4,16 @@
 package filenotifywatcher
 
 import (
+	"context"
+
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/worker/common"
 )
-
-// Logger represents the logging methods called.
-type Logger interface {
-	Errorf(message string, args ...interface{})
-	Warningf(message string, args ...interface{})
-	Infof(message string, args ...interface{})
-	Debugf(message string, args ...interface{})
-	Tracef(message string, args ...interface{})
-	IsTraceEnabled() bool
-}
 
 // WatcherFn is a function that returns a new Watcher.
 type WatcherFn = func(string, ...Option) (FileWatcher, error)
@@ -29,7 +22,7 @@ type WatcherFn = func(string, ...Option) (FileWatcher, error)
 // depend.
 type ManifoldConfig struct {
 	Clock             clock.Clock
-	Logger            Logger
+	Logger            logger.Logger
 	NewWatcher        WatcherFn
 	NewINotifyWatcher func() (INotifyWatcher, error)
 }
@@ -56,7 +49,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{},
 		Output: fileNotifyWatcherOutput,
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			if err := config.Validate(); err != nil {
 				return nil, errors.Trace(err)
 			}

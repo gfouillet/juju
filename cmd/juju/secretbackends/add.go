@@ -4,29 +4,30 @@
 package secretbackends
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/utils/v3/keyvalues"
+	"github.com/juju/utils/v4/keyvalues"
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/api/client/secretbackends"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/secrets"
-	"github.com/juju/juju/secrets/provider"
-	_ "github.com/juju/juju/secrets/provider/all"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/secrets/provider"
+	_ "github.com/juju/juju/internal/secrets/provider/all"
 )
 
 type addSecretBackendCommand struct {
 	modelcmd.ControllerCommandBase
 
-	AddSecretBackendsAPIFunc func() (AddSecretBackendsAPI, error)
+	AddSecretBackendsAPIFunc func(ctx context.Context) (AddSecretBackendsAPI, error)
 
 	Name        string
 	BackendType string
@@ -59,7 +60,7 @@ const addSecretBackendsExamples = `
 
 // AddSecretBackendsAPI is the secrets client API.
 type AddSecretBackendsAPI interface {
-	AddSecretBackend(backend secretbackends.CreateSecretBackend) error
+	AddSecretBackend(ctx context.Context, backend secretbackends.CreateSecretBackend) error
 	Close() error
 }
 
@@ -71,8 +72,8 @@ func NewAddSecretBackendCommand() cmd.Command {
 	return modelcmd.WrapController(c)
 }
 
-func (c *addSecretBackendCommand) secretBackendsAPI() (AddSecretBackendsAPI, error) {
-	root, err := c.NewAPIRoot()
+func (c *addSecretBackendCommand) secretBackendsAPI(ctx context.Context) (AddSecretBackendsAPI, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -225,12 +226,12 @@ func (c *addSecretBackendCommand) Run(ctxt *cmd.Context) error {
 		TokenRotateInterval: tokenRotateInterval,
 		Config:              attrs,
 	}
-	api, err := c.AddSecretBackendsAPIFunc()
+	api, err := c.AddSecretBackendsAPIFunc(ctxt)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer api.Close()
 
-	err = api.AddSecretBackend(backend)
+	err = api.AddSecretBackend(ctxt, backend)
 	return errors.Trace(err)
 }

@@ -4,12 +4,14 @@
 package actions_test
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"context"
+	"testing"
 
+	"github.com/juju/errors"
+	"github.com/juju/tc"
+
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/common/charmrunner"
 	"github.com/juju/juju/internal/worker/uniter/actions"
 	"github.com/juju/juju/internal/worker/uniter/hook"
@@ -19,25 +21,27 @@ import (
 )
 
 type actionsSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&actionsSuite{})
-
-func (s *actionsSuite) newResolver() resolver.Resolver {
-	return actions.NewResolver(loggo.GetLogger("test"))
+func TestActionsSuite(t *testing.T) {
+	tc.Run(t, &actionsSuite{})
 }
 
-func (s *actionsSuite) TestNoActions(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) newResolver(c *tc.C) resolver.Resolver {
+	return actions.NewResolver(loggertesting.WrapCheckLog(c))
+}
+
+func (s *actionsSuite) TestNoActions(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	localState := resolver.LocalState{}
 	remoteState := remotestate.Snapshot{}
-	_, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, gc.DeepEquals, resolver.ErrNoOperation)
+	_, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.DeepEquals, resolver.ErrNoOperation)
 }
 
-func (s *actionsSuite) TestActionStateKindContinue(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestActionStateKindContinue(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	localState := resolver.LocalState{
 		State: operation.State{
 			Kind: operation.Continue,
@@ -46,13 +50,13 @@ func (s *actionsSuite) TestActionStateKindContinue(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{"actionA", "actionB"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockOp("actionA"))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockOp("actionA"))
 }
 
-func (s *actionsSuite) TestActionRunHook(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestActionRunHook(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	localState := resolver.LocalState{
 		State: operation.State{
 			Kind: operation.RunHook,
@@ -62,13 +66,13 @@ func (s *actionsSuite) TestActionRunHook(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{"actionA", "actionB"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockOp("actionA"))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockOp("actionA"))
 }
 
-func (s *actionsSuite) TestNextAction(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestNextAction(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	localState := resolver.LocalState{
 		State: operation.State{
 			Kind: operation.Continue,
@@ -78,30 +82,13 @@ func (s *actionsSuite) TestNextAction(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{"actionA", "actionB"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockOp("actionB"))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockOp("actionB"))
 }
 
-func (s *actionsSuite) TestNextActionBlocked(c *gc.C) {
-	actionResolver := s.newResolver()
-	localState := resolver.LocalState{
-		State: operation.State{
-			Kind: operation.Continue,
-		},
-		CompletedActions: map[string]struct{}{"actionA": {}},
-	}
-	remoteState := remotestate.Snapshot{
-		ActionsPending: []string{"actionA", "actionB"},
-		ActionsBlocked: true,
-	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, gc.DeepEquals, resolver.ErrNoOperation)
-	c.Assert(op, gc.IsNil)
-}
-
-func (s *actionsSuite) TestNextActionNotAvailable(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestNextActionNotAvailable(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	localState := resolver.LocalState{
 		State: operation.State{
 			Kind: operation.Continue,
@@ -111,72 +98,13 @@ func (s *actionsSuite) TestNextActionNotAvailable(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{"actionA", "actionB"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{err: charmrunner.ErrActionNotAvailable})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockFailAction("actionB"))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{err: charmrunner.ErrActionNotAvailable})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockFailAction("actionB"))
 }
 
-func (s *actionsSuite) TestNextActionBlockedRemoteInit(c *gc.C) {
-	actionResolver := s.newResolver()
-	localState := resolver.LocalState{
-		State: operation.State{
-			Kind: operation.Continue,
-		},
-		CompletedActions:    map[string]struct{}{"actionA": {}},
-		OutdatedRemoteCharm: true,
-	}
-	remoteState := remotestate.Snapshot{
-		ActionsPending: []string{"actionA", "actionB"},
-		ActionsBlocked: false,
-	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, gc.DeepEquals, resolver.ErrNoOperation)
-	c.Assert(op, gc.IsNil)
-}
-
-func (s *actionsSuite) TestNextActionBlockedRemoteInitInProgress(c *gc.C) {
-	actionResolver := s.newResolver()
-	actionId := "actionB"
-	localState := resolver.LocalState{
-		State: operation.State{
-			Kind:     operation.RunAction,
-			ActionId: &actionId,
-		},
-		CompletedActions:    map[string]struct{}{"actionA": {}},
-		OutdatedRemoteCharm: true,
-	}
-	remoteState := remotestate.Snapshot{
-		ActionsPending: []string{"actionA", "actionB"},
-		ActionsBlocked: false,
-	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, gc.DeepEquals, mockFailAction("actionB"))
-}
-
-func (s *actionsSuite) TestNextActionBlockedRemoteInitSkipHook(c *gc.C) {
-	actionResolver := s.newResolver()
-	actionId := "actionBad"
-	localState := resolver.LocalState{
-		State: operation.State{
-			Kind:     operation.RunAction,
-			ActionId: &actionId,
-			Hook:     &hook.Info{Kind: "test"},
-		},
-		CompletedActions:    map[string]struct{}{"actionA": {}},
-		OutdatedRemoteCharm: false,
-	}
-	remoteState := remotestate.Snapshot{
-		ActionsPending: []string{"actionA", "actionB"},
-		ActionsBlocked: true,
-	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, gc.DeepEquals, mockSkipHook(*localState.Hook))
-}
-
-func (s *actionsSuite) TestActionStateKindRunAction(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestActionStateKindRunAction(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	actionA := "actionA"
 
 	localState := resolver.LocalState{
@@ -189,13 +117,13 @@ func (s *actionsSuite) TestActionStateKindRunAction(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockOp(actionA))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockOp(actionA))
 }
 
-func (s *actionsSuite) TestActionStateKindRunActionSkipHook(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestActionStateKindRunActionSkipHook(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	actionA := "actionA"
 
 	localState := resolver.LocalState{
@@ -209,13 +137,13 @@ func (s *actionsSuite) TestActionStateKindRunActionSkipHook(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockSkipHook(*localState.Hook))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockSkipHook(*localState.Hook))
 }
 
-func (s *actionsSuite) TestActionStateKindRunActionPendingRemote(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestActionStateKindRunActionPendingRemote(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	actionA := "actionA"
 
 	localState := resolver.LocalState{
@@ -228,13 +156,13 @@ func (s *actionsSuite) TestActionStateKindRunActionPendingRemote(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{actionA, "actionB"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockFailAction(actionA))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockFailAction(actionA))
 }
 
-func (s *actionsSuite) TestPendingActionNotAvailable(c *gc.C) {
-	actionResolver := s.newResolver()
+func (s *actionsSuite) TestPendingActionNotAvailable(c *tc.C) {
+	actionResolver := s.newResolver(c)
 	actionA := "666"
 
 	localState := resolver.LocalState{
@@ -248,9 +176,9 @@ func (s *actionsSuite) TestPendingActionNotAvailable(c *gc.C) {
 	remoteState := remotestate.Snapshot{
 		ActionsPending: []string{"666"},
 	}
-	op, err := actionResolver.NextOp(localState, remoteState, &mockOperations{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(op, jc.DeepEquals, mockFailAction(actionA))
+	op, err := actionResolver.NextOp(c.Context(), localState, remoteState, &mockOperations{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(op, tc.DeepEquals, mockFailAction(actionA))
 }
 
 type mockOperations struct {
@@ -258,7 +186,7 @@ type mockOperations struct {
 	err error
 }
 
-func (m *mockOperations) NewAction(id string) (operation.Operation, error) {
+func (m *mockOperations) NewAction(_ context.Context, id string) (operation.Operation, error) {
 	if m.err != nil {
 		return nil, errors.Annotate(m.err, "action error")
 	}

@@ -4,17 +4,17 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
 	corebase "github.com/juju/juju/core/base"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -34,6 +34,7 @@ If no filters are supplied, all stored image metadata will be listed.
 Filtering a list of images for a set of bases can be done via --bases. A base can 
 be  specified using the OS name and the version of the OS, separated by @. For 
 example, --bases ubuntu@22.04.
+
 `
 
 // listImagesCommand returns stored image metadata.
@@ -44,7 +45,6 @@ type listImagesCommand struct {
 
 	Stream          string
 	Region          string
-	Series          []string
 	Bases           []string
 	Arches          []string
 	VirtType        string
@@ -53,10 +53,6 @@ type listImagesCommand struct {
 
 // Init implements Command.Init.
 func (c *listImagesCommand) Init(args []string) (err error) {
-	if len(c.Bases) > 0 && len(c.Series) > 0 {
-		return errors.New("--series and --bases cannot be specified together")
-	}
-
 	if len(c.Arches) > 0 {
 		result := []string{}
 		for _, one := range c.Arches {
@@ -74,6 +70,10 @@ func (c *listImagesCommand) Info() *cmd.Info {
 		Purpose: "lists cloud image metadata used when choosing an image to start",
 		Doc:     listCommandDoc,
 		Aliases: []string{"list-images"},
+		SeeAlso: []string{
+			"add-image",
+			"delete-images",
+		},
 	})
 }
 
@@ -84,7 +84,6 @@ func (c *listImagesCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.Stream, "stream", "", "image metadata stream")
 	f.StringVar(&c.Region, "region", "", "image metadata cloud region")
 
-	f.Var(cmd.NewAppendStringsValue(&c.Series), "series", "only show cloud image metadata for these series. DEPRECATED use --bases")
 	f.Var(cmd.NewAppendStringsValue(&c.Bases), "bases", "only show cloud image metadata for these bases")
 	f.Var(cmd.NewAppendStringsValue(&c.Arches), "arch", "only show cloud image metadata for these architectures")
 
@@ -101,21 +100,6 @@ func (c *listImagesCommand) SetFlags(f *gnuflag.FlagSet) {
 // Run implements Command.Run.
 func (c *listImagesCommand) Run(ctx *cmd.Context) (err error) {
 	var bases []corebase.Base
-	// Note: we validated that both series and bases cannot be specified in
-	// Init(), so it's safe to assume that only one of them is set here.
-	if len(c.Series) > 0 {
-		ctx.Warningf("series flag is deprecated, use --bases instead")
-		for _, s := range c.Series {
-			for _, one := range strings.Split(s, ",") {
-				b, err := corebase.GetBaseFromSeries(one)
-				if err != nil {
-					return errors.Annotatef(err, "attempting to convert %q to a base", c.Series)
-				}
-				bases = append(bases, b)
-			}
-		}
-		c.Series = nil
-	}
 	if len(c.Bases) > 0 {
 		for _, b := range c.Bases {
 			for _, one := range strings.Split(b, ",") {
@@ -128,13 +112,13 @@ func (c *listImagesCommand) Run(ctx *cmd.Context) (err error) {
 		}
 	}
 
-	api, err := getImageMetadataListAPI(c)
+	api, err := getImageMetadataListAPI(c, ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
-	found, err := c.List(api, bases)
+	found, err := c.List(ctx, api, bases)
 	if err != nil {
 		return err
 	}
@@ -142,11 +126,7 @@ func (c *listImagesCommand) Run(ctx *cmd.Context) (err error) {
 		return nil
 	}
 
-	info, errs := convertDetailsToInfo(found)
-	if len(errs) > 0 {
-		// display individual error
-		fmt.Fprint(ctx.Stderr, strings.Join(errs, "\n"))
-	}
+	info := convertDetailsToInfo(found)
 
 	var output interface{}
 	switch c.out.Name() {
@@ -161,8 +141,8 @@ func (c *listImagesCommand) Run(ctx *cmd.Context) (err error) {
 	return c.out.Write(ctx, output)
 }
 
-func (c *listImagesCommand) List(api MetadataListAPI, bases []corebase.Base) ([]params.CloudImageMetadata, error) {
-	return api.List(c.Stream, c.Region, bases, c.Arches, c.VirtType, c.RootStorageType)
+func (c *listImagesCommand) List(ctx context.Context, api MetadataListAPI, bases []corebase.Base) ([]params.CloudImageMetadata, error) {
+	return api.List(ctx, c.Stream, c.Region, bases, c.Arches, c.VirtType, c.RootStorageType)
 }
 
 var getImageMetadataListAPI = (*listImagesCommand).getImageMetadataListAPI
@@ -170,23 +150,21 @@ var getImageMetadataListAPI = (*listImagesCommand).getImageMetadataListAPI
 // MetadataListAPI defines the API methods that list image metadata command uses.
 type MetadataListAPI interface {
 	Close() error
-	List(stream, region string, series []corebase.Base, arches []string, virtType, rootStorageType string) ([]params.CloudImageMetadata, error)
+	List(ctx context.Context, stream, region string, bases []corebase.Base, arches []string, virtType, rootStorageType string) ([]params.CloudImageMetadata, error)
 }
 
-func (c *listImagesCommand) getImageMetadataListAPI() (MetadataListAPI, error) {
-	return c.NewImageMetadataAPI()
+func (c *listImagesCommand) getImageMetadataListAPI(ctx context.Context) (MetadataListAPI, error) {
+	return c.NewImageMetadataAPI(ctx)
 }
 
 // convertDetailsToInfo converts cloud image metadata received from api to
 // structure native to CLI.
-// We also return a list of errors for versions we could not convert to series for user friendly read.
-func convertDetailsToInfo(details []params.CloudImageMetadata) ([]MetadataInfo, []string) {
+func convertDetailsToInfo(details []params.CloudImageMetadata) []MetadataInfo {
 	if len(details) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	info := make([]MetadataInfo, len(details))
-	errs := []string{}
 	for i, one := range details {
 		info[i] = MetadataInfo{
 			Source:          one.Source,
@@ -199,7 +177,7 @@ func convertDetailsToInfo(details []params.CloudImageMetadata) ([]MetadataInfo, 
 			RootStorageType: one.RootStorageType,
 		}
 	}
-	return info, errs
+	return info
 }
 
 // metadataInfos is a convenience type enabling to sort
@@ -212,10 +190,8 @@ func (m metadataInfos) Len() int {
 }
 
 // Implements sort.Interface and sort image metadata
-// by source, series, arch and region.
+// by source, os-type, arch and region.
 // All properties are sorted in alphabetical order
-// except for series which is reversed -
-// latest series are at the beginning of the collection.
 func (m metadataInfos) Less(i, j int) bool {
 	if m[i].Source != m[j].Source {
 		// Alphabetical order here is incidentally does what we want:

@@ -4,10 +4,10 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type secretIdsCommand struct {
@@ -50,7 +50,7 @@ func (c *secretIdsCommand) Init(args []string) error {
 
 // Run implements cmd.Command.
 func (c *secretIdsCommand) Run(ctx *cmd.Context) error {
-	result, err := c.ctx.SecretMetadata()
+	result, err := c.ctx.SecretMetadata(ctx)
 	if err != nil {
 		return err
 	}

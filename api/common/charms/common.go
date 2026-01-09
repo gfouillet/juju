@@ -4,15 +4,16 @@
 package charms
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/charm/v12/resource"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charm/resource"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -27,10 +28,10 @@ func NewCharmInfoClient(facade base.FacadeCaller) *CharmInfoClient {
 }
 
 // CharmInfo returns information about the requested charm.
-func (c *CharmInfoClient) CharmInfo(charmURL string) (*CharmInfo, error) {
+func (c *CharmInfoClient) CharmInfo(ctx context.Context, charmURL string) (*CharmInfo, error) {
 	args := params.CharmURL{URL: charmURL}
 	var info params.Charm
-	if err := c.facade.FacadeCall("CharmInfo", args, &info); err != nil {
+	if err := c.facade.FacadeCall(ctx, "CharmInfo", args, &info); err != nil {
 		return nil, errors.Trace(err)
 	}
 	return convertCharm(&info)
@@ -48,11 +49,11 @@ func NewApplicationCharmInfoClient(facade base.FacadeCaller) *ApplicationCharmIn
 }
 
 // ApplicationCharmInfo returns information about an application's charm.
-func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(appName string) (*CharmInfo, error) {
+func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(ctx context.Context, appName string) (*CharmInfo, error) {
 	args := params.Entity{Tag: names.NewApplicationTag(appName).String()}
 	var info params.Charm
-	if err := c.facade.FacadeCall("ApplicationCharmInfo", args, &info); err != nil {
-		return nil, errors.Trace(err)
+	if err := c.facade.FacadeCall(ctx, "ApplicationCharmInfo", args, &info); err != nil {
+		return nil, params.TranslateWellKnownError(err)
 	}
 	return convertCharm(&info)
 }
@@ -61,12 +62,12 @@ func (c *ApplicationCharmInfoClient) ApplicationCharmInfo(appName string) (*Char
 type CharmInfo struct {
 	Revision   int
 	URL        string
-	Config     *charm.Config
+	Config     *charm.ConfigSpec
 	Meta       *charm.Meta
 	Actions    *charm.Actions
-	Metrics    *charm.Metrics
 	Manifest   *charm.Manifest
 	LXDProfile *charm.LXDProfile
+	Version    string
 }
 
 func (info *CharmInfo) Charm() charm.Charm {
@@ -88,9 +89,9 @@ func convertCharm(info *params.Charm) (*CharmInfo, error) {
 		Config:     params.FromCharmOptionMap(info.Config),
 		Meta:       meta,
 		Actions:    convertCharmActions(info.Actions),
-		Metrics:    convertCharmMetrics(info.Metrics),
 		Manifest:   manifest,
 		LXDProfile: convertCharmLXDProfile(info.LXDProfile),
+		Version:    info.Version,
 	}
 	return result, nil
 }
@@ -99,7 +100,7 @@ func convertCharmMeta(meta *params.CharmMeta) (*charm.Meta, error) {
 	if meta == nil {
 		return nil, nil
 	}
-	minVersion, err := version.Parse(meta.MinJujuVersion)
+	minVersion, err := semversion.Parse(meta.MinJujuVersion)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -122,11 +123,8 @@ func convertCharmMeta(meta *params.CharmMeta) (*charm.Meta, error) {
 		ExtraBindings:  convertCharmExtraBindingMap(meta.ExtraBindings),
 		Categories:     meta.Categories,
 		Tags:           meta.Tags,
-		Series:         meta.Series,
 		Storage:        convertCharmStorageMap(meta.Storage),
-		Deployment:     convertCharmDeployment(meta.Deployment),
 		Devices:        convertCharmDevices(meta.Devices),
-		PayloadClasses: convertCharmPayloadClassMap(meta.PayloadClasses),
 		Resources:      resources,
 		Terms:          meta.Terms,
 		MinJujuVersion: minVersion,
@@ -185,24 +183,6 @@ func convertCharmStorage(storage params.CharmStorage) charm.Storage {
 	}
 }
 
-func convertCharmPayloadClassMap(payload map[string]params.CharmPayloadClass) map[string]charm.PayloadClass {
-	if len(payload) == 0 {
-		return nil
-	}
-	result := make(map[string]charm.PayloadClass)
-	for key, value := range payload {
-		result[key] = convertCharmPayloadClass(value)
-	}
-	return result
-}
-
-func convertCharmPayloadClass(payload params.CharmPayloadClass) charm.PayloadClass {
-	return charm.PayloadClass{
-		Name: payload.Name,
-		Type: payload.Type,
-	}
-}
-
 func convertCharmResourceMetaMap(resources map[string]params.CharmResourceMeta) (map[string]resource.Meta, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -258,45 +238,13 @@ func convertCharmActionSpec(spec params.CharmActionSpec) charm.ActionSpec {
 	}
 }
 
-func convertCharmMetrics(metrics *params.CharmMetrics) *charm.Metrics {
-	if metrics == nil {
-		return nil
-	}
-	return &charm.Metrics{
-		Metrics: convertCharmMetricMap(metrics.Metrics),
-		Plan:    convertCharmPlan(metrics.Plan),
-	}
-}
-
-func convertCharmPlan(plan params.CharmPlan) *charm.Plan {
-	return &charm.Plan{Required: plan.Required}
-}
-
-func convertCharmMetricMap(metrics map[string]params.CharmMetric) map[string]charm.Metric {
-	if len(metrics) == 0 {
-		return nil
-	}
-	result := make(map[string]charm.Metric)
-	for key, value := range metrics {
-		result[key] = convertCharmMetric(value)
-	}
-	return result
-}
-
-func convertCharmMetric(metric params.CharmMetric) charm.Metric {
-	return charm.Metric{
-		Type:        charm.MetricType(metric.Type),
-		Description: metric.Description,
-	}
-}
-
 func convertCharmExtraBindingMap(bindings map[string]string) map[string]charm.ExtraBinding {
 	if len(bindings) == 0 {
 		return nil
 	}
 	result := make(map[string]charm.ExtraBinding)
 	for key, value := range bindings {
-		result[key] = charm.ExtraBinding{value}
+		result[key] = charm.ExtraBinding{Name: value}
 	}
 	return result
 }
@@ -332,18 +280,6 @@ func convertCharmLXDProfileDevicesMap(devices map[string]map[string]string) map[
 	return result
 }
 
-func convertCharmDeployment(deployment *params.CharmDeployment) *charm.Deployment {
-	if deployment == nil {
-		return nil
-	}
-	return &charm.Deployment{
-		DeploymentType: charm.DeploymentType(deployment.DeploymentType),
-		DeploymentMode: charm.DeploymentMode(deployment.DeploymentMode),
-		ServiceType:    charm.ServiceType(deployment.ServiceType),
-		MinVersion:     deployment.MinVersion,
-	}
-}
-
 func convertCharmDevices(devices map[string]params.CharmDevice) map[string]charm.Device {
 	if devices == nil {
 		return nil
@@ -369,12 +305,8 @@ func (c *charmImpl) Meta() *charm.Meta {
 	return c.info.Meta
 }
 
-func (c *charmImpl) Config() *charm.Config {
+func (c *charmImpl) Config() *charm.ConfigSpec {
 	return c.info.Config
-}
-
-func (c *charmImpl) Metrics() *charm.Metrics {
-	return c.info.Metrics
 }
 
 func (c *charmImpl) Manifest() *charm.Manifest {
@@ -387,6 +319,10 @@ func (c *charmImpl) Actions() *charm.Actions {
 
 func (c *charmImpl) Revision() int {
 	return c.info.Revision
+}
+
+func (c *charmImpl) Version() string {
+	return c.info.Version
 }
 
 func convertCharmManifest(input *params.CharmManifest) (*charm.Manifest, error) {

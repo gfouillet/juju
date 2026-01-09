@@ -13,7 +13,7 @@ import (
 )
 
 // AvailabilityZones returns the list of availability zones for a given
-// GCE region. If none are found the the list is empty. Any failure in
+// GCE region. If none are found the list is empty. Any failure in
 // the low-level request is returned as an error.
 func (c *Connection) AvailabilityZones(ctx context.Context, region string) ([]*computepb.Zone, error) {
 	req := &computepb.ListZonesRequest{
@@ -157,7 +157,7 @@ func (c *Connection) RemoveInstances(ctx context.Context, prefix string, ids ...
 				zoneName := path.Base(inst.GetZone())
 				if err := c.removeInstance(ctx, instID, zoneName); err != nil {
 					failed = append(failed, instID)
-					logger.Errorf("while removing instance %q: %v", instID, err)
+					logger.Errorf(ctx, "while removing instance %q: %v", instID, err)
 				}
 				break
 			}
@@ -187,7 +187,7 @@ func (c *Connection) UpdateMetadata(ctx context.Context, key, value string, ids 
 			if inst.GetName() == instID {
 				if err := c.updateInstanceMetadata(ctx, inst, key, value); err != nil {
 					failed = append(failed, instID)
-					logger.Errorf("while updating metadata for instance %q (%v=%q): %v",
+					logger.Errorf(ctx, "while updating metadata for instance %q (%v=%q): %v",
 						instID, key, value, err)
 				}
 				break

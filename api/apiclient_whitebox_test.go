@@ -8,24 +8,25 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"testing"
 	"time"
 
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	jtesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	jtesting "github.com/juju/juju/internal/testing"
 )
 
 type apiclientWhiteboxSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&apiclientWhiteboxSuite{})
+func TestApiclientWhiteboxSuite(t *testing.T) {
+	tc.Run(t, &apiclientWhiteboxSuite{})
+}
 
-func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiCancelled(c *gc.C) {
-	ctx := context.TODO()
-	ctx, cancel := context.WithCancel(ctx)
+func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiCancelled(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
 	started := make(chan struct{})
 	go func() {
 		select {
@@ -40,7 +41,7 @@ func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiCancelled(c *gc.C) {
 		}
 	}()
 	listen, err := net.Listen("tcp4", ":0")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	addr := listen.Addr().String()
 	c.Logf("listening at: %s", addr)
 	// Note that we Listen, but we never Accept
@@ -57,12 +58,12 @@ func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiCancelled(c *gc.C) {
 	// Close before we connect
 	listen.Close()
 	_, err = dialAPI(ctx, info, opts)
-	c.Check(err, gc.ErrorMatches, fmt.Sprintf("dial tcp %s:.*", regexp.QuoteMeta(addr)))
+	c.Check(err, tc.NotNil)
 }
 
-func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiClosed(c *gc.C) {
+func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiClosed(c *tc.C) {
 	listen, err := net.Listen("tcp4", ":0")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	addr := listen.Addr().String()
 	c.Logf("listening at: %s", addr)
 	// Note that we Listen, but we never Accept
@@ -76,6 +77,6 @@ func (s *apiclientWhiteboxSuite) TestDialWebsocketMultiClosed(c *gc.C) {
 		DialTimeout:         3 * time.Second,
 	}
 	listen.Close()
-	_, _, err = DialAPI(info, opts)
-	c.Check(err, gc.ErrorMatches, fmt.Sprintf("unable to connect to API: dial tcp %s:.*", regexp.QuoteMeta(addr)))
+	_, _, err = DialAPI(c, info, opts)
+	c.Check(err, tc.ErrorMatches, fmt.Sprintf("unable to connect to API: dial tcp %s:.*", regexp.QuoteMeta(addr)))
 }

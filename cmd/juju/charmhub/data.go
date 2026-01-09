@@ -4,12 +4,10 @@
 package charmhub
 
 import (
-	"github.com/juju/charm/v12"
+	"github.com/juju/juju/internal/charm"
 )
 
 const (
-	// SeriesAll defines a platform that targets all series.
-	SeriesAll = "all"
 	// ArchAll defines a platform that targets all architectures.
 	ArchAll = "all"
 )
@@ -65,7 +63,7 @@ type Base struct {
 
 // Charm matches a params.CharmHubCharm
 type Charm struct {
-	Config      *charm.Config                `json:"config,omitempty" yaml:"config,omitempty"`
+	Config      *charm.ConfigSpec            `json:"config,omitempty" yaml:"config,omitempty"`
 	Relations   map[string]map[string]string `json:"relations,omitempty" yaml:"relations,omitempty"`
 	Subordinate bool                         `json:"subordinate,omitempty" yaml:"subordinate,omitempty"`
 	UsedBy      []string                     `json:"used-by,omitempty" yaml:"used-by,omitempty"` // bundles which use the charm

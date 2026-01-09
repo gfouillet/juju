@@ -5,12 +5,12 @@ package gce
 
 import (
 	"context"
+	stdtesting "testing"
 
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/environs/testing"
 )
@@ -19,9 +19,11 @@ type environVpcSuite struct {
 	BaseSuite
 }
 
-var _ = gc.Suite(&environVpcSuite{})
+func TestEnvironSuite(t *stdtesting.T) {
+	tc.Run(t, &environVpcSuite{})
+}
 
-func (s *environVpcSuite) TestValidateBootstrapSubnetAutoCreate(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapSubnetAutoCreate(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -40,10 +42,10 @@ func (s *environVpcSuite) TestValidateBootstrapSubnetAutoCreate(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapLegacyNetwork(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapLegacyNetwork(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -62,10 +64,10 @@ func (s *environVpcSuite) TestValidateBootstrapLegacyNetwork(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapNetworkNotFound(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapNetworkNotFound(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -74,10 +76,10 @@ func (s *environVpcSuite) TestValidateBootstrapNetworkNotFound(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIs, errorVPCNotUsable)
+	c.Assert(err, tc.ErrorIs, errorVPCNotUsable)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapUsableSubnets(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapUsableSubnets(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -103,10 +105,10 @@ func (s *environVpcSuite) TestValidateBootstrapUsableSubnets(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapNoSSHAccess(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapNoSSHAccess(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -125,10 +127,10 @@ func (s *environVpcSuite) TestValidateBootstrapNoSSHAccess(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIs, errorVPCNotUsable)
+	c.Assert(err, tc.ErrorIs, errorVPCNotUsable)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapNoSubnets(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapNoSubnets(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -140,10 +142,10 @@ func (s *environVpcSuite) TestValidateBootstrapNoSubnets(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIs, errorVPCNotUsable)
+	c.Assert(err, tc.ErrorIs, errorVPCNotUsable)
 }
 
-func (s *environVpcSuite) TestValidateBootstrapNoUsableSubnets(c *gc.C) {
+func (s *environVpcSuite) TestValidateBootstrapNoUsableSubnets(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -169,10 +171,10 @@ func (s *environVpcSuite) TestValidateBootstrapNoUsableSubnets(c *gc.C) {
 	err := validateBootstrapVPC(
 		testing.BootstrapContext(context.Background(), c), s.MockService,
 		"us-east1", "some-vpc", false)
-	c.Assert(err, jc.ErrorIs, errorVPCNotRecommended)
+	c.Assert(err, tc.ErrorIs, errorVPCNotRecommended)
 }
 
-func (s *environVpcSuite) TestValidateModelSubnet(c *gc.C) {
+func (s *environVpcSuite) TestValidateModelSubnet(c *tc.C) {
 	ctrl := s.SetupMocks(c)
 	defer ctrl.Finish()
 
@@ -181,7 +183,7 @@ func (s *environVpcSuite) TestValidateModelSubnet(c *gc.C) {
 		SelfLink:              ptr("/path/to/network/some-vpc"),
 	}, nil)
 
-	err := validateModelVPC(s.CallCtx, s.MockService,
+	err := validateModelVPC(c.Context(), s.MockService,
 		"us-east1", "some-model", "some-vpc")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }

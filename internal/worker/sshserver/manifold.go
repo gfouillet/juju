@@ -4,68 +4,62 @@
 package sshserver
 
 import (
-	"net"
-	"time"
+	"context"
 
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
-	gossh "golang.org/x/crypto/ssh"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
-	"github.com/juju/juju/api/base"
-	sshserverapi "github.com/juju/juju/api/controller/sshserver"
-	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/watcher"
-	"github.com/juju/juju/feature"
-	"github.com/juju/juju/rpc/params"
+	coredependency "github.com/juju/juju/core/dependency"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/featureflag"
+	"github.com/juju/juju/internal/services"
 )
 
-// Logger holds the methods required to log messages.
-type Logger interface {
-	Errorf(string, ...interface{})
-	Debugf(string, ...interface{})
-}
+// GetControllerConfigServiceFunc is a helper function that gets
+// a controller config service from the manifold.
+type GetControllerConfigServiceFunc = func(getter dependency.Getter, name string) (ControllerConfigService, error)
 
-// FacadeClient represents the SSH server's facade client.
-type FacadeClient interface {
-	ControllerConfig() (controller.Config, error)
-	WatchControllerConfig() (watcher.NotifyWatcher, error)
-	SSHServerHostKey() (string, error)
-	VirtualHostKey(arg params.SSHVirtualHostKeyRequestArg) ([]byte, error)
-	ListPublicKeysForModel(sshPKIAuthArgs params.ListAuthorizedKeysArgs) ([]gossh.PublicKey, error)
+// GetControllerConfigService is a helper function that gets a service from the
+// manifold.
+func GetControllerConfigService(getter dependency.Getter, name string) (ControllerConfigService, error) {
+	return coredependency.GetDependencyByName(getter, name, func(factory services.ControllerDomainServices) ControllerConfigService {
+		return factory.ControllerConfig()
+	})
 }
 
 // ManifoldConfig holds the information necessary to run an embedded SSH server
 // worker in a dependency.Engine.
 type ManifoldConfig struct {
-	// APICallerName holds the api caller dependency name.
-	APICallerName string
-
+	// DomainServicesName is the name of the domain services worker.
+	DomainServicesName string
 	// NewServerWrapperWorker is the function that creates the embedded SSH server worker.
 	NewServerWrapperWorker func(ServerWrapperWorkerConfig) (worker.Worker, error)
-
 	// NewServerWorker is the function that creates a worker that has a catacomb
 	// to run the server and other worker dependencies.
 	NewServerWorker func(ServerWorkerConfig) (worker.Worker, error)
-
+	// GetControllerConfigService is used to get a service from the manifold.
+	GetControllerConfigService GetControllerConfigServiceFunc
 	// Logger is the logger to use for the worker.
-	Logger Logger
+	Logger logger.Logger
 }
 
 // Validate validates the manifold configuration.
 func (config ManifoldConfig) Validate() error {
+	if config.DomainServicesName == "" {
+		return errors.NotValidf("empty DomainServicesName")
+	}
 	if config.NewServerWrapperWorker == nil {
 		return errors.NotValidf("nil NewServerWrapperWorker")
 	}
 	if config.NewServerWorker == nil {
 		return errors.NotValidf("nil NewServerWorker")
 	}
+	if config.GetControllerConfigService == nil {
+		return errors.NotValidf("nil GetControllerConfigService")
+	}
 	if config.Logger == nil {
 		return errors.NotValidf("nil Logger")
-	}
-	if config.APICallerName == "" {
-		return errors.NotValidf("empty APICallerName")
 	}
 	return nil
 }
@@ -75,48 +69,33 @@ func (config ManifoldConfig) Validate() error {
 func Manifold(config ManifoldConfig) dependency.Manifold {
 	return dependency.Manifold{
 		Inputs: []string{
-			config.APICallerName,
+			config.DomainServicesName,
 		},
 		Start: config.startWrapperWorker,
 	}
 }
 
 // startWrapperWorker starts the SSH server worker wrapper passing the necessary dependencies.
-func (config ManifoldConfig) startWrapperWorker(context dependency.Context) (worker.Worker, error) {
+func (config ManifoldConfig) startWrapperWorker(_ context.Context, getter dependency.Getter) (worker.Worker, error) {
 	// ssh jump server is not enabled by default, but it must be enabled
 	// via a feature flag.
-	if !featureflag.Enabled(feature.SSHJump) {
-		config.Logger.Debugf("SSH jump server worker is not enabled.")
+	if !featureflag.Enabled(featureflag.SSHJump) {
+		config.Logger.Debugf(context.Background(), "SSH jump server worker is not enabled.")
 		return nil, dependency.ErrUninstall
 	}
-
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	var apiCaller base.APICaller
-	if err := context.Get(config.APICallerName, &apiCaller); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	client, err := sshserverapi.NewClient(apiCaller)
+	controllerConfigService, err := config.GetControllerConfigService(getter, config.DomainServicesName)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	w, err := config.NewServerWrapperWorker(ServerWrapperWorkerConfig{
-		NewServerWorker: config.NewServerWorker,
-		Logger:          config.Logger,
-		FacadeClient:    client,
-		SessionHandler:  &stubSessionHandler{},
+	return config.NewServerWrapperWorker(ServerWrapperWorkerConfig{
+		ControllerConfigService: controllerConfigService,
+		NewServerWorker:         config.NewServerWorker,
+		Logger:                  config.Logger,
+		SessionHandler:          &stubSessionHandler{},
 	})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return w, nil
-}
-
-// NewSSHServerListener returns a listener based on the given listener.
-func NewSSHServerListener(l net.Listener, t time.Duration) net.Listener {
-	return l
 }

@@ -1,0 +1,399 @@
+// Copyright 2024 Canonical Ltd.
+// Licensed under the AGPLv3, see LICENCE file for details.
+
+package state
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+
+	"github.com/canonical/sqlair"
+
+	"github.com/juju/juju/core/instance"
+	domainmachine "github.com/juju/juju/domain/machine"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	networkerrors "github.com/juju/juju/domain/network/errors"
+	"github.com/juju/juju/internal/errors"
+)
+
+// GetHardwareCharacteristics returns the hardware characteristics for a machine.
+//
+// The following errors may be returned:
+// - [machineerrors.NotFound] if the machine with the specified UUID does not
+// exist.
+func (st *State) GetHardwareCharacteristics(
+	ctx context.Context,
+	machineUUID string,
+) (instance.HardwareCharacteristics, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return instance.HardwareCharacteristics{}, errors.Capture(err)
+	}
+
+	query := `
+SELECT    &instanceDataResult.*
+FROM      v_hardware_characteristics AS v
+WHERE     v.machine_uuid = $instanceDataResult.machine_uuid`
+	machineUUIDQuery := instanceDataResult{
+		MachineUUID: machineUUID,
+	}
+	stmt, err := st.Prepare(query, machineUUIDQuery)
+	if err != nil {
+		return instance.HardwareCharacteristics{}, errors.Errorf("preparing retrieve hardware characteristics statement: %w", err)
+	}
+
+	var row instanceDataResult
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		exists, err := st.checkMachineExists(ctx, tx, machineUUID)
+		if err != nil {
+			return errors.Errorf("checking machine %q exists: %w", machineUUID, err)
+		}
+		if !exists {
+			return errors.Errorf(
+				"machine %q does not exist in the model", machineUUID,
+			).Add(machineerrors.MachineNotFound)
+		}
+
+		err = tx.Query(ctx, stmt, machineUUIDQuery).Get(&row)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Hardware characteristics is a struct of pointers, the reality is
+			// if the record doesn't exist return the empty struct. The reocrd
+			// is always created with the machine.
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return instance.HardwareCharacteristics{}, errors.Capture(err)
+	}
+	return row.toHardwareCharacteristics(), nil
+}
+
+// AvailabilityZone returns the availability zone for the specified machine.
+//
+// The following errors may be returned:
+// - [machineerrors.MachineNotFound] if the machine does not exist in the model.
+// - [machineerrors.AvailabilityZoneNotFound] if no availability zone is set on
+// the machines hardware characteristics.
+func (st *State) AvailabilityZone(
+	ctx context.Context,
+	machineUUID string,
+) (string, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	query := `
+SELECT    &instanceDataResult.availability_zone_name
+FROM      v_hardware_characteristics AS v
+WHERE     v.machine_uuid = $instanceDataResult.machine_uuid`
+	machineUUIDQuery := instanceDataResult{
+		MachineUUID: machineUUID,
+	}
+	stmt, err := st.Prepare(query, machineUUIDQuery)
+	if err != nil {
+		return "", errors.Errorf("preparing retrieve hardware characteristics statement: %w", err)
+	}
+
+	var row instanceDataResult
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		exists, err := st.checkMachineExists(ctx, tx, machineUUID)
+		if err != nil {
+			return errors.Errorf("checking machine %q exists: %w", machineUUID, err)
+		}
+		if !exists {
+			return errors.Errorf(
+				"machine %q does not exist in the model", machineUUID,
+			).Add(machineerrors.MachineNotFound)
+		}
+
+		err = tx.Query(ctx, stmt, machineUUIDQuery).Get(&row)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.Errorf(
+				"machine %q has no availability zone set", machineUUID,
+			).Add(machineerrors.AvailabilityZoneNotFound)
+		}
+		if err != nil {
+			return errors.Errorf("querying machine cloud instance for machine %q: %w", machineUUID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+	if row.AvailabilityZone == nil {
+		return "", errors.Errorf(
+			"machine %q has no availability zone set", machineUUID,
+		).Add(machineerrors.AvailabilityZoneNotFound)
+	}
+	return *row.AvailabilityZone, nil
+}
+
+// SetMachineCloudInstance sets an entry in the machine cloud instance table
+// along with the instance tags and the link to a lxd profile if any.
+// This also includes the following fields:
+//   - machine nonce if it's not already set.
+//   - hardware characteristics such as architecture, memory, root disk,
+//     root disk source, cpu cores, cpu power, virt type, and availability zone.
+//   - machine instance tags.
+func (st *State) SetMachineCloudInstance(
+	ctx context.Context,
+	mUUID string,
+	instanceID instance.Id,
+	displayName, nonce string,
+	hardwareCharacteristics *instance.HardwareCharacteristics,
+) error {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	// We will **always** have a machine_cloud_instance entry for a machine.
+	// This is done, when we create the machine. This is so we can have a
+	// status associated with the machine cloud instance. Thus we just need
+	// to update the existing entry.
+	setInstanceData := `
+UPDATE machine_cloud_instance
+SET
+	  instance_id=$instanceData.instance_id,
+	  display_name=$instanceData.display_name,
+	  arch=$instanceData.arch,
+	  mem=$instanceData.mem,
+	  root_disk=$instanceData.root_disk,
+	  root_disk_source=$instanceData.root_disk_source,
+	  cpu_cores=$instanceData.cpu_cores,
+	  cpu_power=$instanceData.cpu_power,
+	  virt_type=$instanceData.virt_type,
+	  availability_zone_uuid=$instanceData.availability_zone_uuid
+WHERE machine_uuid=$instanceData.machine_uuid
+`
+	setInstanceDataStmt, err := st.Prepare(setInstanceData, instanceData{})
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	mNonce := machineNonce{
+		MachineUUID: mUUID,
+		Nonce:       nonce,
+	}
+	setNonceStmt, err := st.Prepare(`
+UPDATE machine
+SET    nonce = $machineNonce.nonce
+WHERE  uuid = $machineNonce.machine_uuid
+AND    nonce IS NULL OR nonce = ''
+`, mNonce)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	setInstanceTags := `
+INSERT INTO instance_tag (*)
+VALUES ($instanceTag.*)
+`
+	setInstanceTagStmt, err := st.Prepare(setInstanceTags, instanceTag{})
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	azName := availabilityZoneName{}
+	if hardwareCharacteristics != nil && hardwareCharacteristics.AvailabilityZone != nil {
+		az := *hardwareCharacteristics.AvailabilityZone
+		azName = availabilityZoneName{Name: az}
+	}
+	retrieveAZUUID := `
+SELECT &availabilityZoneName.uuid
+FROM   availability_zone
+WHERE  availability_zone.name = $availabilityZoneName.name
+`
+	retrieveAZUUIDStmt, err := st.Prepare(retrieveAZUUID, azName)
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	var instID sql.Null[string]
+	if v := instanceID.String(); v != "" {
+		instID = sql.Null[string]{V: v, Valid: true}
+	}
+
+	var disName sql.Null[string]
+	if v := displayName; v != "" {
+		disName = sql.Null[string]{V: v, Valid: true}
+	}
+
+	instanceData := instanceData{
+		MachineUUID: mUUID,
+		InstanceID:  instID,
+		DisplayName: disName,
+	}
+	if hardwareCharacteristics != nil {
+		instanceData.Arch = hardwareCharacteristics.Arch
+		instanceData.Mem = hardwareCharacteristics.Mem
+		instanceData.RootDisk = hardwareCharacteristics.RootDisk
+		instanceData.RootDiskSource = hardwareCharacteristics.RootDiskSource
+		instanceData.CPUCores = hardwareCharacteristics.CpuCores
+		instanceData.CPUPower = hardwareCharacteristics.CpuPower
+		instanceData.VirtType = hardwareCharacteristics.VirtType
+	}
+
+	return db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		// If the machine is not
+		_, err := st.getInstanceID(ctx, tx, mUUID)
+		if err != nil && !errors.Is(err, machineerrors.NotProvisioned) {
+			return errors.Errorf("querying instance id for machine %q: %w", mUUID, err)
+		} else if err == nil {
+			// The instance id is already set, so we can just ignore this change.
+			return errors.Errorf("%w for machine %q", machineerrors.MachineCloudInstanceAlreadyExists, mUUID)
+		}
+
+		if err := tx.Query(ctx, setNonceStmt, mNonce).Run(); err != nil {
+			return errors.Errorf("setting machine nonce for machine %q: %w", mUUID, err)
+		}
+
+		if strings.HasPrefix(instanceID.String(), domainmachine.ManualInstancePrefix) {
+			if err := st.insertManualMachine(ctx, tx, mUUID); err != nil {
+				return errors.Errorf("inserting manual machine for machine %q: %w", mUUID, err)
+			}
+		}
+
+		if hardwareCharacteristics != nil &&
+			hardwareCharacteristics.AvailabilityZone != nil && *hardwareCharacteristics.AvailabilityZone != "" {
+
+			var azUUID availabilityZoneName
+			if err := tx.Query(ctx, retrieveAZUUIDStmt, azName).Get(&azUUID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return errors.Errorf("%w %q for machine %q", networkerrors.AvailabilityZoneNotFound, *hardwareCharacteristics.AvailabilityZone, mUUID)
+				}
+				return errors.Errorf("retrieving availability zone %q for machine uuid %q: %w", *hardwareCharacteristics.AvailabilityZone, mUUID, err)
+			}
+			instanceData.AvailabilityZoneUUID = &azUUID.UUID
+		}
+
+		if err := tx.Query(ctx, setInstanceDataStmt, instanceData).Run(); err != nil {
+			return errors.Errorf("inserting machine cloud instance for machine %q: %w", mUUID, err)
+		}
+
+		if instanceTags := tagsFromHardwareCharacteristics(mUUID, hardwareCharacteristics); len(instanceTags) > 0 {
+			if err := tx.Query(ctx, setInstanceTagStmt, instanceTags).Run(); err != nil {
+				return errors.Errorf("inserting instance tags for machine %q: %w", mUUID, err)
+			}
+		}
+		return nil
+	})
+}
+
+func (st *State) insertManualMachine(
+	ctx context.Context,
+	tx *sqlair.TX,
+	mUUID string,
+) error {
+	setManualStmt, err := st.Prepare(`
+INSERT INTO machine_manual (machine_uuid)
+VALUES ($entityUUID.uuid)
+ON CONFLICT (machine_uuid) DO NOTHING
+`, entityUUID{})
+	if err != nil {
+		return errors.Capture(err)
+	}
+
+	if err := tx.Query(ctx, setManualStmt, entityUUID{
+		UUID: mUUID,
+	}).Run(); err != nil {
+		return errors.Errorf("inserting machine manual entry for machine %q: %w", mUUID, err)
+	}
+
+	return nil
+}
+
+// GetInstanceID returns the cloud specific instance id for this machine.
+// If the machine is not provisioned, it returns a
+// [machineerrors.NotProvisionedError].
+func (st *State) GetInstanceID(ctx context.Context, mUUID string) (string, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	var instanceId string
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		var err error
+		instanceId, err = st.getInstanceID(ctx, tx, mUUID)
+		if err != nil {
+			return errors.Capture(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	return instanceId, nil
+}
+
+func (st *State) getInstanceID(ctx context.Context, tx *sqlair.TX, mUUID string) (string, error) {
+	mUUIDParam := entityUUID{UUID: mUUID}
+	query := `
+SELECT &instanceID.instance_id
+FROM   machine_cloud_instance
+WHERE  machine_uuid = $entityUUID.uuid;`
+	queryStmt, err := st.Prepare(query, mUUIDParam, instanceID{})
+	if err != nil {
+		return "", errors.Capture(err)
+	}
+
+	var result instanceID
+
+	if err := tx.Query(ctx, queryStmt, mUUIDParam).Get(&result); errors.Is(err, sqlair.ErrNoRows) || result.ID == "" {
+		return "", errors.Errorf("getting machine instance id for %q: %w", mUUID, machineerrors.NotProvisioned)
+	} else if err != nil {
+		return "", errors.Errorf("querying instance for machine %q: %w", mUUID, err)
+	}
+
+	return result.ID, nil
+}
+
+// GetInstanceIDAndName returns the cloud specific instance ID and display name for
+// this machine.
+// If the machine is not provisioned, it returns a
+// [machineerrors.NotProvisionedError].
+func (st *State) GetInstanceIDAndName(ctx context.Context, mUUID string) (string, string, error) {
+	db, err := st.DB(ctx)
+	if err != nil {
+		return "", "", errors.Capture(err)
+	}
+
+	mUUIDParam := entityUUID{UUID: mUUID}
+	query := `
+SELECT &instanceIDAndDisplayName.*
+FROM   machine_cloud_instance
+WHERE  machine_uuid = $entityUUID.uuid;`
+	queryStmt, err := st.Prepare(query, mUUIDParam, instanceIDAndDisplayName{})
+	if err != nil {
+		return "", "", errors.Capture(err)
+	}
+
+	var (
+		instanceID, instanceName string
+	)
+	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
+		var result instanceIDAndDisplayName
+		err := tx.Query(ctx, queryStmt, mUUIDParam).Get(&result)
+		if err != nil {
+			return errors.Errorf("querying display name for machine %q: %w", mUUID, err)
+		}
+		// The instance is not provisioned only if it has an empty instance ID.
+		// We always insert a record when creating the machine.
+		if result.ID == "" {
+			return errors.Errorf("machine: %q: %w", mUUID, machineerrors.NotProvisioned)
+		}
+
+		instanceID = result.ID
+		instanceName = result.Name
+		return nil
+	})
+	if err != nil {
+		return "", "", errors.Capture(err)
+	}
+	return instanceID, instanceName, nil
+}

@@ -4,22 +4,18 @@
 package firewaller
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
 
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/controller/crossmodelrelations"
 	"github.com/juju/juju/api/controller/firewaller"
-	"github.com/juju/juju/api/controller/remoterelations"
 	"github.com/juju/juju/internal/worker/apicaller"
 )
-
-// NewRemoteRelationsFacade creates a remote relations API facade.
-func NewRemoteRelationsFacade(apiCaller base.APICaller) *remoterelations.Client {
-	return remoterelations.NewClient(apiCaller)
-}
 
 // NewFirewallerFacade creates a firewaller API facade.
 func NewFirewallerFacade(apiCaller base.APICaller) (FirewallerAPI, error) {
@@ -27,23 +23,23 @@ func NewFirewallerFacade(apiCaller base.APICaller) (FirewallerAPI, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &firewallerShim{facade}, nil
+	return &firewallerShim{Client: facade}, nil
 }
 
 type firewallerShim struct {
 	*firewaller.Client
 }
 
-func (s *firewallerShim) Machine(tag names.MachineTag) (Machine, error) {
-	return s.Client.Machine(tag)
+func (s *firewallerShim) Machine(ctx context.Context, tag names.MachineTag) (Machine, error) {
+	return s.Client.Machine(ctx, tag)
 }
 
-func (s *firewallerShim) Unit(tag names.UnitTag) (Unit, error) {
-	u, err := s.Client.Unit(tag)
+func (s *firewallerShim) Unit(ctx context.Context, tag names.UnitTag) (Unit, error) {
+	u, err := s.Client.Unit(ctx, tag)
 	if err != nil {
-		return nil, err
+		return nil, errors.Trace(err)
 	}
-	return &unitShim{u}, nil
+	return &unitShim{Unit: u}, nil
 }
 
 type unitShim struct {
@@ -71,9 +67,9 @@ func NewWorker(cfg Config) (worker.Worker, error) {
 func crossmodelFirewallerFacadeFunc(
 	connectionFunc apicaller.NewExternalControllerConnectionFunc,
 ) newCrossModelFacadeFunc {
-	return func(apiInfo *api.Info) (CrossModelFirewallerFacadeCloser, error) {
+	return func(ctx context.Context, apiInfo *api.Info) (CrossModelFirewallerFacadeCloser, error) {
 		apiInfo.Tag = names.NewUserTag(api.AnonymousUsername)
-		conn, err := connectionFunc(apiInfo)
+		conn, err := connectionFunc(ctx, apiInfo)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

@@ -4,12 +4,9 @@
 package params
 
 import (
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
-
 	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/core/resources"
-	"github.com/juju/juju/docker"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 )
 
 // CAASUnitIntroductionArgs is used by sidecar units to introduce
@@ -45,21 +42,19 @@ type CAASUnitTerminationResult struct {
 
 // CAASApplicationProvisioningInfo holds info needed to provision a caas application.
 type CAASApplicationProvisioningInfo struct {
-	Version              version.Number               `json:"version"`
-	APIAddresses         []string                     `json:"api-addresses"`
-	CACert               string                       `json:"ca-cert"`
-	Constraints          constraints.Value            `json:"constraints"`
-	Tags                 map[string]string            `json:"tags,omitempty"`
-	Filesystems          []KubernetesFilesystemParams `json:"filesystems,omitempty"`
-	Volumes              []KubernetesVolumeParams     `json:"volumes,omitempty"`
-	Devices              []KubernetesDeviceParams     `json:"devices,omitempty"`
-	Base                 Base                         `json:"base,omitempty"`
-	ImageRepo            DockerImageInfo              `json:"image-repo,omitempty"`
-	CharmModifiedVersion int                          `json:"charm-modified-version,omitempty"`
-	CharmURL             string                       `json:"charm-url,omitempty"`
-	Trust                bool                         `json:"trust,omitempty"`
-	Scale                int                          `json:"scale,omitempty"`
-	Error                *Error                       `json:"error,omitempty"`
+	Version              semversion.Number        `json:"version"`
+	APIAddresses         []string                 `json:"api-addresses"`
+	CACert               string                   `json:"ca-cert"`
+	Constraints          constraints.Value        `json:"constraints"`
+	Tags                 map[string]string        `json:"tags,omitempty"`
+	Volumes              []KubernetesVolumeParams `json:"volumes,omitempty"`
+	Devices              []KubernetesDeviceParams `json:"devices,omitempty"`
+	Base                 Base                     `json:"base,omitempty"`
+	ImageRepo            DockerImageInfo          `json:"image-repo,omitempty"`
+	CharmModifiedVersion int                      `json:"charm-modified-version,omitempty"`
+	Trust                bool                     `json:"trust,omitempty"`
+	Scale                int                      `json:"scale,omitempty"`
+	Error                *Error                   `json:"error,omitempty"`
 }
 
 // KubernetesFilesystemUnitAttachmentParams holds the parameters for
@@ -112,7 +107,7 @@ type DockerImageInfo struct {
 }
 
 // NewDockerImageInfo converts docker.ImageRepoDetails to DockerImageInfo.
-func NewDockerImageInfo(info docker.ImageRepoDetails, registryPath string) DockerImageInfo {
+func NewDockerImageInfo(info resource.ImageRepoDetails, registryPath string) DockerImageInfo {
 	return DockerImageInfo{
 		Username:      info.Username,
 		Password:      info.Password,
@@ -126,20 +121,20 @@ func NewDockerImageInfo(info docker.ImageRepoDetails, registryPath string) Docke
 }
 
 // ConvertDockerImageInfo converts DockerImageInfo to resources.ImageRepoDetails.
-func ConvertDockerImageInfo(info DockerImageInfo) resources.DockerImageDetails {
-	return resources.DockerImageDetails{
+func ConvertDockerImageInfo(info DockerImageInfo) resource.DockerImageDetails {
+	return resource.DockerImageDetails{
 		RegistryPath: info.RegistryPath,
-		ImageRepoDetails: docker.ImageRepoDetails{
+		ImageRepoDetails: resource.ImageRepoDetails{
 			Repository:    info.Repository,
 			ServerAddress: info.ServerAddress,
-			BasicAuthConfig: docker.BasicAuthConfig{
+			BasicAuthConfig: resource.BasicAuthConfig{
 				Username: info.Username,
 				Password: info.Password,
-				Auth:     docker.NewToken(info.Auth),
+				Auth:     resource.NewToken(info.Auth),
 			},
-			TokenAuthConfig: docker.TokenAuthConfig{
-				IdentityToken: docker.NewToken(info.IdentityToken),
-				RegistryToken: docker.NewToken(info.RegistryToken),
+			TokenAuthConfig: resource.TokenAuthConfig{
+				IdentityToken: resource.NewToken(info.IdentityToken),
+				RegistryToken: resource.NewToken(info.RegistryToken),
 				Email:         info.Email,
 			},
 		},
@@ -160,59 +155,4 @@ type CAASApplicationOCIResourceResult struct {
 // CAASApplicationOCIResources holds a list of image OCI resources.
 type CAASApplicationOCIResources struct {
 	Images map[string]DockerImageInfo `json:"images"`
-}
-
-// CAASUnitInfo holds CAAS unit information.
-type CAASUnitInfo struct {
-	Tag        string      `json:"tag"`
-	UnitStatus *UnitStatus `json:"unit-status,omitempty"`
-}
-
-// CAASUnit holds CAAS unit information.
-type CAASUnit struct {
-	Tag        names.Tag
-	UnitStatus *UnitStatus
-}
-
-// CAASUnitsResult holds a slice of CAAS unit information or an error.
-type CAASUnitsResult struct {
-	Units []CAASUnitInfo `json:"units,omitempty"`
-	Error *Error         `json:"error,omitempty"`
-}
-
-// CAASUnitsResults contains multiple CAAS units result.
-type CAASUnitsResults struct {
-	Results []CAASUnitsResult `json:"results"`
-}
-
-// CAASApplicationProvisioningState represents the provisioning state for a CAAS application.
-type CAASApplicationProvisioningState struct {
-	Scaling     bool `json:"scaling"`
-	ScaleTarget int  `json:"scale-target"`
-}
-
-// CAASApplicationProvisioningStateResult represents the result of getting the
-// provisioning state for a CAAS application.
-type CAASApplicationProvisioningStateResult struct {
-	ProvisioningState *CAASApplicationProvisioningState `json:"provisioning-state,omitempty"`
-	Error             *Error                            `json:"error,omitempty"`
-}
-
-// CAASApplicationProvisioningStateArg holds the arguments for setting a CAAS application's
-// provisioning state.
-type CAASApplicationProvisioningStateArg struct {
-	Application       Entity                           `json:"application"`
-	ProvisioningState CAASApplicationProvisioningState `json:"provisioning-state"`
-}
-
-// CAASApplicationProvisionerConfig holds the configuration for the caasapplicationprovisioner worker.
-type CAASApplicationProvisionerConfig struct {
-	UnmanagedApplications Entities `json:"unmanaged-applications,omitempty"`
-}
-
-// CAASApplicationProvisionerConfigResult is the result of getting the caasapplicationprovisioner worker's
-// configuration for the current model.
-type CAASApplicationProvisionerConfigResult struct {
-	ProvisionerConfig *CAASApplicationProvisionerConfig `json:"provisioner-config,omitempty"`
-	Error             *Error                            `json:"error,omitempty"`
 }

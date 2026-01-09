@@ -1,84 +1,133 @@
 // Copyright 2012, 2013 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package machinemanager_test
+package machinemanager
 
 import (
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
+	"fmt"
+	"testing"
 
-	"github.com/juju/juju/apiserver/facades/client/machinemanager"
-	"github.com/juju/juju/apiserver/facades/client/machinemanager/mocks"
-	"github.com/juju/juju/core/instance"
-	"github.com/juju/juju/core/network"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
+
+	commonmocks "github.com/juju/juju/apiserver/common/mocks"
+	corebase "github.com/juju/juju/core/base"
+	instance "github.com/juju/juju/core/instance"
+	coremachine "github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/domain/agentbinary"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/internal/provider/dummy"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/binarystorage"
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
+	"github.com/juju/juju/internal/uuid"
 )
 
 type machineConfigSuite struct {
-	ctrlSt *mocks.MockControllerBackend
-	st     *mocks.MockInstanceConfigBackend
-	model  *mocks.MockModel
+	store        *MockObjectStore
+	cloudService *commonmocks.MockCloudService
+
+	controllerConfigService *MockControllerConfigService
+	controllerNodeService   *MockControllerNodeService
+	keyUpdaterService       *MockKeyUpdaterService
+	modelConfigService      *MockModelConfigService
+	machineService          *MockMachineService
+	bootstrapEnviron        *MockBootstrapEnviron
+	agentPasswordService    *MockAgentPasswordService
+	agentBinaryService      *MockAgentBinaryService
 }
 
-var _ = gc.Suite(&machineConfigSuite{})
+func TestMachineConfigSuite(t *testing.T) {
+	tc.Run(t, &machineConfigSuite{})
+}
 
-func (s *machineConfigSuite) setup(c *gc.C) *gomock.Controller {
+func (s *machineConfigSuite) setup(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
+	s.controllerConfigService = NewMockControllerConfigService(ctrl)
+	s.controllerNodeService = NewMockControllerNodeService(ctrl)
 
-	s.ctrlSt = mocks.NewMockControllerBackend(ctrl)
-	s.st = mocks.NewMockInstanceConfigBackend(ctrl)
+	s.cloudService = commonmocks.NewMockCloudService(ctrl)
+	s.store = NewMockObjectStore(ctrl)
+	s.keyUpdaterService = NewMockKeyUpdaterService(ctrl)
+	s.modelConfigService = NewMockModelConfigService(ctrl)
+	s.machineService = NewMockMachineService(ctrl)
+	s.bootstrapEnviron = NewMockBootstrapEnviron(ctrl)
+	s.agentPasswordService = NewMockAgentPasswordService(ctrl)
+	s.agentBinaryService = NewMockAgentBinaryService(ctrl)
 
-	s.model = mocks.NewMockModel(ctrl)
-	s.model.EXPECT().UUID().Return("uuid").AnyTimes()
-	s.model.EXPECT().ModelTag().Return(coretesting.ModelTag).AnyTimes()
+	c.Cleanup(func() {
+		s.controllerNodeService = nil
+		s.controllerConfigService = nil
+		s.cloudService = nil
+		s.store = nil
+		s.keyUpdaterService = nil
+		s.modelConfigService = nil
+		s.machineService = nil
+		s.bootstrapEnviron = nil
+		s.agentBinaryService = nil
+	})
 
 	return ctrl
 }
 
-func (s *machineConfigSuite) TestMachineConfig(c *gc.C) {
+func (s *machineConfigSuite) TestMachineConfig(c *tc.C) {
 	ctrl := s.setup(c)
 	defer ctrl.Finish()
 
-	s.st.EXPECT().Model().Return(s.model, nil)
-	s.model.EXPECT().Config().Return(config.New(config.UseDefaults, dummy.SampleConfig().Merge(coretesting.Attrs{
+	controllerUUID := uuid.MustNewUUID()
+
+	cfg, err := config.New(config.NoDefaults, coretesting.FakeConfig().Merge(coretesting.Attrs{
 		"agent-version":            "2.6.6",
 		"enable-os-upgrade":        true,
 		"enable-os-refresh-update": true,
-	})))
+	}))
+	c.Assert(err, tc.ErrorIsNil)
+	s.modelConfigService.EXPECT().ModelConfig(gomock.Any()).Return(
+		cfg, nil,
+	)
+	s.controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).Return(coretesting.FakeControllerConfig(), nil).AnyTimes()
 
-	machine0 := mocks.NewMockMachine(ctrl)
-	machine0.EXPECT().Base().Return(state.Base{OS: "ubuntu", Channel: "20.04/stable"}).AnyTimes()
-	machine0.EXPECT().Tag().Return(names.NewMachineTag("0")).AnyTimes()
+	s.machineService.EXPECT().GetMachineBase(gomock.Any(), coremachine.Name("0")).Return(corebase.MustParseBaseFromString("ubuntu@20.04/stable"), nil)
+
 	hc := instance.MustParseHardware("mem=4G arch=amd64")
-	machine0.EXPECT().HardwareCharacteristics().Return(&hc, nil)
-	machine0.EXPECT().SetPassword(gomock.Any()).Return(nil)
-	s.st.EXPECT().Machine("0").Return(machine0, nil)
 
-	storageCloser := mocks.NewMockStorageCloser(ctrl)
-	storageCloser.EXPECT().AllMetadata().Return([]binarystorage.Metadata{{
-		Version: "2.6.6-ubuntu-amd64",
-	}}, nil)
-	storageCloser.EXPECT().Close().Return(nil)
-	s.st.EXPECT().ToolsStorage().Return(storageCloser, nil)
+	s.machineService.EXPECT().GetMachineUUID(gomock.Any(), coremachine.Name("0")).Return("deadbeef", nil)
+	s.machineService.EXPECT().GetHardwareCharacteristics(gomock.Any(), coremachine.UUID("deadbeef")).Return(hc, nil)
+	s.agentPasswordService.EXPECT().SetMachinePassword(gomock.Any(), coremachine.Name("0"), gomock.Any()).Return(nil)
 
-	s.ctrlSt.EXPECT().APIHostPortsForAgents().Return([]network.SpaceHostPorts{{{
-		SpaceAddress: network.NewSpaceAddress("1.2.3.4", network.WithScope(network.ScopeCloudLocal)),
-		NetPort:      1,
-	}}}, nil).MinTimes(1)
-	s.ctrlSt.EXPECT().ControllerConfig().Return(coretesting.FakeControllerConfig(), nil)
-	s.ctrlSt.EXPECT().ControllerTag().Return(coretesting.ControllerTag).AnyTimes()
+	metadata := []agentbinary.Metadata{{
+		Version: "2.6.6",
+		Arch:    "amd64",
+	}}
+	s.agentBinaryService.EXPECT().ListAgentBinaries(gomock.Any()).Return(metadata, nil)
 
-	icfg, err := machinemanager.InstanceConfig(s.ctrlSt, s.st, "0", "nonce", "")
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(icfg.APIInfo.Addrs, gc.DeepEquals, []string{"1.2.3.4:1"})
-	c.Assert(icfg.ToolsList().URLs(), gc.DeepEquals, map[version.Binary][]string{
-		icfg.AgentVersion(): {"https://1.2.3.4:1/model/uuid/tools/2.6.6-ubuntu-amd64"},
+	addrs := []string{"1.2.3.4:1"}
+	s.controllerNodeService.EXPECT().GetAllAPIAddressesForAgents(gomock.Any()).Return(addrs, nil).MinTimes(2)
+
+	s.keyUpdaterService.EXPECT().GetAuthorisedKeysForMachine(
+		gomock.Any(), coremachine.Name("0"),
+	).Return([]string{
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4GpCvqUUYUJlx6d1kpUO9k/t4VhSYsf0yE0/QTqDzC existing1",
+	}, nil)
+
+	services := InstanceConfigServices{
+		ControllerConfigService: s.controllerConfigService,
+		ControllerNodeService:   s.controllerNodeService,
+		CloudService:            s.cloudService,
+		ObjectStore:             s.store,
+		KeyUpdaterService:       s.keyUpdaterService,
+		ModelConfigService:      s.modelConfigService,
+		MachineService:          s.machineService,
+		AgentPasswordService:    s.agentPasswordService,
+		AgentBinaryService:      s.agentBinaryService,
+	}
+
+	modelID := tc.Must0(c, coremodel.NewUUID)
+
+	icfg, err := InstanceConfig(c.Context(), controllerUUID.String(), modelID, services, "0", "nonce", "")
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(icfg.APIInfo.Addrs, tc.DeepEquals, []string{"1.2.3.4:1"})
+	c.Check(icfg.ToolsList().URLs(), tc.DeepEquals, map[semversion.Binary][]string{
+		icfg.AgentVersion(): {fmt.Sprintf("https://1.2.3.4:1/model/%s/tools/2.6.6-ubuntu-amd64", modelID.String())},
 	})
+	c.Check(icfg.AuthorizedKeys, tc.Equals, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4GpCvqUUYUJlx6d1kpUO9k/t4VhSYsf0yE0/QTqDzC existing1")
 }

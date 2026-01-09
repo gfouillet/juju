@@ -5,46 +5,32 @@ package kubernetes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sync"
+	"slices"
 
-	"github.com/juju/errors"
 	core "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 
-	jujucontext "github.com/juju/juju/environs/context"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/internal/errors"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
-	"github.com/juju/juju/internal/provider/kubernetes/resources"
 	"github.com/juju/juju/internal/provider/kubernetes/storage"
-	"github.com/juju/juju/internal/provider/kubernetes/utils"
-	jujustorage "github.com/juju/juju/storage"
+	jujustorage "github.com/juju/juju/internal/storage"
 )
 
 func validateStorageAttributes(attributes map[string]interface{}) error {
 	if _, err := storage.ParseStorageConfig(attributes); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	if _, err := storage.ParseStorageMode(attributes); err != nil {
-		return errors.Trace(err)
+		return errors.Capture(err)
 	}
 	return nil
 }
 
-type storageProvider struct {
-	client *kubernetesClient
-}
-
-var _ jujustorage.Provider = (*storageProvider)(nil)
-
-// ValidateStorageProvider returns an error if the storage type and config is not valid
-// for a Kubernetes deployment.
-func (g *storageProvider) ValidateForK8s(attributes map[string]any) error {
-
+func validateStorageMedium(attributes map[string]any) error {
 	if attributes == nil {
 		return nil
 	}
@@ -52,339 +38,790 @@ func (g *storageProvider) ValidateForK8s(attributes map[string]any) error {
 	if mediumValue, ok := attributes[constants.StorageMedium]; ok {
 		medium := core.StorageMedium(fmt.Sprintf("%v", mediumValue))
 		if medium != core.StorageMediumMemory && medium != core.StorageMediumHugePages {
-			return errors.NotValidf("storage medium %q", mediumValue)
+			return errors.Errorf(
+				"storage medium %q not valid", mediumValue,
+			).Add(coreerrors.NotValid)
 		}
 	}
 
-	if err := validateStorageAttributes(attributes); err != nil {
-		return errors.Trace(err)
-	}
-
 	return nil
 }
 
-// ValidateConfig is defined on the jujustorage.Provider interface.
-func (g *storageProvider) ValidateConfig(cfg *jujustorage.Config) error {
-	return errors.Trace(validateStorageAttributes(cfg.Attrs()))
-}
+// noopFSSource is a [jujustorage.FilesystemSource] that performs no actions for
+// the provider.
+type noopFSSource struct{}
 
-// Supports is defined on the jujustorage.Provider interface.
-func (g *storageProvider) Supports(k jujustorage.StorageKind) bool {
-	return k == jujustorage.StorageKindBlock
-}
+// rootfsStorageProvider is a [jujustorage.Provider] that provides rootfs
+// like filesystems in a Kubernetes model.
+type rootfsStorageProvider struct{}
 
-// Scope is defined on the jujustorage.Provider interface.
-func (g *storageProvider) Scope() jujustorage.Scope {
-	return jujustorage.ScopeEnviron
-}
-
-// Dynamic is defined on the jujustorage.Provider interface.
-func (g *storageProvider) Dynamic() bool {
-	return true
-}
-
-// Releasable is defined on the jujustorage.Provider interface.
-func (g *storageProvider) Releasable() bool {
-	return true
-}
-
-// DefaultPools is defined on the jujustorage.Provider interface.
-func (g *storageProvider) DefaultPools() []*jujustorage.Config {
-	return nil
-}
-
-// VolumeSource is defined on the jujustorage.Provider interface.
-func (g *storageProvider) VolumeSource(cfg *jujustorage.Config) (jujustorage.VolumeSource, error) {
-	return &volumeSource{
-		client: g.client,
-	}, nil
-}
-
-// FilesystemSource is defined on the jujustorage.Provider interface.
-func (g *storageProvider) FilesystemSource(providerConfig *jujustorage.Config) (jujustorage.FilesystemSource, error) {
-	return nil, errors.NotSupportedf("filesystems")
-}
-
-type volumeSource struct {
+// storageProvider is a [jujustorage.Provider] that provides storage in a
+// Kubernetes model.
+type storageProvider struct {
 	client *kubernetesClient
 }
 
-var _ jujustorage.VolumeSource = (*volumeSource)(nil)
+// tmpfsStorageProvider is a [jujustorage.Provider] that provides tmpfs like
+// filesystems in a Kubernetes model.
+type tmpfsStorageProvider struct{}
 
-// CreateVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) CreateVolumes(ctx jujucontext.ProviderCallContext, params []jujustorage.VolumeParams) (_ []jujustorage.CreateVolumesResult, err error) {
-	// noop
-	return nil, nil
+var (
+	_ jujustorage.Provider = (*rootfsStorageProvider)(nil)
+	_ jujustorage.Provider = (*storageProvider)(nil)
+	_ jujustorage.Provider = (*tmpfsStorageProvider)(nil)
+)
+
+// RecommendedPoolForKind returns the recommended storage pool to use for
+// supplied storage kind. At the moment the only supported recommended kind is
+// filesystem.
+//
+// This func implements the [jujustorage.ProviderRegistry] interface.
+func (k *kubernetesClient) RecommendedPoolForKind(
+	kind jujustorage.StorageKind,
+) *jujustorage.Config {
+	// NOTE (tlm): The Juju logic around if a storage provider through either
+	// its filesystem or volume source are capable of supporting a given storage
+	// kind is not owned by a provider today. This determinantion is made by
+	// storage provisoning where the assumption is that a volume source can be a
+	// volume or filesystem source. This divorces the provider from being
+	// involved in the decision making even though it provides the storage.
+	//
+	// For now we assume that the Kubernetes provider is always capable of
+	// creating filesystems and block devices are not supported on Kubernetes.
+	if kind != jujustorage.StorageKindFilesystem {
+		return nil
+	}
+
+	s := storageProvider{k}
+	defaultPools := s.DefaultPools()
+	// We take the first default pool offered by the storage provider.
+	if len(defaultPools) != 0 {
+		return defaultPools[0]
+	}
+	return nil
 }
 
-// ListVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) ListVolumes(ctx jujucontext.ProviderCallContext) ([]string, error) {
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	vols, err := pVolumes.List(context.TODO(), v1.ListOptions{})
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	volumeIds := make([]string, 0, len(vols.Items))
-	for _, v := range vols.Items {
-		volumeIds = append(volumeIds, v.Name)
-	}
-	return volumeIds, nil
+// StorageProviderTypes is defined on the jujustorage.ProviderRegistry interface.
+func (*kubernetesClient) StorageProviderTypes() ([]jujustorage.ProviderType, error) {
+	return []jujustorage.ProviderType{
+		constants.StorageProviderType,
+		constants.StorageProviderTypeRootfs,
+		constants.StorageProviderTypeTmpfs,
+	}, nil
 }
 
-// DescribeVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) DescribeVolumes(ctx jujucontext.ProviderCallContext, volIds []string) ([]jujustorage.DescribeVolumesResult, error) {
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	vols, err := pVolumes.List(context.TODO(), v1.ListOptions{
-		// TODO(caas) - filter on volumes for the current model
-	})
-	if err != nil {
-		return nil, errors.Trace(err)
+// StorageProvider is defined on the jujustorage.ProviderRegistry interface.
+func (k *kubernetesClient) StorageProvider(t jujustorage.ProviderType) (jujustorage.Provider, error) {
+	switch t {
+	case constants.StorageProviderType:
+		return &storageProvider{k}, nil
+	case constants.StorageProviderTypeRootfs:
+		return &rootfsStorageProvider{}, nil
+	case constants.StorageProviderTypeTmpfs:
+		return &tmpfsStorageProvider{}, nil
+	default:
+		return nil, errors.Errorf(
+			"storage provider for type %q does not exist",
+			t,
+		).Add(coreerrors.NotFound)
 	}
+}
 
-	byID := make(map[string]core.PersistentVolume)
-	for _, vol := range vols.Items {
-		byID[vol.Name] = vol
-	}
-	results := make([]jujustorage.DescribeVolumesResult, len(volIds))
-	for i, volID := range volIds {
-		vol, ok := byID[volID]
-		if !ok {
-			results[i].Error = errors.NotFoundf("%s", volID)
-			continue
+// AttachFilesystems is a noop operation for attaching filesystems in this
+// source.
+//
+// Implements the [jujustorage.FilesystemSource] interface.
+func (*noopFSSource) AttachFilesystems(
+	_ context.Context, params []jujustorage.FilesystemAttachmentParams,
+) ([]jujustorage.AttachFilesystemsResult, error) {
+	// This is a no-op, but we must reflect the input back to the storage
+	// provisioner so that it can set the provisioned state.
+	results := make([]jujustorage.AttachFilesystemsResult, 0, len(params))
+	for _, v := range params {
+		result := jujustorage.AttachFilesystemsResult{
+			FilesystemAttachment: &jujustorage.FilesystemAttachment{
+				Filesystem: v.Filesystem,
+				Machine:    v.Machine,
+				FilesystemAttachmentInfo: jujustorage.FilesystemAttachmentInfo{
+					Path:     v.Path,
+					ReadOnly: v.ReadOnly,
+				},
+			},
 		}
-		results[i].VolumeInfo = &jujustorage.VolumeInfo{
-			Size:       uint64(vol.Size()),
-			VolumeId:   vol.Name,
-			Persistent: true,
-		}
+		results = append(results, result)
 	}
 	return results, nil
 }
 
-// DestroyVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) DestroyVolumes(ctx jujucontext.ProviderCallContext, volIds []string) ([]error, error) {
-	logger.Debugf("destroy k8s volumes: %v", volIds)
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	return foreachVolume(volIds, func(volumeId string) error {
-		vol, err := pVolumes.Get(context.TODO(), volumeId, v1.GetOptions{})
-		if err != nil && !k8serrors.IsNotFound(err) {
-			return errors.Annotatef(err, "getting volume %v to delete", volumeId)
+// CreateFilesystems is a noop operation for creating filesystems in this source.
+//
+// Implements the [jujustorage.FilesystemSource] interface.
+func (*noopFSSource) CreateFilesystems(
+	_ context.Context, params []jujustorage.FilesystemParams,
+) ([]jujustorage.CreateFilesystemsResult, error) {
+	// This is a no-op, but we must reflect the input back to the storage
+	// provisioner so that it can set the provisioned state.
+	results := make([]jujustorage.CreateFilesystemsResult, 0, len(params))
+	for _, v := range params {
+		result := jujustorage.CreateFilesystemsResult{
+			Filesystem: &jujustorage.Filesystem{
+				Tag: v.Tag,
+				FilesystemInfo: jujustorage.FilesystemInfo{
+					// ProviderId must be set for the filesystem attachment to
+					// progress. Since this is a no-op fs, the filesystem tag is
+					// sufficient.
+					ProviderId: v.Tag.Id(),
+					Size:       v.Size,
+				},
+			},
 		}
-		if err == nil && vol.Spec.ClaimRef != nil {
-			claimRef := vol.Spec.ClaimRef
-			pClaims := v.client.client().CoreV1().PersistentVolumeClaims(claimRef.Namespace)
-			logger.Infof("deleting PVC %s due to call to volumeSource.DestroyVolumes(%q)", claimRef.Name, volumeId)
-			err := pClaims.Delete(context.TODO(), claimRef.Name, v1.DeleteOptions{PropagationPolicy: constants.DefaultPropagationPolicy()})
-			if err != nil && !k8serrors.IsNotFound(err) {
-				return errors.Annotatef(err, "destroying volume claim %v", claimRef.Name)
-			}
-		}
-		if err := pVolumes.Delete(context.TODO(),
-			volumeId,
-			v1.DeleteOptions{PropagationPolicy: constants.DefaultPropagationPolicy()},
-		); !k8serrors.IsNotFound(err) {
-			return errors.Annotate(err, "destroying k8s volumes")
-		}
-		return nil
-	}), nil
-}
-
-// ReleaseVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) ReleaseVolumes(ctx jujucontext.ProviderCallContext, volIds []string) ([]error, error) {
-	// noop
-	return make([]error, len(volIds)), nil
-}
-
-// ValidateVolumeParams is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) ValidateVolumeParams(params jujustorage.VolumeParams) error {
-	// TODO(caas) - we need to validate params based on the underlying substrate
-	return nil
-}
-
-// AttachVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) AttachVolumes(ctx jujucontext.ProviderCallContext, attachParams []jujustorage.VolumeAttachmentParams) ([]jujustorage.AttachVolumesResult, error) {
-	// noop
-	return nil, nil
-}
-
-// DetachVolumes is specified on the jujustorage.VolumeSource interface.
-func (v *volumeSource) DetachVolumes(ctx jujucontext.ProviderCallContext, attachParams []jujustorage.VolumeAttachmentParams) ([]error, error) {
-	// noop
-	return make([]error, len(attachParams)), nil
-}
-
-// ImportVolue is specified on the jujustorage.VolumeImporter interface.
-func (v *volumeSource) ImportVolume(
-	ctx jujucontext.ProviderCallContext,
-	volumeId string,
-	storageName string,
-	resourceTags map[string]string,
-	force bool,
-) (jujustorage.VolumeInfo, error) {
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	vol, err := pVolumes.Get(ctx, volumeId, v1.GetOptions{})
-
-	if k8serrors.IsNotFound(err) {
-		return jujustorage.VolumeInfo{}, errors.NotFoundf("persistent volume %q", volumeId)
-	} else if err != nil {
-		return jujustorage.VolumeInfo{}, err
+		results = append(results, result)
 	}
+	return results, nil
+}
 
-	var importErr error
-	if force {
-		importErr = v.prepareVolumeForImport(ctx, vol, storageName)
-	} else {
-		importErr = v.validateImportVolume(vol)
-	}
-	if importErr != nil {
-		return jujustorage.VolumeInfo{}, errors.Trace(importErr)
-	}
+// DefaultPools returns the default storage pools for [rootfsStorageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) DefaultPools() []*jujustorage.Config {
+	pool, _ := jujustorage.NewConfig(
+		constants.StorageProviderTypeRootfs.String(),
+		constants.StorageProviderTypeRootfs,
+		jujustorage.Attrs{},
+	)
+	return []*jujustorage.Config{pool}
+}
 
-	return jujustorage.VolumeInfo{
-		Size:       uint64(vol.Size()),
-		VolumeId:   vol.Name,
-		Persistent: true,
+// DefaultPools returns the default storage pools for [storageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*storageProvider) DefaultPools() []*jujustorage.Config {
+	pool, _ := jujustorage.NewConfig(
+		constants.StorageProviderType.String(),
+		constants.StorageProviderType,
+		jujustorage.Attrs{},
+	)
+	return []*jujustorage.Config{pool}
+}
+
+// DefaultPools returns the default storage pools for [tmpfsStorageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) DefaultPools() []*jujustorage.Config {
+	pool, _ := jujustorage.NewConfig(
+		constants.StorageProviderTypeTmpfs.String(),
+		constants.StorageProviderTypeTmpfs,
+		jujustorage.Attrs{},
+	)
+	return []*jujustorage.Config{pool}
+}
+
+// DestroyFilesystems is a noop operation for destroying filesystems in this
+// source.
+//
+// Implements the [jujustorage.FilesystemSource] interface.
+func (*noopFSSource) DestroyFilesystems(
+	_ context.Context, providerIDs []string,
+) ([]error, error) {
+	return make([]error, len(providerIDs)), nil
+}
+
+// DetatchFilesystems is a noop operation for detaching filesystems in this
+// source.
+//
+// Implements the [jujustorage.FilesystemSource] interface.
+func (*noopFSSource) DetachFilesystems(
+	_ context.Context, params []jujustorage.FilesystemAttachmentParams,
+) ([]error, error) {
+	return make([]error, len(params)), nil
+}
+
+// Dynamic informs the caller if this provider supports creating storage after
+// a machine is provisioned. This question is not applicable to Kubernetes so
+// we return true.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) Dynamic() bool {
+	return true
+}
+
+// Dynamic informs the caller if this provider supports creating storage after
+// a machine is provisioned. This question is not applicable to Kubernetes so
+// we return true.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*storageProvider) Dynamic() bool {
+	return true
+}
+
+// Dynamic informs the caller if this provider supports creating storage after
+// a machine is provisioned. This question is not applicable to Kubernetes so
+// we return true.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) Dynamic() bool {
+	return true
+}
+
+// FilesystemSource returns the filesystem source for this provider.
+//
+// The returned filesystem source does not provision any filesystems in the
+// model and results in noop operations. Actual provisioning is done by
+// kubernetes as part of creating the application.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) FilesystemSource(
+	_ *jujustorage.Config,
+) (jujustorage.FilesystemSource, error) {
+	return &noopFSSource{}, nil
+}
+
+// FilesystemSource is defined on the jujustorage.Provider interface.
+func (g *storageProvider) FilesystemSource(providerConfig *jujustorage.Config) (jujustorage.FilesystemSource, error) {
+	return &filesystemSource{
+		client: g.client,
 	}, nil
 }
 
-// validateImportVolume verifies whether the given PersistentVolume is eligible for import.
-func (v *volumeSource) validateImportVolume(vol *core.PersistentVolume) error {
-	// The PersistentVolume's reclaim policy must be set to Retain.
-	if vol.Spec.PersistentVolumeReclaimPolicy != core.PersistentVolumeReclaimRetain {
-		return errors.NewNotSupported(
-			nil,
-			fmt.Sprintf(
-				"importing volume %q with reclaim policy %q not supported (must be %q)",
-				vol.Name, vol.Spec.PersistentVolumeReclaimPolicy, core.PersistentVolumeReclaimRetain,
-			),
+// FilesystemSource returns the filesystem source for this provider.
+//
+// The returned filesystem source does not provision any filesystems in the
+// model and results in noop operations. Actual provisioning is done by
+// kubernetes as part of creating the application.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) FilesystemSource(
+	_ *jujustorage.Config,
+) (jujustorage.FilesystemSource, error) {
+	return &noopFSSource{}, nil
+}
+
+// Reports if this provider is capable of releasing dynamically provisioned
+// storage.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) Releasable() bool {
+	return false
+}
+
+// Reports if this provider is capable of releasing dynamically provisioned
+// storage.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*storageProvider) Releasable() bool {
+	return true
+}
+
+// Reports if this provider is capable of releasing dynamically provisioned
+// storage.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) Releasable() bool {
+	return false
+}
+
+// ReleaseFilesystems is a noop operation for releasing filesystems in this
+// source.
+//
+// Implements the [jujustorage.FilesystemSource] interface.
+func (*noopFSSource) ReleaseFilesystems(
+	_ context.Context, _ []string,
+) ([]error, error) {
+	return nil, nil
+}
+
+// Scope returns the provisioning scope required for [rootfsStorageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) Scope() jujustorage.Scope {
+	return jujustorage.ScopeEnviron
+}
+
+// Scope returns the provisioning scope required for [storageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*storageProvider) Scope() jujustorage.Scope {
+	return jujustorage.ScopeEnviron
+}
+
+// Scope returns the provisioning scope required for [tmpfsStorageProvider].
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) Scope() jujustorage.Scope {
+	return jujustorage.ScopeEnviron
+}
+
+// Supports tells the caller if this provider supports the given storage kind.
+// Currently only filesystems are supported.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) Supports(k jujustorage.StorageKind) bool {
+	return k == jujustorage.StorageKindFilesystem
+}
+
+// Support tells the caller if this provider supports the given storage kind.
+// Currently only block storage is supported.
+//
+// Implements the [jujustorage.Provider] interface.
+func (g *storageProvider) Supports(k jujustorage.StorageKind) bool {
+	return k == jujustorage.StorageKindFilesystem
+}
+
+// Support tells the caller if this provider supports the given storage kind.
+// Currently only filesystems are supported.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) Supports(k jujustorage.StorageKind) bool {
+	return k == jujustorage.StorageKindFilesystem
+}
+
+// ValidateConfig validates the supplied configuration for the rootfs storage
+// provider. This func implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) ValidateConfig(cfg *jujustorage.Config) error {
+	return errors.Capture(validateStorageMedium(cfg.Attrs()))
+}
+
+// ValidateConfig is defined on the jujustorage.Provider interface.
+func (g *storageProvider) ValidateConfig(cfg *jujustorage.Config) error {
+	return errors.Capture(validateStorageAttributes(cfg.Attrs()))
+}
+
+// ValidateConfig validates the supplied configuration for the tmpfs storage
+// provider. This func implements the [jujustorage.Provider] interface.
+func (*tmpfsStorageProvider) ValidateConfig(cfg *jujustorage.Config) error {
+	return errors.Capture(validateStorageMedium(cfg.Attrs()))
+}
+
+func (*rootfsStorageProvider) ValidateForK8s(attributes map[string]any) error {
+	return errors.Capture(validateStorageMedium(attributes))
+}
+
+// ValidateStorageProvider returns an error if the storage type and config is not valid
+// for a Kubernetes deployment.
+func (g *storageProvider) ValidateForK8s(attributes map[string]any) error {
+	if attributes == nil {
+		return nil
+	}
+
+	if err := validateStorageMedium(attributes); err != nil {
+		return errors.Capture(err)
+	}
+
+	if err := validateStorageAttributes(attributes); err != nil {
+		return errors.Capture(err)
+	}
+
+	return nil
+}
+
+func (*tmpfsStorageProvider) ValidateForK8s(attributes map[string]any) error {
+	return errors.Capture(validateStorageMedium(attributes))
+}
+
+// ValidateFilesystemParams validates the parameters for a fielsystem. No
+// validation is performed by this source and results in a noop operation.
+func (*noopFSSource) ValidateFilesystemParams(_ jujustorage.FilesystemParams) error {
+	return nil
+}
+
+// VolumeSource provides the [jujustorage.VolumeSource] implementation for tmpfs
+// storage.
+//
+// This always results in an error as volumes are not support for tmpfs storage.
+//
+// Implements the [jujustorage.Provider] interface.
+func (*rootfsStorageProvider) VolumeSource(*jujustorage.Config) (
+	jujustorage.VolumeSource, error,
+) {
+	return nil, errors.New("volumes are not supported by rootfs storage").Add(
+		coreerrors.NotSupported,
+	)
+}
+
+// VolumeSource is defined on the jujustorage.Provider interface.
+func (g *storageProvider) VolumeSource(cfg *jujustorage.Config) (jujustorage.VolumeSource, error) {
+	return nil, errors.New("volumes are not supported").Add(
+		coreerrors.NotSupported,
+	)
+}
+
+// VolumeSource provides the [jujustorage.VolumeSource] implementation for tmpfs
+// storage.
+//
+// This always results in an error as volumes are not support for tmpfs storage.
+//
+// Implements the [jujustorage.Provider] interface.
+func (p *tmpfsStorageProvider) VolumeSource(*jujustorage.Config) (
+	jujustorage.VolumeSource, error,
+) {
+	return nil, errors.New("volumes are not supported by tmpfs").Add(
+		coreerrors.NotSupported,
+	)
+}
+
+type filesystemSource struct {
+	client *kubernetesClient
+}
+
+var _ jujustorage.FilesystemSource = (*filesystemSource)(nil)
+
+// ValidateFilesystemParams is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) ValidateFilesystemParams(
+	params jujustorage.FilesystemParams,
+) error {
+	if params.ProviderId == nil {
+		return errors.Errorf(
+			"kubernetes filesystem %q missing provider id", params.Tag.Id(),
+		).Add(jujustorage.FilesystemCreateParamsIncomplete)
+	}
+	return nil
+}
+
+// CreateFilesystems is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) CreateFilesystems(
+	ctx context.Context,
+	params []jujustorage.FilesystemParams,
+) ([]jujustorage.CreateFilesystemsResult, error) {
+	results := make([]jujustorage.CreateFilesystemsResult, 0, len(params))
+	for _, param := range params {
+		var result jujustorage.CreateFilesystemsResult
+		if param.ProviderId == nil {
+			result.Error = errors.Errorf(
+				"creating kubernetes filesystem %q with missing provider id",
+				param.Tag.Id(),
+			).Add(coreerrors.NotValid)
+			results = append(results, result)
+			continue
+		}
+		// Kubernetes filesystems are PersistentVolumes that are provisioned
+		// by Kubernetes, not by the storage provider. Instead we check that
+		// it exists and source any filesystem required information.
+		fsInfo, err := v.getPersistentVolume(ctx, *param.ProviderId)
+		if err != nil {
+			result.Error = errors.Errorf(
+				"finalising kubernetes filesystem %q with PersistentVolume %q: %w",
+				param.Tag.Id(), *param.ProviderId, err,
+			)
+		} else {
+			result.Filesystem = &jujustorage.Filesystem{
+				Tag:            param.Tag,
+				FilesystemInfo: fsInfo,
+			}
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func (v *filesystemSource) getPersistentVolume(
+	ctx context.Context, pvName string,
+) (jujustorage.FilesystemInfo, error) {
+	pvAPI := v.client.client().CoreV1().PersistentVolumes()
+	pv, err := pvAPI.Get(ctx, pvName, v1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return jujustorage.FilesystemInfo{}, errors.New(
+			"kubernetes PersistentVolume not found",
+		).Add(coreerrors.NotFound)
+	} else if err != nil {
+		return jujustorage.FilesystemInfo{}, errors.Errorf(
+			"getting kubernetes PersistentVolume: %w", err,
 		)
 	}
-	// The PersistentVolume must not be bound to any PersistentVolumeClaim.
-	if vol.Spec.ClaimRef != nil {
-		return errors.NotSupportedf("importing volume %q already bound to a claim", vol.Name)
+	sizeMiB := uint64(0)
+	if pv.Spec.Capacity != nil {
+		storageCapacity := pv.Spec.Capacity.Storage()
+		if storageCapacity != nil {
+			sizeMiB = quantityAsMibiBytes(*storageCapacity)
+		}
 	}
-	return nil
+	fs := jujustorage.FilesystemInfo{
+		ProviderId: pvName,
+		Size:       sizeMiB,
+	}
+	return fs, nil
 }
 
-// prepareVolumeForImport prepares a PersistentVolume for forced import by Juju.
-// This function modifies the PersistentVolume to ensure it can be imported by:
-//   - Setting the reclaim policy to Retain to prevent deletion
-//   - Deleting any bound PersistentVolumeClaim if it's managed by Juju
-//   - Clearing the claimRef to make the volume available for new claims
-//
-// Returns an error if the PVC is not managed by Juju or if any Kubernetes operations fail.
-func (v *volumeSource) prepareVolumeForImport(ctx jujucontext.ProviderCallContext, vol *core.PersistentVolume, storageName string) error {
-	logger.Debugf("force importing PersistentVolume %q", vol.Name)
-
-	// Ensures the PV's reclaim policy is Retain before deleting the PVC.
-	if err := v.patchPersistentVolumeReclaimToRetain(ctx, vol); err != nil {
-		return errors.Trace(err)
-	}
-
-	if err := v.makePersistentVolumeAvailable(ctx, vol, storageName); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
+func quantityAsMibiBytes(q resource.Quantity) uint64 {
+	return uint64(q.MilliValue()) / 1000 / 1024 / 1024
 }
 
-func foreachVolume(volumeIds []string, f func(string) error) []error {
-	results := make([]error, len(volumeIds))
-	var wg sync.WaitGroup
-	for i, volumeId := range volumeIds {
-		wg.Add(1)
-		go func(i int, volumeId string) {
-			defer wg.Done()
-			results[i] = f(volumeId)
-		}(i, volumeId)
-	}
-	wg.Wait()
-	return results
-}
-
-// patchPersistentVolumeReclaimToRetain patches the persistent volume's reclaim policy to Retain.
-// This prevents the volume from being deleted when its claim is removed.
-func (v *volumeSource) patchPersistentVolumeReclaimToRetain(ctx jujucontext.ProviderCallContext, vol *core.PersistentVolume) error {
-	if vol.Spec.PersistentVolumeReclaimPolicy == core.PersistentVolumeReclaimRetain {
-		return nil
-	}
-
-	vol.Spec.PersistentVolumeReclaimPolicy = core.PersistentVolumeReclaimRetain
-	data, err := runtime.Encode(unstructured.UnstructuredJSONScheme, vol)
-	if err != nil {
-		return errors.Annotatef(err, "failed to encode PersistentVolume %s", vol.Name)
-	}
-
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	_, err = pVolumes.Patch(ctx, vol.Name, types.StrategicMergePatchType, data, v1.PatchOptions{FieldManager: resources.JujuFieldManager})
-	if err != nil {
-		return errors.Annotatef(err, "failed to patch PersistentVolume %s", vol.Name)
-	}
-
-	// Make sure the change is applyed.
-	pv, err := pVolumes.Get(ctx, vol.Name, v1.GetOptions{})
-	if err != nil {
-		return errors.Annotatef(err, "failed to get PersistentVolume %s", vol.Name)
-	}
-
-	if pv.Spec.PersistentVolumeReclaimPolicy != core.PersistentVolumeReclaimRetain {
-		return errors.Errorf("persistent volume %s reclaim policy is not Retain", vol.Name)
-	}
-
-	logger.Infof("successfully patched PersistentVolume %q: set reclaim policy to Retain", vol.Name)
-	return nil
-}
-
-// makePersistentVolumeAvailable deletes the PVC and clears the claimRef if the PV is bound to a PVC.
-// This transitions the PersistentVolume from bound/released state to available state for import.
-func (v *volumeSource) makePersistentVolumeAvailable(ctx jujucontext.ProviderCallContext, vol *core.PersistentVolume, storageName string) error {
-	if vol.Spec.ClaimRef == nil {
-		return nil
-	}
-
-	pvcName := vol.Spec.ClaimRef.Name
-	pvcNamespace := vol.Spec.ClaimRef.Namespace
-	logger.Infof("importing PersistentVolume %q is bound to PVC %s/%s, deleting PVC", vol.Name, pvcNamespace, pvcName)
-
-	// Delete the PVC if it exists and is managed by juju.
-	pvcClient := v.client.client().CoreV1().PersistentVolumeClaims(pvcNamespace)
-	pvc, err := pvcClient.Get(context.TODO(), pvcName, v1.GetOptions{})
-	if err == nil {
-		if _, err := utils.MatchStorageMetaLabelVersion(pvc.ObjectMeta, storageName); err != nil {
-			return errors.NewNotSupported(
-				err,
-				fmt.Sprintf(
-					"importing PersistentVolume %q whose PersistentVolumeClaim is not managed by juju",
-					vol.Name,
-				),
+// DestroyFilesystems is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) DestroyFilesystems(ctx context.Context, pvNames []string) ([]error, error) {
+	logger.Infof(ctx, "destroying kubernetes PersistentVolume(s): %v", pvNames)
+	errs := make([]error, 0, len(pvNames))
+	for _, pvName := range pvNames {
+		err := v.deletePersistentVolume(ctx, pvName)
+		if err != nil {
+			err = errors.Errorf(
+				"destroying kubernetes PersistentVolume %q: %w", pvName, err,
 			)
 		}
-
-		err := pvcClient.Delete(ctx, pvcName, v1.DeleteOptions{})
-		if err != nil {
-			return errors.Annotatef(err, "failed to delete PVC %s/%s", pvcNamespace, pvcName)
-		}
-		logger.Infof("successfully deleted PVC %s/%s", pvcNamespace, pvcName)
-	} else if !k8serrors.IsNotFound(err) {
-		return errors.Trace(err)
+		errs = append(errs, err)
 	}
+	return errs, nil
+}
 
-	// Clear the claimRef to make the PV available using a targeted patch
-	patchData := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"claimRef": nil,
-		},
+func (v *filesystemSource) deletePersistentVolume(
+	ctx context.Context, pvName string,
+) error {
+	pvAPI := v.client.client().CoreV1().PersistentVolumes()
+	err := pvAPI.Delete(ctx, pvName, v1.DeleteOptions{
+		PropagationPolicy: constants.DefaultPropagationPolicy(),
+	})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return errors.Errorf("deleting PersistentVolume: %w", err)
 	}
-
-	data, err := json.Marshal(patchData)
-	if err != nil {
-		return errors.Annotatef(err, "failed to marshal patch data for PersistentVolume %s", vol.Name)
-	}
-
-	pVolumes := v.client.client().CoreV1().PersistentVolumes()
-	_, err = pVolumes.Patch(ctx, vol.Name, types.StrategicMergePatchType, data, v1.PatchOptions{FieldManager: resources.JujuFieldManager})
-	if err != nil {
-		return errors.Annotatef(err, "failed to patch PersistentVolume %s", vol.Name)
-	}
-	logger.Infof("successfully patched PersistentVolume %q: set claimRef to nil", vol.Name)
 	return nil
+}
+
+// ReleaseFilesystems is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) ReleaseFilesystems(ctx context.Context, ids []string) ([]error, error) {
+	// noop
+	return make([]error, len(ids)), nil
+}
+
+// AttachFilesystems is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) AttachFilesystems(
+	ctx context.Context,
+	params []jujustorage.FilesystemAttachmentParams,
+) ([]jujustorage.AttachFilesystemsResult, error) {
+	results := make([]jujustorage.AttachFilesystemsResult, 0, len(params))
+	for _, param := range params {
+		var result jujustorage.AttachFilesystemsResult
+		if param.AttachmentParams.ProviderId == nil {
+			result.Error = errors.Errorf(
+				"kubernetes filesystem %q attachment to %q missing provider id",
+				param.Filesystem.Id(), param.Machine.Id(),
+			).Add(jujustorage.FilesystemAttachParamsIncomplete)
+			results = append(results, result)
+			continue
+		}
+		if param.InstanceId == "" {
+			result.Error = errors.Errorf(
+				"kubernetes filesystem %q attachment to %q missing instance id",
+				param.Filesystem.Id(), param.Machine.Id(),
+			).Add(jujustorage.FilesystemAttachParamsIncomplete)
+			results = append(results, result)
+			continue
+		}
+		// Kubernetes filesystems attachments are PersistentVolumeClaims
+		// that are provisioned by the StatefulSet, not by the storage
+		// provider. Instead we check that it exists and source any
+		// filesystem attachment required information.
+		info, err := v.getPersistentVolumeClaim(
+			ctx,
+			*param.AttachmentParams.ProviderId,
+			param.ReadOnly,
+			param.InstanceId.String(),
+		)
+		if err != nil {
+			result.Error = errors.Errorf(
+				"finalising kubernetes filesystem %q attachment to %q with PersistentVolumeClaim %q: %w",
+				param.Filesystem.Id(),
+				param.Machine.Id(),
+				*param.AttachmentParams.ProviderId,
+				err,
+			)
+		} else {
+			result.FilesystemAttachment = &jujustorage.FilesystemAttachment{
+				Filesystem:               param.Filesystem,
+				Machine:                  param.Machine,
+				FilesystemAttachmentInfo: info,
+			}
+		}
+
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func (v *filesystemSource) getPersistentVolumeClaim(
+	ctx context.Context, pvcName string, readOnly bool, podName string,
+) (jujustorage.FilesystemAttachmentInfo, error) {
+	client := v.client.client()
+	pvcAPI := client.CoreV1().PersistentVolumeClaims(v.client.namespace)
+	_, err := pvcAPI.Get(ctx, pvcName, v1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.New(
+			"kubernetes PersistentVolumeClaim not found",
+		).Add(coreerrors.NotFound)
+	} else if err != nil {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.Errorf(
+			"getting kubernetes PersistentVolumeClaim: %w", err,
+		)
+	}
+
+	// We attempt to find the mount path in the charm container by going through
+	// the pod -> container -> volume mount.
+	// If any of the lookup fails, stop the search and return an error.
+	pod, err := client.CoreV1().Pods(v.client.namespace).Get(ctx, podName, v1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.Errorf(
+			"kubernetes Pod %q not found",
+			podName,
+		).Add(coreerrors.NotFound)
+	} else if err != nil {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.Errorf(
+			"getting kubernetes Pod %q: %w", podName, err,
+		)
+	}
+
+	containerIdx := slices.IndexFunc(pod.Spec.Containers, func(container core.Container) bool {
+		return container.Name == constants.ApplicationCharmContainer
+	})
+	if containerIdx == -1 {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.New(
+			"missing charm container").Add(coreerrors.NotProvisioned)
+	}
+
+	charmContainer := pod.Spec.Containers[containerIdx]
+	volIdx := slices.IndexFunc(pod.Spec.Volumes, func(volume core.Volume) bool {
+		return volume.PersistentVolumeClaim.ClaimName == pvcName
+	})
+	if volIdx == -1 {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.Errorf(
+			"missing pod volume which references claim %q", pvcName,
+		).Add(coreerrors.NotProvisioned)
+	}
+
+	volumeName := pod.Spec.Volumes[volIdx].Name
+	volumeMountIdx := slices.IndexFunc(charmContainer.VolumeMounts, func(mount core.VolumeMount) bool {
+		return mount.Name == volumeName
+	})
+	if volumeMountIdx == -1 {
+		return jujustorage.FilesystemAttachmentInfo{}, errors.Errorf(
+			"missing pod volume mount %q", volumeName,
+		).Add(coreerrors.NotProvisioned)
+	}
+	volumeMount := charmContainer.VolumeMounts[volumeMountIdx]
+
+	fsAttachment := jujustorage.FilesystemAttachmentInfo{
+		Path:     volumeMount.MountPath,
+		ReadOnly: readOnly,
+	}
+	return fsAttachment, nil
+}
+
+// DetachFilesystems is specified on the jujustorage.FilesystemSource interface.
+func (v *filesystemSource) DetachFilesystems(
+	ctx context.Context,
+	params []jujustorage.FilesystemAttachmentParams,
+) ([]error, error) {
+	pvcNamesInformational := make([]string, 0, len(params))
+	for _, param := range params {
+		if param.AttachmentParams.ProviderId != nil {
+			pvcNamesInformational = append(
+				pvcNamesInformational, *param.AttachmentParams.ProviderId)
+		}
+	}
+	logger.Infof(
+		ctx, "destroying kubernetes PersistentVolumeClaim(s): %v",
+		pvcNamesInformational,
+	)
+	errs := make([]error, 0, len(params))
+	for _, param := range params {
+		if param.AttachmentParams.ProviderId == nil {
+			err := errors.Errorf(
+				"kubernetes filesystem %q attachment to %q missing provider id",
+				param.Filesystem.Id(), param.Machine.Id(),
+			)
+			errs = append(errs, err)
+			continue
+		}
+		pvcName := *param.AttachmentParams.ProviderId
+		err := v.deletePersistentVolumeClaim(ctx, pvcName)
+		if err != nil {
+			err = errors.Errorf(
+				"destroying kubernetes PersistentVolumeClaim %q: %w",
+				pvcName, err,
+			)
+		}
+		errs = append(errs, err)
+	}
+	return errs, nil
+}
+
+func (v *filesystemSource) deletePersistentVolumeClaim(
+	ctx context.Context, pvcName string,
+) error {
+	client := v.client.client()
+	pvcAPI := client.CoreV1().PersistentVolumeClaims(v.client.namespace)
+	pvc, err := pvcAPI.Get(ctx, pvcName, v1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return errors.Errorf(
+			"getting kubernetes PersistentVolumeClaim: %w", err,
+		)
+	}
+	if pvc.Spec.VolumeName != "" {
+		err := v.ensurePersistentVolumeWillRetain(ctx, pvc.Spec.VolumeName)
+		if err != nil {
+			return errors.Errorf(
+				"updating kubernetes PersistentVolume %q ReclaimPolicy to Retain",
+				pvc.Spec.VolumeName,
+			)
+		}
+	}
+	err = pvcAPI.Delete(ctx, pvcName, v1.DeleteOptions{
+		PropagationPolicy: constants.DefaultPropagationPolicy(),
+	})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return errors.Errorf(
+			"deleting kubernetes PersistentVolumeClaim: %w", err,
+		)
+	}
+	return nil
+}
+
+func (v *filesystemSource) ensurePersistentVolumeWillRetain(
+	ctx context.Context, pvName string,
+) error {
+	pvAPI := v.client.client().CoreV1().PersistentVolumes()
+	pv, err := pvAPI.Get(ctx, pvName, v1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		logger.Warningf(
+			ctx, "kubernetes PersistentVolume %q missing during PersistentVolumeClaim delete",
+			pvName,
+		)
+		return nil
+	} else if err != nil {
+		return errors.Errorf("getting kubernetes PersistentVolume: %w", err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy == core.PersistentVolumeReclaimRetain {
+		return nil
+	}
+	pv.Spec.PersistentVolumeReclaimPolicy = core.PersistentVolumeReclaimRetain
+	pv, err = pvAPI.Update(ctx, pv, v1.UpdateOptions{
+		FieldManager: "juju",
+	})
+	if k8serrors.IsNotFound(err) {
+		logger.Warningf(
+			ctx, "kubernetes PersistentVolume %q missing during Retain update",
+			pvName,
+		)
+		return nil
+	} else if err != nil {
+		return errors.Errorf("updating kubernetes PersistentVolume: %w", err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != core.PersistentVolumeReclaimRetain {
+		return errors.Errorf(
+			"kubernetes PersistentVolume %q ReclaimPolicy unable to be set to Retain",
+			pvName,
+		)
+	}
+	return nil
+}
+
+// ImportFilesystem is specified on the jujustorage.FilesystemImporter interface.
+func (v *filesystemSource) ImportFilesystem(
+	ctx context.Context,
+	filesystemId string,
+	resourceTags map[string]string,
+) (jujustorage.FilesystemInfo, error) {
+	return jujustorage.FilesystemInfo{}, errors.New("import filesystem not implemented")
 }

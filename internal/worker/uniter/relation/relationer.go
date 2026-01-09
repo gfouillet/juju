@@ -4,12 +4,15 @@
 package relation
 
 import (
+	stdcontext "context"
 	"fmt"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4/dependency"
 
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 	"github.com/juju/juju/rpc/params"
@@ -18,17 +21,17 @@ import (
 // relationer manages a unit's presence in a relation.
 type relationer struct {
 	relationId int
-	ru         RelationUnit
+	ru         api.RelationUnit
 	stateMgr   StateManager
 	unitGetter UnitGetter
 	dying      bool
 
-	logger Logger
+	logger logger.Logger
 }
 
 // NewRelationer creates a new relationer. The unit will not join the
 // relation until explicitly requested.
-func NewRelationer(ru RelationUnit, stateMgr StateManager, unitGetter UnitGetter, logger Logger) Relationer {
+func NewRelationer(ru api.RelationUnit, stateMgr StateManager, unitGetter UnitGetter, logger logger.Logger) Relationer {
 	return &relationer{
 		relationId: ru.Relation().Id(),
 		ru:         ru,
@@ -41,7 +44,7 @@ func NewRelationer(ru RelationUnit, stateMgr StateManager, unitGetter UnitGetter
 // ContextInfo returns a representation of the relationer's current state.
 func (r *relationer) ContextInfo() *context.RelationInfo {
 	st, err := r.stateMgr.Relation(r.relationId)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		st = NewState(r.relationId)
 	}
 	members := st.Members
@@ -49,9 +52,8 @@ func (r *relationer) ContextInfo() *context.RelationInfo {
 	for memberName := range members {
 		memberNames = append(memberNames, memberName)
 	}
-	sh, _ := r.ru.(*RelationUnitShim)
 	return &context.RelationInfo{
-		RelationUnit: &context.RelationUnitShim{sh.RelationUnit},
+		RelationUnit: r.ru,
 		MemberNames:  memberNames,
 	}
 }
@@ -68,14 +70,14 @@ func (r *relationer) IsDying() bool {
 }
 
 // RelationUnit returns the relation unit associated with this relationer instance.
-func (r *relationer) RelationUnit() RelationUnit {
+func (r *relationer) RelationUnit() api.RelationUnit {
 	return r.ru
 }
 
 // Join initializes local state and causes the unit to enter its relation
 // scope, allowing its counterpart units to detect its presence and settings
 // changes.
-func (r *relationer) Join() error {
+func (r *relationer) Join(ctx stdcontext.Context) error {
 	if r.dying {
 		return errors.New("dying relationer must not join!")
 	}
@@ -85,22 +87,22 @@ func (r *relationer) Join() error {
 	if !r.stateMgr.RelationFound(r.relationId) {
 		// Add a state for the new relation to the state manager.
 		st := NewState(r.relationId)
-		if err := r.stateMgr.SetRelation(st); err != nil {
+		if err := r.stateMgr.SetRelation(ctx, st); err != nil {
 			return err
 		}
 	}
 	// uniter.RelationUnit.EnterScope() sets the unit's private address
 	// internally automatically, so no need to set it here.
-	return r.ru.EnterScope()
+	return r.ru.EnterScope(ctx)
 }
 
 // SetDying informs the relationer that the unit is departing the relation,
 // and that the only hooks it should send henceforth are -departed hooks,
 // until the relation is empty, followed by a -broken hook.
-func (r *relationer) SetDying() error {
+func (r *relationer) SetDying(ctx stdcontext.Context) error {
 	if r.IsImplicit() {
 		r.dying = true
-		return r.die()
+		return r.die(ctx)
 	}
 	r.dying = true
 	return nil
@@ -108,12 +110,12 @@ func (r *relationer) SetDying() error {
 
 // die is run when the relationer has no further responsibilities; it leaves
 // relation scope, and removes relation state.
-func (r *relationer) die() error {
-	err := r.ru.LeaveScope()
+func (r *relationer) die(ctx stdcontext.Context) error {
+	err := r.ru.LeaveScope(ctx)
 	if err != nil && !params.IsCodeNotFoundOrCodeUnauthorized(err) {
 		return errors.Annotatef(err, "leaving scope of relation %q", r.ru.Relation())
 	}
-	return r.stateMgr.RemoveRelation(r.relationId, r.unitGetter, map[string]bool{})
+	return r.stateMgr.RemoveRelation(ctx, r.relationId, r.unitGetter, map[string]bool{})
 }
 
 // PrepareHook checks that the relation is in a state such that it makes
@@ -124,7 +126,7 @@ func (r *relationer) PrepareHook(hi hook.Info) (string, error) {
 	if r.IsImplicit() {
 		// Implicit relations always return ErrNoOperation from
 		// NextOp.  Something broken if we reach here.
-		r.logger.Errorf("implicit relations must not run hooks")
+		r.logger.Errorf(stdcontext.Background(), "implicit relations must not run hooks")
 		return "", dependency.ErrBounce
 	}
 	st, err := r.stateMgr.Relation(hi.RelationId)
@@ -139,20 +141,20 @@ func (r *relationer) PrepareHook(hi hook.Info) (string, error) {
 }
 
 // CommitHook persists the fact of the supplied hook's completion.
-func (r *relationer) CommitHook(hi hook.Info) error {
+func (r *relationer) CommitHook(ctx stdcontext.Context, hi hook.Info) error {
 	if r.IsImplicit() {
 		// Implicit relations always return ErrNoOperation from
 		// NextOp.  Something broken if we reach here.
-		r.logger.Errorf("implicit relations must not run hooks")
+		r.logger.Errorf(ctx, "implicit relations must not run hooks")
 		return dependency.ErrBounce
 	}
 	if hi.Kind == hooks.RelationBroken {
-		return r.die()
+		return r.die(ctx)
 	}
 	st, err := r.stateMgr.Relation(hi.RelationId)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	st.UpdateStateForHook(hi, r.logger)
-	return r.stateMgr.SetRelation(st)
+	return r.stateMgr.SetRelation(ctx, st)
 }

@@ -5,11 +5,11 @@ package params
 
 import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
-	"github.com/juju/charm/v12"
 	"github.com/kr/pretty"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/internal/charm"
 )
 
 // ExternalControllerInfoResults contains the results of querying
@@ -53,8 +53,8 @@ type OfferFilters struct {
 
 // OfferFilter is used to query offers.
 type OfferFilter struct {
-	// OwnerName is the owner of the model hosting the offer.
-	OwnerName string `json:"owner-name"`
+	// ModelQualifier disambiguates the name of the model hosting the offer.
+	ModelQualifier string `json:"model-qualifier"`
 
 	// ModelName is the name of the model hosting the offer.
 	ModelName string `json:"model-name"`
@@ -79,13 +79,6 @@ type ApplicationOfferDetailsV5 struct {
 	Users                  []OfferUserDetails `json:"users,omitempty"`
 }
 
-// ApplicationOfferDetailsV4 represents an application offering from an external model.
-type ApplicationOfferDetailsV4 struct {
-	ApplicationOfferDetailsV5
-	Spaces   []RemoteSpace     `json:"spaces,omitempty"`
-	Bindings map[string]string `json:"bindings,omitempty"`
-}
-
 // OfferUserDetails represents an offer consumer and their permission on the offer.
 type OfferUserDetails struct {
 	UserName    string `json:"user"`
@@ -102,14 +95,6 @@ type ApplicationOfferAdminDetailsV5 struct {
 	Connections     []OfferConnection `json:"connections,omitempty"`
 }
 
-// ApplicationOfferAdminDetailsV4 represents an application offering,
-// including details about how it has been deployed.
-type ApplicationOfferAdminDetailsV4 struct {
-	ApplicationOfferAdminDetailsV5
-	Spaces   []RemoteSpace     `json:"spaces,omitempty"`
-	Bindings map[string]string `json:"bindings,omitempty"`
-}
-
 // OfferConnection holds details about a connection to an offer.
 type OfferConnection struct {
 	SourceModelTag string       `json:"source-model-tag"`
@@ -124,12 +109,6 @@ type OfferConnection struct {
 type QueryApplicationOffersResultsV5 struct {
 	// Results contains application offers matching each filter.
 	Results []ApplicationOfferAdminDetailsV5 `json:"results"`
-}
-
-// QueryApplicationOffersResultsV4 is a result of searching application offers.
-type QueryApplicationOffersResultsV4 struct {
-	// Results contains application offers matching each filter.
-	Results []ApplicationOfferAdminDetailsV4 `json:"results"`
 }
 
 // AddApplicationOffers is used when adding offers to an application directory.
@@ -159,15 +138,6 @@ type RemoteEndpoint struct {
 	Role      charm.RelationRole `json:"role"`
 	Interface string             `json:"interface"`
 	Limit     int                `json:"limit"`
-}
-
-// RemoteSpace represents a space in some remote model.
-type RemoteSpace struct {
-	CloudType          string                 `json:"cloud-type"`
-	Name               string                 `json:"name"`
-	ProviderId         string                 `json:"provider-id"`
-	ProviderAttributes map[string]interface{} `json:"provider-attributes"`
-	Subnets            []Subnet               `json:"subnets"`
 }
 
 // ApplicationOfferResult is a result of querying a remote
@@ -211,21 +181,9 @@ type ConsumeApplicationArgV5 struct {
 	ApplicationAlias string `json:"application-alias,omitempty"`
 }
 
-// ConsumeApplicationArgV4 holds the arguments for consuming a remote application.
-type ConsumeApplicationArgV4 struct {
-	ConsumeApplicationArgV5
-	Spaces   []RemoteSpace     `json:"spaces,omitempty"`
-	Bindings map[string]string `json:"bindings,omitempty"`
-}
-
 // ConsumeApplicationArgsV5 is a collection of arg for consuming applications.
 type ConsumeApplicationArgsV5 struct {
 	Args []ConsumeApplicationArgV5 `json:"args,omitempty"`
-}
-
-// ConsumeApplicationArgsV4 is a collection of arg for consuming applications.
-type ConsumeApplicationArgsV4 struct {
-	Args []ConsumeApplicationArgV4 `json:"args,omitempty"`
 }
 
 // TokenResult holds a token and an error.
@@ -396,8 +354,9 @@ type RemoteRelationChangeEvent struct {
 	// RelationToken is the token of the relation.
 	RelationToken string `json:"relation-token"`
 
-	// ApplicationToken is the token of the application.
-	ApplicationToken string `json:"application-token"`
+	// ApplicationOrOfferToken is the token of the application or offer.
+	// Note we can't easily change the json tag for compatibility reasons.
+	ApplicationOrOfferToken string `json:"application-token"`
 
 	// Life is the current lifecycle state of the relation.
 	Life life.Value `json:"life"`
@@ -406,12 +365,10 @@ type RemoteRelationChangeEvent struct {
 	// ensure that all relation units have left scope.
 	ForceCleanup *bool `json:"force-cleanup,omitempty"`
 
-	// UnitCount is the number of units still in relation scope.
-	UnitCount *int `json:"unit-count"`
-
 	// Suspended is the current suspended status of the relation.
 	Suspended *bool `json:"suspended,omitempty"`
 
+	// SuspendedReason is an optional message to explain why suspended is true.
 	SuspendedReason string `json:"suspended-reason,omitempty"`
 
 	// ApplicationSettings represent the updated application-level settings in
@@ -421,15 +378,27 @@ type RemoteRelationChangeEvent struct {
 	// ChangedUnits maps unit tokens to relation unit changes.
 	ChangedUnits []RemoteRelationUnitChange `json:"changed-units,omitempty"`
 
-	// DepartedUnits contains the ids of units that have departed
-	// the relation since the last change.
-	DepartedUnits []int `json:"departed-units,omitempty"`
+	// InScopeUnits contains the ids of all units that are currently
+	// in scope of the relation for the application
+	InScopeUnits []int `json:"in-scope-units,omitempty"`
 
 	// Macaroons are used for authentication.
 	Macaroons macaroon.Slice `json:"macaroons,omitempty"`
 
 	// BakeryVersion is the version of the bakery used to mint macaroons.
 	BakeryVersion bakery.Version `json:"bakery-version,omitempty"`
+
+	// DepartedUnits contains the ids of units that have departed
+	// the relation since the last change.
+	//
+	// Deprecated: Use InScopeUnits will tell us which units are expected
+	// to be alive and in-scope. Anything else should be treated as departed.
+	DepartedUnits []int `json:"departed-units,omitempty"`
+
+	// UnitCount is the number of units still in relation scope.
+	//
+	// Deprecated: Use len(InScopeUnits) instead.
+	UnitCount int `json:"unit-count"`
 }
 
 func (e *RemoteRelationChangeEvent) GoString() string {
@@ -487,8 +456,9 @@ type RelationStatusWatchResults struct {
 
 // OfferStatusChange describes the status of an offer.
 type OfferStatusChange struct {
-	// OfferName is the name of the offer.
-	OfferName string `json:"offer-name"`
+	// OfferUUID is the name of the offer.
+	// NOTE: We use the tag "offer-name" here for compatibility
+	OfferUUID string `json:"offer-name"`
 
 	// Status is the status of the offer.
 	Status EntityStatus `json:"status"`
@@ -540,10 +510,10 @@ func (e *IngressNetworksChangeEvent) GoString() string {
 	return pretty.Sprint(eCopy)
 }
 
-// RegisterRemoteRelationArg holds attributes used to register a remote relation.
-type RegisterRemoteRelationArg struct {
-	// ApplicationToken is the application token on the remote model.
-	ApplicationToken string `json:"application-token"`
+// RegisterConsumingRelationArg holds attributes used to register a consuming relation.
+type RegisterConsumingRelationArg struct {
+	// ConsumerApplicationToken is the application token on the consuming model.
+	ConsumerApplicationToken string `json:"application-token"`
 
 	// SourceModelTag is the tag of the model hosting the application.
 	SourceModelTag string `json:"source-model-tag"`
@@ -551,14 +521,14 @@ type RegisterRemoteRelationArg struct {
 	// RelationToken is the relation token on the remote model.
 	RelationToken string `json:"relation-token"`
 
-	// RemoteEndpoint contains info about the endpoint in the remote model.
-	RemoteEndpoint RemoteEndpoint `json:"remote-endpoint"`
+	// ConsumerApplicationEndpoint contains info about the endpoint in the remote model.
+	ConsumerApplicationEndpoint RemoteEndpoint `json:"remote-endpoint"`
 
 	// OfferUUID is the UUID of the offer.
 	OfferUUID string `json:"offer-uuid"`
 
-	// LocalEndpointName is the name of the endpoint in the local model.
-	LocalEndpointName string `json:"local-endpoint-name"`
+	// OfferEndpointName is the name of the endpoint in the offer which is used.
+	OfferEndpointName string `json:"local-endpoint-name"`
 
 	// ConsumeVersion is incremented each time a new consumer
 	// proxy is created for an offer.
@@ -571,38 +541,24 @@ type RegisterRemoteRelationArg struct {
 	BakeryVersion bakery.Version `json:"bakery-version,omitempty"`
 }
 
-// RegisterRemoteRelationArg holds attributes used to register a remote relation.
-type RegisterRemoteRelationArgV2 struct {
-	RegisterRemoteRelationArg
-
-	// RemoteSpace contains provider-level info about the space the
-	// endpoint is bound to in the remote model.
-	RemoteSpace RemoteSpace `json:"remote-space"`
+// RegisterConsumingRelationArgs holds args used to add consuming relations.
+type RegisterConsumingRelationArgs struct {
+	Relations []RegisterConsumingRelationArg `json:"relations"`
 }
 
-// RegisterRemoteRelationArgs holds args used to add remote relations.
-type RegisterRemoteRelationArgs struct {
-	Relations []RegisterRemoteRelationArg `json:"relations"`
+// RegisterConsumingRelationResult holds a remote relation details and an error.
+type RegisterConsumingRelationResult struct {
+	Result *ConsumingRelationDetails `json:"result,omitempty"`
+	Error  *Error                    `json:"error,omitempty"`
 }
 
-// RegisterRemoteRelationArgsV2 holds args used to add remote relations.
-type RegisterRemoteRelationArgsV2 struct {
-	Relations []RegisterRemoteRelationArgV2 `json:"relations"`
+// RegisterConsumingRelationResults has a set of consuming relation results.
+type RegisterConsumingRelationResults struct {
+	Results []RegisterConsumingRelationResult `json:"results,omitempty"`
 }
 
-// RegisterRemoteRelationResult holds a remote relation details and an error.
-type RegisterRemoteRelationResult struct {
-	Result *RemoteRelationDetails `json:"result,omitempty"`
-	Error  *Error                 `json:"error,omitempty"`
-}
-
-// RegisterRemoteRelationResults has a set of remote relation results.
-type RegisterRemoteRelationResults struct {
-	Results []RegisterRemoteRelationResult `json:"results,omitempty"`
-}
-
-// RemoteRelationDetails holds a remote relation token and corresponding macaroon.
-type RemoteRelationDetails struct {
+// ConsumingRelationDetails holds a remote relation token and corresponding macaroon.
+type ConsumingRelationDetails struct {
 	Token         string             `json:"relation-token"`
 	Macaroon      *macaroon.Macaroon `json:"macaroon,omitempty"`
 	BakeryVersion bakery.Version     `json:"bakery-version,omitempty"`

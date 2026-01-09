@@ -5,26 +5,28 @@ package kubernetes
 
 import (
 	"fmt"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	core "k8s.io/api/core/v1"
 
-	"github.com/juju/juju/cloudconfig/podcfg"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
 )
 
 type UpgraderSuite struct {
 }
 
-var _ = gc.Suite(&UpgraderSuite{})
+func TestUpgraderSuite(t *testing.T) {
+	tc.Run(t, &UpgraderSuite{})
+}
 
-func (u *UpgraderSuite) TestUpgradePodTemplateSpec(c *gc.C) {
+func (u *UpgraderSuite) TestUpgradePodTemplateSpec(c *tc.C) {
 	tests := []struct {
 		ExpectedPodTemplateSpec core.PodTemplateSpec
 		PodTemplateSpec         core.PodTemplateSpec
 		ImagePath               string
-		Version                 version.Number
+		Version                 semversion.Number
 	}{
 		{
 			ExpectedPodTemplateSpec: core.PodTemplateSpec{
@@ -45,13 +47,13 @@ func (u *UpgraderSuite) TestUpgradePodTemplateSpec(c *gc.C) {
 					},
 				},
 			},
-			Version: version.MustParse("2.6.7"),
+			Version: semversion.MustParse("2.6.7"),
 		},
 	}
 
 	for _, test := range tests {
 		containers, err := upgradePodTemplateSpec(test.PodTemplateSpec.Spec.Containers, test.ImagePath, test.Version)
-		c.Assert(err, jc.ErrorIsNil)
-		c.Assert(test.ExpectedPodTemplateSpec.Spec.Containers[0].Image, gc.Equals, containers[0].Image)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(test.ExpectedPodTemplateSpec.Spec.Containers[0].Image, tc.Equals, containers[0].Image)
 	}
 }

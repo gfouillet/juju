@@ -4,6 +4,7 @@
 package application
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/juju/errors"
@@ -13,92 +14,49 @@ import (
 
 // Register is called to expose a package of facades onto a given registry.
 func Register(registry facade.FacadeRegistry) {
-	registry.MustRegister("Application", 15, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV15(ctx)
-	}, reflect.TypeOf((*APIv15)(nil)))
-	registry.MustRegister("Application", 16, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV16(ctx) // DestroyApplication & DestroyUnit gains dry-run
-	}, reflect.TypeOf((*APIv16)(nil)))
-	registry.MustRegister("Application", 17, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV17(ctx) // Drop deprecated DestroyUnits & Destroy facades
-	}, reflect.TypeOf((*APIv17)(nil)))
-	registry.MustRegister("Application", 18, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV18(ctx) // Added new DeployFromRepository
-	}, reflect.TypeOf((*APIv18)(nil)))
-	registry.MustRegister("Application", 19, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV19(ctx) // Added new DeployFromRepository
+	registry.MustRegister("Application", 19, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV19(stdCtx, ctx) // Added new DeployFromRepository
 	}, reflect.TypeOf((*APIv19)(nil)))
-	registry.MustRegister("Application", 20, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV20(ctx) // Remove remote space
+
+	registry.MustRegister("Application", 20, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV20(stdCtx, ctx) // Remove remote space, rename storage constraint to storage directive
 	}, reflect.TypeOf((*APIv20)(nil)))
-	registry.MustRegister("Application", 21, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV21(ctx) // Added ScaleApplication attach storage support
+	registry.MustRegister("Application", 21, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV21(stdCtx, ctx) // Added ScaleApplication attach storage support
 	}, reflect.TypeOf((*APIv21)(nil)))
-	registry.MustRegister("Application", 22, func(ctx facade.Context) (facade.Facade, error) {
-		return newFacadeV22(ctx) // Added GetApplicationStorage and UpdateApplicationStorage storage constraints support
+	registry.MustRegister("Application", 22, func(stdCtx context.Context, ctx facade.ModelContext) (facade.Facade, error) {
+		return newFacadeV22(stdCtx, ctx) // Added GetApplicationStorage and UpdateApplicationStorage storage constraints support
 	}, reflect.TypeOf((*APIv22)(nil)))
 }
 
-func newFacadeV22(ctx facade.Context) (*APIv22, error) {
-	api, err := newFacadeBase(ctx)
+func newFacadeV19(stdCtx context.Context, ctx facade.ModelContext) (*APIv19, error) {
+	api, err := newFacadeV20(stdCtx, ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &APIv22{api}, nil
+	return &APIv19{APIv20: api}, nil
 }
 
-func newFacadeV21(ctx facade.Context) (*APIv21, error) {
-	api, err := newFacadeV22(ctx)
+func newFacadeV20(stdCtx context.Context, ctx facade.ModelContext) (*APIv20, error) {
+	api, err := newFacadeV21(stdCtx, ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &APIv20{APIv21: api}, nil
+}
+
+func newFacadeV21(stdCtx context.Context, ctx facade.ModelContext) (*APIv21, error) {
+	api, err := newFacadeV22(stdCtx, ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return &APIv21{api}, nil
 }
 
-func newFacadeV20(ctx facade.Context) (*APIv20, error) {
-	api, err := newFacadeV21(ctx)
+func newFacadeV22(stdCtx context.Context, ctx facade.ModelContext) (*APIv22, error) {
+	api, err := newFacadeBase(stdCtx, ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &APIv20{api}, nil
-}
-
-func newFacadeV19(ctx facade.Context) (*APIv19, error) {
-	api, err := newFacadeV20(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &APIv19{api}, nil
-}
-
-func newFacadeV18(ctx facade.Context) (*APIv18, error) {
-	api, err := newFacadeV19(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &APIv18{api}, nil
-}
-
-func newFacadeV17(ctx facade.Context) (*APIv17, error) {
-	api, err := newFacadeV18(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &APIv17{api}, nil
-}
-
-func newFacadeV16(ctx facade.Context) (*APIv16, error) {
-	api, err := newFacadeV17(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &APIv16{api}, nil
-}
-
-func newFacadeV15(ctx facade.Context) (*APIv15, error) {
-	api, err := newFacadeV16(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &APIv15{api}, nil
+	return &APIv22{api}, nil
 }

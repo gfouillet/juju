@@ -4,18 +4,20 @@
 package caasunitterminationworker
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/worker/v3"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/agent"
 	"github.com/juju/juju/api/agent/caasapplication"
+	"github.com/juju/juju/core/logger"
 )
 
 // TerminationSignal is SIGTERM which is sent by most container runtimes when
@@ -28,7 +30,7 @@ type terminationWorker struct {
 	agent          agent.Agent
 	state          State
 	unitTerminator UnitTerminator
-	logger         Logger
+	logger         logger.Logger
 	clock          clock.Clock
 }
 
@@ -36,12 +38,12 @@ type Config struct {
 	Agent          agent.Agent
 	State          State
 	UnitTerminator UnitTerminator
-	Logger         Logger
+	Logger         logger.Logger
 	Clock          clock.Clock
 }
 
 type State interface {
-	UnitTerminating(tag names.UnitTag) (caasapplication.UnitTermination, error)
+	UnitTerminating(ctx context.Context, tag names.UnitTag) (caasapplication.UnitTermination, error)
 }
 
 type UnitTerminator interface {
@@ -77,12 +79,15 @@ func (w *terminationWorker) Wait() error {
 }
 
 func (w *terminationWorker) loop(c <-chan os.Signal) (err error) {
+	ctx, cancel := w.scopedContext()
+	defer cancel()
+
 	select {
 	case <-c:
-		w.logger.Infof("terminating due to SIGTERM")
-		term, err := w.state.UnitTerminating(w.agent.CurrentConfig().Tag().(names.UnitTag))
+		w.logger.Infof(ctx, "terminating due to SIGTERM")
+		term, err := w.state.UnitTerminating(ctx, w.agent.CurrentConfig().Tag().(names.UnitTag))
 		if err != nil {
-			w.logger.Errorf("error while terminating unit: %v", err)
+			w.logger.Errorf(ctx, "error while terminating unit: %v", err)
 			return err
 		}
 		if !term.WillRestart {
@@ -91,11 +96,15 @@ func (w *terminationWorker) loop(c <-chan os.Signal) (err error) {
 		}
 		err = w.unitTerminator.Terminate()
 		if err != nil {
-			w.logger.Errorf("error while terminating unit: %v", err)
+			w.logger.Errorf(ctx, "error while terminating unit: %v", err)
 			return errors.Annotatef(err, "failed to terminate unit agent worker")
 		}
 		return nil
 	case <-w.tomb.Dying():
 		return tomb.ErrDying
 	}
+}
+
+func (w *terminationWorker) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.tomb.Context(context.Background()))
 }

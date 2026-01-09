@@ -13,18 +13,18 @@ run_juju_bind() {
 	# Note that due to the way that run_* funcs are executed, $1 holds the
 	# test name so the NIC ID is actually provided in $2
 	hotplug_nic_id=$2
-	add_multi_nic_machine "$hotplug_nic_id"
+	add_multi_nic_machine "$hotplug_nic_id" "spaces-juju-bind"
 
 	juju_machine_id=$(juju show-machine --format json | jq -r '.["machines"] | keys[0]')
 	ifaces=$(juju ssh ${juju_machine_id} 'ip -j link' | jq -r '.[].ifname | select(. | startswith("en") or startswith("eth"))')
 	primary_iface=$(echo $ifaces | cut -d " " -f1)
 	hotplug_iface=$(echo $ifaces | cut -d " " -f2)
-	configure_multi_nic_netplan "$juju_machine_id" "$hotplug_iface"
 
 	# Deploy test charm to dual-nic machine
-	juju deploy ./testcharms/charms/space-defender --bind "defend-a=alpha defend-b=isolated" --to "${juju_machine_id}"
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/space-defender) --bind "defend-a=alpha defend-b=isolated" --to "${juju_machine_id}"
 	unit_index=$(get_unit_index "space-defender")
-	wait_for "space-defender" "$(idle_condition "space-defender" 0 "${unit_index}")"
+	wait_for "space-defender" "$(idle_condition "space-defender" "${unit_index}")"
 
 	assert_net_iface_for_endpoint_matches "space-defender" "defend-a" "${primary_iface}"
 	assert_net_iface_for_endpoint_matches "space-defender" "defend-b" "${hotplug_iface}"

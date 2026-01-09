@@ -4,27 +4,28 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/storage"
 )
 
 // NewAddCommand returns a command used to add unit storage.
 func NewAddCommand() cmd.Command {
 	cmd := &addCommand{}
-	cmd.newAPIFunc = func() (StorageAddAPI, error) {
-		return cmd.NewStorageAPI()
+	cmd.newAPIFunc = func(ctx context.Context) (StorageAddAPI, error) {
+		return cmd.NewStorageAPI(ctx)
 	}
 	return modelcmd.Wrap(cmd)
 }
@@ -35,10 +36,10 @@ Add storage to a pre-existing unit within a model.
 
 Storage is allocated from
 a storage pool, using parameters provided within a "storage directive". (Use
-` + "`juju deploy --storage=<storage-directive>` " + `to provision storage during the
-deployment process.)
+` + "`juju deploy --storage=<storage-name>=<storage-directive>` " + `to provision storage during the
+deployment process).
 
-	juju add-storage <unit> <storage-directive>
+	juju add-storage <unit> <storage-name>=<storage-directive>
 
 ` + "`<unit>` " + `is the ID of a unit that is already in the model.
 
@@ -57,7 +58,7 @@ following:
     <pool>,<count>,<size>
 
 Each parameter is optional, so long as at least one is present. So the following
-storage constraints are also valid:
+storage directives are also valid:
 
     <pool>,<size>
     <count>,<size>
@@ -96,7 +97,6 @@ using the default count (` + "`1`" + `) and storage pool
 (e.g., on AWS, the ` + "`ebs`" + ` pool; equivalent to spelling out ` + "`pgdata=ebs,100G,1`)" + `:
 
     juju deploy postgresql --storage pgdata=100G
-
 `
 
 	addCommandAgs = `<unit> <storage-directive>`
@@ -108,10 +108,10 @@ type addCommand struct {
 	modelcmd.IAASOnlyCommand
 	unitTag names.UnitTag
 
-	// storageCons is a map of storage constraints, keyed on the storage name
+	// storageDirectives is a map of storage directives, keyed on the storage name
 	// defined in charm storage metadata.
-	storageCons map[string]storage.Constraints
-	newAPIFunc  func() (StorageAddAPI, error)
+	storageDirectives map[string]storage.Directive
+	newAPIFunc        func(ctx context.Context) (StorageAddAPI, error)
 }
 
 // Init implements Command.Init.
@@ -126,7 +126,7 @@ func (c *addCommand) Init(args []string) (err error) {
 	}
 	c.unitTag = names.NewUnitTag(u)
 
-	c.storageCons, err = storage.ParseConstraintsMap(args[1:], false)
+	c.storageDirectives, err = storage.ParseDirectivesMap(args[1:], false)
 	return
 }
 
@@ -148,14 +148,14 @@ func (c *addCommand) Info() *cmd.Info {
 
 // Run implements Command.Run.
 func (c *addCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
 
 	storages := c.createStorageAddParams()
-	results, err := api.AddToUnit(storages)
+	results, err := api.AddToUnit(ctx, storages)
 	if err != nil {
 		if params.IsCodeUnauthorized(err) {
 			common.PermissionsMessage(ctx.Stderr, "add storage")
@@ -208,20 +208,20 @@ func (c *addCommand) Run(ctx *cmd.Context) (err error) {
 // StorageAddAPI defines the API methods that the storage commands use.
 type StorageAddAPI interface {
 	Close() error
-	AddToUnit(storages []params.StorageAddParams) ([]params.AddStorageResult, error)
+	AddToUnit(ctx context.Context, storages []params.StorageAddParams) ([]params.AddStorageResult, error)
 }
 
 func (c *addCommand) createStorageAddParams() []params.StorageAddParams {
-	all := make([]params.StorageAddParams, 0, len(c.storageCons))
-	for one, sc := range c.storageCons {
-		cons := sc
+	all := make([]params.StorageAddParams, 0, len(c.storageDirectives))
+	for one, directive := range c.storageDirectives {
+		d := directive
 		all = append(all, params.StorageAddParams{
 			UnitTag:     c.unitTag.String(),
 			StorageName: one,
-			Constraints: params.StorageConstraints{
-				Pool:  cons.Pool,
-				Size:  &cons.Size,
-				Count: &cons.Count,
+			Directives: params.StorageDirectives{
+				Pool:    d.Pool,
+				SizeMiB: &d.Size,
+				Count:   &d.Count,
 			},
 		})
 	}

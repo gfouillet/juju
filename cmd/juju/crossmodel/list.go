@@ -4,21 +4,23 @@
 package crossmodel
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"time"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/applicationoffers"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
-	"github.com/juju/juju/jujuclient"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 )
 
 const listCommandDoc = `
@@ -58,8 +60,8 @@ type listCommand struct {
 
 	out cmd.Output
 
-	newAPIFunc    func() (ListAPI, error)
-	refreshModels func(jujuclient.ClientStore, string) error
+	newAPIFunc    func(ctx context.Context) (ListAPI, error)
+	refreshModels func(context.Context, jujuclient.ClientStore, string) error
 
 	activeOnly        bool
 	interfaceName     string
@@ -73,8 +75,8 @@ type listCommand struct {
 // NewListEndpointsCommand constructs new list endpoint command.
 func NewListEndpointsCommand() cmd.Command {
 	listCmd := &listCommand{}
-	listCmd.newAPIFunc = func() (ListAPI, error) {
-		return listCmd.NewApplicationOffersAPI()
+	listCmd.newAPIFunc = func(ctx context.Context) (ListAPI, error) {
+		return listCmd.NewApplicationOffersAPI(ctx)
 	}
 	listCmd.refreshModels = listCmd.ModelCommandBase.RefreshModels
 	return modelcmd.Wrap(listCmd)
@@ -82,8 +84,8 @@ func NewListEndpointsCommand() cmd.Command {
 
 // NewApplicationOffersAPI returns an application offers api for the root api endpoint
 // that the command returns.
-func (c *listCommand) NewApplicationOffersAPI() (*applicationoffers.Client, error) {
-	root, err := c.NewControllerAPIRoot()
+func (c *listCommand) NewApplicationOffersAPI(ctx context.Context) (*applicationoffers.Client, error) {
+	root, err := c.NewControllerAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +136,7 @@ func (c *listCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Run implements Command.Run.
 func (c *listCommand) Run(ctx *cmd.Context) (err error) {
-	api, err := c.newAPIFunc()
+	api, err := c.newAPIFunc(ctx)
 	if err != nil {
 		return err
 	}
@@ -145,7 +147,7 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	modelName, _, err := c.ModelDetails()
+	modelName, _, err := c.ModelDetails(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -158,12 +160,12 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 		}
 	}
 
-	unqualifiedModelName, ownerTag, err := jujuclient.SplitModelName(modelName)
+	unqualifiedModelName, qualifier, err := jujuclient.SplitFullyQualifiedModelName(modelName)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	c.filters = []crossmodel.ApplicationOfferFilter{{
-		OwnerName:       ownerTag.Id(),
+		ModelQualifier:  coremodel.Qualifier(qualifier),
 		ModelName:       unqualifiedModelName,
 		ApplicationName: c.applicationName,
 	}}
@@ -182,7 +184,7 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 		c.filters[0].AllowedConsumers = []string{c.consumerName}
 	}
 
-	offeredApplications, err := api.ListOffers(c.filters...)
+	offeredApplications, err := api.ListOffers(ctx, c.filters...)
 	if err != nil {
 		return err
 	}
@@ -199,7 +201,7 @@ func (c *listCommand) Run(ctx *cmd.Context) (err error) {
 // ListAPI defines the API methods that list endpoints command use.
 type ListAPI interface {
 	Close() error
-	ListOffers(filters ...crossmodel.ApplicationOfferFilter) ([]*crossmodel.ApplicationOfferDetails, error)
+	ListOffers(ctx context.Context, filters ...crossmodel.ApplicationOfferFilter) ([]*crossmodel.ApplicationOfferDetails, error)
 }
 
 // ListOfferItem defines the serialization behaviour of an offer item in endpoints list.
@@ -266,7 +268,7 @@ func formatApplicationOfferDetails(store string, all []*crossmodel.ApplicationOf
 	return result, nil
 }
 
-func convertOfferToListItem(url *crossmodel.OfferURL, offer *crossmodel.ApplicationOfferDetails) ListOfferItem {
+func convertOfferToListItem(url crossmodel.OfferURL, offer *crossmodel.ApplicationOfferDetails) ListOfferItem {
 	item := ListOfferItem{
 		OfferName:       offer.OfferName,
 		ApplicationName: offer.ApplicationName,

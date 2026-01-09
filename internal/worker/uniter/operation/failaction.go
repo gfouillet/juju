@@ -4,6 +4,7 @@
 package operation
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
@@ -21,7 +22,7 @@ func (fa *failAction) String() string {
 }
 
 // Prepare is part of the Operation interface.
-func (fa *failAction) Prepare(state State) (*State, error) {
+func (fa *failAction) Prepare(ctx context.Context, state State) (*State, error) {
 	return stateChange{
 		Kind:     RunAction,
 		Step:     Pending,
@@ -31,8 +32,8 @@ func (fa *failAction) Prepare(state State) (*State, error) {
 }
 
 // Execute is part of the Operation interface.
-func (fa *failAction) Execute(state State) (*State, error) {
-	if err := fa.callbacks.FailAction(fa.actionId, "action terminated"); err != nil {
+func (fa *failAction) Execute(ctx context.Context, state State) (*State, error) {
+	if err := fa.callbacks.FailAction(ctx, fa.actionId, "action terminated"); err != nil {
 		return nil, err
 	}
 
@@ -46,7 +47,7 @@ func (fa *failAction) Execute(state State) (*State, error) {
 
 // Commit preserves the recorded hook, and returns a neutral state.
 // Commit is part of the Operation interface.
-func (fa *failAction) Commit(state State) (*State, error) {
+func (fa *failAction) Commit(ctx context.Context, state State) (*State, error) {
 	return stateChange{
 		Kind: continuationKind(state),
 		Step: Pending,

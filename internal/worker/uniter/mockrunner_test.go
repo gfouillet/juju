@@ -4,52 +4,54 @@
 package uniter_test
 
 import (
+	stdcontext "context"
 	"fmt"
 	"sync"
 
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	utilexec "github.com/juju/utils/v3/exec"
+	utilexec "github.com/juju/utils/v4/exec"
 
+	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 )
 
 // mockRunner implements Runner.
 type mockRunner struct {
-	ctx context.Context
+	stdContext context.Context
 
 	mu              sync.Mutex
+	ctx             *testContext
 	hooksWithErrors set.Strings
 	ranActions_     []actionData
 }
 
 func (r *mockRunner) Context() context.Context {
-	return r.ctx
+	return r.stdContext
 }
 
 func (r *mockRunner) ranActions() []actionData {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := make([]actionData, len(r.ranActions_))
-	for i, a := range r.ranActions_ {
-		result[i] = a
-	}
+	copy(result, r.ranActions_)
 	return result
 }
 
 // RunCommands exists to satisfy the Runner interface.
-func (r *mockRunner) RunCommands(commands string, runLocation runner.RunLocation) (*utilexec.ExecResponse, error) {
+func (r *mockRunner) RunCommands(_ stdcontext.Context, commands string) (*utilexec.ExecResponse, error) {
 	result := &utilexec.ExecResponse{
 		Code:   0,
-		Stdout: []byte(fmt.Sprintf("%s on %s", commands, runLocation)),
+		Stdout: []byte(commands),
 	}
 	return result, nil
 }
 
 // RunAction exists to satisfy the Runner interface.
-func (r *mockRunner) RunAction(actionName string) (runner.HookHandlerType, error) {
-	data, err := r.ctx.ActionData()
+func (r *mockRunner) RunAction(_ stdcontext.Context, actionName string) (runner.HookHandlerType, error) {
+	data, err := r.stdContext.ActionData()
 	if err != nil {
 		return runner.ExplicitHookHandler, errors.Trace(err)
 	}
@@ -66,7 +68,15 @@ func (r *mockRunner) RunAction(actionName string) (runner.HookHandlerType, error
 }
 
 // RunHook exists to satisfy the Runner interface.
-func (r *mockRunner) RunHook(hookName string) (runner.HookHandlerType, error) {
+func (r *mockRunner) RunHook(_ stdcontext.Context, hookName string) (runner.HookHandlerType, error) {
+	r.ctx.unit.mu.Lock()
+	if hookName == string(hooks.Install) {
+		r.ctx.unit.unitStatus = status.StatusInfo{
+			Status:  status.Maintenance,
+			Message: status.MessageInstallingCharm,
+		}
+	}
+	r.ctx.unit.mu.Unlock()
 	var err error = nil
 	if r.hooksWithErrors != nil && r.hooksWithErrors.Contains(hookName) {
 		err = errors.Errorf("%q failed", hookName)

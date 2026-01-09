@@ -4,7 +4,7 @@
 package lxd
 
 import (
-	stdcontext "context"
+	"context"
 	"net"
 	"os"
 	"strconv"
@@ -14,31 +14,30 @@ import (
 	"github.com/canonical/lxd/shared/api"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jujutesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/cloud"
-	"github.com/juju/juju/cloudconfig/instancecfg"
-	"github.com/juju/juju/cloudconfig/providerinit"
-	"github.com/juju/juju/container/lxd"
-	containerlxd "github.com/juju/juju/container/lxd"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/network/firewall"
+	"github.com/juju/juju/core/semversion"
+	jujuversion "github.com/juju/juju/core/version"
 	"github.com/juju/juju/environs"
 	environscloudspec "github.com/juju/juju/environs/cloudspec"
 	"github.com/juju/juju/environs/config"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	"github.com/juju/juju/environs/tags"
-	"github.com/juju/juju/testing"
-	coretools "github.com/juju/juju/tools"
-	jujuversion "github.com/juju/juju/version"
+	"github.com/juju/juju/internal/cloudconfig/instancecfg"
+	"github.com/juju/juju/internal/cloudconfig/providerinit"
+	"github.com/juju/juju/internal/container/lxd"
+	"github.com/juju/juju/internal/provider/common"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/testing"
+	coretools "github.com/juju/juju/internal/tools"
 )
 
 // Ensure LXD provider supports the expected interfaces.
@@ -82,9 +81,11 @@ type BaseSuiteUnpatched struct {
 	EndpointAddrs  []string
 	InterfaceAddr  string
 	InterfaceAddrs []net.Addr
+
+	Invalidator *MockCredentialInvalidator
 }
 
-func (s *BaseSuiteUnpatched) SetUpSuite(c *gc.C) {
+func (s *BaseSuiteUnpatched) SetUpSuite(c *tc.C) {
 	s.osPathOrig = os.Getenv("PATH")
 	if s.osPathOrig == "" {
 		// TODO(ericsnow) This shouldn't happen. However, an undiagnosed
@@ -97,16 +98,20 @@ func (s *BaseSuiteUnpatched) SetUpSuite(c *gc.C) {
 	s.BaseSuite.SetUpSuite(c)
 }
 
-func (s *BaseSuiteUnpatched) SetUpTest(c *gc.C) {
-	s.BaseSuite.SetUpTest(c)
+func (s *BaseSuiteUnpatched) SetupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
 
-	s.initProvider(c)
+	s.Invalidator = NewMockCredentialInvalidator(ctrl)
+
+	s.initProvider()
 	s.initEnv(c)
 	s.initInst(c)
 	s.initNet(c)
+
+	return ctrl
 }
 
-func (s *BaseSuiteUnpatched) initProvider(c *gc.C) {
+func (s *BaseSuiteUnpatched) initProvider() {
 	s.Provider = &environProvider{}
 	s.EndpointAddrs = []string{"1.2.3.4"}
 	s.InterfaceAddr = "1.2.3.4"
@@ -116,13 +121,14 @@ func (s *BaseSuiteUnpatched) initProvider(c *gc.C) {
 	}
 }
 
-func (s *BaseSuiteUnpatched) initEnv(c *gc.C) {
+func (s *BaseSuiteUnpatched) initEnv(c *tc.C) {
 	certCred := cloud.NewCredential(cloud.CertificateAuthType, map[string]string{
 		"client-cert": testing.CACert,
 		"client-key":  testing.CAKey,
 		"server-cert": testing.ServerCert,
 	})
 	s.Env = &environ{
+		CredentialInvalidator: common.NewCredentialInvalidator(s.Invalidator, IsAuthorisationFailure),
 		cloud: environscloudspec.CloudSpec{
 			Name:       "localhost",
 			Type:       "lxd",
@@ -139,14 +145,14 @@ func (s *BaseSuiteUnpatched) Prefix() string {
 	return s.Env.namespace.Prefix()
 }
 
-func (s *BaseSuiteUnpatched) initInst(c *gc.C) {
+func (s *BaseSuiteUnpatched) initInst(c *tc.C) {
 	tools := []*coretools.Tools{
 		{
-			Version: version.Binary{Arch: arch.AMD64, Release: "ubuntu"},
+			Version: semversion.Binary{Arch: arch.AMD64, Release: "ubuntu"},
 			URL:     "https://example.org/amd",
 		},
 		{
-			Version: version.Binary{Arch: arch.ARM64, Release: "ubuntu"},
+			Version: semversion.Binary{Arch: arch.ARM64, Release: "ubuntu"},
 			URL:     "https://example.org/arm",
 		},
 	}
@@ -155,16 +161,16 @@ func (s *BaseSuiteUnpatched) initInst(c *gc.C) {
 
 	instanceConfig, err := instancecfg.NewBootstrapInstanceConfig(testing.FakeControllerConfig(), cons, cons,
 		jujuversion.DefaultSupportedLTSBase(), "", nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	err = instanceConfig.SetTools(coretools.List{
 		tools[0],
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	instanceConfig.AuthorizedKeys = s.Config.AuthorizedKeys()
 
 	userData, err := providerinit.ComposeUserData(instanceConfig, nil, lxdRenderer{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	var archName = arch.ARM64
 	var numCores uint64 = 1
@@ -176,12 +182,12 @@ func (s *BaseSuiteUnpatched) initInst(c *gc.C) {
 	}
 
 	s.Metadata = map[string]string{
-		containerlxd.UserNamespacePrefix + tags.JujuIsController: "true",
-		containerlxd.UserNamespacePrefix + tags.JujuController:   testing.ControllerTag.Id(),
-		containerlxd.JujuModelKey:                                s.Config.UUID(),
-		containerlxd.UserDataKey:                                 string(userData),
-		"limits.cpu":                                             "1",
-		"limits.memory":                                          strconv.Itoa(3750 * 1024 * 1024),
+		lxd.UserNamespacePrefix + tags.JujuIsController: "true",
+		lxd.UserNamespacePrefix + tags.JujuController:   testing.ControllerTag.Id(),
+		lxd.JujuModelKey: s.Config.UUID(),
+		lxd.UserDataKey:  string(userData),
+		"limits.cpu":     "1",
+		"limits.memory":  strconv.Itoa(3750 * 1024 * 1024),
 	}
 	s.Addresses = network.ProviderAddresses{
 		network.NewMachineAddress("10.0.0.1", network.WithScope(network.ScopeCloudLocal)).AsProviderAddress(),
@@ -193,7 +199,7 @@ func (s *BaseSuiteUnpatched) initInst(c *gc.C) {
 	s.Instance = s.NewInstance(c, "spam")
 	s.Container = s.Instance.container
 	s.InstName, err = s.Env.namespace.Hostname("42")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	s.StartInstArgs = environs.StartInstanceParams{
 		ControllerUUID: instanceConfig.ControllerConfig.ControllerUUID(),
@@ -203,51 +209,51 @@ func (s *BaseSuiteUnpatched) initInst(c *gc.C) {
 	}
 }
 
-func (s *BaseSuiteUnpatched) initNet(c *gc.C) {
+func (s *BaseSuiteUnpatched) initNet(c *tc.C) {
 	s.Rules = firewall.IngressRules{
 		firewall.NewIngressRule(network.MustParsePortRange("80/tcp")),
 	}
 }
 
-func (s *BaseSuiteUnpatched) setConfig(c *gc.C, cfg *config.Config) {
+func (s *BaseSuiteUnpatched) setConfig(c *tc.C, cfg *config.Config) {
 	s.Config = cfg
-	ecfg, err := newValidConfig(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	ecfg, err := newValidConfig(c.Context(), cfg)
+	c.Assert(err, tc.ErrorIsNil)
 	s.EnvConfig = ecfg
 	uuid := cfg.UUID()
 	s.Env.uuid = uuid
 	s.Env.ecfgUnlocked = s.EnvConfig
 	namespace, err := instance.NewNamespace(uuid)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.Env.namespace = namespace
 }
 
-func (s *BaseSuiteUnpatched) NewConfig(c *gc.C, updates testing.Attrs) *config.Config {
+func (s *BaseSuiteUnpatched) NewConfig(c *tc.C, updates testing.Attrs) *config.Config {
 	if updates == nil {
 		updates = make(testing.Attrs)
 	}
 	var err error
 	cfg := testing.ModelConfig(c)
 	cfg, err = cfg.Apply(ConfigAttrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	cfg, err = cfg.Apply(updates)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return cfg
 }
 
-func (s *BaseSuiteUnpatched) UpdateConfig(c *gc.C, attrs map[string]interface{}) {
+func (s *BaseSuiteUnpatched) UpdateConfig(c *tc.C, attrs map[string]interface{}) {
 	cfg, err := s.Config.Apply(attrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.setConfig(c, cfg)
 }
 
-func (s *BaseSuiteUnpatched) NewContainer(c *gc.C, name string) *containerlxd.Container {
+func (s *BaseSuiteUnpatched) NewContainer(c *tc.C, name string) *lxd.Container {
 	metadata := make(map[string]string)
 	for k, v := range s.Metadata {
 		metadata[k] = v
 	}
 
-	return &containerlxd.Container{
+	return &lxd.Container{
 		Instance: api.Instance{
 			Name:       name,
 			StatusCode: api.Running,
@@ -258,7 +264,7 @@ func (s *BaseSuiteUnpatched) NewContainer(c *gc.C, name string) *containerlxd.Co
 	}
 }
 
-func (s *BaseSuiteUnpatched) NewInstance(c *gc.C, name string) *environInstance {
+func (s *BaseSuiteUnpatched) NewInstance(c *tc.C, name string) *environInstance {
 	container := s.NewContainer(c, name)
 	return newInstance(container, s.Env)
 }
@@ -266,21 +272,24 @@ func (s *BaseSuiteUnpatched) NewInstance(c *gc.C, name string) *environInstance 
 type BaseSuite struct {
 	BaseSuiteUnpatched
 
-	Stub   *jujutesting.Stub
+	Stub   *testhelpers.Stub
 	Client *StubClient
 	Common *stubCommon
 }
 
-func (s *BaseSuite) SetUpSuite(c *gc.C) {
+func (s *BaseSuite) SetUpSuite(c *tc.C) {
 	s.BaseSuiteUnpatched.SetUpSuite(c)
 	// Do this *before* s.initEnv() gets called in BaseSuiteUnpatched.SetUpTest
 }
 
-func (s *BaseSuite) SetUpTest(c *gc.C) {
+func (s *BaseSuite) SetUpTest(c *tc.C) {
 	testing.SkipLXDNotSupported(c)
-	s.BaseSuiteUnpatched.SetUpTest(c)
+}
 
-	s.Stub = &jujutesting.Stub{}
+func (s *BaseSuite) SetupMocks(c *tc.C) *gomock.Controller {
+	ctrl := s.BaseSuiteUnpatched.SetupMocks(c)
+
+	s.Stub = &testhelpers.Stub{}
 	s.Client = &StubClient{
 		Stub:               s.Stub,
 		StorageIsSupported: true,
@@ -296,29 +305,31 @@ func (s *BaseSuite) SetUpTest(c *gc.C) {
 	// Patch out all expensive external deps.
 	s.Env.serverUnlocked = s.Client
 	s.Env.base = s.Common
+
+	return ctrl
 }
 
-func (s *BaseSuite) TestingCert(c *gc.C) (lxd.Certificate, string) {
+func (s *BaseSuite) TestingCert(c *tc.C) (lxd.Certificate, string) {
 	cert := lxd.Certificate{
 		Name:    "juju",
 		CertPEM: []byte(testing.CACert),
 		KeyPEM:  []byte(testing.CAKey),
 	}
 	fingerprint, err := cert.Fingerprint()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return cert, fingerprint
 }
 
-func (s *BaseSuite) CheckNoAPI(c *gc.C) {
+func (s *BaseSuite) CheckNoAPI(c *tc.C) {
 	s.Stub.CheckCalls(c, nil)
 }
 
-func NewBaseConfig(c *gc.C) *config.Config {
+func NewBaseConfig(c *tc.C) *config.Config {
 	var err error
 	cfg := testing.ModelConfig(c)
 
 	cfg, err = cfg.Apply(ConfigAttrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return cfg
 }
@@ -334,8 +345,8 @@ func NewConfig(cfg *config.Config) *Config {
 	return &Config{ecfg}
 }
 
-func (ecfg *Config) Values(c *gc.C) (ConfigValues, map[string]interface{}) {
-	c.Assert(ecfg.attrs, jc.DeepEquals, ecfg.UnknownAttrs())
+func (ecfg *Config) Values(c *tc.C) (ConfigValues, map[string]interface{}) {
+	c.Assert(ecfg.attrs, tc.DeepEquals, ecfg.UnknownAttrs())
 
 	var values ConfigValues
 	extras := make(map[string]interface{})
@@ -348,9 +359,9 @@ func (ecfg *Config) Values(c *gc.C) (ConfigValues, map[string]interface{}) {
 	return values, extras
 }
 
-func (ecfg *Config) Apply(c *gc.C, updates map[string]interface{}) *Config {
+func (ecfg *Config) Apply(c *tc.C, updates map[string]interface{}) *Config {
 	cfg, err := ecfg.Config.Apply(updates)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return NewConfig(cfg)
 }
 
@@ -359,13 +370,13 @@ func (ecfg *Config) Validate() error {
 }
 
 type stubCommon struct {
-	stub *jujutesting.Stub
+	stub *testhelpers.Stub
 
 	BootstrapResult *environs.BootstrapResult
 }
 
-func (sc *stubCommon) BootstrapEnv(ctx environs.BootstrapContext, callCtx context.ProviderCallContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
-	sc.stub.AddCall("Bootstrap", ctx, callCtx, params)
+func (sc *stubCommon) BootstrapEnv(ctx environs.BootstrapContext, params environs.BootstrapParams) (*environs.BootstrapResult, error) {
+	sc.stub.AddCall("Bootstrap", ctx, params)
 	if err := sc.stub.NextErr(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -373,8 +384,8 @@ func (sc *stubCommon) BootstrapEnv(ctx environs.BootstrapContext, callCtx contex
 	return sc.BootstrapResult, nil
 }
 
-func (sc *stubCommon) DestroyEnv(callCtx context.ProviderCallContext) error {
-	sc.stub.AddCall("Destroy", callCtx)
+func (sc *stubCommon) DestroyEnv(ctx context.Context) error {
+	sc.stub.AddCall("Destroy", ctx)
 	if err := sc.stub.NextErr(); err != nil {
 		return errors.Trace(err)
 	}
@@ -383,7 +394,7 @@ func (sc *stubCommon) DestroyEnv(callCtx context.ProviderCallContext) error {
 }
 
 type StubClient struct {
-	*jujutesting.Stub
+	*testhelpers.Stub
 
 	Containers         []lxd.Container
 	Container          *lxd.Container
@@ -418,7 +429,7 @@ func (conn *StubClient) CreateContainerFromSpec(spec lxd.ContainerSpec) (*lxd.Co
 }
 
 func (conn *StubClient) FindImage(
-	ctx stdcontext.Context, base corebase.Base, arch string, virtType instance.VirtType, sources []lxd.ServerSpec, copyLocal bool, callback environs.StatusCallbackFunc,
+	ctx context.Context, base corebase.Base, arch string, virtType instance.VirtType, sources []lxd.ServerSpec, copyLocal bool, callback environs.StatusCallbackFunc,
 ) (lxd.SourcedImage, error) {
 	conn.AddCall("FindImage", base.DisplayString(), arch)
 	if err := conn.NextErr(); err != nil {
@@ -525,8 +536,8 @@ func (conn *StubClient) UpdateContainerProfiles(name string, profiles []string) 
 	return conn.NextErr()
 }
 
-func (conn *StubClient) VerifyNetworkDevice(profile *api.Profile, ETag string) error {
-	conn.AddCall("VerifyNetworkDevice", profile, ETag)
+func (conn *StubClient) VerifyNetworkDevice(profile *api.Profile, etag string) error {
+	conn.AddCall("VerifyNetworkDevice", profile, etag)
 	return conn.NextErr()
 }
 
@@ -535,12 +546,12 @@ func (conn *StubClient) StorageSupported() bool {
 	return conn.StorageIsSupported
 }
 
-func (conn *StubClient) EnsureDefaultStorage(profile *api.Profile, ETag string) error {
-	conn.AddCall("EnsureDefaultStorage", profile, ETag)
+func (conn *StubClient) EnsureDefaultStorage(profile *api.Profile, etag string) error {
+	conn.AddCall("EnsureDefaultStorage", profile, etag)
 	return conn.NextErr()
 }
 
-func (conn *StubClient) GetStoragePool(name string) (pool *api.StoragePool, ETag string, err error) {
+func (conn *StubClient) GetStoragePool(name string) (pool *api.StoragePool, etag string, err error) {
 	conn.AddCall("GetStoragePool", name)
 	return &api.StoragePool{
 		Name:   name,
@@ -569,9 +580,17 @@ func (conn *StubClient) CreateVolume(pool, volume string, config map[string]stri
 	return conn.NextErr()
 }
 
-func (conn *StubClient) DeleteStoragePoolVolume(pool, volType, volume string) error {
+type stubOperation struct {
+	lxdclient.Operation
+}
+
+func (stubOperation) Wait() error {
+	return nil
+}
+
+func (conn *StubClient) DeleteStoragePoolVolume(pool, volType, volume string) (lxdclient.Operation, error) {
 	conn.AddCall("DeleteStoragePoolVolume", pool, volType, volume)
-	return conn.NextErr()
+	return stubOperation{}, conn.NextErr()
 }
 
 func (conn *StubClient) GetStoragePoolVolume(
@@ -598,10 +617,10 @@ func (conn *StubClient) GetStoragePoolVolumes(pool string) ([]api.StorageVolume,
 }
 
 func (conn *StubClient) UpdateStoragePoolVolume(
-	pool string, volType string, name string, volume api.StorageVolumePut, ETag string,
-) error {
-	conn.AddCall("UpdateStoragePoolVolume", pool, volType, name, volume, ETag)
-	return conn.NextErr()
+	pool string, volType string, name string, volume api.StorageVolumePut, etag string,
+) (lxdclient.Operation, error) {
+	conn.AddCall("UpdateStoragePoolVolume", pool, volType, name, volume, etag)
+	return stubOperation{}, conn.NextErr()
 }
 
 func (conn *StubClient) AliveContainers(prefix string) ([]lxd.Container, error) {
@@ -710,7 +729,7 @@ func (*StubClient) GetInstanceState(string) (*api.InstanceState, string, error) 
 // TODO (manadart 2018-07-20): This exists to satisfy the testing stub
 // interface. It is temporary, pending replacement with mocks and
 // should not be called in tests.
-func (conn *StubClient) UseTargetServer(name string) (*lxd.Server, error) {
+func (conn *StubClient) UseTargetServer(ctx context.Context, name string) (*lxd.Server, error) {
 	conn.AddCall("UseTargetServer", name)
 	return nil, conn.NextErr()
 }
@@ -741,69 +760,80 @@ type EnvironSuite struct {
 	testing.BaseSuite
 }
 
-func (s *EnvironSuite) NewEnviron(c *gc.C, srv Server, cfgEdit map[string]interface{}, cloudSpec environscloudspec.CloudSpec) environs.Environ {
+func (s *EnvironSuite) NewEnviron(c *tc.C,
+	srv Server,
+	cfgEdit map[string]interface{},
+	cloudSpec environscloudspec.CloudSpec,
+	invalidator environs.CredentialInvalidator,
+) environs.Environ {
 	cfg, err := testing.ModelConfig(c).Apply(ConfigAttrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	if cfgEdit != nil {
 		var err error
 		cfg, err = cfg.Apply(cfgEdit)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
-	eCfg, err := newValidConfig(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	eCfg, err := newValidConfig(c.Context(), cfg)
+	c.Assert(err, tc.ErrorIsNil)
 
 	namespace, err := instance.NewNamespace(cfg.UUID())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return &environ{
-		serverUnlocked: srv,
-		ecfgUnlocked:   eCfg,
-		namespace:      namespace,
-		cloud:          cloudSpec,
-		uuid:           eCfg.UUID(),
-		name:           "model",
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, IsAuthorisationFailure),
+		serverUnlocked:        srv,
+		ecfgUnlocked:          eCfg,
+		namespace:             namespace,
+		cloud:                 cloudSpec,
+		uuid:                  eCfg.UUID(),
+		name:                  "model",
 	}
 }
 
-func (s *EnvironSuite) NewEnvironWithServerFactory(c *gc.C, srv ServerFactory, cfgEdit map[string]interface{}) environs.Environ {
+func (s *EnvironSuite) NewEnvironWithServerFactory(c *tc.C,
+	srv ServerFactory,
+	cfgEdit map[string]interface{},
+	invalidator environs.CredentialInvalidator,
+) environs.Environ {
 	cfg, err := testing.ModelConfig(c).Apply(ConfigAttrs)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	if cfgEdit != nil {
 		var err error
 		cfg, err = cfg.Apply(cfgEdit)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 
-	eCfg, err := newValidConfig(cfg)
-	c.Assert(err, jc.ErrorIsNil)
+	eCfg, err := newValidConfig(c.Context(), cfg)
+	c.Assert(err, tc.ErrorIsNil)
 
 	namespace, err := instance.NewNamespace(cfg.UUID())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	provid := environProvider{
 		serverFactory: srv,
 	}
 
 	return &environ{
-		name:         "controller",
-		provider:     &provid,
-		ecfgUnlocked: eCfg,
-		namespace:    namespace,
-		uuid:         eCfg.UUID(),
+		CredentialInvalidator: common.NewCredentialInvalidator(invalidator, IsAuthorisationFailure),
+		name:                  "controller",
+		provider:              &provid,
+		ecfgUnlocked:          eCfg,
+		namespace:             namespace,
+		uuid:                  eCfg.UUID(),
 	}
 }
 
-func (s *EnvironSuite) GetStartInstanceArgs(c *gc.C) environs.StartInstanceParams {
+func (s *EnvironSuite) GetStartInstanceArgs(c *tc.C) environs.StartInstanceParams {
 	tools := []*coretools.Tools{
 		{
-			Version: version.Binary{Arch: arch.AMD64, Release: "ubuntu"},
+			Version: semversion.Binary{Arch: arch.AMD64, Release: "ubuntu"},
 			URL:     "https://example.org/amd",
 		},
 		{
-			Version: version.Binary{Arch: arch.ARM64, Release: "ubuntu"},
+			Version: semversion.Binary{Arch: arch.ARM64, Release: "ubuntu"},
 			URL:     "https://example.org/arm",
 		},
 	}
@@ -811,7 +841,7 @@ func (s *EnvironSuite) GetStartInstanceArgs(c *gc.C) environs.StartInstanceParam
 	cons := constraints.Value{}
 	iConfig, err := instancecfg.NewBootstrapInstanceConfig(testing.FakeControllerConfig(), cons, cons,
 		jujuversion.DefaultSupportedLTSBase(), "", nil)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	return environs.StartInstanceParams{
 		ControllerUUID: iConfig.ControllerConfig.ControllerUUID(),

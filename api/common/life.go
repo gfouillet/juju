@@ -4,8 +4,10 @@
 package common
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/core/life"
@@ -14,17 +16,17 @@ import (
 
 // Life requests the life cycle of the given entities from the given
 // server-side API facade via the given caller.
-func Life(caller base.FacadeCaller, tags []names.Tag) ([]params.LifeResult, error) {
+func Life(ctx context.Context, caller base.FacadeCaller, tags []names.Tag) ([]params.LifeResult, error) {
 	if len(tags) == 0 {
 		return []params.LifeResult{}, nil
 	}
 	var result params.LifeResults
 	entities := make([]params.Entity, len(tags))
 	for i, t := range tags {
-		entities[i] = params.Entity{t.String()}
+		entities[i] = params.Entity{Tag: t.String()}
 	}
 	args := params.Entities{Entities: entities}
-	if err := caller.FacadeCall("Life", args, &result); err != nil {
+	if err := caller.FacadeCall(ctx, "Life", args, &result); err != nil {
 		return []params.LifeResult{}, err
 	}
 	return result.Results, nil
@@ -32,8 +34,8 @@ func Life(caller base.FacadeCaller, tags []names.Tag) ([]params.LifeResult, erro
 
 // OneLife requests the life cycle of the given entity from the given
 // server-side API facade via the given caller.
-func OneLife(caller base.FacadeCaller, tag names.Tag) (life.Value, error) {
-	result, err := Life(caller, []names.Tag{tag})
+func OneLife(ctx context.Context, caller base.FacadeCaller, tag names.Tag) (life.Value, error) {
+	result, err := Life(ctx, caller, []names.Tag{tag})
 	if err != nil {
 		return "", err
 	}

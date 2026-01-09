@@ -4,41 +4,44 @@
 package controller_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/cmd/juju/controller"
 	jujucontroller "github.com/juju/juju/controller"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
 )
 
 type ConfigSuite struct {
 	baseControllerSuite
 }
 
-var _ = gc.Suite(&ConfigSuite{})
+func TestConfigSuite(t *testing.T) {
+	tc.Run(t, &ConfigSuite{})
+}
 
-func (s *ConfigSuite) SetUpTest(c *gc.C) {
+func (s *ConfigSuite) SetUpTest(c *tc.C) {
 	s.baseControllerSuite.SetUpTest(c)
 	s.createTestClientStore(c)
 }
 
-func (s *ConfigSuite) run(c *gc.C, args ...string) (*cmd.Context, error) {
+func (s *ConfigSuite) run(c *tc.C, args ...string) (*cmd.Context, error) {
 	return s.runWithAPI(c, &fakeControllerAPI{}, args...)
 }
 
-func (s *ConfigSuite) runWithAPI(c *gc.C, api *fakeControllerAPI, args ...string) (*cmd.Context, error) {
+func (s *ConfigSuite) runWithAPI(c *tc.C, api *fakeControllerAPI, args ...string) (*cmd.Context, error) {
 	command := controller.NewConfigCommandForTest(api, s.store)
 	return cmdtesting.RunCommand(c, command, args...)
 }
 
-func (s *ConfigSuite) TestInit(c *gc.C) {
+func (s *ConfigSuite) TestInit(c *tc.C) {
 	tests := []struct {
 		desc string
 		args []string
@@ -54,13 +57,13 @@ func (s *ConfigSuite) TestInit(c *gc.C) {
 		err:  "cannot specify multiple keys to get",
 	}, {
 		desc: "set one key",
-		args: []string{"juju-ha-space=value"},
+		args: []string{"juju-mgt-space=value"},
 	}, {
 		desc: "set two keys",
-		args: []string{"juju-ha-space=value", "juju-mgmt-space=value"},
+		args: []string{"juju-mgt-space=value", "api-port=value"},
 	}, {
 		desc: "can't mix setting and getting",
-		args: []string{"juju-ha-space=value", "hey2"},
+		args: []string{"juju-mgt-space=value", "hey2"},
 		err:  "cannot get value and set key=value pairs simultaneously",
 	}, {
 		desc: "can't reset",
@@ -71,32 +74,32 @@ func (s *ConfigSuite) TestInit(c *gc.C) {
 		c.Logf("%d - %s", i, test.desc)
 		err := cmdtesting.InitCommand(controller.NewConfigCommandForTest(&fakeControllerAPI{}, s.store), test.args)
 		if test.err == "" {
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 		} else {
-			c.Check(err, gc.ErrorMatches, test.err)
+			c.Check(err, tc.ErrorMatches, test.err)
 		}
 	}
 }
 
-func (s *ConfigSuite) TestSingleValue(c *gc.C) {
+func (s *ConfigSuite) TestSingleValue(c *tc.C) {
 	context, err := s.run(c, "ca-cert")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "multi\nline")
+	c.Assert(output, tc.Equals, "multi\nline")
 }
 
-func (s *ConfigSuite) TestSingleValueJSON(c *gc.C) {
+func (s *ConfigSuite) TestSingleValueJSON(c *tc.C) {
 	context, err := s.run(c, "--format=json", "controller-uuid")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, `"uuid"`)
+	c.Assert(output, tc.Equals, `"uuid"`)
 }
 
-func (s *ConfigSuite) TestAllValues(c *gc.C) {
+func (s *ConfigSuite) TestAllValues(c *tc.C) {
 	context, err := s.run(c)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
 	expected := `
@@ -109,169 +112,156 @@ ca-cert  |-
   multi
   line
 controller-uuid  uuid`[1:]
-	c.Assert(output, gc.Equals, expected)
+	c.Assert(output, tc.Equals, expected)
 }
 
-func (s *ConfigSuite) TestOneLineExcludeMethods(c *gc.C) {
+func (s *ConfigSuite) TestOneLineExcludeMethods(c *tc.C) {
 	var api fakeControllerAPI
 	api.config = map[string]interface{}{
 		"audit-log-exclude-methods": []string{"Actual.Size"},
 	}
 	context, err := s.runWithAPI(c, &api)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
 	expected := `
 Attribute                  Value
 audit-log-exclude-methods  Actual.Size`[1:]
-	c.Assert(output, gc.Equals, expected)
+	c.Assert(output, tc.Equals, expected)
 }
 
-func (s *ConfigSuite) TestAllValuesJSON(c *gc.C) {
+func (s *ConfigSuite) TestAllValuesJSON(c *tc.C) {
 	context, err := s.run(c, "--format=json")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
 	expected := `{"api-port":1234,"audit-log-exclude-methods":["Thing1","Thing2"],"ca-cert":"multi\nline","controller-uuid":"uuid"}`
-	c.Assert(output, gc.Equals, expected)
+	c.Assert(output, tc.Equals, expected)
 }
 
-func (s *ConfigSuite) TestNonexistentValue(c *gc.C) {
+func (s *ConfigSuite) TestNonexistentValue(c *tc.C) {
 	context, err := s.run(c, "courtney-barnett")
-	c.Assert(err, gc.ErrorMatches, `key "courtney-barnett" not found in controller "mallards"`)
+	c.Assert(err, tc.ErrorMatches, `key "courtney-barnett" not found in controller "mallards"`)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 }
 
-func (s *ConfigSuite) TestSetReadOnly(c *gc.C) {
+func (s *ConfigSuite) TestSetReadOnly(c *tc.C) {
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, "api-port=123")
-	c.Assert(err, gc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[api-port\]`)
+	c.Assert(err, tc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[api-port\]`)
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 }
 
-func (s *ConfigSuite) TestSetWrongType(c *gc.C) {
+func (s *ConfigSuite) TestSetWrongType(c *tc.C) {
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, "audit-log-max-backups=foo")
-	c.Assert(err, gc.ErrorMatches, `audit-log-max-backups: expected number, got string\("foo"\)`)
+	c.Assert(err, tc.ErrorMatches, `audit-log-max-backups: expected number, got string\("foo"\)`)
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 }
 
-func (s *ConfigSuite) TestError(c *gc.C) {
+func (s *ConfigSuite) TestError(c *tc.C) {
 	command := controller.NewConfigCommandForTest(&fakeControllerAPI{err: errors.New("error")}, s.store)
 	_, err := cmdtesting.RunCommand(c, command)
-	c.Assert(err, gc.ErrorMatches, "error")
+	c.Assert(err, tc.ErrorMatches, "error")
 }
 
-func (s *ConfigSuite) TestSettingKey(c *gc.C) {
+func (s *ConfigSuite) TestSettingKey(c *tc.C) {
 	var api fakeControllerAPI
-	context, err := s.runWithAPI(c, &api, "juju-ha-space=value")
-	c.Assert(err, jc.ErrorIsNil)
+	context, err := s.runWithAPI(c, &api, "public-dns-address=value")
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{"juju-ha-space": "value"})
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{"public-dns-address": "value"})
 }
 
-func (s *ConfigSuite) TestSettingDuration(c *gc.C) {
+func (s *ConfigSuite) TestSettingDuration(c *tc.C) {
 	var api fakeControllerAPI
-	context, err := s.runWithAPI(c, &api, "api-port-open-delay=100ms")
-	c.Assert(err, jc.ErrorIsNil)
+	context, err := s.runWithAPI(c, &api, "query-tracing-threshold=100ms")
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{"api-port-open-delay": "100ms"})
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{"query-tracing-threshold": "100ms"})
 }
 
-func (s *ConfigSuite) TestSettingComplexKey(c *gc.C) {
-	var api fakeControllerAPI
-	context, err := s.runWithAPI(c, &api, "features=[value1,value2]")
-	c.Assert(err, jc.ErrorIsNil)
-
-	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
-
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{
-		"features": []interface{}{"value1", "value2"},
-	})
-}
-
-func (s *ConfigSuite) TestSettingFromFile(c *gc.C) {
-	path := writeFile(c, "yaml", "juju-ha-space: value\n")
+func (s *ConfigSuite) TestSettingFromFile(c *tc.C) {
+	path := writeFile(c, "yaml", "public-dns-address: value\n")
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, "--file", path)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{"juju-ha-space": "value"})
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{"public-dns-address": "value"})
 }
 
-func (s *ConfigSuite) TestSettingFromStdin(c *gc.C) {
+func (s *ConfigSuite) TestSettingFromStdin(c *tc.C) {
 	ctx := cmdtesting.Context(c)
-	ctx.Stdin = strings.NewReader("juju-ha-space: value\n")
+	ctx.Stdin = strings.NewReader("public-dns-address: value\n")
 	var api fakeControllerAPI
 	code := cmd.Main(controller.NewConfigCommandForTest(&api, s.store), ctx,
 		[]string{"--file", "-"})
 
-	c.Assert(code, gc.Equals, 0)
+	c.Assert(code, tc.Equals, 0)
 	output := strings.TrimSpace(cmdtesting.Stdout(ctx))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 	stderr := strings.TrimSpace(cmdtesting.Stderr(ctx))
-	c.Assert(stderr, gc.Equals, "")
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{"juju-ha-space": "value"})
+	c.Assert(stderr, tc.Equals, "")
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{"public-dns-address": "value"})
 }
 
-func (s *ConfigSuite) TestOverrideFileFromArgs(c *gc.C) {
-	path := writeFile(c, "yaml", "juju-ha-space: value\naudit-log-max-backups: 2\n")
+func (s *ConfigSuite) TestOverrideFileFromArgs(c *tc.C) {
+	path := writeFile(c, "yaml", "public-dns-address: value\naudit-log-max-backups: 2\n")
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, "--file", path, "audit-log-max-backups=4")
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{
-		"juju-ha-space":         "value",
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{
+		"public-dns-address":    "value",
 		"audit-log-max-backups": 4,
 	})
 }
 
-func (s *ConfigSuite) TestSetReadOnlyControllerName(c *gc.C) {
+func (s *ConfigSuite) TestSetReadOnlyControllerName(c *tc.C) {
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, `controller-name=new-name`)
-	c.Assert(err, gc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[controller-name\]`)
+	c.Assert(err, tc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[controller-name\]`)
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 }
 
-func (s *ConfigSuite) TestSetReadOnlyInvalidControllerName(c *gc.C) {
+func (s *ConfigSuite) TestSetReadOnlyInvalidControllerName(c *tc.C) {
 	var api fakeControllerAPI
 	context, err := s.runWithAPI(c, &api, `controller-name=-new-name-`)
-	c.Assert(err, gc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[controller-name\]`)
+	c.Assert(err, tc.ErrorMatches, `invalid or read-only controller config values cannot be updated: \[controller-name\]`)
 	output := strings.TrimSpace(cmdtesting.Stdout(context))
-	c.Assert(output, gc.Equals, "")
+	c.Assert(output, tc.Equals, "")
 }
 
-func (s *ConfigSuite) TestErrorOnSetting(c *gc.C) {
+func (s *ConfigSuite) TestErrorOnSetting(c *tc.C) {
 	api := fakeControllerAPI{err: errors.Errorf("kablooie")}
-	context, err := s.runWithAPI(c, &api, "juju-ha-space=value")
-	c.Assert(err, gc.ErrorMatches, "kablooie")
+	context, err := s.runWithAPI(c, &api, "public-dns-address=value")
+	c.Assert(err, tc.ErrorMatches, "kablooie")
 
-	c.Assert(strings.TrimSpace(cmdtesting.Stdout(context)), gc.Equals, "")
-	c.Assert(api.values, gc.DeepEquals, map[string]interface{}{"juju-ha-space": "value"})
+	c.Assert(strings.TrimSpace(cmdtesting.Stdout(context)), tc.Equals, "")
+	c.Assert(api.values, tc.DeepEquals, map[string]interface{}{"public-dns-address": "value"})
 }
 
-func writeFile(c *gc.C, name, content string) string {
+func writeFile(c *tc.C, name, content string) string {
 	path := filepath.Join(c.MkDir(), name)
 	err := os.WriteFile(path, []byte(content), 0777)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return path
 }
 
@@ -285,7 +275,7 @@ func (f *fakeControllerAPI) Close() error {
 	return nil
 }
 
-func (f *fakeControllerAPI) ControllerConfig() (jujucontroller.Config, error) {
+func (f *fakeControllerAPI) ControllerConfig(context.Context) (jujucontroller.Config, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -303,7 +293,7 @@ func (f *fakeControllerAPI) ControllerConfig() (jujucontroller.Config, error) {
 	return result, nil
 }
 
-func (f *fakeControllerAPI) ConfigSet(values map[string]interface{}) error {
+func (f *fakeControllerAPI) ConfigSet(ctx context.Context, values map[string]interface{}) error {
 	if f.values == nil {
 		f.values = values
 	} else {

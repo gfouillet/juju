@@ -6,6 +6,7 @@ package controller
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/base64"
@@ -20,13 +21,10 @@ import (
 
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	jujuhttp "github.com/juju/http/v2"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/ssh/terminal"
 	"gopkg.in/yaml.v2"
@@ -34,21 +32,24 @@ import (
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
+	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/internal/loginprovider"
-	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	corelogger "github.com/juju/juju/core/logger"
+	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/proxy/factory"
+	"github.com/juju/juju/internal/cmd"
+	jujuhttp "github.com/juju/juju/internal/http"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/proxy/factory"
 	"github.com/juju/juju/rpc/params"
 )
 
 var noModelsMessage = `
 There are no models available. You can add models with
-"juju add-model", or you can ask an administrator or owner
-of a model to grant access to that model with "juju grant".
+"juju add-model", or you can ask an administrator of a
+model to grant access to that model with "juju grant".
 `
 
 // NewRegisterCommand returns a command to allow the user to register a controller.
@@ -66,7 +67,7 @@ func NewRegisterCommand() cmd.Command {
 type registerCommand struct {
 	modelcmd.CommandBase
 	apiOpen        api.OpenFunc
-	listModelsFunc func(_ jujuclient.ClientStore, controller, user string) ([]base.UserModel, error)
+	listModelsFunc func(_ context.Context, _ jujuclient.ClientStore, controller, user string) ([]base.UserModel, error)
 	store          jujuclient.ClientStore
 
 	arg     string
@@ -211,7 +212,7 @@ func (c *registerCommand) run(ctx *cmd.Context) error {
 	}
 	// Log into the controller to verify the credentials, and
 	// list the models available.
-	models, err := c.listModelsFunc(c.store, controllerName, accountDetails.User)
+	models, err := c.listModelsFunc(ctx, c.store, controllerName, accountDetails.User)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -277,9 +278,9 @@ func (c *registerCommand) publicControllerDetails(ctx *cmd.Context, host, contro
 
 	// we set up a login provider that will first try to log in using
 	// oauth device flow, failing that it will try to log in using
-	// user-pass and/or macaroons.
+	// user-pass or macaroons.
 	dialOpts.LoginProvider = loginprovider.NewTryInOrderLoginProvider(
-		loggo.GetLogger("juju.cmd.loginprovider"),
+		internallogger.GetLogger("juju.cmd.loginprovider"),
 		api.NewClientCredentialsLoginProviderFromEnvironment(
 			func() { supportsOIDCLogin = true },
 		),
@@ -294,7 +295,7 @@ func (c *registerCommand) publicControllerDetails(ctx *cmd.Context, host, contro
 		api.NewLegacyLoginProvider(names.UserTag{}, "", "", nil, api.CookieURLFromHost(host)),
 	)
 
-	conn, err := c.apiOpen(&api.Info{
+	conn, err := c.apiOpen(ctx, &api.Info{
 		Addrs: []string{apiAddr},
 	}, dialOpts)
 	if err != nil {
@@ -309,7 +310,7 @@ func (c *registerCommand) publicControllerDetails(ctx *cmd.Context, host, contro
 	// user. If we encounter an error after here, we need to clear it.
 	c.onRunError = func() {
 		if err := c.ClearControllerMacaroons(c.store, controllerName); err != nil {
-			logger.Errorf("failed to clear macaroon: %v", err)
+			logger.Errorf(context.TODO(), "failed to clear macaroon: %v", err)
 		}
 	}
 	return jujuclient.ControllerDetails{
@@ -375,7 +376,7 @@ func (c *registerCommand) nonPublicControllerDetails(ctx *cmd.Context, registrat
 			&registrationParams.key,
 		),
 	}
-	resp, err := c.secretKeyLogin(controllerDetails, req, controllerName)
+	resp, err := c.secretKeyLogin(ctx, controllerDetails, req, controllerName)
 	if err != nil {
 		return errRet(errors.Trace(err))
 	}
@@ -410,7 +411,7 @@ func (c *registerCommand) nonPublicControllerDetails(ctx *cmd.Context, registrat
 	// user. If we encounter an error after here, we need to clear it.
 	c.onRunError = func() {
 		if err := c.ClearControllerMacaroons(c.store, controllerName); err != nil {
-			logger.Errorf("failed to clear macaroon: %v", err)
+			logger.Errorf(context.TODO(), "failed to clear macaroon: %v", err)
 		}
 	}
 	return controllerDetails, jujuclient.AccountDetails{
@@ -453,7 +454,7 @@ func (c *registerCommand) updateController(
 	}
 	if c.replace {
 		if err := store.UpdateController(controllerName, controllerDetails); err != nil {
-			if !errors.IsNotFound(err) {
+			if !errors.Is(err, errors.NotFound) {
 				return errors.Trace(err)
 			}
 			if err := store.AddController(controllerName, controllerDetails); err != nil {
@@ -471,14 +472,14 @@ func (c *registerCommand) updateController(
 	return nil
 }
 
-func (c *registerCommand) listModels(store jujuclient.ClientStore, controllerName, userName string) ([]base.UserModel, error) {
-	api, err := c.NewAPIRoot(store, controllerName, "")
+func (c *registerCommand) listModels(ctx context.Context, store jujuclient.ClientStore, controllerName, userName string) ([]base.UserModel, error) {
+	api, err := c.NewAPIRoot(ctx, store, controllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	defer api.Close()
 	mm := modelmanager.NewClient(api)
-	return mm.ListModels(userName)
+	return mm.ListModels(ctx, userName)
 }
 
 func (c *registerCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclient.ClientStore, controllerName, userName string, models []base.UserModel) error {
@@ -492,8 +493,7 @@ func (c *registerCommand) maybeSetCurrentModel(ctx *cmd.Context, store jujuclien
 		// There is exactly one model shared,
 		// so set it as the current model.
 		model := models[0]
-		owner := names.NewUserTag(model.Owner)
-		modelName := jujuclient.JoinOwnerModelName(owner, model.Name)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		err := store.SetCurrentModel(controllerName, modelName)
 		if err != nil {
 			return errors.Trace(err)
@@ -506,18 +506,17 @@ There are %d models available. Use "juju switch" to select
 one of them:
 `, len(models))
 	user := names.NewUserTag(userName)
-	ownerModelNames := make(set.Strings)
+	userModelNames := make(set.Strings)
 	otherModelNames := make(set.Strings)
 	for _, model := range models {
-		if model.Owner == userName {
-			ownerModelNames.Add(model.Name)
+		if model.Qualifier == coremodel.QualifierFromUserTag(user) {
+			userModelNames.Add(model.Name)
 			continue
 		}
-		owner := names.NewUserTag(model.Owner)
-		modelName := common.OwnerQualifiedModelName(model.Name, owner, user)
+		modelName := jujuclient.QualifyModelName(model.Qualifier.String(), model.Name)
 		otherModelNames.Add(modelName)
 	}
-	for _, modelName := range ownerModelNames.SortedValues() {
+	for _, modelName := range userModelNames.SortedValues() {
 		fmt.Fprintf(ctx.Stderr, "  - juju switch %s\n", modelName)
 	}
 	for _, modelName := range otherModelNames.SortedValues() {
@@ -581,7 +580,9 @@ func (c *registerCommand) getParameters(ctx *cmd.Context) (*registrationParams, 
 }
 
 func (c *registerCommand) secretKeyLogin(
-	controllerDetails jujuclient.ControllerDetails, request params.SecretKeyLoginRequest, controllerName string,
+	ctx context.Context,
+	controllerDetails jujuclient.ControllerDetails, request params.SecretKeyLoginRequest,
+	controllerName string,
 ) (_ *params.SecretKeyLoginResponse, err error) {
 	cookieJar, err := c.CookieJar(c.store, controllerName)
 	if err != nil {
@@ -608,9 +609,9 @@ func (c *registerCommand) secretKeyLogin(
 	if controllerDetails.Proxy != nil {
 		apiInfo.Proxier = controllerDetails.Proxy.Proxier
 	}
-	conn, err := c.apiOpen(apiInfo, opts)
+	conn, err := c.apiOpen(ctx, apiInfo, opts)
 	if err != nil {
-		logger.Infof("opening api connection: %s", err)
+		logger.Infof(context.TODO(), "opening api connection: %s", err)
 		return nil, controllerUnreachableError(controllerName, controllerDetails.APIEndpoints)
 	}
 	defer func() {
@@ -618,7 +619,7 @@ func (c *registerCommand) secretKeyLogin(
 			if err == nil {
 				err = closeErr
 			} else {
-				logger.Warningf("error closing API connection: %v", closeErr)
+				logger.Warningf(context.TODO(), "error closing API connection: %v", closeErr)
 			}
 		}
 	}()
@@ -638,11 +639,11 @@ func (c *registerCommand) secretKeyLogin(
 	httpClient := jujuhttp.NewClient(
 		jujuhttp.WithSkipHostnameVerification(true),
 		jujuhttp.WithCookieJar(cookieJar),
-		jujuhttp.WithLogger(logger.ChildWithLabels("http", corelogger.HTTP)),
+		jujuhttp.WithLogger(logger.Child("http", corelogger.HTTP)),
 	)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		logger.Infof("connecting to controller: %s", err)
+		logger.Infof(context.TODO(), "connecting to controller: %s", err)
 		return nil, controllerUnreachableError(controllerName, controllerDetails.APIEndpoints)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
@@ -652,7 +653,7 @@ func (c *registerCommand) secretKeyLogin(
 		if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 			return nil, errors.Annotatef(err, "internal error: cannot decode http response")
 		}
-		logger.Infof("error response, %s", resp.Error)
+		logger.Infof(context.TODO(), "error response, %s", resp.Error)
 		return nil, errors.Errorf("Provided registration token may have expired."+
 			"\nA controller administrator must reset your user to issue a new token.\nSee %q for more information.", "juju help change-user-password")
 	}
@@ -783,7 +784,7 @@ To login run 'juju login -c %s'.`, existingName, existingName)
 func (c *registerCommand) ensureNotKnownEndpoint(user string, controllerAddrs []string) error {
 	allAddresses := set.NewStrings(controllerAddrs...)
 	existingDetails, existingName, err := c.store.ControllerByAPIEndpoints(allAddresses.Values()...)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 
@@ -793,7 +794,7 @@ func (c *registerCommand) ensureNotKnownEndpoint(user string, controllerAddrs []
 
 	// Check if we know the username for this controller
 	accountDetails, err := c.store.AccountDetails(existingName)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return errors.Trace(err)
 	}
 

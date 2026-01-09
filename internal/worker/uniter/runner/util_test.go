@@ -4,30 +4,32 @@
 package runner_test
 
 import (
+	stdcontext "context"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/juju/clock/testclock"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	"github.com/juju/utils/v3/fs"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"github.com/juju/utils/v4/fs"
+	"go.uber.org/mock/gomock"
 
-	"github.com/juju/juju/api"
-	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/core/instance"
+	apiuniter "github.com/juju/juju/api/agent/uniter"
+	"github.com/juju/juju/api/types"
+	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
+	"github.com/juju/juju/internal/charm"
+	internallogger "github.com/juju/juju/internal/logger"
+	"github.com/juju/juju/internal/testhelpers"
+	coretesting "github.com/juju/juju/internal/testing"
+	uniterapi "github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner"
 	"github.com/juju/juju/internal/worker/uniter/runner/context"
 	runnertesting "github.com/juju/juju/internal/worker/uniter/runner/testing"
-	"github.com/juju/juju/juju/testing"
-	"github.com/juju/juju/state"
+	"github.com/juju/juju/rpc/params"
 	"github.com/juju/juju/testcharms"
 )
 
@@ -37,149 +39,136 @@ var (
 )
 
 type ContextSuite struct {
-	testing.JujuConnSuite
+	testhelpers.IsolationSuite
 
 	paths          runnertesting.RealPaths
 	factory        runner.Factory
 	contextFactory context.ContextFactory
 	membership     map[int][]string
 
-	st          api.Connection
-	model       *state.Model
-	application *state.Application
-	machine     *state.Machine
-	unit        *state.Unit
-	uniter      *uniter.State
-	apiUnit     *uniter.Unit
-	payloads    *uniter.PayloadFacadeClient
-	secrets     *runnertesting.SecretsContextAccessor
+	uniter  *uniterapi.MockUniterClient
+	unit    *uniterapi.MockUnit
+	secrets *runnertesting.SecretsContextAccessor
 
-	apiRelunits map[int]*uniter.RelationUnit
-	relch       *state.Charm
-	relunits    map[int]*state.RelationUnit
+	relunits map[int]*uniterapi.MockRelationUnit
 }
 
-func (s *ContextSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
+func (s *ContextSuite) SetUpTest(c *tc.C) {
+	s.IsolationSuite.SetUpTest(c)
 
-	s.machine = nil
-
-	ch := s.AddTestingCharm(c, "wordpress-nolimit")
-	s.application = s.AddTestingApplication(c, "u", ch)
-	s.unit = s.AddUnit(c, s.application)
-
+	s.relunits = map[int]*uniterapi.MockRelationUnit{}
 	s.secrets = &runnertesting.SecretsContextAccessor{}
+}
 
-	password, err := utils.RandomPassword()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.unit.SetPassword(password)
-	c.Assert(err, jc.ErrorIsNil)
-	s.st = s.OpenAPIAs(c, s.unit.Tag(), password)
-	s.uniter, err = uniter.NewFromConnection(s.st)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.uniter, gc.NotNil)
-	s.apiUnit, err = s.uniter.Unit(s.unit.Tag().(names.UnitTag))
-	c.Assert(err, jc.ErrorIsNil)
-	s.model, err = s.State.Model()
-	c.Assert(err, jc.ErrorIsNil)
-	s.payloads = uniter.NewPayloadFacadeClient(s.st)
+func (s *ContextSuite) AddContextRelation(c *tc.C, ctrl *gomock.Controller, name string) {
+	num := len(s.relunits)
+	rel := uniterapi.NewMockRelation(ctrl)
+	rel.EXPECT().Id().Return(num).AnyTimes()
+	rel.EXPECT().Tag().Return(names.NewRelationTag("mysql:server wordpress:" + name)).AnyTimes()
+	rel.EXPECT().Life().Return(life.Alive).AnyTimes()
+	rel.EXPECT().Suspended().Return(false).AnyTimes()
 
-	s.paths = runnertesting.NewRealPaths(c)
-	s.membership = map[int][]string{}
+	relUnit := uniterapi.NewMockRelationUnit(ctrl)
+	relUnit.EXPECT().Relation().Return(rel).AnyTimes()
+	relUnit.EXPECT().Endpoint().Return(apiuniter.Endpoint{Relation: charm.Relation{Name: "db"}}).AnyTimes()
+	relUnit.EXPECT().Settings(gomock.Any()).Return(
+		apiuniter.NewSettings(rel.Tag().String(), names.NewUnitTag("u/0").String(), params.Settings{}), nil,
+	).AnyTimes()
 
-	// Note: The unit must always have a charm URL set, because this
-	// happens as part of the installation process (that happens
-	// before the initial install hook).
-	err = s.unit.SetCharmURL(ch.URL())
-	c.Assert(err, jc.ErrorIsNil)
-	s.relch = s.AddTestingCharm(c, "mysql")
-	s.relunits = map[int]*state.RelationUnit{}
-	s.apiRelunits = map[int]*uniter.RelationUnit{}
-	s.AddContextRelation(c, "db0")
-	s.AddContextRelation(c, "db1")
+	s.relunits[num] = relUnit
+}
 
-	s.contextFactory, err = context.NewContextFactory(context.FactoryConfig{
-		State:            s.uniter,
-		Unit:             s.apiUnit,
-		Payloads:         s.payloads,
+func (s *ContextSuite) setupUnit(ctrl *gomock.Controller) names.MachineTag {
+	unitTag := names.NewUnitTag("u/0")
+	s.unit = uniterapi.NewMockUnit(ctrl)
+	s.unit.EXPECT().Tag().Return(unitTag).AnyTimes()
+	s.unit.EXPECT().Name().Return(unitTag.Id()).AnyTimes()
+	s.unit.EXPECT().PublicAddress(gomock.Any()).Return("u-0.testing.invalid", nil).AnyTimes()
+	s.unit.EXPECT().PrivateAddress(gomock.Any()).Return("u-0.testing.invalid", nil).AnyTimes()
+	s.unit.EXPECT().AvailabilityZone(gomock.Any()).Return("a-zone", nil).AnyTimes()
+
+	machineTag := names.NewMachineTag("0")
+	s.unit.EXPECT().AssignedMachine(gomock.Any()).Return(machineTag, nil).AnyTimes()
+	return machineTag
+}
+
+func (s *ContextSuite) setupUniter(ctrl *gomock.Controller) names.MachineTag {
+	machineTag := s.setupUnit(ctrl)
+	s.uniter = uniterapi.NewMockUniterClient(ctrl)
+	s.uniter.EXPECT().OpenedMachinePortRangesByEndpoint(gomock.Any(), machineTag).DoAndReturn(func(_ stdcontext.Context, _ names.MachineTag) (map[names.UnitTag]network.GroupedPortRanges, error) {
+		return nil, nil
+	}).AnyTimes()
+	s.uniter.EXPECT().OpenedPortRangesByEndpoint(gomock.Any()).Return(nil, nil).AnyTimes()
+	return machineTag
+}
+
+func (s *ContextSuite) setupFactory(c *tc.C, ctrl *gomock.Controller) {
+	s.setupUniter(ctrl)
+
+	s.unit.EXPECT().PrincipalName(gomock.Any()).Return("", false, nil).AnyTimes()
+	s.uniter.EXPECT().Model(gomock.Any()).Return(&types.Model{
+		Name:      "test-model",
+		UUID:      coretesting.ModelTag.Id(),
+		ModelType: types.IAAS,
+	}, nil).AnyTimes()
+	s.uniter.EXPECT().APIAddresses(gomock.Any()).Return([]string{"10.6.6.6"}, nil).AnyTimes()
+	s.uniter.EXPECT().CloudAPIVersion(gomock.Any()).Return("6.6.6", nil).AnyTimes()
+
+	cfg := coretesting.ModelConfig(c)
+	s.uniter.EXPECT().ModelConfig(gomock.Any()).Return(cfg, nil).AnyTimes()
+
+	contextFactory, err := context.NewContextFactory(c.Context(), context.FactoryConfig{
+		Uniter:           s.uniter,
+		Unit:             s.unit,
 		Tracker:          &runnertesting.FakeTracker{},
 		GetRelationInfos: s.getRelationInfos,
 		SecretsClient:    s.secrets,
 		Paths:            s.paths,
 		Clock:            testclock.NewClock(time.Time{}),
-		Logger:           loggo.GetLogger("test"),
+		Logger:           internallogger.GetLogger("test"),
 	})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	s.contextFactory = contextFactory
+
+	s.paths = runnertesting.NewRealPaths(c)
+	s.membership = map[int][]string{}
+
+	s.contextFactory, err = context.NewContextFactory(c.Context(), context.FactoryConfig{
+		Uniter:           s.uniter,
+		Unit:             s.unit,
+		Tracker:          &runnertesting.FakeTracker{},
+		GetRelationInfos: s.getRelationInfos,
+		SecretsClient:    s.secrets,
+		Paths:            s.paths,
+		Clock:            testclock.NewClock(time.Time{}),
+		Logger:           internallogger.GetLogger("test"),
+	})
+	c.Assert(err, tc.ErrorIsNil)
 
 	factory, err := runner.NewFactory(
 		s.paths,
 		s.contextFactory,
 		runner.NewRunner,
-		nil,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	s.factory = factory
+
+	s.AddContextRelation(c, ctrl, "db0")
+	s.AddContextRelation(c, ctrl, "db1")
 }
 
-func (s *ContextSuite) AddContextRelation(c *gc.C, name string) {
-	s.AddTestingApplication(c, name, s.relch)
-	eps, err := s.State.InferEndpoints("u", name)
-	c.Assert(err, jc.ErrorIsNil)
-	rel, err := s.State.AddRelation(eps...)
-	c.Assert(err, jc.ErrorIsNil)
-	ru, err := rel.Unit(s.unit)
-	c.Assert(err, jc.ErrorIsNil)
-	err = ru.EnterScope(map[string]interface{}{"relation-name": name})
-	c.Assert(err, jc.ErrorIsNil)
-	s.relunits[rel.Id()] = ru
-	apiRel, err := s.uniter.Relation(rel.Tag().(names.RelationTag))
-	c.Assert(err, jc.ErrorIsNil)
-	apiRelUnit, err := apiRel.Unit(s.apiUnit.Tag())
-	c.Assert(err, jc.ErrorIsNil)
-	s.apiRelunits[rel.Id()] = apiRelUnit
-}
-
-func (s *ContextSuite) AddUnit(c *gc.C, svc *state.Application) *state.Unit {
-	unit, err := svc.AddUnit(state.AddUnitParams{})
-	c.Assert(err, jc.ErrorIsNil)
-	if s.machine != nil {
-		err = unit.AssignToMachine(s.machine)
-		c.Assert(err, jc.ErrorIsNil)
-		return unit
-	}
-
-	err = s.State.AssignUnit(unit, state.AssignCleanEmpty)
-	c.Assert(err, jc.ErrorIsNil)
-	machineId, err := unit.AssignedMachineId()
-	c.Assert(err, jc.ErrorIsNil)
-	s.machine, err = s.State.Machine(machineId)
-	c.Assert(err, jc.ErrorIsNil)
-	zone := "a-zone"
-	hwc := instance.HardwareCharacteristics{
-		AvailabilityZone: &zone,
-	}
-	err = s.machine.SetProvisioned("i-exist", "", "fake_nonce", &hwc)
-	c.Assert(err, jc.ErrorIsNil)
-
-	name := strings.Replace(unit.Name(), "/", "-", 1)
-	privateAddr := network.NewSpaceAddress(name+".testing.invalid", network.WithScope(network.ScopeCloudLocal))
-	err = s.machine.SetProviderAddresses(privateAddr)
-	c.Assert(err, jc.ErrorIsNil)
-	return unit
-}
-
-func (s *ContextSuite) SetCharm(c *gc.C, name string) {
+func (s *ContextSuite) setCharm(c *tc.C, name string) {
 	err := os.RemoveAll(s.paths.GetCharmDir())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = fs.Copy(testcharms.Repo.CharmDirPath(name), s.paths.GetCharmDir())
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 func (s *ContextSuite) getRelationInfos() map[int]*context.RelationInfo {
 	info := map[int]*context.RelationInfo{}
-	for relId, relUnit := range s.apiRelunits {
+	for relId, relUnit := range s.relunits {
 		info[relId] = &context.RelationInfo{
-			RelationUnit: &relUnitShim{relUnit},
+			RelationUnit: relUnit,
 			MemberNames:  s.membership[relId],
 		}
 	}
@@ -212,12 +201,12 @@ type hookSpec struct {
 // with permissions perm and exit code code. If output is non-empty,
 // the charm will write it to stdout and stderr, with each one prefixed
 // by name of the stream.
-func makeCharm(c *gc.C, spec hookSpec, charmDir string) {
+func makeCharm(c *tc.C, spec hookSpec, charmDir string) {
 	dir := charmDir
 	if spec.dir != "" {
 		dir = filepath.Join(dir, spec.dir)
 		err := os.Mkdir(dir, 0755)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 	if !spec.charmMissing {
 		makeCharmMetadata(c, charmDir)
@@ -226,14 +215,14 @@ func makeCharm(c *gc.C, spec hookSpec, charmDir string) {
 	hook, err := os.OpenFile(
 		filepath.Join(dir, spec.name), os.O_CREATE|os.O_WRONLY, spec.perm,
 	)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	defer func() {
-		c.Assert(hook.Close(), gc.IsNil)
+		c.Assert(hook.Close(), tc.IsNil)
 	}()
 
 	printf := func(f string, a ...interface{}) {
 		_, err := fmt.Fprintf(hook, f+"\n", a...)
-		c.Assert(err, jc.ErrorIsNil)
+		c.Assert(err, tc.ErrorIsNil)
 	}
 	if !spec.missingShebang {
 		printf("#!/bin/bash")
@@ -256,17 +245,9 @@ func makeCharm(c *gc.C, spec hookSpec, charmDir string) {
 	printf("exit %d", spec.code)
 }
 
-func makeCharmMetadata(c *gc.C, charmDir string) {
+func makeCharmMetadata(c *tc.C, charmDir string) {
 	err := os.MkdirAll(charmDir, 0755)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	err = os.WriteFile(path.Join(charmDir, "metadata.yaml"), nil, 0664)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-type relUnitShim struct {
-	*uniter.RelationUnit
-}
-
-func (r *relUnitShim) Relation() context.Relation {
-	return r.RelationUnit.Relation()
+	c.Assert(err, tc.ErrorIsNil)
 }

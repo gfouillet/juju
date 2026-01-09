@@ -4,12 +4,12 @@
 package jujuc
 
 import (
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/core/status"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // StatusGetCommand implements the status-get command.
@@ -95,9 +95,9 @@ func toDetails(info StatusInfo, includeData bool) map[string]interface{} {
 }
 
 func (c *StatusGetCommand) ApplicationStatus(ctx *cmd.Context) error {
-	applicationStatus, err := c.ctx.ApplicationStatus()
+	applicationStatus, err := c.ctx.ApplicationStatus(ctx)
 	if err != nil {
-		if errors.IsNotImplemented(err) {
+		if errors.Is(err, errors.NotImplemented) {
 			return c.out.Write(ctx, status.Unknown)
 		}
 		return errors.Annotatef(err, "finding application status")
@@ -128,9 +128,9 @@ func (c *StatusGetCommand) unitOrApplicationStatus(ctx *cmd.Context) error {
 		return c.ApplicationStatus(ctx)
 	}
 
-	unitStatus, err := c.ctx.UnitStatus()
+	unitStatus, err := c.ctx.UnitStatus(ctx)
 	if err != nil {
-		if errors.IsNotImplemented(err) {
+		if errors.Is(err, errors.NotImplemented) {
 			return c.out.Write(ctx, status.Unknown)
 		}
 		return errors.Annotatef(err, "finding workload status")

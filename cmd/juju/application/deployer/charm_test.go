@@ -5,17 +5,14 @@ package deployer
 
 import (
 	"bytes"
+	"context"
+	"testing"
 
-	"github.com/juju/charm/v12"
-	charmresource "github.com/juju/charm/v12/resource"
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
-	"github.com/juju/cmd/v3/cmdtesting"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	jc "github.com/juju/testing/checkers"
+	"github.com/juju/tc"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/application"
@@ -25,9 +22,12 @@ import (
 	"github.com/juju/juju/cmd/juju/application/deployer/mocks"
 	"github.com/juju/juju/cmd/modelcmd"
 	corebase "github.com/juju/juju/core/base"
-	"github.com/juju/juju/core/constraints"
-	"github.com/juju/juju/environs/config"
-	coretesting "github.com/juju/juju/testing"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/internal/charm"
+	charmresource "github.com/juju/juju/internal/charm/resource"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/cmd/cmdtesting"
+	coretesting "github.com/juju/juju/internal/testing"
 )
 
 type charmSuite struct {
@@ -43,9 +43,11 @@ type charmSuite struct {
 	url               *charm.URL
 }
 
-var _ = gc.Suite(&charmSuite{})
+func TestCharmSuite(t *testing.T) {
+	tc.Run(t, &charmSuite{})
+}
 
-func (s *charmSuite) SetUpTest(c *gc.C) {
+func (s *charmSuite) SetUpTest(c *tc.C) {
 	s.ctx = cmdtesting.Context(c)
 	s.deployResourceIDs = make(map[string]string)
 	s.url = charm.MustParseURL("testme")
@@ -58,80 +60,29 @@ func (s *charmSuite) SetUpTest(c *gc.C) {
 	}
 }
 
-func (s *charmSuite) TestSimpleCharmDeploy(c *gc.C) {
+func (s *charmSuite) TestSimpleCharmDeploy(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
 	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
 	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
-	s.deployerAPI.EXPECT().Deploy(gomock.Any()).Return(nil)
+	s.deployerAPI.EXPECT().Deploy(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := s.newDeployCharm().deploy(s.ctx, s.deployerAPI)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *charmSuite) TestRepositoryCharmDeployDryRunCompatibility(c *gc.C) {
+func (s *charmSuite) TestRepositoryCharmDeployDryRunDefaultSeriesForce(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
-	s.deployerAPI.EXPECT().BestFacadeVersion("Application").Return(17).AnyTimes()
+	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
+	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
+	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
 	s.resolver = mocks.NewMockResolver(ctrl)
 	s.expectResolveChannel()
-	s.expectDeployerAPIModelGet(c, corebase.Base{})
-
-	dCharm := s.newDeployCharm()
-	dCharm.dryRun = true
-	dCharm.validateCharmBaseWithName = func(corebase.Base, string, string) error {
-		return nil
-	}
-	repoCharm := &repositoryCharm{
-		deployCharm:      *dCharm,
-		userRequestedURL: s.url,
-		clock:            clock.WallClock,
-	}
-
-	err := repoCharm.PrepareAndDeploy(s.ctx, s.deployerAPI, s.resolver)
-	c.Assert(err, jc.ErrorIsNil)
-}
-
-func (s *charmSuite) TestRepositoryCharmDeployDryRunImageIdNoBase(c *gc.C) {
-	ctrl := s.setupMocks(c)
-	defer ctrl.Finish()
-	s.deployerAPI.EXPECT().BestFacadeVersion("Application").Return(17).AnyTimes()
-	s.resolver = mocks.NewMockResolver(ctrl)
-	s.expectResolveChannel()
-	s.expectDeployerAPIModelGet(c, corebase.Base{})
-
-	dCharm := s.newDeployCharm()
-	dCharm.dryRun = true
-	dCharm.validateCharmBaseWithName = func(_ corebase.Base, _ string, _ string) error {
-		return nil
-	}
-	dCharm.constraints = constraints.Value{
-		ImageID: strptr("ubuntu-bf2"),
-	}
-	repoCharm := &repositoryCharm{
-		deployCharm:      *dCharm,
-		userRequestedURL: s.url,
-		clock:            clock.WallClock,
-	}
-
-	err := repoCharm.PrepareAndDeploy(s.ctx, s.deployerAPI, s.resolver)
-	c.Assert(err, gc.ErrorMatches, "base must be explicitly provided when image-id constraint is used")
-}
-
-func (s *charmSuite) TestRepositoryCharmDeployDryRunDefaultSeriesForce(c *gc.C) {
-	ctrl := s.setupMocks(c)
-	defer ctrl.Finish()
-	s.deployerAPI.EXPECT().BestFacadeVersion("Application").Return(17).AnyTimes()
-	s.resolver = mocks.NewMockResolver(ctrl)
-	s.expectResolveChannel()
-	s.expectDeployerAPIModelGet(c, corebase.MustParseBaseFromString("ubuntu@22.04"))
 
 	dCharm := s.newDeployCharm()
 	dCharm.dryRun = true
 	dCharm.force = true
-	dCharm.validateCharmBaseWithName = func(_ corebase.Base, _ string, _ string) error {
-		return nil
-	}
 	repoCharm := &repositoryCharm{
 		deployCharm:      *dCharm,
 		userRequestedURL: s.url,
@@ -153,16 +104,30 @@ func (s *charmSuite) TestRepositoryCharmDeployDryRunDefaultSeriesForce(c *gc.C) 
 		Stdout: stdOut,
 	}
 
+	dInfo := application.DeployInfo{
+		Name:     "testme",
+		Revision: 1,
+		Channel:  "latest/stable",
+		Base: corebase.Base{Channel: corebase.Channel{Track: "20.04"},
+			OS: "ubuntu"},
+	}
+
+	repoCharm.uploadExistingPendingResources = func(_ context.Context, appName string, pendingResources []application.PendingResourceUpload, conn base.APICallCloser, filesystem modelcmd.Filesystem) error {
+		c.Assert(appName, tc.Equals, dInfo.Name)
+		return nil
+	}
+
+	s.deployerAPI.EXPECT().DeployFromRepository(gomock.Any(), gomock.Any()).Return(dInfo, nil, nil)
+
 	err := repoCharm.PrepareAndDeploy(ctx, s.deployerAPI, s.resolver)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(output.String(), gc.Equals, "\"testme\" from  charm \"testme\", revision -1 on ubuntu@22.04 would be deployed\n")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(output.String(), tc.Equals, "\"testme\" from charm-hub charm \"testme\", revision 1 in channel latest/stable on ubuntu@20.04 would be deployed\n")
 }
 
-func (s *charmSuite) TestDeployFromRepositoryCharmAppNameVSCharmName(c *gc.C) {
+func (s *charmSuite) TestDeployFromRepositoryCharmAppNameVSCharmName(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.deployerAPI.EXPECT().BestFacadeVersion("Application").Return(19).AnyTimes()
 	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
 	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
 	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
@@ -196,25 +161,24 @@ func (s *charmSuite) TestDeployFromRepositoryCharmAppNameVSCharmName(c *gc.C) {
 			OS: "ubuntu"},
 	}
 
-	repoCharm.uploadExistingPendingResources = func(appName string, pendingResources []application.PendingResourceUpload, conn base.APICallCloser, filesystem modelcmd.Filesystem) error {
-		c.Assert(appName, gc.Equals, dInfo.Name)
+	repoCharm.uploadExistingPendingResources = func(_ context.Context, appName string, pendingResources []application.PendingResourceUpload, conn base.APICallCloser, filesystem modelcmd.Filesystem) error {
+		c.Assert(appName, tc.Equals, dInfo.Name)
 		return nil
 	}
 
-	s.deployerAPI.EXPECT().DeployFromRepository(gomock.Any()).Return(dInfo, nil, nil)
+	s.deployerAPI.EXPECT().DeployFromRepository(gomock.Any(), gomock.Any()).Return(dInfo, nil, nil)
 
 	err := repoCharm.PrepareAndDeploy(ctx, s.deployerAPI, nil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Check(output.String(), gc.Equals,
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(output.String(), tc.Equals,
 		"Deployed \"differentThanCharmName\" from charm-hub charm \"testme\", "+
 			"revision 1 in channel latest/stable on ubuntu@20.04\n")
 }
 
-func (s *charmSuite) TestDeployFromRepositoryErrorNoUploadResources(c *gc.C) {
+func (s *charmSuite) TestDeployFromRepositoryErrorNoUploadResources(c *tc.C) {
 	ctrl := s.setupMocks(c)
 	defer ctrl.Finish()
 
-	s.deployerAPI.EXPECT().BestFacadeVersion("Application").Return(19).AnyTimes()
 	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
 	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
 	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
@@ -230,25 +194,56 @@ func (s *charmSuite) TestDeployFromRepositoryErrorNoUploadResources(c *gc.C) {
 	writer := mocks.NewMockWriter(ctrl)
 	writer.EXPECT().Write(gomock.Any()).Return(0, nil).AnyTimes()
 	ctx := &cmd.Context{
-		Stderr: writer,
-		Stdout: writer,
+		Context: c.Context(),
+		Stderr:  writer,
+		Stdout:  writer,
 	}
 
-	repoCharm.uploadExistingPendingResources = func(appName string, pendingResources []application.PendingResourceUpload, conn base.APICallCloser, filesystem modelcmd.Filesystem) error {
+	repoCharm.uploadExistingPendingResources = func(_ context.Context, appName string, pendingResources []application.PendingResourceUpload, conn base.APICallCloser, filesystem modelcmd.Filesystem) error {
 		c.Fatalf("Do not upload pending resources if errors")
 		return nil
 	}
 	expectedErrors := []error{errors.NotFoundf("test errors")}
-	s.deployerAPI.EXPECT().DeployFromRepository(gomock.Any()).Return(application.DeployInfo{}, nil, expectedErrors)
+	s.deployerAPI.EXPECT().DeployFromRepository(gomock.Any(), gomock.Any()).Return(application.DeployInfo{}, nil, expectedErrors)
 
 	err := repoCharm.PrepareAndDeploy(ctx, s.deployerAPI, nil)
-	c.Assert(err, gc.ErrorMatches, "failed to deploy charm \"testme\"")
+	c.Assert(err, tc.ErrorMatches, "failed to deploy charm \"testme\"")
+}
+
+func (s *charmSuite) TestDeployFromPredeployed(c *tc.C) {
+	ctrl := s.setupMocks(c)
+	defer ctrl.Finish()
+
+	s.modelCommand.EXPECT().Filesystem().Return(s.filesystem).AnyTimes()
+	s.configFlag.EXPECT().AbsoluteFileNames(gomock.Any()).Return(nil, nil)
+	s.configFlag.EXPECT().ReadConfigPairs(gomock.Any()).Return(nil, nil)
+	s.deployerAPI.EXPECT().Deploy(gomock.Any(), gomock.Any()).Return(nil)
+
+	dCharm := s.newDeployCharm()
+
+	predeployedCharm := &predeployedLocalCharm{
+		deployCharm:  *dCharm,
+		userCharmURL: s.url,
+		base:         corebase.MustParseBaseFromString("ubuntu@22.04"),
+	}
+
+	writer := mocks.NewMockWriter(ctrl)
+	writer.EXPECT().Write(gomock.Any()).Return(0, nil).AnyTimes()
+	ctx := &cmd.Context{
+		Context: c.Context(),
+		Stderr:  writer,
+		Stdout:  writer,
+	}
+
+	err := predeployedCharm.PrepareAndDeploy(ctx, s.deployerAPI, nil)
+	c.Assert(err, tc.ErrorIsNil)
 }
 
 func (s *charmSuite) newDeployCharm() *deployCharm {
 	return &deployCharm{
 		configOptions: s.configFlag,
 		deployResources: func(
+			context.Context,
 			string,
 			resources.CharmID,
 			map[string]string,
@@ -268,25 +263,27 @@ func (s *charmSuite) newDeployCharm() *deployCharm {
 	}
 }
 
-func (s *charmSuite) setupMocks(c *gc.C) *gomock.Controller {
+func (s *charmSuite) setupMocks(c *tc.C) *gomock.Controller {
 	ctrl := gomock.NewController(c)
 	s.deployerAPI = mocks.NewMockDeployerAPI(ctrl)
-	s.deployerAPI.EXPECT().CharmInfo(gomock.Any()).Return(s.charmInfo, nil).AnyTimes()
+	s.deployerAPI.EXPECT().CharmInfo(gomock.Any(), gomock.Any()).Return(s.charmInfo, nil).AnyTimes()
 	s.deployerAPI.EXPECT().ModelUUID().Return("dead-beef", true).AnyTimes()
 
 	s.modelCommand = mocks.NewMockModelCommand(ctrl)
+	s.modelCommand.EXPECT().ModelType(gomock.Any()).Return(model.IAAS, nil).AnyTimes()
 	s.configFlag = mocks.NewMockDeployConfigFlag(ctrl)
 	return ctrl
 }
 
 func (s *charmSuite) expectResolveChannel() {
 	s.resolver.EXPECT().ResolveCharm(
+		gomock.Any(),
 		gomock.AssignableToTypeOf(&charm.URL{}),
 		gomock.AssignableToTypeOf(commoncharm.Origin{}),
 		false,
 	).DoAndReturn(
 		// Ensure the same curl that is provided, is returned.
-		func(curl *charm.URL, requestedOrigin commoncharm.Origin, _ bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error) {
+		func(ctx context.Context, curl *charm.URL, requestedOrigin commoncharm.Origin, _ bool) (*charm.URL, commoncharm.Origin, []corebase.Base, error) {
 			return curl, requestedOrigin, []corebase.Base{
 				corebase.MustParseBaseFromString("ubuntu@18.04"),
 				corebase.MustParseBaseFromString("ubuntu@20.04"),
@@ -295,18 +292,10 @@ func (s *charmSuite) expectResolveChannel() {
 		}).AnyTimes()
 }
 
-func (s *charmSuite) expectDeployerAPIModelGet(c *gc.C, defaultBase corebase.Base) {
-	cfg, err := config.New(true, minimalModelConfig())
-	c.Assert(err, jc.ErrorIsNil)
-	attrs := cfg.AllAttrs()
-	attrs["default-base"] = defaultBase.String()
-	s.deployerAPI.EXPECT().ModelGet().Return(attrs, nil)
-}
-
 func minimalModelConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"name":            "test",
-		"type":            "manual",
+		"type":            "unmanaged",
 		"uuid":            coretesting.ModelTag.Id(),
 		"controller-uuid": coretesting.ControllerTag.Id(),
 		"firewall-mode":   "instance",

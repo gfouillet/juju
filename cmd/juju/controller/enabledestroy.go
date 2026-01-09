@@ -4,11 +4,13 @@
 package controller
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewEnableDestroyControllerCommand returns a command that allows a controller admin
@@ -24,7 +26,7 @@ type enableDestroyController struct {
 
 type removeBlocksAPI interface {
 	Close() error
-	RemoveBlocks() error
+	RemoveBlocks(ctx context.Context) error
 }
 
 var enableDestroyDoc = `
@@ -49,19 +51,19 @@ func (c *enableDestroyController) Info() *cmd.Info {
 	})
 }
 
-func (c *enableDestroyController) getAPI() (removeBlocksAPI, error) {
+func (c *enableDestroyController) getAPI(ctx context.Context) (removeBlocksAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.NewControllerAPIClient()
+	return c.NewControllerAPIClient(ctx)
 }
 
 // Run implements Command.Run
 func (c *enableDestroyController) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer client.Close()
-	return errors.Trace(client.RemoveBlocks())
+	return errors.Trace(client.RemoveBlocks(ctx))
 }

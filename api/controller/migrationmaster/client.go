@@ -11,29 +11,37 @@ import (
 	"net/http"
 	"time"
 
-	charmresource "github.com/juju/charm/v12/resource"
-	"github.com/juju/description/v9"
+	"github.com/juju/description/v11"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
 	"gopkg.in/httprequest.v1"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/common"
 	"github.com/juju/juju/core/migration"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
+	charmresource "github.com/juju/juju/internal/charm/resource"
 	"github.com/juju/juju/rpc/params"
 )
+
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
 
 // NewWatcherFunc exists to let us unit test Facade without patching.
 type NewWatcherFunc func(base.APICaller, params.NotifyWatchResult) watcher.NotifyWatcher
 
 // NewClient returns a new Client based on an existing API connection.
-func NewClient(caller base.APICaller, newWatcher NewWatcherFunc) *Client {
+func NewClient(caller base.APICaller, newWatcher NewWatcherFunc, options ...Option) *Client {
 	return &Client{
-		caller:            base.NewFacadeCaller(caller, "MigrationMaster"),
+		caller:            base.NewFacadeCaller(caller, "MigrationMaster", options...),
 		newWatcher:        newWatcher,
 		httpClientFactory: caller.HTTPClient,
 	}
@@ -49,9 +57,9 @@ type Client struct {
 
 // Watch returns a watcher which reports when a migration is active
 // for the model associated with the API connection.
-func (c *Client) Watch() (watcher.NotifyWatcher, error) {
+func (c *Client) Watch(ctx context.Context) (watcher.NotifyWatcher, error) {
 	var result params.NotifyWatchResult
-	err := c.caller.FacadeCall("Watch", nil, &result)
+	err := c.caller.FacadeCall(ctx, "Watch", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -63,10 +71,10 @@ func (c *Client) Watch() (watcher.NotifyWatcher, error) {
 
 // MigrationStatus returns the details and progress of the latest
 // model migration.
-func (c *Client) MigrationStatus() (migration.MigrationStatus, error) {
+func (c *Client) MigrationStatus(ctx context.Context) (migration.MigrationStatus, error) {
 	var empty migration.MigrationStatus
 	var status params.MasterMigrationStatus
-	err := c.caller.FacadeCall("MigrationStatus", nil, &status)
+	err := c.caller.FacadeCall(ctx, "MigrationStatus", nil, &status)
 	if err != nil {
 		return empty, errors.Trace(err)
 	}
@@ -105,10 +113,10 @@ func (c *Client) MigrationStatus() (migration.MigrationStatus, error) {
 		Phase:            phase,
 		PhaseChangedTime: status.PhaseChangedTime,
 		TargetInfo: migration.TargetInfo{
-			ControllerTag:  controllerTag,
+			ControllerUUID: controllerTag.Id(),
 			Addrs:          target.Addrs,
 			CACert:         target.CACert,
-			AuthTag:        authTag,
+			User:           authTag.Id(),
 			Password:       target.Password,
 			Macaroons:      macs,
 			Token:          target.Token,
@@ -118,47 +126,49 @@ func (c *Client) MigrationStatus() (migration.MigrationStatus, error) {
 }
 
 // SetPhase updates the phase of the currently active model migration.
-func (c *Client) SetPhase(phase migration.Phase) error {
+func (c *Client) SetPhase(ctx context.Context, phase migration.Phase) error {
 	args := params.SetMigrationPhaseArgs{
 		Phase: phase.String(),
 	}
-	return c.caller.FacadeCall("SetPhase", args, nil)
+	return c.caller.FacadeCall(ctx, "SetPhase", args, nil)
 }
 
 // SetStatusMessage sets a human readable message regarding the
 // progress of a migration.
-func (c *Client) SetStatusMessage(message string) error {
+func (c *Client) SetStatusMessage(ctx context.Context, message string) error {
 	args := params.SetMigrationStatusMessageArgs{
 		Message: message,
 	}
-	return c.caller.FacadeCall("SetStatusMessage", args, nil)
+	return c.caller.FacadeCall(ctx, "SetStatusMessage", args, nil)
 }
 
 // ModelInfo return basic information about the model to migrated.
-func (c *Client) ModelInfo() (migration.ModelInfo, error) {
-	var info params.MigrationModelInfo
-	err := c.caller.FacadeCall("ModelInfo", nil, &info)
-	if err != nil {
-		return migration.ModelInfo{}, errors.Trace(err)
+func (c *Client) ModelInfo(ctx context.Context) (migration.ModelInfo, error) {
+	if c.caller.BestAPIVersion() < 5 {
+		return c.modelInfoCompat(ctx)
 	}
-	owner, err := names.ParseUserTag(info.OwnerTag)
+	var info params.MigrationModelInfo
+	err := c.caller.FacadeCall(ctx, "ModelInfo", nil, &info)
 	if err != nil {
 		return migration.ModelInfo{}, errors.Trace(err)
 	}
 
+	// The model description is marshalled into YAML (description package does
+	// not support JSON) to prevent potential issues with
+	// marshalling/unmarshalling on the target API controller.
 	var modelDescription description.Model
 	if bytes := info.ModelDescription; len(bytes) > 0 {
 		var err error
 		modelDescription, err = description.Deserialize(info.ModelDescription)
 		if err != nil {
-			return migration.ModelInfo{}, errors.Trace(err)
+			return migration.ModelInfo{}, errors.Annotate(err, "failed to marshal model description")
 		}
 	}
 
 	return migration.ModelInfo{
 		UUID:                   info.UUID,
 		Name:                   info.Name,
-		Owner:                  owner,
+		Qualifier:              model.Qualifier(info.Qualifier),
 		AgentVersion:           info.AgentVersion,
 		ControllerAgentVersion: info.ControllerAgentVersion,
 		ModelDescription:       modelDescription,
@@ -167,9 +177,9 @@ func (c *Client) ModelInfo() (migration.ModelInfo, error) {
 
 // SourceControllerInfo returns connection information about the source controller
 // and uuids of any other hosted models involved in cross model relations.
-func (c *Client) SourceControllerInfo() (migration.SourceControllerInfo, []string, error) {
+func (c *Client) SourceControllerInfo(ctx context.Context) (migration.SourceControllerInfo, []string, error) {
 	var info params.MigrationSourceInfo
-	err := c.caller.FacadeCall("SourceControllerInfo", nil, &info)
+	err := c.caller.FacadeCall(ctx, "SourceControllerInfo", nil, &info)
 	if err != nil {
 		return migration.SourceControllerInfo{}, nil, errors.Trace(err)
 	}
@@ -187,29 +197,29 @@ func (c *Client) SourceControllerInfo() (migration.SourceControllerInfo, []strin
 
 // Prechecks verifies that the source controller and model are healthy
 // and able to participate in a migration.
-func (c *Client) Prechecks() error {
-	return c.caller.FacadeCall("Prechecks", params.PrechecksArgs{}, nil)
+func (c *Client) Prechecks(ctx context.Context) error {
+	return c.caller.FacadeCall(ctx, "Prechecks", params.PrechecksArgs{}, nil)
 }
 
 // Export returns a serialized representation of the model associated
 // with the API connection. The charms used by the model are also
 // returned.
-func (c *Client) Export() (migration.SerializedModel, error) {
+func (c *Client) Export(ctx context.Context) (migration.SerializedModel, error) {
 	var empty migration.SerializedModel
 	var serialized params.SerializedModel
-	err := c.caller.FacadeCall("Export", nil, &serialized)
+	err := c.caller.FacadeCall(ctx, "Export", nil, &serialized)
 	if err != nil {
 		return empty, errors.Trace(err)
 	}
 
 	// Convert tools info to output map.
-	tools := make(map[version.Binary]string)
+	tools := make(map[string]semversion.Binary, len(serialized.Tools))
 	for _, toolsInfo := range serialized.Tools {
-		v, err := version.ParseBinary(toolsInfo.Version)
+		v, err := semversion.ParseBinary(toolsInfo.Version)
 		if err != nil {
 			return migration.SerializedModel{}, errors.Annotate(err, "error parsing agent binary version")
 		}
-		tools[v] = toolsInfo.URI
+		tools[toolsInfo.SHA256] = v
 	}
 
 	resources, err := convertResources(serialized.Resources)
@@ -227,12 +237,12 @@ func (c *Client) Export() (migration.SerializedModel, error) {
 
 // ProcessRelations runs a series of processes to ensure that the relations
 // of a given model are correct after a migrated model.
-func (c *Client) ProcessRelations(controllerAlias string) error {
+func (c *Client) ProcessRelations(ctx context.Context, controllerAlias string) error {
 	param := params.ProcessRelations{
 		ControllerAlias: controllerAlias,
 	}
 	var result params.ErrorResult
-	err := c.caller.FacadeCall("ProcessRelations", param, &result)
+	err := c.caller.FacadeCall(ctx, "ProcessRelations", param, &result)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -243,7 +253,7 @@ func (c *Client) ProcessRelations(controllerAlias string) error {
 }
 
 // OpenResource downloads the named resource for an application.
-func (c *Client) OpenResource(application, name string) (io.ReadCloser, error) {
+func (c *Client) OpenResource(ctx context.Context, application, name string) (io.ReadCloser, error) {
 	httpClient, err := c.httpClientFactory()
 	if err != nil {
 		return nil, errors.Annotate(err, "unable to create HTTP client")
@@ -252,7 +262,7 @@ func (c *Client) OpenResource(application, name string) (io.ReadCloser, error) {
 	uri := fmt.Sprintf("/applications/%s/resources/%s", application, name)
 	var resp *http.Response
 	if err := httpClient.Get(
-		c.caller.RawAPICaller().Context(),
+		ctx,
 		uri, &resp); err != nil {
 		return nil, errors.Annotate(err, "unable to retrieve resource")
 	}
@@ -261,15 +271,15 @@ func (c *Client) OpenResource(application, name string) (io.ReadCloser, error) {
 
 // Reap removes the documents for the model associated with the API
 // connection.
-func (c *Client) Reap() error {
-	return c.caller.FacadeCall("Reap", nil, nil)
+func (c *Client) Reap(ctx context.Context) error {
+	return c.caller.FacadeCall(ctx, "Reap", nil, nil)
 }
 
 // WatchMinionReports returns a watcher which reports when a migration
 // minion has made a report for the current migration phase.
-func (c *Client) WatchMinionReports() (watcher.NotifyWatcher, error) {
+func (c *Client) WatchMinionReports(ctx context.Context) (watcher.NotifyWatcher, error) {
 	var result params.NotifyWatchResult
-	err := c.caller.FacadeCall("WatchMinionReports", nil, &result)
+	err := c.caller.FacadeCall(ctx, "WatchMinionReports", nil, &result)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -281,11 +291,11 @@ func (c *Client) WatchMinionReports() (watcher.NotifyWatcher, error) {
 
 // MinionReports returns details of the reports made by migration
 // minions to the controller for the current migration phase.
-func (c *Client) MinionReports() (migration.MinionReports, error) {
+func (c *Client) MinionReports(ctx context.Context) (migration.MinionReports, error) {
 	var in params.MinionReports
 	var out migration.MinionReports
 
-	err := c.caller.FacadeCall("MinionReports", nil, &in)
+	err := c.caller.FacadeCall(ctx, "MinionReports", nil, &in)
 	if err != nil {
 		return out, errors.Trace(err)
 	}
@@ -316,11 +326,11 @@ func (c *Client) MinionReports() (migration.MinionReports, error) {
 
 // MinionReportTimeout returns the maximum duration that the migration master
 // worker should wait for minions to report on a migration phase.
-func (c *Client) MinionReportTimeout() (time.Duration, error) {
+func (c *Client) MinionReportTimeout(ctx context.Context) (time.Duration, error) {
 	var timeout time.Duration
 
 	var res params.StringResult
-	err := c.caller.FacadeCall("MinionReportTimeout", nil, &res)
+	err := c.caller.FacadeCall(ctx, "MinionReportTimeout", nil, &res)
 	if err != nil {
 		return timeout, errors.Trace(err)
 	}
@@ -369,13 +379,13 @@ func groupTagIds(tagStrs []string) ([]string, []string, []string, error) {
 	return machines, units, applications, nil
 }
 
-func convertResources(in []params.SerializedModelResource) ([]migration.SerializedModelResource, error) {
+func convertResources(in []params.SerializedModelResource) ([]resource.Resource, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
-	out := make([]migration.SerializedModelResource, 0, len(in))
+	out := make([]resource.Resource, 0, len(in))
 	for _, resource := range in {
-		outResource, err := convertAppResource(resource)
+		outResource, err := convertResource(resource)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -384,62 +394,35 @@ func convertResources(in []params.SerializedModelResource) ([]migration.Serializ
 	return out, nil
 }
 
-func convertAppResource(in params.SerializedModelResource) (migration.SerializedModelResource, error) {
-	var empty migration.SerializedModelResource
-	appRev, err := convertResourceRevision(in.Application, in.Name, in.ApplicationRevision)
-	if err != nil {
-		return empty, errors.Annotate(err, "application revision")
-	}
-	csRev, err := convertResourceRevision(in.Application, in.Name, in.CharmStoreRevision)
-	if err != nil {
-		return empty, errors.Annotate(err, "charmstore revision")
-	}
-	unitRevs := make(map[string]resources.Resource)
-	for unitName, inUnitRev := range in.UnitRevisions {
-		unitRev, err := convertResourceRevision(in.Application, in.Name, inUnitRev)
-		if err != nil {
-			return empty, errors.Annotate(err, "unit revision")
-		}
-		unitRevs[unitName] = unitRev
-	}
-	return migration.SerializedModelResource{
-		ApplicationRevision: appRev,
-		CharmStoreRevision:  csRev,
-		UnitRevisions:       unitRevs,
-	}, nil
-}
-
-func convertResourceRevision(app, name string, rev params.SerializedModelResourceRevision) (resources.Resource, error) {
-	var empty resources.Resource
-	type_, err := charmresource.ParseType(rev.Type)
+func convertResource(res params.SerializedModelResource) (resource.Resource, error) {
+	var empty resource.Resource
+	type_, err := charmresource.ParseType(res.Type)
 	if err != nil {
 		return empty, errors.Trace(err)
 	}
-	origin, err := charmresource.ParseOrigin(rev.Origin)
+	origin, err := charmresource.ParseOrigin(res.Origin)
 	if err != nil {
 		return empty, errors.Trace(err)
 	}
 	var fp charmresource.Fingerprint
-	if rev.FingerprintHex != "" {
-		if fp, err = charmresource.ParseFingerprint(rev.FingerprintHex); err != nil {
+	if res.FingerprintHex != "" {
+		if fp, err = charmresource.ParseFingerprint(res.FingerprintHex); err != nil {
 			return empty, errors.Annotate(err, "invalid fingerprint")
 		}
 	}
-	return resources.Resource{
+	return resource.Resource{
 		Resource: charmresource.Resource{
 			Meta: charmresource.Meta{
-				Name:        name,
-				Type:        type_,
-				Path:        rev.Path,
-				Description: rev.Description,
+				Name: res.Name,
+				Type: type_,
 			},
 			Origin:      origin,
-			Revision:    rev.Revision,
-			Size:        rev.Size,
+			Revision:    res.Revision,
+			Size:        res.Size,
 			Fingerprint: fp,
 		},
-		ApplicationID: app,
-		Username:      rev.Username,
-		Timestamp:     rev.Timestamp,
+		ApplicationName: res.Application,
+		RetrievedBy:     res.Username,
+		Timestamp:       res.Timestamp,
 	}, nil
 }

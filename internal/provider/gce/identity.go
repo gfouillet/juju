@@ -4,23 +4,24 @@
 package gce
 
 import (
+	"context"
+
 	"github.com/juju/errors"
 
 	jujucloud "github.com/juju/juju/cloud"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 )
 
 // SupportsInstanceRoles indicates if Instance Roles are supported by this
 // environ.
-func (env *environ) SupportsInstanceRoles(_ context.ProviderCallContext) bool {
+func (env *environ) SupportsInstanceRoles(_ context.Context) bool {
 	return true
 }
 
 // CreateAutoInstanceRole is responsible for setting up an instance role on
 // behalf of the user.
 func (env *environ) CreateAutoInstanceRole(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	args environs.BootstrapParams,
 ) (string, error) {
 	serviceAccount, err := env.gce.DefaultServiceAccount(ctx)

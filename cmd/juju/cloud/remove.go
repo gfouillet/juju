@@ -4,17 +4,18 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	cloudapi "github.com/juju/juju/api/client/cloud"
+	"github.com/juju/juju/api/jujuclient"
 	"github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/jujuclient"
+	"github.com/juju/juju/internal/cmd"
 )
 
 var usageRemoveCloudSummary = `
@@ -43,7 +44,7 @@ type removeCloudCommand struct {
 	Cloud string
 
 	// Used when querying a controller for its cloud details
-	removeCloudAPIFunc func() (RemoveCloudAPI, error)
+	removeCloudAPIFunc func(ctx context.Context) (RemoveCloudAPI, error)
 
 	// targetController holds a controller name when removing
 	// a cloud from a controller managed by JAAS.
@@ -51,7 +52,7 @@ type removeCloudCommand struct {
 }
 
 type RemoveCloudAPI interface {
-	RemoveCloud(cloud string) error
+	RemoveCloud(ctx context.Context, cloud string) error
 	Close() error
 }
 
@@ -67,8 +68,8 @@ func NewRemoveCloudCommand() cmd.Command {
 	return modelcmd.WrapBase(c)
 }
 
-func (c *removeCloudCommand) cloudAPI() (RemoveCloudAPI, error) {
-	root, err := c.NewAPIRoot(c.Store, c.ControllerName, "")
+func (c *removeCloudCommand) cloudAPI(ctx context.Context) (RemoveCloudAPI, error) {
+	root, err := c.NewAPIRoot(ctx, c.Store, c.ControllerName, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -124,7 +125,7 @@ func (c *removeCloudCommand) Run(ctxt *cmd.Context) error {
 	}
 	if c.ControllerName != "" {
 		if err := c.removeControllerCloud(ctxt); err != nil {
-			if errors.IsNotFound(err) {
+			if errors.Is(err, errors.NotFound) {
 				ctxt.Infof("No cloud called %q exists on controller %q", c.Cloud, c.ControllerName)
 			} else {
 				ctxt.Infof("ERROR %v", err)
@@ -176,12 +177,12 @@ func (c *removeCloudCommand) removeLocalPersonalCloud(ctxt *cmd.Context) error {
 }
 
 func (c *removeCloudCommand) removeControllerCloud(ctxt *cmd.Context) error {
-	api, err := c.removeCloudAPIFunc()
+	api, err := c.removeCloudAPIFunc(ctxt)
 	if err != nil {
 		return err
 	}
 	defer api.Close()
-	err = api.RemoveCloud(c.Cloud)
+	err = api.RemoveCloud(ctxt, c.Cloud)
 	if err != nil {
 		return err
 	}

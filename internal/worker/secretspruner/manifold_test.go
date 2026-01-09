@@ -4,36 +4,39 @@
 package secretspruner_test
 
 import (
+	"testing"
+
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/worker/v3"
-	dt "github.com/juju/worker/v3/dependency/testing"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4"
+	dt "github.com/juju/worker/v4/dependency/testing"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
 	"github.com/juju/juju/api/base"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
 	"github.com/juju/juju/internal/worker/secretspruner"
 	"github.com/juju/juju/internal/worker/secretspruner/mocks"
 )
 
 type manifoldSuite struct {
-	testing.IsolationSuite
+	testhelpers.IsolationSuite
 	config secretspruner.ManifoldConfig
 }
 
-var _ = gc.Suite(&manifoldSuite{})
-
-func (s *manifoldSuite) SetUpTest(c *gc.C) {
-	s.IsolationSuite.SetUpTest(c)
-	s.config = s.validConfig()
+func TestManifoldSuite(t *testing.T) {
+	tc.Run(t, &manifoldSuite{})
 }
 
-func (s *manifoldSuite) validConfig() secretspruner.ManifoldConfig {
+func (s *manifoldSuite) SetUpTest(c *tc.C) {
+	s.IsolationSuite.SetUpTest(c)
+	s.config = s.validConfig(c)
+}
+
+func (s *manifoldSuite) validConfig(c *tc.C) secretspruner.ManifoldConfig {
 	return secretspruner.ManifoldConfig{
 		APICallerName: "api-caller",
-		Logger:        loggo.GetLogger("test"),
+		Logger:        loggertesting.WrapCheckLog(c),
 		NewWorker: func(config secretspruner.Config) (worker.Worker, error) {
 			return nil, nil
 		},
@@ -41,37 +44,36 @@ func (s *manifoldSuite) validConfig() secretspruner.ManifoldConfig {
 	}
 }
 
-func (s *manifoldSuite) TestValid(c *gc.C) {
-	c.Check(s.config.Validate(), jc.ErrorIsNil)
+func (s *manifoldSuite) TestValid(c *tc.C) {
+	c.Check(s.config.Validate(), tc.ErrorIsNil)
 }
 
-func (s *manifoldSuite) TestMissingAPICallerName(c *gc.C) {
+func (s *manifoldSuite) TestMissingAPICallerName(c *tc.C) {
 	s.config.APICallerName = ""
 	s.checkNotValid(c, "empty APICallerName not valid")
 }
 
-func (s *manifoldSuite) TestMissingLogger(c *gc.C) {
+func (s *manifoldSuite) TestMissingLogger(c *tc.C) {
 	s.config.Logger = nil
 	s.checkNotValid(c, "nil Logger not valid")
 }
-
-func (s *manifoldSuite) TestMissingNewWorker(c *gc.C) {
+func (s *manifoldSuite) TestMissingNewWorker(c *tc.C) {
 	s.config.NewWorker = nil
 	s.checkNotValid(c, "nil NewWorker not valid")
 }
 
-func (s *manifoldSuite) TestMissingNewFacade(c *gc.C) {
+func (s *manifoldSuite) TestMissingNewFacade(c *tc.C) {
 	s.config.NewUserSecretsFacade = nil
 	s.checkNotValid(c, "nil NewUserSecretsFacade not valid")
 }
 
-func (s *manifoldSuite) checkNotValid(c *gc.C, expect string) {
+func (s *manifoldSuite) checkNotValid(c *tc.C, expect string) {
 	err := s.config.Validate()
-	c.Check(err, gc.ErrorMatches, expect)
-	c.Check(err, jc.ErrorIs, errors.NotValid)
+	c.Check(err, tc.ErrorMatches, expect)
+	c.Check(err, tc.ErrorIs, errors.NotValid)
 }
 
-func (s *manifoldSuite) TestStart(c *gc.C) {
+func (s *manifoldSuite) TestStart(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
@@ -83,18 +85,18 @@ func (s *manifoldSuite) TestStart(c *gc.C) {
 	called := false
 	s.config.NewWorker = func(config secretspruner.Config) (worker.Worker, error) {
 		called = true
-		mc := jc.NewMultiChecker()
-		mc.AddExpr(`_.Logger`, gc.NotNil)
+		mc := tc.NewMultiChecker()
+		mc.AddExpr(`_.Logger`, tc.NotNil)
 		c.Check(config, mc, secretspruner.Config{SecretsFacade: facade})
 		return nil, nil
 	}
 	manifold := secretspruner.Manifold(s.config)
-	w, err := manifold.Start(dt.StubContext(nil, map[string]interface{}{
+	w, err := manifold.Start(c.Context(), dt.StubGetter(map[string]interface{}{
 		"api-caller": struct{ base.APICaller }{&mockAPICaller{}},
 	}))
-	c.Assert(w, gc.IsNil)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(called, jc.IsTrue)
+	c.Assert(w, tc.IsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(called, tc.IsTrue)
 }
 
 type mockAPICaller struct {

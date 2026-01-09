@@ -7,21 +7,18 @@ import (
 	"testing"
 
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func TestPackage(t *testing.T) {
-	gc.TestingT(t)
-}
 
 type importSuite struct{}
 
-var _ = gc.Suite(&importSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &importSuite{})
+}
 
-func (*importSuite) TestImports(c *gc.C) {
+func (*importSuite) TestImports(c *tc.C) {
 	// TODO(sidecar) - improve test performance
 	c.Skip("test times out on Jenkins")
 	found := set.NewStrings(
@@ -32,56 +29,41 @@ func (*importSuite) TestImports(c *gc.C) {
 		"agent/tools",
 		"api",
 		"api/agent/agent",
+		"api/agent/caasoperator",
+		"api/agent/keyupdater",
+		"api/agent/leadership",
+		"api/agent/logger",
+		"api/agent/machiner",
+		"api/agent/migrationflag",
+		"api/agent/migrationminion",
+		"api/agent/proxyupdater",
+		"api/agent/reboot",
+		"api/agent/retrystrategy",
+		"api/agent/uniter",
+		"api/agent/upgrader",
 		"api/authentication",
 		"api/base",
 		"api/client/block",
-		"api/agent/caasoperator",
+		"api/client/modelmanager",
+		"api/client/usermanager",
 		"api/common",
 		"api/common/cloudspec",
 		"api/controller/controller",
 		"api/controller/instancepoller",
-		"api/agent/keyupdater",
-		"api/agent/leadership",
-		"api/agent/logger",
 		"api/logsender",
-		"api/agent/machiner",
-		"api/agent/migrationflag",
-		"api/agent/migrationminion",
-		"api/client/modelmanager",
-		"api/agent/proxyupdater",
-		"api/agent/reboot",
-		"api/agent/retrystrategy",
-		"api/agent/unitassigner",
-		"api/agent/uniter",
-		"api/agent/upgrader",
-		"api/client/usermanager",
 		"api/watcher",
-		"cmd/containeragent/utils",
-		"apiserver/errors",
-		"rpc/params",
 		"apiserver/apiserverhttp",
+		"apiserver/errors",
 		"caas",
 		"caas/kubernetes/clientconfig",
-		"caas/kubernetes/provider",
-		"caas/kubernetes/provider/application",
-		"caas/kubernetes/provider/constants",
-		"caas/kubernetes/provider/proxy",
-		"caas/kubernetes/provider/resources",
-		"caas/kubernetes/provider/specs",
-		"caas/kubernetes/provider/storage",
-		"caas/kubernetes/provider/utils",
-		"caas/kubernetes/provider/watcher",
 		"caas/specs",
-		"charmhub",
-		"charmhub/path",
-		"charmhub/transport",
-		"charmstore",
 		"cloud",
 		"cloudconfig",
 		"cloudconfig/cloudinit",
 		"cloudconfig/instancecfg",
 		"cloudconfig/podcfg",
 		"cmd",
+		"cmd/containeragent/utils",
 		"cmd/juju/common",
 		"cmd/juju/interact",
 		"cmd/jujud/agent/addons",
@@ -112,23 +94,22 @@ func (*importSuite) TestImports(c *gc.C) {
 		"core/paths",
 		"core/paths/transientfile",
 		"core/permission",
-		"core/presence",
 		"core/quota",
 		"core/raftlease",
 		"core/relation",
-		"core/resources",
+		"core/resource",
 		"core/secrets",
 		"core/snap",
 		"core/status",
+		"core/user",
 		"core/watcher",
 		"downloader",
 		"environs",
 		"environs/bootstrap",
 		"environs/cloudspec",
 		"environs/config",
-		"environs/context",
-		"environs/filestorage",
 		"environs/dashboard",
+		"environs/filestorage",
 		"environs/imagemetadata",
 		"environs/instances",
 		"environs/simplestreams",
@@ -138,37 +119,48 @@ func (*importSuite) TestImports(c *gc.C) {
 		"environs/tools",
 		"environs/utils",
 		"feature",
+		"internal/charmhub",
+		"internal/charmhub/path",
+		"internal/charmhub/transport",
+		"internal/network",
+		"internal/network/netplan",
+		"internal/packaging",
+		"internal/packaging/dependency",
+		"internal/pki",
+		"internal/pki/tls",
+		"internal/provider/kubernetes",
+		"internal/provider/kubernetes/application",
+		"internal/provider/kubernetes/constants",
+		"internal/provider/kubernetes/proxy",
+		"internal/provider/kubernetes/resources",
+		"internal/provider/kubernetes/specs",
+		"internal/provider/kubernetes/storage",
+		"internal/provider/kubernetes/utils",
+		"internal/provider/kubernetes/watcher",
 		"internal/provider/lxd/lxdnames",
+		"internal/proxy",
+		"internal/proxy/config",
+		"internal/pubsub/agent",
+		"internal/scriptrunner",
+		"internal/service",
+		"internal/service/common",
+		"internal/service/snap",
+		"internal/service/systemd",
+		"internal/storage",
+		"internal/storage/provider",
+		"internal/tools",
+		"internal/wrench",
 		"juju",
 		"juju/keys",
 		"juju/names",
 		"juju/osenv",
 		"juju/sockets",
 		"jujuclient",
-		"logfwd",
-		"logfwd/syslog",
 		"mongo", // TODO: move mongo dependency from JUJU CLI if we decide to split the `agent.Config` for controller and machineagent/unitagent/containeragent.
-		"network",
-		"network/debinterfaces",
-		"network/netplan",
-		"packaging",
-		"packaging/dependency",
-		"pki",
-		"pki/tls",
-		"proxy",
-		"pubsub/agent",
 		"rpc",
 		"rpc/jsoncodec",
-		"service",
-		"service/common",
-		"service/snap",
-		"service/systemd",
+		"rpc/params",
 		"state/errors",
-		"storage",
-		"storage/provider",
-		"tools",
-		"utils/proxy",
-		"utils/scriptrunner",
 		"version",
 		"worker",
 		"worker/agent",
@@ -208,16 +200,15 @@ func (*importSuite) TestImports(c *gc.C) {
 		"worker/uniter/storage",
 		"worker/uniter/upgradeseries",
 		"worker/uniter/verifycharmprofile",
-		"wrench",
 	)
 
 	unexpected := found.Difference(expected)
 	// TODO: review if there are any un-expected imports!
 	// Show the values rather than just checking the length so a failing
 	// test shows them.
-	c.Check(unexpected.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unexpected.SortedValues(), tc.DeepEquals, []string{})
 	// If unneeded show any values this is good as we've reduced
 	// dependencies, and they should be removed from expected above.
 	unneeded := expected.Difference(found)
-	c.Check(unneeded.SortedValues(), jc.DeepEquals, []string{})
+	c.Check(unneeded.SortedValues(), tc.DeepEquals, []string{})
 }

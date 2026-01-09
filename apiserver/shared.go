@@ -4,95 +4,150 @@
 package apiserver
 
 import (
+	"context"
 	"sync"
 	"time"
 
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/juju/clock"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/apiserver/facade"
-	jujucontroller "github.com/juju/juju/controller"
-	"github.com/juju/juju/core/cache"
-	coredatabase "github.com/juju/juju/core/database"
+	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/changestream"
+	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/lease"
-	"github.com/juju/juju/core/multiwatcher"
-	"github.com/juju/juju/core/presence"
-	"github.com/juju/juju/pubsub/controller"
-	"github.com/juju/juju/state"
+	corelogger "github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/internal/services"
+	"github.com/juju/juju/internal/worker/trace"
+	"github.com/juju/juju/internal/worker/watcherregistry"
 )
 
-// SharedHub represents the methods of the pubsub.StructuredHub
-// that are used. The context uses an interface to allow mocking
-// of the hub.
-type SharedHub interface {
-	Publish(topic string, data interface{}) (func(), error)
-	Subscribe(topic string, handler interface{}) (func(), error)
-}
-
 // sharedServerContext contains a number of components that are unchangeable in the API server.
-// These components need to be exposed through the facade.Context. Instead of having the methods
-// of newAPIHandler and newAPIRoot take ever increasing numbers of parameters, they will instead
+// These components need to be exposed through the facade.ModelContext. Instead of having the methods
+// of newAPIHandler and newAPIRoot take ever-increasing numbers of parameters, they will instead
 // have a pointer to the sharedServerContext.
 //
 // All attributes in the context should be goroutine aware themselves, like the state pool, hub, and
 // presence, or protected and only accessed through methods on this context object.
 type sharedServerContext struct {
-	statePool           *state.StatePool
-	controller          *cache.Controller
-	multiwatcherFactory multiwatcher.Factory
-	centralHub          SharedHub
-	presence            presence.Recorder
-	leaseManager        lease.Manager
-	logger              loggo.Logger
-	cancel              <-chan struct{}
-	charmhubHTTPClient  facade.HTTPClient
-	dbGetter            coredatabase.DBGetter
+	// flightRecorder is the flight recorder for the server.
+	flightRecorder flightrecorder.FlightRecorder
 
-	configMutex      sync.RWMutex
-	controllerConfig jujucontroller.Config
+	leaseManager       lease.Manager
+	logger             corelogger.Logger
+	clock              clock.Clock
+	charmhubHTTPClient facade.HTTPClient
+	macaroonHTTPClient facade.HTTPClient
+
+	// dbGetter is used to access databases from the API server. Along with
+	// creating a new database for new models and during model migrations.
+	dbGetter changestream.WatchableDBGetter
+
+	// DomainServicesGetter is used to get the domain services for controllers
+	// and models.
+	domainServicesGetter     services.DomainServicesGetter
+	controllerDomainServices services.ControllerDomainServices
+
+	// TraceGetter is used to get the tracer for the API server.
+	tracerGetter trace.TracerGetter
+
+	// ObjectStoreGetter is used to get the object store for storing blobs
+	// for the API server.
+	objectStoreGetter objectstore.ObjectStoreGetter
+
+	// watcherRegistryGetter is used to get the watcher registry for the API
+	// server.
+	watcherRegistryGetter watcherregistry.WatcherRegistryGetter
+
+	configMutex sync.RWMutex
+
+	// controllerUUID is the unique identifier of the controller.
+	controllerUUID   string
+	controllerConfig controller.Config
 	features         set.Strings
 
-	unsubscribe func()
+	loginTokenRefreshURL    string
+	offersThirdPartyKeyPair *bakery.KeyPair
+
+	// controllerModelUUID is the UUID of the controller model.
+	controllerModelUUID model.UUID
+
+	machineTag names.Tag
+	dataDir    string
+	logDir     string
 }
 
 type sharedServerConfig struct {
-	statePool           *state.StatePool
-	controller          *cache.Controller
-	multiwatcherFactory multiwatcher.Factory
-	centralHub          SharedHub
-	presence            presence.Recorder
-	leaseManager        lease.Manager
-	controllerConfig    jujucontroller.Config
-	logger              loggo.Logger
-	charmhubHTTPClient  facade.HTTPClient
-	dbGetter            coredatabase.DBGetter
+	flightRecorder          flightrecorder.FlightRecorder
+	leaseManager            lease.Manager
+	controllerUUID          string
+	controllerModelUUID     model.UUID
+	controllerConfig        controller.Config
+	loginTokenRefreshURL    string
+	offersThirdPartyKeyPair *bakery.KeyPair
+	logger                  corelogger.Logger
+	clock                   clock.Clock
+	charmhubHTTPClient      facade.HTTPClient
+	macaroonHTTPClient      facade.HTTPClient
+
+	dbGetter                 changestream.WatchableDBGetter
+	domainServicesGetter     services.DomainServicesGetter
+	controllerDomainServices services.ControllerDomainServices
+	tracerGetter             trace.TracerGetter
+	objectStoreGetter        objectstore.ObjectStoreGetter
+	watcherRegistryGetter    watcherregistry.WatcherRegistryGetter
+	machineTag               names.Tag
+	dataDir                  string
+	logDir                   string
 }
 
 func (c *sharedServerConfig) validate() error {
-	if c.statePool == nil {
-		return errors.NotValidf("nil statePool")
-	}
-	if c.controller == nil {
-		return errors.NotValidf("nil controller")
-	}
-	if c.multiwatcherFactory == nil {
-		return errors.NotValidf("nil multiwatcherFactory")
-	}
-	if c.centralHub == nil {
-		return errors.NotValidf("nil centralHub")
-	}
-	if c.presence == nil {
-		return errors.NotValidf("nil presence")
+	if c.flightRecorder == nil {
+		return errors.NotValidf("nil flightRecorder")
 	}
 	if c.leaseManager == nil {
 		return errors.NotValidf("nil leaseManager")
+	}
+	if c.controllerUUID == "" {
+		return errors.NotValidf("empty controllerUUID")
 	}
 	if c.controllerConfig == nil {
 		return errors.NotValidf("nil controllerConfig")
 	}
 	if c.dbGetter == nil {
 		return errors.NotValidf("nil dbGetter")
+	}
+	if c.domainServicesGetter == nil {
+		return errors.NotValidf("nil domainServicesGetter")
+	}
+	if c.controllerDomainServices == nil {
+		return errors.NotValidf("nil controllerDomainServices")
+	}
+	if c.tracerGetter == nil {
+		return errors.NotValidf("nil tracerGetter")
+	}
+	if c.objectStoreGetter == nil {
+		return errors.NotValidf("nil objectStoreGetter")
+	}
+	if c.watcherRegistryGetter == nil {
+		return errors.NotValidf("nil watcherRegistryGetter")
+	}
+	if c.machineTag == nil {
+		return errors.NotValidf("empty machineTag")
+	}
+	if c.charmhubHTTPClient == nil {
+		return errors.NotValidf("nil charmhubHTTPClient")
+	}
+	if c.macaroonHTTPClient == nil {
+		return errors.NotValidf("nil macaroonHTTPClient")
+	}
+	if c.offersThirdPartyKeyPair == nil {
+		return errors.NotValidf("nil offersThirdPartyKeyPair")
 	}
 	return nil
 }
@@ -101,65 +156,75 @@ func newSharedServerContext(config sharedServerConfig) (*sharedServerContext, er
 	if err := config.validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	ctx := &sharedServerContext{
-		statePool:           config.statePool,
-		controller:          config.controller,
-		multiwatcherFactory: config.multiwatcherFactory,
-		centralHub:          config.centralHub,
-		presence:            config.presence,
-		leaseManager:        config.leaseManager,
-		logger:              config.logger,
-		controllerConfig:    config.controllerConfig,
-		charmhubHTTPClient:  config.charmhubHTTPClient,
-		dbGetter:            config.dbGetter,
-	}
-	ctx.features = config.controllerConfig.Features()
-	// We are able to get the current controller config before subscribing to changes
-	// because the changes are only ever published in response to an API call, and
-	// this function is called in the newServer call to create the API server,
-	// and we know that we can't make any API calls until the server has started.
-	unsubscribe, err := ctx.centralHub.Subscribe(controller.ConfigChanged, ctx.onConfigChanged)
+	return &sharedServerContext{
+		flightRecorder:           config.flightRecorder,
+		leaseManager:             config.leaseManager,
+		logger:                   config.logger,
+		clock:                    config.clock,
+		controllerUUID:           config.controllerUUID,
+		controllerModelUUID:      config.controllerModelUUID,
+		controllerConfig:         config.controllerConfig,
+		loginTokenRefreshURL:     config.loginTokenRefreshURL,
+		offersThirdPartyKeyPair:  config.offersThirdPartyKeyPair,
+		charmhubHTTPClient:       config.charmhubHTTPClient,
+		macaroonHTTPClient:       config.macaroonHTTPClient,
+		dbGetter:                 config.dbGetter,
+		domainServicesGetter:     config.domainServicesGetter,
+		controllerDomainServices: config.controllerDomainServices,
+		tracerGetter:             config.tracerGetter,
+		objectStoreGetter:        config.objectStoreGetter,
+		watcherRegistryGetter:    config.watcherRegistryGetter,
+		machineTag:               config.machineTag,
+		dataDir:                  config.dataDir,
+		logDir:                   config.logDir,
+		features:                 config.controllerConfig.Features(),
+	}, nil
+}
+
+// NewCrossModelAuthContext returns a new CrossModelAuthContext for the given
+// server host.
+func (c *sharedServerContext) NewCrossModelAuthContext(ctx context.Context, serverHost string) (facade.CrossModelAuthContext, error) {
+	crossModelAuthContext, err := newOfferAuthContext(
+		ctx,
+		c.controllerDomainServices.Access(),
+		c.controllerDomainServices.Macaroon(),
+		c.offersThirdPartyKeyPair,
+		serverHost,
+		c.controllerUUID,
+		c.controllerModelUUID,
+		c.loginTokenRefreshURL,
+		c.macaroonHTTPClient,
+		c.clock,
+		c.logger,
+	)
 	if err != nil {
-		ctx.logger.Criticalf("programming error in subscribe function: %v", err)
 		return nil, errors.Trace(err)
 	}
-	ctx.unsubscribe = unsubscribe
-	return ctx, nil
+	return crossModelAuthContext, nil
 }
 
-func (c *sharedServerContext) Close() {
-	c.unsubscribe()
-}
-
-func (c *sharedServerContext) onConfigChanged(topic string, data controller.ConfigChangedMessage, err error) {
-	if err != nil {
-		c.logger.Criticalf("programming error in %s message data: %v", topic, err)
-		return
-	}
-
-	features := data.Config.Features()
-
+func (c *sharedServerContext) updateControllerConfig(ctx context.Context, config controller.Config) {
 	c.configMutex.Lock()
-	c.controllerConfig = data.Config
+	defer c.configMutex.Unlock()
+
+	c.controllerConfig = config
+
+	features := config.Features()
+
 	removed := c.features.Difference(features)
 	added := features.Difference(c.features)
-	c.features = features
 	values := features.SortedValues()
-	c.configMutex.Unlock()
 
 	if removed.Size() != 0 || added.Size() != 0 {
-		c.logger.Infof("updating features to %v", values)
+		c.logger.Infof(ctx, "updating features to %v", values)
 	}
-}
 
-func (c *sharedServerContext) featureEnabled(flag string) bool {
-	c.configMutex.RLock()
-	defer c.configMutex.RUnlock()
-	return c.features.Contains(flag)
+	c.features = features
 }
 
 func (c *sharedServerContext) maxDebugLogDuration() time.Duration {
 	c.configMutex.RLock()
 	defer c.configMutex.RUnlock()
+
 	return c.controllerConfig.MaxDebugLogDuration()
 }

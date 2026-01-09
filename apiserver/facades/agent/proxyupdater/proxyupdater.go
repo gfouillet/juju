@@ -4,102 +4,105 @@
 package proxyupdater
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
 
-	"github.com/juju/juju/apiserver/common"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
-	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/environs/config"
+	"github.com/juju/juju/apiserver/internal"
+	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
-// ProxyUpdaterV2 defines the pubic methods for the v2 facade.
+// ProxyUpdaterV2 defines the public methods for the v2 facade.
 type ProxyUpdaterV2 interface {
-	ProxyConfig(args params.Entities) params.ProxyConfigResults
-	WatchForProxyConfigAndAPIHostPortChanges(args params.Entities) params.NotifyWatchResults
+	ProxyConfig(ctx context.Context, args params.Entities) params.ProxyConfigResults
+	WatchForProxyConfigAndAPIHostPortChanges(ctx context.Context, args params.Entities) params.NotifyWatchResults
 }
 
 var _ ProxyUpdaterV2 = (*API)(nil)
 
 // newFacadeBase provides the signature required for facade registration
 // and creates a v2 facade.
-func newFacadeBase(ctx facade.Context) (*API, error) {
-	st := ctx.State()
-	model, err := st.Model()
-	if err != nil {
-		return nil, err
-	}
-	systemState, err := ctx.StatePool().SystemState()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
+func newFacadeBase(ctx facade.ModelContext) (*API, error) {
 	return NewAPIV2(
-		systemState,
-		model,
-		ctx.Resources(),
+		ctx.DomainServices().ControllerNode(),
+		ctx.DomainServices().Config(),
 		ctx.Auth(),
+		ctx.WatcherRegistry(),
 	)
 }
 
 // API provides the ProxyUpdater version 2 facade.
 type API struct {
-	backend    Backend
-	controller ControllerBackend
-	resources  facade.Resources
-	authorizer facade.Authorizer
-}
-
-// Backend defines the model state methods this facade needs,
-// so they can be mocked for testing.
-type Backend interface {
-	ModelConfig() (*config.Config, error)
-	WatchForModelConfigChanges() state.NotifyWatcher
-}
-
-// ControllerBackend defines the controller state methods this facade needs,
-// so they can be mocked for testing.
-type ControllerBackend interface {
-	APIHostPortsForAgents() ([]network.SpaceHostPorts, error)
-	WatchAPIHostPortsForAgents() state.NotifyWatcher
+	controllerNodeService ControllerNodeService
+	modelConfigService    ModelConfigService
+	authorizer            facade.Authorizer
+	watcherRegistry       facade.WatcherRegistry
 }
 
 // NewAPIV2 creates a new server-side API facade with the given Backing.
-func NewAPIV2(controller ControllerBackend, backend Backend, resources facade.Resources, authorizer facade.Authorizer) (*API, error) {
+func NewAPIV2(
+	controllerNodeService ControllerNodeService,
+	modelConfigService ModelConfigService,
+	authorizer facade.Authorizer,
+	watcherRegistry facade.WatcherRegistry,
+) (*API, error) {
 	if !(authorizer.AuthMachineAgent() || authorizer.AuthUnitAgent() || authorizer.AuthApplicationAgent() || authorizer.AuthModelAgent()) {
 		return nil, apiservererrors.ErrPerm
 	}
 	return &API{
-		backend:    backend,
-		controller: controller,
-		resources:  resources,
-		authorizer: authorizer,
+		controllerNodeService: controllerNodeService,
+		modelConfigService:    modelConfigService,
+		authorizer:            authorizer,
+		watcherRegistry:       watcherRegistry,
 	}, nil
 }
 
-func (api *API) oneWatch() params.NotifyWatchResult {
+func (api *API) oneWatch(ctx context.Context) params.NotifyWatchResult {
 	var result params.NotifyWatchResult
 
-	watch := common.NewMultiNotifyWatcher(
-		api.backend.WatchForModelConfigChanges(),
-		api.controller.WatchAPIHostPortsForAgents())
-
-	if _, ok := <-watch.Changes(); ok {
-		result = params.NotifyWatchResult{
-			NotifyWatcherId: api.resources.Register(watch),
-		}
-	} else {
-		result.Error = apiservererrors.ServerError(watcher.EnsureErr(watch))
+	modelConfigWatcher, err := api.modelConfigService.Watch(ctx)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
 	}
+
+	modelConfigNotifyWatcher, err := watcher.Normalise(modelConfigWatcher)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
+
+	controllerAPIHostPortsWatcher, err := api.controllerNodeService.WatchControllerAPIAddresses(ctx)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
+
+	watch, err := eventsource.NewMultiNotifyWatcher(ctx,
+		modelConfigNotifyWatcher,
+		controllerAPIHostPortsWatcher,
+	)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
+
+	result.NotifyWatcherId, _, err = internal.EnsureRegisterWatcher(ctx, api.watcherRegistry, watch)
+	if err != nil {
+		result.Error = apiservererrors.ServerError(err)
+		return result
+	}
+
 	return result
 }
 
 // WatchForProxyConfigAndAPIHostPortChanges watches for changes to the proxy and api host port settings.
-func (api *API) WatchForProxyConfigAndAPIHostPortChanges(args params.Entities) params.NotifyWatchResults {
+func (api *API) WatchForProxyConfigAndAPIHostPortChanges(ctx context.Context, args params.Entities) params.NotifyWatchResults {
 	results := params.NotifyWatchResults{
 		Results: make([]params.NotifyWatchResult, len(args.Entities)),
 	}
@@ -107,7 +110,7 @@ func (api *API) WatchForProxyConfigAndAPIHostPortChanges(args params.Entities) p
 
 	for i := range args.Entities {
 		if errors.Results[i].Error == nil {
-			results.Results[i] = api.oneWatch()
+			results.Results[i] = api.oneWatch(ctx)
 		} else {
 			results.Results[i].Error = errors.Results[i].Error
 		}
@@ -148,15 +151,15 @@ func (api *API) authEntities(args params.Entities) (params.ErrorResults, bool) {
 	return result, ok
 }
 
-func (api *API) proxyConfig() params.ProxyConfigResult {
+func (api *API) proxyConfig(ctx context.Context) params.ProxyConfigResult {
 	var result params.ProxyConfigResult
-	config, err := api.backend.ModelConfig()
+	config, err := api.modelConfigService.ModelConfig(ctx)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result
 	}
 
-	apiHostPorts, err := api.controller.APIHostPortsForAgents()
+	proxyAddressPorts, err := api.controllerNodeService.GetAllNoProxyAPIAddressesForAgents(ctx)
 	if err != nil {
 		result.Error = apiservererrors.ServerError(err)
 		return result
@@ -166,9 +169,9 @@ func (api *API) proxyConfig() params.ProxyConfigResult {
 	legacyProxySettings := config.LegacyProxySettings()
 
 	if jujuProxySettings.HasProxySet() {
-		jujuProxySettings.AutoNoProxy = network.APIHostPortsToNoProxyString(apiHostPorts)
+		jujuProxySettings.AutoNoProxy = proxyAddressPorts
 	} else {
-		legacyProxySettings.AutoNoProxy = network.APIHostPortsToNoProxyString(apiHostPorts)
+		legacyProxySettings.AutoNoProxy = proxyAddressPorts
 	}
 	result.JujuProxySettings = toParams(jujuProxySettings)
 	result.LegacyProxySettings = toParams(legacyProxySettings)
@@ -185,12 +188,12 @@ func (api *API) proxyConfig() params.ProxyConfigResult {
 }
 
 // ProxyConfig returns the proxy settings for the current model.
-func (api *API) ProxyConfig(args params.Entities) params.ProxyConfigResults {
+func (api *API) ProxyConfig(ctx context.Context, args params.Entities) params.ProxyConfigResults {
 	var result params.ProxyConfigResult
 	errors, ok := api.authEntities(args)
 
 	if ok {
-		result = api.proxyConfig()
+		result = api.proxyConfig(ctx)
 	}
 
 	results := params.ProxyConfigResults{

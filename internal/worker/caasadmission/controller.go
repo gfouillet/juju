@@ -4,13 +4,15 @@
 package caasadmission
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4/catacomb"
 
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 )
 
@@ -22,7 +24,7 @@ type Mux interface {
 // Kubernetes controller responsible
 type Controller struct {
 	catacomb catacomb.Catacomb
-	logger   Logger
+	logger   logger.Logger
 }
 
 func AdmissionPathForModel(modelUUID string) string {
@@ -30,7 +32,7 @@ func AdmissionPathForModel(modelUUID string) string {
 }
 
 func NewController(
-	logger Logger,
+	logger logger.Logger,
 	mux Mux,
 	path string,
 	labelVersion constants.LabelVersion,
@@ -46,6 +48,7 @@ func NewController(
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "caas-admission",
 		Site: &c.catacomb,
 		Work: c.makeLoop(admissionCreator,
 			admissionHandler(logger, rbacMapper, labelVersion, controllerUUID, modelUUID, modelName),
@@ -57,26 +60,24 @@ func NewController(
 	return c, nil
 }
 
-func (c *Controller) Kill() {
-	c.catacomb.Kill(nil)
-}
-
 func (c *Controller) makeLoop(
 	admissionCreator AdmissionCreator,
 	handler http.Handler,
-	logger Logger,
+	logger logger.Logger,
 	mux Mux,
 	path string) func() error {
-
 	return func() error {
-		logger.Debugf("installing caas admission handler at %s", path)
+		ctx, cancel := c.scopedContext()
+		defer cancel()
+
+		logger.Debugf(ctx, "installing caas admission handler at %s", path)
 		if err := mux.AddHandler(http.MethodPost, path, handler); err != nil {
 			return errors.Trace(err)
 		}
 		defer mux.RemoveHandler(http.MethodPost, path)
 
-		logger.Infof("ensuring model k8s webhook configurations")
-		admissionCleanup, err := admissionCreator.EnsureMutatingWebhookConfiguration()
+		logger.Infof(ctx, "ensuring model k8s webhook configurations")
+		admissionCleanup, err := admissionCreator.EnsureMutatingWebhookConfiguration(context.TODO())
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -89,6 +90,14 @@ func (c *Controller) makeLoop(
 	}
 }
 
+func (c *Controller) Kill() {
+	c.catacomb.Kill(nil)
+}
+
 func (c *Controller) Wait() error {
 	return c.catacomb.Wait()
+}
+
+func (w *Controller) scopedContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(w.catacomb.Context(context.Background()))
 }

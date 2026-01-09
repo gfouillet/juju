@@ -4,227 +4,282 @@
 package machiner_test
 
 import (
-	stdtesting "testing"
+	"testing"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/agent/machiner"
-	apitesting "github.com/juju/juju/api/testing"
+	basetesting "github.com/juju/juju/api/base/testing"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/network"
 	"github.com/juju/juju/core/status"
-	"github.com/juju/juju/core/watcher/watchertest"
-	"github.com/juju/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	coretesting "github.com/juju/juju/testing"
 )
 
-func TestAll(t *stdtesting.T) {
-	coretesting.MgoTestPackage(t)
-}
-
 type machinerSuite struct {
-	testing.JujuConnSuite
-	*apitesting.APIAddresserTests
-
-	st      api.Connection
-	machine *state.Machine
-
-	machiner *machiner.State
+	coretesting.BaseSuite
 }
 
-var _ = gc.Suite(&machinerSuite{})
-
-func (s *machinerSuite) SetUpTest(c *gc.C) {
-	s.JujuConnSuite.SetUpTest(c)
-	m, err := s.State.AddMachine(state.UbuntuBase("12.10"), state.JobManageModel)
-	c.Assert(err, jc.ErrorIsNil)
-	err = m.SetProviderAddresses(network.NewSpaceAddress("10.0.0.1"))
-	c.Assert(err, jc.ErrorIsNil)
-
-	s.st, s.machine = s.OpenAPIAsNewMachine(c)
-	// Create the machiner API facade.
-	s.machiner = machiner.NewState(s.st)
-	c.Assert(s.machiner, gc.NotNil)
-	waitForModelWatchersIdle := func(c *gc.C) {
-		s.JujuConnSuite.WaitForModelWatchersIdle(c, s.BackingState.ModelUUID())
-	}
-	systemState, err := s.StatePool.SystemState()
-	c.Assert(err, jc.ErrorIsNil)
-	s.APIAddresserTests = apitesting.NewAPIAddresserTests(s.machiner, systemState, s.BackingState, waitForModelWatchersIdle)
+func TestMachinerSuite(t *testing.T) {
+	tc.Run(t, &machinerSuite{})
 }
 
-func (s *machinerSuite) TestMachineAndMachineTag(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("42"))
-	c.Assert(err, gc.ErrorMatches, ".*permission denied")
-	c.Assert(err, jc.Satisfies, params.IsCodeUnauthorized)
-	c.Assert(machine, gc.IsNil)
-
-	machine1 := names.NewMachineTag("1")
-	machine, err = s.machiner.Machine(machine1)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machine.Tag(), gc.Equals, machine1)
+func (s *machinerSuite) TestMachineAndMachineTag(c *tc.C) {
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: "alive"}},
+		}
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m.Life(), tc.Equals, life.Alive)
+	c.Assert(m.Tag(), tc.DeepEquals, tag)
 }
 
-func (s *machinerSuite) TestSetStatus(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-
-	statusInfo, err := s.machine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Pending)
-	c.Assert(statusInfo.Message, gc.Equals, "")
-	c.Assert(statusInfo.Data, gc.HasLen, 0)
-
-	err = machine.SetStatus(status.Started, "blah", nil)
-	c.Assert(err, jc.ErrorIsNil)
-
-	statusInfo, err = s.machine.Status()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(statusInfo.Status, gc.Equals, status.Started)
-	c.Assert(statusInfo.Message, gc.Equals, "blah")
-	c.Assert(statusInfo.Data, gc.HasLen, 0)
-	c.Assert(statusInfo.Since, gc.NotNil)
+func (s *machinerSuite) TestSetStatus(c *tc.C) {
+	data := map[string]interface{}{"foo": "bar"}
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		if calls == 0 {
+			c.Check(request, tc.Equals, "Life")
+			c.Assert(arg, tc.DeepEquals, params.Entities{
+				Entities: []params.Entity{{Tag: "machine-666"}},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			*(result.(*params.LifeResults)) = params.LifeResults{
+				Results: []params.LifeResult{{Life: "alive"}},
+			}
+		} else {
+			c.Check(request, tc.Equals, "SetStatus")
+			c.Assert(arg, tc.DeepEquals, params.SetStatus{
+				Entities: []params.EntityStatusArgs{{
+					Tag:    "machine-666",
+					Status: "error",
+					Info:   "failed",
+					Data:   data,
+				}},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.ErrorResults{})
+			*(result.(*params.ErrorResults)) = params.ErrorResults{
+				Results: []params.ErrorResult{{}},
+			}
+		}
+		calls++
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = m.SetStatus(c.Context(), status.Error, "failed", data)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *machinerSuite) TestEnsureDead(c *gc.C) {
-	c.Assert(s.machine.Life(), gc.Equals, state.Alive)
-
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = machine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine.Life(), gc.Equals, state.Dead)
-
-	err = machine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine.Life(), gc.Equals, state.Dead)
-
-	err = s.machine.Remove()
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.Refresh()
-	c.Assert(err, jc.Satisfies, errors.IsNotFound)
-
-	err = machine.EnsureDead()
-	c.Assert(err, gc.ErrorMatches, "machine 1 not found")
-	c.Assert(err, jc.Satisfies, params.IsCodeNotFound)
+func (s *machinerSuite) TestEnsureDead(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		if calls > 0 {
+			c.Check(request, tc.Equals, "EnsureDead")
+			c.Assert(result, tc.FitsTypeOf, &params.ErrorResults{})
+			*(result.(*params.ErrorResults)) = params.ErrorResults{
+				Results: []params.ErrorResult{{}},
+			}
+		} else {
+			c.Check(request, tc.Equals, "Life")
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			*(result.(*params.LifeResults)) = params.LifeResults{
+				Results: []params.LifeResult{{Life: life.Alive}},
+			}
+		}
+		calls++
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = m.EnsureDead(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *machinerSuite) TestRefresh(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machine.Life(), gc.Equals, life.Alive)
-
-	err = machine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machine.Life(), gc.Equals, life.Alive)
-
-	err = machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machine.Life(), gc.Equals, life.Dead)
+func (s *machinerSuite) TestRefresh(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Check(request, tc.Equals, "Life")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+		lifeVal := life.Alive
+		if calls > 0 {
+			lifeVal = life.Dead
+		}
+		calls++
+		*(result.(*params.LifeResults)) = params.LifeResults{
+			Results: []params.LifeResult{{Life: lifeVal}},
+		}
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = m.Refresh(c.Context())
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(m.Life(), tc.Equals, life.Dead)
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *machinerSuite) TestSetMachineAddresses(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-
-	addr := s.machine.Addresses()
-	c.Assert(addr, gc.HasLen, 0)
-
-	setAddresses := []network.MachineAddress{
-		network.NewMachineAddress("8.8.8.8"),
-		network.NewMachineAddress("127.0.0.1"),
-		network.NewMachineAddress("10.0.0.1"),
-	}
-	// Before setting, the addresses are sorted to put public on top,
-	// cloud-local next, machine-local last.
-	expectAddresses := network.NewSpaceAddresses(
-		"8.8.8.8",
-		"10.0.0.1",
-		"127.0.0.1",
-	)
-	err = machine.SetMachineAddresses(setAddresses)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine.MachineAddresses(), jc.DeepEquals, expectAddresses)
+func (s *machinerSuite) TestSetMachineAddresses(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		if calls > 0 {
+			c.Check(request, tc.Equals, "SetMachineAddresses")
+			c.Assert(arg, tc.DeepEquals, params.SetMachinesAddresses{
+				MachineAddresses: []params.MachineAddresses{{
+					Tag: "machine-666",
+					Addresses: []params.Address{{
+						Value:       "10.0.0.1",
+						CIDR:        "10.0.0.0/24",
+						Type:        "ipv6",
+						Scope:       "local-cloud",
+						ConfigType:  "dhcp",
+						IsSecondary: true,
+					}},
+				}},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.ErrorResults{})
+			*(result.(*params.ErrorResults)) = params.ErrorResults{
+				Results: []params.ErrorResult{{}},
+			}
+		} else {
+			c.Check(request, tc.Equals, "Life")
+			c.Assert(arg, tc.DeepEquals, params.Entities{
+				Entities: []params.Entity{{Tag: "machine-666"}},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			*(result.(*params.LifeResults)) = params.LifeResults{
+				Results: []params.LifeResult{{Life: life.Alive}},
+			}
+		}
+		calls++
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = m.SetMachineAddresses(c.Context(), []network.MachineAddress{{
+		Value:       "10.0.0.1",
+		Type:        network.IPv6Address,
+		Scope:       network.ScopeCloudLocal,
+		CIDR:        "10.0.0.0/24",
+		ConfigType:  network.ConfigDHCP,
+		IsSecondary: true,
+	}})
+	c.Assert(err, tc.ErrorIsNil)
 }
 
-func (s *machinerSuite) TestSetEmptyMachineAddresses(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-
-	setAddresses := []network.MachineAddress{
-		network.NewMachineAddress("8.8.8.8"),
-		network.NewMachineAddress("127.0.0.1"),
-		network.NewMachineAddress("10.0.0.1"),
-	}
-	err = machine.SetMachineAddresses(setAddresses)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine.MachineAddresses(), gc.HasLen, 3)
-
-	err = machine.SetMachineAddresses(nil)
-	c.Assert(err, jc.ErrorIsNil)
-	err = s.machine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(s.machine.MachineAddresses(), gc.HasLen, 0)
+func (s *machinerSuite) TestWatch(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		c.Assert(arg, tc.DeepEquals, params.Entities{
+			Entities: []params.Entity{{Tag: "machine-666"}},
+		})
+		if calls > 0 {
+			c.Assert(result, tc.FitsTypeOf, &params.NotifyWatchResults{})
+			c.Check(request, tc.Equals, "Watch")
+			*(result.(*params.NotifyWatchResults)) = params.NotifyWatchResults{
+				Results: []params.NotifyWatchResult{{Error: &params.Error{Message: "FAIL"}}},
+			}
+		} else {
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			c.Check(request, tc.Equals, "Life")
+			*(result.(*params.LifeResults)) = params.LifeResults{
+				Results: []params.LifeResult{{Life: life.Alive}},
+			}
+		}
+		calls++
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	_, err = m.Watch(c.Context())
+	c.Assert(err, tc.ErrorMatches, "FAIL")
+	c.Assert(calls, tc.Equals, 2)
 }
 
-func (s *machinerSuite) TestWatch(c *gc.C) {
-	machine, err := s.machiner.Machine(names.NewMachineTag("1"))
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(machine.Life(), gc.Equals, life.Alive)
-	s.WaitForModelWatchersIdle(c, s.State.ModelUUID())
-
-	w, err := machine.Watch()
-	c.Assert(err, jc.ErrorIsNil)
-	wc := watchertest.NewNotifyWatcherC(c, w)
-	defer wc.AssertStops()
-
-	// Initial event.
-	wc.AssertOneChange()
-
-	// Change something other than the lifecycle and make sure it's
-	// not detected.
-	err = machine.SetStatus(status.Started, "not really", nil)
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertNoChange()
-
-	// Make the machine dead and check it's detected.
-	err = machine.EnsureDead()
-	c.Assert(err, jc.ErrorIsNil)
-	wc.AssertOneChange()
-}
-
-func (s *machinerSuite) TestRecordAgentStartInformation(c *gc.C) {
-	mTag := names.NewMachineTag("1")
-	stMachine, err := s.State.Machine(mTag.Id())
-	c.Assert(err, jc.ErrorIsNil)
-	oldStartedAt := stMachine.AgentStartTime()
-
-	machine, err := s.machiner.Machine(mTag)
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = machine.RecordAgentStartInformation("thundering-herds")
-	c.Assert(err, jc.ErrorIsNil)
-
-	err = stMachine.Refresh()
-	c.Assert(err, jc.ErrorIsNil)
-
-	c.Assert(stMachine.AgentStartTime(), gc.Not(gc.Equals), oldStartedAt, gc.Commentf("expected the agent start time to be updated"))
-	c.Assert(stMachine.Hostname(), gc.Equals, "thundering-herds", gc.Commentf("expected for the recorded machine hostname to be updated"))
+func (s *machinerSuite) TestRecordAgentStartInformation(c *tc.C) {
+	calls := 0
+	apiCaller := basetesting.APICallerFunc(func(objType string, version int, id, request string, arg, result interface{}) error {
+		c.Check(objType, tc.Equals, "Machiner")
+		c.Check(version, tc.Equals, 0)
+		c.Check(id, tc.Equals, "")
+		if calls > 0 {
+			c.Check(request, tc.Equals, "RecordAgentStartInformation")
+			c.Assert(arg, tc.DeepEquals, params.RecordAgentStartInformationArgs{
+				Args: []params.RecordAgentStartInformationArg{
+					{
+						Tag:      "machine-666",
+						Hostname: "hostname",
+					},
+				},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.ErrorResults{})
+			*(result.(*params.ErrorResults)) = params.ErrorResults{
+				Results: []params.ErrorResult{{}},
+			}
+		} else {
+			c.Check(request, tc.Equals, "Life")
+			c.Assert(arg, tc.DeepEquals, params.Entities{
+				Entities: []params.Entity{{Tag: "machine-666"}},
+			})
+			c.Assert(result, tc.FitsTypeOf, &params.LifeResults{})
+			*(result.(*params.LifeResults)) = params.LifeResults{
+				Results: []params.LifeResult{{Life: life.Alive}},
+			}
+		}
+		calls++
+		return nil
+	})
+	tag := names.NewMachineTag("666")
+	client := machiner.NewClient(apiCaller)
+	m, err := client.Machine(c.Context(), tag)
+	c.Assert(err, tc.ErrorIsNil)
+	err = m.RecordAgentStartInformation(c.Context(), "hostname")
+	c.Assert(err, tc.ErrorIsNil)
 }

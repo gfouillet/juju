@@ -4,34 +4,53 @@
 package agentconfigupdater
 
 import (
-	"github.com/juju/errors"
-	"github.com/juju/pubsub/v2"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"context"
+	"strings"
 
-	coreagent "github.com/juju/juju/agent"
+	"github.com/juju/names/v6"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
+
+	jujuagent "github.com/juju/juju/agent"
 	apiagent "github.com/juju/juju/api/agent/agent"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/controller"
+	coredependency "github.com/juju/juju/core/dependency"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/machine"
+	"github.com/juju/juju/core/model"
+	coretrace "github.com/juju/juju/core/trace"
+	"github.com/juju/juju/internal/errors"
+	"github.com/juju/juju/internal/services"
 	jworker "github.com/juju/juju/internal/worker"
-	"github.com/juju/juju/mongo"
+	"github.com/juju/juju/internal/worker/trace"
 )
 
-// Logger defines the logging methods used by the worker.
-type Logger interface {
-	Criticalf(string, ...interface{})
-	Warningf(string, ...interface{})
-	Infof(string, ...interface{})
-	Debugf(string, ...interface{})
-	Tracef(string, ...interface{})
+// ControllerDomainServices is an interface that defines the
+// services that are required by the agent config updater.
+type ControllerDomainServices interface {
+	// ControllerConfig returns the controller configuration service.
+	ControllerConfig() ControllerConfigService
 }
 
-// ManifoldConfig provides the dependencies for the
-// agent config updater manifold.
+// GetControllerDomainServicesFunc is a function that retrieves the
+// controller domain services from the dependency getter.
+type GetControllerDomainServicesFunc func(dependency.Getter, string) (ControllerDomainServices, error)
+
+// IsControllerAgentFunc is a function that checks if the agent is a controller
+// agent based on the tag.
+type IsControllerAgentFunc func(context.Context, dependency.Getter, string, names.ModelTag, names.Tag) (bool, error)
+
+// ManifoldConfig provides the dependencies for the agent config updater
+// manifold.
 type ManifoldConfig struct {
-	AgentName      string
-	APICallerName  string
-	CentralHubName string
-	Logger         Logger
+	APICallerName                 string
+	AgentName                     string
+	DomainServicesName            string
+	TraceName                     string
+	Logger                        logger.Logger
+	GetControllerDomainServicesFn GetControllerDomainServicesFunc
+	IsControllerAgentFn           IsControllerAgentFunc
 }
 
 // Manifold defines a simple start function which
@@ -43,145 +62,279 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 		Inputs: []string{
 			config.AgentName,
 			config.APICallerName,
-			config.CentralHubName,
+			config.DomainServicesName,
+			config.TraceName,
 		},
-		Start: func(context dependency.Context) (worker.Worker, error) {
+		Start: func(ctx context.Context, getter dependency.Getter) (worker.Worker, error) {
 			// Get the agent.
-			var agent coreagent.Agent
-			if err := context.Get(config.AgentName, &agent); err != nil {
+			var agent jujuagent.Agent
+			if err := getter.Get(config.AgentName, &agent); err != nil {
 				return nil, err
 			}
 
+			var (
+				logger        = config.Logger
+				currentConfig = agent.CurrentConfig()
+			)
+
 			// Grab the tag and ensure that it's for a controller.
-			tag := agent.CurrentConfig().Tag()
-			if !apiagent.IsAllowedControllerTag(tag.Kind()) {
-				return nil, errors.New("agent's tag is not a machine or controller agent tag")
+			tag := currentConfig.Tag()
+			modelTag := currentConfig.Model()
+
+			if isControllerNode, err := config.IsControllerAgentFn(ctx, getter, config.DomainServicesName, modelTag, tag); err != nil {
+				return nil, errors.Errorf("checking is controller agent: %w", err)
+			} else if !isControllerNode {
+				// Not a controller agent, nothing to do.
+				return nil, dependency.ErrUninstall
 			}
 
 			// Get API connection.
 			var apiCaller base.APICaller
-			if err := context.Get(config.APICallerName, &apiCaller); err != nil {
+			if err := getter.Get(config.APICallerName, &apiCaller); err != nil {
 				return nil, err
 			}
-			// If the machine needs State, grab the state serving info
-			// over the API and write it to the agent configuration.
-			if controller, err := apiagent.IsController(apiCaller, tag); err != nil {
-				return nil, errors.Annotate(err, "checking controller status")
-			} else if !controller {
-				// Not a controller, nothing to do.
-				return nil, dependency.ErrUninstall
-			}
 
-			// Do the initial state serving info and mongo profile checks
-			// before attempting to get the central hub. The central hub is only
-			// running when the agent is a controller. If the agent isn't a controller
-			// but should be, the agent config will not have any state serving info
-			// but the database will think that we should be. In those situations
-			// we need to update the local config and restart.
-			apiState, err := apiagent.NewState(apiCaller)
+			controllerServices, err := config.GetControllerDomainServicesFn(getter, config.DomainServicesName)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.Errorf("getting controller domain services: %w", err)
 			}
-			controllerConfig, err := apiState.ControllerConfig()
+			controllerConfigService := controllerServices.ControllerConfig()
+
+			// Get the tracer from the context.
+			var tracerGetter trace.TracerGetter
+			if err := getter.Get(config.TraceName, &tracerGetter); err != nil {
+				return nil, errors.Capture(err)
+			}
+
+			tracer, err := tracerGetter.GetTracer(ctx, coretrace.Namespace("agentconfigupdater", modelTag.Id()))
 			if err != nil {
-				return nil, errors.Annotate(err, "getting controller config")
+				tracer = coretrace.NoopTracer{}
 			}
 
-			logger := config.Logger
+			controllerConfig, err := controllerConfigService.ControllerConfig(ctx)
+			if err != nil {
+				return nil, errors.Capture(err)
+			}
 
-			// If the mongo memory profile from the controller config
-			// is different from the one in the agent config we need to
-			// restart the agent to apply the memory profile to the mongo
-			// service.
-			agentsMongoMemoryProfile := agent.CurrentConfig().MongoMemoryProfile()
-			configMongoMemoryProfile := mongo.MemoryProfile(controllerConfig.MongoMemoryProfile())
-			mongoProfileChanged := agentsMongoMemoryProfile != configMongoMemoryProfile
-
-			agentsJujuDBSnapChannel := agent.CurrentConfig().JujuDBSnapChannel()
-			configJujuDBSnapChannel := controllerConfig.JujuDBSnapChannel()
-			jujuDBSnapChannelChanged := agentsJujuDBSnapChannel != configJujuDBSnapChannel
-
-			agentsQueryTracingEnabled := agent.CurrentConfig().QueryTracingEnabled()
+			agentsQueryTracingEnabled := currentConfig.QueryTracingEnabled()
 			configQueryTracingEnabled := controllerConfig.QueryTracingEnabled()
 			queryTracingEnabledChanged := agentsQueryTracingEnabled != configQueryTracingEnabled
 
-			agentsQueryTracingThreshold := agent.CurrentConfig().QueryTracingThreshold()
+			agentsQueryTracingThreshold := currentConfig.QueryTracingThreshold()
 			configQueryTracingThreshold := controllerConfig.QueryTracingThreshold()
 			queryTracingThresholdChanged := agentsQueryTracingThreshold != configQueryTracingThreshold
 
-			info, err := apiState.StateServingInfo()
+			agentsDqliteBusyTimeout := currentConfig.DqliteBusyTimeout()
+			configDqliteBusyTimeout := controllerConfig.DqliteBusyTimeout()
+			dqliteBusyTimeoutChanged := agentsDqliteBusyTimeout != configDqliteBusyTimeout
+
+			agentsOpenTelemetryEnabled := currentConfig.OpenTelemetryEnabled()
+			configOpenTelemetryEnabled := controllerConfig.OpenTelemetryEnabled()
+			openTelemetryEnabledChanged := agentsOpenTelemetryEnabled != configOpenTelemetryEnabled
+
+			agentsOpenTelemetryEndpoint := currentConfig.OpenTelemetryEndpoint()
+			configOpenTelemetryEndpoint := controllerConfig.OpenTelemetryEndpoint()
+			openTelemetryEndpointChanged := agentsOpenTelemetryEndpoint != configOpenTelemetryEndpoint
+
+			agentsOpenTelemetryInsecure := currentConfig.OpenTelemetryInsecure()
+			configOpenTelemetryInsecure := controllerConfig.OpenTelemetryInsecure()
+			openTelemetryInsecureChanged := agentsOpenTelemetryInsecure != configOpenTelemetryInsecure
+
+			agentsOpenTelemetryStackTraces := currentConfig.OpenTelemetryStackTraces()
+			configOpenTelemetryStackTraces := controllerConfig.OpenTelemetryStackTraces()
+			openTelemetryStackTracesChanged := agentsOpenTelemetryStackTraces != configOpenTelemetryStackTraces
+
+			agentsOpenTelemetrySampleRatio := currentConfig.OpenTelemetrySampleRatio()
+			configOpenTelemetrySampleRatio := controllerConfig.OpenTelemetrySampleRatio()
+			openTelemetrySampleRatioChanged := agentsOpenTelemetrySampleRatio != configOpenTelemetrySampleRatio
+
+			agentsOpenTelemetryTailSamplingThreshold := currentConfig.OpenTelemetryTailSamplingThreshold()
+			configOpenTelemetryTailSamplingThreshold := controllerConfig.OpenTelemetryTailSamplingThreshold()
+			openTelemetryTailSamplingThresholdChanged := agentsOpenTelemetryTailSamplingThreshold != configOpenTelemetryTailSamplingThreshold
+
+			apiState, err := apiagent.NewClient(apiCaller, apiagent.WithTracer(tracer))
 			if err != nil {
-				return nil, errors.Annotate(err, "getting state serving info")
+				return nil, errors.Capture(err)
 			}
-			err = agent.ChangeConfig(func(config coreagent.ConfigSetter) error {
-				existing, hasInfo := config.StateServingInfo()
+
+			// If the machine needs Client, grab the state serving info
+			// over the API and write it to the agent configuration.
+			info, err := apiState.StateServingInfo(ctx)
+			if err != nil {
+				return nil, errors.Errorf("getting state serving info: %w", err)
+			}
+			err = agent.ChangeConfig(func(config jujuagent.ConfigSetter) error {
+				existing, hasInfo := config.ControllerAgentInfo()
 				if hasInfo {
-					// Use the existing cert and key as they appear to
-					// have been already updated by the cert updater
-					// worker to have this machine's IP address as
-					// part of the cert. This changed cert is never
-					// put back into the database, so it isn't
-					// reflected in the copy we have got from
-					// apiState.
+					// Use the existing cert and key as they appear to have been
+					// already updated by the cert updater worker to have this
+					// machine's IP address as part of the cert. This changed
+					// cert is never put back into the database, so it isn't
+					// reflected in the copy we have got from apiState.
 					info.Cert = existing.Cert
 					info.PrivateKey = existing.PrivateKey
 				}
-				config.SetStateServingInfo(info)
-				if mongoProfileChanged {
-					logger.Debugf("setting agent config mongo memory profile: %q => %q", agentsMongoMemoryProfile, configMongoMemoryProfile)
-					config.SetMongoMemoryProfile(configMongoMemoryProfile)
-				}
-				if jujuDBSnapChannelChanged {
-					logger.Debugf("setting agent config mongo snap channel: %q => %q", agentsJujuDBSnapChannel, configJujuDBSnapChannel)
-					config.SetJujuDBSnapChannel(configJujuDBSnapChannel)
-				}
+				config.SetControllerAgentInfo(info)
+
 				if queryTracingEnabledChanged {
-					logger.Debugf("setting agent config query tracing enabled: %t => %t", agentsQueryTracingEnabled, configQueryTracingEnabled)
+					logger.Debugf(ctx, "setting agent config query tracing enabled: %t => %t", agentsQueryTracingEnabled, configQueryTracingEnabled)
 					config.SetQueryTracingEnabled(configQueryTracingEnabled)
 				}
 				if queryTracingThresholdChanged {
-					logger.Debugf("setting agent config query tracing threshold: %d => %d", agentsQueryTracingThreshold, configQueryTracingThreshold)
+					logger.Debugf(ctx, "setting agent config query tracing threshold: %d => %d", agentsQueryTracingThreshold, configQueryTracingThreshold)
 					config.SetQueryTracingThreshold(configQueryTracingThreshold)
+				}
+				if dqliteBusyTimeoutChanged {
+					logger.Debugf(ctx, "setting dqlite busy timeout: %s => %s", agentsDqliteBusyTimeout, configDqliteBusyTimeout)
+					config.SetDqliteBusyTimeout(configDqliteBusyTimeout)
+				}
+				if openTelemetryEnabledChanged {
+					logger.Debugf(ctx, "setting open telemetry enabled: %t => %t", agentsOpenTelemetryEnabled, configOpenTelemetryEnabled)
+					config.SetOpenTelemetryEnabled(configOpenTelemetryEnabled)
+				}
+				if openTelemetryEndpointChanged {
+					logger.Debugf(ctx, "setting open telemetry endpoint: %q => %q", agentsOpenTelemetryEndpoint, configOpenTelemetryEndpoint)
+					config.SetOpenTelemetryEndpoint(configOpenTelemetryEndpoint)
+				}
+				if openTelemetryInsecureChanged {
+					logger.Debugf(ctx, "setting open telemetry insecure: %t => %t", agentsOpenTelemetryInsecure, configOpenTelemetryInsecure)
+					config.SetOpenTelemetryInsecure(configOpenTelemetryInsecure)
+				}
+				if openTelemetryStackTracesChanged {
+					logger.Debugf(ctx, "setting open telemetry stack trace: %t => %t", agentsOpenTelemetryStackTraces, configOpenTelemetryStackTraces)
+					config.SetOpenTelemetryStackTraces(configOpenTelemetryStackTraces)
+				}
+				if openTelemetrySampleRatioChanged {
+					logger.Debugf(ctx, "setting open telemetry sample ratio: %f => %f", agentsOpenTelemetrySampleRatio, configOpenTelemetrySampleRatio)
+					config.SetOpenTelemetrySampleRatio(configOpenTelemetrySampleRatio)
+				}
+				if openTelemetryTailSamplingThresholdChanged {
+					logger.Debugf(ctx, "setting open telemetry tail sampling threshold: %f => %f", agentsOpenTelemetryTailSamplingThreshold, configOpenTelemetryTailSamplingThreshold)
+					config.SetOpenTelemetryTailSamplingThreshold(configOpenTelemetryTailSamplingThreshold)
 				}
 
 				return nil
 			})
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.Capture(err)
 			}
 
 			// If we need a restart, return the fatal error.
-			if mongoProfileChanged {
-				logger.Infof("restarting agent for new mongo memory profile")
-				return nil, jworker.ErrRestartAgent
-			} else if jujuDBSnapChannelChanged {
-				logger.Infof("restarting agent for new mongo snap channel")
-				return nil, jworker.ErrRestartAgent
-			} else if queryTracingEnabledChanged {
-				logger.Infof("restarting agent for new query tracing enabled")
-				return nil, jworker.ErrRestartAgent
-			} else if queryTracingThresholdChanged {
-				logger.Infof("restarting agent for new query tracing threshold")
-				return nil, jworker.ErrRestartAgent
+			reason := []string{}
+			if queryTracingEnabledChanged {
+				logger.Infof(ctx, "restarting agent for new query tracing enabled")
+				reason = append(reason, controller.QueryTracingEnabled)
 			}
-
-			// Only get the hub if we are a controller and we haven't updated
-			// the memory profile.
-			var hub *pubsub.StructuredHub
-			if err := context.Get(config.CentralHubName, &hub); err != nil {
-				logger.Tracef("hub dependency not available")
-				return nil, err
+			if queryTracingThresholdChanged {
+				logger.Infof(ctx, "restarting agent for new query tracing threshold")
+				reason = append(reason, controller.QueryTracingThreshold)
+			}
+			if dqliteBusyTimeoutChanged {
+				logger.Infof(ctx, "restarting agent for new dqlite busy timeout")
+				reason = append(reason, controller.DqliteBusyTimeout)
+			}
+			if openTelemetryEnabledChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry enabled")
+				reason = append(reason, controller.OpenTelemetryEnabled)
+			}
+			if openTelemetryEndpointChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry endpoint")
+				reason = append(reason, controller.OpenTelemetryEndpoint)
+			}
+			if openTelemetryInsecureChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry insecure")
+				reason = append(reason, controller.OpenTelemetryInsecure)
+			}
+			if openTelemetryStackTracesChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry stack traces")
+				reason = append(reason, controller.OpenTelemetryStackTraces)
+			}
+			if openTelemetrySampleRatioChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry sample ratio")
+				reason = append(reason, controller.OpenTelemetrySampleRatio)
+			}
+			if openTelemetryTailSamplingThresholdChanged {
+				logger.Infof(ctx, "restarting agent for new open telemetry tail sampling threshold")
+				reason = append(reason, controller.OpenTelemetryTailSamplingThreshold)
+			}
+			if len(reason) > 0 {
+				return nil, errors.Errorf("%w: controller config changed: %s",
+					jworker.ErrRestartAgent, strings.Join(reason, ", "))
 			}
 
 			return NewWorker(WorkerConfig{
-				Agent:                 agent,
-				Hub:                   hub,
-				MongoProfile:          configMongoMemoryProfile,
-				JujuDBSnapChannel:     configJujuDBSnapChannel,
-				QueryTracingEnabled:   configQueryTracingEnabled,
-				QueryTracingThreshold: configQueryTracingThreshold,
-				Logger:                config.Logger,
+				Agent:                              agent,
+				ControllerConfigService:            controllerConfigService,
+				QueryTracingEnabled:                configQueryTracingEnabled,
+				QueryTracingThreshold:              configQueryTracingThreshold,
+				DqliteBusyTimeout:                  configDqliteBusyTimeout,
+				OpenTelemetryEnabled:               configOpenTelemetryEnabled,
+				OpenTelemetryEndpoint:              configOpenTelemetryEndpoint,
+				OpenTelemetryInsecure:              configOpenTelemetryInsecure,
+				OpenTelemetryStackTraces:           configOpenTelemetryStackTraces,
+				OpenTelemetrySampleRatio:           configOpenTelemetrySampleRatio,
+				OpenTelemetryTailSamplingThreshold: configOpenTelemetryTailSamplingThreshold,
+				Logger:                             config.Logger,
 			})
 		},
 	}
+}
+
+// GetControllerDomainServices retrieves the controller domain services
+// from the dependency getter.
+func GetControllerDomainServices(getter dependency.Getter, name string) (ControllerDomainServices, error) {
+	return coredependency.GetDependencyByName(getter, name, func(s services.ControllerDomainServices) ControllerDomainServices {
+		return controllerDomainServices{
+			ControllerConfigService: s.ControllerConfig(),
+		}
+	})
+}
+
+// IAASIsControllerAgent checks if the agent is a controller node based on the
+// tag.
+func IAASIsControllerAgent(ctx context.Context, getter dependency.Getter, name string, modelTag names.ModelTag, tag names.Tag) (bool, error) {
+	// All controller agents will be controller agents, so we can just check the
+	// tag kind.
+	switch tag.Kind() {
+	case names.MachineTagKind:
+	default:
+		return false, nil
+	}
+
+	var domainServicesGetter services.DomainServicesGetter
+	if err := getter.Get(name, &domainServicesGetter); err != nil {
+		return false, errors.Errorf("getting domain services getter: %w", err)
+	}
+
+	domainservices, err := domainServicesGetter.ServicesForModel(ctx, model.UUID(modelTag.Id()))
+	if err != nil {
+		return false, errors.Errorf("getting domain services for model %q: %w", modelTag.Id(), err)
+	}
+	isController, err := domainservices.Machine().IsMachineController(ctx, machine.Name(tag.Id()))
+	if err != nil {
+		return false, errors.Errorf("checking if machine is controller: %w", err)
+	}
+	return isController, nil
+}
+
+// CAASIsControllerAgent checks if the agent is a controller node based on the
+// tag.
+func CAASIsControllerAgent(ctx context.Context, getter dependency.Getter, name string, modelTag names.ModelTag, tag names.Tag) (bool, error) {
+	// All controller agents will be controller agents, so we can just check the
+	// tag kind.
+	switch tag.Kind() {
+	case names.ControllerAgentTagKind:
+		return true, nil
+	}
+	return false, nil
+}
+
+type controllerDomainServices struct {
+	ControllerConfigService
+}
+
+// ControllerConfigService is an interface that defines the methods that are
+// required to get the controller configuration.
+func (s controllerDomainServices) ControllerConfig() ControllerConfigService {
+	return s.ControllerConfigService
 }

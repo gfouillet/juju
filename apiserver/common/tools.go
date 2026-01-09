@@ -4,105 +4,137 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	"sort"
+	"strings"
 
-	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	"github.com/juju/version/v2"
+	"github.com/juju/names/v6"
+	"github.com/juju/os/v2"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/controller"
-	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/simplestreams"
-	envtools "github.com/juju/juju/environs/tools"
+	coreagentbinary "github.com/juju/juju/core/agentbinary"
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/machine"
+	coremodel "github.com/juju/juju/core/model"
+	"github.com/juju/juju/core/objectstore"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/unit"
+	"github.com/juju/juju/domain/agentbinary"
+	agentbinaryservice "github.com/juju/juju/domain/agentbinary/service"
+	applicationerrors "github.com/juju/juju/domain/application/errors"
+	machineerrors "github.com/juju/juju/domain/machine/errors"
+	modelagenterrors "github.com/juju/juju/domain/modelagent/errors"
+	"github.com/juju/juju/internal/errors"
+	coretools "github.com/juju/juju/internal/tools"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/binarystorage"
-	coretools "github.com/juju/juju/tools"
 )
 
-var envtoolsFindTools = envtools.FindTools
+// ModelAgentService provides access to the Juju agent version for the model.
+type ModelAgentService interface {
+	// GetModelTargetAgentVersion returns the target agent version for the
+	// entire model. The following errors can be returned:
+	// - [github.com/juju/juju/domain/model/errors.NotFound] - When the model does
+	// not exist.
+	GetModelTargetAgentVersion(context.Context) (semversion.Number, error)
 
-type ToolsFindEntity interface {
-	FindEntity(tag names.Tag) (state.Entity, error)
+	// GetMachineTargetAgentVersion reports the target agent version that should
+	// be running on the provided machine identified by name. The following
+	// errors are possible:
+	// - [github.com/juju/juju/domain/machine/errors.MachineNotFound]
+	// - [github.com/juju/juju/domain/model/errors.NotFound]
+	GetMachineTargetAgentVersion(context.Context, machine.Name) (coreagentbinary.Version, error)
+
+	// GetUnitTargetAgentVersion reports the target agent version that should be
+	// being run on the provided unit identified by name. The following errors
+	// are possible:
+	// - [github.com/juju/juju/domain/application/errors.UnitNotFound] - When
+	// the unit in question does not exist.
+	// - [github.com/juju/juju/domain/model/errors.NotFound] - When the model
+	// the unit belongs to no longer exists.
+	GetUnitTargetAgentVersion(context.Context, unit.Name) (coreagentbinary.Version, error)
 }
 
 // ToolsURLGetter is an interface providing the ToolsURL method.
 type ToolsURLGetter interface {
 	// ToolsURLs returns URLs for the tools with
 	// the specified binary version.
-	ToolsURLs(v version.Binary) ([]string, error)
-}
-
-// APIHostPortsForAgentsGetter is an interface providing
-// the APIHostPortsForAgents method.
-type APIHostPortsForAgentsGetter interface {
-	// APIHostPortsForAgents returns the HostPorts for each API server that
-	// are suitable for agent-to-controller API communication based on the
-	// configured (if any) controller management space.
-	APIHostPortsForAgents() ([]network.SpaceHostPorts, error)
-}
-
-// ToolsStorageGetter is an interface providing the ToolsStorage method.
-type ToolsStorageGetter interface {
-	// ToolsStorage returns a binarystorage.StorageCloser.
-	ToolsStorage() (binarystorage.StorageCloser, error)
-}
-
-// AgentTooler is implemented by entities
-// that have associated agent tools.
-type AgentTooler interface {
-	AgentTools() (*coretools.Tools, error)
-	SetAgentVersion(version.Binary) error
-
-	// Tag is included in this interface only so the generated mock of
-	// AgentTooler implements state.Entity, returned by FindEntity
-	Tag() names.Tag
+	ToolsURLs(context.Context, semversion.Binary) ([]string, error)
 }
 
 // ToolsGetter implements a common Tools method for use by various
 // facades.
 type ToolsGetter struct {
-	entityFinder       ToolsFindEntity
-	configGetter       environs.EnvironConfigGetter
-	toolsStorageGetter ToolsStorageGetter
-	toolsFinder        ToolsFinder
-	urlGetter          ToolsURLGetter
-	getCanRead         GetAuthFunc
+	modelAgentService ModelAgentService
+	toolsFinder       ToolsFinder
+	urlGetter         ToolsURLGetter
+	getCanRead        GetAuthFunc
 }
 
 // NewToolsGetter returns a new ToolsGetter. The GetAuthFunc will be
 // used on each invocation of Tools to determine current permissions.
 func NewToolsGetter(
-	entityFinder ToolsFindEntity,
-	configGetter environs.EnvironConfigGetter,
-	toolsStorageGetter ToolsStorageGetter,
+	modelAgentService ModelAgentService,
 	urlGetter ToolsURLGetter,
 	toolsFinder ToolsFinder,
 	getCanRead GetAuthFunc,
 ) *ToolsGetter {
 	return &ToolsGetter{
-		entityFinder:       entityFinder,
-		configGetter:       configGetter,
-		toolsStorageGetter: toolsStorageGetter,
-		urlGetter:          urlGetter,
-		toolsFinder:        toolsFinder,
-		getCanRead:         getCanRead,
+		modelAgentService: modelAgentService,
+		urlGetter:         urlGetter,
+		toolsFinder:       toolsFinder,
+		getCanRead:        getCanRead,
 	}
 }
 
+// getEntityAgentTargetVersion is responsible for getting the target agent version for
+// a given tag.
+func (t *ToolsGetter) getEntityAgentTargetVersion(
+	ctx context.Context,
+	tag names.Tag,
+) (ver coreagentbinary.Version, err error) {
+	switch tag.Kind() {
+	case names.ControllerTagKind:
+	case names.MachineTagKind:
+		ver, err = t.modelAgentService.GetMachineTargetAgentVersion(ctx, machine.Name(tag.Id()))
+	case names.UnitTagKind:
+		ver, err = t.modelAgentService.GetUnitTargetAgentVersion(ctx, unit.Name(tag.Id()))
+	default:
+		return coreagentbinary.Version{}, errors.Errorf(
+			"getting agent version for unsupported entity kind %q",
+			tag.Kind(),
+		).Add(coreerrors.NotSupported)
+	}
+
+	isEntityNotFound := errors.IsOneOf(
+		err,
+		applicationerrors.UnitNotFound,
+		machineerrors.MachineNotFound,
+	)
+	if isEntityNotFound {
+		return coreagentbinary.Version{}, errors.Errorf(
+			"%q not found", names.ReadableString(tag),
+		).Add(coreerrors.NotFound)
+	} else if errors.Is(err, modelagenterrors.AgentVersionNotFound) {
+		return coreagentbinary.Version{}, errors.Errorf(
+			"target agent version for %q not found", names.ReadableString(tag),
+		).Add(coreerrors.NotFound)
+	} else if err != nil {
+		return coreagentbinary.Version{}, errors.Errorf(
+			"finding target agent version for entity %q: %w", names.ReadableString(tag), err,
+		)
+	}
+
+	return ver, nil
+}
+
 // Tools finds the tools necessary for the given agents.
-func (t *ToolsGetter) Tools(args params.Entities) (params.ToolsResults, error) {
+func (t *ToolsGetter) Tools(ctx context.Context, args params.Entities) (params.ToolsResults, error) {
 	result := params.ToolsResults{
 		Results: make([]params.ToolsResult, len(args.Entities)),
 	}
-	canRead, err := t.getCanRead()
-	if err != nil {
-		return result, err
-	}
-	agentVersion, err := t.getGlobalAgentVersion()
+	canRead, err := t.getCanRead(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -113,7 +145,8 @@ func (t *ToolsGetter) Tools(args params.Entities) (params.ToolsResults, error) {
 			result.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
 			continue
 		}
-		agentToolsList, err := t.oneAgentTools(canRead, tag, agentVersion)
+
+		agentToolsList, err := t.oneAgentTools(ctx, canRead, tag)
 		if err == nil {
 			result.Results[i].ToolsList = agentToolsList
 		}
@@ -122,96 +155,25 @@ func (t *ToolsGetter) Tools(args params.Entities) (params.ToolsResults, error) {
 	return result, nil
 }
 
-func (t *ToolsGetter) getGlobalAgentVersion() (version.Number, error) {
-	// Get the Agent Version requested in the Model Config
-	nothing := version.Number{}
-	cfg, err := t.configGetter.ModelConfig()
-	if err != nil {
-		return nothing, err
-	}
-	agentVersion, ok := cfg.AgentVersion()
-	if !ok {
-		return nothing, errors.New("agent version not set in model config")
-	}
-	return agentVersion, nil
-}
-
-func (t *ToolsGetter) oneAgentTools(canRead AuthFunc, tag names.Tag, agentVersion version.Number) (coretools.List, error) {
+func (t *ToolsGetter) oneAgentTools(ctx context.Context, canRead AuthFunc, tag names.Tag) (coretools.List, error) {
 	if !canRead(tag) {
 		return nil, apiservererrors.ErrPerm
 	}
-	entity, err := t.entityFinder.FindEntity(tag)
-	if err != nil {
-		return nil, err
-	}
-	tooler, ok := entity.(AgentTooler)
-	if !ok {
-		return nil, apiservererrors.NotSupportedError(tag, "agent binaries")
-	}
-	existingTools, err := tooler.AgentTools()
+
+	targetVersion, err := t.getEntityAgentTargetVersion(ctx, tag)
 	if err != nil {
 		return nil, err
 	}
 
 	findParams := FindAgentsParams{
-		Number: agentVersion,
-		OSType: existingTools.Version.Release,
-		Arch:   existingTools.Version.Arch,
+		Number: targetVersion.Number,
+		// OSType is always "ubuntu" now.
+		// We will eventually get rid of it.
+		OSType: strings.ToLower(os.Ubuntu.String()),
+		Arch:   targetVersion.Arch,
 	}
 
-	return t.toolsFinder.FindAgents(findParams)
-}
-
-// ToolsSetter implements a common Tools method for use by various
-// facades.
-type ToolsSetter struct {
-	st          ToolsFindEntity
-	getCanWrite GetAuthFunc
-}
-
-// NewToolsSetter returns a new ToolsGetter. The GetAuthFunc will be
-// used on each invocation of Tools to determine current permissions.
-func NewToolsSetter(st ToolsFindEntity, getCanWrite GetAuthFunc) *ToolsSetter {
-	return &ToolsSetter{
-		st:          st,
-		getCanWrite: getCanWrite,
-	}
-}
-
-// SetTools updates the recorded tools version for the agents.
-func (t *ToolsSetter) SetTools(args params.EntitiesVersion) (params.ErrorResults, error) {
-	results := params.ErrorResults{
-		Results: make([]params.ErrorResult, len(args.AgentTools)),
-	}
-	canWrite, err := t.getCanWrite()
-	if err != nil {
-		return results, errors.Trace(err)
-	}
-	for i, agentTools := range args.AgentTools {
-		tag, err := names.ParseTag(agentTools.Tag)
-		if err != nil {
-			results.Results[i].Error = apiservererrors.ServerError(apiservererrors.ErrPerm)
-			continue
-		}
-		err = t.setOneAgentVersion(tag, agentTools.Tools.Version, canWrite)
-		results.Results[i].Error = apiservererrors.ServerError(err)
-	}
-	return results, nil
-}
-
-func (t *ToolsSetter) setOneAgentVersion(tag names.Tag, vers version.Binary, canWrite AuthFunc) error {
-	if !canWrite(tag) {
-		return apiservererrors.ErrPerm
-	}
-	entity0, err := t.st.FindEntity(tag)
-	if err != nil {
-		return err
-	}
-	entity, ok := entity0.(AgentTooler)
-	if !ok {
-		return apiservererrors.NotSupportedError(tag, "agent binaries")
-	}
-	return entity.SetAgentVersion(vers)
+	return t.toolsFinder.FindAgents(ctx, findParams)
 }
 
 // FindAgentsParams defines parameters for the FindAgents method.
@@ -220,10 +182,10 @@ type FindAgentsParams struct {
 	ControllerCfg controller.Config
 
 	// ModelType is the type of the model.
-	ModelType state.ModelType
+	ModelType coremodel.ModelType
 
 	// Number will be used to match tools versions exactly if non-zero.
-	Number version.Number
+	Number semversion.Number
 
 	// MajorVersion will be used to match the major version if non-zero.
 	MajorVersion int
@@ -243,31 +205,46 @@ type FindAgentsParams struct {
 
 // ToolsFinder defines methods for finding tools.
 type ToolsFinder interface {
-	FindAgents(args FindAgentsParams) (coretools.List, error)
+	FindAgents(context.Context, FindAgentsParams) (coretools.List, error)
 }
 
 type toolsFinder struct {
-	configGetter       environs.EnvironConfigGetter
-	toolsStorageGetter ToolsStorageGetter
 	urlGetter          ToolsURLGetter
-	newEnviron         NewEnvironFunc
+	agentBinaryService AgentBinaryService
+}
+
+// AgentBinaryService is an interface for getting the
+// EnvironAgentBinariesFinder function.
+type AgentBinaryService interface {
+	// GetEnvironAgentBinariesFinder returns the function to find agent binaries.
+	// This is used to find the agent binaries.
+	GetEnvironAgentBinariesFinder() agentbinaryservice.EnvironAgentBinariesFinderFunc
+
+	// ListAgentBinaries lists all agent binaries in the controller and model stores.
+	// It merges the two lists of agent binaries, with the model agent binaries
+	// taking precedence over the controller agent binaries.
+	// It returns a slice of agent binary metadata. The order of the metadata is not guaranteed.
+	// An empty slice is returned if no agent binaries are found.
+	ListAgentBinaries(ctx context.Context) ([]agentbinary.Metadata, error)
 }
 
 // NewToolsFinder returns a new ToolsFinder, returning tools
 // with their URLs pointing at the API server.
 func NewToolsFinder(
-	configGetter environs.EnvironConfigGetter,
-	toolsStorageGetter ToolsStorageGetter,
 	urlGetter ToolsURLGetter,
-	newEnviron NewEnvironFunc,
+	store objectstore.ObjectStore,
+	agentBinaryService AgentBinaryService,
 ) *toolsFinder {
-	return &toolsFinder{configGetter, toolsStorageGetter, urlGetter, newEnviron}
+	return &toolsFinder{
+		urlGetter:          urlGetter,
+		agentBinaryService: agentBinaryService,
+	}
 }
 
 // FindAgents calls findMatchingTools and then rewrites the URLs
 // using the provided ToolsURLGetter.
-func (f *toolsFinder) FindAgents(args FindAgentsParams) (coretools.List, error) {
-	list, err := f.findMatchingAgents(args)
+func (f *toolsFinder) FindAgents(ctx context.Context, args FindAgentsParams) (coretools.List, error) {
+	list, err := f.findMatchingAgents(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +254,7 @@ func (f *toolsFinder) FindAgents(args FindAgentsParams) (coretools.List, error) 
 	// download and cache them if the client requests that version.
 	var fullList coretools.List
 	for _, baseTools := range list {
-		urls, err := f.urlGetter.ToolsURLs(baseTools.Version)
+		urls, err := f.urlGetter.ToolsURLs(ctx, baseTools.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -294,10 +271,10 @@ func (f *toolsFinder) FindAgents(args FindAgentsParams) (coretools.List, error) 
 // matching the given parameters.
 // If an exact match is specified (number, ostype and arch) and is found in
 // agent storage, then simplestreams will not be searched.
-func (f *toolsFinder) findMatchingAgents(args FindAgentsParams) (result coretools.List, _ error) {
-	exactMatch := args.Number != version.Zero && args.OSType != "" && args.Arch != ""
+func (f *toolsFinder) findMatchingAgents(ctx context.Context, args FindAgentsParams) (result coretools.List, _ error) {
+	exactMatch := args.Number != semversion.Zero && args.OSType != "" && args.Arch != ""
 
-	storageList, err := f.matchingStorageAgent(args)
+	storageList, err := f.matchingStorageAgent(ctx, args)
 	if err != nil && err != coretools.ErrNoMatches {
 		return nil, err
 	}
@@ -307,34 +284,27 @@ func (f *toolsFinder) findMatchingAgents(args FindAgentsParams) (result coretool
 
 	// Look for tools in simplestreams too, but don't replace
 	// any versions found in storage.
-	env, err := f.newEnviron()
-	if err != nil {
-		return nil, err
-	}
 	filter := toolsFilter(args)
-	cfg := env.Config()
-	requestedStream := cfg.AgentStream()
-	if args.AgentStream != "" {
-		requestedStream = args.AgentStream
-	}
-
-	streams := envtools.PreferredStreams(&args.Number, cfg.Development(), requestedStream)
-	ss := simplestreams.NewSimpleStreams(simplestreams.DefaultDataSourceFactory())
 	majorVersion := args.Number.Major
 	minorVersion := args.Number.Minor
-	if args.Number == version.Zero {
+	if args.Number == semversion.Zero {
 		majorVersion = args.MajorVersion
 		minorVersion = args.MinorVersion
 	}
-	simplestreamsList, err := envtoolsFindTools(ss,
-		env, majorVersion, minorVersion, streams, filter,
+	environAgentBinariesFinder := f.agentBinaryService.GetEnvironAgentBinariesFinder()
+	simplestreamsList, err := environAgentBinariesFinder(
+		ctx,
+		majorVersion, minorVersion,
+		args.Number,
+		args.AgentStream,
+		filter,
 	)
-	if len(storageList) == 0 && err != nil {
+	if err != nil && len(storageList) == 0 {
 		return nil, err
 	}
 
 	list := storageList
-	found := make(map[version.Binary]bool)
+	found := make(map[semversion.Binary]bool)
 	for _, tools := range storageList {
 		found[tools.Version] = true
 	}
@@ -349,25 +319,27 @@ func (f *toolsFinder) findMatchingAgents(args FindAgentsParams) (result coretool
 
 // matchingStorageAgent returns a coretools.List, with an entry for each
 // metadata entry in the agent storage that matches the given parameters.
-func (f *toolsFinder) matchingStorageAgent(args FindAgentsParams) (coretools.List, error) {
-	storage, err := f.toolsStorageGetter.ToolsStorage()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = storage.Close() }()
-
-	allMetadata, err := storage.AllMetadata()
+func (f *toolsFinder) matchingStorageAgent(ctx context.Context, args FindAgentsParams) (coretools.List, error) {
+	allMetadata, err := f.agentBinaryService.ListAgentBinaries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	list := make(coretools.List, len(allMetadata))
 	for i, m := range allMetadata {
-		vers, err := version.ParseBinary(m.Version)
+		ver, err := semversion.Parse(m.Version)
 		if err != nil {
-			return nil, errors.Annotatef(err, "unexpected bad version %q of agent binary in storage", m.Version)
+			return nil, errors.Errorf(
+				"unexpected bad version %q of agent binary in storage: %w",
+				m.Version, err,
+			)
+		}
+		binVer := semversion.Binary{
+			Number:  ver,
+			Arch:    m.Arch,
+			Release: "ubuntu",
 		}
 		list[i] = &coretools.Tools{
-			Version: vers,
+			Version: binVer,
 			Size:    m.Size,
 			SHA256:  m.SHA256,
 		}
@@ -377,7 +349,7 @@ func (f *toolsFinder) matchingStorageAgent(args FindAgentsParams) (coretools.Lis
 		return nil, err
 	}
 	// Return early if we are doing an exact match.
-	if args.Number != version.Zero {
+	if args.Number != semversion.Zero {
 		if len(list) == 0 {
 			return nil, coretools.ErrNoMatches
 		}
@@ -417,21 +389,25 @@ type toolsURLGetter struct {
 // NewToolsURLGetter creates a new ToolsURLGetter that
 // returns tools URLs pointing at an API server.
 func NewToolsURLGetter(modelUUID string, a APIHostPortsForAgentsGetter) *toolsURLGetter {
-	return &toolsURLGetter{modelUUID, a}
+	return &toolsURLGetter{
+		modelUUID:          modelUUID,
+		apiHostPortsGetter: a,
+	}
 }
 
-func (t *toolsURLGetter) ToolsURLs(v version.Binary) ([]string, error) {
-	addrs, err := apiAddresses(t.apiHostPortsGetter)
+// ToolsURLs returns a list of tools URLs pointing at an API server.
+func (t *toolsURLGetter) ToolsURLs(ctx context.Context, v semversion.Binary) ([]string, error) {
+	addrs, err := t.apiHostPortsGetter.GetAllAPIAddressesForAgents(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if len(addrs) == 0 {
-		return nil, errors.Errorf("no suitable API server address to pick from")
+		return nil, errors.New("no suitable API server address to pick from")
 	}
 	var urls []string
 	for _, addr := range addrs {
 		serverRoot := fmt.Sprintf("https://%s/model/%s", addr, t.modelUUID)
-		url := ToolsURL(serverRoot, v)
+		url := ToolsURL(serverRoot, v.String())
 		urls = append(urls, url)
 	}
 	return urls, nil
@@ -439,6 +415,6 @@ func (t *toolsURLGetter) ToolsURLs(v version.Binary) ([]string, error) {
 
 // ToolsURL returns a tools URL pointing the API server
 // specified by the "serverRoot".
-func ToolsURL(serverRoot string, v version.Binary) string {
-	return fmt.Sprintf("%s/tools/%s", serverRoot, v.String())
+func ToolsURL(serverRoot string, v string) string {
+	return fmt.Sprintf("%s/tools/%s", serverRoot, v)
 }

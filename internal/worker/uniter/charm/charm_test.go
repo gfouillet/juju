@@ -4,15 +4,15 @@
 package charm_test
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
-	jujucharm "github.com/juju/charm/v12"
 	"github.com/juju/collections/set"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	jujucharm "github.com/juju/juju/internal/charm"
+	charmtesting "github.com/juju/juju/internal/charm/testing"
 	"github.com/juju/juju/internal/worker/uniter/charm"
 	"github.com/juju/juju/testcharms"
 )
@@ -36,7 +36,7 @@ func (br *bundleReader) EnableWaitForAbort() (stopWaiting chan struct{}) {
 }
 
 // Read implements the BundleReader interface.
-func (br *bundleReader) Read(info charm.BundleInfo, abort <-chan struct{}) (charm.Bundle, error) {
+func (br *bundleReader) Read(ctx context.Context, info charm.BundleInfo) (charm.Bundle, error) {
 	bundle, ok := br.bundles[info.URL()]
 	if !ok {
 		return nil, fmt.Errorf("no such charm!")
@@ -45,7 +45,7 @@ func (br *bundleReader) Read(info charm.BundleInfo, abort <-chan struct{}) (char
 		// EnableWaitForAbort is a one-time wait; make sure we clear it.
 		defer func() { br.stopWaiting = nil }()
 		select {
-		case <-abort:
+		case <-ctx.Done():
 			return nil, fmt.Errorf("charm read aborted")
 		case <-br.stopWaiting:
 			// We can stop waiting for the abort chan and return the bundle.
@@ -54,24 +54,19 @@ func (br *bundleReader) Read(info charm.BundleInfo, abort <-chan struct{}) (char
 	return bundle, nil
 }
 
-func (br *bundleReader) AddCustomBundle(c *gc.C, url *jujucharm.URL, customize func(path string)) charm.BundleInfo {
+func (br *bundleReader) AddCustomBundle(c *tc.C, url *jujucharm.URL, customize func(path string)) charm.BundleInfo {
 	base := c.MkDir()
 	dirpath := testcharms.Repo.ClonedDirPath(base, "dummy")
 	if customize != nil {
 		customize(dirpath)
 	}
-	dir, err := jujucharm.ReadCharmDir(dirpath)
-	c.Assert(err, jc.ErrorIsNil)
-	err = dir.SetDiskRevision(url.Revision)
-	c.Assert(err, jc.ErrorIsNil)
+	dir, err := charmtesting.ReadCharmDir(dirpath)
+	c.Assert(err, tc.ErrorIsNil)
 	bunpath := filepath.Join(base, "bundle")
-	file, err := os.Create(bunpath)
-	c.Assert(err, jc.ErrorIsNil)
-	defer func() { _ = file.Close() }()
-	err = dir.ArchiveTo(file)
-	c.Assert(err, jc.ErrorIsNil)
+	err = dir.ArchiveToPath(bunpath)
+	c.Assert(err, tc.ErrorIsNil)
 	bundle, err := jujucharm.ReadCharmArchive(bunpath)
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 	return br.AddBundle(url, bundle)
 }
 

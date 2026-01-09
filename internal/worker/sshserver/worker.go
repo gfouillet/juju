@@ -4,31 +4,62 @@
 package sshserver
 
 import (
+	"context"
 	"sync"
 
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
+
+	"github.com/juju/juju/controller"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/core/watcher"
 )
+
+const (
+	// TODO(ale8k): Use generated hostkey from initialise()
+	// As of right now, the generated host key is in mongo.
+	// The initialisation logic needs migrating over to DQLite and then
+	// a domain service should call the method to retrieve the generated
+	// host key here. For now, we're hardcoding it it to stop the server bouncing.
+	temporaryJumpHostKey = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACBT8UidoqUmpUFFCGEhZhHWGE7VHoJY7LZ7yXzuWlSVYAAA
+AIiZq0wRmatMEQAAAAtzc2gtZWQyNTUxOQAAACBT8UidoqUmpUFFCGEhZhHWGE7V
+HoJY7LZ7yXzuWlSVYAAAAEBYRsJTytYJUidtOuv3s3tdjyDA+4TSdCz9+hFKjyqz
+v1PxSJ2ipSalQUUIYSFmEdYYTtUegljstnvJfO5aVJVgAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+`
+)
+
+// ControllerConfigService is the interface that the worker uses to get the
+// controller configuration.
+type ControllerConfigService interface {
+	// WatchControllerConfig returns a watcher that returns keys for any changes
+	// to controller config.
+	WatchControllerConfig(context.Context) (watcher.StringsWatcher, error)
+	// ControllerConfig returns the current controller configuration.
+	ControllerConfig(context.Context) (controller.Config, error)
+}
 
 // ServerWrapperWorkerConfig holds the configuration required by the server wrapper worker.
 type ServerWrapperWorkerConfig struct {
-	NewServerWorker func(ServerWorkerConfig) (worker.Worker, error)
-	Logger          Logger
-	FacadeClient    FacadeClient
-	SessionHandler  SessionHandler
+	ControllerConfigService ControllerConfigService
+	NewServerWorker         func(ServerWorkerConfig) (worker.Worker, error)
+	Logger                  logger.Logger
+	SessionHandler          SessionHandler
 }
 
 // Validate validates the workers configuration is as expected.
 func (c ServerWrapperWorkerConfig) Validate() error {
+	if c.ControllerConfigService == nil {
+		return errors.NotValidf("ControllerConfigService is required")
+	}
 	if c.NewServerWorker == nil {
 		return errors.NotValidf("NewSSHServer is required")
 	}
 	if c.Logger == nil {
 		return errors.NotValidf("Logger is required")
-	}
-	if c.FacadeClient == nil {
-		return errors.NotValidf("FacadeClient is required")
 	}
 	if c.SessionHandler == nil {
 		return errors.NotValidf("SessionHandler is required")
@@ -66,6 +97,7 @@ func NewServerWrapperWorker(config ServerWrapperWorkerConfig) (worker.Worker, er
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
+		Name: "ssh-server",
 		Site: &w.catacomb,
 		Work: w.loop,
 	}); err != nil {
@@ -99,46 +131,35 @@ func (ssw *serverWrapperWorker) Report() map[string]any {
 	}
 }
 
-func (ssw *serverWrapperWorker) getLatestControllerConfig() (port, maxConns int, err error) {
-	ctrlCfg, err := ssw.config.FacadeClient.ControllerConfig()
-	if err != nil {
-		return port, maxConns, errors.Trace(err)
-	}
-
-	return ctrlCfg.SSHServerPort(), ctrlCfg.SSHMaxConcurrentConnections(), nil
-}
-
 // loop is the main loop of the server wrapper worker. It starts the server worker
 // and listens for changes in the controller configuration.
 func (ssw *serverWrapperWorker) loop() error {
-	jumpHostKey, err := ssw.config.FacadeClient.SSHServerHostKey()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if jumpHostKey == "" {
-		return errors.New("jump host key is empty")
-	}
+	ctx := ssw.catacomb.Context(context.Background())
 
-	controllerConfigWatcher, err := ssw.config.FacadeClient.WatchControllerConfig()
+	// Watch for changes then acquire the latest controller configuration
+	// to avoid starting the server with stale config values.
+	controllerConfigWatcher, err := ssw.config.ControllerConfigService.WatchControllerConfig(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	ssw.addWorkerReporter("controller-watcher", controllerConfigWatcher)
 	if err := ssw.catacomb.Add(controllerConfigWatcher); err != nil {
 		return errors.Trace(err)
 	}
+	ssw.addWorkerReporter("controller-watcher", controllerConfigWatcher)
 
-	port, maxConns, err := ssw.getLatestControllerConfig()
+	config, err := ssw.config.ControllerConfigService.ControllerConfig(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
+	port := config.SSHServerPort()
+	maxConns := config.SSHMaxConcurrentConnections()
+
 	srv, err := ssw.config.NewServerWorker(ServerWorkerConfig{
 		Logger:                   ssw.config.Logger,
-		JumpHostKey:              jumpHostKey,
+		JumpHostKey:              temporaryJumpHostKey,
 		Port:                     port,
 		MaxConcurrentConnections: maxConns,
-		FacadeClient:             ssw.config.FacadeClient,
 		SessionHandler:           ssw.config.SessionHandler,
 	})
 	ssw.addWorkerReporter("ssh-server", srv)
@@ -149,18 +170,18 @@ func (ssw *serverWrapperWorker) loop() error {
 		return errors.Trace(err)
 	}
 
+	changesChan := controllerConfigWatcher.Changes()
 	for {
 		select {
 		case <-ssw.catacomb.Dying():
 			return ssw.catacomb.ErrDying()
-		case <-controllerConfigWatcher.Changes():
-			// The ssh server port can't change after bootstrap so we ignore it.
-			_, newMaxConnections, err := ssw.getLatestControllerConfig()
+		case <-changesChan:
+			config, err := ssw.config.ControllerConfigService.ControllerConfig(ctx)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			if newMaxConnections == maxConns {
-				ssw.config.Logger.Debugf("controller configuration changed, but nothing changed for the ssh server.")
+			if maxConns == config.SSHMaxConcurrentConnections() {
+				ssw.config.Logger.Debugf(context.Background(), "controller configuration changed, but nothing changed for the ssh server.")
 				continue
 			}
 			return errors.New("changes detected, stopping SSH server worker")

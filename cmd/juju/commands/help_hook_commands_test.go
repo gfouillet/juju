@@ -5,26 +5,29 @@ package commands
 
 import (
 	"strings"
+	stdtesting "testing"
 
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/testing"
 )
 
 type HelpHookCommandsSuite struct {
 	testing.FakeJujuXDGDataHomeSuite
 }
 
-var _ = gc.Suite(&HelpHookCommandsSuite{})
+func TestHelpHookCommandsSuite(t *stdtesting.T) {
+	tc.Run(t, &HelpHookCommandsSuite{})
+}
 
-func (suite *HelpHookCommandsSuite) SetUpTest(c *gc.C) {
+func (suite *HelpHookCommandsSuite) SetUpTest(c *tc.C) {
 	suite.FakeJujuXDGDataHomeSuite.SetUpTest(c)
 	setFeatureFlags("")
 }
 
-func (suite *HelpHookCommandsSuite) TestHelpHookCommandsHelp(c *gc.C) {
+func (suite *HelpHookCommandsSuite) TestHelpHookCommandsHelp(c *tc.C) {
 	output := badrun(c, 0, "help", "help-hook-commands")
-	c.Assert(output, gc.Equals, `Usage: juju help-hook-commands [hook]
+	c.Assert(output, tc.Equals, `Usage: juju help-hook-commands [hook]
 
 Summary:
 Show help on a Juju charm hook command.
@@ -56,20 +59,9 @@ The currently available charm hook commands include:
     is-leader                Print application leadership status.
     juju-log                 Write a message to the juju log.
     juju-reboot              Reboot the host machine.
-    k8s-raw-get              Get k8s raw spec information.
-    k8s-raw-set              Set k8s raw spec information.
-    k8s-spec-get             Get k8s spec information.
-    k8s-spec-set             Set k8s spec information.
-    leader-get               Print application leadership settings.
-    leader-set               Write application leadership settings.
     network-get              Get network config.
     open-port                Register a request to open a port or port range.
     opened-ports             List all ports or port ranges opened by the unit.
-    payload-register         Register a charm payload with Juju.
-    payload-status-set       Update the status of a payload.
-    payload-unregister       Stop tracking a payload.
-    pod-spec-get             Get k8s spec information. (deprecated)
-    pod-spec-set             Set k8s spec information. (deprecated)
     relation-get             Get relation settings.
     relation-ids             List all relation IDs for the given endpoint.
     relation-list            List relation units.
@@ -115,20 +107,9 @@ var expectedCommands = []string{
 	"is-leader",
 	"juju-log",
 	"juju-reboot",
-	"k8s-raw-get",
-	"k8s-raw-set",
-	"k8s-spec-get",
-	"k8s-spec-set",
-	"leader-get",
-	"leader-set",
 	"network-get",
 	"open-port",
 	"opened-ports",
-	"payload-register",
-	"payload-status-set",
-	"payload-unregister",
-	"pod-spec-get",
-	"pod-spec-set",
 	"relation-get",
 	"relation-ids",
 	"relation-list",
@@ -154,17 +135,17 @@ var expectedCommands = []string{
 	"unit-get",
 }
 
-func (suite *HelpHookCommandsSuite) TestHelpHookCommands(c *gc.C) {
+func (suite *HelpHookCommandsSuite) TestHelpHookCommands(c *tc.C) {
 	output := badrun(c, 0, "help-hook-commands")
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for i, line := range lines {
 		command := strings.Fields(line)[0]
 		lines[i] = command
 	}
-	c.Assert(lines, gc.DeepEquals, expectedCommands)
+	c.Assert(lines, tc.DeepEquals, expectedCommands)
 }
 
-func (suite *HelpHookCommandsSuite) TestHelpHookCommandsName(c *gc.C) {
+func (suite *HelpHookCommandsSuite) TestHelpHookCommandsName(c *tc.C) {
 	output := badrun(c, 0, "help-hook-commands", "relation-get")
 	expectedHelp := `Usage: relation-get \[options\] <key> <unit id>
 
@@ -176,5 +157,5 @@ Options:
 
 Details:
 relation-get prints the value(.|\n)*`
-	c.Assert(output, gc.Matches, expectedHelp)
+	c.Assert(output, tc.Matches, expectedHelp)
 }

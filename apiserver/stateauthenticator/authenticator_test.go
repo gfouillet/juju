@@ -1,93 +1,185 @@
 // Copyright 2014-2018 Canonical Ltd. All rights reserved.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-package stateauthenticator_test
+package stateauthenticator
 
 import (
 	"context"
+	stdtesting "testing"
 
+	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/names/v6"
+	"github.com/juju/tc"
+	"go.uber.org/mock/gomock"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/stateauthenticator"
-	"github.com/juju/juju/state"
-	statetesting "github.com/juju/juju/state/testing"
-	"github.com/juju/juju/testing/factory"
+	"github.com/juju/juju/core/model"
+	coreuser "github.com/juju/juju/core/user"
+	coreusertesting "github.com/juju/juju/core/user/testing"
+	"github.com/juju/juju/internal/auth"
+	"github.com/juju/juju/internal/testing"
 )
 
 // TODO update these tests (moved from apiserver) to test
 // via the public interface, and then get rid of export_test.go.
 type agentAuthenticatorSuite struct {
-	statetesting.StateSuite
-	authenticator *stateauthenticator.Authenticator
+	authenticator              *Authenticator
+	entityAuthenticator        *MockEntityAuthenticator
+	agentAuthenticatorGetter   *MockAgentAuthenticatorGetter
+	agentPasswordServiceGetter *MockAgentPasswordServiceGetter
+	agentPasswordService       *MockAgentPasswordService
+	controllerConfigService    *MockControllerConfigService
+	accessService              *MockAccessService
+	macaroonService            *MockMacaroonService
 }
 
-var _ = gc.Suite(&agentAuthenticatorSuite{})
-
-func (s *agentAuthenticatorSuite) SetUpTest(c *gc.C) {
-	s.StateSuite.SetUpTest(c)
-	authenticator, err := stateauthenticator.NewAuthenticator(s.StatePool, clock.WallClock)
-	c.Assert(err, jc.ErrorIsNil)
-	s.authenticator = authenticator
+func TestAgentAuthenticatorSuite(t *stdtesting.T) {
+	tc.Run(t, &agentAuthenticatorSuite{})
 }
 
-func (s *agentAuthenticatorSuite) TestAuthenticateLoginRequestHandleNotSupportedRequests(c *gc.C) {
-	_, err := s.authenticator.AuthenticateLoginRequest(context.TODO(), "", "", authentication.AuthParams{Token: "token"})
-	c.Assert(err, jc.Satisfies, errors.IsNotSupported)
+func (s *agentAuthenticatorSuite) TestAuthenticateLoginRequestHandleNotSupportedRequests(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.agentPasswordServiceGetter.EXPECT().GetAgentPasswordServiceForModel(gomock.Any(), gomock.Any()).Return(s.agentPasswordService, nil)
+	s.agentAuthenticatorGetter.EXPECT().AuthenticatorForModel(gomock.Any()).Return(s.entityAuthenticator)
+
+	_, err := s.authenticator.AuthenticateLoginRequest(c.Context(), "", "", authentication.AuthParams{Token: "token"})
+	c.Assert(err, tc.ErrorIs, errors.NotSupported)
 }
 
-func (s *agentAuthenticatorSuite) TestAuthenticatorForTag(c *gc.C) {
-	user := s.Factory.MakeUser(c, &factory.UserParams{Password: "password"})
+func (s *agentAuthenticatorSuite) TestAuthenticatorForTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
 
-	authenticator, err := stateauthenticator.EntityAuthenticator(s.authenticator, user.Tag())
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(authenticator, gc.NotNil)
-	userFinder := userFinder{user}
+	user := coreuser.User{
+		Name: coreusertesting.GenNewName(c, "user"),
+	}
+	tag := names.NewUserTag("user")
 
-	entity, err := authenticator.Authenticate(context.TODO(), userFinder, authentication.AuthParams{
-		AuthTag:     user.Tag(),
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticator, tc.NotNil)
+
+	s.accessService.EXPECT().GetUserByAuth(gomock.Any(), coreusertesting.GenNewName(c, "user"), auth.NewPassword("password")).Return(user, nil).AnyTimes()
+
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{
+		AuthTag:     tag,
 		Credentials: "password",
 		Nonce:       "nonce",
 	})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(entity, gc.DeepEquals, user)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.DeepEquals, tag)
 }
 
-func (s *agentAuthenticatorSuite) TestMachineGetsAgentAuthenticator(c *gc.C) {
-	authenticator, err := stateauthenticator.EntityAuthenticator(s.authenticator, names.NewMachineTag("0"))
-	c.Assert(err, jc.ErrorIsNil)
-	_, ok := authenticator.(*authentication.AgentAuthenticator)
-	c.Assert(ok, jc.IsTrue)
+func (s *agentAuthenticatorSuite) TestNotSupportedTag(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, names.NewCloudTag("not-support"))
+	c.Assert(err, tc.ErrorMatches, "unexpected login entity tag: invalid request")
+	c.Check(authenticator, tc.IsNil)
 }
 
-func (s *agentAuthenticatorSuite) TestModelGetsAgentAuthenticator(c *gc.C) {
-	authenticator, err := stateauthenticator.EntityAuthenticator(s.authenticator, names.NewModelTag("deadbeef-0bad-400d-8000-4b1d0d06f00d"))
-	c.Assert(err, jc.ErrorIsNil)
-	_, ok := authenticator.(*authentication.AgentAuthenticator)
-	c.Assert(ok, jc.IsTrue)
+func (s *agentAuthenticatorSuite) TestMachineGetsAgentAuthenticator(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	tag := names.NewMachineTag("0")
+
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+	s.entityAuthenticator.EXPECT().Authenticate(gomock.Any(), authentication.AuthParams{}).Return(tag, nil)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.Equals, tag)
 }
 
-func (s *agentAuthenticatorSuite) TestUnitGetsAgentAuthenticator(c *gc.C) {
-	authenticator, err := stateauthenticator.EntityAuthenticator(s.authenticator, names.NewUnitTag("wordpress/0"))
-	c.Assert(err, jc.ErrorIsNil)
-	_, ok := authenticator.(*authentication.AgentAuthenticator)
-	c.Assert(ok, jc.IsTrue)
+func (s *agentAuthenticatorSuite) TestMachineGetsAgentAuthenticatorController(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	tag := names.NewMachineTag("0")
+
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+	s.entityAuthenticator.EXPECT().Authenticate(gomock.Any(), authentication.AuthParams{}).Return(tag, nil)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.Equals, tag)
 }
 
-func (s *agentAuthenticatorSuite) TestNotSupportedTag(c *gc.C) {
-	authenticator, err := stateauthenticator.EntityAuthenticator(s.authenticator, names.NewCloudTag("not-support"))
-	c.Assert(err, gc.ErrorMatches, "unexpected login entity tag: invalid request")
-	c.Assert(authenticator, gc.IsNil)
+func (s *agentAuthenticatorSuite) TestModelGetsAgentAuthenticator(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	tag := names.NewModelTag("deadbeef-0bad-400d-8000-4b1d0d06f00d")
+
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+	s.entityAuthenticator.EXPECT().Authenticate(gomock.Any(), authentication.AuthParams{}).Return(tag, nil)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.Equals, tag)
 }
 
-type userFinder struct {
-	user state.Entity
+func (s *agentAuthenticatorSuite) TestUnitGetsAgentAuthenticator(c *tc.C) {
+	defer s.setupMocks(c).Finish()
+
+	tag := names.NewUnitTag("wordpress/0")
+
+	s.agentAuthenticatorGetter.EXPECT().Authenticator().Return(s.entityAuthenticator)
+	s.entityAuthenticator.EXPECT().Authenticate(gomock.Any(), authentication.AuthParams{}).Return(tag, nil)
+
+	authenticator, err := s.authenticatorForTag(c.Context(), s.authenticator, tag)
+	c.Assert(err, tc.ErrorIsNil)
+	authenticatedTag, err := authenticator.Authenticate(c.Context(), authentication.AuthParams{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(authenticatedTag, tc.Equals, tag)
 }
 
-func (u userFinder) FindEntity(tag names.Tag) (state.Entity, error) {
-	return u.user, nil
+func (s *agentAuthenticatorSuite) setupMocks(c *tc.C) *gomock.Controller {
+	ctrl := gomock.NewController(c)
+
+	s.agentAuthenticatorGetter = NewMockAgentAuthenticatorGetter(ctrl)
+	s.entityAuthenticator = NewMockEntityAuthenticator(ctrl)
+
+	s.agentPasswordService = NewMockAgentPasswordService(ctrl)
+
+	s.agentPasswordServiceGetter = NewMockAgentPasswordServiceGetter(ctrl)
+	s.agentPasswordServiceGetter.EXPECT().GetAgentPasswordServiceForModel(gomock.Any(), gomock.Any()).Return(s.agentPasswordService, nil)
+
+	s.controllerConfigService = NewMockControllerConfigService(ctrl)
+	s.controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).Return(testing.FakeControllerConfig(), nil).AnyTimes()
+
+	s.accessService = NewMockAccessService(ctrl)
+
+	s.macaroonService = NewMockMacaroonService(ctrl)
+	s.macaroonService.EXPECT().GetLocalUsersKey(gomock.Any()).Return(bakery.MustGenerateKey(), nil).MinTimes(1)
+	s.macaroonService.EXPECT().GetLocalUsersThirdPartyKey(gomock.Any()).Return(bakery.MustGenerateKey(), nil).MinTimes(1)
+
+	authenticator, err := NewAuthenticator(
+		c.Context(),
+		model.UUID(testing.ModelTag.Id()),
+		s.controllerConfigService,
+		s.agentPasswordServiceGetter,
+		s.accessService,
+		s.macaroonService,
+		s.agentAuthenticatorGetter,
+		clock.WallClock,
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	s.authenticator = authenticator
+
+	return ctrl
+}
+
+func (s *agentAuthenticatorSuite) authenticatorForTag(ctx context.Context, authenticator *Authenticator, tag names.Tag) (authentication.EntityAuthenticator, error) {
+	return authenticator.authContext.authenticator("testing.invalid:1234").authenticatorForTag(ctx, tag)
 }

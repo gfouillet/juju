@@ -4,24 +4,27 @@
 package kubernetes
 
 import (
+	"context"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/juju/loggo"
 	"golang.org/x/time/rate"
+
+	corelogger "github.com/juju/juju/core/logger"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
 // klogAdapter is an adapter for Kubernetes logger onto juju loggo. We use this
 // to suppress logging from client-go and force it through juju logging methods
 type klogAdapter struct {
-	loggo.Logger
+	corelogger.Logger
 }
 
-// newKlogAdapter creates a new klog adapter to juju loggo
-func newKlogAdapter() logr.Logger {
+// newKlogAdaptor creates a new klog adapter to juju loggo
+func newKlogAdaptor() logr.Logger {
 	return logr.New(&klogAdapter{
-		Logger: loggo.GetLogger("juju.kubernetes.klog"),
+		Logger: internallogger.GetLogger("juju.kubernetes.klog"),
 	})
 }
 
@@ -38,14 +41,14 @@ func (k *klogAdapter) Error(err error, msg string, keysAndValues ...any) {
 		if klogIgnorePrefixes.Matches(err.Error()) {
 			return
 		}
-		k.Logger.Errorf(msg+": "+err.Error(), keysAndValues...)
+		k.Logger.Errorf(context.TODO(), msg+": "+err.Error(), keysAndValues...)
 		return
 	}
 
 	if klogIgnorePrefixes.Matches(msg) {
 		return
 	}
-	k.Logger.Errorf(msg, keysAndValues...)
+	k.Logger.Errorf(context.TODO(), msg, keysAndValues...)
 }
 
 // Info see https://pkg.go.dev/github.com/go-logr/logr#Logger
@@ -55,7 +58,7 @@ func (k *klogAdapter) Info(level int, msg string, keysAndValues ...any) {
 		return
 	}
 
-	k.Logger.Infof(msg, keysAndValues...)
+	k.Logger.Infof(context.TODO(), msg, keysAndValues...)
 }
 
 // V see https://pkg.go.dev/github.com/go-logr/logr#Logger
@@ -104,16 +107,16 @@ type klogSuppressMessagePrefix struct {
 
 // Do calls the logger function if the rate allows it. If the rate is nil, the
 // function is called directly, thus bypassing the rate.
-func (k klogSuppressMessagePrefix) Do(loggerFn func(string, ...any), msg string, args ...any) {
+func (k klogSuppressMessagePrefix) Do(loggerFn func(context.Context, string, ...any), msg string, args ...any) {
 	// If we don't have a rate, just call the function directly.
 	if k.rate == nil {
-		loggerFn(msg, args)
+		loggerFn(context.TODO(), msg, args)
 		return
 	}
 
 	// If we have a rate, use it to suppress the message.
 	k.rate.Do(func() {
-		loggerFn(msg, args)
+		loggerFn(context.TODO(), msg, args)
 	})
 }
 

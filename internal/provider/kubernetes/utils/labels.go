@@ -55,8 +55,8 @@ const (
 
 // MatchModelLabelVersion checks to see if the provided model is running on an older
 // labeling scheme or a newer one and returns the detected label version.
-func MatchModelLabelVersion(namespace, modelName, modelUUID, controllerUUID string, namespaceI core.NamespaceInterface) (constants.LabelVersion, error) {
-	ns, err := namespaceI.Get(context.TODO(), namespace, meta.GetOptions{})
+func MatchModelLabelVersion(ctx context.Context, namespace, modelName, modelUUID, controllerUUID string, namespaceI core.NamespaceInterface) (constants.LabelVersion, error) {
+	ns, err := namespaceI.Get(ctx, namespace, meta.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return constants.LabelVersion2, nil
 	}

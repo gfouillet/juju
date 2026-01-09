@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -127,7 +127,7 @@ func (c *RemoveCommand) Run(ctx *cmd.Context) error {
 			}
 		}
 
-		space, err := api.RemoveSpace(c.name, c.force, false)
+		space, err := api.RemoveSpace(ctx, c.name, c.force, false)
 		if err != nil {
 			return errors.Annotatef(err, "cannot remove space %q", c.name)
 		}
@@ -147,7 +147,7 @@ func (c *RemoveCommand) Run(ctx *cmd.Context) error {
 }
 
 func (c *RemoveCommand) handleForceOption(api SpaceAPI, currentModel string, ctx *cmd.Context) error {
-	space, err := api.RemoveSpace(c.name, false, true)
+	space, err := api.RemoveSpace(ctx, c.name, false, true)
 	if err != nil {
 		return errors.Trace(err)
 	}

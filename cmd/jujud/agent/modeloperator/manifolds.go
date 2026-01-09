@@ -4,14 +4,14 @@
 package modeloperator
 
 import (
-	"github.com/juju/loggo"
-	"github.com/juju/utils/v3/voyeur"
-	version "github.com/juju/version/v2"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/utils/v4/voyeur"
+	"github.com/juju/worker/v4/dependency"
 
 	coreagent "github.com/juju/juju/agent"
 	"github.com/juju/juju/api"
 	"github.com/juju/juju/caas"
+	"github.com/juju/juju/core/semversion"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/worker/agent"
 	"github.com/juju/juju/internal/worker/apicaller"
 	"github.com/juju/juju/internal/worker/apiconfigwatcher"
@@ -50,7 +50,7 @@ type ManifoldConfig struct {
 
 	// PreviousAgentVersion passes through the version the unit
 	// agent was running before the current restart.
-	PreviousAgentVersion version.Number
+	PreviousAgentVersion semversion.Number
 
 	// UpgradeStepsLock is passed to the upgrade steps gate to
 	// coordinate workers that shouldn't do anything until the
@@ -67,7 +67,7 @@ func Manifolds(config ManifoldConfig) dependency.Manifolds {
 		apiConfigWatcherName: apiconfigwatcher.Manifold(apiconfigwatcher.ManifoldConfig{
 			AgentName:          agentName,
 			AgentConfigChanged: config.AgentConfigChanged,
-			Logger:             loggo.GetLogger("juju.worker.apiconfigwatcher"),
+			Logger:             internallogger.GetLogger("juju.worker.apiconfigwatcher"),
 		}),
 
 		apiCallerName: apicaller.Manifold(apicaller.ManifoldConfig{
@@ -75,7 +75,7 @@ func Manifolds(config ManifoldConfig) dependency.Manifolds {
 			APIOpen:              api.Open,
 			APIConfigWatcherName: apiConfigWatcherName,
 			NewConnection:        apicaller.OnlyConnect,
-			Logger:               loggo.GetLogger("juju.worker.apicaller"),
+			Logger:               internallogger.GetLogger("juju.worker.apicaller"),
 		}),
 
 		// The log sender is a leaf worker that sends log messages to some
@@ -90,7 +90,7 @@ func Manifolds(config ManifoldConfig) dependency.Manifolds {
 			AgentName:        agentName,
 			AuthorityName:    certificateWatcherName,
 			BrokerName:       caasBrokerTrackerName,
-			Logger:           loggo.GetLogger("juju.worker.caasadmission"),
+			Logger:           internallogger.GetLogger("juju.worker.caasadmission"),
 			MuxName:          modelHTTPServerName,
 			ServerInfoName:   modelHTTPServerName,
 			RBACMapperName:   caasRBACMapperName,
@@ -101,13 +101,13 @@ func Manifolds(config ManifoldConfig) dependency.Manifolds {
 		caasBrokerTrackerName: caasbroker.Manifold(caasbroker.ManifoldConfig{
 			APICallerName:          apiCallerName,
 			NewContainerBrokerFunc: config.NewContainerBrokerFunc,
-			Logger:                 loggo.GetLogger("juju.worker.caas"),
+			Logger:                 internallogger.GetLogger("juju.worker.caas"),
 		}),
 
 		caasRBACMapperName: caasrbacmapper.Manifold(
 			caasrbacmapper.ManifoldConfig{
 				BrokerName: caasBrokerTrackerName,
-				Logger:     loggo.GetLogger("juju.worker.caasrbacmapper"),
+				Logger:     internallogger.GetLogger("juju.worker.caasrbacmapper"),
 			},
 		),
 
@@ -123,15 +123,15 @@ func Manifolds(config ManifoldConfig) dependency.Manifolds {
 		loggingConfigUpdaterName: logger.Manifold(logger.ManifoldConfig{
 			AgentName:       agentName,
 			APICallerName:   apiCallerName,
-			LoggingContext:  loggo.DefaultContext(),
-			Logger:          loggo.GetLogger("juju.worker.loggerconfig"),
+			LoggerContext:   internallogger.DefaultContext(),
+			Logger:          internallogger.GetLogger("juju.worker.loggerconfig"),
 			UpdateAgentFunc: config.UpdateLoggerConfig,
 		}),
 
 		modelHTTPServerName: muxhttpserver.Manifold(
 			muxhttpserver.ManifoldConfig{
 				AuthorityName: certificateWatcherName,
-				Logger:        loggo.GetLogger("juju.worker.muxhttpserver"),
+				Logger:        internallogger.GetLogger("juju.worker.muxhttpserver"),
 				Port:          config.Port,
 			},
 		),

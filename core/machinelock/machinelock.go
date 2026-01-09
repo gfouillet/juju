@@ -4,6 +4,7 @@
 package machinelock
 
 import (
+	"context"
 	"fmt"
 	"runtime/debug"
 	"sort"
@@ -11,12 +12,14 @@ import (
 	"time"
 
 	"github.com/juju/collections/deque"
-	"github.com/juju/errors"
 	"github.com/juju/lumberjack/v2"
 	"github.com/juju/mutex/v2"
 	"gopkg.in/yaml.v2"
 
+	coreerrors "github.com/juju/juju/core/errors"
+	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/paths"
+	"github.com/juju/juju/internal/errors"
 )
 
 // Filename represents the name of the logfile that is created in the LOG_DIR.
@@ -38,34 +41,28 @@ type Clock interface {
 	Now() time.Time
 }
 
-// Logger defines the logging methods used by the machine lock.
-type Logger interface {
-	Debugf(string, ...interface{})
-	Warningf(string, ...interface{})
-}
-
 // Config defines the attributes needed to correctly construct
 // a machine lock.
 type Config struct {
 	AgentName   string
 	Clock       Clock
-	Logger      Logger
+	Logger      logger.Logger
 	LogFilename string
 }
 
 // Validate ensures that all the required config values are set.
 func (c Config) Validate() error {
 	if c.AgentName == "" {
-		return errors.NotValidf("missing AgentName")
+		return errors.Errorf("missing AgentName %w", coreerrors.NotValid)
 	}
 	if c.Clock == nil {
-		return errors.NotValidf("missing Clock")
+		return errors.Errorf("missing Clock %w", coreerrors.NotValid)
 	}
 	if c.Logger == nil {
-		return errors.NotValidf("missing Logger")
+		return errors.Errorf("missing Logger %w", coreerrors.NotValid)
 	}
 	if c.LogFilename == "" {
-		return errors.NotValidf("missing LogFilename")
+		return errors.Errorf("missing LogFilename %w", coreerrors.NotValid)
 	}
 	return nil
 }
@@ -73,7 +70,7 @@ func (c Config) Validate() error {
 // New creates a new machine lock.
 func New(config Config) (*lock, error) {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	if err := paths.PrimeLogFile(config.LogFilename); err != nil {
 		// This isn't a fatal error so  continue if priming fails.
@@ -128,11 +125,11 @@ type Spec struct {
 func (s Spec) Validate() error {
 	if s.Cancel == nil {
 		if !s.NoCancel {
-			return errors.NotValidf("missing Cancel")
+			return errors.Errorf("missing Cancel %w", coreerrors.NotValid)
 		}
 	}
 	if s.Worker == "" {
-		return errors.NotValidf("missing Worker")
+		return errors.Errorf("missing Worker %w", coreerrors.NotValid)
 	}
 	return nil
 }
@@ -142,7 +139,7 @@ func (s Spec) Validate() error {
 // channel is signalled before the lock is acquired.
 func (c *lock) Acquire(spec Spec) (func(), error) {
 	if err := spec.Validate(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
 	current := &info{
 		worker:    spec.Worker,
@@ -163,7 +160,7 @@ func (c *lock) Acquire(spec Spec) (func(), error) {
 	}
 
 	c.mu.Unlock()
-	c.logger.Debugf("acquire machine lock %q for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
+	c.logger.Debugf(context.TODO(), "acquire machine lock %q for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
 	releaser, err := c.acquire(mSpec)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -171,9 +168,9 @@ func (c *lock) Acquire(spec Spec) (func(), error) {
 	delete(c.waiting, id)
 
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Capture(err)
 	}
-	c.logger.Debugf("machine lock %q acquired for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
+	c.logger.Debugf(context.TODO(), "machine lock %q acquired for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
 	c.holder = current
 	current.acquired = c.clock.Now()
 	return func() {
@@ -187,7 +184,7 @@ func (c *lock) Acquire(spec Spec) (func(), error) {
 		// log file.
 		current.released = c.clock.Now()
 		c.writeLogEntry()
-		c.logger.Debugf("machine lock %q released for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
+		c.logger.Debugf(context.TODO(), "machine lock %q released for %s (%s)", mSpec.Name, spec.Worker, spec.Comment)
 		releaser.Release()
 		c.history.PushFront(current)
 		c.holder = nil
@@ -203,21 +200,21 @@ func (c *lock) writeLogEntry() {
 		MaxBackups: 5,
 		Compress:   true,
 	}
-	c.logger.Debugf("created rotating log file %q with max size %d MB and max backups %d",
+	c.logger.Debugf(context.TODO(), "created rotating log file %q with max size %d MB and max backups %d",
 		writer.Filename, writer.MaxSize, writer.MaxBackups)
 	defer func() { _ = writer.Close() }()
 
 	if c.startMessage != "" {
 		_, err := fmt.Fprintln(writer, c.startMessage)
 		if err != nil {
-			c.logger.Warningf("unable to write startMessage: %s", err.Error())
+			c.logger.Warningf(context.TODO(), "unable to write startMessage: %s", err.Error())
 		}
 		c.startMessage = ""
 	}
 
 	_, err := fmt.Fprintln(writer, simpleInfo(c.agent, c.holder, c.clock.Now()))
 	if err != nil {
-		c.logger.Warningf("unable to release message: %s", err.Error())
+		c.logger.Warningf(context.TODO(), "unable to release message: %s", err.Error())
 	}
 }
 
@@ -237,7 +234,7 @@ type info struct {
 type lock struct {
 	agent        string
 	clock        Clock
-	logger       Logger
+	logger       logger.Logger
 	logFilename  string
 	startMessage string
 
@@ -316,7 +313,7 @@ func (c *lock) Report(opts ...ReportOption) (string, error) {
 	output := map[string]report{c.agent: r}
 	out, err := yaml.Marshal(output)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Capture(err)
 	}
 	return string(out), nil
 }

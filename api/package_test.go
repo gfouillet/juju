@@ -6,57 +6,75 @@ package api
 import (
 	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
-	coretesting "github.com/juju/juju/testing"
+	coretesting "github.com/juju/juju/internal/testing"
 )
-
-func TestPackage(t *testing.T) {
-	coretesting.MgoTestPackage(t)
-}
 
 type ImportSuite struct{}
 
-var _ = gc.Suite(&ImportSuite{})
+func TestImportSuite(t *testing.T) {
+	tc.Run(t, &ImportSuite{})
+}
 
-func (*ImportSuite) TestImports(c *gc.C) {
+func (*ImportSuite) TestImports(c *tc.C) {
 	found := coretesting.FindJujuCoreImports(c, "github.com/juju/juju/api")
 
-	c.Assert(found, jc.SameContents, []string{
+	c.Assert(found, tc.SameContents, []string{
 		"api/agent/keyupdater",
 		"api/base",
 		"api/watcher",
 		"core/arch",
+		"core/backups",
 		"core/base",
 		"core/constraints",
+		"core/credential",
 		"core/devices",
+		"core/errors",
 		"core/facades",
+		"core/flightrecorder",
+		"core/http",
 		"core/instance",
 		"core/life",
-		"core/macaroon",
+		"core/logger",
 		"core/migration",
 		"core/model",
 		"core/network",
-		"core/os",
+		"core/unit",
 		"core/os/ostype",
 		"core/paths",
+		"core/permission",
 		"core/relation",
-		"core/resources",
+		"core/resource",
 		"core/secrets",
+		"core/semversion",
 		"core/status",
+		"core/storage",
+		"core/trace",
+		"core/user",
+		"core/version",
 		"core/watcher",
-		"docker",
-		"environs/context",
-		"feature",
-		"proxy",
+		"domain/model/errors",
+		"domain/secret/errors",
+		"domain/secretbackend/errors",
+		"internal/charm",
+		"internal/charm/assumes",
+		"internal/charm/hooks",
+		"internal/charm/resource",
+		"internal/errors",
+		"internal/featureflag",
+		"internal/http",
+		"internal/logger",
+		"internal/macaroon",
+		"internal/proxy",
+		"internal/proxy/config",
+		"internal/rpcreflect",
+		"internal/storage",
+		"internal/stringcompare",
+		"internal/tools",
+		"internal/uuid",
 		"rpc",
 		"rpc/jsoncodec",
 		"rpc/params",
-		"storage",
-		"tools",
-		"utils/proxy",
-		"utils/stringcompare",
-		"version",
 	})
 }

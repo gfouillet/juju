@@ -4,6 +4,7 @@
 package openstack
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/go-goose/goose/v5/neutron"
@@ -16,13 +17,12 @@ import (
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/network/firewall"
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/instances"
 	envstorage "github.com/juju/juju/environs/storage"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/common"
-	"github.com/juju/juju/storage"
-	"github.com/juju/juju/testing"
+	"github.com/juju/juju/internal/storage"
+	"github.com/juju/juju/internal/testing"
 )
 
 var (
@@ -44,18 +44,19 @@ var (
 	NewOpenstackStorage       = &newOpenstackStorage
 )
 
-func NewCinderVolumeSource(s OpenstackStorage, env common.ZonedEnviron) storage.VolumeSource {
-	return NewCinderVolumeSourceForModel(s, testing.ModelTag.Id(), env)
+func NewCinderVolumeSource(s OpenstackStorage, env common.ZonedEnviron, invalidator common.CredentialInvalidator) storage.VolumeSource {
+	return NewCinderVolumeSourceForModel(s, testing.ModelTag.Id(), env, invalidator)
 }
 
-func NewCinderVolumeSourceForModel(s OpenstackStorage, modelUUID string, env common.ZonedEnviron) storage.VolumeSource {
+func NewCinderVolumeSourceForModel(s OpenstackStorage, modelUUID string, env common.ZonedEnviron, invalidator common.CredentialInvalidator) storage.VolumeSource {
 	const envName = "testmodel"
 	return &cinderVolumeSource{
-		storageAdapter: s,
-		envName:        envName,
-		modelUUID:      modelUUID,
-		namespace:      fakeNamespace{},
-		zonedEnv:       env,
+		storageAdaptor:        s,
+		envName:               envName,
+		modelUUID:             modelUUID,
+		namespace:             fakeNamespace{},
+		zonedEnv:              env,
+		credentialInvalidator: invalidator,
 	}
 }
 
@@ -67,7 +68,7 @@ func (fakeNamespace) Value(s string) string {
 	return "juju-" + s
 }
 
-func EnsureGroup(e environs.Environ, ctx context.ProviderCallContext, name string, isModelGroup bool) (neutron.SecurityGroupV2, error) {
+func EnsureGroup(e environs.Environ, ctx context.Context, name string, isModelGroup bool) (neutron.SecurityGroupV2, error) {
 	switching := &neutronFirewaller{firewallerBase: firewallerBase{environ: e.(*Environ)}}
 	return switching.ensureGroup(name, isModelGroup, nil)
 }
@@ -77,14 +78,14 @@ func MachineGroupName(e environs.Environ, controllerUUID, machineId string) stri
 	return switching.machineGroupName(controllerUUID, machineId)
 }
 
-func GetSecurityGroupByName(e environs.Environ, ctx context.ProviderCallContext, name string) (neutron.SecurityGroupV2, error) {
+func GetSecurityGroupByName(e environs.Environ, ctx context.Context, name string) (neutron.SecurityGroupV2, error) {
 	switching := &neutronFirewaller{firewallerBase: firewallerBase{environ: e.(*Environ)}}
 	return switching.getSecurityGroupByName(ctx, name)
 }
 
 func OpenModelPorts(
 	e environs.Environ,
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	enableSecurityGroup bool,
 	controllerUUID string,
 	rules firewall.IngressRules,
@@ -150,8 +151,8 @@ func FindNetworks(e environs.Environ, internal bool) (set.Strings, error) {
 }
 
 // TerminateInstanceNetworkPorts exposes environ helper function terminateInstanceNetworkPorts for testing.
-func TerminateInstanceNetworkPorts(e environs.Environ, id instance.Id) error {
-	return e.(*Environ).terminateInstanceNetworkPorts(id)
+func TerminateInstanceNetworkPorts(ctx context.Context, e environs.Environ, id instance.Id) error {
+	return e.(*Environ).terminateInstanceNetworkPorts(ctx, id)
 }
 
 var PortsToRuleInfo = rulesToRuleInfo

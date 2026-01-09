@@ -4,31 +4,27 @@
 package secrets
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
-	"github.com/juju/charm/v12/hooks"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/core/life"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/charm/hooks"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
 )
 
-// Logger is here to stop the desire of creating a package level Logger.
-// Don't do this, instead pass a Logger in to the required functions.
-type logger interface{}
-
-var _ logger = struct{}{}
-
 // secretsResolver is a Resolver that returns operations to rotate secrets.
 // When a rotation is completed, the "rotatedSecrets" callback
 // is invoked to update the rotate time in the remote state.
 type secretsResolver struct {
-	logger           Logger
+	logger           logger.Logger
 	secretsTracker   SecretStateTracker
 	rotatedSecrets   func(url string)
 	expiredRevisions func(rev string)
@@ -37,7 +33,7 @@ type secretsResolver struct {
 
 // NewSecretsResolver returns a new Resolver that returns operations
 // to rotate, expire, or run other secret related hooks.
-func NewSecretsResolver(logger Logger, secretsTracker SecretStateTracker,
+func NewSecretsResolver(logger logger.Logger, secretsTracker SecretStateTracker,
 	rotatedSecrets func(string), expiredRevisions func(string), deletedSecrets func(map[string][]int),
 ) resolver.Resolver {
 	return &secretsResolver{logger: logger, secretsTracker: secretsTracker,
@@ -46,6 +42,7 @@ func NewSecretsResolver(logger Logger, secretsTracker SecretStateTracker,
 
 // NextOp is part of the resolver.Resolver interface.
 func (s *secretsResolver) NextOp(
+	ctx context.Context,
 	localState resolver.LocalState,
 	remoteState remotestate.Snapshot,
 	opFactory operation.Factory,
@@ -68,12 +65,12 @@ func (s *secretsResolver) NextOp(
 	}
 	for uri, info := range remoteState.ConsumedSecretInfo {
 		existing := s.secretsTracker.ConsumedSecretRevision(uri)
-		s.logger.Debugf("%s: current=%d, new=%d", uri, existing, info.Revision)
-		if existing != info.Revision {
+		s.logger.Debugf(ctx, "%s: current=%d, new=%d", uri, existing, info.LatestRevision)
+		if existing != info.LatestRevision {
 			op, err := opFactory.NewRunHook(hook.Info{
 				Kind:           hooks.SecretChanged,
 				SecretURI:      uri,
-				SecretRevision: info.Revision,
+				SecretRevision: info.LatestRevision,
 				SecretLabel:    info.Label,
 			})
 			return op, err
@@ -96,7 +93,7 @@ func (s *secretsResolver) NextOp(
 	}
 
 	for uri, revs := range remoteState.ObsoleteSecretRevisions {
-		s.logger.Debugf("%s: resolving obsolete %v", uri, revs)
+		s.logger.Debugf(ctx, "%s: resolving obsolete %v", uri, revs)
 		alreadyProcessed := set.NewInts(s.secretsTracker.SecretObsoleteRevisions(uri)...)
 		for _, rev := range revs {
 			if alreadyProcessed.Contains(rev) {
@@ -157,7 +154,7 @@ func (s *secretsResolver) expireOp(
 	revSpec := remoteState.ExpiredSecretRevisions[0]
 	uri, rev := splitSecretChange(revSpec)
 	if rev == 0 {
-		s.logger.Warningf("ignoring invalid secret revision %q", revSpec)
+		s.logger.Warningf(context.TODO(), "ignoring invalid secret revision %q", revSpec)
 		return nil, resolver.ErrNoOperation
 	}
 
@@ -172,7 +169,7 @@ func (s *secretsResolver) expireOp(
 	opCompleted := func() {
 		s.expiredRevisions(revSpec)
 	}
-	return &secretCompleter{op, opCompleted}, nil
+	return &secretCompleter{Operation: op, secretCompleted: opCompleted}, nil
 }
 
 type secretCompleter struct {
@@ -180,8 +177,8 @@ type secretCompleter struct {
 	secretCompleted func()
 }
 
-func (c *secretCompleter) Commit(st operation.State) (*operation.State, error) {
-	result, err := c.Operation.Commit(st)
+func (c *secretCompleter) Commit(ctx context.Context, st operation.State) (*operation.State, error) {
+	result, err := c.Operation.Commit(ctx, st)
 	if err == nil {
 		c.secretCompleted()
 	}

@@ -4,12 +4,15 @@
 package muxhttpserver
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/apiserver/apiserverhttp"
-	"github.com/juju/juju/pki"
+	"github.com/juju/juju/core/logger"
+	"github.com/juju/juju/internal/pki"
 )
 
 type ManifoldConfig struct {
@@ -17,7 +20,7 @@ type ManifoldConfig struct {
 	Address string
 
 	AuthorityName string
-	Logger        Logger
+	Logger        logger.Logger
 	Port          string
 }
 
@@ -52,7 +55,7 @@ func manifoldOutput(in worker.Worker, out interface{}) error {
 	return nil
 }
 
-func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error) {
+func (c ManifoldConfig) Start(context context.Context, getter dependency.Getter) (worker.Worker, error) {
 	if err := c.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -71,7 +74,7 @@ func (c ManifoldConfig) Start(context dependency.Context) (worker.Worker, error)
 	}
 
 	var authority pki.Authority
-	if err := context.Get(c.AuthorityName, &authority); err != nil {
+	if err := getter.Get(c.AuthorityName, &authority); err != nil {
 		return nil, errors.Trace(err)
 	}
 

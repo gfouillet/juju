@@ -41,6 +41,11 @@ This is the case for MAAS, as described below.
 
 The concept of spaces is native to MAAS and its API can be used to modify the space/subnet topology. As such, Juju does not permit editing of spaces in a MAAS model. MAAS spaces and subnets are read and loaded into Juju when a new model is created.
 
+By default, Juju applications are bound to the space named `alpha`. In MAAS, the `alpha` space does not exist, so on
+MAAS models, by default, applications won't have any connectivity. To enable connectivity, the deployer needs to either
+bind the application to a space that exists, or use `default-space` in model configuration to specify a space that
+does exist before deploying.
+
 If spaces or subnets are changed in MAAS, they can be reloaded into Juju via Juju's `reload-spaces` command.
 
 ```{important}
@@ -69,13 +74,13 @@ LXD automatically detects any subnets belonging to bridge networks that it has a
 
 ### Subnets discovered progressively
 
-This is the case for the Manual provider, as described below.
+This is the case for the Unmanaged provider, as described below.
 
-#### Manual
+#### Unmanaged
 
-For the Manual provider, space support differs somewhat from other providers. The `reload-spaces` command does not discover subnets. Instead, each time a manual machine is provisioned, its discovered network devices are used to update Juju's known subnet list.
+For the Unmanaged provider, space support differs somewhat from other providers. The `reload-spaces` command does not discover subnets. Instead, each time a machine is manually added, its discovered network devices are used to update Juju's known subnet list.
 
-Accordingly, the machines to be used in a manual provider must be provisioned by Juju before their subnets can be grouped into spaces. When provisioning a machine results in discovery of a new subnet, that subnet will reside in the _alpha_ space.
+Accordingly, the machines to be used in an Unmanaged provider must be provisioned by Juju before their subnets can be grouped into spaces. When provisioning a machine results in discovery of a new subnet, that subnet will reside in the _alpha_ space.
 
 
 <!--(2) Subnets inherited from the substrate, to be grouped at the discretion of the Juju administrator. -->

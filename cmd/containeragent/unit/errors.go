@@ -1,11 +1,11 @@
-// Copyright 2024 Canonical Ltd.
+// Copyright 2023 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
 package unit
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3/dependency"
+	"github.com/juju/worker/v4/dependency"
 
 	"github.com/juju/juju/internal/worker/lifeflag"
 )

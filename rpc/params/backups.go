@@ -6,7 +6,8 @@ package params
 import (
 	"time"
 
-	"github.com/juju/version/v2"
+	corebackups "github.com/juju/juju/core/backups"
+	"github.com/juju/juju/core/semversion"
 )
 
 // BackupsCreateArgs holds the args for the API Create method.
@@ -30,14 +31,14 @@ type BackupsMetadataResult struct {
 	Size           int64     `json:"size"`
 	Stored         time.Time `json:"stored"` // May be zero...
 
-	Started  time.Time      `json:"started"`
-	Finished time.Time      `json:"finished"` // May be zero...
-	Notes    string         `json:"notes"`
-	Model    string         `json:"model"`
-	Machine  string         `json:"machine"`
-	Hostname string         `json:"hostname"`
-	Version  version.Number `json:"version"`
-	Base     string         `json:"base"`
+	Started  time.Time         `json:"started"`
+	Finished time.Time         `json:"finished"` // May be zero...
+	Notes    string            `json:"notes"`
+	Model    string            `json:"model"`
+	Machine  string            `json:"machine"`
+	Hostname string            `json:"hostname"`
+	Version  semversion.Number `json:"version"`
+	Base     string            `json:"base"`
 
 	Filename string `json:"filename"`
 
@@ -57,4 +58,40 @@ type BackupsMetadataResult struct {
 
 	// HANodes reflects HA configuration: number of controller nodes in HA.
 	HANodes int64 `json:"ha-nodes"`
+}
+
+// CreateResult updates the result with the information in the
+// metadata value.
+func CreateResult(meta *corebackups.Metadata, filename string) BackupsMetadataResult {
+	var result BackupsMetadataResult
+
+	result.ID = meta.ID()
+
+	result.Checksum = meta.Checksum()
+	result.ChecksumFormat = meta.ChecksumFormat()
+	result.Size = meta.Size()
+	if meta.Stored() != nil {
+		result.Stored = *(meta.Stored())
+	}
+
+	result.Started = meta.Started
+	if meta.Finished != nil {
+		result.Finished = *meta.Finished
+	}
+	result.Notes = meta.Notes
+
+	result.Model = meta.Origin.Model
+	result.Machine = meta.Origin.Machine
+	result.Hostname = meta.Origin.Hostname
+	result.Version = meta.Origin.Version
+	result.Base = meta.Origin.Base
+
+	result.ControllerUUID = meta.Controller.UUID
+	result.FormatVersion = meta.FormatVersion
+	result.HANodes = meta.Controller.HANodes
+	result.ControllerMachineID = meta.Controller.MachineID
+	result.ControllerMachineInstanceID = meta.Controller.MachineInstanceID
+	result.Filename = filename
+
+	return result
 }

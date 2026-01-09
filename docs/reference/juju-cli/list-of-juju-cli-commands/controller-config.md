@@ -72,11 +72,6 @@ Controller configuration keys:
     agent-ratelimit-rate:
       type: string
       description: The time taken to add a new token to the ratelimit bucket
-    api-port-open-delay:
-      type: string
-      description: "The duration that the controller will wait \nbetween when the controller
-        has been deemed to be ready to open \nthe api-port and when the api-port is actually
-        opened \n(only used when a controller-api-port value is set)."
     application-resource-download-limit:
       type: int
       description: The maximum number of concurrent resources downloads per application
@@ -84,9 +79,9 @@ Controller configuration keys:
       type: bool
       description: Determines if the audit log contains the arguments passed to API methods
     audit-log-exclude-methods:
-      type: list
-      description: The list of Facade.Method names that aren't interesting for audit logging
-        purposes.
+      type: string
+      description: A comma-delimited list of Facade.Method names that aren't interesting
+        for audit logging purposes.
     audit-log-max-backups:
       type: int
       description: The number of old audit log files to keep (compressed)
@@ -99,30 +94,26 @@ Controller configuration keys:
     caas-image-repo:
       type: string
       description: The docker repo to use for the jujud operator and mongo images
-    controller-api-port:
-      type: int
-      description: |-
-        An optional port that may be set for controllers
-        that have a very heavy load. If this port is set, this port is used by
-        the controllers to talk to each other - used for the local API connection
-        as well as the pubsub forwarders, and the raft workers. If this value is
-        set, the api-port isn't opened until the controllers have started properly.
     controller-resource-download-limit:
       type: int
       description: The maximum number of concurrent resources downloads across all the
         applications on the controller
+    dqlite-busy-timeout:
+      type: string
+      description: |-
+        The timeout for how long a database operation will wait for a lock
+        to be released before returning an error, that is the amount of
+        time a writer will wait for others to finish writing on the
+        same database.
     features:
-      type: list
-      description: A list of runtime changeable features to be updated
+      type: string
+      description: A comma-delimited list of runtime changeable features to be updated
     idle-connection-timeout:
       type: string
       description: |
         The time the controller will wait between
         resets of all idle connections. By default, every 10 minutes
         the controller will close all idle connections.
-    juju-ha-space:
-      type: string
-      description: The network space within which the MongoDB replica-set should communicate
     juju-mgmt-space:
       type: string
       description: The network space that agents should use to communicate with controllers
@@ -155,12 +146,39 @@ Controller configuration keys:
       type: string
       description: The maximum size of the log file written out by the controller on behalf
         of workers running for a model
-    model-logs-size:
+    object-store-s3-endpoint:
       type: string
-      description: The size of the capped collections used to hold the logs for the models
-    mongo-memory-profile:
+      description: The s3 endpoint for the object store backend
+    object-store-s3-static-key:
       type: string
-      description: Sets mongo memory profile
+      description: The s3 static key for the object store backend
+    object-store-s3-static-secret:
+      type: string
+      description: The s3 static secret for the object store backend
+    object-store-s3-static-session:
+      type: string
+      description: The s3 static session for the object store backend
+    object-store-type:
+      type: string
+      description: The type of object store backend to use for storing blobs
+    open-telemetry-enabled:
+      type: bool
+      description: Enable open telemetry tracing
+    open-telemetry-endpoint:
+      type: string
+      description: Endpoint open telemetry tracing
+    open-telemetry-insecure:
+      type: bool
+      description: Allows insecure endpoint for open telemetry tracing
+    open-telemetry-sample-ratio:
+      type: string
+      description: Allows defining a sample ratio open telemetry tracing
+    open-telemetry-stack-traces:
+      type: bool
+      description: Allows stack traces open telemetry tracing per span
+    open-telemetry-tail-sampling-threshold:
+      type: string
+      description: Allows defining a tail sampling threshold open telemetry tracing
     prune-txn-query-count:
       type: int
       description: The number of transactions to read in a single query
@@ -175,9 +193,10 @@ Controller configuration keys:
       description: Enable query tracing for the dqlite driver
     query-tracing-threshold:
       type: string
-      description: "The minimum duration of a query for it to be traced. The lower the
-        \nthreshold, the more queries will be output. A value of 0 means all queries \nwill
-        be output if tracing is enabled."
+      description: |-
+        The minimum duration of a query for it to be traced. The lower the
+        threshold, the more queries will be output. A value of 0 means all
+        queries will be output if tracing is enabled.
     ssh-max-concurrent-connections:
       type: int
       description: The maximum number of concurrent ssh connections to the controller

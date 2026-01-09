@@ -4,60 +4,75 @@
 package externalcontrollerupdater
 
 import (
-	"github.com/juju/names/v5"
+	"context"
+
+	"github.com/juju/errors"
+	"github.com/juju/names/v6"
 
 	apiservererrors "github.com/juju/juju/apiserver/errors"
-	"github.com/juju/juju/apiserver/facade"
+	"github.com/juju/juju/apiserver/internal"
 	"github.com/juju/juju/core/crossmodel"
+	"github.com/juju/juju/core/watcher"
 	"github.com/juju/juju/rpc/params"
-	"github.com/juju/juju/state"
-	"github.com/juju/juju/state/watcher"
 )
 
-// ExternalControllerUpdaterAPI provides access to the CrossModelRelations API facade.
+// ExternalControllerService provides a subset of the external controller domain
+// service methods.
+type ExternalControllerService interface {
+	Controller(ctx context.Context, controllerUUID string) (*crossmodel.ControllerInfo, error)
+	UpdateExternalController(ctx context.Context, ec crossmodel.ControllerInfo) error
+	Watch(context.Context) (watcher.StringsWatcher, error)
+}
+
+// ExternalControllerUpdaterAPI provides access to the CrossModelRelations API
+// facade.
 type ExternalControllerUpdaterAPI struct {
-	externalControllers state.ExternalControllers
-	resources           facade.Resources
+	ecService       ExternalControllerService
+	watcherRegistry internal.WatcherRegistry
 }
 
 // NewAPI creates a new server-side CrossModelRelationsAPI API facade backed
 // by the given interfaces.
 func NewAPI(
-	auth facade.Authorizer,
-	resources facade.Resources,
-	externalControllers state.ExternalControllers,
+	ecService ExternalControllerService,
+	watcherRegistry internal.WatcherRegistry,
 ) (*ExternalControllerUpdaterAPI, error) {
-	if !auth.AuthController() {
-		return nil, apiservererrors.ErrPerm
-	}
 	return &ExternalControllerUpdaterAPI{
-		externalControllers,
-		resources,
+		ecService:       ecService,
+		watcherRegistry: watcherRegistry,
 	}, nil
 }
 
 // WatchExternalControllers watches for the addition and removal of external
 // controller records to the local controller's database.
-func (api *ExternalControllerUpdaterAPI) WatchExternalControllers() (params.StringsWatchResults, error) {
-	w := api.externalControllers.Watch()
-	changes, ok := <-w.Changes()
-	if !ok {
+func (api *ExternalControllerUpdaterAPI) WatchExternalControllers(ctx context.Context) (params.StringsWatchResults, error) {
+	w, err := api.ecService.Watch(ctx)
+	if err != nil {
 		return params.StringsWatchResults{
-			[]params.StringsWatchResult{{
-				Error: apiservererrors.ServerError(watcher.EnsureErr(w)),
+			Results: []params.StringsWatchResult{{
+				Error: apiservererrors.ServerError(errors.Annotate(err, "watching external controllers changes")),
+			}},
+		}, nil
+	}
+
+	id, changes, err := internal.EnsureRegisterWatcher(ctx, api.watcherRegistry, w)
+	if err != nil {
+		return params.StringsWatchResults{
+			Results: []params.StringsWatchResult{{
+				Error: apiservererrors.ServerError(errors.Annotate(err, "watching external controllers changes")),
 			}},
 		}, nil
 	}
 	return params.StringsWatchResults{
-		[]params.StringsWatchResult{{
-			StringsWatcherId: api.resources.Register(w),
+		Results: []params.StringsWatchResult{{
+			StringsWatcherId: id,
 			Changes:          changes,
 		}},
 	}, nil
 }
 
 // ExternalControllerInfo returns the info for the specified external controllers.
-func (s *ExternalControllerUpdaterAPI) ExternalControllerInfo(args params.Entities) (params.ExternalControllerInfoResults, error) {
+func (s *ExternalControllerUpdaterAPI) ExternalControllerInfo(ctx context.Context, args params.Entities) (params.ExternalControllerInfoResults, error) {
 	result := params.ExternalControllerInfoResults{
 		Results: make([]params.ExternalControllerInfoResult, len(args.Entities)),
 	}
@@ -67,24 +82,23 @@ func (s *ExternalControllerUpdaterAPI) ExternalControllerInfo(args params.Entiti
 			result.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		controller, err := s.externalControllers.Controller(controllerTag.Id())
+		controllerInfo, err := s.ecService.Controller(ctx, controllerTag.Id())
 		if err != nil {
 			result.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		info := controller.ControllerInfo()
 		result.Results[i].Result = &params.ExternalControllerInfo{
 			ControllerTag: controllerTag.String(),
-			Alias:         info.Alias,
-			Addrs:         info.Addrs,
-			CACert:        info.CACert,
+			Alias:         controllerInfo.Alias,
+			Addrs:         controllerInfo.Addrs,
+			CACert:        controllerInfo.CACert,
 		}
 	}
 	return result, nil
 }
 
 // SetExternalControllerInfo saves the info for the specified external controllers.
-func (s *ExternalControllerUpdaterAPI) SetExternalControllerInfo(args params.SetExternalControllersInfoParams) (params.ErrorResults, error) {
+func (s *ExternalControllerUpdaterAPI) SetExternalControllerInfo(ctx context.Context, args params.SetExternalControllersInfoParams) (params.ErrorResults, error) {
 	result := params.ErrorResults{
 		Results: make([]params.ErrorResult, len(args.Controllers)),
 	}
@@ -94,11 +108,11 @@ func (s *ExternalControllerUpdaterAPI) SetExternalControllerInfo(args params.Set
 			result.Results[i].Error = apiservererrors.ServerError(err)
 			continue
 		}
-		if _, err := s.externalControllers.Save(crossmodel.ControllerInfo{
-			ControllerTag: controllerTag,
-			Alias:         arg.Info.Alias,
-			Addrs:         arg.Info.Addrs,
-			CACert:        arg.Info.CACert,
+		if err := s.ecService.UpdateExternalController(ctx, crossmodel.ControllerInfo{
+			ControllerUUID: controllerTag.Id(),
+			Alias:          arg.Info.Alias,
+			Addrs:          arg.Info.Addrs,
+			CACert:         arg.Info.CACert,
 		}); err != nil {
 			result.Results[i].Error = apiservererrors.ServerError(err)
 			continue

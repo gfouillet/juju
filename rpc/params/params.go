@@ -4,6 +4,7 @@
 package params
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,15 +12,14 @@ import (
 	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
 	"github.com/juju/errors"
 	"github.com/juju/proxy"
-	"github.com/juju/utils/v3/ssh"
-	"github.com/juju/version/v2"
 	"gopkg.in/macaroon.v2"
 
 	"github.com/juju/juju/core/constraints"
 	"github.com/juju/juju/core/instance"
 	"github.com/juju/juju/core/model"
-	"github.com/juju/juju/storage"
-	"github.com/juju/juju/tools"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/tools"
 )
 
 // Entity identifies a single entity.
@@ -224,7 +224,7 @@ type AddMachineParams struct {
 
 	// Disks describes constraints for disks that must be attached to
 	// the machine when it is provisioned.
-	Disks []storage.Constraints `json:"disks,omitempty"`
+	Disks []storage.Directive `json:"disks,omitempty"`
 
 	// If Placement is non-nil, it contains a placement directive
 	// that will be used to decide how to instantiate the machine.
@@ -270,18 +270,6 @@ type AddMachinesResults struct {
 type AddMachinesResult struct {
 	Machine string `json:"machine"`
 	Error   *Error `json:"error,omitempty"`
-}
-
-// DestroyMachinesParamsV9 holds parameters for the v9 DestroyMachinesWithParams call.
-type DestroyMachinesParamsV9 struct {
-	MachineTags []string `json:"machine-tags"`
-	Force       bool     `json:"force,omitempty"`
-	Keep        bool     `json:"keep,omitempty"`
-
-	// MaxWait specifies the amount of time that each step in machine destroy process
-	// will wait before forcing the next step to kick-off. This parameter
-	// only makes sense in combination with 'force' set to 'true'.
-	MaxWait *time.Duration `json:"max-wait,omitempty"`
 }
 
 // DestroyMachinesParams holds parameters for the latest DestroyMachinesWithParams call.
@@ -356,25 +344,9 @@ type ConfigResult struct {
 
 // ModelOperatorInfo holds infor needed for a model operator.
 type ModelOperatorInfo struct {
-	APIAddresses []string        `json:"api-addresses"`
-	ImageDetails DockerImageInfo `json:"image-details"`
-	Version      version.Number  `json:"version"`
-}
-
-// OperatorProvisioningInfoResults holds OperatorProvisioningInfo results.
-type OperatorProvisioningInfoResults struct {
-	Results []OperatorProvisioningInfo `json:"results"`
-}
-
-// OperatorProvisioningInfo holds info need to provision an operator.
-type OperatorProvisioningInfo struct {
-	ImageDetails     DockerImageInfo             `json:"image-details"`
-	BaseImageDetails DockerImageInfo             `json:"base-image-details"`
-	Version          version.Number              `json:"version"`
-	APIAddresses     []string                    `json:"api-addresses"`
-	Tags             map[string]string           `json:"tags,omitempty"`
-	CharmStorage     *KubernetesFilesystemParams `json:"charm-storage,omitempty"`
-	Error            *Error                      `json:"error,omitempty"`
+	APIAddresses []string          `json:"api-addresses"`
+	ImageDetails DockerImageInfo   `json:"image-details"`
+	Version      semversion.Number `json:"version"`
 }
 
 // IssueOperatorCertificateResult contains an x509 certificate
@@ -598,10 +570,12 @@ type LoginRequest struct {
 	Nonce         string           `json:"nonce"`
 	Macaroons     []macaroon.Slice `json:"macaroons"`
 	BakeryVersion bakery.Version   `json:"bakery-version,omitempty"`
-	Token         string           `json:"token,omitempty"`
-	CLIArgs       string           `json:"cli-args,omitempty"`
-	UserData      string           `json:"user-data"`
-	ClientVersion string           `json:"client-version,omitempty"`
+
+	// Token represents a JSON Web Token (JWT).
+	Token         string `json:"token,omitempty"`
+	CLIArgs       string `json:"cli-args,omitempty"`
+	UserData      string `json:"user-data"`
+	ClientVersion string `json:"client-version,omitempty"`
 }
 
 // LoginRequestCompat holds credentials for identifying an entity to the Login v1
@@ -686,19 +660,6 @@ type ResolveCharmWithChannelResults struct {
 	Results []ResolveCharmWithChannelResult
 }
 
-// ResolveCharmWithChannelResultV6 is the result of a single charm resolution.
-type ResolveCharmWithChannelResultV6 struct {
-	URL             string      `json:"url"`
-	Origin          CharmOrigin `json:"charm-origin"`
-	SupportedSeries []string    `json:"supported-series"`
-	Error           *Error      `json:"error,omitempty"`
-}
-
-// ResolveCharmWithChannelResultsV6 holds the results of ResolveCharmsWithChannel.
-type ResolveCharmWithChannelResultsV6 struct {
-	Results []ResolveCharmWithChannelResultV6
-}
-
 // CharmURLAndOrigins contains a slice of charm urls with a given origin.
 type CharmURLAndOrigins struct {
 	Entities []CharmURLAndOrigin `json:"entities"`
@@ -727,15 +688,25 @@ type AllWatcherId struct {
 	AllWatcherId string `json:"watcher-id"`
 }
 
-// AllWatcherNextResults holds deltas returned from calling AllWatcher.Next().
-type AllWatcherNextResults struct {
-	Deltas []Delta `json:"deltas"`
-}
+// SSHListMode describes the mode to use when list ssh keys. This value has been
+// brought over from [github.com/juju/utils/ssh].
+type SSHListMode bool
+
+const (
+	// SSHListModeFull is a [SSHListMode] that list ssh keys with their full raw
+	// value. This const comes from [github.com/juju/utils/ssh.FullKeys]
+	SSHListModeFull = SSHListMode(true)
+
+	// SSHListModeFingerprint is a [SSHListMode] that list ssh keys with just
+	// their fingerprint value. This const comes from
+	// [github.com/juju/utils/ssh.Fingerprints]
+	SSHListModeFingerprint = SSHListMode(false)
+)
 
 // ListSSHKeys stores parameters used for a KeyManager.ListKeys call.
 type ListSSHKeys struct {
 	Entities `json:"entities"`
-	Mode     ssh.ListMode `json:"mode"`
+	Mode     SSHListMode `json:"mode"`
 }
 
 // ModifyUserSSHKeys stores parameters used for a KeyManager.Add|Delete|Import call for a user.
@@ -747,9 +718,7 @@ type ModifyUserSSHKeys struct {
 // StateServingInfo holds information needed by a state
 // server.
 type StateServingInfo struct {
-	APIPort           int `json:"api-port"`
-	ControllerAPIPort int `json:"controller-api-port,omitempty"`
-	StatePort         int `json:"state-port"`
+	APIPort int `json:"api-port"`
 	// The controller cert and corresponding private key.
 	Cert       string `json:"cert"`
 	PrivateKey string `json:"private-key"`
@@ -757,7 +726,6 @@ type StateServingInfo struct {
 	// cert can be generated when needed.
 	CAPrivateKey string `json:"ca-private-key"`
 	// this will be passed as the KeyFile argument to MongoDB
-	SharedSecret   string `json:"shared-secret"`
 	SystemIdentity string `json:"system-identity"`
 }
 
@@ -835,10 +803,24 @@ type DeployerConnectionValues struct {
 	APIAddresses []string `json:"api-addresses"`
 }
 
+// IsControllerResult holds the result of an IsController call, which returns
+// whether a given machine is a controller machine.
+type IsControllerResult struct {
+	IsController bool   `json:"is-controller"`
+	Error        *Error `json:"error,omitempty"`
+}
+
+// IsControllerResults holds the result of a call to IsController
+type IsControllerResults struct {
+	Results []IsControllerResult `json:"results"`
+}
+
 // JobsResult holds the jobs for a machine that are returned by a call to Jobs.
+//
+// Deprecated: Jobs is being deprecated. Use IsController instead.
 type JobsResult struct {
-	Jobs  []model.MachineJob `json:"jobs"`
-	Error *Error             `json:"error,omitempty"`
+	Jobs  []string `json:"jobs"`
+	Error *Error   `json:"error,omitempty"`
 }
 
 // JobsResults holds the result of a call to Jobs.
@@ -972,6 +954,19 @@ type ControllersSpecs struct {
 	Specs []ControllersSpec `json:"specs"`
 }
 
+// ControllerDetailsResults contains the results
+// of a call to fetch controller config details.
+type ControllerDetailsResults struct {
+	Results []ControllerDetails `json:"results"`
+}
+
+// ControllerDetails contains the details about a controller.
+type ControllerDetails struct {
+	ControllerId string   `json:"controller-id"`
+	APIAddresses []string `json:"api-addresses"`
+	Error        *Error   `json:"error,omitempty"`
+}
+
 // ControllersChangeResult contains the results
 // of a single EnableHA API call or
 // an error.
@@ -999,7 +994,7 @@ type ControllersChanges struct {
 // FindToolsParams defines parameters for the FindTools method.
 type FindToolsParams struct {
 	// Number will be used to match tools versions exactly if non-zero.
-	Number version.Number `json:"number"`
+	Number semversion.Number `json:"number"`
 
 	// MajorVersion will be used to match the major version if non-zero.
 	// TODO(juju 3.1) - remove
@@ -1036,14 +1031,43 @@ type RebootActionResult struct {
 // LogRecord is used to transmit log messages to the logsink API
 // endpoint.  Single character field names are used for serialisation
 // to keep the size down. These messages are going to be sent a lot.
+// The log messages are sent by the log sender worker, used by agents to
+// send logs to the controller.
 type LogRecord struct {
+	Time     time.Time         `json:"t"`
+	Module   string            `json:"m"`
+	Location string            `json:"l"`
+	Level    string            `json:"v"`
+	Message  string            `json:"x"`
+	Entity   string            `json:"e,omitempty"`
+	Labels   map[string]string `json:"b,omitempty"`
+}
+
+type logRecordJSON struct {
 	Time     time.Time `json:"t"`
 	Module   string    `json:"m"`
 	Location string    `json:"l"`
 	Level    string    `json:"v"`
 	Message  string    `json:"x"`
 	Entity   string    `json:"e,omitempty"`
-	Labels   []string  `json:"c,omitempty"`
+	Labels   any       `json:"b,omitempty"`
+}
+
+// UnmarshalJSON unmarshalls an incoming log record
+// which may have been generated by an older client.
+func (m *LogRecord) UnmarshalJSON(data []byte) error {
+	var jr logRecordJSON
+	if err := json.Unmarshal(data, &jr); err != nil {
+		return errors.Trace(err)
+	}
+	m.Time = jr.Time
+	m.Entity = jr.Entity
+	m.Level = jr.Level
+	m.Module = jr.Module
+	m.Location = jr.Location
+	m.Message = jr.Message
+	m.Labels = unmarshallLogLabels(jr.Labels)
+	return nil
 }
 
 // PubSubMessage is used to propagate pubsub messages from one api server to the
@@ -1110,7 +1134,6 @@ type LeaseOperationCommand struct {
 // ExportBundleParams holds parameters for exporting Bundles.
 type ExportBundleParams struct {
 	IncludeCharmDefaults bool `json:"include-charm-defaults,omitempty"`
-	IncludeSeries        bool `json:"include-series,omitempty"`
 }
 
 // BundleChangesParams holds parameters for making Bundle.GetChanges calls.
@@ -1119,29 +1142,6 @@ type BundleChangesParams struct {
 	// (see "github.com/juju/charm.BundleData").
 	BundleDataYAML string `json:"yaml"`
 	BundleURL      string `json:"bundleURL"`
-}
-
-// BundleChangesResults holds results of the Bundle.GetChanges call.
-type BundleChangesResults struct {
-	// Changes holds the list of changes required to deploy the bundle.
-	// It is omitted if the provided bundle YAML has verification errors.
-	Changes []*BundleChange `json:"changes,omitempty"`
-	// Errors holds possible bundle verification errors.
-	Errors []string `json:"errors,omitempty"`
-}
-
-// BundleChange holds a single change required to deploy a bundle.
-type BundleChange struct {
-	// Id is the unique identifier for this change.
-	Id string `json:"id"`
-	// Method is the action to be performed to apply this change.
-	Method string `json:"method"`
-	// Args holds a list of arguments to pass to the method.
-	Args []interface{} `json:"args"`
-	// Requires holds a list of dependencies for this change. Each dependency
-	// is represented by the corresponding change id, and must be applied
-	// before this change is applied.
-	Requires []string `json:"requires"`
 }
 
 // BundleChangesMapArgsResults holds results of the Bundle.GetChanges call.
@@ -1174,18 +1174,6 @@ type MongoVersion struct {
 	Minor         int    `json:"minor"`
 	Patch         string `json:"patch"`
 	StorageEngine string `json:"engine"`
-}
-
-// MeterStatusParam holds meter status information to be set for the specified tag.
-type MeterStatusParam struct {
-	Tag  string `json:"tag"`
-	Code string `json:"code"`
-	Info string `json:"info,omitempty"`
-}
-
-// MeterStatusParams holds parameters for making SetMeterStatus calls.
-type MeterStatusParams struct {
-	Statuses []MeterStatusParam `json:"statues"`
 }
 
 // MacaroonResults contains a set of MacaroonResults.
@@ -1268,72 +1256,6 @@ type DestroyUnitInfo struct {
 type DumpModelRequest struct {
 	Entities   []Entity `json:"entities"`
 	Simplified bool     `json:"simplified"`
-}
-
-// UpgradeSeriesStatusResult contains the upgrade series status result for an upgrading
-// machine or unit
-type UpgradeSeriesStatusResult struct {
-	Error  *Error                    `json:"error,omitempty"`
-	Status model.UpgradeSeriesStatus `json:"status,omitempty"`
-	Target string                    `json:"target,omitempty"`
-}
-
-// UpgradeSeriesStatusResults contains the upgrade series status results for
-// upgrading machines or units.
-type UpgradeSeriesStatusResults struct {
-	Results []UpgradeSeriesStatusResult `json:"results,omitempty"`
-}
-
-// UpgradeSeriesStatusParams contains the entities and desired statuses for
-// those entities.
-type UpgradeSeriesStatusParams struct {
-	Params []UpgradeSeriesStatusParam `json:"params"`
-}
-
-// UpgradeSeriesStatusParam contains the entity and desired status for that
-// entity along with a context message describing why the change to the status
-// is being requested.
-type UpgradeSeriesStatusParam struct {
-	Entity  Entity                    `json:"entity"`
-	Status  model.UpgradeSeriesStatus `json:"status"`
-	Message string                    `json:"message"`
-}
-
-// UpgradeSeriesStartUnitCompletionParam contains entities and a context message.
-type UpgradeSeriesStartUnitCompletionParam struct {
-	Entities []Entity `json:"entities"`
-	Message  string   `json:"message"`
-}
-
-type UpgradeSeriesNotificationParams struct {
-	Params []UpgradeSeriesNotificationParam `json:"params"`
-}
-
-type UpgradeSeriesNotificationParam struct {
-	Entity    Entity `json:"entity"`
-	WatcherId string `json:"watcher-id"`
-}
-
-// UpgradeSeriesUnitsResults contains the units affected by a series per
-// machine entity.
-type UpgradeSeriesUnitsResults struct {
-	Results []UpgradeSeriesUnitsResult
-}
-
-// UpgradeSeriesUnitsResult contains the units affected by a series for
-// a given machine.
-type UpgradeSeriesUnitsResult struct {
-	Error     *Error   `json:"error,omitempty"`
-	UnitNames []string `json:"unit-names"`
-}
-
-type UpgradeSeriesValidationErrorInfo struct {
-	Status string
-}
-
-// AsMap encodes the error info as a map that can be attached to an Error.
-func (e UpgradeSeriesValidationErrorInfo) AsMap() map[string]interface{} {
-	return serializeToMap(e)
 }
 
 type ProfileArg struct {
@@ -1481,17 +1403,6 @@ type GenerationResult struct {
 type CharmProfilingInfoResult struct {
 	InstanceId      instance.Id         `json:"instance-id"`
 	ModelName       string              `json:"model-name"`
-	ProfileChanges  []ProfileInfoResult `json:"profile-changes"`
-	CurrentProfiles []string            `json:"current-profiles"`
-	Error           *Error              `json:"error"`
-}
-
-// CharmProfilingInfoResultV4 has the same data as CharmProfilingInfoResult with
-// the addition of a ModelUUID field.
-type CharmProfilingInfoResultV4 struct {
-	InstanceId      instance.Id         `json:"instance-id"`
-	ModelName       string              `json:"model-name"`
-	ModelUUID       string              `json:"model-uuid"`
 	ProfileChanges  []ProfileInfoResult `json:"profile-changes"`
 	CurrentProfiles []string            `json:"current-profiles"`
 	Error           *Error              `json:"error"`

@@ -5,19 +5,20 @@ package charmhub
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/juju/charm/v12"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 
-	"github.com/juju/juju/charmhub/transport"
 	"github.com/juju/juju/core/arch"
 	corebase "github.com/juju/juju/core/base"
 	corecharm "github.com/juju/juju/core/charm"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/charmhub/transport"
 )
 
 func convertInfoResponse(info transport.InfoResponse, arch string, risk charm.Risk, revision int, track string, base corebase.Base) (InfoResponse, error) {
@@ -109,7 +110,7 @@ func convertCharm(info transport.InfoResponse) *Charm {
 		ch.Relations = transformRelations(meta.Requires, meta.Provides)
 	}
 	if cfg := unmarshalCharmConfig(info.DefaultRelease.Revision.ConfigYAML); cfg != nil {
-		ch.Config = &charm.Config{
+		ch.Config = &charm.ConfigSpec{
 			Options: toCharmOptionMap(cfg),
 		}
 	}
@@ -224,7 +225,7 @@ func transformFindArchitectureSeries(channel transport.FindChannelMap) supported
 	}
 }
 
-func toCharmOptionMap(config *charm.Config) map[string]charm.Option {
+func toCharmOptionMap(config *charm.ConfigSpec) map[string]charm.Option {
 	if config == nil {
 		return nil
 	}
@@ -255,13 +256,13 @@ func unmarshalCharmMetadata(metadataYAML string) *charm.Meta {
 		// we were dealing with handwritten data for test, not
 		// the real deal.  Usually charms are validated before
 		// being uploaded to the store.
-		logger.Warningf(errors.Annotate(err, "cannot unmarshal charm metadata").Error())
+		logger.Warningf(context.TODO(), errors.Annotate(err, "cannot unmarshal charm metadata").Error())
 		return nil
 	}
 	return meta
 }
 
-func unmarshalCharmConfig(configYAML string) *charm.Config {
+func unmarshalCharmConfig(configYAML string) *charm.ConfigSpec {
 	if configYAML == "" || strings.TrimSpace(configYAML) == "{}" {
 		return nil
 	}
@@ -273,7 +274,7 @@ func unmarshalCharmConfig(configYAML string) *charm.Config {
 		// we were dealing with handwritten data for test, not
 		// the real deal.  Usually charms are validated before
 		// being uploaded to the store.
-		logger.Warningf(errors.Annotate(err, "cannot unmarshal charm config").Error())
+		logger.Warningf(context.TODO(), errors.Annotate(err, "cannot unmarshal charm config").Error())
 		return nil
 	}
 	return cfg
@@ -281,7 +282,7 @@ func unmarshalCharmConfig(configYAML string) *charm.Config {
 
 func transformRelations(requires, provides map[string]charm.Relation) map[string]map[string]string {
 	if len(requires) == 0 && len(provides) == 0 {
-		logger.Debugf("no relation data found in charm meta data")
+		logger.Debugf(context.TODO(), "no relation data found in charm meta data")
 		return nil
 	}
 	relations := make(map[string]map[string]string)

@@ -4,19 +4,21 @@
 package deployer
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/juju/charm/v12"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 
 	commoncharm "github.com/juju/juju/api/common/charm"
 	"github.com/juju/juju/cmd/juju/application/bundle"
 	"github.com/juju/juju/core/constraints"
+	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/devices"
-	"github.com/juju/juju/storage"
+	"github.com/juju/juju/core/storage"
+	"github.com/juju/juju/internal/charm"
+	"github.com/juju/juju/internal/cmd"
 )
 
 type deployBundle struct {
@@ -39,13 +41,13 @@ type deployBundle struct {
 	defaultCharmSchema charm.Schema
 
 	resolver             Resolver
-	newConsumeDetailsAPI func(url *charm.OfferURL) (ConsumeDetails, error)
+	newConsumeDetailsAPI func(ctx context.Context, url crossmodel.OfferURL) (ConsumeDetails, error)
 	deployResources      DeployResourcesFunc
 	charmReader          CharmReader
 
 	useExistingMachines bool
 	bundleMachines      map[string]string
-	bundleStorage       map[string]map[string]storage.Constraints
+	bundleStorage       map[string]map[string]storage.Directive
 	bundleDevices       map[string]map[string]devices.Constraints
 
 	targetModelName string
@@ -68,7 +70,7 @@ func (d *deployBundle) deploy(
 	}
 
 	var err error
-	if d.targetModelName, _, err = d.model.ModelDetails(); err != nil {
+	if d.targetModelName, _, err = d.model.ModelDetails(ctx); err != nil {
 		return errors.Annotatef(err, "could not retrieve model name")
 	}
 
@@ -90,7 +92,7 @@ func (d *deployBundle) deploy(
 	}
 	d.printDryRunUnmarshalErrors(ctx, unmarshalErrors)
 
-	err = d.checkExplicitSeries(bundleData)
+	err = d.checkExplicitBase(bundleData)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -113,15 +115,15 @@ Please repeat the deploy command with the --trust argument if you consent to tru
 
 	// Deploying bundles does not allow the use force, it's expected that the
 	// bundle is correct and therefore the charms are also.
-	if err := bundleDeploy(d.defaultCharmSchema, bundleData, spec); err != nil {
+	if err := bundleDeploy(ctx, d.defaultCharmSchema, bundleData, spec); err != nil {
 		return errors.Annotate(err, "cannot deploy bundle")
 	}
 	return nil
 }
 
-// checkExplicitSeries returns an error if the image-id constraint is used and
+// checkExplicitBase returns an error if the image-id constraint is used and
 // there is no series explicitly defined by the user.
-func (d *deployBundle) checkExplicitSeries(bundleData *charm.BundleData) error {
+func (d *deployBundle) checkExplicitBase(bundleData *charm.BundleData) error {
 	for _, applicationSpec := range bundleData.Applications {
 		// First we check if the app is deployed "to" a machine that
 		// has the image-id constraint
@@ -161,9 +163,7 @@ func (d *deployBundle) checkExplicitSeries(bundleData *charm.BundleData) error {
 		// We check if series are defined when any of the constraints
 		// above have image-id
 		if (appHasImageID || modelHasImageID || machineHasImageID) &&
-			applicationSpec.Series == "" &&
 			applicationSpec.Base == "" &&
-			bundleData.Series == "" &&
 			bundleData.DefaultBase == "" {
 			return errors.Forbiddenf("base must be explicitly provided for %q when image-id constraint is used", applicationSpec.Charm)
 		}
@@ -196,16 +196,16 @@ func (d *deployBundle) makeBundleDeploySpec(ctx *cmd.Context, apiRoot DeployerAP
 	// the local cache.
 	// If no controller is found within the local cache, an error will be raised
 	// which should ask the user to login.
-	getConsumeDetails := func(url *charm.OfferURL) (ConsumeDetails, error) {
+	getConsumeDetails := func(url crossmodel.OfferURL) (ConsumeDetails, error) {
 		// Ensure that we have a url source when querying the controller.
 		if url.Source == "" {
 			url.Source = d.controllerName
 		}
-		return d.newConsumeDetailsAPI(url)
+		return d.newConsumeDetailsAPI(ctx, url)
 	}
 
-	knownSpaces, err := apiRoot.ListSpaces()
-	if err != nil && !errors.IsNotSupported(err) {
+	knownSpaces, err := apiRoot.ListSpaces(ctx)
+	if err != nil && !errors.Is(err, errors.NotSupported) {
 		return bundleDeploySpec{}, errors.Trace(err)
 	}
 
@@ -214,9 +214,14 @@ func (d *deployBundle) makeBundleDeploySpec(ctx *cmd.Context, apiRoot DeployerAP
 		knownSpaceNames.Add(space.Name)
 	}
 
+	modelType, err := d.model.ModelType(ctx)
+	if err != nil {
+		return bundleDeploySpec{}, errors.Trace(err)
+	}
 	return bundleDeploySpec{
 		ctx:                  ctx,
 		filesystem:           d.model.Filesystem(),
+		modelType:            modelType,
 		dryRun:               d.dryRun,
 		force:                d.force,
 		trust:                d.trust,

@@ -4,20 +4,18 @@
 package kubernetes
 
 import (
-	"context"
 	"fmt"
+	"testing"
 
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 	apps "k8s.io/api/apps/v1"
 	core "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/juju/juju/cloudconfig/podcfg"
+	"github.com/juju/juju/core/semversion"
+	"github.com/juju/juju/internal/cloudconfig/podcfg"
 	"github.com/juju/juju/internal/provider/kubernetes/constants"
 	"github.com/juju/juju/internal/provider/kubernetes/utils"
 )
@@ -30,7 +28,9 @@ type modelUpgraderSuite struct {
 	broker *dummyUpgradeCAASModel
 }
 
-var _ = gc.Suite(&modelUpgraderSuite{})
+func TestModelUpgraderSuite(t *testing.T) {
+	tc.Run(t, &modelUpgraderSuite{})
+}
 
 func (d *dummyUpgradeCAASModel) Client() kubernetes.Interface {
 	return d.client
@@ -44,20 +44,20 @@ func (d *dummyUpgradeCAASModel) Namespace() string {
 	return "test"
 }
 
-func (s *modelUpgraderSuite) SetUpTest(c *gc.C) {
+func (s *modelUpgraderSuite) SetUpTest(c *tc.C) {
 	s.broker = &dummyUpgradeCAASModel{
 		client: fake.NewSimpleClientset(),
 	}
 }
 
-func (s *modelUpgraderSuite) TestModelOperatorUpgrade(c *gc.C) {
+func (s *modelUpgraderSuite) TestModelOperatorUpgrade(c *tc.C) {
 	var (
 		operatorName = modelOperatorName
 		oldImagePath = fmt.Sprintf("%s/%s:9.9.8", podcfg.JujudOCINamespace, podcfg.JujudOCIName)
 		newImagePath = fmt.Sprintf("%s/%s:9.9.9", podcfg.JujudOCINamespace, podcfg.JujudOCIName)
 	)
 
-	_, err := s.broker.Client().AppsV1().Deployments(s.broker.Namespace()).Create(context.TODO(),
+	_, err := s.broker.Client().AppsV1().Deployments(s.broker.Namespace()).Create(c.Context(),
 		&apps.Deployment{
 			ObjectMeta: meta.ObjectMeta{
 				Name: operatorName,
@@ -79,15 +79,15 @@ func (s *modelUpgraderSuite) TestModelOperatorUpgrade(c *gc.C) {
 					},
 				},
 			},
-		}, v1.CreateOptions{})
-	c.Assert(err, jc.ErrorIsNil)
+		}, meta.CreateOptions{})
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(modelOperatorUpgrade(operatorName, version.MustParse("9.9.9"), s.broker), jc.ErrorIsNil)
+	c.Assert(modelOperatorUpgrade(c.Context(), operatorName, semversion.MustParse("9.9.9"), s.broker), tc.ErrorIsNil)
 	de, err := s.broker.Client().AppsV1().Deployments(s.broker.Namespace()).
-		Get(context.TODO(), operatorName, meta.GetOptions{})
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(de.Spec.Template.Spec.Containers[0].Image, gc.Equals, newImagePath)
+		Get(c.Context(), operatorName, meta.GetOptions{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(de.Spec.Template.Spec.Containers[0].Image, tc.Equals, newImagePath)
 
-	c.Assert(de.Annotations[utils.AnnotationVersionKey(1)], gc.Equals, version.MustParse("9.9.9").String())
-	c.Assert(de.Spec.Template.Annotations[utils.AnnotationVersionKey(1)], gc.Equals, version.MustParse("9.9.9").String())
+	c.Assert(de.Annotations[utils.AnnotationVersionKey(1)], tc.Equals, semversion.MustParse("9.9.9").String())
+	c.Assert(de.Spec.Template.Annotations[utils.AnnotationVersionKey(1)], tc.Equals, semversion.MustParse("9.9.9").String())
 }

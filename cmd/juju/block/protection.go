@@ -4,17 +4,18 @@
 package block
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
 
 	"github.com/juju/juju/api"
 	apiblock "github.com/juju/juju/api/client/block"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/rpc/params"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.block")
+var logger = internallogger.GetLogger("juju.cmd.juju.block")
 
 const (
 	cmdAll          = "all"
@@ -51,12 +52,12 @@ func operationFromType(blockType string) string {
 }
 
 type newAPIRoot interface {
-	NewAPIRoot() (api.Connection, error)
+	NewAPIRoot(ctx context.Context) (api.Connection, error)
 }
 
 // getBlockAPI returns a block api for block manipulation.
-func getBlockAPI(c newAPIRoot) (*apiblock.Client, error) {
-	root, err := c.NewAPIRoot()
+func getBlockAPI(ctx context.Context, c newAPIRoot) (*apiblock.Client, error) {
+	root, err := c.NewAPIRoot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +100,7 @@ func ProcessBlockedError(err error, block Block) error {
 	}
 	if params.IsCodeOperationBlocked(err) {
 		msg := fmt.Sprintf("%v\n%v", err, blockedMessages[block])
-		logger.Infof("%s", msg)
+		logger.Infof(context.TODO(), msg)
 		return errors.New(msg)
 	}
 	return err

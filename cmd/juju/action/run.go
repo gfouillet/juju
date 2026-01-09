@@ -7,17 +7,17 @@ import (
 	"strings"
 
 	"github.com/juju/clock"
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"gopkg.in/yaml.v2"
 
 	actionapi "github.com/juju/juju/api/client/action"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 )
 
 func NewRunCommand() cmd.Command {
@@ -170,7 +170,7 @@ func (c *runCommand) Init(args []string) (err error) {
 }
 
 func (c *runCommand) Run(ctx *cmd.Context) error {
-	if err := c.ensureAPI(); err != nil {
+	if err := c.ensureAPI(ctx); err != nil {
 		return errors.Trace(err)
 	}
 	defer c.api.Close()
@@ -241,7 +241,7 @@ func (c *runCommand) enqueueActions(ctx *cmd.Context) (*actionapi.EnqueuedAction
 		actions[i].Name = c.actionName
 		actions[i].Parameters = actionParams
 	}
-	results, err := c.api.EnqueueOperation(actions)
+	results, err := c.api.EnqueueOperation(ctx, actions)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

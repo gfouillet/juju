@@ -4,8 +4,10 @@
 package externalcontrollerupdater
 
 import (
+	"context"
+
 	"github.com/juju/errors"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
 	apiwatcher "github.com/juju/juju/api/watcher"
@@ -15,6 +17,13 @@ import (
 	"github.com/juju/juju/rpc/params"
 )
 
+// Option is a function that can be used to configure a Client.
+type Option = base.Option
+
+// WithTracer returns an Option that configures the Client to use the
+// supplied tracer.
+var WithTracer = base.WithTracer
+
 const Facade = "ExternalControllerUpdater"
 
 // Client provides access to the ExternalControllerUpdater API facade.
@@ -23,15 +32,15 @@ type Client struct {
 }
 
 // New creates a new client-side ExternalControllerUpdater facade.
-func New(caller base.APICaller) *Client {
-	return &Client{base.NewFacadeCaller(caller, Facade)}
+func New(caller base.APICaller, options ...Option) *Client {
+	return &Client{base.NewFacadeCaller(caller, Facade, options...)}
 }
 
 // WatchExternalControllers watches for the addition and removal of external
 // controllers.
-func (c *Client) WatchExternalControllers() (watcher.StringsWatcher, error) {
+func (c *Client) WatchExternalControllers(ctx context.Context) (watcher.StringsWatcher, error) {
 	var results params.StringsWatchResults
-	err := c.facade.FacadeCall("WatchExternalControllers", nil, &results)
+	err := c.facade.FacadeCall(ctx, "WatchExternalControllers", nil, &results)
 	if err != nil {
 		return nil, err
 	}
@@ -48,16 +57,16 @@ func (c *Client) WatchExternalControllers() (watcher.StringsWatcher, error) {
 }
 
 // ExternalControllerInfo returns the info for the external controller with the specified UUID.
-func (c *Client) ExternalControllerInfo(controllerUUID string) (*crossmodel.ControllerInfo, error) {
+func (c *Client) ExternalControllerInfo(ctx context.Context, controllerUUID string) (*crossmodel.ControllerInfo, error) {
 	if !names.IsValidController(controllerUUID) {
 		return nil, errors.NotValidf("controller UUID %q", controllerUUID)
 	}
 	controllerTag := names.NewControllerTag(controllerUUID)
-	args := params.Entities{[]params.Entity{{
+	args := params.Entities{Entities: []params.Entity{{
 		Tag: controllerTag.String(),
 	}}}
 	var results params.ExternalControllerInfoResults
-	err := c.facade.FacadeCall("ExternalControllerInfo", args, &results)
+	err := c.facade.FacadeCall(ctx, "ExternalControllerInfo", args, &results)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -70,27 +79,27 @@ func (c *Client) ExternalControllerInfo(controllerUUID string) (*crossmodel.Cont
 		return nil, errors.Trace(err)
 	}
 	return &crossmodel.ControllerInfo{
-		ControllerTag: controllerTag,
-		Alias:         result.Result.Alias,
-		Addrs:         result.Result.Addrs,
-		CACert:        result.Result.CACert,
+		ControllerUUID: controllerTag.Id(),
+		Alias:          result.Result.Alias,
+		Addrs:          result.Result.Addrs,
+		CACert:         result.Result.CACert,
 	}, nil
 }
 
 // SetExternalControllerInfo saves the given controller info.
-func (c *Client) SetExternalControllerInfo(info crossmodel.ControllerInfo) error {
+func (c *Client) SetExternalControllerInfo(ctx context.Context, info crossmodel.ControllerInfo) error {
 	var results params.ErrorResults
 	args := params.SetExternalControllersInfoParams{
 		Controllers: []params.SetExternalControllerInfoParams{{
 			Info: params.ExternalControllerInfo{
-				ControllerTag: info.ControllerTag.String(),
+				ControllerTag: names.NewControllerTag(info.ControllerUUID).String(),
 				Alias:         info.Alias,
 				Addrs:         info.Addrs,
 				CACert:        info.CACert,
 			},
 		}},
 	}
-	err := c.facade.FacadeCall("SetExternalControllerInfo", args, &results)
+	err := c.facade.FacadeCall(ctx, "SetExternalControllerInfo", args, &results)
 	if err != nil {
 		return errors.Trace(err)
 	}

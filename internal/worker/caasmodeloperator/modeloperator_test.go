@@ -4,18 +4,22 @@
 package caasmodeloperator_test
 
 import (
+	"context"
+	"testing"
+	"time"
+
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/version/v2"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
 	"github.com/juju/juju/agent"
 	modeloperatorapi "github.com/juju/juju/api/controller/caasmodeloperator"
 	"github.com/juju/juju/caas"
-	"github.com/juju/juju/core/resources"
+	"github.com/juju/juju/core/resource"
+	"github.com/juju/juju/core/semversion"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/core/watcher/eventsource"
 	"github.com/juju/juju/core/watcher/watchertest"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/worker/caasmodeloperator"
 )
 
@@ -26,66 +30,67 @@ type dummyAPI struct {
 }
 
 type dummyBroker struct {
-	ensureModelOperator             func(string, string, *caas.ModelOperatorConfig) error
-	modelOperator                   func() (*caas.ModelOperatorConfig, error)
-	modelOperatorExists             func() (bool, error)
-	getModelOperatorDeploymentImage func() (string, error)
+	ensureModelOperator             func(context.Context, string, string, *caas.ModelOperatorConfig) error
+	modelOperator                   func(ctx context.Context) (*caas.ModelOperatorConfig, error)
+	modelOperatorExists             func(context.Context) (bool, error)
+	getModelOperatorDeploymentImage func(ctx context.Context) (string, error)
 }
 
 type ModelOperatorManagerSuite struct{}
 
-var _ = gc.Suite(&ModelOperatorManagerSuite{})
-
-func (b *dummyBroker) EnsureModelOperator(modelUUID, agentPath string, c *caas.ModelOperatorConfig) error {
+func TestModelOperatorManagerSuite(t *testing.T) {
+	tc.Run(t, &ModelOperatorManagerSuite{})
+}
+func (b *dummyBroker) EnsureModelOperator(ctx context.Context, modelUUID, agentPath string, c *caas.ModelOperatorConfig) error {
 	if b.ensureModelOperator == nil {
 		return nil
 	}
-	return b.ensureModelOperator(modelUUID, agentPath, c)
+	return b.ensureModelOperator(ctx, modelUUID, agentPath, c)
 }
 
-func (b *dummyBroker) ModelOperator() (*caas.ModelOperatorConfig, error) {
+func (b *dummyBroker) ModelOperator(ctx context.Context) (*caas.ModelOperatorConfig, error) {
 	if b.modelOperator == nil {
 		return nil, nil
 	}
-	return b.modelOperator()
+	return b.modelOperator(ctx)
 }
 
-func (b *dummyBroker) ModelOperatorExists() (bool, error) {
+func (b *dummyBroker) ModelOperatorExists(ctx context.Context) (bool, error) {
 	if b.modelOperatorExists == nil {
 		return false, nil
 	}
-	return b.modelOperatorExists()
+	return b.modelOperatorExists(ctx)
 }
 
-func (b *dummyBroker) GetModelOperatorDeploymentImage() (string, error) {
+func (b *dummyBroker) GetModelOperatorDeploymentImage(ctx context.Context) (string, error) {
 	if b.getModelOperatorDeploymentImage == nil {
 		return "ghcr.io/juju/jujud-operator:3.6.9", nil
 	}
-	return b.getModelOperatorDeploymentImage()
+	return b.getModelOperatorDeploymentImage(ctx)
 }
 
-func (a *dummyAPI) ModelOperatorProvisioningInfo() (modeloperatorapi.ModelOperatorProvisioningInfo, error) {
+func (a *dummyAPI) ModelOperatorProvisioningInfo(ctx context.Context) (modeloperatorapi.ModelOperatorProvisioningInfo, error) {
 	if a.provInfo == nil {
 		return modeloperatorapi.ModelOperatorProvisioningInfo{}, nil
 	}
 	return a.provInfo()
 }
 
-func (a *dummyAPI) WatchModelOperatorProvisioningInfo() (watcher.NotifyWatcher, error) {
+func (a *dummyAPI) WatchModelOperatorProvisioningInfo(ctx context.Context) (watcher.NotifyWatcher, error) {
 	if a.watchProvInfo == nil {
-		return watcher.NewMultiNotifyWatcher(), nil
+		return eventsource.NewMultiNotifyWatcher(ctx)
 	}
 	return a.watchProvInfo()
 }
 
-func (a *dummyAPI) SetPassword(p string) error {
+func (a *dummyAPI) SetPassword(ctx context.Context, p string) error {
 	if a.setPassword == nil {
 		return nil
 	}
 	return a.setPassword(p)
 }
 
-func (m *ModelOperatorManagerSuite) TestModelOperatorManagerApplying(c *gc.C) {
+func (m *ModelOperatorManagerSuite) TestModelOperatorManagerApplying(c *tc.C) {
 	const n = 3
 	var (
 		iteration = 0 // ... n
@@ -93,7 +98,7 @@ func (m *ModelOperatorManagerSuite) TestModelOperatorManagerApplying(c *gc.C) {
 		apiAddresses      = [n][]string{{"fe80:abcd::1"}, {"fe80:abcd::2"}, {"fe80:abcd::3"}}
 		modelUUID         = "deadbeef-0bad-400d-8000-4b1d0d06f00d"
 		imagePath         = [n]string{"docker.io/jujusolutions/jujud-operator:1", "docker.io/jujusolutions/jujud-operator:2", "docker.io/jujusolutions/jujud-operator:3"}
-		ver               = [n]version.Number{version.MustParse("2.8.2"), version.MustParse("2.9.1"), version.MustParse("2.9.99")}
+		ver               = [n]semversion.Number{semversion.MustParse("2.8.2"), semversion.MustParse("2.9.1"), semversion.MustParse("2.9.99")}
 		expectedImagePath = [n]string{"docker.io/jujusolutions/jujud-operator:1", "docker.io/jujusolutions/jujud-operator:2.9.1", "docker.io/jujusolutions/jujud-operator:2.9.99"}
 		password          = ""
 		lastConfig        = (*caas.ModelOperatorConfig)(nil)
@@ -104,7 +109,7 @@ func (m *ModelOperatorManagerSuite) TestModelOperatorManagerApplying(c *gc.C) {
 		provInfo: func() (modeloperatorapi.ModelOperatorProvisioningInfo, error) {
 			return modeloperatorapi.ModelOperatorProvisioningInfo{
 				APIAddresses: apiAddresses[iteration],
-				ImageDetails: resources.DockerImageDetails{RegistryPath: imagePath[iteration]},
+				ImageDetails: resource.DockerImageDetails{RegistryPath: imagePath[iteration]},
 				Version:      ver[iteration],
 			}, nil
 		},
@@ -114,56 +119,60 @@ func (m *ModelOperatorManagerSuite) TestModelOperatorManagerApplying(c *gc.C) {
 	}
 
 	broker := &dummyBroker{
-		ensureModelOperator: func(_, _ string, conf *caas.ModelOperatorConfig) error {
+		ensureModelOperator: func(_ context.Context, _, _ string, conf *caas.ModelOperatorConfig) error {
 			defer func() {
 				iteration++
 			}()
 			lastConfig = conf
 
-			c.Check(conf.ImageDetails.RegistryPath, gc.Equals, expectedImagePath[iteration])
+			c.Check(conf.ImageDetails.RegistryPath, tc.Equals, expectedImagePath[iteration])
 
 			ac, err := agent.ParseConfigData(conf.AgentConf)
-			c.Check(err, jc.ErrorIsNil)
+			c.Check(err, tc.ErrorIsNil)
 			if err != nil {
 				return err
 			}
 			addresses, _ := ac.APIAddresses()
-			c.Check(addresses, gc.DeepEquals, apiAddresses[iteration])
-			c.Check(ac.UpgradedToVersion(), gc.Equals, ver[iteration])
+			c.Check(addresses, tc.DeepEquals, apiAddresses[iteration])
+			c.Check(ac.UpgradedToVersion(), tc.Equals, ver[iteration])
 
 			if password == "" {
 				password = ac.OldPassword()
 			}
-			c.Check(ac.OldPassword(), gc.Equals, password)
-			c.Check(ac.OldPassword(), gc.HasLen, 24)
+			c.Check(ac.OldPassword(), tc.Equals, password)
+			c.Check(ac.OldPassword(), tc.HasLen, 24)
+
+			c.Check(ac.OpenTelemetrySampleRatio(), tc.Equals, 0.1000)
+			c.Check(ac.OpenTelemetryTailSamplingThreshold(), tc.Equals, time.Millisecond)
 
 			return nil
 		},
-		modelOperatorExists: func() (bool, error) {
+		modelOperatorExists: func(context.Context) (bool, error) {
 			return iteration > 0, nil
 		},
-		modelOperator: func() (*caas.ModelOperatorConfig, error) {
+		modelOperator: func(context.Context) (*caas.ModelOperatorConfig, error) {
 			if iteration == 0 {
 				return nil, errors.NotFoundf("model operator")
 			}
 			return lastConfig, nil
 		},
-		getModelOperatorDeploymentImage: func() (string, error) {
+		getModelOperatorDeploymentImage: func(ctx context.Context) (string, error) {
 			return imagePath[iteration], nil
 		},
 	}
 
-	worker, err := caasmodeloperator.NewModelOperatorManager(loggo.Logger{},
+	worker, err := caasmodeloperator.NewModelOperatorManager(
+		loggertesting.WrapCheckLog(c),
 		api, broker, modelUUID, &mockAgentConfig{})
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	for i := 0; i < n; i++ {
+	for range n {
 		changed <- struct{}{}
 	}
 
 	worker.Kill()
 	err = worker.Wait()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
 
-	c.Assert(iteration, gc.Equals, n)
+	c.Assert(iteration, tc.Equals, n)
 }

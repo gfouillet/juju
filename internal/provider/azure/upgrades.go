@@ -4,22 +4,22 @@
 package azure
 
 import (
+	"context"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/juju/errors"
 
 	"github.com/juju/juju/environs"
-	"github.com/juju/juju/environs/context"
 	"github.com/juju/juju/environs/tags"
 	"github.com/juju/juju/internal/provider/azure/internal/errorutils"
 )
 
 // UpgradeOperations is part of the upgrades.OperationSource interface.
-func (env *azureEnviron) UpgradeOperations(context.ProviderCallContext, environs.UpgradeOperationsParams) []environs.UpgradeOperation {
+func (env *azureEnviron) UpgradeOperations(context.Context, environs.UpgradeOperationsParams) []environs.UpgradeOperation {
 	return []environs.UpgradeOperation{{
-		providerVersion1,
-		[]environs.UpgradeStep{
+		TargetVersion: providerVersion1,
+		Steps: []environs.UpgradeStep{
 			commonDeploymentUpgradeStep{env},
 		},
 	}}
@@ -37,7 +37,7 @@ func (commonDeploymentUpgradeStep) Description() string {
 }
 
 // Run is part of the environs.UpgradeStep interface.
-func (step commonDeploymentUpgradeStep) Run(ctx context.ProviderCallContext) error {
+func (step commonDeploymentUpgradeStep) Run(ctx context.Context) error {
 	env := step.env
 	isControllerEnviron, err := isControllerEnviron(env, ctx)
 	if err != nil {
@@ -58,7 +58,7 @@ func (step commonDeploymentUpgradeStep) Run(ctx context.ProviderCallContext) err
 		return errors.Trace(err)
 	}
 	allRules, err := existingSecurityRules(ctx, securityGroups, env.resourceGroup)
-	if errors.IsNotFound(err) {
+	if errors.Is(err, errors.NotFound) {
 		allRules = nil
 	} else if err != nil {
 		return errors.Trace(err)
@@ -80,7 +80,7 @@ func (step commonDeploymentUpgradeStep) Run(ctx context.ProviderCallContext) err
 // security group has not been created, this function will return an error
 // satisfying errors.IsNotFound.
 func existingSecurityRules(
-	ctx context.ProviderCallContext,
+	ctx context.Context,
 	nsgClient *armnetwork.SecurityGroupsClient,
 	resourceGroup string,
 ) ([]*armnetwork.SecurityRule, error) {
@@ -98,7 +98,7 @@ func existingSecurityRules(
 	return rules, nil
 }
 
-func isControllerEnviron(env *azureEnviron, ctx context.ProviderCallContext) (bool, error) {
+func isControllerEnviron(env *azureEnviron, ctx context.Context) (bool, error) {
 	compute, err := env.computeClient()
 	if err != nil {
 		return false, errors.Trace(err)
@@ -108,7 +108,7 @@ func isControllerEnviron(env *azureEnviron, ctx context.ProviderCallContext) (bo
 	for pager.More() {
 		next, err := pager.NextPage(ctx)
 		if err != nil {
-			return false, errorutils.HandleCredentialError(errors.Annotate(err, "listing virtual machines"), ctx)
+			return false, env.HandleCredentialError(ctx, err)
 		}
 		for _, vm := range next.Value {
 			if toValue(vm.Tags[tags.JujuIsController]) == "true" {

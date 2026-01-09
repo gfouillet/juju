@@ -4,10 +4,12 @@
 package uniter
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/juju/errors"
 
+	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -16,8 +18,8 @@ import (
 
 // Charm represents the state of a charm in the model.
 type Charm struct {
-	st   *State
-	curl string
+	client *Client
+	curl   string
 }
 
 // URL returns the URL that identifies the charm.
@@ -35,12 +37,12 @@ func (c *Charm) URL() string {
 // TODO(dimitern): 2013-09-06 bug 1221834
 // Cache the result after getting it once for the same charm URL,
 // because it's immutable.
-func (c *Charm) ArchiveSha256() (string, error) {
+func (c *Charm) ArchiveSha256(ctx context.Context) (string, error) {
 	var results params.StringResults
 	args := params.CharmURLs{
 		URLs: []params.CharmURL{{URL: c.curl}},
 	}
-	err := c.st.facade.FacadeCall("CharmArchiveSha256", args, &results)
+	err := c.client.facade.FacadeCall(ctx, "CharmArchiveSha256", args, &results)
 	if err != nil {
 		return "", err
 	}
@@ -49,19 +51,19 @@ func (c *Charm) ArchiveSha256() (string, error) {
 	}
 	result := results.Results[0]
 	if result.Error != nil {
-		return "", result.Error
+		return "", apiservererrors.RestoreError(result.Error)
 	}
 	return result.Result, nil
 }
 
 // LXDProfileRequired returns true if this charm requires an
 // lxd profile to be applied.
-func (c *Charm) LXDProfileRequired() (bool, error) {
+func (c *Charm) LXDProfileRequired(ctx context.Context) (bool, error) {
 	var results params.BoolResults
 	args := params.CharmURLs{
 		URLs: []params.CharmURL{{URL: c.curl}},
 	}
-	err := c.st.facade.FacadeCall("LXDProfileRequired", args, &results)
+	err := c.client.facade.FacadeCall(ctx, "LXDProfileRequired", args, &results)
 	if err != nil {
 		return false, err
 	}

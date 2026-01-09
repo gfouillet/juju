@@ -4,105 +4,102 @@
 package leaseexpiry_test
 
 import (
-	"sync"
-	"time"
+	"testing"
+	time "time"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
-	jc "github.com/juju/testing/checkers"
-	"github.com/juju/utils/v3"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/workertest"
+	"github.com/juju/tc"
+	"github.com/juju/worker/v4/workertest"
 	"go.uber.org/mock/gomock"
-	gc "gopkg.in/check.v1"
 
-	"github.com/juju/juju/database/testing"
+	"github.com/juju/juju/core/trace"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	jujujujutesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/leaseexpiry"
 )
 
 type workerSuite struct {
-	testing.ControllerSuite
+	testhelpers.IsolationSuite
 }
 
-var _ = gc.Suite(&workerSuite{})
+func TestWorkerSuite(t *testing.T) {
+	tc.Run(t, &workerSuite{})
+}
 
-func (s *workerSuite) TestConfigValidate(c *gc.C) {
+func (s *workerSuite) TestConfigValidate(c *tc.C) {
+	ctrl := gomock.NewController(c)
+	defer ctrl.Finish()
+
+	store := NewMockExpiryStore(ctrl)
+
 	validCfg := leaseexpiry.Config{
-		Clock:     clock.WallClock,
-		Logger:    leaseexpiry.StubLogger{},
-		TrackedDB: s.TrackedDB(),
+		Clock:  clock.WallClock,
+		Logger: loggertesting.WrapCheckLog(c),
+		Tracer: trace.NoopTracer{},
+		Store:  store,
 	}
 
 	cfg := validCfg
 	cfg.Clock = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = validCfg
 	cfg.Logger = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 
 	cfg = validCfg
-	cfg.TrackedDB = nil
-	c.Check(errors.Is(cfg.Validate(), errors.NotValid), jc.IsTrue)
+	cfg.Store = nil
+	c.Check(cfg.Validate(), tc.ErrorIs, errors.NotValid)
 }
 
-func (s *workerSuite) TestWorkerDeletesExpiredLeases(c *gc.C) {
+func (s *workerSuite) TestWorker(c *tc.C) {
 	ctrl := gomock.NewController(c)
 	defer ctrl.Finish()
 
 	clk := NewMockClock(ctrl)
 	timer := NewMockTimer(ctrl)
-
-	var w worker.Worker
-	var wmutex sync.Mutex
+	store := NewMockExpiryStore(ctrl)
 
 	clk.EXPECT().NewTimer(time.Second).Return(timer)
+	store.EXPECT().ExpireLeases(gomock.Any()).Return(nil)
 
-	// Kill the worker on the first pass through the loop,
-	// after we've processed one expiration.
+	done := make(chan time.Duration)
+
 	ch := make(chan time.Time, 1)
 	ch <- time.Now()
 	timer.EXPECT().Chan().Return(ch).MinTimes(1)
-	timer.EXPECT().Reset(time.Second).Do(func(any) {
-		wmutex.Lock()
-		defer wmutex.Unlock()
-		w.Kill()
+	timer.EXPECT().Reset(gomock.Any()).DoAndReturn(func(t time.Duration) bool {
+		defer func() {
+			select {
+			case done <- t:
+			case <-time.After(jujujujutesting.LongWait):
+				c.Fatalf("timed out sending reset")
+			}
+		}()
+
+		return true
 	})
 	timer.EXPECT().Stop().Return(true)
 
-	// Insert 2 leases, one with an expiry time in the past,
-	// another in the future.
-	q := `
-INSERT INTO lease (uuid, lease_type_id, model_uuid, name, holder, start, expiry)
-VALUES (?, 1, 'some-model-uuid', ?, ?, datetime('now'), datetime('now', ?))`[1:]
-
-	stmt, err := s.DB().Prepare(q)
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = stmt.Exec(utils.MustNewUUID().String(), "postgresql", "postgresql/0", "+2 minutes")
-	c.Assert(err, jc.ErrorIsNil)
-
-	_, err = stmt.Exec(utils.MustNewUUID().String(), "redis", "redis/0", "-2 minutes")
-	c.Assert(err, jc.ErrorIsNil)
-
-	wmutex.Lock()
-	w, err = leaseexpiry.NewWorker(leaseexpiry.Config{
-		Clock:     clk,
-		Logger:    leaseexpiry.StubLogger{},
-		TrackedDB: s.TrackedDB(),
+	w, err := leaseexpiry.NewWorker(leaseexpiry.Config{
+		Clock:  clk,
+		Logger: loggertesting.WrapCheckLog(c),
+		Tracer: trace.NoopTracer{},
+		Store:  store,
 	})
-	wmutex.Unlock()
-	c.Assert(err, jc.ErrorIsNil)
+	c.Assert(err, tc.ErrorIsNil)
+	defer workertest.DirtyKill(c, w)
 
-	err = workertest.CheckKilled(c, w)
-	c.Assert(err, jc.ErrorIsNil)
+	select {
+	case t := <-done:
+		// Ensure it's within the expected range.
+		c.Check(t >= time.Second*1, tc.IsTrue)
+		c.Check(t <= time.Second*5, tc.IsTrue)
+	case <-time.After(jujujujutesting.ShortWait):
+		c.Fatalf("timed out waiting for reset")
+	}
 
-	// Only the postgresql lease (expiring in the future) should remain.
-	row := s.DB().QueryRow("SELECT name FROM LEASE")
-	var name string
-	err = row.Scan(&name)
-	c.Assert(err, jc.ErrorIsNil)
-	c.Assert(row.Err(), jc.ErrorIsNil)
-
-	c.Check(name, gc.Equals, "postgresql")
+	workertest.CleanKill(c, w)
 }

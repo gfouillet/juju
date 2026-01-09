@@ -4,22 +4,23 @@
 package machine
 
 import (
+	"context"
 	"fmt"
 	"io"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
 
 	"github.com/juju/juju/api/client/client"
 	"github.com/juju/juju/cmd/juju/status"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/rpc/params"
 )
 
 // statusAPI defines the API methods for the machines and show-machine commands.
 type statusAPI interface {
-	Status(*client.StatusArgs) (*params.FullStatus, error)
+	Status(context.Context, *client.StatusArgs) (*params.FullStatus, error)
 	Close() error
 }
 
@@ -51,22 +52,22 @@ func (c *baselistMachinesCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 }
 
-var newAPIClientForMachines = func(c *baselistMachinesCommand) (statusAPI, error) {
+var newAPIClientForMachines = func(ctx context.Context, c *baselistMachinesCommand) (statusAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.NewAPIClient()
+	return c.NewAPIClient(ctx)
 }
 
 // Run implements Command.Run for baseMachinesCommand.
 func (c *baselistMachinesCommand) Run(ctx *cmd.Context) error {
-	apiclient, err := newAPIClientForMachines(c)
+	apiclient, err := newAPIClientForMachines(ctx, c)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer apiclient.Close()
 
-	fullStatus, err := apiclient.Status(nil)
+	fullStatus, err := apiclient.Status(ctx, nil)
 	if err != nil {
 		if fullStatus == nil {
 			// Status call completely failed, there is nothing to report

@@ -4,26 +4,25 @@
 package context
 
 import (
-	"github.com/juju/charm/v12"
 	"github.com/juju/errors"
-	"github.com/juju/loggo"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 	"github.com/juju/proxy"
+	"github.com/juju/tc"
 	"k8s.io/client-go/rest"
 
 	"github.com/juju/juju/api/agent/uniter"
-	"github.com/juju/juju/core/leadership"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
-	"github.com/juju/juju/internal/worker/uniter/runner/context/mocks"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	jujusecrets "github.com/juju/juju/internal/secrets"
+	"github.com/juju/juju/internal/worker/uniter/api"
 	"github.com/juju/juju/internal/worker/uniter/runner/jujuc"
 	"github.com/juju/juju/rpc/params"
-	jujusecrets "github.com/juju/juju/secrets"
 )
 
 type HookContextParams struct {
-	Unit                *uniter.Unit
-	State               State
+	Unit                api.Unit
+	Uniter              api.UniterClient
 	ID                  string
 	UUID                string
 	ModelName           string
@@ -33,12 +32,10 @@ type HookContextParams struct {
 	APIAddrs            []string
 	LegacyProxySettings proxy.Settings
 	JujuProxySettings   proxy.Settings
-	CanAddMetrics       bool
-	CharmMetrics        *charm.Metrics
 	ActionData          *ActionData
 	AssignedMachineTag  names.MachineTag
 	StorageTag          names.StorageTag
-	SecretsClient       SecretsAccessor
+	SecretsClient       api.SecretsAccessor
 	SecretsStore        jujusecrets.BackendsClient
 	SecretMetadata      map[string]jujuc.SecretMetadata
 	Paths               Paths
@@ -54,10 +51,10 @@ func (stub *stubLeadershipContext) IsLeader() (bool, error) {
 	return stub.isLeader, nil
 }
 
-func NewHookContext(hcParams HookContextParams) (*HookContext, error) {
+func NewHookContext(c *tc.C, hcParams HookContextParams) (*HookContext, error) {
 	ctx := &HookContext{
 		unit:                   hcParams.Unit,
-		state:                  hcParams.State,
+		uniter:                 hcParams.Uniter,
 		id:                     hcParams.ID,
 		uuid:                   hcParams.UUID,
 		modelName:              hcParams.ModelName,
@@ -73,44 +70,45 @@ func NewHookContext(hcParams HookContextParams) (*HookContext, error) {
 		assignedMachineTag:     hcParams.AssignedMachineTag,
 		storageTag:             hcParams.StorageTag,
 		secretsClient:          hcParams.SecretsClient,
-		secretsBackendGetter:   func() (jujusecrets.BackendsClient, error) { return hcParams.SecretsStore, nil },
+		secretsBackendGetter:   func() (api.SecretsBackend, error) { return hcParams.SecretsStore, nil },
 		secretMetadata:         hcParams.SecretMetadata,
 		clock:                  hcParams.Clock,
-		logger:                 loggo.GetLogger("test"),
+		logger:                 loggertesting.WrapCheckLog(c),
 		LeadershipContext:      &stubLeadershipContext{isLeader: true},
 		storageAttachmentCache: make(map[names.StorageTag]jujuc.ContextStorageAttachment),
 	}
 	// Get and cache the addresses.
 	var err error
-	ctx.publicAddress, err = hcParams.Unit.PublicAddress()
+	ctx.publicAddress, err = hcParams.Unit.PublicAddress(c.Context())
 	if err != nil && !params.IsCodeNoAddressSet(err) {
 		return nil, err
 	}
-	ctx.privateAddress, err = hcParams.Unit.PrivateAddress()
+	ctx.privateAddress, err = hcParams.Unit.PrivateAddress(c.Context())
 	if err != nil && !params.IsCodeNoAddressSet(err) {
 		return nil, err
 	}
-	ctx.availabilityZone, err = hcParams.Unit.AvailabilityZone()
+	ctx.availabilityZone, err = hcParams.Unit.AvailabilityZone(c.Context())
 	if err != nil {
 		return nil, err
 	}
-	machPorts, err := hcParams.State.OpenedMachinePortRangesByEndpoint(ctx.assignedMachineTag)
+	machPorts, err := hcParams.Uniter.OpenedMachinePortRangesByEndpoint(c.Context(), ctx.assignedMachineTag)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	appPortRanges, err := hcParams.State.OpenedPortRangesByEndpoint()
+	appPortRanges, err := hcParams.Uniter.OpenedPortRangesByEndpoint(c.Context())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	ctx.portRangeChanges = newPortRangeChangeRecorder(ctx.logger, hcParams.Unit.Tag(), ctx.modelType, machPorts, appPortRanges)
 
 	ctx.secretChanges = newSecretsChangeRecorder(ctx.logger)
+
 	return ctx, nil
 }
 
-func NewMockUnitHookContext(mockUnit *mocks.MockHookUnit, modelType model.ModelType, leadership LeadershipContext) *HookContext {
-	logger := loggo.GetLogger("test")
+func NewMockUnitHookContext(c *tc.C, mockUnit *api.MockUnit, modelType model.ModelType, leadership LeadershipContext) *HookContext {
+	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unit:              mockUnit,
 		unitName:          mockUnit.Tag().Id(),
@@ -130,16 +128,12 @@ func NewMockUnitHookContext(mockUnit *mocks.MockHookUnit, modelType model.ModelT
 	}
 }
 
-func NewMockUnitHookContextWithState(mockUnit *mocks.MockHookUnit, state State) *HookContext {
-	return NewMockUnitHookContextWithStateAndModelType(mockUnit, state, model.IAAS)
-}
-
-func NewMockUnitHookContextWithStateAndModelType(mockUnit *mocks.MockHookUnit, state State, modelType model.ModelType) *HookContext {
-	logger := loggo.GetLogger("test")
+func NewMockUnitHookContextWithUniter(c *tc.C, modelType model.ModelType, mockUnit *api.MockUnit, uniterClient *api.MockUniterClient) *HookContext {
+	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unitName:               mockUnit.Tag().Id(), //unitName used by the action finaliser method.
 		unit:                   mockUnit,
-		state:                  state,
+		uniter:                 uniterClient,
 		logger:                 logger,
 		modelType:              modelType,
 		portRangeChanges:       newPortRangeChangeRecorder(logger, mockUnit.Tag(), model.IAAS, nil, nil),
@@ -148,12 +142,12 @@ func NewMockUnitHookContextWithStateAndModelType(mockUnit *mocks.MockHookUnit, s
 	}
 }
 
-func NewMockUnitHookContextWithStateAndStorage(unitName string, unit HookUnit, state State, storageTag names.StorageTag) *HookContext {
-	logger := loggo.GetLogger("test")
+func NewMockUnitHookContextWithStateAndStorage(c *tc.C, unitName string, unit HookUnit, uniterClient api.UniterClient, storageTag names.StorageTag) *HookContext {
+	logger := loggertesting.WrapCheckLog(c)
 	return &HookContext{
 		unitName:               unit.Tag().Id(), //unitName used by the action finaliser method.
 		unit:                   unit,
-		state:                  state,
+		uniter:                 uniterClient,
 		logger:                 logger,
 		portRangeChanges:       newPortRangeChangeRecorder(logger, names.NewUnitTag(unitName), model.IAAS, nil, nil),
 		storageTag:             storageTag,
@@ -163,7 +157,7 @@ func NewMockUnitHookContextWithStateAndStorage(unitName string, unit HookUnit, s
 
 // SetEnvironmentHookContextSecret exists purely to set the fields used in hookVars.
 func SetEnvironmentHookContextSecret(
-	context *HookContext, secretURI string, metadata map[string]jujuc.SecretMetadata, client SecretsAccessor, backend jujusecrets.BackendsClient,
+	context *HookContext, secretURI string, metadata map[string]jujuc.SecretMetadata, client api.SecretsAccessor, backend jujusecrets.BackendsClient,
 ) {
 	context.secretURI = secretURI
 	context.secretLabel = "label-" + secretURI
@@ -245,16 +239,8 @@ func WithActionContext(ctx *HookContext, in map[string]interface{}, cancel <-cha
 	}
 }
 
-type LeadershipContextFunc func(LeadershipSettingsAccessor, leadership.Tracker, string) LeadershipContext
-
-func PatchNewLeadershipContext(f LeadershipContextFunc) func() {
-	var old LeadershipContextFunc
-	old, newLeadershipContext = newLeadershipContext, f
-	return func() { newLeadershipContext = old }
-}
-
-func StorageAddConstraints(ctx *HookContext) map[string][]params.StorageConstraints {
-	return ctx.storageAddConstraints
+func StorageAddDirectives(ctx *HookContext) map[string][]params.StorageDirectives {
+	return ctx.storageAddDirectives
 }
 
 // ModelHookContextParams encapsulates the parameters for a NewModelHookContext call.
@@ -265,8 +251,6 @@ type ModelHookContextParams struct {
 	ModelName string
 	UnitName  string
 
-	SLALevel string
-
 	AvailZone    string
 	APIAddresses []string
 
@@ -275,13 +259,13 @@ type ModelHookContextParams struct {
 
 	MachineTag names.MachineTag
 
-	State State
-	Unit  HookUnit
+	Uniter api.UniterClient
+	Unit   HookUnit
 }
 
 // NewModelHookContext exists purely to set the fields used in rs.
 // The returned value is not otherwise valid.
-func NewModelHookContext(p ModelHookContextParams) *HookContext {
+func NewModelHookContext(c *tc.C, p ModelHookContextParams) *HookContext {
 	return &HookContext{
 		id:                     p.ID,
 		hookName:               p.HookName,
@@ -294,11 +278,10 @@ func NewModelHookContext(p ModelHookContextParams) *HookContext {
 		relationId:             -1,
 		assignedMachineTag:     p.MachineTag,
 		availabilityZone:       p.AvailZone,
-		slaLevel:               p.SLALevel,
 		principal:              p.UnitName,
 		cloudAPIVersion:        "6.66",
-		logger:                 loggo.GetLogger("test"),
-		state:                  p.State,
+		logger:                 loggertesting.WrapCheckLog(c),
+		uniter:                 p.Uniter,
 		unit:                   p.Unit,
 		storageAttachmentCache: make(map[names.StorageTag]jujuc.ContextStorageAttachment),
 	}
@@ -344,10 +327,6 @@ func CachedAppSettings(cf0 ContextFactory, relId int, appName string) (params.Se
 	cf := cf0.(*contextFactory)
 	settings, found := cf.relationCaches[relId].applications[appName]
 	return settings, found
-}
-
-func (ctx *HookContext) SLALevel() string {
-	return ctx.slaLevel
 }
 
 func (ctx *HookContext) PendingSecretRemoves() map[string]uniter.SecretDeleteArg {

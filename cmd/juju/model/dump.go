@@ -4,14 +4,16 @@
 package model
 
 import (
-	"github.com/juju/cmd/v3"
+	"context"
+
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/names/v5"
+	"github.com/juju/names/v6"
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/modelcmd"
-	"github.com/juju/juju/cmd/output"
+	"github.com/juju/juju/core/output"
+	"github.com/juju/juju/internal/cmd"
 )
 
 // NewDumpCommand returns a fully constructed dump-model command.
@@ -23,8 +25,6 @@ type dumpCommand struct {
 	modelcmd.ModelCommandBase
 	out cmd.Output
 	api DumpModelAPI
-
-	simplified bool
 }
 
 const dumpModelHelpDoc = `
@@ -53,7 +53,6 @@ func (c *dumpCommand) Info() *cmd.Info {
 func (c *dumpCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ModelCommandBase.SetFlags(f)
 	c.out.AddFlags(f, "yaml", output.DefaultFormatters)
-	f.BoolVar(&c.simplified, "simplified", false, "Dump a simplified partial model")
 }
 
 // Init implements Command.
@@ -64,31 +63,31 @@ func (c *dumpCommand) Init(args []string) error {
 // DumpModelAPI specifies the used function calls of the ModelManager.
 type DumpModelAPI interface {
 	Close() error
-	DumpModel(names.ModelTag, bool) (map[string]interface{}, error)
+	DumpModel(context.Context, names.ModelTag) (map[string]interface{}, error)
 }
 
-func (c *dumpCommand) getAPI() (DumpModelAPI, error) {
+func (c *dumpCommand) getAPI(ctx context.Context) (DumpModelAPI, error) {
 	if c.api != nil {
 		return c.api, nil
 	}
-	return c.ModelCommandBase.NewModelManagerAPIClient()
+	return c.ModelCommandBase.NewModelManagerAPIClient(ctx)
 }
 
 // Run implements Command.
 func (c *dumpCommand) Run(ctx *cmd.Context) error {
-	client, err := c.getAPI()
+	client, err := c.getAPI(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	_, modelDetails, err := c.ModelCommandBase.ModelDetails()
+	_, modelDetails, err := c.ModelCommandBase.ModelDetails(ctx)
 	if err != nil {
 		return errors.Annotate(err, "getting model details")
 	}
 
 	modelTag := names.NewModelTag(modelDetails.ModelUUID)
-	results, err := client.DumpModel(modelTag, c.simplified)
+	results, err := client.DumpModel(ctx, modelTag)
 	if err != nil {
 		return err
 	}

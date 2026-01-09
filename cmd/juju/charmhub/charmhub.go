@@ -9,17 +9,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
-	"github.com/juju/loggo"
 
-	"github.com/juju/juju/charmhub"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/arch"
+	"github.com/juju/juju/internal/charmhub"
+	"github.com/juju/juju/internal/cmd"
+	internallogger "github.com/juju/juju/internal/logger"
 )
 
-var logger = loggo.GetLogger("juju.cmd.juju.charmhub")
+var logger = internallogger.GetLogger("juju.cmd.juju.charmhub")
 
 func newCharmHubCommand() *charmHubCommand {
 	return &charmHubCommand{
@@ -38,9 +38,6 @@ type charmHubCommand struct {
 	arches      arch.Arches
 	base        string
 	charmHubURL string
-
-	// DEPRECATED: Use --base instead.
-	series string
 
 	CharmHubClientFunc func(charmhub.Config) (CharmHubClient, error)
 }

@@ -4,23 +4,23 @@
 package resolver_test
 
 import (
+	"context"
 	"errors"
+	stdtesting "testing"
 	"time"
 
-	"github.com/juju/charm/v12/hooks"
-	"github.com/juju/loggo"
 	"github.com/juju/mutex/v2"
-	envtesting "github.com/juju/testing"
-	jc "github.com/juju/testing/checkers"
-	gc "gopkg.in/check.v1"
+	"github.com/juju/tc"
 
+	"github.com/juju/juju/internal/charm/hooks"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
+	"github.com/juju/juju/internal/testhelpers"
+	"github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/internal/worker/uniter/hook"
 	"github.com/juju/juju/internal/worker/uniter/operation"
 	"github.com/juju/juju/internal/worker/uniter/remotestate"
 	"github.com/juju/juju/internal/worker/uniter/resolver"
 	"github.com/juju/juju/testcharms"
-	"github.com/juju/juju/testing"
-	coretesting "github.com/juju/juju/testing"
 )
 
 type LoopSuite struct {
@@ -32,15 +32,16 @@ type LoopSuite struct {
 	executor  *mockOpExecutor
 	charmURL  string
 	charmDir  string
-	abort     chan struct{}
 	onIdle    func() error
 }
 
-var _ = gc.Suite(&LoopSuite{})
+func TestLoopSuite(t *stdtesting.T) {
+	tc.Run(t, &LoopSuite{})
+}
 
-func (s *LoopSuite) SetUpTest(c *gc.C) {
+func (s *LoopSuite) SetUpTest(c *tc.C) {
 	s.BaseSuite.SetUpTest(c)
-	s.resolver = resolver.ResolverFunc(func(resolver.LocalState, remotestate.Snapshot, operation.Factory) (operation.Operation, error) {
+	s.resolver = resolver.ResolverFunc(func(context.Context, resolver.LocalState, remotestate.Snapshot, operation.Factory) (operation.Operation, error) {
 		return nil, resolver.ErrNoOperation
 	})
 	s.watcher = &mockRemoteStateWatcher{
@@ -49,53 +50,60 @@ func (s *LoopSuite) SetUpTest(c *gc.C) {
 	s.opFactory = &mockOpFactory{}
 	s.executor = &mockOpExecutor{}
 	s.charmURL = "ch:trusty/mysql-1"
-	s.abort = make(chan struct{})
 }
 
-func (s *LoopSuite) loop() (resolver.LocalState, error) {
-	localState := resolver.LocalState{
-		CharmURL: s.charmURL,
+func (s *LoopSuite) loop(c *tc.C) func(context.Context) (resolver.LocalState, error) {
+	return func(ctx context.Context) (resolver.LocalState, error) {
+		localState := resolver.LocalState{
+			CharmURL: s.charmURL,
+		}
+		err := resolver.Loop(ctx, resolver.LoopConfig{
+			Resolver:      s.resolver,
+			Factory:       s.opFactory,
+			Watcher:       s.watcher,
+			Executor:      s.executor,
+			OnIdle:        s.onIdle,
+			CharmDir:      s.charmDir,
+			CharmDirGuard: &mockCharmDirGuard{},
+			Logger:        loggertesting.WrapCheckLog(c),
+		}, &localState)
+		return localState, err
 	}
-	err := resolver.Loop(resolver.LoopConfig{
-		Resolver:      s.resolver,
-		Factory:       s.opFactory,
-		Watcher:       s.watcher,
-		Executor:      s.executor,
-		Abort:         s.abort,
-		OnIdle:        s.onIdle,
-		CharmDir:      s.charmDir,
-		CharmDirGuard: &mockCharmDirGuard{},
-		Logger:        loggo.GetLogger("test"),
-	}, &localState)
-	return localState, err
 }
 
-func (s *LoopSuite) TestAbort(c *gc.C) {
-	close(s.abort)
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
+func (s *LoopSuite) TestAbort(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	cancel()
+
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
 }
 
-func (s *LoopSuite) TestOnIdle(c *gc.C) {
+func (s *LoopSuite) TestOnIdle(c *tc.C) {
 	onIdleCh := make(chan interface{}, 1)
 	s.onIdle = func() error {
 		onIdleCh <- nil
 		return nil
 	}
 
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
+	loopFn := s.loop(c)
+
 	done := make(chan interface{}, 1)
 	go func() {
-		_, err := s.loop()
+		_, err := loopFn(ctx)
 		done <- err
 	}()
 
 	waitChannel(c, onIdleCh, "waiting for onIdle")
 	s.watcher.changes <- struct{}{}
 	waitChannel(c, onIdleCh, "waiting for onIdle")
-	close(s.abort)
+	cancel()
 
 	err := waitChannel(c, done, "waiting for loop to exit")
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
 
 	select {
 	case <-onIdleCh:
@@ -104,37 +112,45 @@ func (s *LoopSuite) TestOnIdle(c *gc.C) {
 	}
 }
 
-func (s *LoopSuite) TestOnIdleError(c *gc.C) {
+func (s *LoopSuite) TestOnIdleError(c *tc.C) {
 	s.onIdle = func() error {
 		return errors.New("onIdle failed")
 	}
-	close(s.abort)
-	_, err := s.loop()
-	c.Assert(err, gc.ErrorMatches, "onIdle failed")
+
+	ctx, cancel := context.WithCancel(c.Context())
+	cancel()
+
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.ErrorMatches, "onIdle failed")
 }
 
-func (s *LoopSuite) TestErrWaitingNoOnIdle(c *gc.C) {
+func (s *LoopSuite) TestErrWaitingNoOnIdle(c *tc.C) {
 	var onIdleCalled bool
 	s.onIdle = func() error {
 		onIdleCalled = true
 		return nil
 	}
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
 	) (operation.Operation, error) {
 		return nil, resolver.ErrWaiting
 	})
-	close(s.abort)
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
-	c.Assert(onIdleCalled, jc.IsFalse)
+
+	ctx, cancel := context.WithCancel(c.Context())
+	cancel()
+
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
+	c.Assert(onIdleCalled, tc.IsFalse)
 }
 
-func (s *LoopSuite) TestInitialFinalLocalState(c *gc.C) {
+func (s *LoopSuite) TestInitialFinalLocalState(c *tc.C) {
 	var local resolver.LocalState
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		l resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
@@ -143,19 +159,25 @@ func (s *LoopSuite) TestInitialFinalLocalState(c *gc.C) {
 		return nil, resolver.ErrNoOperation
 	})
 
-	close(s.abort)
-	lastLocal, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
-	c.Assert(local, jc.DeepEquals, resolver.LocalState{
+	ctx, cancel := context.WithCancel(c.Context())
+	cancel()
+
+	lastLocal, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
+	c.Assert(local, tc.DeepEquals, resolver.LocalState{
 		CharmURL: s.charmURL,
 	})
-	c.Assert(lastLocal, jc.DeepEquals, local)
+	c.Assert(lastLocal, tc.DeepEquals, local)
 }
 
-func (s *LoopSuite) TestLoop(c *gc.C) {
+func (s *LoopSuite) TestLoop(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
 	var resolverCalls int
 	theOp := &mockOp{}
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
@@ -171,30 +193,32 @@ func (s *LoopSuite) TestLoop(c *gc.C) {
 		// change.
 		case 2:
 			s.watcher.changes <- struct{}{}
-			break
 		// On the third call, kill the loop.
 		case 3:
-			close(s.abort)
-			break
+			cancel()
 		}
 		return nil, resolver.ErrNoOperation
 	})
 
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
-	c.Assert(resolverCalls, gc.Equals, 3)
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
+	c.Assert(resolverCalls, tc.Equals, 3)
 	s.executor.CheckCallNames(c, "State", "State", "State", "Run", "State", "State")
 
 	runArgs := s.executor.Calls()[3].Args
-	c.Assert(runArgs, gc.HasLen, 2)
-	c.Assert(runArgs[0], gc.DeepEquals, theOp)
-	c.Assert(runArgs[1], gc.NotNil)
+	c.Assert(runArgs, tc.HasLen, 2)
+	c.Assert(runArgs[0], tc.DeepEquals, theOp)
+	c.Assert(runArgs[1], tc.NotNil)
 }
 
-func (s *LoopSuite) TestLoopWithChange(c *gc.C) {
+func (s *LoopSuite) TestLoopWithChange(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
 	var resolverCalls int
 	theOp := &mockOp{}
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
@@ -210,13 +234,10 @@ func (s *LoopSuite) TestLoopWithChange(c *gc.C) {
 		// change.
 		case 2:
 			s.watcher.changes <- struct{}{}
-			break
 		case 3:
-			break
 		// On the fourth call, kill the loop.
 		case 4:
-			close(s.abort)
-			break
+			cancel()
 		}
 		return nil, resolver.ErrNoOperation
 	})
@@ -231,7 +252,7 @@ func (s *LoopSuite) TestLoopWithChange(c *gc.C) {
 			// wait for changes to propagate
 			select {
 			case _, ok := <-rs:
-				c.Assert(ok, jc.IsTrue)
+				c.Assert(ok, tc.IsTrue)
 				remoteStateSnapshotCount++
 			case <-time.After(testing.ShortWait):
 				c.Fatalf("timed out waiting for remote state snapshot")
@@ -241,54 +262,62 @@ func (s *LoopSuite) TestLoopWithChange(c *gc.C) {
 		return nil
 	}
 
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
-	c.Assert(resolverCalls, gc.Equals, 4)
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
+	c.Assert(resolverCalls, tc.Equals, 4)
 	s.executor.CheckCallNames(c, "State", "State", "State", "Run", "State", "State", "State")
 
-	c.Assert(remoteStateSnapshotCount, gc.Equals, 5)
+	c.Assert(remoteStateSnapshotCount, tc.Equals, 5)
 	select {
 	case _, ok := <-remoteStateSnapshotChan:
-		c.Assert(ok, jc.IsTrue)
+		c.Assert(ok, tc.IsTrue)
 		c.Fatalf("remote state snapshot channel fired more than once")
 	default:
 	}
 
 	runArgs := s.executor.Calls()[3].Args
-	c.Assert(runArgs, gc.HasLen, 2)
-	c.Assert(runArgs[0], gc.DeepEquals, theOp)
-	c.Assert(runArgs[1], gc.NotNil)
+	c.Assert(runArgs, tc.HasLen, 2)
+	c.Assert(runArgs[0], tc.DeepEquals, theOp)
+	c.Assert(runArgs[1], tc.NotNil)
 }
 
-func (s *LoopSuite) TestRunFails(c *gc.C) {
+func (s *LoopSuite) TestRunFails(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
 	s.executor.SetErrors(errors.New("run fails"))
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
 	) (operation.Operation, error) {
 		return mockOp{}, nil
 	})
-	_, err := s.loop()
-	c.Assert(err, gc.ErrorMatches, "run fails")
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.ErrorMatches, "run fails")
 }
 
-func (s *LoopSuite) TestNextOpFails(c *gc.C) {
+func (s *LoopSuite) TestNextOpFails(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
 	) (operation.Operation, error) {
 		return nil, errors.New("NextOp fails")
 	})
-	_, err := s.loop()
-	c.Assert(err, gc.ErrorMatches, "NextOp fails")
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.ErrorMatches, "NextOp fails")
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeUpgradeCharmHook(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmUpgradeUpgradeCharmHook(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Installed: true,
 			Kind:      operation.Continue,
@@ -299,10 +328,10 @@ func (s *LoopSuite) TestCheckCharmUpgradeUpgradeCharmHook(c *gc.C) {
 	s.testCheckCharmUpgradeDoesNothing(c)
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeSameURL(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmUpgradeSameURL(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Installed: true,
 			Kind:      operation.Continue,
@@ -318,10 +347,10 @@ func (s *LoopSuite) TestCheckCharmUpgradeSameURL(c *gc.C) {
 	s.testCheckCharmUpgradeDoesNothing(c)
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeNotInstalled(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmUpgradeNotInstalled(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Kind: operation.Continue,
 		},
@@ -336,48 +365,33 @@ func (s *LoopSuite) TestCheckCharmUpgradeNotInstalled(c *gc.C) {
 	s.testCheckCharmUpgradeDoesNothing(c)
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeIncorrectLXDProfile(c *gc.C) {
-	s.executor = &mockOpExecutor{
-		Executor: nil,
-		Stub:     envtesting.Stub{},
-		st: operation.State{
-			Installed: true,
-			Started:   true,
-			Kind:      operation.Continue,
-		},
-		run: nil,
-	}
-	s.watcher = &mockRemoteStateWatcher{
-		snapshot: remotestate.Snapshot{
-			CharmURL:             "ch:trusty/mysql-2",
-			CharmProfileRequired: true,
-			LXDProfileName:       "juju-test-mysql-1",
-		},
-	}
-	s.testCheckCharmUpgradeDoesNothing(c)
-}
+func (s *LoopSuite) testCheckCharmUpgradeDoesNothing(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
 
-func (s *LoopSuite) testCheckCharmUpgradeDoesNothing(c *gc.C) {
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
 	) (operation.Operation, error) {
 		return nil, resolver.ErrWaiting
 	})
-	close(s.abort)
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
+
+	cancel()
+
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
 
 	// Run not called
-	c.Assert(s.executor.Calls(), gc.HasLen, 3)
+	c.Assert(s.executor.Calls(), tc.HasLen, 3)
 	s.executor.CheckCallNames(c, "State", "State", "State")
 }
 
-func (s *LoopSuite) TestCheckCharmUpgrade(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmUpgrade(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Installed: true,
 			Kind:      operation.Continue,
@@ -392,10 +406,10 @@ func (s *LoopSuite) TestCheckCharmUpgrade(c *gc.C) {
 	s.testCheckCharmUpgradeCallsRun(c, "Upgrade")
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeMissingCharmDir(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmUpgradeMissingCharmDir(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Installed: true,
 			Kind:      operation.Continue,
@@ -410,10 +424,10 @@ func (s *LoopSuite) TestCheckCharmUpgradeMissingCharmDir(c *gc.C) {
 	s.testCheckCharmUpgradeCallsRun(c, "Upgrade")
 }
 
-func (s *LoopSuite) TestCheckCharmInstallMissingCharmDirInstallHookFail(c *gc.C) {
+func (s *LoopSuite) TestCheckCharmInstallMissingCharmDirInstallHookFail(c *tc.C) {
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Installed: false,
 			Kind:      operation.RunHook,
@@ -430,56 +444,44 @@ func (s *LoopSuite) TestCheckCharmInstallMissingCharmDirInstallHookFail(c *gc.C)
 	s.testCheckCharmUpgradeCallsRun(c, "Install")
 }
 
-func (s *LoopSuite) TestCheckCharmUpgradeLXDProfile(c *gc.C) {
-	s.executor = &mockOpExecutor{
-		Executor: nil,
-		Stub:     envtesting.Stub{},
-		st: operation.State{
-			Installed: true,
-			Started:   true,
-			Kind:      operation.Continue,
-		},
-		run: nil,
-	}
-	s.watcher = &mockRemoteStateWatcher{
-		snapshot: remotestate.Snapshot{
-			CharmURL:             "ch:trusty/mysql-2",
-			CharmProfileRequired: true,
-			LXDProfileName:       "juju-test-mysql-2",
-		},
-	}
-	s.testCheckCharmUpgradeCallsRun(c, "Upgrade")
-}
+func (s *LoopSuite) testCheckCharmUpgradeCallsRun(c *tc.C, op string) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
 
-func (s *LoopSuite) testCheckCharmUpgradeCallsRun(c *gc.C, op string) {
 	s.opFactory = &mockOpFactory{
 		Factory: nil,
-		Stub:    envtesting.Stub{},
+		Stub:    testhelpers.Stub{},
 		op:      mockOp{},
 	}
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
 	) (operation.Operation, error) {
 		return nil, resolver.ErrWaiting
 	})
-	close(s.abort)
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrLoopAborted)
+
+	cancel()
+
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrLoopAborted)
 
 	// Run not called
-	c.Assert(s.executor.Calls(), gc.HasLen, 4)
+	c.Assert(s.executor.Calls(), tc.HasLen, 4)
 	s.executor.CheckCallNames(c, "State", "State", "Run", "State")
 
-	c.Assert(s.opFactory.Calls(), gc.HasLen, 1)
+	c.Assert(s.opFactory.Calls(), tc.HasLen, 1)
 	s.opFactory.CheckCallNames(c, "New"+op)
 }
 
-func (s *LoopSuite) TestCancelledLockAcquisitionCausesRestart(c *gc.C) {
+func (s *LoopSuite) TestCancelledLockAcquisitionCausesRestart(c *tc.C) {
+	ctx, cancel := context.WithCancel(c.Context())
+	defer cancel()
+
 	s.executor = &mockOpExecutor{
 		Executor: nil,
-		Stub:     envtesting.Stub{},
+		Stub:     testhelpers.Stub{},
 		st: operation.State{
 			Started: true,
 			Kind:    operation.Continue,
@@ -490,6 +492,7 @@ func (s *LoopSuite) TestCancelledLockAcquisitionCausesRestart(c *gc.C) {
 	}
 
 	s.resolver = resolver.ResolverFunc(func(
+		_ context.Context,
 		_ resolver.LocalState,
 		_ remotestate.Snapshot,
 		_ operation.Factory,
@@ -497,15 +500,15 @@ func (s *LoopSuite) TestCancelledLockAcquisitionCausesRestart(c *gc.C) {
 		return &mockOp{}, nil
 	})
 
-	_, err := s.loop()
-	c.Assert(err, gc.Equals, resolver.ErrRestart)
+	_, err := s.loop(c)(ctx)
+	c.Assert(err, tc.Equals, resolver.ErrRestart)
 }
 
-func waitChannel(c *gc.C, ch <-chan interface{}, activity string) interface{} {
+func waitChannel(c *tc.C, ch <-chan interface{}, activity string) interface{} {
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(coretesting.LongWait):
+	case <-time.After(testing.LongWait):
 		c.Fatalf("timed out %s", activity)
 		panic("unreachable")
 	}

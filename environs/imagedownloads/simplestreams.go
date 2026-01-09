@@ -4,6 +4,7 @@
 package imagedownloads
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"sort"
@@ -81,6 +82,7 @@ func (m *Metadata) DownloadURL(baseURL string) (*url.URL, error) {
 // Fetch gets product results as Metadata from the provided datasources, given
 // some constraints and an optional filter function.
 func Fetch(
+	ctx context.Context,
 	fetcher imagemetadata.SimplestreamsFetcher,
 	src []simplestreams.DataSource,
 	cons *imagemetadata.ImageConstraint,
@@ -98,7 +100,7 @@ func Fetch(
 		},
 	}
 
-	items, resolveInfo, err := fetcher.GetMetadata(src, params)
+	items, resolveInfo, err := fetcher.GetMetadata(ctx, src, params)
 	if err != nil {
 		return nil, resolveInfo, err
 	}
@@ -120,12 +122,8 @@ func validateArgs(arch, release, ftype string) error {
 	}
 
 	validVersion := false
-	workloadVersions, err := corebase.AllWorkloadVersions()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	for _, supported := range workloadVersions.Values() {
-		if release == supported {
+	for _, supported := range corebase.WorkloadBases() {
+		if release == supported.Channel.Track {
 			validVersion = true
 			break
 		}
@@ -158,7 +156,7 @@ func validateArgs(arch, release, ftype string) error {
 //   - File image type.
 //
 // src exists to pass in a data source for testing.
-func One(fetcher imagemetadata.SimplestreamsFetcher, arch, release, stream, ftype string, src func() simplestreams.DataSource) (*Metadata, error) {
+func One(ctx context.Context, fetcher imagemetadata.SimplestreamsFetcher, arch, release, stream, ftype string, src func() simplestreams.DataSource) (*Metadata, error) {
 	if err := validateArgs(arch, release, ftype); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -177,7 +175,7 @@ func One(fetcher imagemetadata.SimplestreamsFetcher, arch, release, stream, ftyp
 		return nil, errors.Trace(err)
 	}
 
-	md, _, err := Fetch(fetcher, ds, limit, Filter(ftype))
+	md, _, err := Fetch(ctx, fetcher, ds, limit, Filter(ftype))
 	if err != nil {
 		// It doesn't appear that arch is vetted anywhere else so we can wind
 		// up with empty results if someone requests any arch with valid series

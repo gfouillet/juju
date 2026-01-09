@@ -5,8 +5,8 @@ package remotestate
 
 import (
 	"github.com/juju/errors"
-	"github.com/juju/worker/v3"
-	"github.com/juju/worker/v3/catacomb"
+	"github.com/juju/worker/v4"
+	"github.com/juju/worker/v4/catacomb"
 
 	"github.com/juju/juju/core/watcher"
 )
@@ -40,6 +40,7 @@ func wrapRelationUnitsWatcher(
 		out:        out,
 	}
 	err := catacomb.Invoke(catacomb.Plan{
+		Name: "relation-units-watcher",
 		Site: &ruw.catacomb,
 		Work: ruw.loop,
 		Init: []worker.Worker{watcher},

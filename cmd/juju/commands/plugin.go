@@ -4,6 +4,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,11 +15,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/juju/cmd/v3"
 	"github.com/juju/collections/set"
 	"github.com/juju/gnuflag"
-	"github.com/juju/utils/v3"
+	"github.com/juju/utils/v4"
 
+	"github.com/juju/juju/internal/cmd"
 	"github.com/juju/juju/juju/osenv"
 )
 
@@ -130,7 +131,7 @@ func (c *PluginCommand) Run(ctx *cmd.Context) error {
 	if exitError, ok := err.(*exec.ExitError); ok && exitError != nil {
 		status := exitError.ProcessState.Sys().(syscall.WaitStatus)
 		if status.Exited() {
-			return cmd.NewRcPassthroughError(status.ExitStatus())
+			return utils.NewRcPassthroughError(status.ExitStatus())
 		}
 	}
 	return err
@@ -168,7 +169,7 @@ func GetPluginDescriptions() []PluginDescription {
 				result.description = strings.SplitN(string(output), "\n", 2)[0]
 			} else {
 				result.description = fmt.Sprintf("error occurred running '%s --description'", plugin)
-				logger.Errorf("'%s --description': %s", plugin, err)
+				logger.Errorf(context.TODO(), "'%s --description': %s", plugin, err)
 			}
 		}(plugin)
 	}

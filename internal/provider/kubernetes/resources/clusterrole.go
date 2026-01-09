@@ -110,7 +110,7 @@ func (r *ClusterRole) Ensure(
 	if err == nil {
 		hasClaim, err = RunClaims(claims...).Assert(&existing.ClusterRole)
 	}
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.Is(err, errors.NotFound) {
 		return cleanups, errors.Annotatef(
 			err,
 			"checking for existing cluster role %q",

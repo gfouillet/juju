@@ -29,20 +29,9 @@ The currently available charm hook commands include:
     is-leader                Print application leadership status.
     juju-log                 Write a message to the juju log.
     juju-reboot              Reboot the host machine.
-    k8s-raw-get              Get k8s raw spec information.
-    k8s-raw-set              Set k8s raw spec information.
-    k8s-spec-get             Get k8s spec information.
-    k8s-spec-set             Set k8s spec information.
-    leader-get               Print application leadership settings.
-    leader-set               Write application leadership settings.
     network-get              Get network config.
     open-port                Register a request to open a port or port range.
     opened-ports             List all ports or port ranges opened by the unit.
-    payload-register         Register a charm payload with Juju.
-    payload-status-set       Update the status of a payload.
-    payload-unregister       Stop tracking a payload.
-    pod-spec-get             Get k8s spec information. (deprecated)
-    pod-spec-set             Set k8s spec information. (deprecated)
     relation-get             Get relation settings.
     relation-ids             List all relation IDs for the given endpoint.
     relation-list            List relation units.

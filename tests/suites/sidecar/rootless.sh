@@ -5,9 +5,10 @@ run_non_root_charm() {
 
 	ensure "test-rootless-non-root-charm" "${file}"
 
-	juju deploy ./testcharms/charms/sidecar-non-root --resource ubuntu=public.ecr.aws/ubuntu/ubuntu:22.04
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/sidecar-non-root) --resource ubuntu=public.ecr.aws/ubuntu/ubuntu:22.04
 
-	wait_for "sidecar-non-root" "$(idle_condition "sidecar-non-root" 0 0)"
+	wait_for "sidecar-non-root" "$(idle_condition "sidecar-non-root" 0)"
 	sleep 10 # wait for logs
 
 	output=$(juju debug-log --replay)
@@ -26,9 +27,10 @@ run_sudoer_charm() {
 
 	ensure "test-rootless-sudoer-charm" "${file}"
 
-	juju deploy ./testcharms/charms/sidecar-sudoer --resource ubuntu=public.ecr.aws/ubuntu/ubuntu:22.04
+	# shellcheck disable=SC2046
+	juju deploy $(pack_charm ./testcharms/charms/sidecar-sudoer) --resource ubuntu=public.ecr.aws/ubuntu/ubuntu:22.04
 
-	wait_for "sidecar-sudoer" "$(idle_condition "sidecar-sudoer" 0 0)"
+	wait_for "sidecar-sudoer" "$(idle_condition "sidecar-sudoer" 0)"
 	sleep 10 # wait for logs
 
 	output=$(juju debug-log --replay)
@@ -48,6 +50,9 @@ test_rootless() {
 
 	(
 		set_verbosity
+
+		echo "==> Checking for dependencies"
+		check_dependencies charmcraft
 
 		cd .. || exit
 
