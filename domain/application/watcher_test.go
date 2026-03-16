@@ -846,6 +846,8 @@ func (s *watcherSuite) TestWatchUnitAddressesHashEmptyInitial(c *tc.C) {
 	appName := "foo"
 	_ = s.createIAASApplication(c, svc, appName, service.AddIAASUnitArg{})
 
+	s.AssertChangeStreamIdle(c)
+
 	ctx := c.Context()
 	watcher, err := svc.WatchUnitAddressesHash(ctx, "foo/0")
 	c.Assert(err, tc.ErrorIsNil)
@@ -918,6 +920,8 @@ func (s *watcherSuite) TestWatchUnitAddressesHash(c *tc.C) {
 	})
 	c.Assert(err, tc.ErrorIsNil)
 
+	s.AssertChangeStreamIdle(c)
+
 	ctx := c.Context()
 	watcher, err := svc.WatchUnitAddressesHash(ctx, "foo/0")
 	c.Assert(err, tc.ErrorIsNil)
@@ -964,6 +968,8 @@ func (s *watcherSuite) TestWatchCloudServiceAddressesHash(c *tc.C) {
 		},
 	})
 	c.Assert(err, tc.ErrorIsNil)
+
+	s.AssertChangeStreamIdle(c)
 
 	watcher, err := svc.WatchUnitAddressesHash(ctx, "foo/0")
 	c.Assert(err, tc.ErrorIsNil)
@@ -1038,6 +1044,8 @@ func (s *watcherSuite) TestWatchUnitAddRemoveOnMachineInitialEvents(c *tc.C) {
 			},
 		},
 	)
+
+	s.AssertChangeStreamIdle(c)
 
 	ctx := c.Context()
 	watcher, err := svc.WatchUnitAddRemoveOnMachine(ctx, machineName)
@@ -1164,6 +1172,8 @@ func (s *watcherSuite) TestWatchApplicationsInitialEvent(c *tc.C) {
 
 	app1 := s.createCAASApplication(c, svc, "foo")
 	app2 := s.createCAASApplication(c, svc, "bar")
+
+	s.AssertChangeStreamIdle(c)
 
 	ctx := c.Context()
 	watcher, err := svc.WatchApplications(ctx)

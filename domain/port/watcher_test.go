@@ -318,14 +318,32 @@ func (s *watcherSuite) TestWatchOpenedPorts(c *tc.C) {
 		w.AssertNoChange()
 	})
 
-	// open ports on different machines at the same time
+	// open ports on different machines at the same time, in a single
+	// transaction to ensure they are in the same change stream term.
 	harness.AddTest(c, func(c *tc.C) {
-		err := s.srv.ImportOpenUnitPorts(c.Context(), s.unitUUIDs[1], network.GroupedPortRanges{
-			"ep3": {https},
-		})
-		c.Assert(err, tc.ErrorIsNil)
-		err = s.srv.ImportOpenUnitPorts(c.Context(), s.unitUUIDs[2], network.GroupedPortRanges{
-			"ep3": {https},
+		err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
+			// Look up the charm_relation UUID for endpoint "ep3" on unit 1 (shared
+			// by both units 1 and 2, which belong to the same application).
+			var relationUUID string
+			if err := tx.QueryRowContext(ctx,
+				"SELECT uuid FROM v_endpoint WHERE unit_uuid = ? AND endpoint = 'ep3'",
+				s.unitUUIDs[1],
+			).Scan(&relationUUID); err != nil {
+				return err
+			}
+
+			insertPortRange := `
+INSERT INTO port_range (uuid, protocol_id, from_port, to_port, relation_uuid, unit_uuid)
+VALUES (lower(hex(randomblob(16))),
+        (SELECT id FROM protocol WHERE protocol = 'tcp'),
+        443, 443, ?, ?)`
+			if _, err := tx.ExecContext(ctx, insertPortRange, relationUUID, s.unitUUIDs[1]); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, insertPortRange, relationUUID, s.unitUUIDs[2]); err != nil {
+				return err
+			}
+			return nil
 		})
 		c.Assert(err, tc.ErrorIsNil)
 	}, func(w watchertest.WatcherC[[]string]) {
