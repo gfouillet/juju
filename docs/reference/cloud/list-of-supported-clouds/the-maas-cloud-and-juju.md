@@ -62,6 +62,7 @@ Attributes:
 | - {ref}`constraint-image-id`           | &#10005; <br> An image name from MAAS.              |
 | - {ref}`constraint-instance-role`      | &#10005;                                            |
 | - {ref}`constraint-instance-type`      | &#10005;                                            |
+| - {ref}`constraint-ip-family`         | &#10005; <br> The IP family reflects the machine's interfaces as configured in MAAS. |
 | - {ref}`constraint-mem`                | &#10003;                                            |
 | - {ref}`constraint-root-disk`          | &#10003;                                            |
 | - {ref}`constraint-root-disk-source`   | &#10005;                                            |

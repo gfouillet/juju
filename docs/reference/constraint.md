@@ -80,6 +80,19 @@ Indicates that the specified role/profile for the given cloud should be used.  <
 
 Cloud-specific instance-type name. Values vary by provider, and individual deployment in some cases. <p> **Note:** When compatibility between clouds is desired, use corresponding values for `cores`, `mem`, and `root-disk` instead.
 
+(constraint-ip-family)=
+### `ip-family`
+
+```{versionadded} 4.1.0
+```
+
+The IP address family for the machine's network interfaces. <p> **Valid values:**
+`ipv4`, `ipv6`, `dual`. <p> **Note:** Currently only supported by Azure. `ipv4`
+provisions an IPv4-only machine. `dual` provisions a dual-stack machine with both IPv4
+and IPv6 connectivity. `ipv6` is accepted by the CLI but is not currently honoured by any
+provider (Azure rejects it; other providers ignore the constraint with a warning). On
+unsupported providers, this constraint is ignored with a warning.
+
 (constraint-mem)=
 ### `mem`
 

@@ -120,6 +120,7 @@ The network label or UUID to bring machines up on when multiple networks exist.
 | - {ref}`constraint-image-id`           | &#10005; <br> An OpenStack image ID.                |
 | - {ref}`constraint-instance-role`      | &#10005;                                            |
 | - {ref}`constraint-instance-type`      | &#10003; <br> Any OpenStack flavor defined by an OpenStack cloud admin. |
+| - {ref}`constraint-ip-family`         | &#10005; <br> The IP family depends on the Neutron network configuration. |
 | - {ref}`constraint-mem`                | &#10003;                                            |
 | - {ref}`constraint-root-disk`          | &#10003;                                            |
 | - {ref}`constraint-root-disk-source`   | &#10003; <br> Valid values: `[local, volume]`.      |

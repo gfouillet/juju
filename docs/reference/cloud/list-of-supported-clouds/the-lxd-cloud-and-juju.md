@@ -103,6 +103,7 @@ With LXD system containers, constraints are interpreted as resource *maximums* (
 | - {ref}`constraint-image-id`           | &#10005;                                            |
 | - {ref}`constraint-instance-role`      | &#10005;                                            |
 | - {ref}`constraint-instance-type`      | TBA                                                 |
+| - {ref}`constraint-ip-family`         | &#10005; <br> The IP family is determined by the LXD bridge (`lxdbr0`) configuration on the host. |
 | - {ref}`constraint-mem`                | &#10003; <br> The maximum amount of memory that a machine/container will have.|
 | - {ref}`constraint-root-disk`          | &#10003;                                            |
 | - {ref}`constraint-root-disk-source`   | &#10003; <br> The LXD storage pool for the root disk. The default LXD storage pool is used if `root-disk-source` is not specified. |

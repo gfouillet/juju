@@ -117,6 +117,7 @@ An external network that VMs will be connected to. The resulting IP address for 
 | - {ref}`constraint-image-id`           | &#10005;                                            |
 | - {ref}`constraint-instance-role`      | &#10005;                                            |
 | - {ref}`constraint-instance-type`      | &#10003;                                            |
+| - {ref}`constraint-ip-family`         | &#10005; <br> The IP family depends on the VM network and DHCP configuration. |
 | - {ref}`constraint-mem`                | &#10003;                                            |
 | - {ref}`constraint-root-disk`          | &#10003;                                            |
 | - {ref}`constraint-root-disk-source`   | &#10005;                                            |

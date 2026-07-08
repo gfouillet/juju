@@ -74,6 +74,7 @@ The OCID of the compartment in which juju has access to create resources.
 | - {ref}`constraint-image-id`           | &#10005;                                      |
 | - {ref}`constraint-instance-role`      | &#10005;                                      |
 | - {ref}`constraint-instance-type`      | &#10003;                                      |
+| - {ref}`constraint-ip-family`         | &#10005; <br> IPv4 only (hardcoded in provider). |
 | - {ref}`constraint-mem`                | &#10003;                                      |
 | - {ref}`constraint-root-disk`          | &#10003;                                      |
 | - {ref}`constraint-root-disk-source`   | &#10005;                                      |
