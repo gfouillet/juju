@@ -35,7 +35,7 @@ func CreateTestCloud(
 			SELECT ?, ?, cloud_type.id, "", true
 			FROM cloud_type
 			WHERE type = ?
-		`, cloudUUID.String(), cloud.Name, cloud.Type)
+`, cloudUUID.String(), cloud.Name, cloud.Type)
 		if err != nil {
 			fmt.Println("this error")
 			return err
@@ -47,7 +47,7 @@ func CreateTestCloud(
 				SELECT ?, auth_type.id
 				FROM auth_type
 				WHERE type = ?
-			`, cloudUUID.String(), authType)
+`, cloudUUID.String(), authType)
 			if err != nil {
 				fmt.Println("this error2")
 				return err
