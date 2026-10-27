@@ -25,12 +25,16 @@ type sourceEdit struct {
 // violation position and only ever touches bytes that the extractor
 // mapped to literal SQL text.
 var (
+	// sqlfluff escapes tabs and newlines in the Found section, e.g.
+	// "Found ' \\t'", so the class accepts both real and escaped runs.
 	fixCollapseSpace = regexp.MustCompile(
-		`^Expected only single space before .+\. Found '[ \t]+'`)
+		`^Expected only single space before .+\. Found '(?:[ \t]|\\t|\\n)+'`)
 	fixTrailingSpace = regexp.MustCompile(
 		`^Unnecessary trailing whitespace`)
 	fixInsertSpace = regexp.MustCompile(
 		`^Expected single whitespace between .+ and .+`)
+	fixRemoveSpace = regexp.MustCompile(
+		`^Unexpected whitespace before .+`)
 	fixNoIndent = regexp.MustCompile(
 		`^Line should not be indented\.`)
 	fixIndent = regexp.MustCompile(
@@ -126,6 +130,8 @@ func planViolationFix(
 		return pl.removeTrailingSpace(st, anchor)
 	case fixInsertSpace.MatchString(msg):
 		return pl.insertAt(st, anchor, " ")
+	case fixRemoveSpace.MatchString(msg):
+		return pl.removeSpaceBefore(st, anchor)
 	case fixNoIndent.MatchString(msg):
 		return pl.setLineIndent(st, anchor, 0)
 	case fixIndent.MatchString(msg):
@@ -198,6 +204,27 @@ func (pl *fixer) collapseSpace(st *Statement, anchor int) (sourceEdit, bool) {
 		return sourceEdit{}, false
 	}
 	edit.repl = " "
+	return edit, true
+}
+
+// removeSpaceBefore removes the run of spaces and tabs starting at the
+// anchor entirely, for findings where sqlfluff wants no whitespace at
+// all before the following token (function call brackets, commas and
+// the like).
+func (pl *fixer) removeSpaceBefore(st *Statement, anchor int) (sourceEdit, bool) {
+	content := st.Eval.Content
+	j := anchor
+	for j < len(content) && (content[j] == ' ' || content[j] == '\t') {
+		j++
+	}
+	if j == anchor || j >= len(content) {
+		return sourceEdit{}, false
+	}
+	edit, ok := literalSpan(st, anchor, j)
+	if !ok {
+		return sourceEdit{}, false
+	}
+	edit.repl = ""
 	return edit, true
 }
 

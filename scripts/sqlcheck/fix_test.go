@@ -223,3 +223,32 @@ func (s *fixSuite) TestSkipsUnfixableMessage(c *tc.C) {
 	c.Check(len(edits), tc.Equals, 0)
 	c.Check(skipped, tc.Equals, 1)
 }
+
+func (s *fixSuite) TestRemoveSpaceBeforeBracket(c *tc.C) {
+	src := `package p
+
+func f() {
+	st.Prepare("SELECT EXISTS (uuid) FROM t WHERE x = 1")
+}
+`
+	rend, _ := renderFixture(c, src)
+	v := violationAt(c, rend, " (uuid)", "LT01",
+		"Unexpected whitespace before start bracket '('.")
+	edits, skipped := fixFixture(c, src, []fluffViolation{v})
+	c.Assert(skipped, tc.Equals, 0)
+	out := applyTo(c, src, edits)
+	c.Check(strings.Contains(out, "EXISTS(uuid)"), tc.IsTrue)
+}
+
+func (s *fixSuite) TestCollapseSpaceWithEscapedTabMessage(c *tc.C) {
+	// sqlfluff reports mixed runs as "Found ' \t'" with a literal
+	// backslash-t; the class must still classify the message.
+	src := "package p\n\nfunc f() {\n\tst.Prepare(`WITH \tblockdevice_pool AS (\n    SELECT x\n)`)\n}\n"
+	rend, _ := renderFixture(c, src)
+	v := violationAt(c, rend, " \t", "LT01",
+		`Expected only single space before naked identifier. Found ' \t'.`)
+	edits, skipped := fixFixture(c, src, []fluffViolation{v})
+	c.Assert(skipped, tc.Equals, 0)
+	out := applyTo(c, src, edits)
+	c.Check(strings.Contains(out, "WITH blockdevice_pool AS"), tc.IsTrue)
+}
