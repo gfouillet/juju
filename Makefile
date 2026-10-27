@@ -984,12 +984,13 @@ local-operator-update: check-k8s-model operator-image
 STATIC_ANALYSIS_JOB ?=
 
 SQLCHECK_FLAGS ?=
+SQLFLUFF_VERSION := $(shell cat .github/sqlfluff-version)
 
 .PHONY: lint-sql
 lint-sql:
 ## lint-sql: Lint SQL embedded in Go source with sqlfluff
 	@command -v sqlfluff >/dev/null 2>&1 || { \
-		echo "sqlfluff not found in PATH; install sqlfluff==3.0.7"; \
+		echo "sqlfluff not found in PATH; install sqlfluff==$(SQLFLUFF_VERSION)"; \
 		exit 1; \
 	}
 	go run ./scripts/sqlcheck $(SQLCHECK_FLAGS)

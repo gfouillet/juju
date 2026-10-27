@@ -70,7 +70,7 @@ jobs:
           python-version: "3.9"
 
       - name: Install SQLFluff
-        run: "pip install sqlfluff==3.0.7"
+        run: 'pip install "sqlfluff==$(cat .github/sqlfluff-version)"'
 
       - name: Lint SQL
         run: "sqlfluff lint --config .github/.sqlfluff domain/schema/**/sql/*.sql"
@@ -94,7 +94,7 @@ jobs:
           python-version: "3.9"
 
       - name: Install SQLFluff
-        run: "pip install sqlfluff==3.0.7"
+        run: 'pip install "sqlfluff==$(cat .github/sqlfluff-version)"'
 
       - name: Test sqlcheck
         run: go test ./scripts/sqlcheck/...

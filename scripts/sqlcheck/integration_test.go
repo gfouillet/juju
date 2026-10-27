@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func (s *integrationSuite) TestSQLFluffEndToEnd(c *tc.C) {
 		c.Skip("sqlfluff not installed")
 	}
 
-	// sqlfluff 3.0.7 with .github/.sqlfluff does not emit CP01 for
+	// Pinned sqlfluff with .github/.sqlfluff does not emit CP01 for
 	// lowercase keywords. LT01 (layout.spacing) is a known hit.
 	src := trimFixture(`
 package p
@@ -80,4 +81,64 @@ WHERE x = 1
 		}
 	}
 	c.Check(found, tc.IsTrue, tc.Commentf("diagnostics: %#v", diags))
+}
+
+func (s *integrationSuite) TestSQLFluffFixEndToEnd(c *tc.C) {
+	bin, err := lookSQLFluff()
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			c.Fatalf("sqlfluff is required in CI: %v", err)
+		}
+		c.Skip("sqlfluff not installed")
+	}
+
+	// Run the real plan/apply/re-lint cycle to validate the message
+	// matchers against the pinned sqlfluff output and to prove that fixes
+	// converge without making the Go source unparsable.
+	root := c.MkDir()
+	path := filepath.Join(root, "foo.go")
+	src := "package p\n\nfunc f() {\n\tst.Prepare(`SELECT id  FROM   t WHERE x = 1`)\n}\n"
+	c.Assert(os.WriteFile(path, []byte(src), 0o644), tc.ErrorIsNil)
+	repo, err := findRepoRoot(".")
+	c.Assert(err, tc.ErrorIsNil)
+	cfg := filepath.Join(repo, ".github", ".sqlfluff")
+	rules := map[string]bool{"LT01": true}
+	var finalFluff []fluffFile
+	for pass := 0; pass <= maxFixPasses; pass++ {
+		data, err := os.ReadFile(path)
+		c.Assert(err, tc.ErrorIsNil)
+		fset := token.NewFileSet()
+		pkg, err := parsePackage(fset, []goFile{{Path: "foo.go", Src: data}})
+		c.Assert(err, tc.ErrorIsNil)
+		next := 1
+		stmts, skips := extractPackage(pkg, &next)
+		c.Assert(skips, tc.HasLen, 0)
+		c.Assert(stmts, tc.HasLen, 1)
+		rend := renderPackage(pkg, stmts)["foo.go"]
+		c.Assert(rend, tc.NotNil)
+		dir := c.MkDir()
+		bySynth, err := writeExtracted(dir, map[string]*FileRender{"foo.go": rend})
+		c.Assert(err, tc.ErrorIsNil)
+		fluff, stderr, err := runSQLFluff(context.Background(), bin, cfg, dir, rules)
+		c.Assert(err, tc.ErrorIsNil, tc.Commentf("stderr: %s", stderr))
+		finalFluff = fluff
+		edits, _ := planFixes(stmts, bySynth, fluff)
+		if len(edits) == 0 {
+			break
+		}
+		changed, err := applyEdits(root, edits)
+		c.Assert(err, tc.ErrorIsNil)
+		c.Assert(changed, tc.Equals, 1)
+	}
+
+	violations := 0
+	for _, file := range finalFluff {
+		violations += len(file.Violations)
+	}
+	c.Check(violations, tc.Equals, 0, tc.Commentf("sqlfluff findings: %#v", finalFluff))
+	fixed, err := os.ReadFile(path)
+	c.Assert(err, tc.ErrorIsNil)
+	_, err = parser.ParseFile(token.NewFileSet(), "foo.go", fixed, parser.AllErrors)
+	c.Check(err, tc.ErrorIsNil)
+	c.Check(strings.Contains(string(fixed), "SELECT id FROM t WHERE x = 1"), tc.IsTrue)
 }

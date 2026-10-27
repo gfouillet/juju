@@ -92,7 +92,7 @@ func (s *stateSuite) TestGetSSHServerHostPublicKeyEmpty(c *tc.C) {
 	// Insert a row directly with an empty public_key. The ignore is
 	// needed because sqlfluff mis-parses the valid empty hex blob
 	// literal x'' as an identifier followed by a quoted literal.
-	// sqllint-ignore LT01
+	// sqlcheck-ignore LT01
 	_, err := s.DB().Exec(
 		`INSERT INTO controller_ssh_host_key (id, algorithm_type_id, ssh_key, public_key) VALUES (?, ?, ?, x'')`,
 		domainssh.SSHServerHostKeyUUID, domainssh.SSHKeyAlgorithmTypeED25519ID, "dummy-key",

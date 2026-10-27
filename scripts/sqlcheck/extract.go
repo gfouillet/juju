@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -53,7 +54,7 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 		fset:  pkg.fset,
 		files: pkg.files,
 	}
-	collectPkgConsts(env)
+	collectPkgStrings(env)
 
 	ignores := map[string]map[int]ignoreDir{}
 	for _, pf := range pkg.order {
@@ -66,17 +67,13 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 	covered := map[string]bool{}
 
 	addStmt := func(st Statement) {
-		key := st.File + ":" + itoa(st.Start) + ":" + itoa(st.End)
+		key := st.File + ":" + strconv.Itoa(st.Start) + ":" + strconv.Itoa(st.End)
 		if _, ok := seen[key]; ok {
 			return
 		}
 		seen[key] = len(stmts)
-		if nextID != nil {
-			st.ID = *nextID
-			*nextID++
-		} else {
-			st.ID = len(stmts) + 1
-		}
+		st.ID = *nextID
+		*nextID++
 		attachIgnores(&st, pkg.fset, ignores)
 		stmts = append(stmts, st)
 		if st.Eval != nil {
@@ -84,7 +81,7 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 				if ob.File == "" || ob.Kind == KindVirtual {
 					continue
 				}
-				covered[ob.File+":"+itoa(ob.Offset)] = true
+				covered[ob.File+":"+strconv.Itoa(ob.Offset)] = true
 			}
 		}
 	}
@@ -132,7 +129,11 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 				}
 				return true
 			}
-			if !looksLikeSQL(out.val.Content) {
+			// A recognised sink establishes SQL-ness. Once its static
+			// argument starts with a SQL keyword, lint it even when the
+			// statement has no clause keyword (for example SELECT 1).
+			if !looksLikeSQL(out.val.Content) &&
+				!(knownSQLSink(call) && hasSQLLead(out.val.Content)) {
 				return true
 			}
 			out.val = toSQLite(out.val)
@@ -162,7 +163,7 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 				return true
 			}
 			off := pf.tf.Offset(lit.Pos())
-			if covered[pf.path+":"+itoa(off+1)] || covered[pf.path+":"+itoa(off)] {
+			if covered[pf.path+":"+strconv.Itoa(off+1)] || covered[pf.path+":"+strconv.Itoa(off)] {
 				return true
 			}
 			out := env.evalBasicLit(lit)
@@ -199,8 +200,8 @@ func coverExpr(expr ast.Expr, env *evalEnv, covered map[string]bool) {
 				return true
 			}
 			off := pf.tf.Offset(e.Pos())
-			covered[pf.path+":"+itoa(off)] = true
-			covered[pf.path+":"+itoa(off+1)] = true
+			covered[pf.path+":"+strconv.Itoa(off)] = true
+			covered[pf.path+":"+strconv.Itoa(off+1)] = true
 		case *ast.Ident:
 			if e.Obj == nil {
 				return true
@@ -359,6 +360,15 @@ func looksLikeSQL(s string) bool {
 	return false
 }
 
+// hasSQLLead reports whether s starts with a SQL statement keyword after
+// leading comments and whitespace. It deliberately does not require a
+// clause keyword: recognised SQL sinks must not silently lose statements
+// such as SELECT last_insert_rowid().
+func hasSQLLead(s string) bool {
+	lead, _, ok := firstSQLWord(stripLeadingSQLNoise(s))
+	return ok && leadSQL[lead]
+}
+
 var strongClauseSQL = map[string]bool{
 	"FROM": true, "WHERE": true, "INTO": true, "VALUES": true,
 	"TABLE": true, "JOIN": true, "SET": true, "INDEX": true,
@@ -491,10 +501,10 @@ func parseIgnoreComment(text string) (ignoreDir, bool) {
 	text = strings.TrimPrefix(text, "/*")
 	text = strings.TrimSuffix(text, "*/")
 	text = strings.TrimSpace(text)
-	if text == "sqllint-ignore" {
+	if text == "sqlcheck-ignore" {
 		return ignoreDir{all: true}, true
 	}
-	rest, ok := strings.CutPrefix(text, "sqllint-ignore ")
+	rest, ok := strings.CutPrefix(text, "sqlcheck-ignore ")
 	if !ok {
 		return ignoreDir{}, false
 	}

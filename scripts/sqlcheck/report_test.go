@@ -97,7 +97,7 @@ func (s *reportSuite) TestIgnoreSuppressesRule(c *tc.C) {
 package p
 
 func f() {
-	// sqllint-ignore CP01
+	// sqlcheck-ignore CP01
 	st.Prepare("select id from t where x = 1")
 }
 `

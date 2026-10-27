@@ -30,9 +30,9 @@ func noneVal() evalOutcome {
 }
 
 type evalEnv struct {
-	fset      *token.FileSet
-	files     map[string]*parsedFile
-	pkgConsts map[string]*evaluated
+	fset       *token.FileSet
+	files      map[string]*parsedFile
+	pkgStrings map[string]*evaluated
 }
 
 func (env *evalEnv) fileFor(pos token.Pos) *parsedFile {
@@ -117,7 +117,10 @@ func unquoteLiteral(file string, start int, raw []byte) (*evaluated, error) {
 		content := raw[1 : len(raw)-1]
 		m := make([]origByte, len(content))
 		for i := range content {
-			m[i] = origByte{File: file, Offset: start + 1 + i, Kind: KindLiteral}
+			m[i] = origByte{
+				File: file, Offset: start + 1 + i,
+				Kind: KindLiteral, RawString: true,
+			}
 		}
 		return &evaluated{Content: string(content), Map: m}, nil
 	case '"', '\'':
@@ -128,7 +131,6 @@ func unquoteLiteral(file string, start int, raw []byte) (*evaluated, error) {
 }
 
 func unquoteInterpreted(file string, start int, raw []byte) (*evaluated, error) {
-	quote := raw[0]
 	i := 1
 	end := len(raw) - 1
 	var b strings.Builder
@@ -162,9 +164,6 @@ func unquoteInterpreted(file string, start int, raw []byte) (*evaluated, error) 
 		i += size
 		var enc [utf8.UTFMax]byte
 		n := utf8.EncodeRune(enc[:], ch)
-		if quote == '\'' && ch == '"' {
-			// keep as-is
-		}
 		b.Write(enc[:n])
 		for range n {
 			m = append(m, origByte{File: file, Offset: escOff, Kind: KindEscape})
@@ -253,7 +252,7 @@ func (env *evalEnv) evalIdent(id *ast.Ident) evalOutcome {
 	if id == nil {
 		return noneVal()
 	}
-	if v, ok := env.pkgConsts[id.Name]; ok && (id.Obj == nil || id.Obj.Kind == ast.Con) {
+	if v, ok := env.pkgStrings[id.Name]; ok && (id.Obj == nil || id.Obj.Kind == ast.Con) {
 		return staticVal(v)
 	}
 	if id.Obj == nil {
@@ -287,7 +286,7 @@ func (env *evalEnv) evalValueSpecIdent(id *ast.Ident, spec *ast.ValueSpec) evalO
 		return noneVal()
 	}
 	if idx >= len(spec.Values) {
-		if v, ok := env.pkgConsts[id.Name]; ok {
+		if v, ok := env.pkgStrings[id.Name]; ok {
 			return staticVal(v)
 		}
 		return noneVal()
@@ -501,8 +500,11 @@ func isStringConstruction(expr ast.Expr) bool {
 	}
 }
 
-func collectPkgConsts(env *evalEnv) {
-	env.pkgConsts = map[string]*evaluated{}
+// collectPkgStrings resolves static package-level string constants and
+// variables across files. Cross-file identifiers have no ast.Object, so
+// this package-wide table is needed to avoid silently dropping their SQL.
+func collectPkgStrings(env *evalEnv) {
+	env.pkgStrings = map[string]*evaluated{}
 	type pending struct {
 		name string
 		expr ast.Expr
@@ -511,7 +513,7 @@ func collectPkgConsts(env *evalEnv) {
 	for _, pf := range env.files {
 		for _, decl := range pf.ast.Decls {
 			gd, ok := decl.(*ast.GenDecl)
-			if !ok || gd.Tok != token.CONST {
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
 				continue
 			}
 			for _, spec := range gd.Specs {
@@ -531,12 +533,12 @@ func collectPkgConsts(env *evalEnv) {
 	for {
 		progress := false
 		for _, it := range items {
-			if _, ok := env.pkgConsts[it.name]; ok {
+			if _, ok := env.pkgStrings[it.name]; ok {
 				continue
 			}
 			out := env.eval(it.expr)
 			if out.val != nil {
-				env.pkgConsts[it.name] = out.val
+				env.pkgStrings[it.name] = out.val
 				progress = true
 			}
 		}

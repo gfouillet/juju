@@ -5,6 +5,8 @@ package main
 
 import (
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,7 +38,7 @@ func fixFixture(c *tc.C, src string, violations []fluffViolation) ([]sourceEdit,
 	}, []fluffFile{{
 		Filepath:   "foo.go.sql",
 		Violations: violations,
-	}}, pkg.files)
+	}})
 	return edits, skipped
 }
 
@@ -173,6 +175,22 @@ func (s *fixSuite) TestLineBreakInRawString(c *tc.C) {
 	c.Check(strings.Contains(out, "SELECT\n    a, b FROM"), tc.IsTrue)
 }
 
+func (s *fixSuite) TestLineBreakRawStringAfterQuotedIdentifier(c *tc.C) {
+	// The raw-string bit comes from literal decoding, not from scanning
+	// nearby source bytes. An SQL quote before the anchor must therefore
+	// not cause a literal backslash-n to be inserted into the raw string.
+	src := "package p\n\nfunc f() {\n\tst.Prepare(`SELECT \"col name\", x FROM t WHERE x = 1`)\n}\n"
+	rend, _ := renderFixture(c, src)
+	v := violationAt(c, rend, "x FROM", "LT02",
+		"Expected line break and indent of 4 spaces before 'x'.")
+	edits, skipped := fixFixture(c, src, []fluffViolation{v})
+	c.Assert(skipped, tc.Equals, 0)
+	c.Assert(edits, tc.HasLen, 1)
+	out := applyTo(c, src, edits)
+	c.Check(strings.Contains(out, "\"col name\",\n    x FROM"), tc.IsTrue)
+	c.Check(strings.Contains(out, `,\n    x FROM`), tc.IsFalse)
+}
+
 func (s *fixSuite) TestBlankLineAfterCTE(c *tc.C) {
 	src := "package p\n\nfunc f() {\n\tst.Prepare(`WITH x AS (\n    SELECT a\n)\nSELECT a FROM x WHERE a = 1`)\n}\n"
 	rend, _ := renderFixture(c, src)
@@ -251,6 +269,145 @@ func (s *fixSuite) TestCollapseSpaceWithEscapedTabMessage(c *tc.C) {
 	c.Assert(skipped, tc.Equals, 0)
 	out := applyTo(c, src, edits)
 	c.Check(strings.Contains(out, "WITH blockdevice_pool AS"), tc.IsTrue)
+}
+
+func (s *fixSuite) TestSkipsEscapeAndReplacementAnchors(c *tc.C) {
+	// An edit that started at an expanded escape would rewrite only the
+	// escape's first source byte. One anchored at a sqlair replacement
+	// would rewrite the expression's dummy token. Both must be refused.
+	tests := []struct {
+		name   string
+		src    string
+		needle string
+		desc   string
+	}{{
+		name:   "escape",
+		src:    "package p\n\nfunc f() {\n\tst.Prepare(\"SELECT id\\tFROM t WHERE x = 1\")\n}\n",
+		needle: "\tFROM",
+		desc:   "Expected only single space before 'FROM' keyword. Found '\\t'.",
+	}, {
+		name:   "replacement",
+		src:    "package p\n\nfunc f() {\n\tst.Prepare(\"SELECT &Foo.* FROM t WHERE x = 1\")\n}\n",
+		needle: "c FROM",
+		desc:   "Expected single whitespace between naked identifier and 'FROM' keyword.",
+	}}
+	for _, test := range tests {
+		c.Logf("case: %s", test.name)
+		rend, _ := renderFixture(c, test.src)
+		v := violationAt(c, rend, test.needle, "LT01", test.desc)
+		edits, skipped := fixFixture(c, test.src, []fluffViolation{v})
+		c.Check(edits, tc.HasLen, 0)
+		c.Check(skipped, tc.Equals, 1)
+	}
+}
+
+func (s *fixSuite) TestLiteralSpanRejectsUnsafeMappings(c *tc.C) {
+	base := []origByte{{
+		File: "foo.go", Offset: 10, Kind: KindLiteral,
+	}, {
+		File: "foo.go", Offset: 11, Kind: KindLiteral,
+	}}
+	tests := []struct {
+		name string
+		m    []origByte
+	}{{
+		name: "escape",
+		m: []origByte{{
+			File: "foo.go", Offset: 10, Kind: KindLiteral,
+		}, {
+			File: "foo.go", Offset: 11, Kind: KindEscape,
+		}},
+	}, {
+		name: "replacement",
+		m: []origByte{{
+			File: "foo.go", Offset: 10, Kind: KindLiteral,
+		}, {
+			File: "foo.go", Offset: 11, Kind: KindReplacement,
+		}},
+	}, {
+		name: "non-contiguous",
+		m: []origByte{{
+			File: "foo.go", Offset: 10, Kind: KindLiteral,
+		}, {
+			File: "foo.go", Offset: 12, Kind: KindLiteral,
+		}},
+	}, {
+		name: "cross-file",
+		m: []origByte{{
+			File: "foo.go", Offset: 10, Kind: KindLiteral,
+		}, {
+			File: "bar.go", Offset: 11, Kind: KindLiteral,
+		}},
+	}}
+	for _, test := range tests {
+		c.Logf("case: %s", test.name)
+		st := Statement{Eval: &evaluated{Content: "  ", Map: test.m}}
+		_, ok := literalSpan(&st, 0, 2)
+		c.Check(ok, tc.IsFalse)
+	}
+	st := Statement{Eval: &evaluated{Content: "  ", Map: base}}
+	_, ok := literalSpan(&st, 0, 2)
+	c.Check(ok, tc.IsTrue)
+}
+
+func (s *fixSuite) TestFixConverges(c *tc.C) {
+	// Re-run detection and fixing until the fixture reaches a fixed
+	// point. A self-triggering edit would keep finding the same spacing.
+	src := "package p\n\nfunc f() {\n\tst.Prepare(`SELECT id  FROM t WHERE x = 1`)\n}\n"
+	for range 2 {
+		rend, _ := renderFixture(c, src)
+		if !strings.Contains(string(rend.Synthetic), "  FROM") {
+			break
+		}
+		v := violationAt(c, rend, "  FROM", "LT01",
+			"Expected only single space before 'FROM' keyword. Found '  '.")
+		edits, skipped := fixFixture(c, src, []fluffViolation{v})
+		c.Assert(skipped, tc.Equals, 0)
+		c.Assert(edits, tc.HasLen, 1)
+		src = applyTo(c, src, edits)
+	}
+	rend, _ := renderFixture(c, src)
+	c.Check(strings.Contains(string(rend.Synthetic), "  FROM"), tc.IsFalse)
+	c.Check(strings.Contains(string(rend.Synthetic), " FROM"), tc.IsTrue)
+}
+
+func (s *fixSuite) TestApplyEditsWritesFilesBottomUp(c *tc.C) {
+	root := c.MkDir()
+	c.Assert(os.MkdirAll(filepath.Join(root, "b"), 0o755), tc.ErrorIsNil)
+	c.Assert(os.WriteFile(filepath.Join(root, "a.go"), []byte("abcdef"), 0o644), tc.ErrorIsNil)
+	c.Assert(os.WriteFile(filepath.Join(root, "b", "b.go"), []byte("123456"), 0o644), tc.ErrorIsNil)
+
+	changed, err := applyEdits(root, []sourceEdit{{
+		file: "a.go", start: 1, end: 2, repl: "X",
+	}, {
+		file: "b/b.go", start: 0, end: 1, repl: "x",
+	}, {
+		file: "a.go", start: 4, end: 5, repl: "Y",
+	}, {
+		file: "b/b.go", start: 5, end: 6, repl: "y",
+	}})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(changed, tc.Equals, 2)
+	a, err := os.ReadFile(filepath.Join(root, "a.go"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(string(a), tc.Equals, "aXcdYf")
+	b, err := os.ReadFile(filepath.Join(root, "b", "b.go"))
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(string(b), tc.Equals, "x2345y")
+}
+
+func (s *fixSuite) TestApplyEditsRejectsOutOfRangeWithoutWriting(c *tc.C) {
+	root := c.MkDir()
+	path := filepath.Join(root, "a.go")
+	c.Assert(os.WriteFile(path, []byte("abcdef"), 0o644), tc.ErrorIsNil)
+	changed, err := applyEdits(root, []sourceEdit{{
+		file: "a.go", start: 4, end: 7, repl: "X",
+	}})
+	c.Check(err, tc.ErrorMatches, "edit out of range in a.go: \\[4,7\\)")
+	c.Check(changed, tc.Equals, 0)
+	data, readErr := os.ReadFile(path)
+	c.Assert(readErr, tc.ErrorIsNil)
+	c.Check(string(data), tc.Equals, "abcdef")
 }
 
 func (s *fixSuite) TestNoSpaceInsideBlobLiteral(c *tc.C) {

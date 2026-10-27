@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -36,13 +37,19 @@ func findRepoRoot(start string) (string, error) {
 	}
 }
 
-func discoverGoFiles(root string, args []string) ([]string, error) {
-	if len(args) > 0 {
-		return discoverFromArgs(root, args)
+func discoverGoFiles(ctx context.Context, root string, args []string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	paths, err := gitGoFiles(root)
+	if len(args) > 0 {
+		return discoverFromArgs(ctx, root, args)
+	}
+	paths, err := gitGoFiles(ctx, root)
 	if err == nil {
 		return filterGoFiles(root, paths), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	var out []string
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -68,7 +75,7 @@ func discoverGoFiles(root string, args []string) ([]string, error) {
 	return out, err
 }
 
-func discoverFromArgs(root string, args []string) ([]string, error) {
+func discoverFromArgs(ctx context.Context, root string, args []string) ([]string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -76,7 +83,7 @@ func discoverFromArgs(root string, args []string) ([]string, error) {
 	var out []string
 	for _, arg := range args {
 		if hasGlobMeta(arg) {
-			matches, err := globGoFiles(root, arg)
+			matches, err := globGoFiles(ctx, root, arg)
 			if err != nil {
 				return nil, err
 			}
@@ -129,8 +136,8 @@ func discoverFromArgs(root string, args []string) ([]string, error) {
 	return uniqueStrings(out), nil
 }
 
-func gitGoFiles(root string) ([]string, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
+func gitGoFiles(ctx context.Context, root string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -148,8 +155,8 @@ func gitGoFiles(root string) ([]string, error) {
 // globGoFiles expands a wildcard pattern such as "domain/*/state/**"
 // against the tracked Go files of the repository. It returns an error
 // when the pattern matches nothing, mirroring git pathspec behaviour.
-func globGoFiles(root, pattern string) ([]string, error) {
-	all, err := discoverGoFiles(root, nil)
+func globGoFiles(ctx context.Context, root, pattern string) ([]string, error) {
+	all, err := discoverGoFiles(ctx, root, nil)
 	if err != nil {
 		return nil, err
 	}

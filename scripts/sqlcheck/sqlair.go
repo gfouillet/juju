@@ -19,7 +19,7 @@ type replacement struct {
 // replaceSQLair rewrites sqlair input/output expressions into SQLite-safe
 // dummy tokens while padding to the original width.
 //
-// Input expressions become "1" rather than "?" because sqlfluff 3.0.7's
+// Input expressions become "1" rather than "?" because pinned sqlfluff's
 // sqlite dialect cannot parse "?" placeholders.
 func replaceSQLair(ev *evaluated) *evaluated {
 	if ev == nil || ev.Content == "" {

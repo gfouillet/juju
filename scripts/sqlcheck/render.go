@@ -69,11 +69,59 @@ func (r *FileRender) emitStatement(st Statement) {
 	for end > 0 && isSQLSpace(ev.Content[end-1]) {
 		end--
 	}
-	r.emitEvalPart(ev, 0, end, st.ID)
-	if !endsWithSemi(ev.Content[:end]) {
+	// If the statement ends in a line comment, terminate before the
+	// comment. A semicolon appended after it would itself be commented
+	// out, leaving sqlfluff with an unterminated statement.
+	terminator := end
+	if comment := trailingLineCommentStart(ev.Content[:end]); comment >= 0 {
+		terminator = comment
+		for terminator > 0 && isSQLSpace(ev.Content[terminator-1]) {
+			terminator--
+		}
+	}
+	r.emitEvalPart(ev, 0, terminator, st.ID)
+	if !endsWithSemi(ev.Content[:terminator]) {
 		r.emitVirtual([]byte(";"))
 	}
-	r.emitEvalPart(ev, end, len(ev.Content), st.ID)
+	r.emitEvalPart(ev, terminator, len(ev.Content), st.ID)
+}
+
+// trailingLineCommentStart returns the start of a -- comment on the last
+// line of s, or -1 when there is none. Comment markers inside quoted SQL
+// strings and identifiers are ignored.
+func trailingLineCommentStart(s string) int {
+	comment := -1
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if comment >= 0 {
+			if c == '\n' {
+				comment = -1
+			}
+			continue
+		}
+		if quote != 0 {
+			if c != quote {
+				continue
+			}
+			if i+1 < len(s) && s[i+1] == quote {
+				i++
+				continue
+			}
+			quote = 0
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '-':
+			if i+1 < len(s) && s[i+1] == '-' {
+				comment = i
+				i++
+			}
+		}
+	}
+	return comment
 }
 
 func isSQLSpace(c byte) bool {

@@ -5,10 +5,13 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -20,8 +23,8 @@ type sourceEdit struct {
 	repl  string
 }
 
-// fixMatchers classify sqlfluff violation messages (pinned 3.0.7
-// wording) into mechanical source edits. Every edit is anchored at the
+// fixMatchers classify violation messages from the pinned sqlfluff
+// version into mechanical source edits. Every edit is anchored at the
 // violation position and only ever touches bytes that the extractor
 // mapped to literal SQL text.
 var (
@@ -55,7 +58,6 @@ func planFixes(
 	stmts []Statement,
 	bySynth map[string]*FileRender,
 	fluff []fluffFile,
-	pkgFiles map[string]*parsedFile,
 ) (edits []sourceEdit, skipped int) {
 	byID := map[int]*Statement{}
 	for i := range stmts {
@@ -68,7 +70,7 @@ func planFixes(
 			continue
 		}
 		for _, v := range ff.Violations {
-			edit, ok := planViolationFix(rend, byID, v, pkgFiles)
+			edit, ok := planViolationFix(rend, byID, v)
 			if !ok {
 				skipped++
 				continue
@@ -102,7 +104,6 @@ func planViolationFix(
 	rend *FileRender,
 	byID map[int]*Statement,
 	v fluffViolation,
-	pkgFiles map[string]*parsedFile,
 ) (sourceEdit, bool) {
 	renderedOff := lineColToOffset(rend.Synthetic, v.line(), v.col())
 	if renderedOff >= len(rend.Synthetic) && len(rend.Synthetic) > 0 {
@@ -121,7 +122,7 @@ func planViolationFix(
 		return sourceEdit{}, false
 	}
 
-	pl := &fixer{pkgFiles: pkgFiles}
+	pl := &fixer{}
 	msg := v.Description
 	switch {
 	case fixCollapseSpace.MatchString(msg):
@@ -135,10 +136,16 @@ func planViolationFix(
 	case fixNoIndent.MatchString(msg):
 		return pl.setLineIndent(st, anchor, 0)
 	case fixIndent.MatchString(msg):
-		n := atoiCapture(fixIndent.FindStringSubmatch(msg)[1])
+		n, ok := fixIndentCount(fixIndent, msg)
+		if !ok {
+			return sourceEdit{}, false
+		}
 		return pl.setLineIndent(st, anchor, n)
 	case fixLineBreakIndent.MatchString(msg):
-		n := atoiCapture(fixLineBreakIndent.FindStringSubmatch(msg)[1])
+		n, ok := fixIndentCount(fixLineBreakIndent, msg)
+		if !ok {
+			return sourceEdit{}, false
+		}
 		return pl.insertLineBreak(st, anchor, strings.Repeat(" ", n))
 	case fixLineBreakNoIndent.MatchString(msg):
 		return pl.insertLineBreak(st, anchor, "")
@@ -149,17 +156,16 @@ func planViolationFix(
 	}
 }
 
-// fixer carries the parsed source files needed to plan edits safely.
-type fixer struct {
-	pkgFiles map[string]*parsedFile
-}
+// fixer groups the mechanical edit operations.
+type fixer struct{}
 
-func atoiCapture(s string) int {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		n = n*10 + int(s[i]-'0')
-	}
-	return n
+// maxAutoFixIndent bounds memory allocation if an unexpected external
+// diagnostic contains a pathological indent count.
+const maxAutoFixIndent = 1000
+
+func fixIndentCount(re *regexp.Regexp, msg string) (int, bool) {
+	n, err := strconv.Atoi(re.FindStringSubmatch(msg)[1])
+	return n, err == nil && n <= maxAutoFixIndent
 }
 
 // literalSpan verifies that the content range [i,j) maps to contiguous
@@ -319,7 +325,7 @@ func (pl *fixer) insertLineBreak(st *Statement, anchor int, indent string) (sour
 		return pl.insertAt(st, anchor, "\n"+indent)
 	}
 	text := "\n" + indent
-	if !pl.inRawString(st, st.Eval.Map[i]) {
+	if !st.Eval.Map[i].RawString {
 		text = strings.ReplaceAll(text, "\n", "\\n")
 	}
 	edit.repl = text
@@ -332,18 +338,18 @@ func (pl *fixer) insertLineBreak(st *Statement, anchor int, indent string) (sour
 //
 // A space is never inserted between a name character and a following
 // quote: in SQLite that adjacency forms a hexadecimal blob literal
-// (x'...'), and sqlfluff 3.0.7 mis-parses the empty form x” as an
+// (x'...'), and the pinned sqlfluff mis-parses the empty form x” as an
 // identifier followed by a quoted literal.
 func (pl *fixer) insertAt(st *Statement, anchor int, text string) (sourceEdit, bool) {
 	m := st.Eval.Map
 	ob := m[anchor]
-	if ob.Kind == KindVirtual || ob.File == "" {
+	if ob.Kind != KindLiteral || ob.File == "" {
 		return sourceEdit{}, false
 	}
 	if text == " " && pl.atQuoteAfterName(st, anchor) {
 		return sourceEdit{}, false
 	}
-	if strings.Contains(text, "\n") && !pl.inRawString(st, ob) {
+	if strings.Contains(text, "\n") && !ob.RawString {
 		text = strings.ReplaceAll(text, "\n", "\\n")
 	}
 	return sourceEdit{
@@ -352,45 +358,6 @@ func (pl *fixer) insertAt(st *Statement, anchor int, text string) (sourceEdit, b
 		end:   ob.Offset,
 		repl:  text,
 	}, true
-}
-
-// inRawString reports whether the source byte mapped by ob sits inside
-// a raw (backtick) string literal, by scanning back to the enclosing
-// opening quote. Bytes of escape expansions never belong to raw
-// strings.
-func (pl *fixer) inRawString(st *Statement, ob origByte) bool {
-	if ob.Kind == KindEscape {
-		return false
-	}
-	pf := pl.pkgFiles[ob.File]
-	if pf == nil {
-		return false
-	}
-	src := pf.src
-	i := ob.Offset
-	for i > 0 {
-		i--
-		switch src[i] {
-		case '`':
-			return true
-		case '"', '\'':
-			if isEscapedQuote(src, i) {
-				continue
-			}
-			return false
-		}
-	}
-	return false
-}
-
-// isEscapedQuote reports whether the quote at src[i] is preceded by an
-// odd number of backslashes, i.e. is itself escaped.
-func isEscapedQuote(src []byte, i int) bool {
-	n := 0
-	for j := i - 1; j >= 0 && src[j] == '\\'; j-- {
-		n++
-	}
-	return n%2 == 1
 }
 
 // applyEdits applies non-overlapping edits to the source files under
@@ -402,7 +369,8 @@ func applyEdits(root string, edits []sourceEdit) (int, error) {
 		byFile[e.file] = append(byFile[e.file], e)
 	}
 	changed := 0
-	for file, list := range byFile {
+	for _, file := range slices.Sorted(maps.Keys(byFile)) {
+		list := byFile[file]
 		sort.Slice(list, func(i, j int) bool { return list[i].start > list[j].start })
 		data, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {

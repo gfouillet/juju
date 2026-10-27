@@ -170,6 +170,46 @@ func f() {
 	c.Check(containsKind(kinds, KindVirtual), tc.IsTrue)
 }
 
+func (s *renderSuite) TestSemicolonBeforeTrailingLineComment(c *tc.C) {
+	// Appending the terminator after a -- comment would comment out the
+	// semicolon itself and produce an unterminated-statement finding.
+	src := `
+package p
+
+func f() {
+	db.Exec(` + "`" + `SELECT id FROM t -- note
+` + "`" + `)
+}
+`
+	_, _, rend := parseAndRender(c, "foo.go", src)
+	c.Check(strings.Contains(string(rend.Synthetic), "SELECT id FROM t; -- note"), tc.IsTrue)
+}
+
+func (s *renderSuite) TestSemicolonBeforeCommentOnFollowingLine(c *tc.C) {
+	src := `
+package p
+
+func f() {
+	db.Exec(` + "`" + `SELECT id FROM t
+-- note` + "`" + `)
+}
+`
+	_, _, rend := parseAndRender(c, "foo.go", src)
+	c.Check(strings.Contains(string(rend.Synthetic), "SELECT id FROM t;\n-- note"), tc.IsTrue)
+}
+
+func (s *renderSuite) TestCommentMarkerInsideQuotedLiteral(c *tc.C) {
+	src := `
+package p
+
+func f() {
+	db.Exec("SELECT '-- not a comment' AS note FROM t")
+}
+`
+	_, _, rend := parseAndRender(c, "foo.go", src)
+	c.Check(strings.Contains(string(rend.Synthetic), "SELECT '-- not a comment' AS note FROM t;"), tc.IsTrue)
+}
+
 func containsKind(kinds []SegmentKind, want SegmentKind) bool {
 	return slices.Contains(kinds, want)
 }

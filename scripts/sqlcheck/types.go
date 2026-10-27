@@ -5,6 +5,7 @@ package main
 
 import (
 	"go/token"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,9 @@ type origByte struct {
 	File   string
 	Offset int
 	Kind   SegmentKind
+	// RawString records literal bytes copied from a backtick string.
+	// The fixer uses it to decide whether inserted newlines need escaping.
+	RawString bool
 }
 
 // evaluated is reconstructed SQL plus a per-byte origin map.
@@ -203,29 +207,7 @@ type Diagnostic struct {
 func (d Diagnostic) String() string {
 	rule := d.Rule
 	if rule == "" {
-		return d.File + ":" + itoa(d.Line) + ":" + itoa(d.Column) + ": " + d.Message
+		return d.File + ":" + strconv.Itoa(d.Line) + ":" + strconv.Itoa(d.Column) + ": " + d.Message
 	}
-	return d.File + ":" + itoa(d.Line) + ":" + itoa(d.Column) + ": " + rule + " " + d.Message
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return d.File + ":" + strconv.Itoa(d.Line) + ":" + strconv.Itoa(d.Column) + ": " + rule + " " + d.Message
 }

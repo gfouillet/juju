@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -84,7 +87,9 @@ func runSQLFluff(ctx context.Context, bin, config, dir string, rules map[string]
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil && !isFluffLintExit(err) {
-		return nil, stderr.String(), fmt.Errorf("sqlfluff lint failed: %w\n%s", err, stderr.String())
+		return nil, stderr.String(), fmt.Errorf(
+			"sqlfluff lint failed: %w\n%s",
+			err, truncate(stderr.String(), 2000))
 	}
 	data := bytes.TrimSpace(stdout.Bytes())
 	if len(data) == 0 {
@@ -107,22 +112,28 @@ func joinRules(rules map[string]bool) string {
 }
 
 func isFluffLintExit(err error) bool {
-	ex, ok := err.(*exec.ExitError)
-	if !ok {
+	var ex *exec.ExitError
+	if !errors.As(err, &ex) {
 		return false
 	}
-	code := ex.ExitCode()
-	return code == 1 || code == 0
+	return ex.ExitCode() == 1
 }
 
 func lookSQLFluff() (string, error) {
 	bin, err := exec.LookPath("sqlfluff")
 	if err != nil {
-		return "", fmt.Errorf("sqlfluff not found in PATH; install sqlfluff==3.0.7")
+		return "", fmt.Errorf(
+			"sqlfluff not found in PATH; install the repository-pinned version: %w",
+			err)
 	}
 	return bin, nil
 }
 
+// matchSynth maps a sqlfluff-reported path back to its FileRender.
+// Direct and cleaned lookups are tried first. The heuristic fallback
+// (basename and suffix matching) considers candidates in sorted key
+// order and only returns a match when it is unambiguous; if several
+// synthetic files match equally, no guess is made.
 func matchSynth(bySynth map[string]*FileRender, fluffPath string) *FileRender {
 	if r, ok := bySynth[fluffPath]; ok {
 		return r
@@ -131,18 +142,31 @@ func matchSynth(bySynth map[string]*FileRender, fluffPath string) *FileRender {
 	if r, ok := bySynth[cleaned]; ok {
 		return r
 	}
-	for synth, r := range bySynth {
-		if synth == fluffPath || filepath.Base(synth) == filepath.Base(fluffPath) {
-			return r
+	fluffSlash := filepath.ToSlash(fluffPath)
+	var candidates []string
+	seen := map[*FileRender]bool{}
+	for _, synth := range slices.Sorted(maps.Keys(bySynth)) {
+		rend := bySynth[synth]
+		if seen[rend] {
+			// Absolute and relative aliases of one render are not an
+			// ambiguity.
+			continue
 		}
-		if strings.HasSuffix(filepath.ToSlash(fluffPath), filepath.ToSlash(synth)) {
-			return r
+		synthSlash := filepath.ToSlash(synth)
+		matches := filepath.Base(synth) == filepath.Base(fluffPath) ||
+			strings.HasSuffix(synthSlash, fluffSlash) ||
+			strings.HasSuffix(fluffSlash, synthSlash)
+		if !matches {
+			continue
 		}
-		if strings.HasSuffix(filepath.ToSlash(synth), filepath.ToSlash(fluffPath)) {
-			return r
-		}
+		seen[rend] = true
+		candidates = append(candidates, synth)
 	}
-	return nil
+	if len(candidates) != 1 {
+		// No heuristic match, or several equally plausible ones.
+		return nil
+	}
+	return bySynth[candidates[0]]
 }
 
 func truncate(s string, n int) string {

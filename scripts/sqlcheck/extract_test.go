@@ -217,10 +217,10 @@ func (s *extractSuite) TestIgnoreDirectives(c *tc.C) {
 package p
 
 func f() {
-	// sqllint-ignore CP01
+	// sqlcheck-ignore CP01
 	st.Prepare("SELECT id FROM t")
-	st.Prepare("SELECT id FROM u") // sqllint-ignore
-	// sqllint-ignore LT01,CP01
+	st.Prepare("SELECT id FROM u") // sqlcheck-ignore
+	// sqlcheck-ignore LT01,CP01
 	const q = "SELECT id FROM v"
 	st.Prepare(q)
 }
@@ -302,6 +302,55 @@ package p
 const msg = "hello world this is not SQL"
 `)
 	c.Check(stmts, tc.HasLen, 0)
+}
+
+func (s *extractSuite) TestSinkSelectWithoutClause(c *tc.C) {
+	// A recognised sink must not silently drop a SELECT statement just
+	// because it has no FROM clause.
+	stmts, skips := extractSrc(c, `
+package p
+
+func f() {
+	db.Exec("SELECT last_insert_rowid()")
+}
+`)
+	c.Assert(skips, tc.HasLen, 0)
+	c.Assert(stmts, tc.HasLen, 1)
+	c.Check(stmts[0].Eval.Content, tc.Equals, "SELECT last_insert_rowid()")
+}
+
+func (s *extractSuite) TestSinkMultiStatementString(c *tc.C) {
+	stmts, skips := extractSrc(c, `
+package p
+
+func f() {
+	db.Exec("INSERT INTO t VALUES (1); SELECT last_insert_rowid()")
+}
+`)
+	c.Assert(skips, tc.HasLen, 0)
+	c.Assert(stmts, tc.HasLen, 1)
+	c.Check(strings.Contains(stmts[0].Eval.Content, "SELECT last_insert_rowid()"), tc.IsTrue)
+}
+
+func (s *extractSuite) TestCrossFilePackageVariable(c *tc.C) {
+	// Package-level variables have no ast.Object at a cross-file use.
+	// Resolve their static initialisers package-wide instead of dropping
+	// the query without a coverage note.
+	fset := token.NewFileSet()
+	pkg, err := parsePackage(fset, []goFile{{
+		Path: "query.go",
+		Src:  []byte("package p\n\nvar query = \"SELECT id FROM t WHERE x = 1\"\n"),
+	}, {
+		Path: "foo.go",
+		Src:  []byte("package p\n\nfunc f() {\n\tdb.Exec(query)\n}\n"),
+	}})
+	c.Assert(err, tc.ErrorIsNil)
+	next := 1
+	stmts, skips := extractPackage(pkg, &next)
+	c.Assert(skips, tc.HasLen, 0)
+	c.Assert(stmts, tc.HasLen, 1)
+	c.Check(stmts[0].File, tc.Equals, "query.go")
+	c.Check(stmts[0].Eval.Content, tc.Equals, "SELECT id FROM t WHERE x = 1")
 }
 
 func (s *extractSuite) TestPR23696StyleExtraction(c *tc.C) {

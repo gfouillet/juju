@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"go/token"
@@ -28,7 +29,7 @@ func run(args []string) int {
 	github := fs.Bool("github", false, "emit GitHub Actions error annotations")
 	writeDir := fs.String("write-extracted", "", "write rendered SQL into this directory instead of a temp dir")
 	config := fs.String("config", "", "path to sqlfluff config (default <repo>/.github/.sqlfluff)")
-	rules := fs.String("rule", "", "only report these sqlfluff rules, comma-separated (e.g. LT01,CP01)")
+	rules := fs.String("rules", "", "only report these sqlfluff rules, comma-separated (e.g. LT01,CP01)")
 	fix := fs.Bool("fix", false, "apply the mechanical fixes for spacing and indentation violations to the Go sources, then re-lint")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: sqlcheck [flags] [files-or-dirs-or-globs...]\n")
@@ -36,7 +37,7 @@ func run(args []string) int {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
+		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
@@ -78,7 +79,7 @@ func run(args []string) int {
 		return 2
 	}
 
-	rels, err := discoverGoFiles(root, fs.Args())
+	rels, err := discoverGoFiles(ctx, root, fs.Args())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
 		return 2
@@ -110,7 +111,7 @@ func run(args []string) int {
 		if !*fix || iter >= maxFixPasses || len(pass.fluff) == 0 {
 			break
 		}
-		edits, skipped := planFixes(pass.stmts, pass.absSynth, pass.fluff, pass.pkgFiles)
+		edits, skipped := planFixes(pass.stmts, pass.absSynth, pass.fluff)
 		if len(edits) == 0 {
 			break
 		}
@@ -126,7 +127,10 @@ func run(args []string) int {
 	for _, d := range pass.diags {
 		fmt.Println(formatDiagnostic(d, *github))
 	}
-	notes := checkTemplates(root)
+	var notes []TemplateNote
+	if shouldCheckTemplates(root, fs.Args()) {
+		notes = checkTemplates(root)
+	}
 	fmt.Fprint(os.Stderr, writeSummary(len(pass.stmts), pass.nFiles, pass.skips, notes, len(pass.diags)))
 
 	if len(pass.diags) > 0 && !*reportOnly {
@@ -139,7 +143,6 @@ func run(args []string) int {
 // the Go files in scope.
 type lintPass struct {
 	fset     *token.FileSet
-	pkgFiles map[string]*parsedFile
 	stmts    []Statement
 	skips    []Skip
 	absSynth map[string]*FileRender
@@ -161,10 +164,7 @@ func runLintPass(
 	}
 
 	fset := token.NewFileSet()
-	pass := &lintPass{
-		fset:     fset,
-		pkgFiles: map[string]*parsedFile{},
-	}
+	pass := &lintPass{fset: fset}
 	renders := map[string]*FileRender{}
 	nextID := 1
 	for _, group := range groupByPackage(files) {
@@ -175,7 +175,6 @@ func runLintPass(
 		st, sk := extractPackage(pkg, &nextID)
 		pass.stmts = append(pass.stmts, st...)
 		pass.skips = append(pass.skips, sk...)
-		maps.Copy(pass.pkgFiles, pkg.files)
 		maps.Copy(renders, renderPackage(pkg, st))
 	}
 

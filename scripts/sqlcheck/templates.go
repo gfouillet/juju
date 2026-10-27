@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"os"
@@ -57,6 +58,64 @@ func checkTemplates(root string) []TemplateNote {
 	return notes
 }
 
+// shouldCheckTemplates reports whether the template coverage check should
+// run for the given discovery arguments. With no arguments the whole
+// repository, including generate/, is in scope. With explicit arguments
+// the check only matters when the scope may still include the
+// repository's generate/ directory; scoping to concrete files or
+// directories elsewhere cannot change template coverage. Glob patterns
+// and unreadable paths are treated conservatively, because skipping the
+// check must never hide a coverage regression.
+func shouldCheckTemplates(root string, args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	genDir := filepath.Join(root, "generate")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return true
+	}
+	for _, arg := range args {
+		if hasGlobMeta(arg) {
+			// A glob may match generated output under generate/.
+			return true
+		}
+		path := arg
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			// Leave unreadable paths to discovery to report.
+			return true
+		}
+		if pathMayCover(info.IsDir(), path, genDir) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMayCover reports whether the file or directory at path may cover
+// the target directory: the path is the target or inside it, or the path
+// is a directory that contains the target.
+func pathMayCover(isDir bool, path, target string) bool {
+	if rel, err := filepath.Rel(target, path); err == nil {
+		if rel == "." || !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	if !isDir {
+		return false
+	}
+	if rel, err := filepath.Rel(path, target); err == nil {
+		if rel == "." || !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
+}
+
 // templateOutputCommitted reports whether any generated Go file contains
 // SQL matching one of the template's distinctive SQL lines. Template
 // variables are treated as wildcards when matching.
@@ -80,7 +139,7 @@ func templateOutputCommitted(root string, tmpl []byte) bool {
 // check needs repo-wide generated output even when linting is scoped to
 // specific paths.
 func generatedGoFiles(root string) []goFile {
-	rels, err := discoverGoFiles(root, nil)
+	rels, err := discoverGoFiles(context.Background(), root, nil)
 	if err != nil {
 		return nil
 	}
