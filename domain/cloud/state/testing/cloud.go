@@ -32,7 +32,12 @@ func CreateTestCloud(
 
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO cloud (uuid, name, cloud_type_id, endpoint, skip_tls_verify)
-SELECT ?, ?, cloud_type.id, "", true
+SELECT
+    ?,
+    ?,
+    cloud_type.id,
+    "",
+    true
 FROM cloud_type
 WHERE type = ?
 `, cloudUUID.String(), cloud.Name, cloud.Type)
@@ -44,7 +49,9 @@ WHERE type = ?
 		for _, authType := range cloud.AuthTypes {
 			_, err = tx.ExecContext(ctx, `
 INSERT INTO cloud_auth_type (cloud_uuid, auth_type_id)
-SELECT ?, auth_type.id
+SELECT
+    ?,
+    auth_type.id
 FROM auth_type
 WHERE type = ?
 `, cloudUUID.String(), authType)

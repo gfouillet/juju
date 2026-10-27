@@ -97,7 +97,17 @@ func (s *stateSuite) assertCloud(c *tc.C, cloud cloud.Cloud) string {
 	db := s.DB()
 
 	// Check the cloud record.
-	row := db.QueryRow("SELECT uuid, name, cloud_type, endpoint, identity_endpoint, storage_endpoint, skip_tls_verify FROM v_cloud WHERE name = ?", "fluffy")
+	row := db.QueryRow(`
+SELECT
+    uuid,
+    name,
+    cloud_type,
+    endpoint,
+    identity_endpoint,
+    storage_endpoint,
+    skip_tls_verify
+FROM v_cloud
+WHERE name = ?`, "fluffy")
 	c.Assert(row.Err(), tc.ErrorIsNil)
 
 	var dbCloud dbCloud
@@ -125,7 +135,11 @@ func (s *stateSuite) assertAuthTypes(c *tc.C, cloudUUID string, expected cloud.A
 
 	var dbAuthTypes = map[int]string{}
 
-	rows, err := db.Query("SELECT id, type FROM auth_type")
+	rows, err := db.Query(`
+SELECT
+    id,
+    type
+FROM auth_type`)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = rows.Close() }()
 
@@ -194,7 +208,14 @@ func regionsFromDbRegions(dbRegions []cloudRegion) []cloud.Region {
 func (s *stateSuite) assertRegions(c *tc.C, cloudUUID string, expected []cloud.Region) {
 	db := s.DB()
 
-	rows, err := db.Query("SELECT name, endpoint, identity_endpoint, storage_endpoint FROM cloud_region WHERE cloud_uuid = ?", cloudUUID)
+	rows, err := db.Query(`
+SELECT
+    name,
+    endpoint,
+    identity_endpoint,
+    storage_endpoint
+FROM cloud_region
+WHERE cloud_uuid = ?`, cloudUUID)
 	c.Assert(err, tc.ErrorIsNil)
 	defer func() { _ = rows.Close() }()
 
@@ -402,7 +423,11 @@ func (s *stateSuite) TestDeleteCloud(c *tc.C) {
 
 	// Do not find the permission
 	row := s.DB().QueryRow(`
-SELECT uuid, access_type, grant_to, grant_on
+SELECT
+    p.uuid,
+    p.access_type,
+    p.grant_to,
+    p.grant_on
 FROM v_permission p
 WHERE p.grant_to = ?
 `, "fluffy")
@@ -459,7 +484,14 @@ func (s *stateSuite) TestDeleteCloudWithCredentials(c *tc.C) {
 		// Insert a credential for the cloud.
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
-SELECT ?, 'default', uuid, 1, ? FROM cloud WHERE cloud.name = ?
+SELECT
+    ?,
+    'default',
+    uuid,
+    1,
+    ?
+FROM cloud
+WHERE cloud.name = ?
 `, credUUID, s.adminUUID.String(), "fluffy")
 		if err != nil {
 			return err
@@ -503,7 +535,14 @@ func (s *stateSuite) TestDeleteCloudWithCredentialAndModel(c *tc.C) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO cloud_credential (uuid, name, cloud_uuid, auth_type_id, owner_uuid)
-SELECT ?, 'default', uuid, 1, ? FROM cloud WHERE cloud.name = ?
+SELECT
+    ?,
+    'default',
+    uuid,
+    1,
+    ?
+FROM cloud
+WHERE cloud.name = ?
 `, credUUID, s.adminUUID.String(), "fluffy")
 		return err
 	})
@@ -596,7 +635,11 @@ WHERE name = ?
 
 	// Find the permission
 	row = db.QueryRow(`
-SELECT uuid, access_type, grant_to, grant_on
+SELECT
+    uuid,
+    access_type,
+    grant_to,
+    grant_on
 FROM v_permission
 `)
 	c.Assert(row.Err(), tc.ErrorIsNil)
