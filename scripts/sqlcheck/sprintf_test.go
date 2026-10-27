@@ -21,10 +21,10 @@ func (s *sprintfSuite) TestVerbs(c *tc.C) {
 		want string
 	}{{
 		in:   "SELECT %s FROM t",
-		want: "SELECT t  FROM t",
+		want: "SELECT t FROM t",
 	}, {
 		in:   "NEW.%[1]s AND x = 1",
-		want: "NEW.t     AND x = 1",
+		want: "NEW.t AND x = 1",
 	}, {
 		in:   "VALUES (%d, %s)",
 		want: "VALUES (1, t)",

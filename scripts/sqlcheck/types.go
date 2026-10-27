@@ -17,9 +17,6 @@ const (
 	// KindReplacement is a dummy token substituted for a sqlair
 	// expression or fmt.Sprintf verb.
 	KindReplacement
-	// KindPadding is space appended so a replacement keeps its original
-	// width.
-	KindPadding
 	// KindVirtual is synthetic content (blanked Go, semicolons, newlines).
 	KindVirtual
 	// KindEscape is SQL produced by expanding a Go escape sequence.
@@ -32,8 +29,6 @@ func (k SegmentKind) String() string {
 		return "literal"
 	case KindReplacement:
 		return "replacement"
-	case KindPadding:
-		return "padding"
 	case KindVirtual:
 		return "virtual"
 	case KindEscape:

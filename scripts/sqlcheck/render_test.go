@@ -119,6 +119,26 @@ func f() {
 	c.Check(pos.Column > 0, tc.IsTrue)
 }
 
+func (s *renderSuite) TestSemicolonAttachesAfterTrailingWhitespace(c *tc.C) {
+	src := `
+package p
+
+func f(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, ` + "`" + `
+		INSERT INTO cloud (uuid)
+		VALUES (?)
+	` + "`" + `)
+	return err
+}
+`
+	_, _, rend := parseAndRender(c, "foo.go", src)
+	synthetic := string(rend.Synthetic)
+	// The raw string closes with "\n\t"; the virtual semicolon must
+	// attach to the last SQL token, not to the whitespace-only tail.
+	// The ? placeholder is rendered as 1 (sqlfluff cannot parse ?).
+	c.Check(strings.Contains(synthetic, "VALUES (1);"), tc.IsTrue)
+}
+
 func (s *renderSuite) TestEscapedNewline(c *tc.C) {
 	src := `
 package p
@@ -132,7 +152,7 @@ func f() {
 	c.Check(strings.Contains(string(rend.Synthetic), "AND y = 2"), tc.IsTrue)
 }
 
-func (s *renderSuite) TestPaddingAndVirtualAreClassified(c *tc.C) {
+func (s *renderSuite) TestReplacementAndVirtualAreClassified(c *tc.C) {
 	src := `
 package p
 
@@ -146,7 +166,6 @@ func f() {
 		kinds = append(kinds, seg.Kind)
 	}
 	c.Check(containsKind(kinds, KindReplacement), tc.IsTrue)
-	c.Check(containsKind(kinds, KindPadding), tc.IsTrue)
 	c.Check(containsKind(kinds, KindVirtual), tc.IsTrue)
 }
 

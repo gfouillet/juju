@@ -52,24 +52,16 @@ func applyReplacements(ev *evaluated, reps []replacement) *evaluated {
 		if r.start < len(ev.Map) {
 			orig = ev.Map[r.start]
 		}
-		token := r.token
-		width := r.end - r.start
-		if len(token) > width {
-			token = token[:width]
-		}
-		for i := 0; i < len(token); i++ {
-			b.WriteByte(token[i])
+		// Replacements are not padded back to the original expression
+		// width: padding would violate LT01 spacing rules wherever a
+		// sqlair expression is followed by more SQL on the same line.
+		// Column mapping does not depend on padding because every
+		// segment carries its own original Go position.
+		for i := 0; i < len(r.token); i++ {
+			b.WriteByte(r.token[i])
 			ob := orig
 			ob.Kind = KindReplacement
 			m = append(m, ob)
-		}
-		if shouldPad(ev.Content, r.end) {
-			for i := len(token); i < width; i++ {
-				b.WriteByte(' ')
-				ob := orig
-				ob.Kind = KindPadding
-				m = append(m, ob)
-			}
 		}
 		pos = r.end
 	}
@@ -101,20 +93,6 @@ func findSQLair(sql string) []replacement {
 		p.advanceByte()
 	}
 	return mergeReplacements(reps)
-}
-
-func shouldPad(sql string, end int) bool {
-	for i := end; i < len(sql); i++ {
-		switch sql[i] {
-		case ' ', '\t':
-			continue
-		case '\n', '\r', ')', ',', ';', '.', '(', '[':
-			return false
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 func replaceSQLPlaceholders(ev *evaluated) *evaluated {

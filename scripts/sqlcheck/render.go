@@ -62,16 +62,16 @@ func (r *FileRender) emitStatement(st Statement) {
 	if ev.empty() {
 		return
 	}
+	// Trim all trailing whitespace so the statement terminator attaches
+	// to the last SQL token. Raw strings commonly close with "\n\t\t",
+	// and a semicolon emitted after that whitespace is parsed by sqlfluff
+	// as a separate (empty) statement, leaving the real one unterminated.
+	// The trimmed whitespace is re-emitted after the terminator so any
+	// trailing-whitespace findings still map to the original source.
 	end := len(ev.Content)
-	for end > 0 {
-		switch ev.Content[end-1] {
-		case '\n', '\r':
-			end--
-		default:
-			goto split
-		}
+	for end > 0 && isSQLSpace(ev.Content[end-1]) {
+		end--
 	}
-split:
 	if end > 0 {
 		r.emitEval(&evaluated{Content: ev.Content[:end], Map: ev.Map[:end]}, st.ID)
 	}
@@ -80,6 +80,15 @@ split:
 	}
 	if end < len(ev.Content) {
 		r.emitEval(&evaluated{Content: ev.Content[end:], Map: ev.Map[end:]}, st.ID)
+	}
+}
+
+func isSQLSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
 	}
 }
 
@@ -150,7 +159,7 @@ func sameRun(a, b origByte) bool {
 		return false
 	}
 	switch a.Kind {
-	case KindReplacement, KindPadding, KindEscape, KindVirtual:
+	case KindReplacement, KindEscape, KindVirtual:
 		return a.Offset == b.Offset
 	default:
 		return b.Offset == a.Offset+1
@@ -166,7 +175,7 @@ func (r *FileRender) emitRun(ev *evaluated, start, end, stmtID int) {
 	ob := ev.Map[start]
 	last := ev.Map[end-1]
 	origEnd := last.Offset + 1
-	if ob.Kind == KindReplacement || ob.Kind == KindPadding || ob.Kind == KindEscape {
+	if ob.Kind == KindReplacement || ob.Kind == KindEscape {
 		origEnd = ob.Offset + 1
 	}
 	r.Segments = append(r.Segments, Segment{
