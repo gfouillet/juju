@@ -671,6 +671,7 @@ func (st *State) DeleteCloud(ctx context.Context, name string) error {
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
+
 SELECT COUNT(*) AS &countResult.count
 FROM model
 WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
@@ -683,11 +684,13 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 ),
+
 target_credentials AS (
     SELECT cc.uuid
     FROM cloud_credential AS cc
     JOIN target_cloud AS c ON cc.cloud_uuid = c.uuid
 )
+
 DELETE FROM cloud_credential_attribute
 WHERE cloud_credential_uuid IN (SELECT uuid FROM target_credentials)
 `, cloudName)
@@ -699,6 +702,7 @@ WHERE cloud_credential_uuid IN (SELECT uuid FROM target_credentials)
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
+
 DELETE FROM cloud_credential
 WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 `, cloudName)
@@ -718,6 +722,7 @@ WHERE cloud.name = $dbCloudName.name
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
+
 DELETE FROM cloud_region
 WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 `, cloudName)
@@ -729,6 +734,7 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
+
 DELETE FROM cloud_ca_cert
 WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 `, cloudName)
@@ -740,6 +746,7 @@ WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 WITH target_cloud AS (
     SELECT uuid FROM cloud WHERE cloud.name = $dbCloudName.name
 )
+
 DELETE FROM cloud_auth_type
 WHERE cloud_uuid IN (SELECT uuid FROM target_cloud)
 `, cloudName)
