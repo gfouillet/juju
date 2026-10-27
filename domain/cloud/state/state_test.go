@@ -669,7 +669,7 @@ func (s *stateSuite) TestGetCloudForUUID(c *tc.C) {
 
 	db := s.DB()
 	var uuid corecloud.UUID
-	err := db.QueryRow("SELECT uuid FROM v_cloud where name = ?", testCloud.Name).Scan(&uuid)
+	err := db.QueryRow("SELECT uuid FROM v_cloud WHERE name = ?", testCloud.Name).Scan(&uuid)
 	c.Assert(err, tc.ErrorIsNil)
 
 	c.Assert(err, tc.ErrorIsNil)
