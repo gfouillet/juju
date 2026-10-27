@@ -46,9 +46,9 @@ func (s *patchSuite) TestPatchHashWithSpaces(c *tc.C) {
 func (s *patchSuite) TestPatchRun(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
-	patch := MakePatch("SELECT * FROM schema_master", 1, 2, "a")
+	patch := MakePatch("SELECT name FROM schema_master", 1, 2, "a")
 
-	s.tx.EXPECT().ExecContext(gomock.Any(), "SELECT * FROM schema_master", 1, 2, "a").Return(nil, nil)
+	s.tx.EXPECT().ExecContext(gomock.Any(), "SELECT name FROM schema_master", 1, 2, "a").Return(nil, nil)
 
 	err := patch.run(c.Context(), s.tx)
 	c.Assert(err, tc.ErrorIsNil)
@@ -208,7 +208,7 @@ func (s *schemaSuite) TestHookIsApplied(c *tc.C) {
 	c.Assert(current, tc.DeepEquals, ChangeSet{Current: 0, Post: 1})
 
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, "SELECT * FROM bar")
+		row := tx.QueryRowContext(ctx, "SELECT id FROM bar")
 		return row.Err()
 	})
 	c.Assert(err, tc.ErrorIsNil)
