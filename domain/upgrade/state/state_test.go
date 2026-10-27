@@ -364,8 +364,8 @@ func (s *stateSuite) TestSetControllerDoneCompleteUpgradeEmptyCompletedAt(c *tc.
 
 	_, err = db.Exec(`
 UPDATE upgrade_info_controller_node
-SET    node_upgrade_completed_at = ''
-WHERE  upgrade_info_uuid = ?
+SET node_upgrade_completed_at = ''
+WHERE upgrade_info_uuid = ?
        AND controller_node_id = 0`, uuid)
 	c.Assert(err, tc.ErrorIsNil)
 
