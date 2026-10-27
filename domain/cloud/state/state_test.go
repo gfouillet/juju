@@ -565,16 +565,16 @@ func (s *stateSuite) TestNullCloudType(c *tc.C) {
 func (s *stateSuite) ensureUser(c *tc.C, userUUID, name, createdByUUID string) {
 	err := s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO user (uuid, name, display_name, external, removed, created_by_uuid, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 `, userUUID, name, name, false, false, createdByUUID, time.Now())
 		return err
 	})
 	c.Assert(err, tc.ErrorIsNil)
 	err = s.TxnRunner().StdTxn(c.Context(), func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO user_authentication (user_uuid, disabled)
-			VALUES (?, ?)
+INSERT INTO user_authentication (user_uuid, disabled)
+VALUES (?, ?)
 `, userUUID, false)
 		return err
 	})

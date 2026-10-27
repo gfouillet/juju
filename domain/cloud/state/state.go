@@ -107,9 +107,9 @@ func GetCloudForUUID(
 	}
 
 	q := `
-	SELECT (*) AS (&cloudWithAuthType.*)
-    FROM v_cloud_auth
-	WHERE uuid = $cloudID.uuid
+SELECT (*) AS (&cloudWithAuthType.*)
+FROM v_cloud_auth
+WHERE uuid = $cloudID.uuid
 `
 
 	stmt, err := st.Prepare(q, cloudID, cloudWithAuthType{})
@@ -414,15 +414,17 @@ WHERE name = $dbCloud.name`, dbCloud{})
 	}
 
 	insertCloudStmt, err := sqlair.Prepare(`
-INSERT INTO cloud (uuid, name, cloud_type_id, endpoint,
-                   identity_endpoint, storage_endpoint,
-                   skip_tls_verify)
+INSERT INTO cloud (
+    uuid, name, cloud_type_id, endpoint,
+    identity_endpoint, storage_endpoint,
+    skip_tls_verify
+)
 VALUES ($dbCloud.*)
 ON CONFLICT (uuid) DO UPDATE SET name = excluded.name,
-                                endpoint = excluded.endpoint,
-                                identity_endpoint = excluded.identity_endpoint,
-                                storage_endpoint = excluded.storage_endpoint,
-                                skip_tls_verify = excluded.skip_tls_verify;
+endpoint = excluded.endpoint,
+identity_endpoint = excluded.identity_endpoint,
+storage_endpoint = excluded.storage_endpoint,
+skip_tls_verify = excluded.skip_tls_verify;
 `, dbCloud{})
 	if err != nil {
 		return errors.Capture(err)
@@ -472,7 +474,7 @@ func updateAuthTypes(ctx context.Context, tx *sqlair.TX, cloudUUID string, authT
 	deleteQuery, err := sqlair.Prepare(`
 DELETE FROM cloud_auth_type
 WHERE cloud_uuid = $M.cloud_uuid
-AND auth_type_id NOT IN ($authTypeIds[:])
+    AND auth_type_id NOT IN ($authTypeIds[:])
 `, authTypeIds, sqlair.M{})
 	if err != nil {
 		return errors.Capture(err)
@@ -537,21 +539,23 @@ func updateRegions(ctx context.Context, tx *sqlair.TX, cloudUUID string, regions
 	deleteQuery, err := sqlair.Prepare(`
 DELETE FROM cloud_region
 WHERE cloud_uuid = $M.cloud_uuid
-AND name NOT IN ($regionNames[:])
+    AND name NOT IN ($regionNames[:])
 `, regionNames{}, sqlair.M{})
 	if err != nil {
 		return errors.Capture(err)
 	}
 
 	insertQuery, err := sqlair.Prepare(`
-INSERT INTO cloud_region (uuid, cloud_uuid, name,
-                          endpoint, identity_endpoint,
-                          storage_endpoint)
+INSERT INTO cloud_region (
+    uuid, cloud_uuid, name,
+    endpoint, identity_endpoint,
+    storage_endpoint
+)
 VALUES ($cloudRegion.*)
 ON CONFLICT (cloud_uuid, name) DO UPDATE SET name = excluded.name,
-                                            endpoint = excluded.endpoint,
-                                            identity_endpoint = excluded.identity_endpoint,
-                                            storage_endpoint = excluded.storage_endpoint
+endpoint = excluded.endpoint,
+identity_endpoint = excluded.identity_endpoint,
+storage_endpoint = excluded.storage_endpoint
 `, cloudRegion{})
 	if err != nil {
 		return errors.Capture(err)
@@ -582,19 +586,20 @@ func insertPermission(ctx context.Context, tx *sqlair.TX, ownerName user.Name, c
 	}
 	newPermission := `
 INSERT INTO permission (uuid, access_type_id, object_type_id, grant_to, grant_on)
-SELECT $dbAddUserPermission.uuid,
-       at.id,
-       ot.id,
-       u.uuid,
-       $dbAddUserPermission.grant_on
+SELECT
+    $dbAddUserPermission.uuid,
+    at.id,
+    ot.id,
+    u.uuid,
+    $dbAddUserPermission.grant_on
 FROM v_user_auth u,
-       permission_access_type at,
-       permission_object_type ot
+    permission_access_type at,
+    permission_object_type ot
 WHERE u.name = $dbAddUserPermission.name
-AND u.disabled = false
-AND u.removed = false
-AND at.type = $dbAddUserPermission.access_type
-AND ot.type = $dbAddUserPermission.object_type
+    AND u.disabled = false
+    AND u.removed = false
+    AND at.type = $dbAddUserPermission.access_type
+    AND ot.type = $dbAddUserPermission.object_type
 `
 	insertPermissionStmt, err := sqlair.Prepare(newPermission, dbAddUserPermission{})
 	if err != nil {
