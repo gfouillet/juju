@@ -75,6 +75,14 @@ func discoverFromArgs(root string, args []string) ([]string, error) {
 	}
 	var out []string
 	for _, arg := range args {
+		if hasGlobMeta(arg) {
+			matches, err := globGoFiles(root, arg)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, matches...)
+			continue
+		}
 		path := arg
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, arg)
@@ -135,6 +143,26 @@ func gitGoFiles(root string) ([]string, error) {
 		paths = append(paths, string(p))
 	}
 	return paths, nil
+}
+
+// globGoFiles expands a wildcard pattern such as "domain/*/state/**"
+// against the tracked Go files of the repository. It returns an error
+// when the pattern matches nothing, mirroring git pathspec behaviour.
+func globGoFiles(root, pattern string) ([]string, error) {
+	all, err := discoverGoFiles(root, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, rel := range all {
+		if matchPath(pattern, rel) {
+			out = append(out, rel)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("pattern %q matched no tracked Go files", pattern)
+	}
+	return out, nil
 }
 
 func filterGoFiles(root string, paths []string) []string {

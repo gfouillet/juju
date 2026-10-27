@@ -66,7 +66,7 @@ WHERE x = 1
 		absSynth[p] = r
 	}
 
-	fluff, stderr, err := runSQLFluff(context.Background(), bin, cfg, dir)
+	fluff, stderr, err := runSQLFluff(context.Background(), bin, cfg, dir, nil)
 	c.Assert(err, tc.ErrorIsNil, tc.Commentf("stderr: %s", stderr))
 	diags := mapDiagnostics(pkg.fset, stmts, absSynth, fluff)
 	c.Assert(len(diags) > 0, tc.IsTrue)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -71,8 +72,13 @@ func writeExtracted(dir string, renders map[string]*FileRender) (map[string]*Fil
 	return bySynth, nil
 }
 
-func runSQLFluff(ctx context.Context, bin, config, dir string) ([]fluffFile, string, error) {
-	cmd := exec.CommandContext(ctx, bin, "lint", "--config", config, "--format", "json", dir)
+func runSQLFluff(ctx context.Context, bin, config, dir string, rules map[string]bool) ([]fluffFile, string, error) {
+	args := []string{"lint", "--config", config, "--format", "json"}
+	if len(rules) > 0 {
+		args = append(args, "--rules", joinRules(rules))
+	}
+	args = append(args, dir)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -89,6 +95,15 @@ func runSQLFluff(ctx context.Context, bin, config, dir string) ([]fluffFile, str
 		return nil, stderr.String(), fmt.Errorf("parsing sqlfluff JSON: %w\n%s", err, truncate(string(data), 2000))
 	}
 	return files, stderr.String(), nil
+}
+
+func joinRules(rules map[string]bool) string {
+	names := make([]string, 0, len(rules))
+	for r := range rules {
+		names = append(names, r)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 func isFluffLintExit(err error) bool {

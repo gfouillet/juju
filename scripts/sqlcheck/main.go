@@ -27,8 +27,10 @@ func run(args []string) int {
 	github := fs.Bool("github", false, "emit GitHub Actions error annotations")
 	writeDir := fs.String("write-extracted", "", "write rendered SQL into this directory instead of a temp dir")
 	config := fs.String("config", "", "path to sqlfluff config (default <repo>/.github/.sqlfluff)")
+	rules := fs.String("rule", "", "only report these sqlfluff rules, comma-separated (e.g. LT01,CP01)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: sqlcheck [flags] [files-or-dirs...]\n")
+		fmt.Fprintf(fs.Output(), "usage: sqlcheck [flags] [files-or-dirs-or-globs...]\n")
+		fmt.Fprintf(fs.Output(), "  globs match tracked files, e.g. 'domain/*/state/**' or '**/*_test.go'\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -137,10 +139,12 @@ func run(args []string) int {
 		absSynth[p] = r
 	}
 
+	ruleFilter := parseRules(*rules)
+
 	var fluff []fluffFile
 	if len(bySynth) > 0 {
 		var err error
-		fluff, _, err = runSQLFluff(ctx, bin, cfg, extractDir)
+		fluff, _, err = runSQLFluff(ctx, bin, cfg, extractDir, ruleFilter)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
 			return 2
@@ -148,6 +152,15 @@ func run(args []string) int {
 	}
 
 	diags := mapDiagnostics(fset, stmts, absSynth, fluff)
+	if len(ruleFilter) > 0 {
+		kept := make([]Diagnostic, 0, len(diags))
+		for _, d := range diags {
+			if ruleFilter[d.Rule] {
+				kept = append(kept, d)
+			}
+		}
+		diags = kept
+	}
 	for _, d := range diags {
 		fmt.Println(formatDiagnostic(d, *github))
 	}
