@@ -72,15 +72,11 @@ func (r *FileRender) emitStatement(st Statement) {
 	for end > 0 && isSQLSpace(ev.Content[end-1]) {
 		end--
 	}
-	if end > 0 {
-		r.emitEval(&evaluated{Content: ev.Content[:end], Map: ev.Map[:end]}, st.ID)
-	}
+	r.emitEvalPart(ev, 0, end, st.ID)
 	if !endsWithSemi(ev.Content[:end]) {
 		r.emitVirtual([]byte(";"))
 	}
-	if end < len(ev.Content) {
-		r.emitEval(&evaluated{Content: ev.Content[end:], Map: ev.Map[end:]}, st.ID)
-	}
+	r.emitEvalPart(ev, end, len(ev.Content), st.ID)
 }
 
 func isSQLSpace(c byte) bool {
@@ -137,16 +133,21 @@ func (r *FileRender) emitVirtual(b []byte) {
 		RenderedStart: start,
 		RenderedEnd:   len(r.Synthetic),
 		Kind:          KindVirtual,
+		ContentStart:  -1,
 	})
 }
 
-func (r *FileRender) emitEval(ev *evaluated, stmtID int) {
-	if ev.empty() {
+// emitEvalPart emits the content range [from,to) of ev as segments.
+// base is the index of ev.Content[from] within the statement's full
+// evaluated content, so segments record content-relative positions
+// that the fixer uses to plan source edits.
+func (r *FileRender) emitEvalPart(ev *evaluated, from, to, stmtID int) {
+	if from >= to {
 		return
 	}
-	runStart := 0
-	for i := 1; i <= len(ev.Content); i++ {
-		if i < len(ev.Content) && sameRun(ev.Map[i-1], ev.Map[i]) {
+	runStart := from
+	for i := from + 1; i <= to; i++ {
+		if i < to && sameRun(ev.Map[i-1], ev.Map[i]) {
 			continue
 		}
 		r.emitRun(ev, runStart, i, stmtID)
@@ -186,6 +187,7 @@ func (r *FileRender) emitRun(ev *evaluated, start, end, stmtID int) {
 		OriginalEnd:   origEnd,
 		Kind:          ob.Kind,
 		StmtID:        stmtID,
+		ContentStart:  start,
 	})
 }
 

@@ -152,6 +152,11 @@ type Segment struct {
 	OriginalEnd   int
 	Kind          SegmentKind
 	StmtID        int
+	// ContentStart is the index of the first byte of this segment within
+	// the owning statement's evaluated content, or -1 for synthetic
+	// segments. The fixer uses it to map rendered positions back to
+	// content positions.
+	ContentStart int
 }
 
 func (s Segment) contains(offset int) bool {

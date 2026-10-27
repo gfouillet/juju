@@ -16,6 +16,8 @@ import (
 	"syscall"
 )
 
+const maxFixPasses = 10
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -28,6 +30,7 @@ func run(args []string) int {
 	writeDir := fs.String("write-extracted", "", "write rendered SQL into this directory instead of a temp dir")
 	config := fs.String("config", "", "path to sqlfluff config (default <repo>/.github/.sqlfluff)")
 	rules := fs.String("rule", "", "only report these sqlfluff rules, comma-separated (e.g. LT01,CP01)")
+	fix := fs.Bool("fix", false, "apply the mechanical fixes for spacing and indentation violations to the Go sources, then re-lint")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: sqlcheck [flags] [files-or-dirs-or-globs...]\n")
 		fmt.Fprintf(fs.Output(), "  globs match tracked files, e.g. 'domain/*/state/**' or '**/*_test.go'\n")
@@ -81,32 +84,7 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
 		return 2
 	}
-	files, err := readGoFiles(root, rels)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
-		return 2
-	}
-
-	fset := token.NewFileSet()
-	var stmts []Statement
-	var skips []Skip
-	renders := map[string]*FileRender{}
-	nextID := 1
-	for _, group := range groupByPackage(files) {
-		pkg, err := parsePackage(fset, group)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
-			return 2
-		}
-		st, sk := extractPackage(pkg, &nextID)
-		stmts = append(stmts, st...)
-		skips = append(skips, sk...)
-		for path, rend := range renderPackage(pkg, st) {
-			renders[path] = rend
-		}
-	}
-
-	notes := checkTemplates(root)
+	ruleFilter := parseRules(*rules)
 
 	extractDir := *writeDir
 	cleanup := false
@@ -123,60 +101,127 @@ func run(args []string) int {
 		defer os.RemoveAll(extractDir)
 	}
 
-	bySynth, err := writeExtracted(extractDir, renders)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
-		return 2
+	var pass *lintPass
+	for iter := 0; ; iter++ {
+		pass, err = runLintPass(ctx, bin, cfg, root, rels, ruleFilter, extractDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
+			return 2
+		}
+		if !*fix || iter >= maxFixPasses || len(pass.fluff) == 0 {
+			break
+		}
+		edits, skipped := planFixes(pass.stmts, pass.absSynth, pass.fluff, pass.pkgFiles)
+		if len(edits) == 0 {
+			break
+		}
+		changed, err := applyEdits(root, edits)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
+			return 2
+		}
+		fmt.Fprintf(os.Stderr, "sqlcheck: fix pass %d: applied %d edit(s) to %d file(s); %d violation(s) not auto-fixable\n",
+			iter+1, len(edits), changed, skipped)
 	}
 
-	absSynth := map[string]*FileRender{}
+	for _, d := range pass.diags {
+		fmt.Println(formatDiagnostic(d, *github))
+	}
+	notes := checkTemplates(root)
+	fmt.Fprint(os.Stderr, writeSummary(len(pass.stmts), pass.nFiles, pass.skips, notes, len(pass.diags)))
+
+	if len(pass.diags) > 0 && !*reportOnly {
+		return 1
+	}
+	return 0
+}
+
+// lintPass is the outcome of one extract, render, lint and map pass over
+// the Go files in scope.
+type lintPass struct {
+	fset     *token.FileSet
+	pkgFiles map[string]*parsedFile
+	stmts    []Statement
+	skips    []Skip
+	absSynth map[string]*FileRender
+	fluff    []fluffFile
+	diags    []Diagnostic
+	nFiles   int
+}
+
+func runLintPass(
+	ctx context.Context,
+	bin, cfg, root string,
+	rels []string,
+	ruleFilter map[string]bool,
+	extractDir string,
+) (*lintPass, error) {
+	files, err := readGoFiles(root, rels)
+	if err != nil {
+		return nil, err
+	}
+
+	fset := token.NewFileSet()
+	pass := &lintPass{
+		fset:     fset,
+		pkgFiles: map[string]*parsedFile{},
+	}
+	renders := map[string]*FileRender{}
+	nextID := 1
+	for _, group := range groupByPackage(files) {
+		pkg, err := parsePackage(fset, group)
+		if err != nil {
+			return nil, err
+		}
+		st, sk := extractPackage(pkg, &nextID)
+		pass.stmts = append(pass.stmts, st...)
+		pass.skips = append(pass.skips, sk...)
+		for path, pf := range pkg.files {
+			pass.pkgFiles[path] = pf
+		}
+		for path, rend := range renderPackage(pkg, st) {
+			renders[path] = rend
+		}
+	}
+
+	bySynth, err := writeExtracted(extractDir, renders)
+	if err != nil {
+		return nil, err
+	}
+	pass.absSynth = map[string]*FileRender{}
 	for p, r := range bySynth {
 		abs, err := filepath.Abs(p)
 		if err != nil {
 			abs = p
 		}
-		absSynth[abs] = r
-		absSynth[p] = r
+		pass.absSynth[abs] = r
+		pass.absSynth[p] = r
 	}
 
-	ruleFilter := parseRules(*rules)
-
-	var fluff []fluffFile
 	if len(bySynth) > 0 {
-		var err error
-		fluff, _, err = runSQLFluff(ctx, bin, cfg, extractDir, ruleFilter)
+		fluff, _, err := runSQLFluff(ctx, bin, cfg, extractDir, ruleFilter)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "sqlcheck: %v\n", err)
-			return 2
+			return nil, err
 		}
+		pass.fluff = fluff
 	}
-
-	diags := mapDiagnostics(fset, stmts, absSynth, fluff)
+	pass.diags = mapDiagnostics(fset, pass.stmts, pass.absSynth, pass.fluff)
 	if len(ruleFilter) > 0 {
-		kept := make([]Diagnostic, 0, len(diags))
-		for _, d := range diags {
+		kept := make([]Diagnostic, 0, len(pass.diags))
+		for _, d := range pass.diags {
 			if ruleFilter[d.Rule] {
 				kept = append(kept, d)
 			}
 		}
-		diags = kept
-	}
-	for _, d := range diags {
-		fmt.Println(formatDiagnostic(d, *github))
+		pass.diags = kept
 	}
 
-	nFiles := 0
 	seen := map[string]bool{}
-	for _, st := range stmts {
+	for _, st := range pass.stmts {
 		if !seen[st.File] {
 			seen[st.File] = true
-			nFiles++
+			pass.nFiles++
 		}
 	}
-	fmt.Fprint(os.Stderr, writeSummary(len(stmts), nFiles, skips, notes, len(diags)))
-
-	if len(diags) > 0 && !*reportOnly {
-		return 1
-	}
-	return 0
+	return pass, nil
 }
