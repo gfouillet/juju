@@ -1,8 +1,6 @@
 // Copyright 2026 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Command sqlcheck extracts SQL from Go source, lints it with sqlfluff,
-// and reports diagnostics against the original Go positions.
 package main
 
 import (
@@ -10,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -176,12 +175,8 @@ func runLintPass(
 		st, sk := extractPackage(pkg, &nextID)
 		pass.stmts = append(pass.stmts, st...)
 		pass.skips = append(pass.skips, sk...)
-		for path, pf := range pkg.files {
-			pass.pkgFiles[path] = pf
-		}
-		for path, rend := range renderPackage(pkg, st) {
-			renders[path] = rend
-		}
+		maps.Copy(pass.pkgFiles, pkg.files)
+		maps.Copy(renders, renderPackage(pkg, st))
 	}
 
 	bySynth, err := writeExtracted(extractDir, renders)

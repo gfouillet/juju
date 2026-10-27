@@ -5,6 +5,7 @@ package main
 
 import (
 	"go/token"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,7 +104,7 @@ func f() {
 	idx := strings.Index(string(rend.Synthetic), "AS")
 	c.Assert(idx >= 0, tc.IsTrue)
 	line, col := 1, 1
-	for i := 0; i < idx; i++ {
+	for i := range idx {
 		if rend.Synthetic[i] == '\n' {
 			line++
 			col = 1
@@ -170,12 +171,7 @@ func f() {
 }
 
 func containsKind(kinds []SegmentKind, want SegmentKind) bool {
-	for _, k := range kinds {
-		if k == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(kinds, want)
 }
 
 func (s *renderSuite) TestLineColToOffsetUnicode(c *tc.C) {

@@ -136,7 +136,7 @@ func gitGoFiles(root string) ([]string, error) {
 		return nil, err
 	}
 	var paths []string
-	for _, p := range bytes.Split(out, []byte{0}) {
+	for p := range bytes.SplitSeq(out, []byte{0}) {
 		if len(p) == 0 {
 			continue
 		}
@@ -182,7 +182,7 @@ func excludedRel(rel string) bool {
 	if rel == "scripts/sqlcheck" || strings.HasPrefix(rel, "scripts/sqlcheck/") {
 		return true
 	}
-	for _, p := range strings.Split(rel, "/") {
+	for p := range strings.SplitSeq(rel, "/") {
 		switch p {
 		case ".git", "vendor", "node_modules", "_build":
 			return true
@@ -242,7 +242,7 @@ func groupByPackage(files []goFile) [][]goFile {
 }
 
 func packageNameOf(src []byte) string {
-	for _, line := range bytes.Split(src, []byte("\n")) {
+	for line := range bytes.SplitSeq(src, []byte("\n")) {
 		trim := bytes.TrimSpace(line)
 		if bytes.HasPrefix(trim, []byte("package ")) {
 			fields := bytes.Fields(trim)

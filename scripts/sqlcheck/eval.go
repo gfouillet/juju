@@ -144,7 +144,7 @@ func unquoteInterpreted(file string, start int, raw []byte) (*evaluated, error) 
 				continue
 			}
 			b.Write(raw[i : i+size])
-			for j := 0; j < size; j++ {
+			for j := range size {
 				m = append(m, origByte{File: file, Offset: off + j, Kind: KindLiteral})
 			}
 			i += size
@@ -166,7 +166,7 @@ func unquoteInterpreted(file string, start int, raw []byte) (*evaluated, error) 
 			// keep as-is
 		}
 		b.Write(enc[:n])
-		for j := 0; j < n; j++ {
+		for range n {
 			m = append(m, origByte{File: file, Offset: escOff, Kind: KindEscape})
 		}
 	}
@@ -212,7 +212,7 @@ func parseHexRune(s []byte, n, consumed int) (rune, int, error) {
 		return 0, 0, strconv.ErrSyntax
 	}
 	var v rune
-	for i := 0; i < n; i++ {
+	for i := range n {
 		d, ok := hexVal(s[i])
 		if !ok {
 			return 0, 0, strconv.ErrSyntax
@@ -227,7 +227,7 @@ func parseOctalRune(s []byte) (rune, int, error) {
 		return 0, 0, strconv.ErrSyntax
 	}
 	var v rune
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		c := s[i]
 		if c < '0' || c > '7' {
 			return 0, 0, strconv.ErrSyntax

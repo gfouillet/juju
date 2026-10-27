@@ -60,10 +60,6 @@ func extractPackage(pkg *parsedPackage, nextID *int) ([]Statement, []Skip) {
 		ignores[pf.path] = collectIgnores(pkg.fset, pf.ast)
 	}
 
-	type keyed struct {
-		st   Statement
-		skip bool
-	}
 	seen := map[string]int{}
 	var stmts []Statement
 	var skips []Skip
@@ -503,7 +499,7 @@ func parseIgnoreComment(text string) (ignoreDir, bool) {
 		return ignoreDir{}, false
 	}
 	rules := map[string]bool{}
-	for _, r := range strings.Split(rest, ",") {
+	for r := range strings.SplitSeq(rest, ",") {
 		r = strings.TrimSpace(r)
 		if r == "" {
 			continue

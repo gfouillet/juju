@@ -121,7 +121,7 @@ func readHead(path string, n int64) (string, bool) {
 // distinctive are skipped.
 func templateSQLPatterns(tmpl []byte) []*regexp.Regexp {
 	var pats []*regexp.Regexp
-	for _, line := range strings.Split(string(tmpl), "\n") {
+	for line := range strings.SplitSeq(string(tmpl), "\n") {
 		if !templateLooksLikeSQL(line) {
 			continue
 		}

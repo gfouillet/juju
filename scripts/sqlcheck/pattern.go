@@ -62,7 +62,7 @@ func parseRules(spec string) map[string]bool {
 		return nil
 	}
 	rules := map[string]bool{}
-	for _, r := range strings.Split(spec, ",") {
+	for r := range strings.SplitSeq(spec, ",") {
 		r = strings.TrimSpace(r)
 		if r == "" {
 			continue

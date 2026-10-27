@@ -437,7 +437,7 @@ func (p *scn) parseColumnList() (star bool, paren bool, ok bool) {
 		}
 		p.skipBlanks()
 		if p.skipByte(')') {
-			return star, true, true
+			return star, paren, true
 		}
 		if !p.skipByte(',') {
 			p.pos = mark

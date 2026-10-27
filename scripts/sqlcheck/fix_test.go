@@ -47,7 +47,7 @@ func violationAt(c *tc.C, rend *FileRender, needle, code, desc string) fluffViol
 	idx := strings.Index(string(rend.Synthetic), needle)
 	c.Assert(idx >= 0, tc.IsTrue, tc.Commentf("needle %q not found in %q", needle, rend.Synthetic))
 	line, col := 1, 1
-	for i := 0; i < idx; i++ {
+	for i := range idx {
 		if rend.Synthetic[i] == '\n' {
 			line++
 			col = 1

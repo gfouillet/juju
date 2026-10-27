@@ -39,10 +39,7 @@ func renderFile(pf *parsedFile, stmts []Statement) *FileRender {
 	for _, st := range stmts {
 		if st.Start >= goPos {
 			r.emitGap(pf.src[goPos:st.Start])
-			goPos = st.End
-			if goPos < st.Start {
-				goPos = st.Start
-			}
+			goPos = max(st.End, st.Start)
 		} else {
 			r.emitVirtual([]byte("\n"))
 		}
