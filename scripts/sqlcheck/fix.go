@@ -277,6 +277,31 @@ func (pl *fixer) setLineIndent(st *Statement, anchor int, n int) (sourceEdit, bo
 	return pl.insertAt(st, lineStart, strings.Repeat(" ", n))
 }
 
+// atQuoteAfterName reports whether the anchor is a quote character
+// directly preceded by a name character, i.e. the pair forms the start
+// of a SQLite hexadecimal blob literal such as x” or X'00FF'.
+func (pl *fixer) atQuoteAfterName(st *Statement, anchor int) bool {
+	content := st.Eval.Content
+	if anchor >= len(content) {
+		return false
+	}
+	if content[anchor] != '\'' && content[anchor] != '"' {
+		return false
+	}
+	if anchor == 0 {
+		return false
+	}
+	prev := content[anchor-1]
+	switch {
+	case prev >= 'a' && prev <= 'z',
+		prev >= 'A' && prev <= 'Z',
+		prev >= '0' && prev <= '9',
+		prev == '_':
+		return true
+	}
+	return false
+}
+
 // insertLineBreak inserts a line break (plus indent) before the mapped
 // content byte at anchor, consuming any run of spaces and tabs that
 // precedes it so no trailing whitespace is left behind.
@@ -304,10 +329,18 @@ func (pl *fixer) insertLineBreak(st *Statement, anchor int, indent string) (sour
 // insertAt inserts text before the mapped content byte at anchor. The
 // inserted text may contain newlines, which are escaped when the byte
 // belongs to an interpreted string literal.
+//
+// A space is never inserted between a name character and a following
+// quote: in SQLite that adjacency forms a hexadecimal blob literal
+// (x'...'), and sqlfluff 3.0.7 mis-parses the empty form x” as an
+// identifier followed by a quoted literal.
 func (pl *fixer) insertAt(st *Statement, anchor int, text string) (sourceEdit, bool) {
 	m := st.Eval.Map
 	ob := m[anchor]
 	if ob.Kind == KindVirtual || ob.File == "" {
+		return sourceEdit{}, false
+	}
+	if text == " " && pl.atQuoteAfterName(st, anchor) {
 		return sourceEdit{}, false
 	}
 	if strings.Contains(text, "\n") && !pl.inRawString(st, ob) {

@@ -252,3 +252,21 @@ func (s *fixSuite) TestCollapseSpaceWithEscapedTabMessage(c *tc.C) {
 	out := applyTo(c, src, edits)
 	c.Check(strings.Contains(out, "WITH blockdevice_pool AS"), tc.IsTrue)
 }
+
+func (s *fixSuite) TestNoSpaceInsideBlobLiteral(c *tc.C) {
+	// SQLite hex blob literals like x'' are mis-parsed by sqlfluff as an
+	// identifier plus a quoted literal; the fixer must not insert the
+	// space sqlfluff then asks for, as x '' is invalid SQL.
+	src := `package p
+
+func f() {
+	db.Exec("INSERT INTO t (a, b) VALUES (?, x'')")
+}
+`
+	rend, _ := renderFixture(c, src)
+	v := violationAt(c, rend, "''", "LT01",
+		"Expected single whitespace between naked identifier and quoted literal.")
+	edits, skipped := fixFixture(c, src, []fluffViolation{v})
+	c.Check(len(edits), tc.Equals, 0)
+	c.Check(skipped, tc.Equals, 1)
+}
